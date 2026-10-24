@@ -450,6 +450,9 @@ def _register_identity_allreduce() -> None:
     _register_no_collectives(identity_allreduce)
 
 
+run_speculative_commit_bridge = _extension.run_speculative_commit_bridge
+
+
 class CacheStoreForwardModel:
     """Test model that replaces attention math but keeps the real cache-store call."""
 
@@ -543,6 +546,50 @@ class CacheStoreForwardModel:
     def forward_micro_batch(self, inputs: list[PyModelInputs]) -> list[PyModelOutputs]:
         self.micro_batch_calls += 1
         return [self._forward_one(model_inputs) for model_inputs in inputs]
+
+
+class CloseAwareCacheStoreForwardModel(CacheStoreForwardModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+        self.close_calls = 0
+        self.initialize_calls = 0
+        self.fail_initialize = False
+
+    def initialize(self, resources) -> bool:
+        self.initialize_calls += 1
+        if self.fail_initialize:
+            raise RuntimeError("injected model initialize failure")
+        return super().initialize(resources)
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        if self.closed:
+            raise RuntimeError("model is closed")
+        return super().forward(inputs, fmha_impl)
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.closed = True
+
+
+class MixedDeviceMetadataModel(CacheStoreForwardModel):
+    def __init__(self):
+        super().__init__()
+        self.metadata = []
+
+    def _forward_one(self, inputs):
+        attn = inputs.attention_inputs
+        if isinstance(attn, dict):
+            attn = next(iter(attn.values()))
+        assert attn.input_lengths.is_cuda
+        assert not attn.prefix_lengths.is_cuda
+        self.metadata.append(
+            (
+                attn.cu_seqlens_device.cpu().tolist(),
+                attn.cu_kv_seqlens_device.cpu().tolist(),
+            )
+        )
+        return super()._forward_one(inputs)
 
 
 class DirtyGenerationPrefillCaptureModel:
@@ -759,6 +806,52 @@ class UnsupportedCaptureModel:
         raise AssertionError("unsupported capture model must fail during construction")
 
 
+class SpeculativeCommitBridgeModel:
+    def __init__(
+        self,
+        *,
+        prepare_error: bool = False,
+        commit_error: bool = False,
+        abort_error: bool = False,
+    ):
+        self.prepare_error = prepare_error
+        self.commit_error = commit_error
+        self.abort_error = abort_error
+        self.finish_calls: list[bool] = []
+        self.finalize_calls = 0
+
+    def initialize(self, resources) -> bool:
+        return True
+
+    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+        raise AssertionError("bridge-only test must not execute forward")
+
+    def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
+        if self.prepare_error:
+            raise RuntimeError("prepare bridge boom")
+
+    def finish_speculative_target_commit(self, commit: bool) -> None:
+        self.finish_calls.append(commit)
+        if commit and self.commit_error:
+            raise RuntimeError("commit bridge boom")
+        if not commit and self.abort_error:
+            raise RuntimeError("abort bridge boom")
+
+    def finalize_speculative_target_commit(self) -> None:
+        self.finalize_calls += 1
+
+
+class PrepareOnlySpeculativeCommitBridgeModel:
+    def initialize(self, resources) -> bool:
+        return True
+
+    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
+        raise AssertionError("bridge-only test must not execute forward")
+
+    def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
+        pass
+
+
 def _blocks_by_key(result: dict) -> dict[str, dict]:
     return {
         block["key"]: block
@@ -967,6 +1060,83 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_borrowed_warmup_model_survives_until_owning_wrapper_is_destroyed(self):
+        model = CloseAwareCacheStoreForwardModel()
+        run_scenario(model, "multi_tag", owns_py_model=False)
+        self.assertFalse(model.closed)
+        self.assertEqual(model.close_calls, 0)
+
+        run_scenario(model, "multi_tag")
+        self.assertEqual(model.initialize_calls, 2)
+        self.assertEqual(model.forward_calls, 2)
+        self.assertTrue(model.closed)
+        self.assertEqual(model.close_calls, 1)
+
+    def test_failed_borrowed_wrapper_does_not_close_shared_model(self):
+        model = CloseAwareCacheStoreForwardModel()
+        model.fail_initialize = True
+        with self.assertRaisesRegex(Exception, "injected model initialize failure"):
+            run_scenario(model, "multi_tag", owns_py_model=False)
+        self.assertFalse(model.closed)
+        self.assertEqual(model.close_calls, 0)
+
+        model.fail_initialize = False
+        run_scenario(model, "multi_tag")
+        self.assertEqual(model.forward_calls, 1)
+        self.assertTrue(model.closed)
+        self.assertEqual(model.close_calls, 1)
+
+    def test_failed_owning_wrapper_closes_model(self):
+        model = CloseAwareCacheStoreForwardModel()
+        model.fail_initialize = True
+        with self.assertRaisesRegex(Exception, "injected model initialize failure"):
+            run_scenario(model, "multi_tag")
+        self.assertTrue(model.closed)
+        self.assertEqual(model.close_calls, 1)
+
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM",
+        "ROCm normalizes these lengths to the host metadata path",
+    )
+    def test_cuda_lengths_host_prefix_metadata_updates_on_current_stream(self):
+        for custom_stream in (False, True):
+            with self.subTest(custom_stream=custom_stream):
+                stream = (
+                    torch.cuda.Stream()
+                    if custom_stream
+                    else torch.cuda.default_stream()
+                )
+                model = MixedDeviceMetadataModel()
+                with torch.cuda.stream(stream):
+                    result = run_scenario(model, "cuda_lengths_host_prefix")
+                stream.synchronize()
+                self.assertEqual(
+                    model.metadata,
+                    [
+                        ([0, 1, 4, 8], [0, 129, 388, 904]),
+                        ([0, 1, 4, 8], [0, 257, 388, 776]),
+                        ([0, 1, 4, 8], [0, 1, 4, 8]),
+                    ],
+                )
+                self.assertEqual(result["records"], [])
+
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM",
+        "ROCm normalizes these lengths to the host metadata path",
+    )
+    def test_micro_batch_cuda_lengths_host_prefix_metadata(self):
+        model = MixedDeviceMetadataModel()
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            run_scenario(model, "cuda_lengths_host_prefix_micro")
+        stream.synchronize()
+        lengths, visible = [], []
+        for cu, cu_kv in model.metadata:
+            lengths.extend(b - a for a, b in zip(cu, cu[1:]))
+            visible.extend(b - a for a, b in zip(cu_kv, cu_kv[1:]))
+        self.assertEqual(lengths, [1, 3, 4] * 3)
+        self.assertEqual(visible, [129, 259, 516, 257, 131, 388, 1, 3, 4])
+
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
     ) -> None:
@@ -1260,6 +1430,78 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 self.assertEqual(metric_types[name], _KMONITOR_STATUS)
             else:
                 self.assertEqual(metric_types[name], _KMONITOR_GAUGE)
+
+
+    def test_speculative_commit_hooks_must_be_implemented_as_a_pair(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "must implement.*as a pair"):
+            run_speculative_commit_bridge(
+                PrepareOnlySpeculativeCommitBridgeModel(), "has_hooks"
+            )
+
+    def test_cpu_status_bridge_preserves_false_and_ignores_non_target(self):
+        model = SpeculativeCommitBridgeModel()
+        calls = []
+        model.has_speculative_target_status_reducer = lambda: True
+        model.reduce_speculative_target_prepare_status = lambda ok: (
+            calls.append(ok),
+            False,
+        )[1]
+        self.assertFalse(run_speculative_commit_bridge(model, "reduce_true"))
+        self.assertFalse(run_speculative_commit_bridge(model, "reduce_false"))
+        self.assertEqual(calls, [True, False])
+        self.assertIsNone(run_speculative_commit_bridge(model, "reduce_true", False))
+        self.assertEqual(calls, [True, False])
+
+    def test_cpu_status_bridge_optional_and_disabled_capabilities(self):
+        model = SpeculativeCommitBridgeModel()
+        self.assertIsNone(run_speculative_commit_bridge(model, "reduce_true"))
+        model.has_speculative_target_status_reducer = lambda: False
+        model.reduce_speculative_target_prepare_status = lambda ok: (
+            _ for _ in ()
+        ).throw(AssertionError("disabled hook"))
+        self.assertIsNone(run_speculative_commit_bridge(model, "reduce_true"))
+
+    def test_cpu_status_bridge_transport_errors_propagate(self):
+        model = SpeculativeCommitBridgeModel()
+        model.has_speculative_target_status_reducer = lambda: True
+
+        def fail(ok):
+            raise RuntimeError("status transport poisoned")
+
+        model.reduce_speculative_target_prepare_status = fail
+        with self.assertRaisesRegex(RuntimeError, "status transport poisoned"):
+            run_speculative_commit_bridge(model, "reduce_true")
+
+    def test_speculative_commit_prepare_exception_becomes_error(self) -> None:
+        model = SpeculativeCommitBridgeModel(prepare_error=True)
+
+        self.assertTrue(run_speculative_commit_bridge(model, "has_hooks"))
+        error = run_speculative_commit_bridge(model, "prepare")
+
+        self.assertIn("prepare bridge boom", error)
+
+    def test_speculative_commit_abort_exception_does_not_escape(self) -> None:
+        model = SpeculativeCommitBridgeModel(abort_error=True)
+
+        self.assertIsNone(run_speculative_commit_bridge(model, "abort"))
+        self.assertEqual(model.finish_calls, [False])
+
+    def test_speculative_commit_exception_becomes_error(self) -> None:
+        model = SpeculativeCommitBridgeModel(commit_error=True)
+
+        error = run_speculative_commit_bridge(model, "commit")
+
+        self.assertIn("commit bridge boom", error)
+        self.assertEqual(model.finish_calls, [True])
+
+    def test_non_target_wrapper_ignores_speculative_commit_hooks(self) -> None:
+        self.assertFalse(
+            run_speculative_commit_bridge(
+                PrepareOnlySpeculativeCommitBridgeModel(),
+                "has_hooks",
+                False,
+            )
+        )
 
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()

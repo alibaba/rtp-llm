@@ -53,6 +53,7 @@ public:
                     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter    = nullptr):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(graph_params.enable_cuda_graph),
+        exact_batch_only_(graph_params.exact_batch_only),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
         role_(graph_params.role),
@@ -116,8 +117,11 @@ public:
         }
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
-        options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
-        options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        prepare_model_inputs_enabled_ =
+            py::hasattr(py_instance_, "prepare_cuda_graph_model_inputs")
+            && py::getattr(py_instance_, "requires_cuda_graph_model_input_preparation", py::bool_(false)).cast<bool>();
+        options_cuda_int32_ = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        options_cpu_int32_  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, max_kernel_block_table_width_: %lld, \
@@ -186,6 +190,7 @@ public:
 private:
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
+    void prepareModelInputs(const PyModelInputs& inputs);
     // Common replay and sync check logic
     void replayAndSyncCheck(int key, const char* key_type);
 
@@ -201,9 +206,8 @@ private:
     bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
         // DSpARK propose/commit now run as construction-time-role decode graphs
         // (is_prefill_cuda_graph_mode_ == false), so only the HC-shaped MTP draft
-        // prefill keeps the fixed-capacity Python path: slicing its output buffer
-        // would mismatch the forward_decode [B * q_len, dim] result in
-        // captureOneGraphInstance.
+        // prefill keeps fixed lanes per captured request. Each key's input,
+        // metadata and output capacities must agree with [B * q_len, dim].
         return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
     }
     // Common input preparation logic for capture
@@ -235,7 +239,9 @@ private:
     void                    initCaptureAttentionInputsPost();
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
+    bool                    prepare_model_inputs_enabled_{false};
     bool                    enable_cuda_graph_{false};
+    bool                    exact_batch_only_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};

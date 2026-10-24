@@ -245,3 +245,28 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "linear_tp_cache_layout_test",
+    srcs = ["LinearTpCacheLayoutTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/model_rpc:linear_tp_cache_layout",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "registered_cache_staging_test",
+    srcs = ["RegisteredCacheStagingTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:registered_cache_staging",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+)

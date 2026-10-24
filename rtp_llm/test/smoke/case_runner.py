@@ -55,6 +55,10 @@ from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 from rtp_llm.utils.util import str_to_bool
 
 
+DEFAULT_SERVER_START_TIMEOUT_S = 3600
+SERVER_START_TIMEOUT_ENV = "SMOKE_SERVER_START_TIMEOUT_S"
+
+
 def _iterate_modidfy_qr(origin: Dict[str, Any], new: Dict[str, Any]):
     assert isinstance(origin, dict) and isinstance(
         new, dict
@@ -70,6 +74,9 @@ def _iterate_modidfy_qr(origin: Dict[str, Any], new: Dict[str, Any]):
 
 
 class CaseRunner(object):
+    _MAX_SMOKE_REPEAT_COUNT = 65536
+    _MAX_SMOKE_REPEAT_CHARS = 2 * 1024 * 1024
+
     def __init__(
         self,
         task_info: TaskInfo,
@@ -134,6 +141,64 @@ class CaseRunner(object):
                 except ValueError:
                     return default
         return default
+
+    @classmethod
+    def _expand_smoke_repeat(cls, query_result: Dict[str, Any]) -> None:
+        """Expand opt-in repeated chat-message payloads for smoke fixtures.
+
+        Long-context fixtures remain reviewable because the repeated data is
+        generated in the runner rather than duplicated in JSON. ``smoke_repeat``
+        is smoke-only metadata and bounds prevent a fixture typo from allocating
+        an unbounded prompt in a test worker.
+        """
+        if query_result.get("_smoke_repeat_expanded", False):
+            return
+        spec = query_result.get("smoke_repeat")
+        if spec is None:
+            return
+        if not isinstance(spec, dict):
+            raise ValueError("smoke_repeat must be an object")
+
+        message_index = spec.get("message_index", 0)
+        count = spec.get("count")
+        separator = spec.get("separator", "")
+        if isinstance(message_index, bool) or not isinstance(message_index, int):
+            raise ValueError("smoke_repeat.message_index must be an integer")
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise ValueError("smoke_repeat.count must be an integer")
+        if count < 1 or count > cls._MAX_SMOKE_REPEAT_COUNT:
+            raise ValueError(
+                "smoke_repeat.count must be in "
+                f"[1, {cls._MAX_SMOKE_REPEAT_COUNT}], got {count}"
+            )
+        if not isinstance(separator, str):
+            raise ValueError("smoke_repeat.separator must be a string")
+
+        query = query_result.get("query")
+        messages = query.get("messages") if isinstance(query, dict) else None
+        if not isinstance(messages, list) or not (0 <= message_index < len(messages)):
+            raise ValueError(
+                "smoke_repeat.message_index does not select a chat message"
+            )
+        message = messages[message_index]
+        if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+            raise ValueError("smoke_repeat only supports string chat-message content")
+
+        content = message["content"]
+        expanded_chars = len(content) * count + len(separator) * (count - 1)
+        if expanded_chars > cls._MAX_SMOKE_REPEAT_CHARS:
+            raise ValueError(
+                "smoke_repeat expansion exceeds "
+                f"{cls._MAX_SMOKE_REPEAT_CHARS} characters"
+            )
+        message["content"] = separator.join([content] * count)
+        query_result["_smoke_repeat_expanded"] = True
+        logging.info(
+            "expanded smoke_repeat message=%d count=%d chars=%d",
+            message_index,
+            count,
+            expanded_chars,
+        )
 
     def run(self):
         # Subclasses override `_run_impl`, not `run`, so that coredump cleanup
@@ -722,6 +787,7 @@ class CaseRunner(object):
             self._extract_bool_arg(src, "--reuse_cache") for src in reuse_arg_sources
         )
         for q_idx, q_r in enumerate(qr_array):
+            self._expand_smoke_repeat(q_r)
             q_r["_taskinfo_rel_path"] = task_info.taskinfo_rel_path
             q_r["_query_idx"] = q_idx
             q_r["_reuse_cache_enabled"] = reuse_cache_enabled
@@ -889,6 +955,20 @@ class CaseRunner(object):
             else task_info.model_path
         )
 
+        timeout_value = env_dict.get(
+            SERVER_START_TIMEOUT_ENV, str(DEFAULT_SERVER_START_TIMEOUT_S)
+        )
+        try:
+            server_start_timeout_s = int(timeout_value)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{SERVER_START_TIMEOUT_ENV} must be a positive integer, got {timeout_value!r}"
+            )
+        if server_start_timeout_s <= 0:
+            raise ValueError(
+                f"{SERVER_START_TIMEOUT_ENV} must be a positive integer, got {timeout_value!r}"
+            )
+
         ret = server_manager.start_server(
             task_info.model_path,
             task_info.model_type,
@@ -896,7 +976,7 @@ class CaseRunner(object):
             task_info.lora_infos,
             task_info.ptuning_path,
             True,
-            3600,
+            server_start_timeout_s,
         )
         if task_info.update_lora_infos != None:
             for update_lora_info in task_info.update_lora_infos:

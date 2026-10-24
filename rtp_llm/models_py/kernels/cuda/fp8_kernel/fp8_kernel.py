@@ -13,8 +13,13 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel.get_best_config import (
 from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.models_py.utils.math import align
 
+fp8_grouped_gemm_ptpc = None
+
 if is_cuda():
-    from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
+    try:
+        from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
+    except ImportError:
+        logging.warning("rtp_kernel is unavailable; FP8 CUTLASS MoE is disabled")
 
     from rtp_llm.ops.compute_ops import (
         per_tensor_quant_fp8,
@@ -267,6 +272,11 @@ def cutlass_moe_mm_fp8_scaled(
     elements_m,
     swap_ab,
 ) -> None:
+
+    if fp8_grouped_gemm_ptpc is None:
+        raise RuntimeError(
+            "FP8 CUTLASS MoE requires the rtp-kernel package, which is not installed"
+        )
 
     assert per_act_token == True
     assert per_out_ch == False

@@ -111,8 +111,10 @@ private:
         cfg.dtype                   = spec->memoryLayoutDType();
         cfg.local_head_num_kv       = local_kv_head_num;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
-        // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
-        cfg.is_mla                     = cache_config.use_mla || cache_config.is_sparse;
+        // Sparse GQA still owns ordinary MHA K/V and FP32 per-token/head scales.
+        // Byte-packed scales belong to MLA/indexer regions, not the model-wide sparse flag.
+        cfg.is_mla = spec->type != KVCacheSpecType::MultiHeadAttention
+                     && (cache_config.use_mla || cache_config.is_sparse);
         cfg.use_mla                    = cache_config.use_mla;
         cfg.seq_size_per_block         = seq_size_per_block;
         cfg.kernel_blocks_per_kv_block = kernel_blocks_per_kv_block;

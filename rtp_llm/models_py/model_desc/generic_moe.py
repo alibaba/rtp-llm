@@ -52,8 +52,10 @@ class GenericMoeLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        linear_factory=None,
     ):
         super().__init__()
+        self.linear_factory = linear_factory or LinearFactory
         self.config = config
         self.parallelism_config = parallelism_config
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
@@ -66,7 +68,7 @@ class GenericMoeLayer(nn.Module):
 
         # Get quant_config from model_config
         quant_config = config.quant_config
-        self.gate = LinearFactory.create_linear_from_weights(
+        self.gate = self.linear_factory.create_linear_from_weights(
             weights, W.moe_gate, None, None, quant_config, hw_kernel_config
         )
         self.select_topk = SelectTopk(config=config)
@@ -103,11 +105,12 @@ class GenericMoeLayer(nn.Module):
                 weights,
                 quant_config,
                 hw_kernel_config=hw_kernel_config,
+                linear_factory=self.linear_factory,
             )
         else:
             self.shared_expert = None
         if weights.get(W.shared_expert_gate, None) is not None:
-            self.shared_expert_gate = LinearFactory.create_linear_from_weights(
+            self.shared_expert_gate = self.linear_factory.create_linear_from_weights(
                 weights,
                 W.shared_expert_gate,
                 None,
@@ -171,7 +174,7 @@ class GenericMoeLayer(nn.Module):
             return torch.sigmoid(gate_output) * shared_expert_output
         return shared_expert_output
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _forward_routed(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
 
@@ -225,6 +228,10 @@ class GenericMoeLayer(nn.Module):
             activation="SiGLU",
             skip_tp_allreduce=self.use_unified_tp_allreduce,
         )
+        return experts_output
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        experts_output = self._forward_routed(hidden_states)
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
                 hidden_states,
@@ -240,7 +247,9 @@ class GenericMoeLayer(nn.Module):
                 experts_output = self._merge_shared_expert_output(
                     hidden_states, experts_output, shared_expert_output
                 )
-                experts_output = all_reduce(experts_output, group=Group.TP)
+                experts_output = getattr(self, "tp_all_reduce", all_reduce)(
+                    experts_output, group=Group.TP
+                )
             elif self.use_ep_shared_allreduce:
                 # EP mode: routed expert output is already complete
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
@@ -248,7 +257,9 @@ class GenericMoeLayer(nn.Module):
                 shared_expert_output = self._gate_shared_expert_output(
                     hidden_states, shared_expert_output
                 )
-                shared_expert_output = all_reduce(shared_expert_output, group=Group.TP)
+                shared_expert_output = getattr(self, "tp_all_reduce", all_reduce)(
+                    shared_expert_output, group=Group.TP
+                )
                 experts_output = experts_output + shared_expert_output
             else:
                 # Fallback path: each path is already complete independently.

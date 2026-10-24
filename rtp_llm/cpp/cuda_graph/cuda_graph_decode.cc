@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include <string>
 
 namespace rtp_llm {
 void CudaGraphRunner::replayDecode(int bs) {
@@ -19,6 +20,16 @@ std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
     std::vector<int> capture_bs;
     int              max_generate_batch_size = max_bs_;
     RTP_LLM_LOG_INFO("max_generate_batch_size for cuda graph: %d", max_generate_batch_size);
+    // Side-cache models cannot replay a padded batch. Capture every small
+    // batch so mixed low-concurrency traffic does not fall back to eager for
+    // sizes 2..7. Keep the existing sparse buckets above eight to bound graph
+    // memory; deployments needing larger exact batches can set an explicit
+    // decode_capture_config.
+    if (exact_batch_only_) {
+        for (int i = 2; i <= std::min(7, max_generate_batch_size); ++i) {
+            capture_bs.push_back(i);
+        }
+    }
     // Add key batch sizes up to 32
     for (int i : {1, 8, 16, 24, 32}) {
         if (i <= max_generate_batch_size) {
@@ -31,6 +42,40 @@ std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
     }
     if (capture_bs[capture_bs.size() - 1] != max_generate_batch_size) {
         capture_bs.push_back(max_generate_batch_size);
+    }
+    std::sort(capture_bs.begin(), capture_bs.end());
+    capture_bs.erase(std::unique(capture_bs.begin(), capture_bs.end()), capture_bs.end());
+    if (exact_batch_only_) {
+        // Exact-batch models cannot pad a larger graph down, so every hole in
+        // the bucket set costs a full eager decode step. Surface the holes at
+        // capture time; an explicit decode_capture_config closes them.
+        std::string holes;
+        int         expected = 1;
+        for (int size : capture_bs) {
+            if (size > expected) {
+                if (!holes.empty()) {
+                    holes += ", ";
+                }
+                holes += std::to_string(expected);
+                if (size - 1 > expected) {
+                    holes += "-" + std::to_string(size - 1);
+                }
+            }
+            expected = size + 1;
+        }
+        if (expected <= max_generate_batch_size) {
+            if (!holes.empty()) {
+                holes += ", ";
+            }
+            holes += std::to_string(expected);
+            if (max_generate_batch_size > expected) {
+                holes += "-" + std::to_string(max_generate_batch_size);
+            }
+        }
+        RTP_LLM_LOG_WARNING(
+            "exact-batch decode graphs cover %zu batch sizes; sizes [%s] have no graph and will run eager decode",
+            capture_bs.size(),
+            holes.c_str());
     }
     return capture_bs;
 }

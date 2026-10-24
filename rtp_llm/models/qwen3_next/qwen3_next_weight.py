@@ -196,20 +196,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
         self.prefix = "model."
 
     def _get_weight_info(self):
-        weights: List[WeightModule] = [
-            AtomicWeight(
-                W.embedding,
-                [CkptWeightInfo(self.prefix + "embed_tokens.weight", identity)],
-            ),
-            AtomicWeight(
-                W.lm_head,
-                [CkptWeightInfo("lm_head.weight", identity)],
-            ),
-            AtomicWeight(
-                W.final_ln_gamma,
-                [CkptWeightInfo(self.prefix + "norm.weight", plus_one)],
-            ),
-        ]
+        weights: List[WeightModule] = self._create_global_weights()
         all_layer_weights: List[List[WeightModule]] = []
         for idx in range(self._num_layers):
             layer_weight: List[WeightModule] = []
@@ -224,6 +211,22 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
             layer_weight.extend(self._create_ffn_weight())
             all_layer_weights.append(layer_weight)
         return ModelWeightInfo(layer_weights=all_layer_weights, weights=weights)
+
+    def _create_global_weights(self) -> List[WeightModule]:
+        return [
+            AtomicWeight(
+                W.embedding,
+                [CkptWeightInfo(self.prefix + "embed_tokens.weight", identity)],
+            ),
+            AtomicWeight(
+                W.lm_head,
+                [CkptWeightInfo("lm_head.weight", identity)],
+            ),
+            AtomicWeight(
+                W.final_ln_gamma,
+                [CkptWeightInfo(self.prefix + "norm.weight", plus_one)],
+            ),
+        ]
 
     def _create_layer_norm_weight(self) -> List[WeightModule]:
         return [

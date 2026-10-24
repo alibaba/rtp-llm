@@ -26,6 +26,8 @@ from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
 )
 from rtp_llm.utils.model_weight import W
 
+from .decode_capabilities import decode_capabilities
+
 
 class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
     @classmethod
@@ -61,6 +63,10 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         self.N = self.w1.size(1)  # 2 * inter_size
         self.K = self.w1.size(2)  # hidden_size
         self.inter_size = self.N // 2
+        capabilities = decode_capabilities(self.w1, self.top_k, self.ep_size)
+        self._decode_alignment = capabilities.alignment
+        self._decode_tiles = capabilities.tuned_tiles
+        self._small_moe_gemv = capabilities.small_gemv
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -82,6 +88,24 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         assert topk_ids is not None
         assert topk_weights is not None
 
+        if (
+            self._small_moe_gemv
+            and activation in ("silu", "SiGLU")
+            and expert_map is None
+            and a2_scale is None
+            and not apply_router_weight_on_input
+            and not extra_expert_args
+        ):
+            from rtp_llm.models_py.modules.qwen4_exp.moe.small_moe_gemv import (
+                small_moe_gemv,
+            )
+
+            output = small_moe_gemv(
+                hidden_states, self.w1, self.w2, topk_ids, topk_weights
+            )
+            if output is not None:
+                return CombineForwardPayload(fused_expert_output=output)
+
         if self.ep_size > 1:
             local_ids = topk_ids - self.start_expert_id
             local_mask = (local_ids >= 0) & (local_ids < self.num_experts_per_partition)
@@ -97,6 +121,12 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         # Config selection for both GEMMs
         config1 = get_default_config(M, self.E, self.N, K, top_k)
         config2 = get_default_config(M, self.E, K, self.inter_size, top_k)
+        if self._decode_tiles:
+            from rtp_llm.models_py.modules.qwen4_exp.moe.moe_align_triton import (
+                sm120_decode_gemm_configs,
+            )
+
+            config1, config2 = sm120_decode_gemm_configs(M, config1, config2)
 
         # Flat routing tensors for the kernel
         flat_topk_weights = topk_weights.view(-1)  # [M * top_k]
@@ -105,8 +135,15 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         # Token-expert alignment: compute once if block sizes match, else twice
         block_m1 = config1["BLOCK_SIZE_M"]
         block_m2 = config2["BLOCK_SIZE_M"]
-        sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size_torch(topk_ids, block_m1, self.E)
+        align = moe_align_block_size_torch
+        if self._decode_alignment and 0 < M <= 32:
+            from rtp_llm.models_py.modules.qwen4_exp.moe.moe_align_triton import (
+                moe_align_decode,
+            )
+
+            align = moe_align_decode
+        sorted_token_ids, expert_ids, num_tokens_post_padded = align(
+            topk_ids, block_m1, self.E
         )
         if block_m1 == block_m2:
             sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = (
@@ -115,8 +152,8 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
                 num_tokens_post_padded,
             )
         else:
-            sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = (
-                moe_align_block_size_torch(topk_ids, block_m2, self.E)
+            sorted_token_ids2, expert_ids2, num_tokens_post_padded2 = align(
+                topk_ids, block_m2, self.E
             )
 
         # GEMM1: hidden_states @ w1.T → intermediate1 [M*top_k, 2*inter]

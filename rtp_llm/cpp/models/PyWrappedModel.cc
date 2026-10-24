@@ -127,11 +127,26 @@ CudaGraphState& PyWrappedModel::selectGraphState(const torch_ext::PyAttentionInp
 
 void PyWrappedModel::cleanupAfterConstructionFailure() noexcept {
     try {
+        py::gil_scoped_acquire gil;
+        held_attn_pyobj_   = py::object();
+        py_forward_method_ = py::object();
         generation_prefill_graph_runner_.reset();
         graph_runner_.reset();
+        if (py_model_ && py::hasattr(py_model_, "close")) {
+            if (owns_py_model_) {
+                py_model_.attr("close")();
+            }
+            py_model_ = py::object();
+        } else {
+            py_model_.release();
+        }
     } catch (const std::exception& e) {
+        // A failed drain must keep its storage owner alive. Never let member
+        // destruction decrement this handle after the GIL guard has unwound.
+        py_model_.release();
         RTP_LLM_LOG_ERROR("PyWrappedModel construction cleanup failed: %s", e.what());
     } catch (...) {
+        py_model_.release();
         RTP_LLM_LOG_ERROR("PyWrappedModel construction cleanup failed with unknown exception");
     }
 }
@@ -174,6 +189,80 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
     return has_mtp_hidden_buffer_;
 }
 
+bool PyWrappedModel::hasSpeculativeTargetCommitHooks() const {
+    return has_speculative_target_commit_hooks_;
+}
+
+std::optional<bool> PyWrappedModel::reduceSpeculativeTargetPrepareStatus(bool local_ok) {
+    if (!has_speculative_target_status_reducer_) {
+        return std::nullopt;
+    }
+    py::gil_scoped_acquire gil;
+    // Native waiting releases the GIL. Do not catch errors and switch transports:
+    // the published generation may already have been consumed by the peer.
+    return py_model_.attr("reduce_speculative_target_prepare_status")(local_ok).cast<bool>();
+}
+
+std::string PyWrappedModel::prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) {
+    if (!has_speculative_target_commit_hooks_) {
+        return {};
+    }
+    try {
+        py::gil_scoped_acquire gil;
+        py_model_.attr("prepare_speculative_target_commit")(accept_len);
+        return {};
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("Python speculative target commit prepare failed: %s", e.what());
+        return e.what();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("Speculative target commit prepare failed: %s", e.what());
+        return e.what();
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("Speculative target commit prepare failed with an unknown exception");
+        return "unknown speculative target commit prepare failure";
+    }
+}
+
+std::string PyWrappedModel::finishSpeculativeTargetCommit(bool commit) {
+    if (!has_speculative_target_commit_hooks_) {
+        return {};
+    }
+    try {
+        py::gil_scoped_acquire gil;
+        py_model_.attr("finish_speculative_target_commit")(commit);
+        return {};
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("Python speculative target commit finish failed (commit=%d): %s", commit, e.what());
+        return e.what();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("Speculative target commit finish failed (commit=%d): %s", commit, e.what());
+        return e.what();
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("Speculative target commit finish failed with an unknown exception (commit=%d)", commit);
+        return "unknown speculative target commit finish failure";
+    }
+}
+
+std::string PyWrappedModel::finalizeSpeculativeTargetCommit() {
+    if (!has_speculative_target_commit_hooks_) {
+        return {};
+    }
+    try {
+        py::gil_scoped_acquire gil;
+        py_model_.attr("finalize_speculative_target_commit")();
+        return {};
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("Python speculative target commit finalize failed: %s", e.what());
+        return e.what();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("Speculative target commit finalize failed: %s", e.what());
+        return e.what();
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("Speculative target commit finalize failed with an unknown exception");
+        return "unknown speculative target commit finalize failure";
+    }
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
@@ -187,12 +276,24 @@ PyWrappedModel::~PyWrappedModel() {
         graph_runner_.reset();
         // Runners retain Python methods and graph-owned tensors. Drain and
         // destroy them before releasing the model object they reference.
-        py_model_.release();
+        if (py_model_ && py::hasattr(py_model_, "close")) {
+            if (owns_py_model_) {
+                py_model_.attr("close")();
+            }
+            py_model_ = py::object();
+        } else {
+            py_model_.release();
+        }
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
+        py_model_.release();
         RTP_LLM_LOG_ERROR("Python error during PyWrappedModel destruction: %s", e.what());
     } catch (const std::exception& e) {
+        py_model_.release();
         RTP_LLM_LOG_ERROR("C++ error during PyWrappedModel destruction: %s", e.what());
+    } catch (...) {
+        py_model_.release();
+        RTP_LLM_LOG_ERROR("Unknown error during PyWrappedModel destruction");
     }
 }
 
@@ -327,6 +428,13 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.cu_kv_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.padding_offset          = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
 #if USING_CUDA
+        if (!py_attn_inputs.prefix_lengths.is_cuda()) {
+            // A CUDA input length can accompany a host prefix on MTP prefix
+            // hits. Its device mirror is a deferred H2D destination: fill it
+            // on this stream before the metadata kernel reads it.
+            fusedCopy(d2d_copies_);
+            d2d_copies_.clear();
+        }
         invokeBuildAttentionInputMetadata(py_attn_inputs.input_lengths_device,
                                           py_attn_inputs.prefix_lengths_device,
                                           py_attn_inputs.cu_seqlens_device,
@@ -512,14 +620,20 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
 }
 
 // Helper function to build BertEmbeddingInputs from GptModelInputs
-torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const GptModelInputs& inputs) {
+torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const GptModelInputs& inputs,
+                                                                        const torch::Tensor&  prepared_position_ids) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildBertEmbeddingInputs");
     DevicePerfWrapper              wrapper(enable_device_perf_, "py model buildBertEmbeddingInputs");
     torch_ext::BertEmbeddingInputs bert_embedding_inputs;
 
     // Convert combo_position_ids from Buffer to torch::Tensor
     if (inputs.combo_position_ids.defined()) {
-        bert_embedding_inputs.combo_position_ids = inputs.combo_position_ids.cuda();
+        // forward() already submits this transfer on the current stream. Reuse
+        // that tensor instead of issuing a second blocking .cuda() transfer.
+        // Other callers retain the host owner until asynchronous use completes.
+        bert_embedding_inputs.combo_position_ids = prepared_position_ids.defined() ?
+                                                       prepared_position_ids :
+                                                       tensorHoldHostAndToCuda(inputs.combo_position_ids);
     }
 
     // Convert combo_tokens_type_ids from Buffer to torch::Tensor
@@ -592,8 +706,8 @@ void PyWrappedModel::initializeCustomOutput() {
 torch::Tensor PyWrappedModel::runCustomOutput(const torch::Tensor& rows) {
     py::gil_scoped_acquire gil;
     auto                   output = py_model_.attr("custom_output_handler")
-                      .attr("extend_forward")(py::arg("selected_hidden_states") = rows)
-                      .cast<torch::Tensor>();
+                                        .attr("extend_forward")(py::arg("selected_hidden_states") = rows)
+                                        .cast<torch::Tensor>();
     TORCH_CHECK(output.defined() && (output.dim() == 1 || output.dim() == 2) && output.numel() > 0,
                 "custom output must be a nonempty [batch] or [batch, width] tensor");
     TORCH_CHECK(output.size(0) == rows.size(0), "custom output must return one row per selected context sequence");
@@ -649,8 +763,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     RTP_LLM_PROFILE_SCOPE("py_model.forwardMicroBatched");
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
-    // d2d_copies_ accumulates across ALL micro-batches before the single
-    // fusedCopy() flush below. Per micro-batch this adds ~6 copies from
+    // d2d_copies_ normally accumulates across micro-batches until the final
+    // flush. Mixed device lengths/host prefixes flush before metadata reads.
+    // Per micro-batch this adds ~6 copies from
     // buildPyAttentionInputs + padding_offset, plus group_count from
     // setupKVCacheForAttentionInputs. With the planMicroBatches cap of 2
     // micro-batches and hybrid group_count of 4 the worst case is ~20.
@@ -1057,7 +1172,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
         auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
-        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs, combo_position_ids);
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
             prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
         }
@@ -1105,8 +1220,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
-        const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
-                                   && graph_runner->canRun(py_model_inputs, graph_state);
+        const bool graph_candidate = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
+                                     && graph_runner->canRun(py_model_inputs, graph_state);
+        // Decode side-cache writes and the speculative accept_len callback
+        // require an exact batch. Draft-prefill graphs validate their packed
+        // rows separately and select a token bucket, leaving the decode batch
+        // key unset. Applying that key comparison also rejects valid prefill.
+        const bool can_run_graph = graph_candidate
+                                   && (is_prefill_cuda_graph_mode_ || !requires_exact_cuda_graph_batch_
+                                       || graph_state.current_real_graph_bs == graph_state.current_batch_size);
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
             generation_prefill_cuda_graph_status =
                 graph_state.generation_prefill_status == GenerationPrefillCudaGraphStatus::NOT_REQUESTED ?
@@ -1124,11 +1246,33 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 graph_state.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner->forward(py_model_inputs, graph_state);
+            if (has_speculative_target_commit_hooks_ && py_model_inputs.attention_inputs.is_target_verify) {
+                py_model_.attr("activate_speculative_target_graph_replay")(graph_state.current_real_graph_bs);
+            }
+            if (!py_model_inputs.attention_inputs.is_prefill
+                && py::hasattr(py_model_, "activate_draft_lm_head_graph")) {
+                py_model_.attr("activate_draft_lm_head_graph")(graph_state.current_real_graph_bs);
+            }
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
         } else {
+            if (!warned_exact_batch_graph_miss_ && !is_prefill_cuda_graph_mode_ && !capture_hidden_states
+                && requires_exact_cuda_graph_batch_ && enable_cuda_graph_ && graph_runner != nullptr
+                && graph_runner->canRun(py_model_inputs, graph_state)) {
+                // The batch was graph-eligible except for the exact-batch key:
+                // exact-batch models have no padded replay, so this batch size
+                // has no captured graph and silently runs the much slower
+                // eager path every step. Surface it once; the fix is an
+                // explicit decode_capture_config that covers this size.
+                warned_exact_batch_graph_miss_ = true;
+                RTP_LLM_LOG_WARNING(
+                    "[PyWrappedModel] exact-batch CUDA graph miss: batch=%d runs eager decode (nearest captured "
+                    "graph_bs=%d); add it to decode_capture_config or it will keep paying eager-step cost",
+                    graph_state.current_batch_size,
+                    graph_state.current_real_graph_bs);
+            }
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
@@ -1276,12 +1420,44 @@ sliceKvCacheBlockIdByBatch(const torch::Tensor& kv_cache_block_id, size_t batch_
     return kv_cache_block_id;
 }
 
-torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input) {
+torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input, bool fp32_logits) {
     RTP_LLM_PROFILE_SCOPE("py_model.tpSyncEmbeddingOrLogits");
-    const auto tp_size     = device_props_.tp_size;
-    const auto tp_rank     = device_props_.tp_rank;
-    const auto rows        = input.size(0);
-    const auto cols        = input.size(1);
+    const auto tp_size = device_props_.tp_size;
+    const auto tp_rank = device_props_.tp_rank;
+    const auto rows    = input.size(0);
+    const auto cols    = input.size(1);
+    if (fp32_logits) {
+        TORCH_CHECK(input.scalar_type() == torch::kBFloat16, "FP8 TP head gather requires BF16 local logits");
+        // A model-owned, preinitialized IPC workspace may serve the measured
+        // local Head domain. Unsupported inputs retain the explicit NCCL path.
+        {
+            py::gil_scoped_acquire gil;
+            if (py::hasattr(py_model_, "try_gather_fp8_lm_head_for_tp")) {
+                auto result = py_model_.attr("try_gather_fp8_lm_head_for_tp")(input);
+                if (!result.is_none()) {
+                    auto logits = result.cast<torch::Tensor>();
+                    TORCH_CHECK(logits.is_cuda() && logits.device() == input.device()
+                                    && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2
+                                    && logits.size(0) == rows && logits.size(1) == cols * (int64_t)tp_size
+                                    && logits.is_contiguous(),
+                                "Head IPC returned an invalid gathered tensor");
+                    return logits;
+                }
+            }
+        }
+        // Match the explicit-send gather used by vLLM: NCCL reads the local
+        // head output directly, with no rank-slice packing copy. The existing
+        // callback expects concatenation on dimension zero for a 2D send.
+        auto send     = input.contiguous();
+        auto gathered = torch::empty({rows * (int64_t)tp_size, cols}, input.options());
+        execAllGather({{gathered}, ParallelMode::TP, {send}, false});
+        // One strided copy performs rank reordering and the lossless BF16 to
+        // FP32 conversion. No intermediate contiguous BF16 logits are needed.
+        auto logits = torch::empty({rows, (int64_t)tp_size, cols}, input.options().dtype(torch::kFloat32));
+        logits.copy_(gathered.reshape({(int64_t)tp_size, rows, cols}).permute({1, 0, 2}));
+        cudaCheckLastError();
+        return logits.reshape({rows, cols * (int64_t)tp_size});
+    }
     const auto local_numel = input.numel();
     auto       all_data    = torch::empty({rows, cols * (int64_t)tp_size}, input.options());
     // Copy local data into the correct rank position
@@ -1403,10 +1579,19 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         printTorchTensorData(last_hidden, "last_hidden");
 
         torch::Tensor logits;
+        bool          use_bf16_tp_head = false;
         {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head_mm)");
 #if USING_CUDA
-            if (lm_head->kernel.dtype() == torch::kBFloat16) {
+            if (lm_head->kernel.dtype() == torch::kFloat8_e4m3fn) {
+                py::gil_scoped_acquire gil;
+                TORCH_CHECK(py::hasattr(py_model_, "compute_fp8_lm_head"), "FP8 LM head requires a scaled consumer");
+                use_bf16_tp_head = device_props_.tp_size > 1 && py::hasattr(py_model_, "compute_fp8_lm_head_for_tp");
+                const char* head_method = use_bf16_tp_head ? "compute_fp8_lm_head_for_tp" : "compute_fp8_lm_head";
+                logits                  = py_model_.attr(head_method)(last_hidden).cast<torch::Tensor>();
+                TORCH_CHECK(!use_bf16_tp_head || logits.scalar_type() == torch::kBFloat16,
+                            "TP FP8 LM head must return its original BF16 output");
+            } else if (lm_head->kernel.dtype() == torch::kBFloat16) {
                 logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
             } else
 #endif
@@ -1432,7 +1617,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         printTorchTensorData(logits, "logits");
         if (device_props_.tp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
-            logits = tpSyncEmbeddingOrLogits(logits);
+            logits = tpSyncEmbeddingOrLogits(logits, use_bf16_tp_head);
         }
         if (description_.output_vocab_size > 0) {
             RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2
@@ -1481,10 +1666,19 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
 
     torch::Tensor last_hidden = hidden;
     torch::Tensor logits;
+    bool          use_bf16_tp_head = false;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(lm_head_mm)");
 #if USING_CUDA
-        if (lm_head->kernel.dtype() == torch::kBFloat16) {
+        if (lm_head->kernel.dtype() == torch::kFloat8_e4m3fn) {
+            py::gil_scoped_acquire gil;
+            TORCH_CHECK(py::hasattr(py_model_, "compute_fp8_lm_head"), "FP8 LM head requires a scaled consumer");
+            use_bf16_tp_head        = device_props_.tp_size > 1 && py::hasattr(py_model_, "compute_fp8_lm_head_for_tp");
+            const char* head_method = use_bf16_tp_head ? "compute_fp8_lm_head_for_tp" : "compute_fp8_lm_head";
+            logits                  = py_model_.attr(head_method)(last_hidden).cast<torch::Tensor>();
+            TORCH_CHECK(!use_bf16_tp_head || logits.scalar_type() == torch::kBFloat16,
+                        "TP FP8 LM head must return its original BF16 output");
+        } else if (lm_head->kernel.dtype() == torch::kBFloat16) {
             logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
         } else
 #endif
@@ -1495,7 +1689,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     printTorchTensorData(logits, "logits");
     if (device_props_.tp_size > 1) {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
-        logits = tpSyncEmbeddingOrLogits(logits);
+        logits = tpSyncEmbeddingOrLogits(logits, use_bf16_tp_head);
     }
     if (check_nan_) {
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
@@ -1643,10 +1837,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     inputs.attention_mask.defined() ?
                         inputs.attention_mask.narrow(0, sliced_batch_idx, total_batch_size) :
                         torch::Tensor();
-                int32_t slice_token_num = std::accumulate(input_lengths_ptr + sliced_batch_idx + d_micro_batch_size,
-                                                          input_lengths_ptr + sliced_batch_idx + total_batch_size,
-                                                          0)
-                                          + d_micro_batch_size;
+                int32_t slice_token_num     = std::accumulate(input_lengths_ptr + sliced_batch_idx + d_micro_batch_size,
+                                                              input_lengths_ptr + sliced_batch_idx + total_batch_size,
+                                                              0)
+                                              + d_micro_batch_size;
                 int32_t slice_lm_output_num = total_batch_size;
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_lm_output_index, slice_lm_output_num);

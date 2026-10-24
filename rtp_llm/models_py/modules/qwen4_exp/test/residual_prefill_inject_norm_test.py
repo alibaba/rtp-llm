@@ -1,0 +1,100 @@
+import unittest
+from unittest.mock import patch
+
+import torch
+
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
+from rtp_llm.models_py.modules.hybrid.gated_residual import (
+    grouped_rms_norm,
+    inject_into_residual,
+)
+from rtp_llm.models_py.modules.qwen4_exp.test import residual_norm_fp8_test as oracle
+from rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_inject_norm_triton import (
+    try_inject_grouped_norm,
+)
+
+MODULE = (
+    "rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_inject_norm_triton"
+)
+
+
+class ResidualPrefillInjectNormTest(unittest.TestCase):
+    def test_unprofitable_medium_prefill_uses_original(self):
+        for rows in (257, 2048):
+            x = torch.empty(rows, 10240, device="cuda", dtype=torch.bfloat16)
+            sub = torch.empty(rows, 2560, device="cuda", dtype=torch.bfloat16)
+            gates = torch.empty(rows, 4, device="cuda", dtype=torch.bfloat16)
+            gamma = torch.empty(10240, device="cuda", dtype=torch.bfloat16)
+            self.assertIsNone(try_inject_grouped_norm(x, sub, gates, gamma, 1e-6))
+
+    def test_complete_consumer_exact_and_small_fallback(self):
+        for rows in (1, 4, 257, 2048, 4093, 4096, 8192, 12288):
+            model = oracle.ResidualNormFp8Test().module(True)
+            x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
+            sub = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+            gates = torch.randn(rows, 4, device="cuda", dtype=torch.bfloat16)
+            with patch(MODULE + ".try_inject_grouped_norm", return_value=None):
+                expected = model.forward_with_injection(x, sub, gates)
+            actual = model.forward_with_injection(x, sub, gates)
+            oracle.ResidualNormFp8Test().assert_outputs(actual, expected)
+
+    def test_bytes_scale_zero_and_nonfinite_values(self):
+        for rows in (4096, 12288):
+            for kind in ("random", "zero", "wide", "nonfinite"):
+                x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
+                sub = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+                gates = torch.randn(rows, 4, device="cuda", dtype=torch.bfloat16)
+                gamma = torch.randn(10240, device="cuda", dtype=torch.bfloat16) * 0.07
+                if kind == "zero":
+                    x.zero_()
+                    sub.zero_()
+                if kind == "wide":
+                    x.mul_(1000)
+                    sub.mul_(1000)
+                if kind == "nonfinite":
+                    x[0, 0] = float("inf")
+                    x[1, 2560] = float("nan")
+                residual, norm, scale = try_inject_grouped_norm(
+                    x, sub, gates, gamma, 1e-6
+                )
+                expected_residual = inject_into_residual(x, sub, gates)
+                expected_norm = grouped_rms_norm(expected_residual, gamma, 2560, 1e-6)
+                torch.testing.assert_close(
+                    residual, expected_residual, rtol=0, atol=0, equal_nan=True
+                )
+                torch.testing.assert_close(
+                    norm, expected_norm, rtol=0, atol=0, equal_nan=True
+                )
+                quant, sf = scaled_fp8_per_tensor_quant(norm, scale=scale)
+                expected_quant, expected_sf = scaled_fp8_per_tensor_quant(expected_norm)
+                self.assertTrue(torch.equal(sf, expected_sf))
+                self.assertTrue(
+                    torch.equal(
+                        quant.view(torch.uint8), expected_quant.view(torch.uint8)
+                    )
+                )
+
+    def test_graph_reads_input_sublayer_gates_gamma_and_scale(self):
+        for rows in (4096, 12288):
+            model = oracle.ResidualNormFp8Test().module(True)
+            x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
+            sub = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+            gates = torch.randn(rows, 4, device="cuda", dtype=torch.bfloat16)
+            model.forward_with_injection(x, sub, gates)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = model.forward_with_injection(x, sub, gates)
+            for _ in range(2):
+                x.normal_()
+                sub.normal_()
+                gates.normal_()
+                model.norm_gamma.normal_(0, 0.07)
+                with patch(MODULE + ".try_inject_grouped_norm", return_value=None):
+                    expected = model.forward_with_injection(x, sub, gates)
+                graph.replay()
+                torch.cuda.synchronize()
+                oracle.ResidualNormFp8Test().assert_outputs(actual, expected)
+
+
+if __name__ == "__main__":
+    unittest.main()

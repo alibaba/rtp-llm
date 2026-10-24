@@ -1,0 +1,1972 @@
+from types import SimpleNamespace
+from unittest import TestCase, main, skipUnless
+from unittest.mock import patch
+
+import torch
+
+from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
+    INDEXER_KV_TAG,
+    INDEXER_STATE_TAG,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
+    _same_tensor_metadata,
+    _validate_required_blocks,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
+    Qwen4ExpQSARuntimeContext,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
+    select_qsa_paged_tokens,
+)
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    exact_head_rms_norm,
+)
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
+    apply_partial_rope,
+    build_interleaved_mrope,
+    build_qsa_rope,
+)
+from rtp_llm.ops import RopeStyle
+from rtp_llm.ops.compute_ops import PyCacheStoreInputs
+
+
+class Qwen4ExpQSARuntimeTest(TestCase):
+    D = 4
+    RATIO = 4
+    KV_TOKENS_PER_BLOCK = 8
+    STATE_TOKENS_PER_BLOCK = 8
+
+    def test_metadata_alias_fast_path_preserves_distinct_tensor_validation(self):
+        values = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+        alias = values.view_as(values)
+        with patch.object(torch, "equal", wraps=torch.equal) as equal:
+            self.assertTrue(_same_tensor_metadata(values, alias))
+            equal.assert_not_called()
+
+            self.assertTrue(_same_tensor_metadata(values, values.clone()))
+            self.assertFalse(_same_tensor_metadata(values, values.T))
+            self.assertFalse(_same_tensor_metadata(values, values + 1))
+            self.assertEqual(equal.call_count, 3)
+
+    def test_required_block_validation_preserves_error_cases(self):
+        devices = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
+        for device in devices:
+            with self.subTest(device=device):
+                table = torch.tensor([[1, 2]], dtype=torch.int32, device=device)
+                required = torch.tensor([2], dtype=torch.int32, device=device)
+                _validate_required_blocks(
+                    table, required, pool_blocks=3, tag=INDEXER_KV_TAG
+                )
+                _validate_required_blocks(
+                    table[:, :0],
+                    torch.zeros_like(required),
+                    pool_blocks=3,
+                    tag=INDEXER_KV_TAG,
+                )
+                for count, message in (
+                    (-1, "negative required-column count"),
+                    (3, "does not cover"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        _validate_required_blocks(
+                            table,
+                            torch.tensor([count], dtype=torch.int32, device=device),
+                            pool_blocks=3,
+                            tag=INDEXER_KV_TAG,
+                        )
+                with self.assertRaisesRegex(RuntimeError, "unallocated"):
+                    _validate_required_blocks(
+                        torch.tensor([[1, 0]], dtype=torch.int32, device=device),
+                        required,
+                        pool_blocks=3,
+                        tag=INDEXER_KV_TAG,
+                    )
+                with self.assertRaisesRegex(RuntimeError, "out-of-range physical"):
+                    _validate_required_blocks(
+                        torch.tensor([[1, 3]], dtype=torch.int32, device=device),
+                        torch.tensor([1], dtype=torch.int32, device=device),
+                        pool_blocks=3,
+                        tag=INDEXER_KV_TAG,
+                    )
+
+    def test_token_selection_rejects_invalid_lengths(self):
+        logits = torch.zeros(1, 1)
+        for length, message in (
+            (-1, "non-negative"),
+            (8, "do not cover every completed block"),
+        ):
+            with self.assertRaisesRegex(ValueError, message):
+                select_qsa_paged_tokens(
+                    logits,
+                    torch.tensor([length], dtype=torch.int32),
+                    compress_ratio=4,
+                    token_budget=4,
+                )
+
+    @skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_fused_required_block_validation_handles_strides_and_fallback(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_validation_triton import (
+            is_supported,
+            required_blocks_are_valid,
+        )
+
+        table = torch.tensor([[1, 2, 3], [1, 2, 3]], dtype=torch.int32, device="cuda").T
+        required = torch.tensor([2, 0, 2, 0, 2, 0], dtype=torch.int32, device="cuda")[
+            ::2
+        ]
+        self.assertTrue(is_supported(table, required))
+        self.assertTrue(required_blocks_are_valid(table, required, pool_blocks=4))
+        _validate_required_blocks(table, required, pool_blocks=4, tag=INDEXER_KV_TAG)
+        table[1, 1] = 4
+        self.assertFalse(required_blocks_are_valid(table, required, pool_blocks=4))
+        with self.assertRaisesRegex(RuntimeError, "out-of-range"):
+            _validate_required_blocks(
+                table, required, pool_blocks=4, tag=INDEXER_KV_TAG
+            )
+
+        wide_table = torch.ones(1, 4097, dtype=torch.int32, device="cuda")
+        self.assertFalse(is_supported(wide_table, required[:1]))
+        _validate_required_blocks(
+            wide_table,
+            required[:1],
+            pool_blocks=4,
+            tag=INDEXER_KV_TAG,
+        )
+
+    def setUp(self):
+        torch.manual_seed(17)
+        self.lengths = [5, 8]
+        self.total_tokens = sum(self.lengths)
+        positions = []
+        for seq_len in self.lengths:
+            positions.extend([[pos, pos, pos] for pos in range(seq_len)])
+        self.position_ids = torch.tensor(positions, dtype=torch.int32).reshape(-1)
+        self.cu_seqlens = torch.tensor([0, 5, 13], dtype=torch.int32)
+        self.input_lengths = torch.tensor(self.lengths, dtype=torch.int32)
+        self.prefix_lengths = torch.zeros(2, dtype=torch.int32)
+        self.sequence_lengths = torch.zeros(2, dtype=torch.int32)
+        self.kv_base = torch.zeros(7, 2 * self.D * 2, dtype=torch.uint8)
+        self.state_base = torch.zeros(8, 2 * self.RATIO * self.D, dtype=torch.float32)
+        self.kv_table = torch.tensor([[3], [1]], dtype=torch.int32)
+        self.state_table = torch.tensor([[6], [2]], dtype=torch.int32)
+        self.rope_config = SimpleNamespace(
+            style=RopeStyle.Mrope,
+            index_factor=3,
+            dim=4,
+            mrope_dim1=1,
+            mrope_dim2=1,
+            mrope_dim3=0,
+            mrope_interleaved=True,
+            base=10_000,
+        )
+        self.indexer = SimpleNamespace(
+            head_dim=self.D,
+            compress_ratio=self.RATIO,
+            k_norm_gamma=torch.rand(self.D),
+            norm_eps=1e-6,
+        )
+
+    def _inputs(self, *, kv_table=None, state_table=None, **overrides):
+        values = dict(
+            is_prefill=True,
+            is_target_verify=False,
+            is_cuda_graph=False,
+            is_s_padded=False,
+            context_parallel_info=None,
+            cache_store_inputs=None,
+            input_lengths=self.input_lengths,
+            prefix_lengths=self.prefix_lengths,
+            sequence_lengths=self.sequence_lengths,
+            cu_seqlens_device=self.cu_seqlens,
+            cu_kv_seqlens_device=self.cu_seqlens,
+            combo_position_ids=self.position_ids,
+            kv_cache_kernel_block_id_device=kv_table,
+            kv_cache_block_id_device=state_table,
+        )
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def _context(self, *, kv_base=None, state_base=None, **state_overrides):
+        main_inputs = self._inputs()
+        kv_inputs = self._inputs(kv_table=self.kv_table)
+        state_inputs = self._inputs(state_table=self.state_table, **state_overrides)
+        return Qwen4ExpQSARuntimeContext(
+            main_cache=SimpleNamespace(tag="full"),
+            main_inputs=main_inputs,
+            indexer_kv_cache=SimpleNamespace(
+                tag=INDEXER_KV_TAG,
+                kv_cache_base=self.kv_base if kv_base is None else kv_base,
+                seq_size_per_block=self.KV_TOKENS_PER_BLOCK,
+            ),
+            indexer_kv_inputs=kv_inputs,
+            indexer_state_cache=SimpleNamespace(
+                tag=INDEXER_STATE_TAG,
+                kv_cache_base=self.state_base if state_base is None else state_base,
+                seq_size_per_block=self.STATE_TOKENS_PER_BLOCK,
+            ),
+            indexer_state_inputs=state_inputs,
+        )
+
+    def _expected(self, raw_keys, cos, sin, start):
+        pooled = raw_keys.float().mean(dim=0).to(raw_keys.dtype)
+        pooled = exact_head_rms_norm(
+            pooled, self.indexer.k_norm_gamma, self.indexer.norm_eps
+        )
+        return apply_partial_rope(pooled, cos, sin).to(torch.bfloat16)
+
+    def _single_request_context(
+        self,
+        kv_base,
+        state_base,
+        *,
+        is_prefill,
+        input_length,
+        sequence_length,
+        position_ids,
+        target_verify=False,
+        prefix_length=0,
+    ):
+        device = kv_base.device
+        input_lengths = torch.tensor([input_length], dtype=torch.int32, device=device)
+        sequence_lengths = torch.tensor(
+            [sequence_length], dtype=torch.int32, device=device
+        )
+        prefix_lengths = torch.tensor([prefix_length], dtype=torch.int32, device=device)
+        cu_seqlens = torch.tensor(
+            [0, input_length if is_prefill else 1],
+            dtype=torch.int32,
+            device=device,
+        )
+        position_ids = torch.as_tensor(
+            position_ids, dtype=torch.int32, device=device
+        ).reshape(-1)
+        kv_table = torch.tensor([[3]], dtype=torch.int32, device=device)
+        state_table = torch.tensor([[6]], dtype=torch.int32, device=device)
+
+        def _inputs(*, kv_table=None, state_table=None):
+            return SimpleNamespace(
+                is_prefill=is_prefill,
+                is_target_verify=target_verify,
+                is_cuda_graph=False,
+                is_s_padded=False,
+                context_parallel_info=None,
+                cache_store_inputs=None,
+                input_lengths=input_lengths,
+                prefix_lengths=prefix_lengths,
+                sequence_lengths=sequence_lengths,
+                cu_seqlens_device=cu_seqlens,
+                cu_kv_seqlens_device=cu_seqlens,
+                combo_position_ids=position_ids,
+                kv_cache_kernel_block_id_device=kv_table,
+                kv_cache_block_id_device=state_table,
+            )
+
+        return Qwen4ExpQSARuntimeContext(
+            main_cache=SimpleNamespace(tag="full"),
+            main_inputs=_inputs(),
+            indexer_kv_cache=SimpleNamespace(
+                tag=INDEXER_KV_TAG,
+                kv_cache_base=kv_base,
+                seq_size_per_block=self.KV_TOKENS_PER_BLOCK,
+            ),
+            indexer_kv_inputs=_inputs(kv_table=kv_table),
+            indexer_state_cache=SimpleNamespace(
+                tag=INDEXER_STATE_TAG,
+                kv_cache_base=state_base,
+                seq_size_per_block=self.STATE_TOKENS_PER_BLOCK,
+            ),
+            indexer_state_inputs=_inputs(state_table=state_table),
+        )
+
+    def _decode_indexer(self, heads=2):
+        return SimpleNamespace(
+            head_dim=self.D,
+            n_heads=heads,
+            compress_ratio=self.RATIO,
+            token_budget=8,
+            k_norm_gamma=self.indexer.k_norm_gamma,
+            norm_eps=self.indexer.norm_eps,
+        )
+
+    @staticmethod
+    def _base_rope_config(
+        index_factor, *, style=RopeStyle.Base, indexer_is_neox_style=True
+    ):
+        return SimpleNamespace(
+            style=style,
+            index_factor=index_factor,
+            dim=4,
+            base=10_000,
+            scale=1.0,
+            indexer_is_neox_style=indexer_is_neox_style,
+        )
+
+    @staticmethod
+    def _set_position_ids(context, position_ids):
+        position_ids = torch.as_tensor(
+            position_ids,
+            dtype=torch.int32,
+            device=context.main_inputs.input_lengths.device,
+        ).reshape(-1)
+        for inputs in (
+            context.main_inputs,
+            context.indexer_kv_inputs,
+            context.indexer_state_inputs,
+        ):
+            inputs.combo_position_ids = position_ids
+
+    def _target_verify_context(self, *, q_len=4, committed_length=7):
+        """Mirror the target-verify ABI produced by MtpExecutor.
+
+        Target verification is represented as a context-style invocation:
+        ``input_lengths=[gamma + 1]``, ``prefix_lengths=[committed]`` and an
+        empty ``sequence_lengths`` tensor.
+        """
+        device = self.kv_base.device
+        input_lengths = torch.tensor([q_len], dtype=torch.int32, device=device)
+        prefix_lengths = torch.tensor(
+            [committed_length], dtype=torch.int32, device=device
+        )
+        sequence_lengths = torch.empty(0, dtype=torch.int32, device=device)
+        cu_seqlens = torch.tensor([0, q_len], dtype=torch.int32, device=device)
+        cu_kv_seqlens = torch.tensor(
+            [0, committed_length + q_len], dtype=torch.int32, device=device
+        )
+        position_ids = torch.arange(
+            committed_length,
+            committed_length + q_len,
+            dtype=torch.int32,
+            device=device,
+        )
+        position_ids = position_ids.unsqueeze(1).expand(-1, 3).reshape(-1)
+        kv_table = torch.tensor([[3, 4]], dtype=torch.int32, device=device)
+        state_table = torch.tensor([[6, 7]], dtype=torch.int32, device=device)
+
+        def _inputs(*, kv_table=None, state_table=None):
+            return SimpleNamespace(
+                is_prefill=True,
+                is_target_verify=True,
+                is_cuda_graph=False,
+                is_s_padded=False,
+                context_parallel_info=None,
+                cache_store_inputs=None,
+                input_lengths=input_lengths,
+                prefix_lengths=prefix_lengths,
+                sequence_lengths=sequence_lengths,
+                cu_seqlens_device=cu_seqlens,
+                cu_kv_seqlens_device=cu_kv_seqlens,
+                combo_position_ids=position_ids,
+                kv_cache_kernel_block_id_device=kv_table,
+                kv_cache_block_id_device=state_table,
+            )
+
+        return Qwen4ExpQSARuntimeContext(
+            main_cache=SimpleNamespace(tag="full"),
+            main_inputs=_inputs(),
+            indexer_kv_cache=SimpleNamespace(
+                tag=INDEXER_KV_TAG,
+                kv_cache_base=self.kv_base,
+                seq_size_per_block=self.KV_TOKENS_PER_BLOCK,
+            ),
+            indexer_kv_inputs=_inputs(kv_table=kv_table),
+            indexer_state_cache=SimpleNamespace(
+                tag=INDEXER_STATE_TAG,
+                kv_cache_base=self.state_base,
+                seq_size_per_block=self.STATE_TOKENS_PER_BLOCK,
+            ),
+            indexer_state_inputs=_inputs(state_table=state_table),
+        )
+
+    def _draft_incremental_context(
+        self,
+        kv_base,
+        state_base,
+        *,
+        prefixes,
+        lengths,
+        kv_table=None,
+        state_table=None,
+        position_factor=3,
+        is_mtp_draft=True,
+        position_overrides=None,
+    ):
+        device = kv_base.device
+        batch_size = len(lengths)
+        input_lengths = torch.tensor(lengths, dtype=torch.int32, device=device)
+        prefix_lengths = torch.tensor(prefixes, dtype=torch.int32, device=device)
+        sequence_lengths = torch.empty(0, dtype=torch.int32, device=device)
+        cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+        cu_seqlens[1:] = input_lengths.cumsum(0)
+        cu_kv_seqlens = torch.zeros_like(cu_seqlens)
+        cu_kv_seqlens[1:] = (prefix_lengths + input_lengths).cumsum(0)
+        positions = []
+        for prefix, length in zip(prefixes, lengths):
+            positions.extend(range(prefix, prefix + length))
+        if position_overrides is not None:
+            positions = position_overrides
+        position_ids = torch.tensor(positions, dtype=torch.int32, device=device)
+        if position_factor == 3:
+            position_ids = position_ids.unsqueeze(1).expand(-1, 3)
+        position_ids = position_ids.reshape(-1)
+        if kv_table is None:
+            kv_table = torch.arange(
+                1,
+                1 + batch_size * 3,
+                dtype=torch.int32,
+                device=device,
+            ).view(batch_size, 3)
+        if state_table is None:
+            state_table = torch.arange(
+                1 + batch_size * 3,
+                1 + batch_size * 6,
+                dtype=torch.int32,
+                device=device,
+            ).view(batch_size, 3)
+
+        def _inputs(*, kv_table=None, state_table=None):
+            return SimpleNamespace(
+                is_prefill=True,
+                is_target_verify=False,
+                is_cuda_graph=False,
+                is_s_padded=False,
+                context_parallel_info=None,
+                cache_store_inputs=None,
+                input_lengths=input_lengths,
+                prefix_lengths=prefix_lengths,
+                sequence_lengths=sequence_lengths,
+                cu_seqlens_device=cu_seqlens,
+                cu_kv_seqlens_device=cu_kv_seqlens,
+                combo_position_ids=position_ids,
+                kv_cache_kernel_block_id_device=kv_table,
+                kv_cache_block_id_device=state_table,
+            )
+
+        return Qwen4ExpQSARuntimeContext(
+            main_cache=SimpleNamespace(tag="full"),
+            main_inputs=_inputs(),
+            indexer_kv_cache=SimpleNamespace(
+                tag=INDEXER_KV_TAG,
+                kv_cache_base=kv_base,
+                seq_size_per_block=self.KV_TOKENS_PER_BLOCK,
+            ),
+            indexer_kv_inputs=_inputs(kv_table=kv_table),
+            indexer_state_cache=SimpleNamespace(
+                tag=INDEXER_STATE_TAG,
+                kv_cache_base=state_base,
+                seq_size_per_block=self.STATE_TOKENS_PER_BLOCK,
+            ),
+            indexer_state_inputs=_inputs(state_table=state_table),
+            is_mtp_draft=is_mtp_draft,
+        )
+
+    def test_ragged_prefill_writes_each_tag_local_pool(self):
+        first = torch.randn(5, self.D, dtype=torch.bfloat16)
+        second = torch.randn(8, self.D, dtype=torch.bfloat16)
+        raw_keys = torch.cat([first, second])
+
+        lengths, cos, sin, result = self._context().write_prefill_indexer_cache(
+            raw_keys, indexer=self.indexer, rope_config=self.rope_config
+        )
+
+        self.assertEqual(lengths, self.lengths)
+        self.assertEqual(result["num_state_writes"], 13)
+        self.assertEqual(result["num_kv_writes"], 3)
+        kv_pool = self.kv_base.view(torch.bfloat16).view(7, 2, self.D)
+        state_pool = self.state_base.view(8, 2 * self.RATIO, self.D)
+        torch.testing.assert_close(
+            kv_pool[3, 0], self._expected(first[:4], cos[0, 0], sin[0, 0], 0)
+        )
+        torch.testing.assert_close(
+            kv_pool[1, 0], self._expected(second[:4], cos[1, 0], sin[1, 0], 0)
+        )
+        torch.testing.assert_close(
+            kv_pool[1, 1], self._expected(second[4:8], cos[1, 4], sin[1, 4], 4)
+        )
+        torch.testing.assert_close(state_pool[6, 4], first[4].float())
+        torch.testing.assert_close(state_pool[2, 7], second[7].float())
+
+    def test_base_rope_prefill_factor_one_and_three_match(self):
+        raw_keys = torch.randn(self.total_tokens, self.D, dtype=torch.bfloat16)
+        scalar_positions = []
+        for seq_len in self.lengths:
+            scalar_positions.extend(range(seq_len))
+
+        factor_one = self._context(
+            kv_base=torch.zeros_like(self.kv_base),
+            state_base=torch.zeros_like(self.state_base),
+        )
+        self._set_position_ids(factor_one, scalar_positions)
+        _, cos_one, sin_one, _ = factor_one.write_prefill_indexer_cache(
+            raw_keys,
+            indexer=self.indexer,
+            rope_config=self._base_rope_config(1),
+        )
+
+        factor_three = self._context(
+            kv_base=torch.zeros_like(self.kv_base),
+            state_base=torch.zeros_like(self.state_base),
+        )
+        positions_three = (
+            torch.tensor(scalar_positions, dtype=torch.int32).unsqueeze(1).expand(-1, 3)
+        )
+        self._set_position_ids(factor_three, positions_three)
+        _, cos_three, sin_three, _ = factor_three.write_prefill_indexer_cache(
+            raw_keys,
+            indexer=self.indexer,
+            rope_config=self._base_rope_config(3),
+        )
+
+        torch.testing.assert_close(cos_one, cos_three)
+        torch.testing.assert_close(sin_one, sin_three)
+
+    def test_base_rope_prefill_rejects_non_logical_position_before_write(self):
+        raw_keys = torch.randn(self.total_tokens, self.D, dtype=torch.bfloat16)
+        scalar_positions = []
+        for seq_len in self.lengths:
+            scalar_positions.extend(range(seq_len))
+        scalar_positions[4] += 1
+        for style in (RopeStyle.Base, "Base", 1):
+            with self.subTest(style=style):
+                context = self._context()
+                self._set_position_ids(context, scalar_positions)
+                with patch(
+                    "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context."
+                    "write_indexer_cache"
+                ) as writer:
+                    with self.assertRaisesRegex(
+                        RuntimeError, "logical cache positions"
+                    ):
+                        context.write_prefill_indexer_cache(
+                            raw_keys,
+                            indexer=self.indexer,
+                            rope_config=self._base_rope_config(1, style=style),
+                        )
+
+                writer.assert_not_called()
+
+    def test_non_neox_indexer_rope_is_rejected_before_prefill_write(self):
+        raw_keys = torch.randn(self.total_tokens, self.D, dtype=torch.bfloat16)
+        scalar_positions = []
+        for seq_len in self.lengths:
+            scalar_positions.extend(range(seq_len))
+        context = self._context()
+        self._set_position_ids(context, scalar_positions)
+
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context.write_indexer_cache"
+        ) as writer:
+            with self.assertRaisesRegex(RuntimeError, "indexer_is_neox_style=true"):
+                context.write_prefill_indexer_cache(
+                    raw_keys,
+                    indexer=self.indexer,
+                    rope_config=self._base_rope_config(1, indexer_is_neox_style=False),
+                )
+
+        writer.assert_not_called()
+
+    def test_bad_2d_pool_row_is_rejected_before_mutation(self):
+        bad_kv = torch.zeros(7, self.kv_base.shape[1] - 1, dtype=torch.uint8)
+        raw_keys = torch.randn(self.total_tokens, self.D, dtype=torch.bfloat16)
+
+        with self.assertRaisesRegex(RuntimeError, "row has"):
+            self._context(kv_base=bad_kv).write_prefill_indexer_cache(
+                raw_keys, indexer=self.indexer, rope_config=self.rope_config
+            )
+
+        self.assertEqual(int(torch.count_nonzero(bad_kv)), 0)
+        self.assertEqual(int(torch.count_nonzero(self.state_base)), 0)
+
+    def test_unsupported_or_inconsistent_side_metadata_is_rejected(self):
+        raw_keys = torch.randn(self.total_tokens, self.D, dtype=torch.bfloat16)
+        cases = (
+            ("prefill", {"is_prefill": False}),
+            ("prefix", {"prefix_lengths": torch.tensor([1, 0], dtype=torch.int32)}),
+            ("target-verify mode", {"is_target_verify": True}),
+            ("CUDA Graph", {"is_cuda_graph": True}),
+            ("PD", {"cache_store_inputs": object()}),
+        )
+        for expected, overrides in cases:
+            with self.subTest(expected=expected):
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    self._context(**overrides).write_prefill_indexer_cache(
+                        raw_keys, indexer=self.indexer, rope_config=self.rope_config
+                    )
+        self.assertEqual(int(torch.count_nonzero(self.kv_base)), 0)
+        self.assertEqual(int(torch.count_nonzero(self.state_base)), 0)
+
+    def test_target_verify_wider_than_one_compression_group_is_rejected(self):
+        q_len = self.RATIO + 1
+        raw_keys = torch.randn(q_len, self.D, dtype=torch.bfloat16)
+        q = torch.randn(q_len, 2, self.D, dtype=torch.bfloat16)
+        self.kv_base.random_(0, 256)
+        self.state_base.normal_()
+        kv_before = self.kv_base.clone()
+        state_before = self.state_base.clone()
+        context = self._target_verify_context(q_len=q_len)
+        indexer = self._decode_indexer()
+
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context.write_indexer_cache"
+        ) as writer:
+            with self.assertRaisesRegex(RuntimeError, "gamma\\+1=.*<= compress_ratio"):
+                context.select_target_verify_tokens(
+                    q,
+                    raw_keys,
+                    indexer=indexer,
+                    rope_config=self.rope_config,
+                )
+
+        writer.assert_not_called()
+        torch.testing.assert_close(self.kv_base, kv_before)
+        torch.testing.assert_close(self.state_base, state_before)
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for target preflight")
+    def test_target_verify_state_table_does_not_wrap_past_its_absolute_width(self):
+        self.kv_base = self.kv_base.cuda()
+        self.state_base = self.state_base.cuda()
+        self.indexer.k_norm_gamma = self.indexer.k_norm_gamma.cuda()
+        self.kv_base.random_(0, 256)
+        self.state_base.normal_()
+        kv_before = self.kv_base.clone()
+        state_before = self.state_base.clone()
+        context = self._target_verify_context(q_len=1, committed_length=8)
+        context.indexer_state_inputs.kv_cache_block_id_device = torch.tensor(
+            [[6]], dtype=torch.int32, device=self.state_base.device
+        )
+        raw_keys = torch.randn(
+            1, self.D, dtype=torch.bfloat16, device=self.kv_base.device
+        )
+        q = torch.randn(1, 2, self.D, dtype=torch.bfloat16, device=self.kv_base.device)
+
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context.write_indexer_cache"
+        ) as writer:
+            with self.assertRaisesRegex(RuntimeError, "does not cover"):
+                context.select_target_verify_tokens(
+                    q,
+                    raw_keys,
+                    indexer=self._decode_indexer(),
+                    rope_config=self.rope_config,
+                )
+
+        writer.assert_not_called()
+        self.assertTrue(torch.equal(self.kv_base, kv_before))
+        self.assertTrue(torch.equal(self.state_base, state_before))
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
+    def test_target_verify_uses_prefix_for_every_query_row(self):
+        self.kv_base = self.kv_base.cuda()
+        self.state_base = self.state_base.cuda()
+        self.indexer.k_norm_gamma = self.indexer.k_norm_gamma.cuda()
+        q_len = self.RATIO
+        committed = 7
+        context = self._target_verify_context(q_len=q_len, committed_length=committed)
+        indexer = self._decode_indexer()
+        raw_keys = torch.randn(
+            q_len, self.D, dtype=torch.bfloat16, device=self.kv_base.device
+        )
+        q = torch.randn(
+            q_len, 2, self.D, dtype=torch.bfloat16, device=self.kv_base.device
+        )
+        observed = {}
+
+        def _score(
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
+            validate_block_table,
+        ):
+            self.assertFalse(validate_block_table)
+            observed.update(q=q, lengths=lengths, max_ctx_len=max_ctx_len)
+            return torch.tensor(
+                [[0.25, 3.0]] * q_len,
+                dtype=torch.float32,
+                device=q.device,
+            )
+
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "qsa_paged_indexer_score",
+            side_effect=_score,
+        ):
+            selected = context.select_target_verify_tokens(
+                q,
+                raw_keys,
+                indexer=indexer,
+                rope_config=self.rope_config,
+            )
+
+        self.assertEqual(observed["q"].shape, (1, q_len, 2, self.D))
+        torch.testing.assert_close(
+            observed["lengths"],
+            torch.full(
+                (1, q_len),
+                2,
+                dtype=torch.int32,
+                device=observed["lengths"].device,
+            ),
+        )
+        self.assertEqual(observed["max_ctx_len"], 2)
+        for row in range(q_len):
+            visible = committed + row + 1
+            valid = selected[row][selected[row] >= 0]
+            self.assertTrue(bool(torch.all(valid < visible)))
+            tail = torch.arange(8, visible, dtype=torch.int32, device=selected.device)
+            if tail.numel():
+                self.assertTrue(
+                    set(tail.tolist()).issubset(set(valid.tolist())),
+                    msg=f"row={row}, selected={valid.tolist()}",
+                )
+
+        kv_pool = self.kv_base.view(torch.bfloat16).view(7, 2, self.D)
+        state_pool = self.state_base.view(8, 2 * self.RATIO, self.D)
+        self.assertGreater(int(torch.count_nonzero(kv_pool[3, 1])), 0)
+        torch.testing.assert_close(state_pool[6, 7], raw_keys[0].float())
+        torch.testing.assert_close(state_pool[7, 0], raw_keys[1].float())
+        torch.testing.assert_close(state_pool[7, 2], raw_keys[3].float())
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for target preflight")
+    def test_target_preflight_plan_is_consumed_once(self):
+        self.kv_base = self.kv_base.cuda()
+        self.state_base = self.state_base.cuda()
+        self.indexer.k_norm_gamma = self.indexer.k_norm_gamma.cuda()
+        q_len = self.RATIO
+        context = self._target_verify_context(q_len=q_len, committed_length=7)
+        indexer = self._decode_indexer()
+        raw_keys = torch.randn(q_len, self.D, dtype=torch.bfloat16, device="cuda")
+        q = torch.randn(q_len, 2, self.D, dtype=torch.bfloat16, device="cuda")
+        original = Qwen4ExpQSARuntimeContext._target_verify_geometry
+        with (
+            patch.object(
+                Qwen4ExpQSARuntimeContext,
+                "_target_verify_geometry",
+                autospec=True,
+                side_effect=original,
+            ) as geometry,
+            patch(
+                "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+                "qsa_paged_indexer_score",
+                return_value=torch.zeros(q_len, 2, device="cuda"),
+            ),
+        ):
+            context.validate_before_projection(
+                indexer=indexer, token_count=q_len, device=raw_keys.device
+            )
+            context.select_target_verify_tokens(
+                q, raw_keys, indexer=indexer, rope_config=self.rope_config
+            )
+        self.assertEqual(geometry.call_count, 1)
+        self.assertIsNone(context._target_verify_plan)
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
+    def test_target_verify_never_overwrites_the_committed_partial_group(self):
+        self.indexer.k_norm_gamma = self.indexer.k_norm_gamma.cuda()
+        device = self.indexer.k_norm_gamma.device
+        q_len = self.RATIO
+
+        def _score(
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
+            validate_block_table,
+        ):
+            self.assertFalse(validate_block_table)
+            return torch.zeros(
+                q.shape[0] * q.shape[1],
+                max_ctx_len,
+                dtype=torch.float32,
+                device=q.device,
+            )
+
+        for residue in range(self.RATIO):
+            with self.subTest(prefix_residue=residue):
+                committed = 2 * self.RATIO + residue
+                self.kv_base = torch.zeros(
+                    7,
+                    2 * self.D * 2,
+                    dtype=torch.uint8,
+                    device=device,
+                )
+                self.state_base = torch.zeros(
+                    8,
+                    2 * self.RATIO * self.D,
+                    dtype=torch.float32,
+                    device=device,
+                )
+                state_pool = self.state_base.view(8, 2 * self.RATIO, self.D)
+                committed_slots = []
+                for position in range(committed - residue, committed):
+                    logical_block = position // self.STATE_TOKENS_PER_BLOCK
+                    self.assertLess(logical_block, 2)
+                    physical_block = (6, 7)[logical_block]
+                    offset = position % (2 * self.RATIO)
+                    value = torch.full(
+                        (self.D,),
+                        float(position + 1),
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    state_pool[physical_block, offset].copy_(value)
+                    committed_slots.append((physical_block, offset, value.clone()))
+
+                context = self._target_verify_context(
+                    q_len=q_len, committed_length=committed
+                )
+                raw_keys = torch.randn(
+                    q_len, self.D, dtype=torch.bfloat16, device=device
+                )
+                q = torch.randn(q_len, 2, self.D, dtype=torch.bfloat16, device=device)
+                with patch(
+                    "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+                    "qsa_paged_indexer_score",
+                    side_effect=_score,
+                ):
+                    context.select_target_verify_tokens(
+                        q,
+                        raw_keys,
+                        indexer=self._decode_indexer(),
+                        rope_config=self.rope_config,
+                    )
+
+                for physical_block, offset, expected in committed_slots:
+                    torch.testing.assert_close(
+                        state_pool[physical_block, offset], expected
+                    )
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
+    def test_draft_incremental_prefill_is_ragged_and_visibility_bounded(self):
+        device = torch.device("cuda")
+        indexer = self._decode_indexer()
+        indexer.k_norm_gamma = indexer.k_norm_gamma.to(device)
+        kv_base = torch.zeros(12, 2 * self.D * 2, dtype=torch.uint8, device=device)
+        state_base = torch.zeros(
+            12, 2 * self.RATIO * self.D, dtype=torch.float32, device=device
+        )
+        kv_table = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32, device=device)
+        state_table = torch.tensor([[5, 6], [7, 8]], dtype=torch.int32, device=device)
+        lengths = [1, self.RATIO]
+        prefixes = [self.RATIO * 2 - 1, self.RATIO * 2 - 1]
+        context = self._draft_incremental_context(
+            kv_base,
+            state_base,
+            prefixes=prefixes,
+            lengths=lengths,
+            kv_table=kv_table,
+            state_table=state_table,
+        )
+        token_count = sum(lengths)
+        q = torch.randn(token_count, 2, self.D, dtype=torch.bfloat16, device=device)
+        raw = torch.randn(token_count, self.D, dtype=torch.bfloat16, device=device)
+        observed = []
+
+        def _score(
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
+            validate_block_table,
+        ):
+            observed.append((q.shape, lengths.clone(), table.clone(), max_ctx_len))
+            self.assertFalse(validate_block_table)
+            rows = q.shape[0] * q.shape[1]
+            return torch.arange(
+                rows * max_ctx_len, dtype=torch.float32, device=device
+            ).view(rows, max_ctx_len)
+
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "qsa_paged_indexer_score",
+            side_effect=_score,
+        ):
+            selected = context.select_draft_incremental_prefill_tokens(
+                q,
+                raw,
+                indexer=indexer,
+                rope_config=self._base_rope_config(3),
+            )
+
+        self.assertEqual(selected.shape, (token_count, 8 + self.RATIO - 1))
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0][0], (2, self.RATIO, 2, self.D))
+        torch.testing.assert_close(
+            observed[0][1],
+            torch.tensor(
+                [[2, 0, 0, 0], [2, 2, 2, 2]], dtype=torch.int32, device=device
+            ),
+        )
+        visible_lengths = [8, 8, 9, 10, 11]
+        for row, visible in enumerate(visible_lengths):
+            valid = selected[row][selected[row] >= 0]
+            self.assertTrue(bool(torch.all(valid < visible)))
+
+        kv_pool = kv_base.view(torch.bfloat16).view(12, 2, self.D)
+        state_pool = state_base.view(12, 2 * self.RATIO, self.D)
+        self.assertGreater(int(torch.count_nonzero(kv_pool[1, 1])), 0)
+        self.assertGreater(int(torch.count_nonzero(kv_pool[3, 1])), 0)
+        torch.testing.assert_close(state_pool[5, 7], raw[0].float())
+        torch.testing.assert_close(state_pool[7, 7], raw[1].float())
+        torch.testing.assert_close(state_pool[8, 0], raw[2].float())
+        torch.testing.assert_close(state_pool[8, 2], raw[4].float())
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for the draft writer")
+    def test_short_draft_writer_matches_reference_and_rolls_back(self):
+        device = torch.device("cuda")
+        self.D = 128
+        self.KV_TOKENS_PER_BLOCK = 128
+        self.STATE_TOKENS_PER_BLOCK = 128
+        self.indexer.k_norm_gamma = (torch.randn(128, device=device) * 0.1).bfloat16()
+        indexer = self._decode_indexer()
+        rope = self._base_rope_config(3)
+        rope.dim = 64
+        kv_initial = torch.zeros(12, 32 * 128 * 2, dtype=torch.uint8, device=device)
+        state_initial = torch.randn(12, 8 * 128, dtype=torch.float32, device=device)
+        kv_table = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32, device=device)
+        state_table = torch.tensor([[5, 6], [7, 8]], dtype=torch.int32, device=device)
+        for prefixes, lengths in (
+            ([5, 127], [4, 4]),
+            ([7, 127], [1, 4]),
+            ([127, 5], [3, 2]),
+        ):
+            with self.subTest(prefixes=prefixes, lengths=lengths):
+                q = torch.randn(
+                    sum(lengths), 2, 128, dtype=torch.bfloat16, device=device
+                )
+                raw = torch.randn(
+                    sum(lengths), 128, dtype=torch.bfloat16, device=device
+                )
+
+                def run(fused):
+                    kv = kv_initial.clone()
+                    state = state_initial.clone()
+                    context = self._draft_incremental_context(
+                        kv,
+                        state,
+                        prefixes=prefixes,
+                        lengths=lengths,
+                        kv_table=kv_table,
+                        state_table=state_table,
+                    )
+
+                    def score(
+                        q, weight, pool, table, lengths, *, max_ctx_len, **kwargs
+                    ):
+                        return torch.zeros(
+                            q.shape[0] * q.shape[1],
+                            max_ctx_len,
+                            dtype=torch.float32,
+                            device=device,
+                        )
+
+                    with patch(
+                        "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+                        "qsa_paged_indexer_score",
+                        side_effect=score,
+                    ):
+                        selected = context.select_draft_incremental_prefill_tokens(
+                            q, raw, indexer=indexer, rope_config=rope
+                        )
+                    return context, selected, kv, state
+
+                reference, selected_ref, kv_ref, state_ref = run(False)
+                candidate, selected, kv, state = run(True)
+                torch.testing.assert_close(selected, selected_ref, rtol=0, atol=0)
+                torch.testing.assert_close(state, state_ref, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    kv.view(torch.bfloat16),
+                    kv_ref.view(torch.bfloat16),
+                    rtol=0.01,
+                    atol=0.016,
+                )
+                candidate.rollback_side_cache()
+                torch.testing.assert_close(kv, kv_initial, rtol=0, atol=0)
+                torch.testing.assert_close(state, state_initial, rtol=0, atol=0)
+                reference.finalize_side_cache()
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for draft graph replay")
+    def test_draft_graph_replays_ragged_lengths_and_new_pages(self):
+        for lanes in (1, 2, 3, 4):
+            with self.subTest(lanes=lanes):
+                self._check_draft_graph_replay(lanes)
+
+    def _check_draft_graph_replay(self, lanes):
+        device = torch.device("cuda")
+        self.D = self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = 128
+        self.indexer.k_norm_gamma = torch.randn(128, device=device).bfloat16()
+        indexer = self._decode_indexer()
+        rope = self._base_rope_config(3)
+        rope.dim = 64
+        kv_initial = torch.randn(
+            12, 32 * 128, device=device, dtype=torch.bfloat16
+        ).view(torch.uint8)
+        state_initial = torch.randn(12, 8 * 128, device=device)
+        kv = kv_initial.clone()
+        state = state_initial.clone()
+        kv_table = torch.tensor([[1, 2], [3, 4]], device=device, dtype=torch.int32)
+        state_table = torch.tensor([[5, 6], [7, 8]], device=device, dtype=torch.int32)
+        ctx = self._draft_incremental_context(
+            kv,
+            state,
+            prefixes=[5, 127],
+            lengths=[lanes, lanes],
+            kv_table=kv_table,
+            state_table=state_table,
+        )
+        for inputs in (
+            ctx.main_inputs,
+            ctx.indexer_kv_inputs,
+            ctx.indexer_state_inputs,
+        ):
+            inputs.is_cuda_graph = True
+            inputs.is_s_padded = True
+            inputs.input_lengths_device = inputs.input_lengths
+            inputs.prefix_lengths_device = inputs.prefix_lengths
+        q = torch.randn(2 * lanes, 2, 128, device=device, dtype=torch.bfloat16)
+        raw = torch.randn(2 * lanes, 128, device=device, dtype=torch.bfloat16)
+
+        def forward():
+            result = ctx.select_draft_graph_tokens(
+                q, raw, indexer=indexer, rope_config=rope
+            )
+            ctx.finalize_side_cache()
+            return result
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                forward()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            selected = forward()
+        for prefixes, lengths, swap in (
+            ([7, 127], [1, lanes], False),
+            ([125, 5], [min(3, lanes), min(2, lanes)], True),
+            ([127, 127], [lanes, lanes], False),
+        ):
+            with self.subTest(prefixes=prefixes, lengths=lengths):
+                kv.copy_(kv_initial)
+                state.copy_(state_initial)
+                q.normal_()
+                raw.normal_()
+                ctx.main_inputs.input_lengths.copy_(
+                    torch.tensor(lengths, device=device, dtype=torch.int32)
+                )
+                ctx.main_inputs.prefix_lengths.copy_(
+                    torch.tensor(prefixes, device=device, dtype=torch.int32)
+                )
+                ctx.main_inputs.cu_seqlens_device.copy_(
+                    torch.tensor(
+                        [0, lengths[0], sum(lengths)], device=device, dtype=torch.int32
+                    )
+                )
+                kv_table.copy_(
+                    torch.tensor(
+                        [[3, 4], [1, 2]] if swap else [[1, 2], [3, 4]],
+                        device=device,
+                        dtype=torch.int32,
+                    )
+                )
+                state_table.copy_(
+                    torch.tensor(
+                        [[7, 8], [5, 6]] if swap else [[5, 6], [7, 8]],
+                        device=device,
+                        dtype=torch.int32,
+                    )
+                )
+                ref_kv, ref_state = kv_initial.clone(), state_initial.clone()
+                ref = self._draft_incremental_context(
+                    ref_kv,
+                    ref_state,
+                    prefixes=prefixes,
+                    lengths=lengths,
+                    kv_table=kv_table,
+                    state_table=state_table,
+                )
+                expected = ref.select_draft_incremental_prefill_tokens(
+                    q[: sum(lengths)],
+                    raw[: sum(lengths)],
+                    indexer=indexer,
+                    rope_config=rope,
+                )
+                ref.finalize_side_cache()
+                graph.replay()
+                torch.cuda.synchronize()
+                torch.testing.assert_close(
+                    selected[: sum(lengths)], expected, rtol=0, atol=0
+                )
+                self.assertTrue(torch.all(selected[sum(lengths) :] == -1).item())
+                torch.testing.assert_close(state, ref_state, rtol=0, atol=0)
+                torch.testing.assert_close(kv, ref_kv, rtol=0, atol=0)
+
+    def test_draft_incremental_prefill_rejects_before_side_writer(self):
+        q = torch.randn(1, 2, self.D, dtype=torch.bfloat16)
+        raw = torch.randn(1, self.D, dtype=torch.bfloat16)
+        cases = (
+            (
+                "explicit MTP draft",
+                self._draft_incremental_context(
+                    self.kv_base,
+                    self.state_base,
+                    prefixes=[7],
+                    lengths=[1],
+                    is_mtp_draft=False,
+                ),
+                q,
+                raw,
+            ),
+            (
+                r"max\(input_lengths\).*<= compress_ratio",
+                self._draft_incremental_context(
+                    self.kv_base,
+                    self.state_base,
+                    prefixes=[7],
+                    lengths=[self.RATIO + 1],
+                ),
+                torch.randn(self.RATIO + 1, 2, self.D, dtype=torch.bfloat16),
+                torch.randn(self.RATIO + 1, self.D, dtype=torch.bfloat16),
+            ),
+            (
+                "logical cache positions",
+                self._draft_incremental_context(
+                    self.kv_base,
+                    self.state_base,
+                    prefixes=[7],
+                    lengths=[1],
+                    position_overrides=[8],
+                ),
+                q,
+                raw,
+            ),
+            (
+                "unallocated",
+                self._draft_incremental_context(
+                    self.kv_base,
+                    self.state_base,
+                    prefixes=[7],
+                    lengths=[1],
+                    state_table=torch.tensor([[0]], dtype=torch.int32),
+                ),
+                q,
+                raw,
+            ),
+        )
+        for expected, context, case_q, case_raw in cases:
+            with (
+                self.subTest(expected=expected),
+                patch(
+                    "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context."
+                    "write_indexer_cache"
+                ) as writer,
+            ):
+                kv_before = context.indexer_kv_cache.kv_cache_base.clone()
+                state_before = context.indexer_state_cache.kv_cache_base.clone()
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    context.select_draft_incremental_prefill_tokens(
+                        case_q,
+                        case_raw,
+                        indexer=self._decode_indexer(),
+                        rope_config=self._base_rope_config(3),
+                    )
+                writer.assert_not_called()
+                self.assertTrue(
+                    torch.equal(context.indexer_kv_cache.kv_cache_base, kv_before)
+                )
+                self.assertTrue(
+                    torch.equal(context.indexer_state_cache.kv_cache_base, state_before)
+                )
+
+    def test_ordinary_prefill_still_rejects_nonzero_prefix_reuse(self):
+        context = self._draft_incremental_context(
+            self.kv_base,
+            self.state_base,
+            prefixes=[7],
+            lengths=[1],
+            is_mtp_draft=False,
+        )
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context.write_indexer_cache"
+        ) as writer:
+            with self.assertRaisesRegex(RuntimeError, "prefix reuse"):
+                context.write_prefill_indexer_cache(
+                    torch.randn(1, self.D, dtype=torch.bfloat16),
+                    indexer=self.indexer,
+                    rope_config=self._base_rope_config(3),
+                )
+        writer.assert_not_called()
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
+    def test_draft_incremental_prefill_accepted_continuation_completes_groups(self):
+        device = torch.device("cuda")
+        self.indexer.k_norm_gamma = self.indexer.k_norm_gamma.to(device)
+        indexer = self._decode_indexer()
+        kv_base = torch.zeros(8, 2 * self.D * 2, dtype=torch.uint8, device=device)
+        state_base = torch.zeros(
+            8, 2 * self.RATIO * self.D, dtype=torch.float32, device=device
+        )
+        kv_table = torch.tensor([[1, 2, 3]], dtype=torch.int32, device=device)
+        state_table = torch.tensor([[4, 5, 6]], dtype=torch.int32, device=device)
+        raw = torch.randn(8, self.D, dtype=torch.bfloat16, device=device)
+        state_pool = state_base.view(8, 2 * self.RATIO, self.D)
+        state_pool[4, :3].copy_(raw[:3].float())
+
+        def _score(
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
+            validate_block_table,
+        ):
+            self.assertFalse(validate_block_table)
+            return torch.zeros(
+                q.shape[0] * q.shape[1], max_ctx_len, dtype=torch.float32, device=device
+            )
+
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "qsa_paged_indexer_score",
+            side_effect=_score,
+        ):
+            first = self._draft_incremental_context(
+                kv_base,
+                state_base,
+                prefixes=[3],
+                lengths=[2],
+                kv_table=kv_table,
+                state_table=state_table,
+            ).select_draft_incremental_prefill_tokens(
+                torch.randn(2, 2, self.D, dtype=torch.bfloat16, device=device),
+                raw[3:5],
+                indexer=indexer,
+                rope_config=self._base_rope_config(3),
+            )
+            second = self._draft_incremental_context(
+                kv_base,
+                state_base,
+                prefixes=[5],
+                lengths=[3],
+                kv_table=kv_table,
+                state_table=state_table,
+            ).select_draft_incremental_prefill_tokens(
+                torch.randn(3, 2, self.D, dtype=torch.bfloat16, device=device),
+                raw[5:8],
+                indexer=indexer,
+                rope_config=self._base_rope_config(3),
+            )
+
+        self.assertTrue(bool(torch.all(first[first >= 0] < 5)))
+        per_row_visible = (6, 7, 8)
+        for row, visible in enumerate(per_row_visible):
+            valid = second[row][second[row] >= 0]
+            self.assertTrue(bool(torch.all(valid < visible)))
+
+        positions = torch.arange(8, dtype=torch.int32, device=device)
+        transported = positions.unsqueeze(1).expand(-1, 3).reshape(-1)
+        cos, sin = build_qsa_rope(
+            transported,
+            self._base_rope_config(3),
+            token_count=8,
+            dtype=torch.bfloat16,
+            device=device,
+            logical_positions=positions,
+        )
+        kv_pool = kv_base.view(torch.bfloat16).view(8, 2, self.D)
+        torch.testing.assert_close(
+            kv_pool[1, 0], self._expected(raw[:4], cos[0], sin[0], 0)
+        )
+        torch.testing.assert_close(
+            kv_pool[1, 1], self._expected(raw[4:8], cos[4], sin[4], 4)
+        )
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
+    def test_target_prefix_reuse_accepts_mixed_cold_and_hot_rows(self):
+        device = torch.device("cuda")
+        indexer = self._decode_indexer()
+        indexer.k_norm_gamma = indexer.k_norm_gamma.to(device)
+        kv_base = torch.zeros(16, 2 * self.D * 2, dtype=torch.uint8, device=device)
+        state_base = torch.zeros(
+            16, 2 * self.RATIO * self.D, dtype=torch.float32, device=device
+        )
+        context = self._draft_incremental_context(
+            kv_base,
+            state_base,
+            prefixes=[0, 8],
+            lengths=[8, 4],
+            is_mtp_draft=False,
+        )
+        q = torch.randn(12, 2, self.D, dtype=torch.bfloat16, device=device)
+        raw = torch.randn(12, self.D, dtype=torch.bfloat16, device=device)
+
+        def _score(
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
+            validate_block_table,
+        ):
+            self.assertFalse(validate_block_table)
+            return torch.zeros(
+                q.shape[0] * q.shape[1], max_ctx_len, dtype=torch.float32, device=device
+            )
+
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "qsa_paged_indexer_score",
+            side_effect=_score,
+        ):
+            selected = context.select_prefix_reuse_prefill_tokens(
+                q,
+                raw,
+                indexer=indexer,
+                rope_config=self.rope_config,
+            )
+
+        self.assertEqual(selected.shape, (12, 11))
+        offset = 0
+        for prefix, length in ((0, 8), (8, 4)):
+            for local_idx in range(length):
+                valid = selected[offset + local_idx]
+                valid = valid[valid >= 0]
+                self.assertTrue(bool(torch.all(valid < prefix + local_idx + 1)))
+            offset += length
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
+    def test_mtp_draft_prefix_reuse_accepts_local_cu_kv_coordinates(self):
+        device = torch.device("cuda")
+        indexer = self._decode_indexer()
+        indexer.k_norm_gamma = indexer.k_norm_gamma.to(device)
+        kv_base = torch.zeros(16, 2 * self.D * 2, dtype=torch.uint8, device=device)
+        state_base = torch.zeros(
+            16, 2 * self.RATIO * self.D, dtype=torch.float32, device=device
+        )
+        context = self._draft_incremental_context(
+            kv_base,
+            state_base,
+            prefixes=[8],
+            lengths=[8],
+            is_mtp_draft=True,
+        )
+        local_cu_kv = torch.tensor([0, 8], dtype=torch.int32, device=device)
+        for inputs in (
+            context.main_inputs,
+            context.indexer_kv_inputs,
+            context.indexer_state_inputs,
+        ):
+            inputs.cu_kv_seqlens_device = local_cu_kv
+
+        q = torch.randn(8, 2, self.D, dtype=torch.bfloat16, device=device)
+        raw = torch.randn(8, self.D, dtype=torch.bfloat16, device=device)
+
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "qsa_paged_indexer_score",
+            side_effect=lambda q, weight, pool, table, lengths, **kwargs: torch.zeros(
+                q.shape[1], kwargs["max_ctx_len"], dtype=torch.float32, device=device
+            ),
+        ):
+            selected = context.select_draft_prefix_reuse_prefill_tokens(
+                q,
+                raw,
+                indexer=indexer,
+                rope_config=self._base_rope_config(3),
+            )
+
+        self.assertEqual(selected.shape, (8, 8 + self.RATIO - 1))
+        for row, visible in enumerate(range(9, 17)):
+            valid = selected[row][selected[row] >= 0]
+            self.assertTrue(bool(torch.all(valid < visible)))
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged metadata")
+    def test_mtp_prefix_reuse_uses_cache_positions_for_shifted_native_rows(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp_mtp import (
+            normalize_mtp_pd_positions,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import build_base_rope
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        indexer = self._decode_indexer()
+        indexer.k_norm_gamma = indexer.k_norm_gamma.to(device)
+        config = self._base_rope_config(3)
+        for length in (1, 3, 4, 8):
+            with self.subTest(length=length):
+                context = self._draft_incremental_context(
+                    torch.zeros(16, 2 * self.D * 2, dtype=torch.uint8, device=device),
+                    torch.zeros(
+                        16, 2 * self.RATIO * self.D, dtype=torch.float32, device=device
+                    ),
+                    prefixes=[8],
+                    lengths=[length],
+                    is_mtp_draft=True,
+                    position_overrides=list(range(9, 8 + length)) + [8 + length - 1],
+                )
+                shifted = context.main_inputs.combo_position_ids.clone()
+                groups = {
+                    "full": context.main_inputs,
+                    "indexer_kv": context.indexer_kv_inputs,
+                    "indexer_state": context.indexer_state_inputs,
+                }
+                publication = PyCacheStoreInputs()
+                shared_positions = shifted.clone()
+                for value in groups.values():
+                    value.combo_position_ids = shared_positions
+                    value.prefix_lengths_device = torch.tensor(
+                        [8], dtype=torch.int32, device=device
+                    )
+                    value.cache_store_inputs = publication
+                    value.cache_store_writer = SimpleNamespace(write=lambda *_: None)
+                inputs = SimpleNamespace(
+                    input_ids=torch.zeros(length, dtype=torch.int32, device=device),
+                    combo_position_ids=context.main_inputs.combo_position_ids,
+                    attention_inputs=groups,
+                )
+                normalize_mtp_pd_positions(inputs, 3)
+                plan = context._draft_incremental_prefill_geometry(
+                    indexer=indexer,
+                    token_count=length,
+                    device=device,
+                    rope_config=config,
+                    draft=False,
+                    draft_prefix_reuse=True,
+                )
+                positions = torch.arange(
+                    8, 8 + length, dtype=torch.int32, device=device
+                )
+                expected_cos, expected_sin = build_base_rope(
+                    positions[:, None].expand(-1, 3).reshape(-1),
+                    config,
+                    token_count=length,
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+                torch.testing.assert_close(plan.current_cos, expected_cos)
+                torch.testing.assert_close(plan.current_sin, expected_sin)
+                if length == 3:
+                    for value in groups.values():
+                        value.combo_position_ids.copy_(shifted)
+                        value.cache_store_inputs = None
+                    for rope, draft_prefix_reuse in (
+                        (config, False),
+                        (self.rope_config, True),
+                    ):
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "positions must equal the logical cache positions",
+                        ):
+                            context._draft_incremental_prefill_geometry(
+                                indexer=indexer,
+                                token_count=length,
+                                device=device,
+                                rope_config=rope,
+                                draft=False,
+                                draft_prefix_reuse=draft_prefix_reuse,
+                            )
+
+    def test_decode_completes_prefill_tail_then_scores_same_projection(self):
+        prefill_raw = torch.randn(7, self.D, dtype=torch.bfloat16)
+        decode_raw = torch.randn(1, self.D, dtype=torch.bfloat16)
+        decode_q = torch.randn(1, 2, self.D, dtype=torch.bfloat16)
+        indexer = self._decode_indexer()
+        prefill = self._single_request_context(
+            self.kv_base,
+            self.state_base,
+            is_prefill=True,
+            input_length=7,
+            sequence_length=0,
+            position_ids=[[pos, pos, pos] for pos in range(7)],
+        )
+        _, prefill_cos, prefill_sin, result = prefill.write_prefill_indexer_cache(
+            prefill_raw, indexer=indexer, rope_config=self.rope_config
+        )
+        self.assertEqual(result["num_kv_writes"], 1)
+
+        decode = self._single_request_context(
+            self.kv_base,
+            self.state_base,
+            is_prefill=False,
+            input_length=7,
+            sequence_length=7,
+            position_ids=[[7, 7, 7]],
+        )
+        observed = {}
+
+        def _score(
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
+            validate_block_table,
+        ):
+            self.assertFalse(validate_block_table)
+            observed.update(
+                q=q,
+                weight=weight,
+                pool=pool,
+                table=table,
+                lengths=lengths,
+                block_size=block_size,
+                max_ctx_len=max_ctx_len,
+            )
+            return torch.tensor([[0.25, 3.0]], dtype=torch.float32)
+
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "qsa_paged_indexer_score",
+            side_effect=_score,
+        ):
+            selected = decode.select_decode_tokens(
+                decode_q,
+                decode_raw,
+                indexer=indexer,
+                rope_config=self.rope_config,
+            )
+
+        kv_pool = self.kv_base.view(torch.bfloat16).view(7, 2, self.D)
+        state_pool = self.state_base.view(8, 2 * self.RATIO, self.D)
+        expected_second = self._expected(
+            torch.cat([prefill_raw[4:], decode_raw]),
+            prefill_cos[0, 4],
+            prefill_sin[0, 4],
+            4,
+        )
+        torch.testing.assert_close(kv_pool[3, 1], expected_second)
+        torch.testing.assert_close(state_pool[6, 7], decode_raw[0].float())
+        self.assertEqual(observed["q"].shape, (1, 1, 2, self.D))
+        torch.testing.assert_close(
+            observed["weight"], torch.full((1, 2), 1.0 / self.D**0.5)
+        )
+        torch.testing.assert_close(
+            observed["lengths"], torch.tensor([[2]], dtype=torch.int32)
+        )
+        self.assertEqual(observed["block_size"], 2)
+        self.assertEqual(observed["max_ctx_len"], 2)
+        torch.testing.assert_close(
+            selected,
+            torch.tensor(
+                [[4, 5, 6, 7, 0, 1, 2, 3, -1, -1, -1]],
+                dtype=torch.int32,
+            ),
+        )
+
+    def test_paged_score_failure_can_rollback_the_side_cache(self):
+        self.kv_base.random_(0, 256)
+        self.state_base.normal_()
+        kv_before = self.kv_base.clone()
+        state_before = self.state_base.clone()
+        context = self._single_request_context(
+            self.kv_base,
+            self.state_base,
+            is_prefill=False,
+            input_length=7,
+            sequence_length=7,
+            position_ids=[[7, 7, 7]],
+        )
+
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "qsa_paged_indexer_score",
+            side_effect=RuntimeError("injected paged score failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "injected paged score failure"):
+                context.select_decode_tokens(
+                    torch.randn(1, 2, self.D, dtype=torch.bfloat16),
+                    torch.randn(1, self.D, dtype=torch.bfloat16),
+                    indexer=self._decode_indexer(),
+                    rope_config=self.rope_config,
+                )
+
+        self.assertFalse(torch.equal(self.kv_base, kv_before))
+        self.assertFalse(torch.equal(self.state_base, state_before))
+        context.rollback_side_cache()
+        self.assertTrue(torch.equal(self.kv_base, kv_before))
+        self.assertTrue(torch.equal(self.state_base, state_before))
+        context.rollback_side_cache()
+
+    def test_main_attention_failure_after_selection_can_rollback_side_cache(self):
+        self.kv_base.random_(0, 256)
+        self.state_base.normal_()
+        kv_before = self.kv_base.clone()
+        state_before = self.state_base.clone()
+        context = self._single_request_context(
+            self.kv_base,
+            self.state_base,
+            is_prefill=False,
+            input_length=7,
+            sequence_length=7,
+            position_ids=[[7, 7, 7]],
+        )
+
+        def _score(
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
+            validate_block_table,
+        ):
+            self.assertFalse(validate_block_table)
+            return torch.zeros((1, max_ctx_len), dtype=torch.float32)
+
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "qsa_paged_indexer_score",
+            side_effect=_score,
+        ):
+            context.select_decode_tokens(
+                torch.randn(1, 2, self.D, dtype=torch.bfloat16),
+                torch.randn(1, self.D, dtype=torch.bfloat16),
+                indexer=self._decode_indexer(),
+                rope_config=self.rope_config,
+            )
+
+        self.assertFalse(torch.equal(self.kv_base, kv_before))
+        self.assertFalse(torch.equal(self.state_base, state_before))
+        try:
+            raise RuntimeError("injected main attention failure")
+        except RuntimeError:
+            context.rollback_side_cache()
+        self.assertTrue(torch.equal(self.kv_base, kv_before))
+        self.assertTrue(torch.equal(self.state_base, state_before))
+
+    def test_side_cache_transaction_reentry_is_rejected(self):
+        raw_keys = torch.randn(self.total_tokens, self.D, dtype=torch.bfloat16)
+        context = self._context()
+        context.write_prefill_indexer_cache(
+            raw_keys, indexer=self.indexer, rope_config=self.rope_config
+        )
+        with self.assertRaisesRegex(RuntimeError, "already active"):
+            context.write_prefill_indexer_cache(
+                raw_keys, indexer=self.indexer, rope_config=self.rope_config
+            )
+        context.rollback_side_cache()
+
+    def test_actual_finalize_keeps_writes_and_allows_the_next_transaction(self):
+        first_raw = torch.randn(self.total_tokens, self.D, dtype=torch.bfloat16)
+        second_raw = torch.randn_like(first_raw)
+        context = self._context()
+        context.write_prefill_indexer_cache(
+            first_raw, indexer=self.indexer, rope_config=self.rope_config
+        )
+        kv_after_first = self.kv_base.clone()
+        state_after_first = self.state_base.clone()
+
+        context.finalize_side_cache()
+        self.assertTrue(torch.equal(self.kv_base, kv_after_first))
+        self.assertTrue(torch.equal(self.state_base, state_after_first))
+        context.write_prefill_indexer_cache(
+            second_raw, indexer=self.indexer, rope_config=self.rope_config
+        )
+        context.finalize_side_cache()
+
+        self.assertFalse(torch.equal(self.kv_base, kv_after_first))
+        self.assertFalse(torch.equal(self.state_base, state_after_first))
+
+    def test_decode_rejects_target_verify_prefix_and_non_text_mrope(self):
+        q = torch.randn(1, 2, self.D, dtype=torch.bfloat16)
+        raw = torch.randn(1, self.D, dtype=torch.bfloat16)
+        indexer = self._decode_indexer()
+        cases = (
+            ("target-verify", dict(target_verify=True)),
+            ("prefix reuse", dict(prefix_length=1)),
+            ("text-only MRoPE", dict(position_ids=[[7, 8, 7]])),
+        )
+        for expected, overrides in cases:
+            values = dict(
+                is_prefill=False,
+                input_length=7,
+                sequence_length=7,
+                position_ids=[[7, 7, 7]],
+            )
+            values.update(overrides)
+            with self.subTest(expected=expected):
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    self._single_request_context(
+                        self.kv_base, self.state_base, **values
+                    ).select_decode_tokens(
+                        q, raw, indexer=indexer, rope_config=self.rope_config
+                    )
+
+    def test_decode_base_rope_factor_one_and_three_rotate_q_identically(self):
+        q = torch.randn(1, 2, self.D, dtype=torch.bfloat16)
+        raw = torch.randn(1, self.D, dtype=torch.bfloat16)
+        rotated_queries = []
+
+        def _score(
+            q,
+            weight,
+            pool,
+            table,
+            lengths,
+            *,
+            block_size,
+            max_ctx_len,
+            validate_block_table,
+        ):
+            self.assertFalse(validate_block_table)
+            rotated_queries.append(q.clone())
+            return torch.zeros((1, 1), dtype=torch.float32)
+
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "qsa_paged_indexer_score",
+            side_effect=_score,
+        ):
+            for index_factor, position_ids in ((1, [[3]]), (3, [[3, 3, 3]])):
+                context = self._single_request_context(
+                    torch.zeros_like(self.kv_base),
+                    torch.zeros_like(self.state_base),
+                    is_prefill=False,
+                    input_length=3,
+                    sequence_length=3,
+                    position_ids=position_ids,
+                )
+                context.select_decode_tokens(
+                    q,
+                    raw,
+                    indexer=self._decode_indexer(),
+                    rope_config=self._base_rope_config(index_factor),
+                )
+
+        self.assertEqual(len(rotated_queries), 2)
+        torch.testing.assert_close(rotated_queries[0], rotated_queries[1])
+
+    def test_decode_base_rope_rejects_non_logical_position_before_write(self):
+        q = torch.randn(1, 2, self.D, dtype=torch.bfloat16)
+        raw = torch.randn(1, self.D, dtype=torch.bfloat16)
+        context = self._single_request_context(
+            self.kv_base,
+            self.state_base,
+            is_prefill=False,
+            input_length=3,
+            sequence_length=3,
+            position_ids=[[4]],
+        )
+
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context.write_indexer_cache"
+        ) as writer:
+            with self.assertRaisesRegex(RuntimeError, "logical cache positions"):
+                context.select_decode_tokens(
+                    q,
+                    raw,
+                    indexer=self._decode_indexer(),
+                    rope_config=self._base_rope_config(1),
+                )
+
+        writer.assert_not_called()
+
+    def test_decode_rejects_compressed_length_beyond_tag_local_table(self):
+        q = torch.randn(1, 2, self.D, dtype=torch.bfloat16)
+        raw = torch.randn(1, self.D, dtype=torch.bfloat16)
+        decode = self._single_request_context(
+            self.kv_base,
+            self.state_base,
+            is_prefill=False,
+            input_length=11,
+            sequence_length=11,
+            position_ids=[[11, 11, 11]],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "compressed decode length"):
+            decode.select_decode_tokens(
+                q,
+                raw,
+                indexer=self._decode_indexer(),
+                rope_config=self.rope_config,
+            )
+
+        self.assertEqual(int(torch.count_nonzero(self.kv_base)), 0)
+        self.assertEqual(int(torch.count_nonzero(self.state_base)), 0)
+
+    def test_decode_rejects_unallocated_required_kv_block_before_side_write(self):
+        q = torch.randn(1, 2, self.D, dtype=torch.bfloat16)
+        raw = torch.randn(1, self.D, dtype=torch.bfloat16)
+        self.kv_base.random_(0, 256)
+        self.state_base.normal_()
+        kv_before = self.kv_base.clone()
+        state_before = self.state_base.clone()
+        decode = self._single_request_context(
+            self.kv_base,
+            self.state_base,
+            is_prefill=False,
+            input_length=7,
+            sequence_length=7,
+            position_ids=[[7, 7, 7]],
+        )
+        decode.indexer_kv_inputs.kv_cache_kernel_block_id_device.zero_()
+
+        with self.assertRaisesRegex(RuntimeError, "unallocated"):
+            decode.select_decode_tokens(
+                q,
+                raw,
+                indexer=self._decode_indexer(),
+                rope_config=self.rope_config,
+            )
+
+        self.assertTrue(torch.equal(self.kv_base, kv_before))
+        self.assertTrue(torch.equal(self.state_base, state_before))
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for the paged scorer")
+    def test_cuda_decode_selection_matches_direct_paged_score_math(self):
+        device = torch.device("cuda")
+        kv_base = torch.zeros(7, 2 * self.D * 2, dtype=torch.uint8, device=device)
+        state_base = torch.zeros(
+            8, 2 * self.RATIO * self.D, dtype=torch.float32, device=device
+        )
+        indexer = self._decode_indexer()
+        indexer.k_norm_gamma = indexer.k_norm_gamma.to(device)
+        prefill_raw = torch.randn(7, self.D, dtype=torch.bfloat16, device=device)
+        decode_raw = torch.randn(1, self.D, dtype=torch.bfloat16, device=device)
+        decode_q = torch.randn(1, 2, self.D, dtype=torch.bfloat16, device=device)
+        self._single_request_context(
+            kv_base,
+            state_base,
+            is_prefill=True,
+            input_length=7,
+            sequence_length=0,
+            position_ids=[[pos, pos, pos] for pos in range(7)],
+        ).write_prefill_indexer_cache(
+            prefill_raw, indexer=indexer, rope_config=self.rope_config
+        )
+        decode = self._single_request_context(
+            kv_base,
+            state_base,
+            is_prefill=False,
+            input_length=7,
+            sequence_length=7,
+            position_ids=[[7, 7, 7]],
+        )
+
+        selected = decode.select_decode_tokens(
+            decode_q,
+            decode_raw,
+            indexer=indexer,
+            rope_config=self.rope_config,
+        )
+
+        positions = torch.arange(8, dtype=torch.int32, device=device)
+        positions = positions.unsqueeze(1).expand(-1, 3)
+        cos, sin = build_interleaved_mrope(
+            positions.reshape(-1),
+            self.rope_config,
+            token_count=8,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        q = apply_partial_rope(decode_q, cos[7].view(1, 1, -1), sin[7].view(1, 1, -1))
+        keys = kv_base.view(torch.bfloat16).view(7, 2, self.D)[3]
+        logits = torch.relu(q.float() @ keys.float().T).sum(dim=1) / self.D**0.5
+        chosen = logits[0].topk(2).indices.tolist()
+        expected = []
+        for block in chosen:
+            expected.extend(range(block * self.RATIO, (block + 1) * self.RATIO))
+        expected.extend([-1] * (8 + self.RATIO - 1 - len(expected)))
+        torch.testing.assert_close(
+            selected, torch.tensor([expected], dtype=torch.int32, device=device)
+        )
+
+    def test_paged_topk_expands_blocks_and_appends_partial_tail(self):
+        block_logits = torch.tensor(
+            [
+                [0.2, 1.5, 0.7, float("-inf")],
+                [3.0, 20.0, float("-inf"), float("-inf")],
+            ],
+            dtype=torch.float32,
+        )
+        token_lengths = torch.tensor([14, 5], dtype=torch.int32)
+
+        selected = select_qsa_paged_tokens(
+            block_logits,
+            token_lengths,
+            compress_ratio=self.RATIO,
+            token_budget=8,
+        )
+
+        expected = torch.tensor(
+            [
+                [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, -1],
+                [0, 1, 2, 3, -1, -1, -1, -1, 4, -1, -1],
+            ],
+            dtype=torch.int32,
+        )
+        torch.testing.assert_close(selected, expected)
+
+        # The runtime has already checked both length and table capacity. Its
+        # decode path must avoid a per-layer device-to-host scalar read here.
+        with patch.object(torch.Tensor, "item", side_effect=AssertionError("sync")):
+            prevalidated = select_qsa_paged_tokens(
+                block_logits,
+                token_lengths,
+                compress_ratio=self.RATIO,
+                token_budget=8,
+                validate_lengths=False,
+            )
+        torch.testing.assert_close(prevalidated, expected)
+
+    @skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_paged_topk_prevalidated_path_replays_new_lengths(self):
+        device = torch.device("cuda")
+        logits = torch.tensor([[0.5, 2.0, 1.0]], device=device)
+        lengths = torch.tensor([9], dtype=torch.int32, device=device)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            select_qsa_paged_tokens(
+                logits,
+                lengths,
+                compress_ratio=4,
+                token_budget=8,
+                validate_lengths=False,
+            )
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            replayed = select_qsa_paged_tokens(
+                logits,
+                lengths,
+                compress_ratio=4,
+                token_budget=8,
+                validate_lengths=False,
+            )
+        logits.copy_(torch.tensor([[3.0, 0.5, 2.0]], device=device))
+        lengths.copy_(torch.tensor([12], dtype=torch.int32, device=device))
+        graph.replay()
+        expected = select_qsa_paged_tokens(
+            logits,
+            lengths,
+            compress_ratio=4,
+            token_budget=8,
+        )
+        torch.testing.assert_close(replayed, expected)
+
+
+if __name__ == "__main__":
+    main()

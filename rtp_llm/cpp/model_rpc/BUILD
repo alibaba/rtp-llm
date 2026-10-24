@@ -60,6 +60,31 @@ cc_library(
 
 
 cc_library(
+    name = "linear_tp_cache_layout",
+    hdrs = ["LinearTpCacheLayout.h", "MhaTpCacheLayout.h", "TpCacheTransferPlan.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "registered_cache_staging",
+    srcs = ["RegisteredCacheStaging.cc"],
+    hdrs = ["RegisteredCacheStaging.h"],
+    copts = copts(),
+    deps = [
+        ":linear_tp_cache_layout",
+        "//rtp_llm/cpp/cache:cache_types",
+        # MemoryUtil.h lives in the interface target; the full cache_store
+        # umbrella drags libcache_store_base.so (whose execNoBlockCopy /
+        # isRuntimeInitialized are resolved only at rtp_compute_ops load
+        # time) into every consumer's link closure and breaks test binaries.
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "model_rpc_server",
     srcs = glob(
         ["*.cc"],
@@ -67,6 +92,7 @@ cc_library(
             "TensorPbConvert.cc",
             "MultimodalPbConverter.cc",
             "ResponseBuffer.cc",
+            "RegisteredCacheStaging.cc",
         ],
     ),
     hdrs = glob(
@@ -82,6 +108,7 @@ cc_library(
         ":embedding_arpc_deps",
         ":model_rpc_pool",
         ":response_buffer",
+        ":registered_cache_staging",
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:cache_types",
@@ -128,6 +155,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":model_rpc_pool",
+        ":registered_cache_staging",
     ],
 )
 

@@ -104,7 +104,7 @@ py_library(
     srcs = glob([
         "modules/*.py",
         "modules/**/*.py",
-    ]),
+    ], exclude = ["modules/qwen4_exp/test/**"]),
     data = [
         ":cutlass_moe_config",
         ":dsv41_jit_sources",
@@ -119,6 +119,7 @@ py_library(
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/distributed:cpu_status",
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
         # cuda13 locks ship flashinfer-python and deep-ep.
@@ -206,6 +207,7 @@ py_library(
     srcs = glob([
         "model_desc/*.py",
         "model_desc/cuda_graph/*.py",
+        "model_desc/qwen4_exp_runtime/*.py",
         "speculative/*.py",
     ]),
     deps = [

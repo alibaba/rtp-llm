@@ -34,6 +34,30 @@ from rtp_llm.utils.util import copy_gemm_config
 
 setup_logging()
 
+# TODO(qwen4-bringup): env override relaxed during slow cold-load bring-up;
+# revisit per docs/design/qwen3.8_flash_next_tp8_bringup_handoff.md §2.
+RANKS_STARTUP_TIMEOUT_S_ENV = "RTP_LLM_BACKEND_RANKS_STARTUP_TIMEOUT_S"
+DEFAULT_RANKS_STARTUP_TIMEOUT_S = 3600
+
+
+def _ranks_startup_timeout_seconds() -> float:
+    raw = os.environ.get(RANKS_STARTUP_TIMEOUT_S_ENV, "").strip()
+    if not raw:
+        return DEFAULT_RANKS_STARTUP_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if value <= 0:
+        logging.warning(
+            "invalid %s=%r, keeping default %ss",
+            RANKS_STARTUP_TIMEOUT_S_ENV,
+            raw,
+            DEFAULT_RANKS_STARTUP_TIMEOUT_S,
+        )
+        return DEFAULT_RANKS_STARTUP_TIMEOUT_S
+    return value
+
 
 def _install_hot_hook_runtime(role: str) -> None:
     try:
@@ -224,7 +248,7 @@ def _wait_for_ranks_startup(
     # Track which ranks have reported
     ranks_received = [False] * local_world_size
     poll_timeout = 0.5  # seconds per poll
-    max_wait_time = 3600  # Maximum 1 hour wait
+    max_wait_time = _ranks_startup_timeout_seconds()
     start_time = time.time()
 
     try:

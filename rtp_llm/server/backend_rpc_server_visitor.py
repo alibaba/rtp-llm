@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import time
+from contextlib import aclosing
 from dataclasses import replace
 from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
@@ -915,17 +916,20 @@ class BackendRPCServerVisitor:
                 yielded_output = False
                 try:
                     stream = await route_and_enqueue(attempt_input)
-                    if is_streaming:
-                        async for output in stream:
+                    # Propagate renderer completion/cancellation to the owned
+                    # RPC stream before another request enters the engine.
+                    async with aclosing(stream):
+                        if is_streaming:
+                            async for output in stream:
+                                yielded_output = True
+                                yield output
+                        else:
+                            buffered_outputs = []
+                            async for output in stream:
+                                buffered_outputs.append(output)
                             yielded_output = True
-                            yield output
-                    else:
-                        buffered_outputs = []
-                        async for output in stream:
-                            buffered_outputs.append(output)
-                        yielded_output = True
-                        for output in buffered_outputs:
-                            yield output
+                            for output in buffered_outputs:
+                                yield output
                     return
                 except (asyncio.CancelledError, GeneratorExit):
                     # Cancellation and generator teardown are control-flow signals,

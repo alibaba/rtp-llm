@@ -85,12 +85,18 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         bos, eos = i_n * T, i_n * T + T
         all = B * T
 
+    # Skipped graph rows still feed normalization, routing and MoE. Initialize
+    # their output deterministically without touching any cache state.
+    o_v = i_v * BV + tl.arange(0, BV)
     if IS_CONTINUOUS_BATCHING:
         sequence_length = tl.load(sequence_lengths + i_n).to(tl.int64)
         # Rounded-up CUDA graph buckets use zero-length tail rows.  They own no
         # cache page, so reject them before calculating or loading a block-map
         # offset.  This mirrors the variable-length T <= 0 contract below.
         if sequence_length <= 0:
+            for i_t in range(0, T):
+                p_zero = o + ((i_k * all + bos + i_t) * HV + i_hv) * V + o_v
+                tl.store(p_zero, 0.0, mask=o_v < V)
             return
     else:
         # not used
@@ -126,6 +132,9 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
                 block_map + i_n * block_map_stride_b + load_block_offset
             ).to(tl.int64)
             if read_block_id <= 0:
+                for i_t in range(0, T):
+                    p_zero = o + ((i_k * all + bos + i_t) * HV + i_hv) * V + o_v
+                    tl.store(p_zero, 0.0, mask=o_v < V)
                 return
             p_h0 = h0 + read_block_id * stride_init_state_token
         else:

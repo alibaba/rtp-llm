@@ -24,7 +24,12 @@ class Qwen35Renderer(Qwen3CoderRenderer, Qwen2VLRenderer):
     def _render_messages(
         self, request: ChatCompletionRequest, add_vision_id: bool
     ) -> PromptWithMMInput:
-        return Qwen2VLRenderer._render_messages(self, request, add_vision_id)
+        enable_thinking = (
+            False if request.disable_thinking() else request.enable_thinking
+        )
+        return Qwen2VLRenderer._render_messages(
+            self, request, add_vision_id, enable_thinking
+        )
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         prompt_and_mm_input = self._render_messages(
@@ -45,3 +50,5 @@ register_renderer("qwen35_moe", Qwen35Renderer)
 register_renderer("qwen35_dense", Qwen35Renderer)
 register_renderer("qwen35_dense_mtp", Qwen35Renderer)
 register_renderer("qwen35_moe_mtp", Qwen35Renderer)
+register_renderer("qwen4_exp", Qwen35Renderer)
+register_renderer("qwen4_exp_mtp", Qwen35Renderer)

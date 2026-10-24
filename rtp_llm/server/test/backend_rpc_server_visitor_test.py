@@ -550,6 +550,63 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         visitor.check_sp_supported = lambda _input: None
         return visitor
 
+    async def test_stream_close_reaches_owned_rpc_before_return(self):
+        closed = asyncio.Event()
+
+        class HeldModelRpcClient:
+            def enqueue(self, _input):
+                async def generate():
+                    try:
+                        yield "first"
+                        await asyncio.Future()
+                    finally:
+                        closed.set()
+
+                # Keep a strong reference: closure must not depend on GC or
+                # event-loop shutdown after the request has already returned.
+                self.stream = generate()
+                return self.stream
+
+        client = HeldModelRpcClient()
+        visitor = self._visitor(client)
+        stream = await visitor.enqueue(_FakeInput(is_streaming=True))
+        try:
+            self.assertEqual(await anext(stream), "first")
+            await stream.aclose()
+            self.assertTrue(closed.is_set())
+            self.assertIsNone(client.stream.ag_frame)
+        finally:
+            await client.stream.aclose()
+
+    async def test_stream_cancel_reaches_owned_rpc_before_return(self):
+        entered = asyncio.Event()
+        closed = asyncio.Event()
+
+        class WaitingModelRpcClient:
+            def enqueue(self, _input):
+                async def generate():
+                    try:
+                        entered.set()
+                        await asyncio.Future()
+                        yield "never"
+                    finally:
+                        closed.set()
+
+                self.stream = generate()
+                return self.stream
+
+        client = WaitingModelRpcClient()
+        visitor = self._visitor(client)
+        stream = await visitor.enqueue(_FakeInput(is_streaming=True))
+        task = asyncio.create_task(anext(stream))
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(closed.is_set())
+        self.assertIsNone(client.stream.ag_frame)
+        await stream.aclose()
+
     async def test_prefill_cp_rejects_full_sequence_outputs_before_rpc(self):
         client = _SuccessfulModelRpcClient(["unexpected-output"])
         visitor = self._visitor(client)

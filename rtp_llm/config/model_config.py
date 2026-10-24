@@ -78,6 +78,41 @@ def resolve_ssm_state_dtype(
 
 
 class ModelConfig(CppModelConfig):
+    # Checkpoint capabilities are read-only; they are not model options.
+    @property
+    def enable_qwen4_ple(self) -> bool:
+        return bool(getattr(self, "_qwen4_ple_layer_ids", ()))
+
+    @property
+    def enable_qwen4_qsa(self) -> bool:
+        return int(getattr(self, "_qwen4_indexer_head_dim", 0)) > 0
+
+    @property
+    def qwen4_ple_prefetch_mb(self) -> int:
+        snapshot = getattr(self, "_qwen4_runtime_snapshot", None)
+        if snapshot is not None:
+            return snapshot.options.ple_prefetch_mb
+        return getattr(self, "_qwen4_ple_prefetch_mb", 256)
+
+    @qwen4_ple_prefetch_mb.setter
+    def qwen4_ple_prefetch_mb(self, value: int) -> None:
+        if type(value) is not int or value <= 0:
+            raise ValueError("qwen4_ple_prefetch_mb must be a positive integer")
+        snapshot = getattr(self, "_qwen4_runtime_snapshot", None)
+        if snapshot is not None and value != snapshot.options.ple_prefetch_mb:
+            raise RuntimeError(
+                "qwen4_exp resource options are frozen after model loading"
+            )
+        self._qwen4_ple_prefetch_mb = value
+
+    # Model-specific weight estimators add to these fields when needed. Class
+    # defaults keep the generic estimator statically visible and zero-cost for
+    # every existing model.
+    _extra_weight_bytes: float = 0.0
+    _tp_sharded_extra_weight_bytes: float = 0.0
+    _replicated_extra_weight_bytes: float = 0.0
+    _extra_weight_param_count: int = 0
+
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
@@ -106,6 +141,7 @@ class ModelConfig(CppModelConfig):
         "moe_inter_size",
         "moe_w1_layout",
         "moe_prefill_max_tokens_per_rank",
+        "qwen4_ple_prefetch_mb",
         "n_shared_experts",
         "dsv4_fixed_pool_use_memory",
         "generate_env_config",
@@ -113,6 +149,7 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "linear_attn_norm_activation",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -168,6 +205,7 @@ class ModelConfig(CppModelConfig):
         "moe_normalize_expert_scale",
         "scoring_func",
         "hc_mult",
+        "mtp_input_hidden_size",
         "hc_sinkhorn_iters",
         "hc_eps",
         "swiglu_limit",
@@ -273,7 +311,32 @@ class ModelConfig(CppModelConfig):
                 self.mm_related_params, self.extra_data_path, self.local_extra_data_path
             )
 
+        # Some model-specific tensors are not represented by the generic
+        # attention/FFN formulas above. Keep their already-byte-sized estimate
+        # separate so non-quantized tables (for example qwen4 PLE BF16) are not
+        # accidentally scaled by the model's main weight bit width.
+        model_size += self._extra_weight_bytes
         return model_size
+
+    def eval_model_weight_size_per_rank(self, tp_size: int, ep_size: int) -> float:
+        """Estimate the resident device weight bytes for one loader rank.
+
+        Generic weights retain the existing ``max(EP, TP)`` approximation.
+        Model-specific TP-only tables must be divided by attention TP instead:
+        using EP for them underestimates memory whenever ``EP > TP``. Replicated
+        model-specific tensors are charged in full on every rank.
+        """
+        if tp_size <= 0 or ep_size <= 0:
+            raise ValueError(
+                f"tp_size and ep_size must be positive, got {tp_size}, {ep_size}"
+            )
+        checkpoint_extra = self._extra_weight_bytes
+        tp_extra = self._tp_sharded_extra_weight_bytes
+        replicated_extra = self._replicated_extra_weight_bytes
+        generic_size = self.eval_model_weight_size() - checkpoint_extra
+        return (
+            generic_size / max(ep_size, tp_size) + tp_extra / tp_size + replicated_extra
+        )
 
     def eval_model_size(self) -> float:
         model_size = self.eval_model_weight_size()
@@ -369,6 +432,7 @@ class ModelConfig(CppModelConfig):
             ).eval_mm_model_param_count(
                 self.mm_related_params, self.extra_data_path, self.local_extra_data_path
             )
+        param_count += self._extra_weight_param_count
         return param_count
 
     def word_emb_param_count(self, vocab_size: int) -> int:
@@ -685,6 +749,11 @@ class ModelConfig(CppModelConfig):
             self.hidden_state_capture_layer_ids = layer_ids
         if capture_dtype is not None:
             self.hidden_state_capture_dtype = capture_dtype
+        if "qwen4_ple_prefetch_mb" in model_override_args:
+            budget = model_override_args["qwen4_ple_prefetch_mb"]
+            if type(budget) is not int or budget <= 0:
+                raise ValueError("qwen4_ple_prefetch_mb must be a positive integer")
+            self.qwen4_ple_prefetch_mb = budget
 
     def init_precision_config(
         self, kv_cache_config: Optional[Any], act_type: Optional[str]
@@ -703,6 +772,14 @@ class ModelConfig(CppModelConfig):
         Args:
             kv_cache_config: Optional KVCacheConfig to set attn_config.kv_cache_dtype
         """
+        if self.quantization:
+            requested = init_quant_config(self.quantization)
+            recipe = getattr(requested, "model_recipe", None)
+            if recipe is not None and (
+                recipe != "qwen4_fp8_nvfp4"
+                or self.model_type not in ("qwen4_exp", "qwen4_exp_mtp")
+            ):
+                raise ValueError("QWEN4_FP8_NVFP4 is only valid for qwen4_exp models")
         # Load quant_config
         quant_config = QuantizationConfig.load_from_ckpt(self.ckpt_path)
         if not quant_config:

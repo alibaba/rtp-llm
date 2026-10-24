@@ -374,7 +374,8 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
 
 }  // anonymous namespace
 
-NormalModelInputGatherer::NormalModelInputGatherer(const NormalModelInputGathererConfig& config): config_(config) {}
+NormalModelInputGatherer::NormalModelInputGatherer(const NormalModelInputGathererConfig& config):
+    config_(config), device_input_enabled_(deviceInputEnabled()) {}
 
 GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamGroups& stream_groups) const {
     const size_t current_tokens_size      = stream_groups.modelExecuteTokenSize();
@@ -481,9 +482,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_decode_streams");
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE);
 
-    const char* device_input_env        = std::getenv("RTP_LLM_DEVICE_INPUT");
-    bool        use_normal_device_state = device_input_env != nullptr && std::string(device_input_env) == "1"
-                                   && stream_groups.totalContextBatchSize() == 0
+    bool use_normal_device_state = device_input_enabled_ && stream_groups.totalContextBatchSize() == 0
                                    && stream_groups.totalDecodeBatchSize() > 0 && !ctx.need_cal_position_id;
     if (use_normal_device_state) {
         for (const auto& stream : stream_groups.decodeStreams()) {
@@ -724,7 +723,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         model_input.mm_features_spans = model_input.mm_features_spans.slice(0, 0, ctx.mm_feature_index);
     }
     model_input.prefix_lengths =
-        deviceInputEnabled() ? publishInt32ToCuda(prefix_lengths_host, host_holder) : prefix_lengths_host;
+        device_input_enabled_ ? publishInt32ToCuda(prefix_lengths_host, host_holder) : prefix_lengths_host;
     if (model_input.custom_output_indexes.defined()) {
         model_input.custom_output_indexes = model_input.custom_output_indexes.narrow(0, 0, custom_output_count);
     }
@@ -880,7 +879,7 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     // No host mirrors are kept for ModelInputsLogger: it snapshots every tensor
     // in place (device-side clone + per-device c10::Event) and only pays the D2H
     // on its own worker thread, so it reads post-publish CUDA members directly.
-    if (deviceInputEnabled()) {
+    if (device_input_enabled_) {
         publishModelInputCoreTensorsToCuda(model_input, host_holder);
         model_input.lm_output_indexes = buildLmOutputIndexesOnCuda(model_input, stream_groups);
     } else {
