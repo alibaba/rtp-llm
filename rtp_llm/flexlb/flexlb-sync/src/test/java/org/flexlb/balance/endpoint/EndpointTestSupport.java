@@ -10,6 +10,7 @@ import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.delivery.NonBatchDeliveryStrategy;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.BatchTtftEstimator;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
@@ -251,18 +252,17 @@ public final class EndpointTestSupport {
         }
     }
 
-    static PrefillState.CommittedHandoff commitBatch(
-            PrefillEndpoint endpoint,
-            long batchId,
-            long predictedMs,
-            List<? extends ScheduledRequest> exactItems) {
+    static PrefillState.CommittedHandoff commitBatch(PrefillEndpoint endpoint,
+                                                     long batchId,
+                                                     long predictedMs,
+                                                     List<? extends ScheduledRequest> exactItems) {
         if (exactItems.isEmpty()) {
             throw new IllegalArgumentException("batch requires at least one item");
         }
         List<ScheduledRequest> items = List.copyOf(exactItems);
-        PrefillState.ReservationResult<PrefillState.BatchReservation> result = endpoint.reserveBatch(
-                items.get(0), batchId, Integer.MAX_VALUE);
-        if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
+        ReservationResult<PrefillState.BatchReservation> result =
+                endpoint.reserveBatch(items.get(0), batchId, Integer.MAX_VALUE);
+        if (result.status() != ReservationResult.Status.SUCCESS) {
             throw new IllegalStateException(
                     "batch reservation rejected: " + result.status());
         }
@@ -272,10 +272,9 @@ public final class EndpointTestSupport {
         }
     }
 
-    static List<PrefillState.CommittedHandoff> commitRoutes(
-            PrefillEndpoint endpoint,
-            long predictedMs,
-            List<? extends ScheduledRequest> exactItems) {
+    static List<PrefillState.CommittedHandoff> commitRoutes(PrefillEndpoint endpoint,
+                                                            long predictedMs,
+                                                            List<? extends ScheduledRequest> exactItems) {
         if (exactItems.isEmpty()) {
             throw new IllegalArgumentException("route group requires an item");
         }
@@ -285,11 +284,9 @@ public final class EndpointTestSupport {
         boolean committed = false;
         try {
             for (ScheduledRequest item : items) {
-                PrefillState.ReservationResult<PrefillState.RouteReservation> result =
-                        endpoint.reserveRouteOwnership(
-                                item, predictedMs);
-                if (result.status()
-                        != PrefillState.CapacityStatus.ACQUIRED) {
+                ReservationResult<PrefillState.RouteReservation> result =
+                        endpoint.reserveRouteOwnership(item, predictedMs);
+                if (result.status() != ReservationResult.Status.SUCCESS) {
                     throw new IllegalStateException(
                             "route reservation rejected: " + result.status());
                 }

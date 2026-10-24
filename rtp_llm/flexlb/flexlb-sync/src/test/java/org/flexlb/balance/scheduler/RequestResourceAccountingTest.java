@@ -8,6 +8,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
@@ -291,7 +292,7 @@ class RequestResourceAccountingTest {
             try (var pin = prefill.tryPinGeneration()) {
                 assertTrue(requests.commitItemForPublication(item, () -> {
                     var result = prefill.reserveUnqueuedRoute(pin, item, 30_000);
-                    assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
+                    assertEquals(ReservationResult.Status.SUCCESS, result.status());
                     held.set(result.reservation());
                     return true;
                 }));
@@ -364,7 +365,7 @@ class RequestResourceAccountingTest {
                     new Response(), null, null, prefill, null, null, System.currentTimeMillis());
             try (var pin = prefill.tryPinGeneration()) {
                 var result = prefill.reserveUnqueuedRoute(pin, next, 1);
-                assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
+                assertEquals(ReservationResult.Status.SUCCESS, result.status());
                 result.reservation().close();
             }
             assertEmpty();

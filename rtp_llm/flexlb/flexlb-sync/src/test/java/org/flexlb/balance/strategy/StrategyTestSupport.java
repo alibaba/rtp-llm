@@ -11,6 +11,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.scheduler.EndpointEventHandler;
@@ -147,20 +148,18 @@ final class StrategyTestSupport {
         }
     }
 
-    static PrefillState.CommittedHandoff commitBatch(
-            PrefillEndpoint endpoint,
-            long batchId,
-            long predictedMs,
-            List<? extends ScheduledRequest> exactItems) {
+    static PrefillState.CommittedHandoff commitBatch(PrefillEndpoint endpoint,
+                                                     long batchId,
+                                                     long predictedMs,
+                                                     List<? extends ScheduledRequest> exactItems) {
         if (exactItems.isEmpty()) {
             throw new IllegalArgumentException(
                     "committed batch requires at least one item");
         }
         List<ScheduledRequest> items = List.copyOf(exactItems);
-        PrefillState.ReservationResult<PrefillState.BatchReservation> result =
-                endpoint.reserveBatch(
-                        items.getFirst(), batchId, Integer.MAX_VALUE);
-        if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
+        ReservationResult<PrefillState.BatchReservation> result =
+                endpoint.reserveBatch(items.getFirst(), batchId, Integer.MAX_VALUE);
+        if (result.status() != ReservationResult.Status.SUCCESS) {
             throw new IllegalStateException(
                     "batch reservation rejected: " + result.status());
         }

@@ -11,6 +11,7 @@ import org.flexlb.balance.delivery.NonBatchTransaction;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.DecodeCostFormula;
@@ -248,14 +249,12 @@ public final class DeliveryStrategyTestSupport {
             return List.copyOf(handoffs);
         }
 
-        private PrefillState.ReservationResult<PrefillState.BatchReservation>
-                reserveBatch() {
+        private ReservationResult<PrefillState.BatchReservation> reserveBatch() {
             batchReservation = Mockito.mock(PrefillState.BatchReservation.class);
             Mockito.when(batchReservation.commit(
                             Mockito.anyList(), Mockito.anyLong()))
                     .thenAnswer(invocation -> committedHandoffs(1).getFirst());
-            return new PrefillState.ReservationResult<>(
-                    PrefillState.CapacityStatus.ACQUIRED, batchReservation);
+            return ReservationResult.success(batchReservation);
         }
 
         private DecodeEndpoint.EngineDispatchPermitAcquisition acquirePermit(

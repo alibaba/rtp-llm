@@ -7,6 +7,7 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
@@ -525,14 +526,14 @@ class PrefillQueueRequestCapacityTest {
                 for (int index = 0; index < 2; index++) {
                     var result = fixture.endpoint.reserveBatch(items.get(index), 100L + index,
                             items.get(index).maxInflightBatchesPerPrefillWorker());
-                    assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
+                    assertEquals(ReservationResult.Status.SUCCESS, result.status());
                     reservations.add(result.reservation());
                 }
-                assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL,
+                assertEquals(ReservationResult.Status.CAPACITY_FULL,
                         fixture.endpoint.reserveBatch(items.get(2), 102L, 2).status());
                 reservations.removeFirst().close();
                 var replacement = fixture.endpoint.reserveBatch(items.get(2), 102L, 2);
-                assertEquals(PrefillState.CapacityStatus.ACQUIRED, replacement.status());
+                assertEquals(ReservationResult.Status.SUCCESS, replacement.status());
                 reservations.add(replacement.reservation());
             } finally {
                 reservations.forEach(PrefillState.BatchReservation::close);

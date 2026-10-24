@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
 import org.flexlb.balance.scheduler.decode.DecodeRequirement;
@@ -104,13 +105,12 @@ public final class PrefillAdmissionResources {
         }
     }
 
-    public static <T> DeliveryBlockReason.Attempt<T> rejectedPrefill(
-            ScheduledRequest item,
-            PrefillState.CapacityStatus status,
-            DeliveryBlockReason capacityFull) {
+    public static <T> DeliveryBlockReason.Attempt<T> rejectedPrefill(ScheduledRequest item,
+                                                                     ReservationResult.Status status,
+                                                                     DeliveryBlockReason capacityFull) {
         return switch (status) {
             case CAPACITY_FULL -> rejected(capacityFull);
-            case REQUEST_NOT_ACTIVE -> rejected(
+            case REQUEST_LEFT_QUEUE -> rejected(
                     DeliveryBlockReason.OWNERSHIP_LOST);
             case ENDPOINT_RETIRED -> failed(retired("Prefill", item));
             case REQUEST_ALREADY_RESERVED, BATCH_ID_ALREADY_RESERVED ->
@@ -118,8 +118,8 @@ public final class PrefillAdmissionResources {
                             "Prefill admission owns another reservation: "
                                     + "request_id=" + item.requestId()
                                     + " status=" + status));
-            case ACQUIRED -> throw new IllegalArgumentException(
-                    "ACQUIRED must carry a reservation");
+            case SUCCESS -> throw new IllegalArgumentException(
+                    "SUCCESS must carry a reservation");
         };
     }
 

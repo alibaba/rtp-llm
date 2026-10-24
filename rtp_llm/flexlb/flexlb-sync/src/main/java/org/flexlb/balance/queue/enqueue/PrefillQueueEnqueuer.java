@@ -2,6 +2,7 @@ package org.flexlb.balance.queue.enqueue;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.queue.QueueFailures;
 import org.flexlb.balance.queue.QueueState;
 import org.flexlb.balance.queue.QueuedRequestRemover;
@@ -164,7 +165,7 @@ public final class PrefillQueueEnqueuer {
             return new EnqueueAttempt(true, null, null);
         }
 
-        PrefillState.ReservationResult<PrefillState.RouteReservation> result;
+        ReservationResult<PrefillState.RouteReservation> result;
         try {
             // 队列锁可重入，同时也是 PrefillState 的锁，所以登记进排队索引和预留 Prefill 资源
             // 在同一把锁里完成，其他线程看不到只做了一半的状态。
@@ -175,7 +176,7 @@ public final class PrefillQueueEnqueuer {
             rollbackFreshActiveUnderLock(item, null);
             return new EnqueueAttempt(false, null, failure);
         }
-        if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
+        if (!result.isSuccess()) {
             rollbackFreshActiveUnderLock(item, null);
             return new EnqueueAttempt(false, null, null);
         }

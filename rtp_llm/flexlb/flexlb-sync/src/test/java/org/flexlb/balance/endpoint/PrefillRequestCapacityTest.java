@@ -2,6 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.endpoint.prefill.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
@@ -39,7 +40,7 @@ class PrefillRequestCapacityTest {
         assertNotNull(registration);
         assertEquals(2L, state.observedRequestCount());
         assertFalse(enqueue(item(3), 2L));
-        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 2L).status());
+        assertEquals(ReservationResult.Status.CAPACITY_FULL, reserve(item(3), 2L).status());
         try (var handoff = commit(immediate, registration)) {
             assertEquals(2L, state.observedRequestCount());
         }
@@ -74,7 +75,7 @@ class PrefillRequestCapacityTest {
         var registration = reserve(item(1), 4L).reservation();
         heartbeat(Map.of(), 2L);
         assertEquals(3L, state.observedRequestCount(), "unseen local shadow cannot explain unidentified Engine work");
-        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(2), 3L).status());
+        assertEquals(ReservationResult.Status.CAPACITY_FULL, reserve(item(2), 3L).status());
         registration.close();
         assertEquals(2L, state.observedRequestCount());
     }
@@ -83,12 +84,12 @@ class PrefillRequestCapacityTest {
     void changingLimitCannotReleaseExistingOwners() {
         var first = reserve(item(1), 2L).reservation();
         var second = reserve(item(2), 2L).reservation();
-        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 1L).status());
+        assertEquals(ReservationResult.Status.CAPACITY_FULL, reserve(item(3), 1L).status());
         assertEquals(2L, state.observedRequestCount());
         assertFalse(state.canAcceptRequest(1L));
         assertTrue(state.canAcceptRequest(5L));
         first.close();
-        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 1L).status());
+        assertEquals(ReservationResult.Status.CAPACITY_FULL, reserve(item(3), 1L).status());
         second.close();
         assertTrue(state.canAcceptRequest(1L));
         assertNotNull(reserve(item(3), 1L).reservation());
@@ -131,7 +132,7 @@ class PrefillRequestCapacityTest {
         assertTrue(enqueue(item(1), 2L));
         assertNotNull(reserve(item(2), 2L).reservation(),
                 "an intervening ownership mutation does not invalidate remaining capacity");
-        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 2L).status(),
+        assertEquals(ReservationResult.Status.CAPACITY_FULL, reserve(item(3), 2L).status(),
                 "the old available snapshot cannot authorize overselling current capacity");
     }
 
@@ -159,7 +160,7 @@ class PrefillRequestCapacityTest {
         CountDownLatch selected = new CountDownLatch(contenders);
         CountDownLatch admit = new CountDownLatch(1);
         try (var executor = Executors.newFixedThreadPool(contenders)) {
-            List<Future<PrefillState.ReservationResult<PrefillState.RouteReservation>>> attempts = new ArrayList<>();
+            List<Future<ReservationResult<PrefillState.RouteReservation>>> attempts = new ArrayList<>();
             for (int i = 0; i < contenders; i++) {
                 ScheduledRequest request = item(i + 1);
                 attempts.add(executor.submit(() -> {
@@ -180,7 +181,7 @@ class PrefillRequestCapacityTest {
                 if (result.reservation() != null) {
                     acquired.add(result.reservation());
                 } else {
-                    assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, result.status());
+                    assertEquals(ReservationResult.Status.CAPACITY_FULL, result.status());
                 }
             }
             assertEquals(1, acquired.size());
@@ -223,7 +224,7 @@ class PrefillRequestCapacityTest {
         assertTrue(state.canAcceptRequest(2L));
     }
 
-    private PrefillState.ReservationResult<PrefillState.RouteReservation> reserve(ScheduledRequest item, long limit) {
+    private ReservationResult<PrefillState.RouteReservation> reserve(ScheduledRequest item, long limit) {
         return state.reserveUnqueuedRoute(item, 0L, limit);
     }
 

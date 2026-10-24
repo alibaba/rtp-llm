@@ -4,7 +4,7 @@ import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -364,8 +364,7 @@ class QueuedDecodeWithdrawalTest {
     @Test
     void prefillBatchRetirementRequeuesInsteadOfPublishingFailure() {
         var item = queued(34);
-        var failure = PrefillAdmissionResources.rejectedPrefill(
-                item, PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
+        var failure = PrefillAdmissionResources.rejectedPrefill(item, ReservationResult.Status.ENDPOINT_RETIRED, null);
         assertFalse(failure.accepted());
         registry.failDeliveryPreparation(item, failure.blockReason().cause());
         verify(queue).requeue(item);

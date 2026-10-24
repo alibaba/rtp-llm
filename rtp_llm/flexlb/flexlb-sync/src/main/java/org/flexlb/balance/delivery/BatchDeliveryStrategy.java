@@ -2,6 +2,7 @@ package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
@@ -387,8 +388,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             return transaction;
         }
 
-        public synchronized DeliveryBlockReason.Attempt<ScheduledRequest> append(
-                ScheduledRequest exact) {
+        public synchronized DeliveryBlockReason.Attempt<ScheduledRequest> append(ScheduledRequest exact) {
             requirePrepared("append");
             requireAdmissionPrepared("append");
             try {
@@ -397,14 +397,9 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 members.ensureCapacity(Math.addExact(members.size(), 1));
                 boolean first = members.isEmpty();
                 if (first) {
-                    PrefillState.ReservationResult<
-                            PrefillState.BatchReservation> result =
-                            prefill.reserveBatch(
-                                    exact,
-                                    batchId,
-                                    exact.maxInflightBatchesPerPrefillWorker());
-                    if (result.status()
-                            != PrefillState.CapacityStatus.ACQUIRED) {
+                    ReservationResult<PrefillState.BatchReservation> result =
+                            prefill.reserveBatch(exact, batchId, exact.maxInflightBatchesPerPrefillWorker());
+                    if (!result.isSuccess()) {
                         return rejectedPrefill(
                                 exact,
                                 result.status(),

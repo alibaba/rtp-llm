@@ -4,6 +4,7 @@ import lombok.Getter;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.PrefillTtftEstimator;
 import org.flexlb.balance.prediction.FormulaPredictor;
@@ -241,17 +242,15 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return new FormulaPredictor(estimator.getExpression());
     }
 
-    public PrefillState.ReservationResult<PrefillState.BatchReservation> reserveBatch(
-            ScheduledRequest exactHead,
-            long batchId,
-            int maximumInflightBatches) {
+    public ReservationResult<PrefillState.BatchReservation> reserveBatch(ScheduledRequest exactHead,
+                                                                         long batchId,
+                                                                         int maximumInflightBatches) {
         EndpointGenerationLifecycle.HandoffPermit handoffPermit =
                 tryAcquireGenerationHandoff();
         if (handoffPermit == null) {
-            return new PrefillState.ReservationResult<>(
-                    PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
+            return ReservationResult.fail(ReservationResult.Status.ENDPOINT_RETIRED);
         }
-        PrefillState.ReservationResult<PrefillState.BatchReservation> result;
+        ReservationResult<PrefillState.BatchReservation> result;
         try {
             result = prefillState.reserveBatch(
                     exactHead,
@@ -272,13 +271,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * Bind exact NON_BATCH ownership inside the caller's pinned placement
      * transaction.
      */
-    public PrefillState.ReservationResult<PrefillState.RouteReservation>
-            reserveRouteOwnership(
-            ScheduledRequest exactItem,
-            long predictedMs) {
+    public ReservationResult<PrefillState.RouteReservation> reserveRouteOwnership(ScheduledRequest exactItem,
+                                                                                  long predictedMs) {
         if (isGenerationRetiringOrRetired()) {
-            return new PrefillState.ReservationResult<>(
-                    PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
+            return ReservationResult.fail(ReservationResult.Status.ENDPOINT_RETIRED);
         }
         return prefillState.reserveRoute(
                 exactItem, predictedMs);
@@ -344,9 +340,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * and the request's dispatcher policy. The pin preserves generation identity while
      * PrefillState checks and occupies capacity under its ownership lock.
      */
-    public PrefillState.ReservationResult<PrefillState.RouteReservation> reserveUnqueuedRoute(GenerationPin pin,
-                                                                                               ScheduledRequest item,
-                                                                                               long predictedMs) {
+    public ReservationResult<PrefillState.RouteReservation> reserveUnqueuedRoute(GenerationPin pin,
+                                                                                 ScheduledRequest item,
+                                                                                 long predictedMs) {
         requirePinnedGeneration(pin);
         long inflightRequestLimit = item.ctx().getConfig().getDispatcher().getMaxInflightPerPrefillWorker();
         return prefillState.reserveUnqueuedRoute(item, predictedMs, inflightRequestLimit);

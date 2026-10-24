@@ -6,6 +6,7 @@ import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.BatchTtftEstimator;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.PrefillTtftEstimator;
@@ -179,9 +180,8 @@ class PrefillQueueSchedulingTest {
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         when(endpoint.isEngineSubQueueMode()).thenReturn(true);
         when(endpoint.tryReserveEngineSubQueueSlot(any())).thenReturn(true);
-        when(endpoint.reserveRouteOwnership(any(), anyLong())).thenReturn(
-                new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED,
-                        mock(PrefillState.RouteReservation.class)));
+        when(endpoint.reserveRouteOwnership(any(), anyLong()))
+                .thenReturn(ReservationResult.success(mock(PrefillState.RouteReservation.class)));
         EventDrivenBlock delivery = new EventDrivenBlock();
         PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
         long now = System.currentTimeMillis();
@@ -429,12 +429,8 @@ class PrefillQueueSchedulingTest {
             decision.setMaxCollectionWaitMs(windowMs);
         }
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
-        when(endpoint.reserveRouteOwnership(
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyLong()))
-                .thenAnswer(ignored -> new org.flexlb.balance.endpoint.prefill.PrefillState.ReservationResult<>(
-                        org.flexlb.balance.endpoint.prefill.PrefillState.CapacityStatus.ACQUIRED,
-                        mock(org.flexlb.balance.endpoint.prefill.PrefillState.RouteReservation.class)));
+        when(endpoint.reserveRouteOwnership(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
+                .thenAnswer(ignored -> ReservationResult.success(mock(PrefillState.RouteReservation.class)));
         DeliveryStrategy delivery = mock(DeliveryStrategy.class);
         List<org.flexlb.dao.pv.DecisionGroup> published = new CopyOnWriteArrayList<>();
         when(delivery.prepare(org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> {

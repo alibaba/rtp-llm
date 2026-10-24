@@ -4,6 +4,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
@@ -671,11 +672,9 @@ class PrefillEndpointTest {
         ScheduledRequest reusedRequestId = createScheduledRequest(101L, 300, 100);
         registerBatch(endpoint, 700L, 100, List.of(first));
 
-        PrefillState.ReservationResult<PrefillState.BatchReservation> duplicate =
-                endpoint.reserveBatch(reusedRequestId, 701L, 10);
+        ReservationResult<PrefillState.BatchReservation> duplicate = endpoint.reserveBatch(reusedRequestId, 701L, 10);
 
-        assertFalse(duplicate.status()
-                        == PrefillState.CapacityStatus.ACQUIRED,
+        assertFalse(duplicate.status() == ReservationResult.Status.SUCCESS,
                 "the canonical ledger rejects ambiguous duplicate live owners");
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.observedRequestCount());
@@ -1165,7 +1164,7 @@ class PrefillEndpointTest {
                     .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
             ScheduledRequest fifth = createScheduledRequest(metricsEndpoint, requestConfig, 5L, 500, 0);
             try (var pin = metricsEndpoint.tryPinGeneration()) {
-                assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL,
+                assertEquals(ReservationResult.Status.CAPACITY_FULL,
                         metricsEndpoint.reserveUnqueuedRoute(pin, fifth, 100L).status());
             }
         } finally {
@@ -1389,8 +1388,7 @@ class PrefillEndpointTest {
     // ---- close ----
 
     @Test
-    void retirementOwnerCanReenterCloseFromSynchronousShutdownCallback()
-            throws Exception {
+    void retirementOwnerCanReenterCloseFromSynchronousShutdownCallback() throws Exception {
         FlexlbConfig retirementConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         configureBatch(retirementConfig, 1, 0, null);
         retirementConfig.setDispatcher(DispatcherConfig.nonBatch());
@@ -1435,16 +1433,11 @@ class PrefillEndpointTest {
             assertTrue(callbackFailure.get() == null,
                     () -> String.valueOf(callbackFailure.get()));
 
-            assertEquals(
-                    PrefillState.CapacityStatus.ENDPOINT_RETIRED,
-                    retirementEndpoint.reserveRouteOwnership(
-                            createScheduledRequest(
-                                    retirementEndpoint,
-                                    retirementConfig,
-                                    8_102L,
-                                    128,
-                                    0),
-                            0L).status());
+            assertEquals(ReservationResult.Status.ENDPOINT_RETIRED,
+                    retirementEndpoint
+                            .reserveRouteOwnership(
+                                    createScheduledRequest(retirementEndpoint, retirementConfig, 8_102L, 128, 0), 0L)
+                            .status());
         } finally {
             retirementEndpoint.close();
             executor.shutdownNow();
@@ -1646,8 +1639,7 @@ class PrefillEndpointTest {
                         .orElseThrow();
         assertTrue(retirement.ownedItems().contains(item),
                 "retirement must publish the exact canonical owner");
-        assertEquals(PrefillState.CapacityStatus.ENDPOINT_RETIRED,
-                endpoint.reserveBatch(item, 2L, 1).status());
+        assertEquals(ReservationResult.Status.ENDPOINT_RETIRED, endpoint.reserveBatch(item, 2L, 1).status());
         endpoint.close();
     }
 
@@ -1657,7 +1649,7 @@ class PrefillEndpointTest {
         ScheduledRequest route = createScheduledRequest(200L, 200L, 0L);
         // A queue route can only be reserved after its canonical item has been
         // offered into the ACTIVE queue; reserveRoute rejects a non-active
-        // identity with REQUEST_NOT_ACTIVE.
+        // identity with REQUEST_LEFT_QUEUE.
         assertTrue(EndpointTestSupport.offer(endpoint, route));
         List<PrefillState.CommittedHandoff> handoffs =
                 EndpointTestSupport.commitRoutes(

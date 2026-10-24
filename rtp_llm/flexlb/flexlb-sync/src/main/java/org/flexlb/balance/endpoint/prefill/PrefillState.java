@@ -39,27 +39,6 @@ import java.util.function.ToLongFunction;
  */
 public final class PrefillState {
 
-    public enum CapacityStatus {
-        ACQUIRED,
-        CAPACITY_FULL,
-        REQUEST_NOT_ACTIVE,
-        REQUEST_ALREADY_RESERVED,
-        BATCH_ID_ALREADY_RESERVED,
-        ENDPOINT_RETIRED
-    }
-
-    public record ReservationResult<R extends AutoCloseable>(
-            CapacityStatus status,
-            R reservation) {
-        public ReservationResult {
-            Objects.requireNonNull(status, "status");
-            if ((status == CapacityStatus.ACQUIRED) != (reservation != null)) {
-                throw new IllegalArgumentException(
-                        "only ACQUIRED may carry a reservation");
-            }
-        }
-    }
-
     public record WorkerStatusFact(
             ScheduledRequest item,
             Kind kind,
@@ -921,26 +900,22 @@ public final class PrefillState {
         return removed;
     }
 
-    public ReservationResult<RouteReservation> reserveRoute(
-            ScheduledRequest exactItem,
-            long predictedMs) {
+    public ReservationResult<RouteReservation> reserveRoute(ScheduledRequest exactItem, long predictedMs) {
         ScheduledRequest item = exactItem;
         lock.lock();
         try {
             RequestEntry entry = requests.get(item.requestId());
             if (entry == null || !entry.activeIdentity(item)) {
-                return new ReservationResult<>(
-                        CapacityStatus.REQUEST_NOT_ACTIVE, null);
+                return ReservationResult.fail(ReservationResult.Status.REQUEST_LEFT_QUEUE);
             }
             if (entry.reservation != null) {
-                return new ReservationResult<>(
-                        CapacityStatus.REQUEST_ALREADY_RESERVED, null);
+                return ReservationResult.fail(ReservationResult.Status.REQUEST_ALREADY_RESERVED);
             }
             RouteReservation lease = new RouteReservation(
                     entry, item.requestId(), predictedMs);
             entry.reservation = lease;
             recordMutationUnderLock();
-            return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
+            return ReservationResult.success(lease);
         } finally {
             lock.unlock();
         }
@@ -957,27 +932,23 @@ public final class PrefillState {
         try {
             RequestEntry entry = requests.get(head.requestId());
             if (entry == null || !entry.activeIdentity(head)) {
-                return new ReservationResult<>(
-                        CapacityStatus.REQUEST_NOT_ACTIVE, null);
+                return ReservationResult.fail(ReservationResult.Status.REQUEST_LEFT_QUEUE);
             }
             if (entry.reservation != null) {
-                return new ReservationResult<>(
-                        CapacityStatus.REQUEST_ALREADY_RESERVED, null);
+                return ReservationResult.fail(ReservationResult.Status.REQUEST_ALREADY_RESERVED);
             }
             if (findBatchReservationUnderLock(batchId) != null) {
-                return new ReservationResult<>(
-                        CapacityStatus.BATCH_ID_ALREADY_RESERVED, null);
+                return ReservationResult.fail(ReservationResult.Status.BATCH_ID_ALREADY_RESERVED);
             }
             if (batchLeasesInUse >= maximum) {
-                return new ReservationResult<>(
-                        CapacityStatus.CAPACITY_FULL, null);
+                return ReservationResult.fail(ReservationResult.Status.CAPACITY_FULL);
             }
             BatchReservation lease = new BatchReservation(
                     entry, head.requestId(), batchId, generationHandoff);
             entry.reservation = lease;
             batchLeasesInUse++;
             recordMutationUnderLock();
-            return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
+            return ReservationResult.success(lease);
         } finally {
             lock.unlock();
         }
@@ -1201,22 +1172,23 @@ public final class PrefillState {
      * Selection revisions are advisory; only exact identity and current capacity
      * decide admission. A zero request limit leaves count admission disabled.
      */
-    public ReservationResult<RouteReservation> reserveUnqueuedRoute(
-            ScheduledRequest item, long predictedMs, long maxOutstandingRequests) {
+    public ReservationResult<RouteReservation> reserveUnqueuedRoute(ScheduledRequest item,
+                                                                    long predictedMs,
+                                                                    long maxOutstandingRequests) {
         if (maxOutstandingRequests < 0L) {
             throw new IllegalArgumentException("request limit must be non-negative");
         }
         lock.lock();
         try {
             if (requests.containsKey(item.requestId())) {
-                return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null);
+                return ReservationResult.fail(ReservationResult.Status.REQUEST_ALREADY_RESERVED);
             }
             if (maxOutstandingRequests > 0L && !canAcceptRequestUnderLock(maxOutstandingRequests)) {
-                return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null);
+                return ReservationResult.fail(ReservationResult.Status.CAPACITY_FULL);
             }
             RequestEntry entry = new RequestEntry(item, QueueMembership.UNINDEXED);
             RouteReservation reservation = new RouteReservation(entry, item.requestId(), predictedMs);
-            ReservationResult<RouteReservation> result = new ReservationResult<>(CapacityStatus.ACQUIRED, reservation);
+            ReservationResult<RouteReservation> result = ReservationResult.success(reservation);
             entry.reservation = reservation;
             putRequestUnderLock(item.requestId(), entry);
             committedWorkCapture = null;

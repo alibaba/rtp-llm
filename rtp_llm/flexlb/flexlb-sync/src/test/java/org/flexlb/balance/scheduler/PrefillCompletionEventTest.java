@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.config.ConfigService;
@@ -91,7 +92,7 @@ class PrefillCompletionEventTest {
                 assertNotNull(pin);
                 assertTrue(requests.commitItemForPublication(item, () -> {
                     var registered = prefill.reserveUnqueuedRoute(pin, item, 30_000L);
-                    assertEquals(PrefillState.CapacityStatus.ACQUIRED, registered.status());
+                    assertEquals(ReservationResult.Status.SUCCESS, registered.status());
                     routeReservation.set(registered.reservation());
                     return true;
                 }));
