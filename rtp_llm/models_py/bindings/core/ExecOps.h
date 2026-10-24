@@ -46,6 +46,27 @@ bool isRuntimeInitialized();
 
 int64_t getDeviceId();
 
+// Optional CPU-only stage tracing. No tensor contents, CUDA queries or synchronization.
+bool gpuStageTraceEnabled() noexcept;
+
+class GpuStageTrace {
+public:
+    GpuStageTrace(const char*          stage,
+                  const torch::Tensor& tensor,
+                  int                  device_id  = -1,
+                  const std::string&   details    = {},
+                  int64_t              request_id = 0) noexcept;
+    ~GpuStageTrace();
+    GpuStageTrace(const GpuStageTrace&)            = delete;
+    GpuStageTrace& operator=(const GpuStageTrace&) = delete;
+    void           finish(const char* phase = nullptr) noexcept;
+
+private:
+    uint64_t id_                  = 0;
+    uint64_t previous_id_         = 0;
+    int      uncaught_exceptions_ = 0;
+};
+
 // ===================================================================
 // Sync / error-check
 // ===================================================================

@@ -98,6 +98,7 @@ cc_library(
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/utils:torch_cuda_oom",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/multimodal_processor",
         "//rtp_llm/cpp/multimodal_processor:mm_processor_config",
         "//rtp_llm/cpp/normal_engine",
