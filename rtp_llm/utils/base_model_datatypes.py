@@ -124,6 +124,8 @@ class AuxInfo:
     softmax_probs: List[float] = field(default_factory=list)
 
     reuse_len: int = 0
+    actual_reuse_len: int = 0
+    writeback_first_use_len: int = 0
     local_reuse_len: int = 0
     remote_reuse_len: int = 0
     memory_reuse_len: int = 0

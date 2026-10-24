@@ -448,6 +448,8 @@ TEST_F(QueryConverterTest, testTransOutput) {
     res.aux_info.cost_time_us                         = 1000;
     res.aux_info.iter_count                           = 9;
     res.aux_info.input_len                            = 8;
+    res.aux_info.reuse_len                            = 4;
+    res.aux_info.writeback_first_use_len              = 2;
     res.aux_info.output_len                           = 7;
     res.aux_info.speculative_draft_rounds             = 4;
     res.aux_info.speculative_accepted_tokens_per_pos  = {3, 2, 1};
@@ -469,6 +471,8 @@ TEST_F(QueryConverterTest, testTransOutput) {
     EXPECT_EQ(aux_info_pb.cost_time_us(), 1000);
     EXPECT_EQ(aux_info_pb.iter_count(), 9);
     EXPECT_EQ(aux_info_pb.input_len(), 8);
+    EXPECT_EQ(aux_info_pb.total_reuse_len(), 4);
+    EXPECT_EQ(aux_info_pb.writeback_first_use_len(), 2);
     EXPECT_EQ(aux_info_pb.output_len(), 7);
     EXPECT_EQ(aux_info_pb.speculative_draft_rounds(), 4);
     EXPECT_EQ(aux_info_pb.speculative_accepted_tokens_per_pos_size(), 3);

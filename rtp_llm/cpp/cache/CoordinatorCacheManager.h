@@ -255,6 +255,7 @@ protected:
 
     struct PreparedKVCache {
         DecodeReuseSourcesPtr          decode_sources;
+        ReuseAccounting                reuse_accounting;
         size_t                         matched_device_blocks = 0;
         size_t                         total_logical_blocks  = 0;
         std::vector<RequiredPositions> required_positions;

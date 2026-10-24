@@ -535,9 +535,11 @@ TEST_F(DecodeWritebackCpIntegrationTest, TcpScatterPublishesCanonicalPrefixAndRe
     info.complete_token_ids      = ids;
     info.reuse_cache             = true;
     info.enable_cache_lookup     = true;
-    const auto result            = prefill_->malloc(info);
+    auto result                  = prefill_->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 8);
+    const auto first_use_tokens = result.reuse_accounting.unaccountedBlocks(result.reuse_len / 8) * 8;
+    EXPECT_EQ(first_use_tokens, 8u);
     ASSERT_EQ(peer_allocators_.size(), 1u);
     EXPECT_EQ(peer_allocators_.front()->devicePrefixBlocksForTest({keys_[1]}), 0u);
     const std::array<std::shared_ptr<Allocator>, 2> ranks{target_, peer_allocators_.front()};
@@ -553,6 +555,16 @@ TEST_F(DecodeWritebackCpIntegrationTest, TcpScatterPublishesCanonicalPrefixAndRe
             }
         }
     }
+    InsertInfo insert_info{reused, ids, false, Tier::DEVICE};
+    insert_info.account_for_prefill = true;
+    size_t resident_prefix_length = 0;
+    prefill_->insertIntoCache(insert_info, resident_prefix_length);
+    const auto cache = target_->blockTreeCacheOwner();
+    auto after_commit = cache->match({keys_[1]});
+    EXPECT_EQ(after_commit.matched_device_blocks, 1u);
+    EXPECT_EQ(after_commit.reuse_accounting.unaccountedBlocks(1), 0u);
+    EXPECT_EQ(result.reuse_accounting.unaccountedBlocks(1), 1u);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, after_commit.matched_device_resources);
     prefill_->free(FreeInfo{reused, ids});
 }
 
@@ -654,7 +666,33 @@ TEST_P(DecodeWritebackHybridIntegrationTest, TransfersReusableGroupsAndPreserves
     EXPECT_EQ(cache->groupSets().size(), GetParam() >= 3 ? 1u : (GetParam() == 1 ? 2u : 3u));
     auto match = cache->match(keys_);
     EXPECT_EQ(match.matched_device_blocks, keys_.size());
+    EXPECT_EQ(match.reuse_accounting.unaccountedBlocks(match.matched_device_blocks), keys_.size() - 1);
     block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
+    auto repeated_match = cache->match(keys_);
+    EXPECT_EQ(repeated_match.reuse_accounting.unaccountedBlocks(repeated_match.matched_device_blocks), keys_.size() - 1);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, repeated_match.matched_device_resources);
+
+    auto input = std::make_shared<GenerateInput>();
+    input->input_ids = torch::tensor(tokens_, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    ModelConfig model_config;
+    model_config.max_seq_len = 64;
+    model_config.vocab_size = 128;
+    ResourceContext resource_context;
+    resource_context.cache_manager = prefill_;
+    resource_context.role_type = RoleType::PREFILL;
+    resource_context.reuse_cache = true;
+    auto reused_stream =
+        std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, resource_context, nullptr);
+    ASSERT_TRUE(reused_stream->initKVBlock().ok());
+    EXPECT_EQ(reused_stream->initialReuseLength(), 20);
+    EXPECT_EQ(reused_stream->writebackFirstUseLength(), 16);
+    reused_stream->generate_status_->status = StreamState::FINISHED;
+    reused_stream->releaseResource();
+    auto after_commit = cache->match(keys_);
+    EXPECT_EQ(after_commit.matched_device_blocks, keys_.size());
+    EXPECT_EQ(after_commit.reuse_accounting.unaccountedBlocks(after_commit.matched_device_blocks), 0u);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, after_commit.matched_device_resources);
 }
 
 INSTANTIATE_TEST_SUITE_P(FullSwaLinear, DecodeWritebackHybridIntegrationTest, ::testing::Values(0, 1, 2, 3, 4));
@@ -699,6 +737,8 @@ TEST_F(DecodeWritebackIntegrationTest, FinishedStreamReleasesBeforeTcpCopyAndNex
     auto result                  = prefill_->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 12);
+    const auto first_use_tokens = result.reuse_accounting.unaccountedBlocks(result.reuse_len / 4) * 4;
+    EXPECT_EQ(first_use_tokens, 8u);
     for (int layer = 0; layer < 2; ++layer) {
         for (size_t i = 1; i < 3; ++i) {
             for (const auto& block :
@@ -712,6 +752,71 @@ TEST_F(DecodeWritebackIntegrationTest, FinishedStreamReleasesBeforeTcpCopyAndNex
         }
     }
     prefill_->free(FreeInfo{reused, ids});
+}
+
+TEST_F(DecodeWritebackIntegrationTest, WritebackDiscountStartsAfterPrefillCommitThroughRealStreamOutputs) {
+    prepare();
+    stream_->generate_status_->status = StreamState::RUNNING;
+    stream_->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    ASSERT_TRUE(await([&]() { return sender_->started > 0; }));
+    sender_->release();
+    ASSERT_TRUE(await([&]() { return drained(); }));
+
+    const auto make_prefill = [&]() {
+        auto input                             = std::make_shared<GenerateInput>();
+        input->input_ids                       = torch::tensor(tokens_, torch::kInt32);
+        input->generate_config                 = std::make_shared<GenerateConfig>();
+        input->generate_config->aux_info       = true;
+        input->generate_config->is_streaming   = true;
+        input->generate_config->max_new_tokens = 2;
+        ModelConfig model_config;
+        model_config.max_seq_len = 64;
+        model_config.vocab_size  = 128;
+        ResourceContext resource_context;
+        resource_context.cache_manager = prefill_;
+        resource_context.role_type     = RoleType::PREFILL;
+        resource_context.reuse_cache   = true;
+        return std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, resource_context, nullptr);
+    };
+    const auto emit_chunk = [&](const std::shared_ptr<NormalGenerateStream>& request, int first_use_tokens) {
+        EXPECT_EQ(request->initialReuseLength(), 12);
+        EXPECT_EQ(request->writebackFirstUseLength(), first_use_tokens);
+        request->update({.new_tokens = torch::tensor({{42}}, torch::kInt32), .num_new_tokens = 1});
+        auto output = request->nextOutput(1000);
+        ASSERT_TRUE(output.ok());
+        ASSERT_EQ(output.value().generate_outputs.size(), 1u);
+        const auto& aux = output.value().generate_outputs.front().aux_info;
+        EXPECT_EQ(aux.reuse_len, 12 - first_use_tokens);
+        EXPECT_EQ(aux.writeback_first_use_len, first_use_tokens);
+    };
+
+    auto cancelled = make_prefill();
+    ASSERT_TRUE(cancelled->initKVBlock().ok());
+    EXPECT_EQ(cancelled->writebackFirstUseLength(), 8);
+    cancelled->reportError(ErrorCode::GENERATE_TIMEOUT, "prefill cancelled before cache commit");
+    cancelled->generate_status_->status = StreamState::FINISHED;
+    cancelled->releaseResource();
+
+    auto first = make_prefill();
+    auto concurrent = make_prefill();
+    ASSERT_TRUE(first->initKVBlock().ok());
+    ASSERT_TRUE(concurrent->initKVBlock().ok());
+    emit_chunk(first, 8);
+    emit_chunk(concurrent, 8);
+    emit_chunk(first, 8);
+    first->generate_status_->status = StreamState::FINISHED;
+    first->releaseResource();
+
+    auto subsequent = make_prefill();
+    ASSERT_TRUE(subsequent->initKVBlock().ok());
+    emit_chunk(subsequent, 0);
+    emit_chunk(concurrent, 8);
+    emit_chunk(subsequent, 0);
+    concurrent->generate_status_->status = StreamState::FINISHED;
+    concurrent->releaseResource();
+    subsequent->generate_status_->status = StreamState::FINISHED;
+    subsequent->releaseResource();
 }
 
 TEST_F(DecodeWritebackIntegrationTest, ReceiverPullsOnlyMissingSuffixFromCandidateSourceBlocks) {

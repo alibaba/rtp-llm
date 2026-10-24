@@ -187,6 +187,7 @@ TEST_F(PrefillResultStoreTest, StopWakesWaiter) {
 TEST_F(PrefillResultStoreTest, FillsTokenReuseMtpAndFirstTokenTensors) {
     auto result             = data(0);
     result.total_reuse_len  = 12;
+    result.writeback_first_use_len = 4;
     result.local_reuse_len  = 8;
     result.remote_reuse_len = 4;
     result.memory_reuse_len = 3;
@@ -203,6 +204,7 @@ TEST_F(PrefillResultStoreTest, FillsTokenReuseMtpAndFirstTokenTensors) {
     EXPECT_TRUE(payload.has_first_generate_token());
     EXPECT_EQ(payload.first_generate_token_id(), 0);
     EXPECT_EQ(payload.total_reuse_len(), 12);
+    EXPECT_EQ(payload.writeback_first_use_len(), 4);
     EXPECT_EQ(payload.local_reuse_len(), 8);
     EXPECT_EQ(payload.remote_reuse_len(), 4);
     EXPECT_EQ(payload.memory_reuse_len(), 3);

@@ -219,7 +219,8 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
                                       payload.remote_reuse_len,
                                       payload.memory_reuse_len,
                                       payload.disk_reuse_len,
-                                      payload.prefill_use_independent_block_pools);
+                                      payload.prefill_use_independent_block_pools,
+                                      payload.writeback_first_use_len);
     }
 
     torch::Tensor probs;
@@ -395,6 +396,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{
                     batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, stream_->streamId()};
+                insert_info.account_for_prefill = resource_context_.role_type == RoleType::PREFILL;
                 size_t resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
                 if (target_tier == Tier::DEVICE && !stream_->isFakeStream() && !stream_->hasNumBeams()) {
@@ -514,13 +516,28 @@ absl::Status StreamCacheResource::initKVBlock() {
     publishReuseLengths(result.reuse_len, 0, 0, 0);
     adoptDecodeReuse(std::move(result.decode_sources), result.reuse_len);
     allocator_load_context_ = std::move(result.async_context);
+    reuse_accounting_       = std::move(result.reuse_accounting);
+    if (!allocator_load_context_) {
+        finalizeReuseAccounting();
+    }
     return absl::OkStatus();
+}
+
+void StreamCacheResource::finalizeReuseAccounting() {
+    if (!reuse_accounting_done_ && resource_context_.role_type != RoleType::DECODE) {
+        const int    tokens           = reuseBlockTokens();
+        const size_t first_use_blocks = reuse_accounting_.unaccountedBlocks(stream_->initialReuseLength() / tokens);
+        stream_->setWritebackFirstUseLength(static_cast<int>(first_use_blocks) * tokens);
+        reuse_accounting_done_ = true;
+    }
+    reuse_accounting_.unaccounted_block_indices.clear();
 }
 
 void StreamCacheResource::clearCacheReuseState() {
     decode_reuse_use_state_.adopt({}, 0);  // Never reset a consumed logical request on retry.
     remote_restore_lifecycle_.reset();
     remote_restore_attempt_started_at_.reset();
+    reuse_accounting_.unaccounted_block_indices.clear();
     stream_->setReuseLength(0);
     stream_->setMtpTokenIndex(0);
     stream_->setInitialReuseLength(0);
@@ -692,6 +709,7 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         return absl::DeadlineExceededError("match-to-ready deadline exceeded");
     }
     if (load_success) {
+        finalizeReuseAccounting();
         return absl::OkStatus();
     }
     if (malloc_status == MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED) {
@@ -704,6 +722,7 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         return absl::InternalError("allocator load materialization failed");
     }
     if (resource_context_.role_type == RoleType::PREFILL) {
+        finalizeReuseAccounting();
         return absl::OkStatus();
     }
     const std::string error_text = error.ToString();
