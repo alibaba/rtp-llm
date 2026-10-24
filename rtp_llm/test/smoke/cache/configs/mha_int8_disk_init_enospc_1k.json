@@ -1,0 +1,16 @@
+{
+  "name": "mha_int8_disk_init_enospc_1k",
+  "scene": "init_enospc",
+  "dtype": "INT8",
+  "model_structure_source": "Qwen-7B pure MHA FULL; reduced layers/KV heads/head dim",
+  "layers": 2,
+  "kv_heads": 4,
+  "head_dim": 32,
+  "tokens": 1024,
+  "block_tokens": 128,
+  "staging_blocks": 4,
+  "max_descriptors_per_batch": 3,
+  "seed": 20260915,
+  "repeat": 2,
+  "process_timeout_seconds": 120
+}
