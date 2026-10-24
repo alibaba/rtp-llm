@@ -9,6 +9,7 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.delivery.NonBatchDeliveryStrategy;
+import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.estimate.BatchTtftEstimator;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
@@ -62,7 +63,7 @@ public final class EndpointTestSupport {
         return org.mockito.Mockito.mock(EndpointEventHandler.class);
     }
 
-    static WorkerStatus workerStatus(
+    public static WorkerStatus workerStatus(
             RoleType role,
             String ip,
             int port,
@@ -71,7 +72,7 @@ public final class EndpointTestSupport {
                 role, null, ip, port, grpcPort, null);
     }
 
-    static WorkerStatus workerStatus(
+    public static WorkerStatus workerStatus(
             RoleType role,
             String group,
             String ip,

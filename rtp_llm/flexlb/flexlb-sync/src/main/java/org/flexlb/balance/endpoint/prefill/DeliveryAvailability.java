@@ -1,4 +1,4 @@
-package org.flexlb.balance.endpoint;
+package org.flexlb.balance.endpoint.prefill;
 
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 

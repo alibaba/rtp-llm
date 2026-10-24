@@ -1,5 +1,7 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.endpoint.prefill.PrefillActiveIndex;
+import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.Comparator;

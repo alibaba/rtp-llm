@@ -3,7 +3,7 @@ package org.flexlb.balance.endpoint;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** One endpoint-generation admission gate and its retirement drain. */
-final class EndpointGenerationLifecycle {
+public final class EndpointGenerationLifecycle {
 
     private static final long DEFAULT_RETIREMENT_TIMEOUT_MS =
             Long.getLong("flexlb.endpoint.retirement.timeout.ms", 30_000L);
@@ -23,11 +23,11 @@ final class EndpointGenerationLifecycle {
     private Thread cleanupThread;
     private Throwable retirementFailure;
 
-    EndpointGenerationLifecycle(Runnable handoffsDrained) {
+    public EndpointGenerationLifecycle(Runnable handoffsDrained) {
         this.handoffsDrained = handoffsDrained;
     }
 
-    synchronized HandoffPermit tryAcquireHandoff() {
+    public synchronized HandoffPermit tryAcquireHandoff() {
         if (phase != RetirementPhase.ACCEPTING_HANDOFFS) {
             return null;
         }
@@ -192,7 +192,7 @@ final class EndpointGenerationLifecycle {
         }
     }
 
-    static final class HandoffPermit implements AutoCloseable {
+    public static final class HandoffPermit implements AutoCloseable {
         private final EndpointGenerationLifecycle lifecycle;
         private final AtomicBoolean open = new AtomicBoolean(true);
 

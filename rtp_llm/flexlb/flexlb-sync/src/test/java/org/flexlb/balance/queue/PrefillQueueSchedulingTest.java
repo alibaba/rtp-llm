@@ -5,7 +5,7 @@ import org.flexlb.balance.delivery.DeliveryGroup;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.estimate.BatchTtftEstimator;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.PrefillTtftEstimator;
@@ -432,9 +432,9 @@ class PrefillQueueSchedulingTest {
         when(endpoint.reserveRouteOwnership(
                 org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.anyLong()))
-                .thenAnswer(ignored -> new org.flexlb.balance.endpoint.PrefillState.ReservationResult<>(
-                        org.flexlb.balance.endpoint.PrefillState.CapacityStatus.ACQUIRED,
-                        mock(org.flexlb.balance.endpoint.PrefillState.RouteReservation.class)));
+                .thenAnswer(ignored -> new org.flexlb.balance.endpoint.prefill.PrefillState.ReservationResult<>(
+                        org.flexlb.balance.endpoint.prefill.PrefillState.CapacityStatus.ACQUIRED,
+                        mock(org.flexlb.balance.endpoint.prefill.PrefillState.RouteReservation.class)));
         DeliveryStrategy delivery = mock(DeliveryStrategy.class);
         List<org.flexlb.dao.pv.DecisionGroup> published = new CopyOnWriteArrayList<>();
         when(delivery.prepare(org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> {

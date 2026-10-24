@@ -1,6 +1,7 @@
-package org.flexlb.balance.endpoint;
+package org.flexlb.balance.endpoint.prefill;
 
 import org.flexlb.balance.delivery.DeliveryBlockReason;
+import org.flexlb.balance.endpoint.EndpointGenerationLifecycle;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.estimate.WorkView.Phase;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
@@ -920,7 +921,7 @@ public final class PrefillState {
         return removed;
     }
 
-    ReservationResult<RouteReservation> reserveRoute(
+    public ReservationResult<RouteReservation> reserveRoute(
             ScheduledRequest exactItem,
             long predictedMs) {
         ScheduledRequest item = exactItem;
@@ -945,7 +946,7 @@ public final class PrefillState {
         }
     }
 
-    ReservationResult<BatchReservation> reserveBatch(
+    public ReservationResult<BatchReservation> reserveBatch(
             ScheduledRequest exactHead,
             long batchId,
             int maximum,
@@ -1056,7 +1057,7 @@ public final class PrefillState {
         }
     }
 
-    CommittedHandoff commitRouteGroup(
+    public CommittedHandoff commitRouteGroup(
             List<ScheduledRequest> items,
             List<RouteReservation> exactReservations,
             EndpointGenerationLifecycle.HandoffPermit generationHandoff) {

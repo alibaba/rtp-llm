@@ -1,6 +1,6 @@
 package org.flexlb.balance.queue;
 
-import org.flexlb.balance.endpoint.PrefillActiveIndex;
+import org.flexlb.balance.endpoint.prefill.PrefillActiveIndex;
 
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;

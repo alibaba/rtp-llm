@@ -1,5 +1,7 @@
-package org.flexlb.balance.endpoint;
+package org.flexlb.balance.endpoint.prefill;
 
+import org.flexlb.balance.endpoint.EndpointGenerationLifecycle;
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.TaskInfo;

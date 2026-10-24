@@ -1,6 +1,6 @@
 package org.flexlb.balance.queue.enqueue;
 
-import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.endpoint.prefill.PrefillState;
 
 /**
  * 一次持队列锁入队的结果。
