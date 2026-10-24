@@ -226,7 +226,9 @@ class CaptureContractTest(unittest.TestCase):
             logs = self.fixture(root, count=1000)
             for policy in ("truncate", "error"):
                 times = iter([0, 0, 2, 2])
-                run = lambda: self.run_capture(root, logs, ["--time-budget-s", "1", "--on-budget", policy], clock=lambda: next(times))
+                run = lambda policy=policy, times=times: self.run_capture(
+                    root, logs, ["--time-budget-s", "1", "--on-budget", policy], clock=lambda: next(times)
+                )
                 if policy == "error":
                     with self.assertRaisesRegex(RuntimeError, "capture incomplete"):
                         run()

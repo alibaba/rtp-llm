@@ -53,8 +53,8 @@ class ErrorTrailerTest(unittest.TestCase):
                 ctx = RuntimeContext({}, None, tmp, time.monotonic, time.sleep)
                 ctx.ops = Ops(batch=False)
                 ctx.ops.pb2.ErrorDetailsPB = DETAILS
-                ctx.ops.pb2_grpc.RpcServiceStub = lambda channel: NS(
-                    GenerateStreamCall=lambda *a, **kw: Stream(error=RpcFailure(trailer(raw), transport))
+                ctx.ops.pb2_grpc.RpcServiceStub = lambda channel, raw=raw, transport=transport: NS(
+                    GenerateStreamCall=lambda *a, raw=raw, transport=transport, **kw: Stream(error=RpcFailure(trailer(raw), transport))
                 )
                 ctx.instance_deadline_s = time.monotonic() + 2
                 batch = RequestBatch(ctx, dict(count=1, consume="immediate"))

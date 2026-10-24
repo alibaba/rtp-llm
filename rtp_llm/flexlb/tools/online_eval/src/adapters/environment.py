@@ -339,7 +339,9 @@ class EnvManager:
         with startup_phase(env.run_dir, "mock", deadline):
             wait_ready(deadline, "mock/http", lambda: port_accepting(env.mock_http_port), process=proc)
             for label, path in [("endpoints", env.endpoint_file), ("discovery", env.discovery_file)]:
-                wait_ready(deadline, "mock/" + label, lambda: path.exists() and path.stat().st_size > 0, process=proc, interval_s=0.1)
+                wait_ready(
+                    deadline, "mock/" + label, lambda path=path: path.exists() and path.stat().st_size > 0, process=proc, interval_s=0.1
+                )
         self._log(f"mock cluster up (pid={proc.pid}, http={env.mock_http_port})")
 
     # -- master ------------------------------------------------------------

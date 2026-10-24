@@ -72,8 +72,7 @@ class ProcessOps:
     @staticmethod
     def start(argv: list[str], env: dict, log_file: Path, cwd: Optional[Path] = None, *, keep_stdin: bool = False) -> ManagedProcess:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        out = open(log_file, "wb")
-        try:
+        with open(log_file, "wb") as out:
             proc = subprocess.Popen(
                 argv,
                 stdin=subprocess.PIPE if keep_stdin else None,
@@ -82,8 +81,6 @@ class ProcessOps:
                 env=env,
                 cwd=str(cwd) if cwd else None,
             )
-        finally:
-            out.close()
         return ManagedProcess(proc, argv, env, log_file)
 
     @staticmethod
@@ -92,12 +89,6 @@ class ProcessOps:
             os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-
-    # ------------------------------------------------------------------
-    # Mode 2 fault primitives (HA case test, brief p3: "SIGSTOP / SIGCONT
-    # 原语（ProcessOps 一行级扩展）").  Directed at a specific master PID
-    # through the masters registry (ManagedProcess.freeze / unfreeze).
-    # ------------------------------------------------------------------
 
     @staticmethod
     def sigstop(pid: int) -> None:

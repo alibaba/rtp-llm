@@ -81,7 +81,7 @@ def render_context(spec):
                 continue
             leaves = []
 
-            def walk(item, path, depth):
+            def walk(item, path, depth, *, key=key, leaves=leaves):
                 if isinstance(item, dict) and depth < (4 if key == "environment" else 2):
                     for child, entry in item.items():
                         walk(entry, path + "." + child if path else child, depth + 1)

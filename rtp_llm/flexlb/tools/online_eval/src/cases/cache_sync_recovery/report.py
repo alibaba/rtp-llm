@@ -98,7 +98,7 @@ def compact_report_spec(data, original, *, presentation=None, store=None):
     for phase in data.get("phase_summary", {}):
         group = [r for r in rows if r["phase"] == phase]
 
-        def maximum_age(field):
+        def maximum_age(field, group=group):
             values = [r[field] for r in group if r.get(field) is not None]
             return max(values) if values else None
 
@@ -169,9 +169,9 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
         first, last = group[0]["epoch_s"], group[-1]["epoch_s"]
         duration = last - first
         pauses = [g for g in gc if first <= g["epoch_s"] <= last]
-        overlap = lambda g: max(0, min(last, g["epoch_s"]) - max(first, g["epoch_s"] - g["duration_ms"] / 1000))
+        overlap = lambda g, first=first, last=last: max(0, min(last, g["epoch_s"]) - max(first, g["epoch_s"] - g["duration_ms"] / 1000))
 
-        def rate(field, scale=1):
+        def rate(field, scale=1, group=group):
             values = [r for r in group if r.get(field) is not None]
             if len(values) < 2 or values[-1][field] < values[0][field]:
                 return None

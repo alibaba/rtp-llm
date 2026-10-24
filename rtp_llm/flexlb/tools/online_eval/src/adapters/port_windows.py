@@ -72,8 +72,8 @@ def _env_int(name: str, default: int) -> int:
         return default
     try:
         value = int(raw)
-    except ValueError:
-        raise PortAdmissionError(f"error: {name}={raw!r} is not an integer")
+    except ValueError as exc:
+        raise PortAdmissionError(f"error: {name}={raw!r} is not an integer") from exc
     if value <= 0:
         raise PortAdmissionError(f"error: {name}={raw!r} must be positive")
     return value
@@ -422,7 +422,7 @@ def admit_port_window(
 def acquire_run_lock(out_dir: Path) -> IO:
     """Return explicit ownership of the output lock; close on every exit path."""
     lock_path = out_dir / ".parallel_runner.lock"
-    holder = open(lock_path, "w")
+    holder = open(lock_path, "w")  # noqa: SIM115 - ownership transfers to the caller until lane shutdown.
     try:
         fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:

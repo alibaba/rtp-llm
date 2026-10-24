@@ -67,7 +67,8 @@ class FrontendPrefixFitTest(unittest.TestCase):
                 capture_output=True,
             )
             capture = root / "pod-0.jsonl.gz"
-            captured = [json.loads(line) for line in gzip.open(capture, "rt")]
+            with gzip.open(capture, "rt") as stream:
+                captured = [json.loads(line) for line in stream]
             self.assertEqual(len(captured), 3)
             # Fit accepts opaque shard names, independent of capture location.
             renamed = root / "anonymous-source.jsonl.gz"

@@ -62,127 +62,125 @@ def capture(a, *, clock=time.monotonic):
     failure = None
     errors = []
     output_path = a.out + (".jsonl.xz" if a.format == "xz" else ".jsonl.gz")
-    out = lzma.open(output_path, "wt", preset=3) if a.format == "xz" else gzip.open(output_path, "wt", compresslevel=1)
-    try:
-        paths = [
-            path
-            for path in sorted(glob.glob(str(a.log_dir / a.log_glob)))
-            if os.path.isfile(path) and not path.endswith((".gz", ".bz2", ".xz", ".zst", ".zip", ".lz4"))
-        ]
-        if not paths:
-            errors.append("no supported log files matched")
-            failure = ValueError("no supported log files matched")
-        for path in paths:
-            if clock() - started > a.time_budget_s:
-                raise BudgetExceeded("extraction time budget exceeded")
-            with open(path, "rb") as f:
-                size = os.fstat(f.fileno()).st_size
-                if not size:
-                    continue
-                file_coverage = {
-                    "path": path,
-                    "inode": os.fstat(f.fileno()).st_ino,
-                    "bytes": size,
-                    "first_completion": None,
-                    "last_completion": None,
-                }
-                coverage.append(file_coverage)
-                line_number = 0
-                while f.tell() < size:
-                    line = f.readline()
-                    line_number += 1
-                    stats["scanned"] += 1
-                    if stats["scanned"] % 1000 == 0 and clock() - started > a.time_budget_s:
-                        raise BudgetExceeded("extraction time budget exceeded")
-                    try:
-                        r = json.loads(line)
-                    except Exception:
-                        stats["invalid_json"] += 1
+    with lzma.open(output_path, "wt", preset=3) if a.format == "xz" else gzip.open(output_path, "wt", compresslevel=1) as out:
+        try:
+            paths = [
+                path
+                for path in sorted(glob.glob(str(a.log_dir / a.log_glob)))
+                if os.path.isfile(path) and not path.endswith((".gz", ".bz2", ".xz", ".zst", ".zip", ".lz4"))
+            ]
+            if not paths:
+                errors.append("no supported log files matched")
+                failure = ValueError("no supported log files matched")
+            for path in paths:
+                if clock() - started > a.time_budget_s:
+                    raise BudgetExceeded("extraction time budget exceeded")
+                with open(path, "rb") as f:
+                    size = os.fstat(f.fileno()).st_size
+                    if not size:
                         continue
-                    if not isinstance(r, dict):
-                        stats["invalid_json"] += 1
-                        continue
-                    completion = r.get("ts_epoch_ms")
-                    if type(completion) is int:
-                        if file_coverage["first_completion"] is None:
-                            file_coverage["first_completion"] = completion
-                        file_coverage["last_completion"] = completion
-                    if not r.get("request_enter_ts_epoch_ms"):
-                        stats["missing_arrival_timestamp"] += 1
-                        continue
-                    ts = int(r["request_enter_ts_epoch_ms"])
-                    if not a.start <= ts < a.end:
-                        continue
-                    rid = str(r.get("request_id") or r.get("upstream_request_id") or "")
-                    if not rid:
-                        stats["missing_request_identity"] += 1
-                        continue
-                    # Log rotation overlap is deduplicated by local request identity + arrival.
-                    ident = (rid, ts)
-                    if ident in seen:
-                        stats["duplicate"] += 1
-                        continue
-                    ids = r.get("input_ids")
-                    if not isinstance(ids, list) or not ids:
-                        stats["missing_tokens"] += 1
-                        continue
-                    if any(type(token) is not int or not -2147483648 <= token <= 2147483647 for token in ids):
-                        stats["invalid_tokens"] += 1
-                        raise CaptureInputError("invalid int32 input tokens")
-                    values = array.array("i", ids)
-                    if values.itemsize != 4:
-                        raise RuntimeError("capture requires 4-byte int32")
-                    if __import__("sys").byteorder != "little":
-                        values.byteswap()
-                    raw = values.tobytes()
-                    hasher = hashlib.sha256()
-                    keys = []
-                    for i in range(0, len(ids) // block_size * (block_size * 4), block_size * 4):
-                        hasher.update(raw[i : i + block_size * 4])
-                        keys.append(hasher.hexdigest()[:32])
-                    cfg = r.get("generate_config") or {}
-                    aux = r.get("aux_info") or {}
-                    try:
-                        record = CaptureRecord(
-                            schema_version=metadata.schema_version,
-                            block_size=metadata.block_size,
-                            ts=ts,
-                            il=len(ids),
-                            ol=r.get("output_token_len"),
-                            keys=tuple(keys),
-                            tail_hash=hashlib.sha256(raw).hexdigest()[:32],
-                            rid=hashlib.sha256(rid.encode()).hexdigest()[:32],
-                            status=r.get("status"),
-                            error=r.get("backend_error_code"),
-                            cached=r.get("prompt_cached_token_num"),
-                            aux_reuse=aux.get("reuse_len"),
-                            latency_ms=r.get("latency_total_ms"),
-                            priority=cfg.get("traffic_reject_priority"),
-                            max_new_tokens=cfg.get("max_new_tokens"),
-                            timeout_ms=cfg.get("timeout_ms"),
-                        )
-                    except ValueError:
-                        stats["contract_errors"] += 1
-                        raise
-                    seen.add(ident)
-                    out.write(json.dumps(record.to_dict(), separators=(",", ":")) + "\n")
-                    stats["records"] += 1
-                    stats["tokens"] += len(ids)
-                    stats["status:" + str(record.status)] += 1
-    except BudgetExceeded as exc:
-        truncated = True
-        stats["budget_exceeded"] += 1
-        errors.append(str(exc))
-        if a.on_budget == "error":
+                    file_coverage = {
+                        "path": path,
+                        "inode": os.fstat(f.fileno()).st_ino,
+                        "bytes": size,
+                        "first_completion": None,
+                        "last_completion": None,
+                    }
+                    coverage.append(file_coverage)
+                    line_number = 0
+                    while f.tell() < size:
+                        line = f.readline()
+                        line_number += 1
+                        stats["scanned"] += 1
+                        if stats["scanned"] % 1000 == 0 and clock() - started > a.time_budget_s:
+                            raise BudgetExceeded("extraction time budget exceeded")
+                        try:
+                            r = json.loads(line)
+                        except Exception:
+                            stats["invalid_json"] += 1
+                            continue
+                        if not isinstance(r, dict):
+                            stats["invalid_json"] += 1
+                            continue
+                        completion = r.get("ts_epoch_ms")
+                        if type(completion) is int:
+                            if file_coverage["first_completion"] is None:
+                                file_coverage["first_completion"] = completion
+                            file_coverage["last_completion"] = completion
+                        if not r.get("request_enter_ts_epoch_ms"):
+                            stats["missing_arrival_timestamp"] += 1
+                            continue
+                        ts = int(r["request_enter_ts_epoch_ms"])
+                        if not a.start <= ts < a.end:
+                            continue
+                        rid = str(r.get("request_id") or r.get("upstream_request_id") or "")
+                        if not rid:
+                            stats["missing_request_identity"] += 1
+                            continue
+                        # Log rotation overlap is deduplicated by local request identity + arrival.
+                        ident = (rid, ts)
+                        if ident in seen:
+                            stats["duplicate"] += 1
+                            continue
+                        ids = r.get("input_ids")
+                        if not isinstance(ids, list) or not ids:
+                            stats["missing_tokens"] += 1
+                            continue
+                        if any(type(token) is not int or not -2147483648 <= token <= 2147483647 for token in ids):
+                            stats["invalid_tokens"] += 1
+                            raise CaptureInputError("invalid int32 input tokens")
+                        values = array.array("i", ids)
+                        if values.itemsize != 4:
+                            raise RuntimeError("capture requires 4-byte int32")
+                        if __import__("sys").byteorder != "little":
+                            values.byteswap()
+                        raw = values.tobytes()
+                        hasher = hashlib.sha256()
+                        keys = []
+                        for i in range(0, len(ids) // block_size * (block_size * 4), block_size * 4):
+                            hasher.update(raw[i : i + block_size * 4])
+                            keys.append(hasher.hexdigest()[:32])
+                        cfg = r.get("generate_config") or {}
+                        aux = r.get("aux_info") or {}
+                        try:
+                            record = CaptureRecord(
+                                schema_version=metadata.schema_version,
+                                block_size=metadata.block_size,
+                                ts=ts,
+                                il=len(ids),
+                                ol=r.get("output_token_len"),
+                                keys=tuple(keys),
+                                tail_hash=hashlib.sha256(raw).hexdigest()[:32],
+                                rid=hashlib.sha256(rid.encode()).hexdigest()[:32],
+                                status=r.get("status"),
+                                error=r.get("backend_error_code"),
+                                cached=r.get("prompt_cached_token_num"),
+                                aux_reuse=aux.get("reuse_len"),
+                                latency_ms=r.get("latency_total_ms"),
+                                priority=cfg.get("traffic_reject_priority"),
+                                max_new_tokens=cfg.get("max_new_tokens"),
+                                timeout_ms=cfg.get("timeout_ms"),
+                            )
+                        except ValueError:
+                            stats["contract_errors"] += 1
+                            raise
+                        seen.add(ident)
+                        out.write(json.dumps(record.to_dict(), separators=(",", ":")) + "\n")
+                        stats["records"] += 1
+                        stats["tokens"] += len(ids)
+                        stats["status:" + str(record.status)] += 1
+        except BudgetExceeded as exc:
+            truncated = True
+            stats["budget_exceeded"] += 1
+            errors.append(str(exc))
+            if a.on_budget == "error":
+                failure = exc
+        except Exception as exc:
+            # 不写日志原文或原始 token 到错误产物。
+            stats["fatal_errors"] += 1
+            safe_reason = isinstance(exc, CaptureInputError) or (isinstance(exc, ValueError) and "contract_errors" in stats)
+            errors.append(str(exc) if safe_reason else type(exc).__name__)
             failure = exc
-    except Exception as exc:
-        # 不写日志原文或原始 token 到错误产物。
-        stats["fatal_errors"] += 1
-        safe_reason = isinstance(exc, CaptureInputError) or (isinstance(exc, ValueError) and "contract_errors" in stats)
-        errors.append(str(exc) if safe_reason else type(exc).__name__)
-        failure = exc
-    finally:
-        out.close()
     if stats["invalid_json"] and failure is None:
         errors.append("invalid JSON log records")
         failure = CaptureInputError("invalid JSON log records")

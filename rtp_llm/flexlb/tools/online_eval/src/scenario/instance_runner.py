@@ -207,7 +207,7 @@ def _run_segment(index, part, instance, lease, args, out, children):
         rows = read_results(result_path, [instance])
     except Exception as exc:
         rc = 1
-        rows = [error_result(instance, f"child launch failed: {exc}")]
+        rows = [error_result(instance, f"child execution/result validation failed: {exc}")]
     results.extend(({**row, "lane": index} for row in rows))
     segments.append(
         {

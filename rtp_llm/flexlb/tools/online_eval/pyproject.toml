@@ -10,7 +10,7 @@ split-on-trailing-comma = false
 skip-magic-trailing-comma = true
 
 [tool.ruff.lint]
-select = ["F", "E9", "I"]
+select = ["F", "E9", "I", "Q", "B023", "B904", "SIM115"]
 
 [tool.mypy]
 files = ["."]

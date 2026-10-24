@@ -77,7 +77,7 @@ def metric_colors(panels):
             color = registry.get(identity) or curve.get("color") or series_color(curve.get("tone"), n)
             value = normalize_color(color).lstrip("#")
             hue, lightness, saturation = colorsys.rgb_to_hls(*(int(value[k : k + 2], 16) / 255 for k in (0, 2, 4)))
-            distance = lambda h: min((min(abs(h - u), 1 - abs(h - u)) for u in used), default=1)
+            distance = lambda h, used=used: min((min(abs(h - u), 1 - abs(h - u)) for u in used), default=1)
             if identity not in registry and saturation >= 0.10 and distance(hue) < 0.07:
                 hue = max(((hue + k / 24) % 1 for k in range(24)), key=distance)
                 color = "#" + "".join(f"{round(v * 255):02x}" for v in colorsys.hls_to_rgb(hue, lightness, saturation))

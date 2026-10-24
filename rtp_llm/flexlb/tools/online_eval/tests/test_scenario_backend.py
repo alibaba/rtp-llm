@@ -167,7 +167,7 @@ class BackendTest(unittest.TestCase):
                 requests = RequestBatch(ctx, dict(count=2, consume="immediate", input_len=10, output_len=2))
                 cancelled, waited, created = [], [], []
 
-                def future(req, timeout):
+                def future(req, timeout, created=created, requests=requests, cancelled=cancelled, waited=waited):
                     created.append(True)
                     requests.cancel("race during Schedule.future")
                     return NS(cancel=lambda: cancelled.append(True), result=lambda **kw: waited.append(True))

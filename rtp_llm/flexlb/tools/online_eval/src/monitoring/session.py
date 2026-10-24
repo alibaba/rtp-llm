@@ -357,8 +357,8 @@ class PrometheusSession:
         self.process.terminate()
         try:
             self.process.wait(timeout=deadline.remaining())
-        except (subprocess.TimeoutExpired, TimeoutError):
+        except (subprocess.TimeoutExpired, TimeoutError) as exc:
             self.process.kill()
             # Reap after escalation even if the cooperative budget has expired.
             self.process.wait(timeout=1)
-            raise TimeoutError("Prometheus exceeded shutdown budget")
+            raise TimeoutError("Prometheus exceeded shutdown budget") from exc
