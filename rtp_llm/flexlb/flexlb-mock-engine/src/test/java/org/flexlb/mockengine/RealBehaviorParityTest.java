@@ -77,8 +77,9 @@ class RealBehaviorParityTest {
             assertNotNull(result.failure);
             assertEquals(Status.Code.DEADLINE_EXCEEDED, Status.fromThrowable(result.failure).getCode());
             assertEquals(603, MockRpcErrors.downstream(result.failure).getErrorCode());
-            for (var service : c.services().values()) assertEquals(0, cache(service).heldBlocks());
+            assertTrue(cache(c.prefill(0)).heldBlocks() > 0, "deadline reports immediately while forward still owns KV");
             Thread.sleep(550);
+            for (var service : c.services().values()) assertEquals(0, cache(service).heldBlocks());
             for (var service : c.services().values()) assertTrue(service.getSnapshot().get("active_decode_requests").equals(0));
         }
     }

@@ -67,7 +67,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  *       the long one, and the long stream ACCELERATES after the short one
  *       leaves (step re-priced 200 → 100 ms), finishing far below the
  *       no-reprice bound.</li>
- *   <li>{@link #cancelRunningStreamPromotesWaitingHeadImmediately} —
+ *   <li>{@link #cancelRunningStreamPromotesWaitingHeadAtStepBoundary} —
  *       cancelling a running stream frees its slot and promotes the waiting
  *       head in the SAME locked section (no step-boundary wait): counters
  *       reflect the promotion instantly, the cancelled request never sees a
@@ -138,8 +138,8 @@ class ContinuousBatchingDecodeTest {
         LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queueB = new LinkedBlockingQueue<>();
         assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 1L, 10, 2), -1, queueA));
         assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 2L, 10, 2), -1, queueB));
-        assertEquals(2, getActiveDecodeRequests(decode),
-                "both streams must be admitted into the running batch");
+        assertEquals(1, getActiveDecodeRequests(decode), "the first forward owns its running batch");
+        assertEquals(1, decodePendingQueueSize(decode), "the newcomer waits for the step boundary");
 
         long doneA = awaitTerminalFrame(queueA, 10_000) - t0;
         long doneB = awaitTerminalFrame(queueB, 10_000) - t0;
@@ -194,8 +194,8 @@ class ContinuousBatchingDecodeTest {
             assertTrue(invokeScheduleDecodeCompletion(
                     decode, shapeOf(model, 100L + i, 10, 3), -1, queues[i]));
         }
-        assertEquals(3, getActiveDecodeRequests(decode), "hard gate: only cap running");
-        assertEquals(n - 3, decodePendingQueueSize(decode), "excess parks in waiting queue");
+        assertEquals(1, getActiveDecodeRequests(decode), "only the first request entered the current forward");
+        assertEquals(n - 1, decodePendingQueueSize(decode), "later arrivals wait for the boundary");
 
         // Sample the conservation invariant while the engine drains: running
         // + waiting + completed must always equal the admitted total.
@@ -301,17 +301,10 @@ class ContinuousBatchingDecodeTest {
 
     // ──────────── Test 4: cancel a running stream → immediate top-up ────────────
 
-    /**
-     * cap 2, five ol=4 streams on a flat 100 ms curve: S1/S2 running, S3–S5
-     * waiting. Cancelling S1 must free the slot and promote S3 IMMEDIATELY
-     * (same locked section — activeDecode back at cap with the waiting queue
-     * one shorter, before any step boundary fires). S1 never receives a
-     * terminal frame; all four survivors complete and every counter nets to
-     * zero.
-     */
+    /** Running cancellation releases its slot at the forward boundary, then all survivors drain. */
     @Test
     @Timeout(30)
-    void cancelRunningStreamPromotesWaitingHeadImmediately() throws Exception {
+    void cancelRunningStreamPromotesWaitingHeadAtStepBoundary() throws Exception {
         MockPerformanceModel model = model(List.of(List.of(1, 100.0)));
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 2);
 
@@ -323,21 +316,21 @@ class ContinuousBatchingDecodeTest {
             assertTrue(invokeScheduleDecodeCompletion(
                     decode, shapeOf(model, 200L + i, 10, 4), -1, queues[i]));
         }
-        assertEquals(2, getActiveDecodeRequests(decode));
-        assertEquals(3, decodePendingQueueSize(decode));
-
-        // Cancel the FIRST running stream. The promotion must be synchronous:
-        // by the time cancel() returns, the freed slot already belongs to S3.
+        assertEquals(1, getActiveDecodeRequests(decode));
+        assertEquals(4, decodePendingQueueSize(decode));
+        long held = decode.getActiveKvTokens();
         decode.cancel(200L);
-        assertEquals(2, getActiveDecodeRequests(decode),
-                "freed slot must be handed to the waiting head immediately (no step-boundary wait)");
-        assertEquals(2, decodePendingQueueSize(decode), "S3 must have left the waiting queue");
-        assertEquals(4, decode.getInflightCount(),
-                "S1 is gone; S2..S5 (running + waiting) stay in flight");
-
-        // S1 must never see a terminal frame; all survivors must.
-        assertNull(queues[0].poll(300, TimeUnit.MILLISECONDS),
-                "cancelled stream must not receive a terminal frame");
+        assertEquals(5, decode.getInflightCount(), "running cancellation retains ownership until the boundary");
+        assertEquals(held, decode.getActiveKvTokens());
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (decode.getInflightCount() == 5 && System.nanoTime() < until) Thread.sleep(1);
+        assertEquals(4, decode.getInflightCount());
+        assertEquals(2, getActiveDecodeRequests(decode));
+        assertEquals(2, decodePendingQueueSize(decode));
+        assertNull(queues[0].poll(), "the canceled internal decode queue cannot receive a successful output");
+        var canceled = MockEngineTestSupport.workerStatus(decode, -1).getFinishedTaskListList().stream()
+                .filter(t -> t.getRequestId() == 200L).findFirst().orElseThrow();
+        assertEquals(8100, canceled.getErrorInfo().getErrorCode());
         for (int i = 1; i < 5; i++) {
             assertNotNull(queues[i].poll(10, TimeUnit.SECONDS),
                     "survivor S" + (i + 1) + " must complete");
@@ -356,7 +349,7 @@ class ContinuousBatchingDecodeTest {
 
     @Test void realFifoDefersJoinAndCancelledKvReleaseUntilTheStepBoundary() throws Exception {
         var model = model(List.of(List.of(1, 500.0)));
-        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(3, 10000, 0, 10000, 1, false, 0, 0, 1, false, false));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(3, 10000, 10000, 1, false, 0, 1, false));
         var decode = newDecodeService(model, 3);
         var first = new LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>();
         var second = new LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>();
@@ -381,7 +374,7 @@ class ContinuousBatchingDecodeTest {
 
     @Test void realFifoWaitingCancelIsCommittedAtStepBoundaryWithoutRunningIt() throws Exception {
         var model = model(List.of(List.of(1, 300.0)));
-        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(3, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(3, 10000, 10000, 1, false, 0, 0, false));
         var decode = newDecodeService(model, 3);
         var first = new LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>();
         var queued = new LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>();
@@ -400,7 +393,7 @@ class ContinuousBatchingDecodeTest {
 
     @Test void priorityCancelReportsCancelingUntilDownstreamResourcesAreReleased() throws Exception {
         var model = model(List.of(List.of(1, 500.0)));
-        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(3, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(3, 10000, 10000, 1, false, 0, 0, false));
         var decode = newDecodeService(model, 3);
         int port = BASE_PORT + nextPortOffset++;
         var prefill = new JavaMockEngineCluster.FastRpcService("prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
@@ -431,7 +424,7 @@ class ContinuousBatchingDecodeTest {
 
     @Test void downstreamQueuedPriorityCancelWaitsForSchedulerCleanup() throws Exception {
         var model = model(List.of(List.of(1, 300.0)));
-        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(3, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(3, 10000, 10000, 1, false, 0, 0, false));
         var decode = newDecodeService(model, 3);
         int port = BASE_PORT + nextPortOffset++;
         var prefill = new JavaMockEngineCluster.FastRpcService("prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,

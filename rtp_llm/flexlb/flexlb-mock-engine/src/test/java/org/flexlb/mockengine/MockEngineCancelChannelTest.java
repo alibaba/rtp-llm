@@ -99,6 +99,7 @@ class MockEngineCancelChannelTest {
         assertEquals(CancelAck.ACCEPTED, outcome,
                 "mid-flight cancel must register the intent");
 
+        awaitNoInflight(prefill, 2_000);
         // The addressed Prefill is the authoritative typed CANCELED producer.
         EngineRpcService.WorkerStatusPB status = workerStatus(prefill, 0);
         boolean cancelledReported = status.getFinishedTaskListList().stream()
@@ -119,7 +120,7 @@ class MockEngineCancelChannelTest {
 
     @Test
     void cancelStage4RoutesThroughOriginalPrefillToOwnedDecode() throws Exception {
-        startCluster(model("10", 10_000.0), 1, 1);
+        startCluster(model("10", 500.0), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
@@ -136,13 +137,15 @@ class MockEngineCancelChannelTest {
                 .get(2, TimeUnit.SECONDS);
 
         assertEquals(CancelAck.ACCEPTED, outcome);
+        assertEquals(1, decode.getInflightCount(), "cancel intent retains running ownership until the forward returns");
+        awaitNoInflight(decode, 2_000);
         assertEquals(0, decode.getInflightCount());
         assertFalse(prefill.hasDownstreamOwnership(51L));
         assertFalse(decode.hasUpstreamOwnership(51L));
         boolean cancelledReported = workerStatus(decode, 0).getFinishedTaskListList().stream()
                 .anyMatch(task -> task.getRequestId() == 51L
                         && task.getErrorInfo().getErrorCode()
-                        == EngineRpcService.ErrorCodePB.CANCELLED.getNumber());
+                        == 8100);
         assertTrue(cancelledReported,
                 "Decode must retain its ordinary CANCELLED terminal");
         boolean typedCanceledReported = workerStatus(prefill, 0).getFinishedTaskListList().stream()
@@ -158,7 +161,7 @@ class MockEngineCancelChannelTest {
         assertTerminalSet(prefill, 51L, 9050L, List.of(0L, 8429L), List.of(0,
                 EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED.getNumber()));
         assertTerminalSet(decode, 51L, 9050L,
-                List.of((long) EngineRpcService.ErrorCodePB.CANCELLED.getNumber()), List.of(0));
+                List.of(8100L), List.of(0));
     }
 
     // ---- not found after natural completion / idempotent cancel terminal record ----
@@ -209,6 +212,7 @@ class MockEngineCancelChannelTest {
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, second,
                 "accepted priority-cancel terminal records are idempotent");
+        awaitNoInflight(prefill, 2_000);
         long terminalCount = workerStatus(prefill, -1).getFinishedTaskListList().stream()
                 .filter(task -> task.getRequestId() == 21L
                         && task.getErrorInfo().getErrorCode() == 8429L
@@ -229,7 +233,7 @@ class MockEngineCancelChannelTest {
         assertTerminalSet(prefill, 21L, 9200L, List.of(8429L), List.of(
                 EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED.getNumber()));
         assertTerminalSet(decodeServices.get(0), 21L, 9200L,
-                List.of((long) EngineRpcService.ErrorCodePB.CANCELLED.getNumber()), List.of(0));
+                List.of(8100L), List.of(0));
     }
 
     /** Full retained set on one engine incarnation, not just filtered cancel records. */

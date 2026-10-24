@@ -78,13 +78,24 @@ class DecodePendingQueueHardGateTest {
         scheduler.awaitTermination(3, TimeUnit.SECONDS);
     }
 
+    private MockPerformanceModel.RequestShape longShape(MockPerformanceModel model, long id) {
+        var request = MockEngineTestSupport.input(id, 8);
+        request = request.toBuilder().setGenerateConfig(request.getGenerateConfig().toBuilder().setMaxNewTokens(4)).build();
+        return model.shape(request, new MockLruBlockCache(100));
+    }
+
+    private void awaitTwoRunning(JavaMockEngineCluster.FastRpcService decode) throws Exception {
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (activeDecodeRequests(decode) != 2 && System.nanoTime() < until) Thread.sleep(1);
+    }
+
     // ──────────── Test 1: hard cap parks excess in the unbounded queue ────────────
 
     @Test
     void hardGateParksExcessInUnboundedQueue() throws Exception {
         // decode step 10000 × sleep_scale 0.1 = 1000 ms — all ten requests are
         // still in flight when the assertions run.
-        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, null);
+        MockPerformanceModel model = decodeModel(tempDir, 10_000.0);
         // Tiny cap 2: the unconditional gate must pin running at 2 and park
         // the remaining 8 in the pending queue.
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 2);
@@ -92,11 +103,12 @@ class DecodePendingQueueHardGateTest {
         int nRequests = 10;
         for (int i = 0; i < nRequests; i++) {
             assertTrue(scheduleDecodeCompletion(
-                            decode, requestShape(model, 100L + i, 8), -1, null),
+                            decode, longShape(model, 100L + i), -1, null),
                     "the hard gate must never reject a decode request — "
                             + "excess parks in the unbounded waiting queue");
         }
 
+        awaitTwoRunning(decode);
         assertEquals(2, activeDecodeRequests(decode),
                 "hard gate: activeDecodeRequests capped at decodeMaxConcurrency");
         assertEquals(nRequests - 2, decodePendingQueueSize(decode),
@@ -123,12 +135,13 @@ class DecodePendingQueueHardGateTest {
     void queuedRequestsDrainThroughCompletionChain() throws Exception {
         // decode step 10000 × sleep_scale 0.1 = 1000 ms per request; cap 2
         // concurrency → requests 1-2 run, 3-6 park and drain in order.
-        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, null);
+        MockPerformanceModel model = decodeModel(tempDir, 10_000.0);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 2);
 
         // First 2 fill the concurrency slots.
-        assertTrue(scheduleDecodeCompletion(decode, requestShape(model, 1L, 8), -1, null));
-        assertTrue(scheduleDecodeCompletion(decode, requestShape(model, 2L, 8), -1, null));
+        assertTrue(scheduleDecodeCompletion(decode, longShape(model, 1L), -1, null));
+        assertTrue(scheduleDecodeCompletion(decode, longShape(model, 2L), -1, null));
+        awaitTwoRunning(decode);
         assertEquals(2, activeDecodeRequests(decode),
                 "hard gate: activeDecodeRequests capped at decodeMaxConcurrency");
         assertEquals(0, decodePendingQueueSize(decode));
@@ -136,9 +149,10 @@ class DecodePendingQueueHardGateTest {
         // Next 4 are parked in the pending queue (accepted, not running) —
         // the queue is unbounded, so there is no overflow / rejection point.
         for (long rid = 3; rid <= 6; rid++) {
-            assertTrue(scheduleDecodeCompletion(decode, requestShape(model, rid, 8), -1, null),
+            assertTrue(scheduleDecodeCompletion(decode, longShape(model, rid), -1, null),
                     "request " + rid + " must be accepted into the pending queue");
         }
+        awaitTwoRunning(decode);
         assertEquals(2, activeDecodeRequests(decode),
                 "queued requests must not consume concurrency slots");
         assertEquals(4, decodePendingQueueSize(decode),

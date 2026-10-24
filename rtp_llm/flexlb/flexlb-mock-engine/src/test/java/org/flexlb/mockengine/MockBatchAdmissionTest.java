@@ -26,7 +26,7 @@ class MockBatchAdmissionTest {
     @TempDir Path directory;
     private MockPerformanceModel model(int cap) throws Exception {
         var model = performanceModel(directory, "500", 1);
-        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(cap, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(cap, 10000, 10000, 1, false, 0, 0, false));
         model.pdPolicy = new MockPdPolicy(0, 5000, 10000, 1, 5000, 10000, 128, 2000);
         return model;
     }
@@ -114,11 +114,11 @@ class MockBatchAdmissionTest {
     @Test void inputLengthCheckFollowsPrepareAndOnlyRejectsInvalidMember() throws Exception {
         var model = model(4);
         model.setDecodeReserveStep(1);
-        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 0, 20, 1, false, 0, 0, 0, false, false));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 20, 1, false, 0, 0, false));
         try (var c = MockEngineTestCluster.create(model, 62880, 1, 1)) {
             var field = c.decode(0).getClass().getDeclaredField("performance"); field.setAccessible(true);
             ((MockPerformanceModel)field.get(c.decode(0))).setPrefillBatchPolicy(
-                    new MockPrefillBatchPolicy(4, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+                    new MockPrefillBatchPolicy(4, 10000, 10000, 1, false, 0, 0, false));
             c.prefill(0).batchAdmissionObserver = phase -> {
                 if (phase.equals("prepared")) assertTrue(c.decode(0).getOccupiedKvTokens() > 0, "D allocated before P input-length check");
             };
@@ -385,12 +385,12 @@ class MockBatchAdmissionTest {
     @Test void schedulerRejectionOnlyOwnsTheTerminalCauseAfterR2() throws Exception {
         for (String phase : List.of("after_enqueue", "before_publish")) {
             var model = model(4); model.setDecodeReserveStep(1);
-            model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 0, 20, 1, false, 0, 0, 0, false, false));
+            model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 20, 1, false, 0, 0, false));
             try (var c = MockEngineTestCluster.create(model, 62880, 1, 1)) {
                 var p = c.prefill(0);
                 var field = c.decode(0).getClass().getDeclaredField("performance"); field.setAccessible(true);
                 ((MockPerformanceModel)field.get(c.decode(0))).setPrefillBatchPolicy(
-                        new MockPrefillBatchPolicy(4, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+                        new MockPrefillBatchPolicy(4, 10000, 10000, 1, false, 0, 0, false));
                 p.batchAdmissionObserver = reached -> {
                     if (phase.equals(reached)) assertEquals(phase.equals("after_enqueue"), p.cancelRequest(1).found(), phase);
                 };

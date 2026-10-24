@@ -171,7 +171,7 @@ class PreemptionPhasesE2ETest {
     @Test
     @Timeout(30)
     void a3_accepted_eviction_cancels_via_real_channel_victim_8429_in_order() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 20, 1, 1, "50", 10_000.0, true)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 20, 1, 1, "50", 500.0, true)) {
             // decode 驱逐入口由 reserved-evict 总开关把门（Phase 4 gate）
             h.allowPreemption(VictimStage.DECODE_RESERVED, VictimStage.DECODE_ENGINE_OWNED);
             h.config.getRouter().getRoles().getDecode().getAvailability()
@@ -208,14 +208,18 @@ class PreemptionPhasesE2ETest {
                 submitter.start();
 
                 // cancel 意图必须先到达引擎（顺序断言第 1 段：cancel 先于确认）
-                AutoTpmE2EHarness.await(() -> decodeEngine.getCancelledCount() >= 1, 3_000,
-                        "cancel must reach the mock engine");
+                AutoTpmE2EHarness.await(() -> {
+                    try { return MockEngineTestSupport.workerStatus(prefillEngine, -1).getRunningTaskInfoList().stream()
+                            .anyMatch(t -> t.getRequestId() == 301 && t.getPriorityPreemptionProgress()
+                                    == org.flexlb.engine.grpc.EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELING); }
+                    catch (Exception error) { throw new RuntimeException(error); }
+                }, 3_000, "cancel intent must reach P before the forward boundary");
                 assertFalse(low.isDone(),
                         "victim must NOT get its terminal before the engine confirms the release (iron rule 4)");
 
-                // Decode's cancelled counter advances before Prefill publishes
-                // its authoritative terminal. Poll as production does until
-                // that terminal settles the victim, without releasing its ACK.
+                // The control overlay retains the P owner until D returns from
+                // its forward and P publishes the authoritative typed terminal.
+                // Confirmation must settle the victim while its ACK is still held.
                 AutoTpmE2EHarness.await(() -> {
                     h.pumpPrefillOnce(0);
                     return low.isDone();
@@ -259,7 +263,7 @@ class PreemptionPhasesE2ETest {
     @Test
     @Timeout(30)
     void a3_cancel_timeout_fails_incoming_without_dispatch_and_without_leak() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 30, 1, 1, "50", 10_000.0, true)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 30, 1, 1, "50", 500.0, true)) {
             h.allowPreemption(VictimStage.DECODE_RESERVED, VictimStage.DECODE_ENGINE_OWNED);
             h.config.getRouter().getRoles().getDecode().getAvailability()
                     .setMaxEngineRequests(1L);
@@ -298,7 +302,10 @@ class PreemptionPhasesE2ETest {
 
                 // victim 保持 CANCEL_REQUESTED，等 WorkerStatus 迟到确认 → 8429 late confirm
                 assertFalse(low.isDone());
-                h.pumpPrefillOnce(0);
+                AutoTpmE2EHarness.await(() -> {
+                    h.pumpPrefillOnce(0);
+                    return low.isDone();
+                }, 2_000, "late forward-boundary terminal must settle the victim");
                 Response victim = low.get(2, TimeUnit.SECONDS);
                 assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), victim.getCode(),
                         "late CANCELLED confirm still attributes 8429");

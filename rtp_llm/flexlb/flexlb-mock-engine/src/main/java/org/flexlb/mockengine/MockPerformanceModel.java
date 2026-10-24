@@ -19,9 +19,6 @@ import java.util.concurrent.ThreadLocalRandom;
 final class MockPerformanceModel {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    // Internal synthetic test defaults. Production behavior comes from MockEngineConfig.
-    static final int DEFAULT_MAX_BATCH_TOKENS = 1_048_576;
-    static final int DEFAULT_MAX_BATCH_REQUESTS = 32;
     static final int DEFAULT_DECODE_RESERVE_STEP = 0;
 
     private record Calibration(JsonNode data, String sha256) {}
@@ -83,23 +80,6 @@ final class MockPerformanceModel {
     // Guards against sleep_scale making prefill unrealistically fast. Null signals
     // "absent in JSON → no floor".
     private final Double prefillMinMs;
-    // Cap on queued (not running) prefill batches from JSON "prefill.max_waiting_batches".
-    // <= 0 disables the cap; defaults to DEFAULT_MAX_WAITING_PREFILL_BATCHES when absent.
-    int maxWaitingPrefillBatches;
-    // Cap on the number of requests coalesced into ONE prefill batch on the direct
-    // (generate_stream / NON_BATCH) path, JSON "prefill.direct_batch_size_max"
-    // (default 32, matching the master FIXED_WINDOW maxRequests). Production
-    // engines run continuous batching on the prefill side, so per-engine drain
-    // scales with batch size instead of being capped at 1 request per batch —
-    // without coalescing the mock's direct-path drain rate is ~batch_ms per
-    // SINGLE request, several times below production. 1 restores the legacy
-    // one-request-per-batch behaviour.
-    int directBatchSizeMax;
-    // Engine-internal regroup budget (20260903 #8): per-execution-batch token
-    // ceiling and request-count cap. Both 0 = regroup off (legacy verbatim
-    // master batches). See the DEFAULT_* constants above for the anchors.
-    int maxBatchTokens;
-    int maxBatchRequests;
     private final PrefillTimeFormula prefillFormula;
     private record RuntimePrefill(String expression, PrefillTimeFormula formula) {}
     private volatile RuntimePrefill runtimePrefill;
@@ -132,15 +112,6 @@ final class MockPerformanceModel {
     Double decodeReserveBlockRatio; // Explicit percentage; null preserves legacy case rounding.
     Double prefillReserveBlockRatio; // Explicit percentage; null preserves legacy case rounding.
     private final double decodeScale;
-    // Opt-in accepted-layer visibility window, JSON
-    // "decode.report_queued_as_kv_allocated" (default false = current
-    // behavior, zero change). When true, decode requests parked in the
-    // pending queue (admitted, not yet running) are reported in WorkerStatus
-    // as TASK_PHASE_KV_ALLOCATED instead of TASK_PHASE_RUNNING — mirroring a
-    // real engine where KV_ALLOCATED is exactly "KV reserved, not running
-    // yet". The decode hard concurrency gate (park overflow in the engine-side
-    // waiting queue) is unconditional and needs no switch.
-    boolean reportQueuedAsKvAllocated;
     private volatile double jitterPct;
     // Opt-in, bounded residual noise. Keep the legacy percentage jitter for old suites.
     private NoiseSpec prefillNoise = NoiseSpec.DISABLED;
@@ -194,7 +165,7 @@ final class MockPerformanceModel {
     private volatile Double overrideDecodeScale;
     private MockPrefillBatchPolicy prefillBatchPolicy;
 
-    void setPrefillBatchPolicy(MockPrefillBatchPolicy policy) { prefillBatchPolicy = policy; }
+    void setPrefillBatchPolicy(MockPrefillBatchPolicy policy) { prefillBatchPolicy = java.util.Objects.requireNonNull(policy); }
     void setDecodeReserveStep(int steps) { decodeReserveStep = steps; }
 
     static MockPerformanceModel loadCalibration(String file) throws IOException {
@@ -241,10 +212,10 @@ final class MockPerformanceModel {
         var model = new MockPerformanceModel(1, number(node, "sleep_scale", 1), number(prefill, "scale", 1),
                 prefill.has("min_ms") ? number(prefill, "min_ms", 0) : null,
                 prefill.has("fixed_ms") ? number(prefill, "fixed_ms", 0) : null,
-                0, 32, DEFAULT_MAX_BATCH_TOKENS, DEFAULT_MAX_BATCH_REQUESTS, formula, List.copyOf(points),
+                formula, List.copyOf(points),
                 number(decode, "step_base_ms", defaults.path("step_base_ms").doubleValue()),
                 number(decode, "step_per_running_ms", defaults.path("step_per_running_ms").doubleValue()),
-                tokens, 0, number(decode, "scale", 1), false, jitter);
+                tokens, 0, number(decode, "scale", 1), jitter);
         model.configuredPrefillExpression = expression;
         double hostLoadMs = number(prefill, "host_load_ms", 0);
         if (hostLoadMs > Long.MAX_VALUE) throw new IllegalArgumentException("host_load_ms is too large");
@@ -263,17 +234,16 @@ final class MockPerformanceModel {
         return value.doubleValue();
     }
 
-    MockPrefillBatchPolicy prefillBatchPolicy() { return prefillBatchPolicy; }
+    MockPrefillBatchPolicy prefillBatchPolicy() {
+        if (prefillBatchPolicy == null) throw new IllegalStateException("engine-config must supply scheduler policy");
+        return prefillBatchPolicy;
+    }
 
     private MockPerformanceModel(int blockSize,
                                  double sleepScale,
                                  double prefillScale,
                                  Double prefillMinMs,
                                  Double configuredFixedPrefillMs,
-                                 int maxWaitingPrefillBatches,
-                                 int directBatchSizeMax,
-                                 int maxBatchTokens,
-                                 int maxBatchRequests,
                                  PrefillTimeFormula prefillFormula,
                                  List<DecodePoint> decodePoints,
                                  double stepBaseMs,
@@ -281,17 +251,12 @@ final class MockPerformanceModel {
                                  double tokensPerStep,
                                  int decodeReserveStep,
                                  double decodeScale,
-                                 boolean reportQueuedAsKvAllocated,
                                  double jitterPct) {
         this.blockSize = blockSize;
         this.sleepScale = sleepScale;
         this.prefillScale = prefillScale;
         this.prefillMinMs = prefillMinMs;
         this.configuredFixedPrefillMs = configuredFixedPrefillMs;
-        this.maxWaitingPrefillBatches = maxWaitingPrefillBatches;
-        this.directBatchSizeMax = Math.max(1, directBatchSizeMax);
-        this.maxBatchTokens = maxBatchTokens;
-        this.maxBatchRequests = maxBatchRequests;
         this.prefillFormula = prefillFormula;
         this.decodePoints = decodePoints;
         this.stepBaseMs = stepBaseMs;
@@ -299,7 +264,6 @@ final class MockPerformanceModel {
         this.tokensPerStep = tokensPerStep;
         this.decodeReserveStep = Math.max(0, decodeReserveStep);
         this.decodeScale = decodeScale;
-        this.reportQueuedAsKvAllocated = reportQueuedAsKvAllocated;
         this.jitterPct = jitterPct;
     }
 
@@ -307,9 +271,8 @@ final class MockPerformanceModel {
     MockPerformanceModel forEngine() {
         MockPerformanceModel copy = new MockPerformanceModel(
                 blockSize, sleepScale, prefillScale, prefillMinMs, configuredFixedPrefillMs,
-                maxWaitingPrefillBatches, directBatchSizeMax, maxBatchTokens, maxBatchRequests,
                 prefillFormula, List.copyOf(decodePoints), stepBaseMs, stepPerRunningMs,
-                tokensPerStep, decodeReserveStep, decodeScale, reportQueuedAsKvAllocated, jitterPct);
+                tokensPerStep, decodeReserveStep, decodeScale, jitterPct);
         // Explicit overrides installed before startup are part of that engine's initial settings.
         copy.calibrationConfig = calibrationConfig;
         copy.eosModel = eosModel;
@@ -508,44 +471,6 @@ final class MockPerformanceModel {
     /** Set finalized allocator geometry before engine construction. */
     void setBlockSize(int blockSize) {
         this.blockSize = blockSize;
-    }
-
-    int maxWaitingPrefillBatches() { return maxWaitingPrefillBatches; }
-
-    /**
-     * Cap on requests coalesced into one direct-path prefill batch
-     * (JSON "prefill.direct_batch_size_max", default 32, minimum 1).
-     */
-    int directBatchSizeMax() {
-        return directBatchSizeMax;
-    }
-
-    /**
-     * Per-execution-batch prefill token budget for the engine-internal
-     * regroup (JSON "prefill.max_batch_tokens", default
-     * DEFAULT_MAX_BATCH_TOKENS; 0 = dimension disabled). Caliber:
-     * sum(computeTokens + hitTokens) over batch members.
-     */
-    int maxBatchTokens() {
-        return maxBatchTokens;
-    }
-
-    /**
-     * Per-execution-batch prefill request-count cap for the engine-internal
-     * regroup (JSON "prefill.max_batch_requests", default
-     * DEFAULT_MAX_BATCH_REQUESTS; 0 = dimension disabled).
-     */
-    int maxBatchRequests() {
-        return maxBatchRequests;
-    }
-
-    /**
-     * Opt-in accepted-layer window (performance JSON
-     * "decode.report_queued_as_kv_allocated", default false): report queued
-     * decode requests as TASK_PHASE_KV_ALLOCATED in WorkerStatus.
-     */
-    boolean reportQueuedAsKvAllocated() {
-        return reportQueuedAsKvAllocated;
     }
 
     /**

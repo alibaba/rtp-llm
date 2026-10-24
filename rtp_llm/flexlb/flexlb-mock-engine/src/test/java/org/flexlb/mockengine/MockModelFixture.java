@@ -9,6 +9,29 @@ import java.util.List;
 
 /** Isolated scheduler test vectors; executable configurations use MockEngineConfig. */
 final class MockModelFixture {
+    private static final MockPrefillBatchPolicy DEFAULT = new MockPrefillBatchPolicy(32, 1_048_576, 1_048_576, 1, false, 0, 0, false);
+
+    static MockPrefillBatchPolicy scheduler(JsonNode node) {
+        if (node.isMissingNode() || node.isNull()) return DEFAULT;
+        MockEngineConfig.fields(node, "max_generate_batch_size", "max_batch_tokens_size", "max_seq_len",
+                "cp_size", "cp_force_single_prefill", "max_batch_tokens_without_cache", "max_inited_kv_cache_streams", "cp_enabled");
+        MockPrefillBatchPolicy policy = new MockPrefillBatchPolicy(
+                node.path("max_generate_batch_size").asInt(0), node.path("max_batch_tokens_size").asLong(0),
+                node.path("max_seq_len").asLong(0),
+                node.path("cp_size").asInt(1), node.path("cp_force_single_prefill").asBoolean(true),
+                node.path("max_batch_tokens_without_cache").asLong(0),
+                node.path("max_inited_kv_cache_streams").asInt(0),
+                node.path("cp_enabled").asBoolean(node.path("cp_size").asInt(1) > 1));
+        if (policy.maxRequests() <= 0 || policy.maxTokens() <= 0
+                || policy.maxSeqLen() <= 0 || policy.cpSize() <= 0 || policy.uncachedStop() < 0
+                || policy.maxInitedKvStreams() < 0
+                || (!policy.cpEnabled() && policy.cpSize() != 1)) {
+            throw new IllegalArgumentException("FIFO requires positive max_generate_batch_size, "
+                    + "max_batch_tokens_size, max_seq_len, cp_size and nonnegative remaining limits");
+        }
+        return policy;
+    }
+
     static MockPerformanceModel load(String file, String master) throws IOException {
         var json = new ObjectMapper();
         JsonNode input = json.readTree(Path.of(file).toFile());
@@ -16,6 +39,9 @@ final class MockModelFixture {
         for (String field : new String[]{"sleep_scale", "jitter_pct", "calibration_sha256"})
             if (input.has(field)) calibration.set(field, input.get(field));
         JsonNode pre = input.path("prefill"), dec = input.path("decode");
+        for (String obsolete : new String[]{"max_waiting_batches", "direct_batch_size_max", "max_batch_tokens", "max_batch_requests"})
+            if (pre.has(obsolete)) throw new IllegalArgumentException("removed scheduler parameter: " + obsolete);
+        if (dec.has("report_queued_as_kv_allocated")) throw new IllegalArgumentException("removed decode reporting mode");
         ObjectNode timing = calibration.putObject("prefill");
         for (String field : new String[]{"fixed_ms", "min_ms", "scale", "noise"})
             if (pre.has(field)) timing.set(field, pre.get(field));
@@ -27,11 +53,6 @@ final class MockModelFixture {
             if (dec.has(field)) decode.set(field, dec.get(field));
         var model = MockPerformanceModel.loadCalibration(calibration);
         model.setBlockSize(input.path("block_size").asInt(1024));
-        model.maxWaitingPrefillBatches = pre.path("max_waiting_batches").asInt(0);
-        model.directBatchSizeMax = pre.path("direct_batch_size_max").asInt(32);
-        model.maxBatchTokens = pre.path("max_batch_tokens").asInt(MockPerformanceModel.DEFAULT_MAX_BATCH_TOKENS);
-        model.maxBatchRequests = pre.path("max_batch_requests").asInt(MockPerformanceModel.DEFAULT_MAX_BATCH_REQUESTS);
-        model.reportQueuedAsKvAllocated = dec.path("report_queued_as_kv_allocated").asBoolean(false);
         model.setDecodeReserveStep(dec.path("reserve_step").asInt(0));
         model.prefillReuseCache = pre.path("reuse_cache").asBoolean(true);
         model.prefillDeviceCache = pre.path("enable_device_cache").asBoolean(true);
@@ -56,9 +77,7 @@ final class MockModelFixture {
                 throw new IllegalStateException("enable_prefix_tree must be boolean");
             model.memoryPrefixTree = memory.path("enable_prefix_tree").asBoolean(true);
         }
-        if (pre.has("fifo") && (pre.has("direct_batch_size_max") || pre.has("max_batch_tokens") || pre.has("max_batch_requests")))
-            throw new IllegalStateException("FIFO test vector cannot mix batch budgets");
-        model.setPrefillBatchPolicy(MockPrefillBatchPolicy.load(pre.path("fifo")));
+        model.setPrefillBatchPolicy(scheduler(pre.path("fifo")));
         return model;
     }
 }

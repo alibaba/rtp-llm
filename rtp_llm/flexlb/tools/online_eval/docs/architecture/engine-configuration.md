@@ -122,8 +122,9 @@ batch RPC 的传输 Context 不拥有已接受的逻辑请求；逻辑请求继�
 
 real 的 gRPC `LocalRpcServer::GetWorkerStatus` 不填旧的 `available_concurrency`、
 `waiting_query_len` 和 `running_query_len`，这些字段保持 protobuf 默认值 0。
-Mock FIFO 同样回报 0。调度状态以任务列表的 `phase`、`is_waiting` 和取消进度为准；
+Mock 同样回报 0。调度状态以任务列表的 `phase`、`is_waiting` 和取消进度为准；
 Mock 的 `/snapshot` 与指标仍提供独立诊断队列深度，不能当作 real 填充的字段。
+P 的历史执行完成与同 batch 的 `CANCELING` 控制 overlay 可同时出现；Master 保留该请求归属，直到 `CANCELED` 确认。异 batch 的 overlay 不会延迟完成结算。
 `/snapshot.rpc_runtime` 的 callback worker 和 in-flight 调用额度属于 Mock harness，
 不能当作 real `RtpLLMOp` 的 gRPC `MAX_POLLERS` 或 engine waiting 容量。
 RPC 线程池过载与 engine 调度队列的完全等价仍需单独验证。
@@ -209,7 +210,7 @@ P/D 同时返回初始校准、当前公式/step/EOS 覆盖与 generation。
 此处比较的是最终配置的行为，不能用同名字段、JSON 可读取或 UT 数量代替行为等价。
 real 的字段来自 `cpp/config/ConfigModules.h`、`config/py_config_modules.py` 和对应 server args；
 Mock 的公共入口是 `MockEngineConfig`、`MockVitServer` 和 `JavaMockEngineCluster.Config`。
-内部旧 fixture 的属性名不构成公开兼容接口。
+调度只有 FIFO 一条实现；测试向量也使用 real 的 scheduler 参数名。旧 direct/coalesce/regroup 模式、并发 lane 和可选队列状态模式已删除。
 
 ### 双方都有的配置
 
@@ -238,8 +239,10 @@ Mock 的公共入口是 `MockEngineConfig`、`MockVitServer` 和 `JavaMockEngine
 
 | Mock 字段/旧名 | real 对应 | 处理 |
 |---|---|---|
-| 旧 `prefill.fifo.max_requests` | `max_generate_batch_size` | 公共行为配置使用 real 名字；内部 fixture loader 不作为导入接口 |
-| 旧 `max_inited_kv_streams` | `max_inited_kv_cache_streams` | 同上 |
+| 旧 `prefill.fifo.max_requests` | `max_generate_batch_size` | 已删除；配置和测试向量均使用 real 名字 |
+| 旧 `max_inited_kv_streams` | `max_inited_kv_cache_streams` | 已删除；使用 real 名字 |
+| 旧 `direct_batch_size_max` / `max_batch_requests` / `max_waiting_batches` | 无对应 real 配置 | 已删除；使用 real scheduler 预算，故障限流使用显式注入 |
+| 旧 `report_queued_as_kv_allocated` | D 实际资源阶段 | 已删除；普通等待为 RECEIVED，PD 预分配为 KV_ALLOCATED |
 | 旧 `block_size` | `seq_size_per_block` | 从 engine-config 导入；校准文件不能修改 |
 | 旧 `prefill_concurrency` / `decode_concurrency` | 容易混淆 RPC 与 scheduler 容量 | 不再作为公共配置；P forward 串行调度，D batch 容量来自 scheduler |
 | `capacity.device_blocks` / `memory_blocks` | allocator 最终可用 pool 块数 | 观测值，不对应 `kv_cache_mem_mb` / `memory_cache_size_mb` 的直接别名 |
@@ -259,7 +262,7 @@ Mock 的公共入口是 `MockEngineConfig`、`MockVitServer` 和 `JavaMockEngine
 | V `hidden_size`、`compute_delay_ms`、`max_output_bytes` | 假特征宽度、耗时和 JVM 输出保护；不是 real 模型隐藏维度及输出容量的完整等价 |
 | `auto-fetch`、逻辑 P/D 实例数、unique-engine-ips、端口布局、发现文件 | 测试部署方式及协议驱动 |
 | `rpc_threads`、`rpc_max_calls`、completion/event-loop 线程 | JVM harness 容量；不是 C++ MAX_POLLERS、prepare pool 或 engine queue |
-| `max_waiting_batches`、`max_waiting_requests`、`max_batch_kv_len`、fault limits、status/ACK 故障注入 | 显式 Mock 故障实验；正常 real FIFO 导入不以这些参数限队列或限准入 |
+| `queue_depth_limit`、status/ACK 故障注入 | 显式 Mock 故障实验；独立于 scheduler 的队列与预算模型 |
 | `source`、`provenance`、`capacity.kind` / `layout` | 配置来源与支持布局的元数据，不是推理算法开关 |
 
 ### PD、host 与预处理配置

@@ -187,12 +187,7 @@ final class MockEngineConfig {
         result.disableDecodeFirstReuse = !kv.path("enable_device_cache").booleanValue() || capacity.path("disable_decode_first_malloc_device_reuse").booleanValue();
         result.observedReserveBlocks = capacity.path("reserve_blocks").intValue();
         result.setDecodeReserveStep(capacity.path("reserve_step").intValue());
-        result.setPrefillBatchPolicy(new MockPrefillBatchPolicy(
-                scheduler.path("max_generate_batch_size").intValue(), scheduler.path("max_batch_tokens_size").longValue(),
-                0, model.path("max_seq_len").longValue(), model.path("cp_size").intValue(),
-                scheduler.path("cp_force_single_prefill").booleanValue(),
-                scheduler.path("max_batch_tokens_without_cache").longValue(), 0,
-                scheduler.path("max_inited_kv_cache_streams").intValue(), false, model.path("cp_enabled").booleanValue()));
+        result.setPrefillBatchPolicy(new MockPrefillBatchPolicy(scheduler.path("max_generate_batch_size").intValue(), scheduler.path("max_batch_tokens_size").longValue(), model.path("max_seq_len").longValue(), model.path("cp_size").intValue(), scheduler.path("cp_force_single_prefill").booleanValue(), scheduler.path("max_batch_tokens_without_cache").longValue(), scheduler.path("max_inited_kv_cache_streams").intValue(), model.path("cp_enabled").booleanValue()));
         return result;
     }
 

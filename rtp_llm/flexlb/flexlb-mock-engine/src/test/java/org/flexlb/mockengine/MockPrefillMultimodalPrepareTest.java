@@ -22,7 +22,7 @@ class MockPrefillMultimodalPrepareTest {
     @TempDir Path directory;
     private MockPerformanceModel model() throws Exception {
         var model = performanceModel(directory, "1", .1);
-        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 0, 10000, 4, false, 0, 0, 0, false, false));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 10000, 4, false, 0, 0, false));
         model.pdPolicy = new MockPdPolicy(2, 5000, 10000, 1, 5000, 10000, 128, 2000);
         return model;
     }

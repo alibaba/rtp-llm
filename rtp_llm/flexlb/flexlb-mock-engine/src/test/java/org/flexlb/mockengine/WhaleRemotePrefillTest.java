@@ -92,7 +92,7 @@ class WhaleRemotePrefillTest {
         startCluster("1000", 5.0);
         var field = prefill.getClass().getDeclaredField("performance"); field.setAccessible(true);
         var model = (MockPerformanceModel)field.get(prefill);
-        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 10000, 1, false, 0, 0, false));
         model.pdPolicy = new MockPdPolicy(0, 1000, 10000, 1, 5000, 10000, 128, 2000);
         var ack = enqueue(prefill, batch(7900, slot(0, inputWithDecode(7900, 10, decode.getGrpcPort()))));
         assertEquals(1, ack.getSuccessesCount(), ack.toString());
@@ -378,7 +378,7 @@ class WhaleRemotePrefillTest {
         startCluster("100", 5);
         var field = prefill.getClass().getDeclaredField("performance"); field.setAccessible(true);
         var model = (MockPerformanceModel)field.get(prefill);
-        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 10000, 1, false, 0, 0, false));
         model.pdPolicy = new MockPdPolicy(0, 5000, 10000, 1, 5000, 10000, 128, 2000);
         field = decode.getClass().getDeclaredField("cache"); field.setAccessible(true);
         var pool = (MockLruBlockCache)field.get(decode);

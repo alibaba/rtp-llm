@@ -1,34 +1,12 @@
 package org.flexlb.mockengine;
 
-import com.fasterxml.jackson.databind.JsonNode;
-
-/** Test-side FIFO execution budgets, matching FIFOScheduler token admission.
+/** FIFO execution budgets, matching FIFOScheduler token admission.
  * Physical KV leases remain a separate admission gate; these are execution budgets.
  */
-record MockPrefillBatchPolicy(int maxRequests, long maxTokens, long maxKvLen,
+record MockPrefillBatchPolicy(int maxRequests, long maxTokens,
                              long maxSeqLen, int cpSize, boolean forceSingle,
-                             long uncachedStop, int maxWaitingRequests, int maxInitedKvStreams,
-                             boolean faultLimitsEnabled, boolean cpEnabled) {
-    static MockPrefillBatchPolicy load(JsonNode node) {
-        if (node.isMissingNode() || node.isNull()) return null;
-        MockPrefillBatchPolicy policy = new MockPrefillBatchPolicy(
-                node.path("max_requests").asInt(0), node.path("max_batch_tokens").asLong(0),
-                node.path("max_batch_kv_len").asLong(0), node.path("max_seq_len").asLong(0),
-                node.path("cp_size").asInt(1), node.path("force_single").asBoolean(true),
-                node.path("max_batch_tokens_without_cache").asLong(0),
-                node.path("max_waiting_requests").asInt(0), node.path("max_inited_kv_streams").asInt(0),
-                node.path("fault_limits_enabled").asBoolean(false),
-                node.path("cp_enabled").asBoolean(node.path("cp_size").asInt(1) > 1));
-        if (policy.maxRequests <= 0 || policy.maxTokens <= 0 || policy.maxKvLen < 0
-                || policy.maxSeqLen <= 0 || policy.cpSize <= 0 || policy.uncachedStop < 0
-                || policy.maxWaitingRequests < 0 || policy.maxInitedKvStreams < 0
-                || (!policy.cpEnabled && policy.cpSize != 1)) {
-            throw new IllegalArgumentException("prefill.fifo requires positive max_requests, "
-                    + "max_batch_tokens, max_seq_len, cp_size and nonnegative remaining limits");
-        }
-        return policy;
-    }
-
+                             long uncachedStop, int maxInitedKvStreams,
+                             boolean cpEnabled) {
     Budget newBudget() { return new Budget(true); }
     Budget newBudget(boolean applyUncachedQuota) { return new Budget(applyUncachedQuota); }
 
@@ -72,11 +50,7 @@ record MockPrefillBatchPolicy(int maxRequests, long maxTokens, long maxKvLen,
                     || (full > 0 && width > (available - fullTokens) / full)) return false;
             long longest = Math.max(maxLength, full);
             if (longest > 0 && sequences + width > available / longest) return false;
-            // Captured mock-only limits are inert unless explicitly requested
-            // for a fault experiment; they never replace the real token gates.
-            return !faultLimitsEnabled || maxKvLen == 0
-                    || (fullTokens < maxKvLen
-                        && (full == 0 || width <= (maxKvLen - fullTokens - 1) / full));
+            return true;
         }
 
         void add(long full, long hit, int width) {

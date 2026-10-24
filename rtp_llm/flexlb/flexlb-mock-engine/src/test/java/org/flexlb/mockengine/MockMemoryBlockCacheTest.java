@@ -67,14 +67,26 @@ class MockMemoryBlockCacheTest {
             assertEquals(2, hot.memoryHitBlocks());
             assertEquals(65, model.prefillMs(List.of(hot)));
             assertEquals(0, gpu.lruKeyBlocks());
-            var acquired = p.getClass().getDeclaredMethod("acquireBlockLease", long.class, MockPerformanceModel.RequestShape.class);
-            acquired.setAccessible(true);
             var busy = gpu.acquire(gpu.totalBlocks() - gpu.reserveBlocks(), List.of());
             assertNotNull(busy);
-            assertNull(acquired.invoke(p, 7L, hot), "host hits cannot admit into a full GPU");
+            p.getPerformance().setOverrideFixedPrefillMs(500.0);
+            var request = MockEngineTestSupport.inputWithBlockKeys(7L, 192, List.of(1L, 2L, 3L));
+            var done = new java.util.concurrent.CompletableFuture<Void>();
+            p.generateStreamCall(request, new io.grpc.stub.StreamObserver<EngineRpcService.GenerateOutputsPB>() {
+                public void onNext(EngineRpcService.GenerateOutputsPB output) { }
+                public void onError(Throwable error) { done.completeExceptionally(error); }
+                public void onCompleted() { done.complete(null); }
+            });
+            assertEquals(1, p.getWaitingCount(), "host hits cannot bypass exhausted physical GPU capacity");
+            assertEquals(0, p.getActivePrefillRequestCount());
             gpu.release(busy);
-            assertNotNull(acquired.invoke(p, 7L, hot));
-            assertEquals(3, gpu.heldBlocks(), "host hits still allocate all three GPU blocks");
+            long until = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+            while (p.getActivePrefillRequestCount() == 0 && System.nanoTime() < until) Thread.sleep(1);
+            assertEquals(1, p.getActivePrefillRequestCount());
+            assertEquals(3, gpu.totalBlocks() - gpu.availableBlocks(),
+                    "host hits still occupy all three GPU blocks, including pinned copied prefixes");
+            assertEquals(2, gpu.referencedKeyBlocks());
+            assertEquals(1, gpu.heldBlocks());
             var result = new java.util.concurrent.atomic.AtomicReference<EngineRpcService.CacheStatusPB>();
             p.getCacheStatus(EngineRpcService.CacheVersionPB.newBuilder().setNeedCacheKeys(true).build(),
                     new io.grpc.stub.StreamObserver<EngineRpcService.CacheStatusPB>() {
@@ -85,6 +97,10 @@ class MockMemoryBlockCacheTest {
             assertEquals(java.util.Set.of(1L, 2L), result.get().getCacheKeysMap().keySet());
             assertEquals(p.getTotalKvTokens(), result.get().getTotalKvCache());
             assertNull(field(cluster.decode(0), "memoryCache"));
+            done.get(2, java.util.concurrent.TimeUnit.SECONDS);
+            until = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(1);
+            while (gpu.availableBlocks() != gpu.totalBlocks() && System.nanoTime() < until) Thread.sleep(1);
+            assertEquals(gpu.totalBlocks(), gpu.availableBlocks());
         }
     }
 
@@ -147,7 +163,7 @@ class MockMemoryBlockCacheTest {
     }
     private void verifyAsyncHostLoad(boolean cancel, boolean failCopy, MockLoadFailure.Kind materialization) throws Exception {
         var model = model("{\"enabled\":true,\"capacity_blocks\":10}");
-        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(4, 10000, 10000, 1, false, 0, 0, false));
         var copy = new java.util.concurrent.CompletableFuture<Void>();
         try (var cluster = MockEngineTestCluster.create(model, 61320, 1, 0)) {
             var service = cluster.prefill(0);

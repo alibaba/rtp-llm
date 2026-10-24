@@ -21,7 +21,6 @@ class MockEngineConfigTest {
         assertFalse(model.prefillReuseCache);
         assertEquals(3, model.prefillBatchPolicy().maxRequests());
         assertEquals(100, model.prefillBatchPolicy().maxTokens());
-        assertFalse(model.prefillBatchPolicy().faultLimitsEnabled());
     }
 
     @Test void missingInvalidAndUnsupportedBehaviorNeverFallsBack() {
@@ -75,6 +74,28 @@ class MockEngineConfigTest {
         assertThrows(IllegalArgumentException.class, () -> MockEngineConfig.parse(document));
         vit.put("gpu_max_batch_images", Long.MAX_VALUE).put("gpu_batch_wait_ms", 10);
         assertThrows(IllegalArgumentException.class, () -> MockEngineConfig.parse(document));
+    }
+
+    @Test void calibrationAloneCannotSelectAnImplicitSchedulerMode() throws Exception {
+        var model = MockPerformanceModel.loadCalibration(new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode());
+        assertThrows(IllegalStateException.class, model::prefillBatchPolicy);
+        var configured = MockEngineConfigFixture.load().configure("prefill", model);
+        assertNotNull(configured.prefillBatchPolicy());
+    }
+
+    @Test void removedQueueModesAreRejectedInAllConfigurationChannels() throws Exception {
+        for (String field : new String[]{"max_waiting_batches", "direct_batch_size_max", "max_batch_tokens",
+                "max_batch_requests", "max_prefill_concurrency", "max_batch_kv_len", "max_waiting_requests", "fault_limits_enabled"}) {
+            ObjectNode document = (ObjectNode)MockEngineConfigFixture.load().snapshot();
+            ((ObjectNode)document.path("roles").path("prefill").path("scheduler")).put(field, 1);
+            assertThrows(IllegalArgumentException.class, () -> MockEngineConfig.parse(document), field);
+            var calibration = new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode();
+            calibration.putObject("prefill").put(field, 1);
+            assertThrows(IllegalArgumentException.class, () -> MockPerformanceModel.loadCalibration(calibration), field);
+        }
+        var calibration = new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode();
+        calibration.putObject("decode").put("report_queued_as_kv_allocated", true);
+        assertThrows(IllegalArgumentException.class, () -> MockPerformanceModel.loadCalibration(calibration));
     }
 
     @Test void calibrationCannotChangeAdmissionOrCapacity() throws Exception {

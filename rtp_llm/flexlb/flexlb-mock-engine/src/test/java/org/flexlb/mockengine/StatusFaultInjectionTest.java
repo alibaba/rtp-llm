@@ -236,8 +236,8 @@ class StatusFaultInjectionTest {
         EngineRpcService.WorkerStatusPB suppressed = workerStatus(prefill, 0);
         assertEquals(0, suppressed.getRunningTaskInfoCount(),
                 "suppress_running must empty runningTaskInfo");
-        assertEquals(1, suppressed.getRunningQueryLen(),
-                "runningQueryLen stays REAL (self-inconsistent report)");
+        assertEquals(0, suppressed.getRunningQueryLen(), "real leaves the legacy field unset");
+        assertEquals(1, prefill.getActivePrefillRequestCount(), "suppression cannot alter actual execution");
 
         // finished is NOT suppressed by the running fault.
         EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 1, 5_000);
@@ -262,7 +262,8 @@ class StatusFaultInjectionTest {
         EngineRpcService.WorkerStatusPB running = workerStatus(prefill, 0);
         assertEquals(1, running.getRunningTaskInfoCount());
         assertEquals(7008, running.getRunningTaskInfo(0).getRequestId());
-        assertEquals(2, running.getRunningQueryLen(), "runningQueryLen stays REAL");
+        assertEquals(0, running.getRunningQueryLen(), "real leaves the legacy field unset");
+        assertEquals(2, prefill.getActivePrefillRequestCount(), "suppression cannot alter actual execution");
 
         // Finished list: rid 7007 swallowed too (double swallow).
         EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 1, 5_000);
@@ -757,26 +758,11 @@ class StatusFaultInjectionTest {
         failedStream.await(10_000);
         survivorStream.await(10_000);
 
-        // Failed member: exactly ONE frame — the in-band typed error terminal
-        // (production stream->reportError's client-visible half). The code
-        // rides the RAW enum value (8500 sits outside ErrorCodePB; proto3 open
-        // enums keep it on the wire) and the message text carries the numeric
-        // too; the stream COMPLETES right after the frame (the pump treats
-        // hasErrorInfo frames as terminal), it does not error.
-        assertNull(failedStream.error.get(),
-                "the error frame must complete the stream, not error it");
-        assertEquals(1, failedStream.frames.size(),
-                "the failed member delivers exactly the error frame");
-        EngineRpcService.GenerateOutputsPB frame = failedStream.frames.get(0);
-        assertEquals(401L, frame.getRequestId());
-        assertTrue(frame.hasErrorInfo(), "the terminal frame carries error_info");
-        assertEquals(8500, frame.getErrorInfo().getErrorCodeValue(),
-                "the injected code rides the raw enum value");
-        assertTrue(frame.getErrorInfo().getErrorMessage().contains("8500"),
-                "the message text carries the numeric code as well");
-        assertTrue(frame.getErrorInfo().getErrorMessage()
-                        .contains("injected prefill_async_partial_fail"),
-                "the message identifies the injection");
+        assertNotNull(failedStream.error.get());
+        assertTrue(failedStream.frames.isEmpty(), "failed members cannot emit successful response frames");
+        var details = MockRpcErrors.downstream(failedStream.error.get());
+        assertEquals(8500, details.getErrorCode());
+        assertTrue(details.getErrorMessage().contains("injected prefill_async_partial_fail"));
 
         // Survivor of the SAME batch: the normal single terminal frame
         // (prefill-only cluster), no error_info — members settle

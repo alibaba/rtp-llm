@@ -341,26 +341,23 @@ class BlockPoolCapacityTest {
         assertEquals(10, cache.availableBlocks());
     }
 
-    // ─────────────── FastRpcService surface: synchronous 602 rejection ───────────────
+    // ─────────────── FastRpcService surface: impossible token-capacity rejection ───────────────
 
     @Test
-    void enqueueBatchRejectsWithMallocFailedWhenPoolExhausted() throws IOException {
+    void enqueueBatchRejectsInputBeyondPhysicalTokenCapacity() throws IOException {
         MockPerformanceModel model =
                 MockEngineTestSupport.performanceModel(tempDir, "10", 0.1);
         JavaMockEngineCluster.FastRpcService prefill =
                 newService(model, 10); // 10-block pool, reserve = 1
 
-        // 11 hash-channel blocks > 10-block pool → synchronous LACK_MEM in the
-        // EnqueueBatch ack (the master's EngineRejectedException surface).
+        // The scheduler checks token demand against the entire physical pool.
         EngineRpcService.GenerateInputPB tooBig = inputWithBlockKeys(
-                7L, SPB, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L));
+                7L, 11 * SPB, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L));
         EngineRpcService.EnqueueBatchResponsePB ack =
                 enqueueAndFetch(prefill, batch(1, slot(0, tooBig)));
         assertEquals(1, ack.getErrorsCount(), "the oversized request must be rejected");
-        assertEquals(JavaMockEngineCluster.LACK_MEM_ERROR_CODE,
-                ack.getErrors(0).getErrorInfo().getErrorCode(),
-                "LACK_MEM must surface MALLOC_FAILED (602), never the master's 8431");
-        assertTrue(ack.getErrors(0).getErrorInfo().getErrorMessage().contains("LACK_MEM"));
+        assertEquals(607, ack.getErrors(0).getErrorInfo().getErrorCode());
+        assertTrue(ack.getErrors(0).getErrorInfo().getErrorMessage().contains("KV cache maximum token capacity"));
         assertEquals("rejected", prefill.getRequestStates().get(7L));
         assertEquals(0, prefill.getInflightCount(), "rejected request leaves no residue");
 
@@ -379,8 +376,7 @@ class BlockPoolCapacityTest {
         var model = MockEngineTestSupport.performanceModel(tempDir, "1500", 1.0);
         var field = MockPerformanceModel.class.getDeclaredField("prefillBatchPolicy");
         field.setAccessible(true);
-        field.set(model, new MockPrefillBatchPolicy(64, 100000, 100000,
-                10000, 8, false, 0, 256, 128, false, true));
+        field.set(model, new MockPrefillBatchPolicy(64, 100000, 10000, 8, false, 0, 128, true));
         var prefill = newService(model, 10);
 
         var first = inputWithBlockKeys(101L, 2 * SPB, List.of(1L, 2L));
@@ -434,8 +430,7 @@ class BlockPoolCapacityTest {
         var model = MockEngineTestSupport.performanceModel(tempDir, "500", 1.0);
         var field = MockPerformanceModel.class.getDeclaredField("prefillBatchPolicy");
         field.setAccessible(true);
-        field.set(model, new MockPrefillBatchPolicy(64, 100000, 0,
-                10000, 1, false, 0, 0, 1, false, false));
+        field.set(model, new MockPrefillBatchPolicy(64, 100000, 10000, 1, false, 0, 1, false));
         var prefill = newService(model, 10);
         assertEquals(1, enqueueAndFetch(prefill, batch(107, slot(0,
                 inputWithBlockKeys(107L, 2 * SPB, List.of(1L, 2L))))).getSuccessesCount());
@@ -466,8 +461,7 @@ class BlockPoolCapacityTest {
         var model = MockEngineTestSupport.performanceModel(tempDir, "10", 0.1);
         var field = MockPerformanceModel.class.getDeclaredField("prefillBatchPolicy");
         field.setAccessible(true);
-        field.set(model, new MockPrefillBatchPolicy(64, 512000, 3145728,
-                786432, 8, false, 0, 256, 128, false, true));
+        field.set(model, new MockPrefillBatchPolicy(64, 512000, 786432, 8, false, 0, 128, true));
         var service = newService(model, 5);
         var status = MockEngineTestSupport.workerStatus(service, 0);
         assertEquals(512000L, status.getMaxBatchTokensSize());

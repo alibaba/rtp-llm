@@ -35,7 +35,7 @@ class PrefillFetchLifecycleTest {
 
     @Test void waitToRunBudgetIsIndependentOfRequestDeadlineAndFetchTtl() throws Exception {
         var model = performanceModel(tempDir, "200", 1, 5);
-        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(1, 10000, 0, 10000, 1, false, 0, 0, 0, false, false));
+        model.setPrefillBatchPolicy(new MockPrefillBatchPolicy(1, 10000, 10000, 1, false, 0, 0, false));
         model.pdPolicy = new MockPdPolicy(0, 1000, 15, 1, 5000, 10000, 128, 2000);
         try (var cluster = MockEngineTestCluster.create(model, 62110, 1, 1)) {
             var first = new Output(); var waiting = new Output();
@@ -266,7 +266,7 @@ class PrefillFetchLifecycleTest {
         }
     }
 
-    @Test void pendingFetchIsNotALeakAndDecodeCancelKeepsOriginalFailureFrame() throws Exception {
+    @Test void pendingFetchIsNotALeakAndDecodeCancelPreservesTypedFailure() throws Exception {
         try (var c = cluster("150")) {
             submit(c, 11, 3000);
             c.decode(0).checkLeakDrain(0);
@@ -274,7 +274,9 @@ class PrefillFetchLifecycleTest {
             Output output = fetch(c, 11);
             c.decode(0).cancel(11);
             assertTrue(output.done.await(2, TimeUnit.SECONDS));
-            assertTrue(output.frames.stream().anyMatch(EngineRpcService.GenerateOutputsPB::hasErrorInfo));
+            assertNotNull(output.error);
+            assertEquals(8100, MockRpcErrors.downstream(output.error).getErrorCode());
+            assertFalse(output.frames.stream().anyMatch(EngineRpcService.GenerateOutputsPB::hasErrorInfo));
             Thread.sleep(200);
             released(c);
         }

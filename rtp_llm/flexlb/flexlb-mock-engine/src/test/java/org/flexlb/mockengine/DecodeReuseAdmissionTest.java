@@ -243,7 +243,7 @@ class DecodeReuseAdmissionTest {
     void decodeAdmissionReusesOwnLruHitsNetAllocatesTheRest() throws Exception {
         // Slow steps (10000 × 0.1 = 1000 ms) so the mid-flight decomposition
         // is stable to observe before the stream completes.
-        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, null);
+        MockPerformanceModel model = decodeModel(tempDir, 10_000.0);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 8);
         List<Long> keys = List.of(1L, 2L, 3L);
 
@@ -288,7 +288,7 @@ class DecodeReuseAdmissionTest {
      */
     @Test
     void decodeReusePositiveFeedbackAcrossRounds() throws Exception {
-        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, null);
+        MockPerformanceModel model = decodeModel(tempDir, 10_000.0);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 8);
         MockLruBlockCache cache = cacheOf(decode);
 
@@ -332,7 +332,7 @@ class DecodeReuseAdmissionTest {
      */
     @Test
     void cancelledDecodeStreamLeavesNoLruEntries() throws Exception {
-        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, null);
+        MockPerformanceModel model = decodeModel(tempDir, 10_000.0);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 8);
         List<Long> keys = List.of(1L, 2L, 3L);
 
@@ -372,7 +372,7 @@ class DecodeReuseAdmissionTest {
         // ~26 tokens = 10 steps × (500 × 0.1) ms = 500 ms per request; the
         // late-cancel offsets below sweep the final steps plus the
         // claim/publish window.
-        MockPerformanceModel model = decodeModel(tempDir, 500.0, null);
+        MockPerformanceModel model = decodeModel(tempDir, 500.0);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 8);
         MockLruBlockCache cache = cacheOf(decode);
 

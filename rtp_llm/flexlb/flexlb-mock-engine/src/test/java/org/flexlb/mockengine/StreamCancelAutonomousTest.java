@@ -161,6 +161,8 @@ class StreamCancelAutonomousTest {
             stream.breakStream();
 
             awaitCancellationBoundary(decode, rid, 1);
+            awaitCondition(() -> countCancelTerminals(prefill, rid) == 1, 1_000,
+                    "the downstream boundary must also publish the original P context terminal");
             // Decode-side cleanup: slot, KV, inflight all released.
             assertEquals(0, decode.getRunningCount());
             assertEquals(0, decode.getInflightCount());
@@ -207,6 +209,8 @@ class StreamCancelAutonomousTest {
                     "Fetch must have advanced the prepared Decode into execution");
             fetch.breakStream();
             awaitCancellationBoundary(decode, rid, 1);
+            awaitCondition(() -> countCancelTerminals(prefill, rid) == 1, 1_000,
+                    "the downstream boundary must also publish the original P context terminal");
             assertEquals(0, decode.getRunningCount());
             assertEquals(0, decode.getActiveKvTokens());
             assertEquals(0, prefill.getCancelledCount());

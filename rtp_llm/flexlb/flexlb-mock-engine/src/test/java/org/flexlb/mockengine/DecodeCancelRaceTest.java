@@ -106,7 +106,7 @@ class DecodeCancelRaceTest {
     void cancelInAdmissionWindowNeverLeaksCounters() throws Exception {
         // decode step 50 × sleep_scale 0.1 = 5 ms — fast completions so the
         // stress loop and the final quiescence stay quick.
-        MockPerformanceModel model = decodeModel(tempDir, 50.0, null);
+        MockPerformanceModel model = decodeModel(tempDir, 50.0);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 132);
 
         int iterations = 300;
@@ -155,7 +155,7 @@ class DecodeCancelRaceTest {
     void activeDecodeRequestsNeverExceedsCapUnderCancelStorm() throws Exception {
         // decode step 100 × sleep_scale 0.1 = 10 ms — completions fire while
         // the storm is still running, exercising the completion drain too.
-        MockPerformanceModel model = decodeModel(tempDir, 100.0, null);
+        MockPerformanceModel model = decodeModel(tempDir, 100.0);
         int cap = 4;
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, cap);
 

@@ -61,7 +61,7 @@ import static org.mockito.Mockito.mock;
  *   <li>the raw /cancel_request JSON still exposes the mock control-plane
  *       detail (found / already_finished / phase) for self-test evidence —
  *       including a queued decode request (opt-in
- *       {@code decode.report_queued_as_kv_allocated}) reporting phase
+ *       reporting phase
  *       KV_ALLOCATED — the accepted-layer contract Phase 5 eviction needs,</li>
  *   <li>the CANCELLED terminal surfaces in the next WorkerStatus finished
  *       list (iron rule 4 confirmation source),</li>
@@ -112,10 +112,10 @@ class HttpMockCancelIntegrationTest {
 
     @Test
     void httpCancelOfQueuedRequestAcceptedAndSurfacesCancelled() throws Exception {
-        startGatedDecodeCluster(true);
+        startGatedDecodeCluster();
         EngineCancelChannel channel = channel();
 
-        // 1 running + 1 queued (KV_ALLOCATED under the opt-in flag).
+        // 1 running + 1 ordinary queued request.
         assertTrue(scheduleOwnedDecode(1L));
         assertTrue(scheduleOwnedDecode(2L));
 
@@ -126,11 +126,12 @@ class HttpMockCancelIntegrationTest {
                 "queued request cancel over HTTP must register the intent (ACCEPTED)");
 
         // Iron rule 4: release confirmation via the next WorkerStatus report.
+        awaitSettled(decodeService, 2L);
         EngineRpcService.WorkerStatusPB status = workerStatus(decodeService, 0);
         boolean cancelledReported = status.getFinishedTaskListList().stream()
                 .anyMatch(task -> task.getRequestId() == 2L
                         && task.getErrorInfo().getErrorCode()
-                        == EngineRpcService.ErrorCodePB.CANCELLED.getNumber());
+                        == 8100);
         assertTrue(cancelledReported,
                 "CANCELLED completion must appear in the next WorkerStatus finished list");
         assertFalse(prefillService.hasDownstreamOwnership(2L));
@@ -141,7 +142,7 @@ class HttpMockCancelIntegrationTest {
 
     @Test
     void rawHttpCancelOfRunningRequestReportsRunningPhase() throws Exception {
-        startGatedDecodeCluster(true);
+        startGatedDecodeCluster();
 
         assertTrue(scheduleOwnedDecode(11L));
 
@@ -164,7 +165,7 @@ class HttpMockCancelIntegrationTest {
 
     @Test
     void httpRepeatedPriorityCancelStaysAcceptedAndPublishesOneTerminal() throws Exception {
-        startGatedDecodeCluster(false);
+        startGatedDecodeCluster();
         EngineCancelChannel channel = channel();
 
         assertTrue(scheduleOwnedDecode(21L));
@@ -177,6 +178,7 @@ class HttpMockCancelIntegrationTest {
                 .cancel(target(prefillService.getGrpcPort()), 21L, 5_000)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, second);
+        awaitSettled(prefillService, 21L);
         long terminalCount = workerStatus(prefillService, -1).getFinishedTaskListList().stream()
                 .filter(task -> task.getRequestId() == 21L
                         && task.getErrorInfo().getErrorCode() == 8429L
@@ -190,7 +192,7 @@ class HttpMockCancelIntegrationTest {
 
     @Test
     void httpCancelUnknownRequestIsFencedAndRejectsLaterEnqueue() throws Exception {
-        startGatedDecodeCluster(false);
+        startGatedDecodeCluster();
         EngineCancelChannel channel = channel();
 
         CancelAck outcome = channel
@@ -232,7 +234,7 @@ class HttpMockCancelIntegrationTest {
 
     @Test
     void httpWrongWorkerDoesNotScanOtherServices() throws Exception {
-        startGatedDecodeCluster(false);
+        startGatedDecodeCluster();
         assertTrue(scheduleOwnedDecode(23L));
 
         int wrongPort = BASE_PORT + nextPortOffset++;
@@ -256,7 +258,7 @@ class HttpMockCancelIntegrationTest {
 
     @Test
     void httpDecodeTargetIsUnimplementedAndDoesNotCancelOwnedRequest() throws Exception {
-        startGatedDecodeCluster(false);
+        startGatedDecodeCluster();
         assertTrue(scheduleOwnedDecode(24L));
 
         var future = channel().cancel(target(decodeService.getGrpcPort()), 24L, 5_000);
@@ -283,7 +285,7 @@ class HttpMockCancelIntegrationTest {
 
     @Test
     void httpCancelUnknownEnginePortMapsToUnsupported() throws Exception {
-        startGatedDecodeCluster(false);
+        startGatedDecodeCluster();
         EngineCancelChannel channel = channel();
 
         assertTrue(channel.isSupported(endpoint(decodeService.getGrpcPort())),
@@ -298,7 +300,7 @@ class HttpMockCancelIntegrationTest {
 
     @Test
     void deadControlUrlSurfacesAsFailedFutureNotSynchronousThrow() throws Exception {
-        startGatedDecodeCluster(false);
+        startGatedDecodeCluster();
         // Port 1 is never listening — connection refused.
         EngineCancelChannel channel = new HttpMockEngineCancelChannel("http://127.0.0.1:1");
 
@@ -312,7 +314,7 @@ class HttpMockCancelIntegrationTest {
 
     @Test
     void rawCancelRequestEndpointSchemaAndValidation() throws Exception {
-        startGatedDecodeCluster(true);
+        startGatedDecodeCluster();
         String base = "http://127.0.0.1:" + controlServer.getPort();
         HttpClient http = HttpClient.newHttpClient();
 
@@ -366,8 +368,8 @@ class HttpMockCancelIntegrationTest {
         JsonNode json = MAPPER.readTree(ok.body());
         assertEquals("ACCEPTED", json.get("status").asText());
         assertTrue(json.get("found").asBoolean());
-        assertEquals("TASK_PHASE_KV_ALLOCATED", json.get("phase").asText(),
-                "queued request phase must serialize as the proto enum name");
+        assertEquals("TASK_PHASE_RUNNING", json.get("phase").asText(),
+                "the addressed P context remains in downstream execution while D waits");
         assertFalse(json.get("already_finished").asBoolean());
         assertEquals(prefillService.getGrpcPort(), json.get("port").asInt());
     }
@@ -376,7 +378,7 @@ class HttpMockCancelIntegrationTest {
 
     @Test
     void httpCancelNoRespondInjectionTimesOutAsFailedFuture() throws Exception {
-        startGatedDecodeCluster(false);
+        startGatedDecodeCluster();
         assertTrue(scheduleOwnedDecode(51L));
         EngineCancelChannel channel = channel();
         inject("cancel_no_respond", true);
@@ -402,7 +404,7 @@ class HttpMockCancelIntegrationTest {
 
     @Test
     void httpCancelErrorInjectionSurfacesAsFailedFuture() throws Exception {
-        startGatedDecodeCluster(false);
+        startGatedDecodeCluster();
         assertTrue(scheduleOwnedDecode(52L));
         EngineCancelChannel channel = channel();
         inject("cancel_error", true);
@@ -426,7 +428,7 @@ class HttpMockCancelIntegrationTest {
 
     @Test
     void httpCancelUnexpectedStatusInjectionFailsTheMapping() throws Exception {
-        startGatedDecodeCluster(false);
+        startGatedDecodeCluster();
         assertTrue(scheduleOwnedDecode(53L));
         EngineCancelChannel channel = channel();
         inject("cancel_unexpected_status", true);
@@ -474,8 +476,14 @@ class HttpMockCancelIntegrationTest {
      * on an ephemeral port. Long decode step (10s × 0.1 sleep_scale = 1s)
      * keeps requests in flight during asserts.
      */
-    private void startGatedDecodeCluster(boolean reportQueuedAsKvAllocated) throws Exception {
-        MockPerformanceModel model = model(10_000.0, reportQueuedAsKvAllocated);
+    private void awaitSettled(JavaMockEngineCluster.FastRpcService service, long id) throws Exception {
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (workerStatus(service, -1).getFinishedTaskListList().stream().noneMatch(t -> t.getRequestId() == id)
+                && System.nanoTime() < until) Thread.sleep(1);
+    }
+
+    private void startGatedDecodeCluster() throws Exception {
+        MockPerformanceModel model = model(10_000.0);
         int prefillPort = BASE_PORT + nextPortOffset++;
         prefillService = new JavaMockEngineCluster.FastRpcService(
                 "prefill-0", "127.0.0.1", "prefill",
@@ -520,19 +528,16 @@ class HttpMockCancelIntegrationTest {
         return new DecodeEndpoint(status, mock(EndpointEventProjector.class));
     }
 
-    private MockPerformanceModel model(double decodeStepMs,
-                                       boolean reportQueuedAsKvAllocated) throws Exception {
+    private MockPerformanceModel model(double decodeStepMs) throws Exception {
         Map<String, Object> decodeConfig = new LinkedHashMap<>();
-        if (reportQueuedAsKvAllocated) {
-            decodeConfig.put("report_queued_as_kv_allocated", true);
-        }
         return MockEngineTestSupport.performanceModel(
                 tempDir, "10", 0.1, decodeStepMs, Map.of(), decodeConfig);
     }
 
     private MockPerformanceModel.RequestShape shapeOf(long requestId) throws Exception {
-        return MockEngineTestSupport.requestShape(
-                decodeService.getPerformance(), requestId, 8);
+        var request = MockEngineTestSupport.input(requestId, 8);
+        request = request.toBuilder().setGenerateConfig(request.getGenerateConfig().toBuilder().setMaxNewTokens(26)).build();
+        return decodeService.getPerformance().shape(request, new MockLruBlockCache(100));
     }
 
     private static boolean invokeScheduleDecodeCompletion(

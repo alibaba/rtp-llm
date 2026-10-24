@@ -285,10 +285,10 @@ class DecodeKvAllocationSemanticsTest {
             StatusRuntimeException pError = assertThrows(StatusRuntimeException.class,
                     () -> stub.generateStreamCall(inputWithDecode(900L, 6 * SPB,
                             decode.getGrpcPort(), 1)).hasNext());
-            assertEquals(Status.Code.RESOURCE_EXHAUSTED, pError.getStatus().getCode());
-            assertEquals("LACK_MEM: insufficient KV cache blocks (need=6, avail=5, spb=1024)",
+            assertEquals(Status.Code.INTERNAL, pError.getStatus().getCode());
+            assertEquals("input length exceeds KV cache maximum token capacity",
                     pError.getStatus().getDescription());
-            assertCapacityTrailer(pError, 602);
+            assertCapacityTrailer(pError, 607);
             StatusRuntimeException dError = assertThrows(StatusRuntimeException.class,
                     () -> stub.generateStreamCall(inputWithDecode(901L, SPB,
                             decode.getGrpcPort(), 1)).hasNext());

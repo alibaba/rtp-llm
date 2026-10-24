@@ -142,7 +142,10 @@ class CodeReviewFixTest {
         // Cancel the request mid-flight.
         decode.cancel(requestId);
 
-        // All counters must now be zero — this is the core of the fix.
+        assertEquals(1, getActiveDecodeRequests(decode), "the executing forward keeps its ownership");
+        assertEquals(expectedKvTokens, decode.getActiveKvTokens());
+        awaitAllInflightZero(2_000);
+        // Counters settle after the forward boundary.
         assertEquals(0, getActiveDecodeRequests(decode),
                 "activeDecodeRequests should be 0 after cancel");
         assertEquals(0, decode.getActiveKvTokens(),
