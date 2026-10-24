@@ -2,9 +2,9 @@ package org.flexlb.balance.queue.enqueue;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.queue.QueueFailures;
 import org.flexlb.balance.queue.QueueState;
 import org.flexlb.balance.queue.QueuedRequestRemover;
-import org.flexlb.balance.queue.dispatch.GroupCommitter;
 import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -93,11 +93,11 @@ public final class PrefillQueueEnqueuer {
             try {
                 attempt.rollback().close();
             } catch (Throwable rollbackFailure) {
-                failure = GroupCommitter.appendFailure(failure, rollbackFailure);
+                failure = QueueFailures.appendFailure(failure, rollbackFailure);
             }
         }
         if (failure != null) {
-            throw GroupCommitter.propagateCommitFailure(failure);
+            throw QueueFailures.propagateCommitFailure(failure);
         }
         if (attempt.accepted()) {
             for (ScheduledRequest victim : victims) {

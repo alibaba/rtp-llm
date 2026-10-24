@@ -11,6 +11,7 @@ import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.queue.CapacityBlockedHead;
 import org.flexlb.balance.queue.ProcessQueueResult;
+import org.flexlb.balance.queue.QueueFailures;
 import org.flexlb.balance.queue.QueueState;
 import org.flexlb.balance.queue.QueuedRequestRemover;
 import org.flexlb.balance.scheduler.EndpointEventHandler;
@@ -213,14 +214,14 @@ public final class GroupCommitter {
                 notifyTerminalAdmissionFailure(
                         removedTerminalBoundary, transaction.blocked());
             } catch (Throwable notificationFailure) {
-                failure = appendFailure(failure, notificationFailure);
+                failure = QueueFailures.appendFailure(failure, notificationFailure);
             }
             try {
                 transaction.rollbackCommitted(failure);
             } catch (Throwable ownerFailure) {
-                failure = appendFailure(failure, ownerFailure);
+                failure = QueueFailures.appendFailure(failure, ownerFailure);
             }
-            throw propagateCommitFailure(failure);
+            throw QueueFailures.propagateCommitFailure(failure);
         }
         if (removedTerminalBoundary) {
             capacityBlockedHead.signalCapacityAvailable();
@@ -341,30 +342,5 @@ public final class GroupCommitter {
                     key, head.requestId(), "request_expired",
                     callbackFailure);
         }
-    }
-
-    public static Throwable appendFailure(
-            Throwable first,
-            Throwable next) {
-        if (first == null) {
-            return next;
-        }
-        if (first != next) {
-            first.addSuppressed(next);
-        }
-        return first;
-    }
-
-    /** Release the publish-time reservation only while it is still item-owned. */
-    public static RuntimeException propagateCommitFailure(
-            Throwable failure) {
-        if (failure instanceof RuntimeException runtimeFailure) {
-            return runtimeFailure;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-        return new IllegalStateException(
-                "delivery selection failed after ownership commit", failure);
     }
 }
