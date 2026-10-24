@@ -48,6 +48,9 @@ class MiniMaxM31Renderer(BasicRenderer, ReasoningToolBaseRenderer):
         # modes follow main's request contract.
         return request.resolve_thinking_mode(ThinkingMode.ADAPTIVE)
 
+    def should_process_think(self, request):
+        return self.resolve_thinking_mode(request) == ThinkingMode.ENABLED
+
     def _create_detector(self, request):
         return MiniMaxM31Detector() if request.tools else None
 

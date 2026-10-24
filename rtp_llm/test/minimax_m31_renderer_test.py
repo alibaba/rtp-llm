@@ -85,6 +85,18 @@ class MiniMaxM31VLRendererTest(unittest.TestCase):
             update={"chat_template_kwargs": {"thinking_mode": "enabled"}}
         )
         self.assertEqual(renderer.resolve_thinking_mode(enabled), ThinkingMode.ENABLED)
+        self.assertTrue(renderer.should_process_think(enabled))
+        self.assertFalse(renderer.should_process_think(disabled))
+        enabled_status = ThinkStatus(
+            enable_think_mode=True,
+            in_think_mode=renderer.should_process_think(enabled),
+            thinking_mode=ThinkingMode.ENABLED,
+        )
+        enabled_delta = renderer._split_reasoning_text_and_content(
+            OutputDelta("Reasoning.</mm:think>Answer", None, 1, 2, 0), enabled_status
+        )
+        self.assertEqual(enabled_delta.reasoning_content, "Reasoning.")
+        self.assertEqual(enabled_delta.content, "Answer")
         status = ThinkStatus(thinking_mode=ThinkingMode.ADAPTIVE, decision_made=False)
 
         def packet(text):
