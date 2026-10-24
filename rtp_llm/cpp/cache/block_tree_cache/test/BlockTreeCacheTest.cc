@@ -251,6 +251,125 @@ protected:
     std::unique_ptr<BlockTreeCache> cache_;
 };
 
+TEST_F(BlockTreeCacheTest, WritebackAccountingChangesOnlyOnPrefillInsertAndPreservesSnapshots) {
+    const CacheKeysType                        keys{100, 200, 300};
+    std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
+    for (size_t index = 0; index < resources.size(); ++index) {
+        resources[index][0].device_blocks = {static_cast<BlockIdxType>(42 + index)};
+    }
+    cache_->insert({100}, {resources[0]}, Tier::DEVICE);
+    ASSERT_FALSE(cache_->insertExternalBlocks(keys, 1, resources, currentTimeMs() + 10000).hasError());
+    const auto path = cache_->tree()->findNode(keys);
+    ASSERT_EQ(path.size(), 3u);
+    EXPECT_TRUE(path[0]->is_accounted);
+    EXPECT_FALSE(path[1]->is_accounted);
+    EXPECT_FALSE(path[2]->is_accounted);
+
+    BlockTreeMatchResult probe;
+    ASSERT_FALSE(cache_->matchForExternalInsert(keys, 1, probe).hasError());
+    releaseRequestRefsForTest(*cache_, probe.matched_device_resources);
+    EXPECT_FALSE(path[1]->is_accounted);
+    EXPECT_FALSE(path[2]->is_accounted);
+
+    auto first = cache_->match(keys);
+    EXPECT_EQ(first.reuse_accounting.unaccountedBlocks(2), 1u);
+    EXPECT_EQ(first.reuse_accounting.unaccountedBlocks(3), 2u);
+    EXPECT_FALSE(path[1]->is_accounted);
+    EXPECT_FALSE(path[2]->is_accounted);
+    releaseRequestRefsForTest(*cache_, first.matched_device_resources);
+
+    ASSERT_FALSE(cache_->insertExternalBlocks(keys, 1, resources, currentTimeMs() + 10000).hasError());
+    cache_->insert(keys, resources, Tier::DEVICE);
+    EXPECT_TRUE(path[0]->is_accounted);
+    EXPECT_FALSE(path[1]->is_accounted);
+    EXPECT_FALSE(path[2]->is_accounted);
+    cache_->insert({100, 200}, {resources[0], resources[1]}, Tier::DEVICE, false, true);
+    EXPECT_TRUE(path[1]->is_accounted);
+    EXPECT_FALSE(path[2]->is_accounted);
+    auto second = cache_->match(keys);
+    EXPECT_EQ(second.reuse_accounting.unaccountedBlocks(second.matched_device_blocks), 1u);
+    releaseRequestRefsForTest(*cache_, second.matched_device_resources);
+    cache_->insert(keys, resources, Tier::DEVICE, false, true);
+    ASSERT_FALSE(cache_->insertExternalBlocks(keys, 1, resources, currentTimeMs() + 10000).hasError());
+    auto third = cache_->match(keys);
+    EXPECT_EQ(third.reuse_accounting.unaccountedBlocks(third.matched_device_blocks), 0u);
+    EXPECT_EQ(first.reuse_accounting.unaccountedBlocks(3), 2u);
+    EXPECT_EQ(second.reuse_accounting.unaccountedBlocks(3), 1u);
+    releaseRequestRefsForTest(*cache_, third.matched_device_resources);
+}
+
+TEST_F(BlockTreeCacheTest, ConcurrentMatchesBeforePrefillCommitAllKeepTheirAccountingSnapshot) {
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    resources[1][0].device_blocks = {43};
+    ASSERT_FALSE(cache_->insertExternalBlocks({100, 200}, 0, resources, currentTimeMs() + 10000).hasError());
+    std::atomic<size_t>      matched_requests{0};
+    std::atomic<bool>        committed{false};
+    std::atomic<size_t>      first_use_blocks{0};
+    std::vector<std::thread> requests;
+    for (size_t request = 0; request < 8; ++request) {
+        requests.emplace_back([&]() {
+            auto match = cache_->match({100, 200});
+            matched_requests.fetch_add(1);
+            while (!committed.load()) {
+                std::this_thread::yield();
+            }
+            first_use_blocks.fetch_add(match.reuse_accounting.unaccountedBlocks(2));
+            releaseRequestRefsForTest(*cache_, match.matched_device_resources);
+        });
+    }
+    while (matched_requests.load() != requests.size()) {
+        std::this_thread::yield();
+    }
+    cache_->insert({100, 200}, resources, Tier::DEVICE, false, true);
+    committed.store(true);
+    for (auto& request : requests) {
+        request.join();
+    }
+    EXPECT_EQ(first_use_blocks.load(), 16u);
+    auto subsequent = cache_->match({100, 200});
+    EXPECT_EQ(subsequent.reuse_accounting.unaccountedBlocks(2), 0u);
+    releaseRequestRefsForTest(*cache_, subsequent.matched_device_resources);
+}
+
+TEST_F(BlockTreeCacheTest, WritebackAccountingSnapshotSurvivesNodeRecreation) {
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    ASSERT_FALSE(cache_->insertExternalBlocks({100}, 0, resources, currentTimeMs() + 10000).hasError());
+    auto previous = cache_->match({100});
+    releaseRequestRefsForTest(*cache_, previous.matched_device_resources);
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
+    ASSERT_TRUE(cache_->tree()->findNode({100}).empty());
+    resources[0][0].device_blocks = {43};
+    ASSERT_FALSE(cache_->insertExternalBlocks({100}, 0, resources, currentTimeMs() + 10000).hasError());
+    auto current = cache_->match({100});
+    cache_->insert({100}, resources, Tier::DEVICE, false, true);
+    EXPECT_EQ(previous.reuse_accounting.unaccountedBlocks(1), 1u);
+    EXPECT_EQ(current.reuse_accounting.unaccountedBlocks(1), 1u);
+    EXPECT_TRUE(cache_->tree()->findNode({100}).front()->is_accounted);
+    releaseRequestRefsForTest(*cache_, current.matched_device_resources);
+}
+
+TEST_F(BlockTreeCacheTest, PrefillAccountingDoesNotConfirmRejectedInsertSuffix) {
+    const CacheKeysType keys{100, 200, 300};
+    std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
+    for (size_t index = 0; index < resources.size(); ++index) {
+        resources[index][0].device_blocks = {static_cast<BlockIdxType>(42 + index)};
+    }
+    ASSERT_FALSE(cache_->insertExternalBlocks(keys, 0, resources, currentTimeMs() + 10000).hasError());
+    const auto path = cache_->tree()->findNode(keys);
+    ASSERT_EQ(path.size(), 3u);
+    path[1]->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
+    cache_->insert(keys, resources, Tier::DEVICE, false, true);
+    EXPECT_TRUE(path[0]->is_accounted);
+    EXPECT_FALSE(path[1]->is_accounted);
+    EXPECT_FALSE(path[2]->is_accounted);
+    path[1]->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
+    cache_->insert(keys, resources, Tier::DEVICE, false, true);
+    EXPECT_TRUE(path[1]->is_accounted);
+    EXPECT_TRUE(path[2]->is_accounted);
+}
+
 TEST_F(BlockTreeCacheTest, IncompleteResidentInsertKeepsPrefixProtectedAndRetrySucceeds) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};

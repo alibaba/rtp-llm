@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 namespace {
@@ -265,6 +266,41 @@ std::shared_ptr<LoadAsyncContext> takeLoadContext(BlockTreeMatchResult& result) 
     auto context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
     result.async_context.reset();
     return context;
+}
+
+TEST(BlockTreeStorerTest, PrefillAccountingWaitsForSuccessfulLowerTierPublication) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    for (const Tier tier : {Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(tierName(tier));
+        auto env = makeStoreEnvironment("prefill_accounting", true, tier == Tier::HOST, tier == Tier::DISK);
+        auto engine = installStoreTransferEngine(env, TransferCopyAction::Fail);
+        const auto sources = allocateDeviceBlocksForTest(*env.groups[0], 1);
+        ASSERT_EQ(sources.size(), 1u);
+        block_tree_cache_detail::ScopeRollback release_sources(
+            [&]() { unreferenceDeviceBlocksForTest(*env.groups[0], sources); });
+        const auto resources = deviceSourceResources(sources);
+        ASSERT_TRUE(env.cache->insertExternalBlocks({100}, 0, resources, currentTimeMs() + 10000).ok());
+        const auto path = env.cache->tree()->findNode({100});
+        ASSERT_EQ(path.size(), 1u);
+        for (const auto action : {TransferCopyAction::Fail, TransferCopyAction::Succeed}) {
+            SCOPED_TRACE(transferCopyActionName(action));
+            auto barrier = std::make_shared<CallbackBarrier>();
+            block_tree_cache_detail::ScopeRollback release_barrier([barrier]() { barrier->release(); });
+            engine->setCopyBehavior(action, barrier);
+            env.cache->insert({100}, resources, tier, false, true);
+            ASSERT_TRUE(barrier->waitUntilEnteredFor(1, std::chrono::seconds(5)));
+            auto before = env.cache->match({100});
+            EXPECT_EQ(before.reuse_accounting.unaccountedBlocks(1), 1u);
+            releaseRequestRefsForTest(*env.cache, before.matched_device_resources);
+            barrier->release();
+            BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
+            EXPECT_EQ(path[0]->is_accounted, action == TransferCopyAction::Succeed);
+            EXPECT_EQ(before.reuse_accounting.unaccountedBlocks(1), 1u);
+            EXPECT_EQ(env.storeRefCount(), 0u);
+        }
+    }
 }
 
 class ResidentTieredCacheTest: public ::testing::TestWithParam<Tier> {

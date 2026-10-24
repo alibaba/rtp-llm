@@ -331,6 +331,7 @@ message AuxInfoPB {
     int32 prefill_disk_reuse_len = 32;
     int32 decode_disk_reuse_len = 33;
     bool xgrammar_update_timeout = 34;
+    int32 writeback_first_use_len = 35;
 }
 
 message PromptLogitsOutputPB {
@@ -952,6 +953,7 @@ message SideChannelPayloadPB {
     // Prefill owns embedding-derived media lengths; Decode has no embedding.
     map<int32, int32> multimodal_lengths = 13;
     PromptLogitsOutputPB prompt_logits = 14;
+    int32 writeback_first_use_len = 15;
 }
 
 message P2PConnectorStartLoadResponsePB {

@@ -557,8 +557,26 @@ void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
     initial_reuse_length_ = initial_reuse_length;
 }
 
-void GenerateStream::setPrefillReuseLength(
-    int64_t total, int64_t local, int64_t remote, int64_t memory, int64_t disk, bool independent_pools) {
+void GenerateStream::setWritebackFirstUseLength(int length) {
+    writeback_first_use_length_ = length;
+}
+
+int GenerateStream::writebackFirstUseLength() const {
+    return writeback_first_use_length_;
+}
+
+int GenerateStream::prefillWritebackFirstUseLength() const {
+    return prefill_writeback_first_use_length_;
+}
+
+void GenerateStream::setPrefillReuseLength(int64_t total,
+                                           int64_t local,
+                                           int64_t remote,
+                                           int64_t memory,
+                                           int64_t disk,
+                                           bool    independent_pools,
+                                           int     writeback_first_use_len) {
+    prefill_writeback_first_use_length_ = writeback_first_use_len;
     prefill_independent_block_pools_ = independent_pools;
     prefill_total_reuse_len_  = total;
     prefill_local_reuse_len_  = local;

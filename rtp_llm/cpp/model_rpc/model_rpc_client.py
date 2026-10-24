@@ -1066,6 +1066,10 @@ def trans_output(
                 pd_sep=aux_info_pb.pd_sep,
                 xgrammar_update_timeout=aux_info_pb.xgrammar_update_timeout,
                 reuse_len=aux_info_pb.total_reuse_len,
+                actual_reuse_len=(
+                    aux_info_pb.total_reuse_len + aux_info_pb.writeback_first_use_len
+                ),
+                writeback_first_use_len=aux_info_pb.writeback_first_use_len,
                 local_reuse_len=aux_info_pb.local_reuse_len,
                 remote_reuse_len=aux_info_pb.remote_reuse_len,
                 memory_reuse_len=aux_info_pb.memory_reuse_len,

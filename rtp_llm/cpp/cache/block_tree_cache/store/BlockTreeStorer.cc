@@ -44,6 +44,8 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               Tier                                              target_tier,
                                               bool                                              is_resident,
                                               size_t&                                           resident_prefix_length,
+                                              bool                                              is_writeback,
+                                              bool                                              account_for_prefill,
                                               std::optional<int64_t>                            request_id) {
     resident_prefix_length = 0;
     assert(!is_resident || target_tier == Tier::DEVICE);
@@ -51,9 +53,9 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                             "unsupported store target tier: %s",
                             tierName(target_tier));
     if (target_tier == Tier::DEVICE) {
-        publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length);
+        publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length, is_writeback, account_for_prefill);
     } else {
-        submitLowerTierLocked(cache_keys, resources, target_tier, request_id);
+        submitLowerTierLocked(cache_keys, resources, target_tier, request_id, account_for_prefill);
         return {};
     }
     return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources, request_id)) :
@@ -63,8 +65,16 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
 void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                           const std::vector<std::vector<GroupSetResource>>& resources,
                                           bool                                              is_resident,
-                                          size_t&                                           resident_prefix_length) {
-    const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false, is_resident);
+                                          size_t&                                           resident_prefix_length,
+                                          bool                                              is_writeback,
+                                          bool                                              account_for_prefill) {
+    const BlockTreeInsertResult insert_result =
+        tree_->insertNode(cache_keys, resources, false, is_resident, account_for_prefill);
+    if (is_writeback) {
+        for (auto* node : insert_result.inserted_nodes) {
+            node->is_accounted = false;
+        }
+    }
     if (insert_result.hard_stop) {
         metrics_reporter_.reportInsertHardStop(*insert_result.hard_stop);
     }
@@ -103,7 +113,8 @@ StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&         
 void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                              cache_keys,
                                             const std::vector<std::vector<GroupSetResource>>& resources,
                                             Tier                                              target_tier,
-                                            std::optional<int64_t>                            request_id) {
+                                            std::optional<int64_t>                            request_id,
+                                            bool                                              account_for_prefill) {
     if (stopping_.load()) {
         return;
     }
@@ -113,6 +124,7 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         cache_keys,
         std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_),
         request_id);
+    task->account_for_prefill = account_for_prefill;
 
     block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() { settleLocked(*task, /*publish=*/false); });
 
@@ -225,7 +237,7 @@ size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
             resources[descriptor.path_index][descriptor.group_set_id].setBlocks(
                 task.target_tier, {descriptor.singleBlockAt(task.target_tier)});
         }
-        insert_result = tree_->insertNode(task.cache_keys, resources, true, false);
+        insert_result = tree_->insertNode(task.cache_keys, resources, true, false, task.account_for_prefill);
     }
 
     store_task_runner_.releaseTaskResources(task);

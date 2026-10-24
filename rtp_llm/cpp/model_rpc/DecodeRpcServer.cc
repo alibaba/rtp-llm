@@ -907,7 +907,7 @@ void DecodeRpcServer::updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_p
 
     for (size_t i = 0; i < outputs_pb.flatten_output().aux_info_size(); i++) {
         auto       aux_info                = outputs_pb.mutable_flatten_output()->mutable_aux_info(i);
-        const auto decode_total_reuse_len  = aux_info->total_reuse_len();
+        const auto decode_total_reuse_len  = aux_info->total_reuse_len() + aux_info->writeback_first_use_len();
         const auto decode_local_reuse_len  = aux_info->local_reuse_len();
         const auto decode_remote_reuse_len = aux_info->remote_reuse_len();
         const auto decode_memory_reuse_len = aux_info->memory_reuse_len();
@@ -918,7 +918,9 @@ void DecodeRpcServer::updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_p
 
         // Generic prompt-cache accounting describes Prefill reuse. Decode reuse
         // is reported separately and must not inflate OpenAI cached_tokens.
-        aux_info->set_total_reuse_len(reuse_lens.total);
+        const auto first_use_len = std::clamp<int64_t>(stream->prefillWritebackFirstUseLength(), 0, reuse_lens.total);
+        aux_info->set_writeback_first_use_len(first_use_len);
+        aux_info->set_total_reuse_len(reuse_lens.total - first_use_len);
         aux_info->set_local_reuse_len(reuse_lens.local);
         aux_info->set_remote_reuse_len(reuse_lens.remote);
         aux_info->set_memory_reuse_len(reuse_lens.memory);

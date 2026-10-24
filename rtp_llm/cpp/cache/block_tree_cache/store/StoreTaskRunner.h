@@ -42,6 +42,7 @@ public:
         CacheKeysType cache_keys;
         TransferTask  transfer_task;
         Phase         phase{Phase::CREATED};
+        bool          account_for_prefill{false};
     };
     using TaskPtr = std::shared_ptr<Task>;
 

@@ -752,6 +752,7 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
     const int            cp_scale = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
     BlockTreeMatchResult match_result =
         block_tree_cache_->match(cache_keys, valid_prefix, enable_storage_backend, request_id);
+    prepared.reuse_accounting = std::move(match_result.reuse_accounting);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
@@ -878,6 +879,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                             load_context};
         result.match_end_time_us = match_end_time_us;
         result.load_attempted    = load_attempted;
+        result.reuse_accounting  = std::move(deferred_prepared->reuse_accounting);
         return result;
     }
 
@@ -888,6 +890,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
         true, static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens, match_cost_time_us, load_context};
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
+    result.reuse_accounting  = std::move(prepared.reuse_accounting);
     return result;
 }
 
@@ -1268,7 +1271,8 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         insert_keys.resize(publish_prefix);
         resources.resize(publish_prefix);
         resident_prefix_length += block_tree_cache_->insert(
-            insert_keys, resources, insert_info.target_tier, insert_info.is_resident, insert_info.request_id);
+            insert_keys, resources, insert_info.target_tier, insert_info.is_resident, insert_info.request_id,
+            insert_info.account_for_prefill);
     }
 }
 
