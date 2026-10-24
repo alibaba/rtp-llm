@@ -54,3 +54,18 @@ def test_expired_measurement_never_calls_case_projection(measured, monkeypatch):
     with pytest.raises(TimeoutError):
         policy.finalize(ctx, snapshot, Deadline(-1, lambda: 0))
     project.assert_not_called()
+
+
+def test_finalizer_published_metrics_refresh_the_analysis(measured, monkeypatch):
+    policy, ctx, snapshot, metrics = measured
+    from monitoring.metric_store import MetricStore
+    store = MetricStore.read(ctx.artifact_dir)
+    series = {}
+    store.series = lambda *_: (dict(series), {}, {}, [])
+    def finalize(directory, analysis, selected, deadline):
+        assert analysis['series'] == {}
+        series['derived'] = [[0, 7]]
+        return {'ha_evidence': {}}
+    monkeypatch.setattr(metrics, 'finalize', finalize)
+    finalized = policy.finalize(ctx, snapshot, Deadline(100, lambda: 0))
+    assert finalized.analysis['series'] == {'derived': [[0, 7]]}

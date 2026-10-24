@@ -144,26 +144,32 @@ class MetricStore:
                 "last": lambda x: x[-1]}[op](values)
         return value, rows
 
-    def series(self, anchor):
-        series, sources = {}, {}
+    def project(self, anchor):
+        """Read structured series once; only the presentation timestamp changes."""
+        rows, seen = [], set()
         for observations in self.document["metrics"].values():
             for row in observations:
                 key = row.get("series_key")
-                if not row["points"]:
-                    continue
                 if key is None:
                     key = "/".join((str(row["epoch"]), row["source"], row["metric_id"],
                                     json.dumps(row["labels"], sort_keys=True)))
-                if key in series:
+                if row["points"] and key in seen:
                     raise MetricContractError("duplicate archived series key: " + key)
+                if row["points"]:
+                    seen.add(key)
                 points = list(_ordered_points(row))
                 if any(value is not None and (type(value) not in (int, float) or not math.isfinite(value)) for _, value in points):
                     raise MetricUnavailable(row['metric_id'] + ': non-finite observation')
-                series[key] = [[t - anchor, value] for t, value in points]
-                sources[key] = dict(row["provenance"], metric_id=row["metric_id"],
-                                    unit=self.document["definitions"][row["metric_id"]]["unit"])
+                rows.append(dict(row, series_key=key, points=[[t - anchor, value] for t, value in points],
+                                 unit=self.document["definitions"][row["metric_id"]]["unit"]))
         gaps = {k: [t - anchor for t in v] for k, v in self.document.get("collection_gaps", {}).items()}
-        return series, sources, gaps, copy.deepcopy(self.document.get("errors", []))
+        return rows, gaps, copy.deepcopy(self.document.get("errors", []))
+
+    def series(self, anchor):
+        rows, gaps, errors = self.project(anchor)
+        rows = [row for row in rows if row["points"]]
+        return ({row["series_key"]: row["points"] for row in rows},
+                {row["series_key"]: dict(row["provenance"], metric_id=row["metric_id"], unit=row["unit"]) for row in rows}, gaps, errors)
 
 
 def _ordered_points(row):

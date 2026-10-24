@@ -3,7 +3,6 @@
 from artifacts.gate_inputs import evidence_origin
 
 import hashlib
-import json
 from pathlib import Path
 
 from reporting.view_config import view
@@ -36,61 +35,58 @@ def request_outcomes(evidence):
 
 def prepare_report(directory, evidence, *, presentation=None):
     from monitoring.metric_store import MetricStore
-    from reporting.view_config import view
     from statistics import median
 
     rows = evidence["samples"]
     anchor = evidence_origin(evidence)
-    series, sources, gaps, errors = MetricStore.read(directory).series(anchor)
+    store = MetricStore.read(directory)
+    observations, gaps, errors = store.project(anchor)
+    sources = {row["series_key"]: dict(row["provenance"], metric_id=row["metric_id"], unit=row["unit"])
+               for row in observations if row["points"]}
     presentation = presentation if presentation is not None else view("cache_scale_in.yaml")
     from reporting.metric_binding import monitoring_audit
-    inventory = monitoring_audit(MetricStore.read(directory), presentation)
-    metric_defs = presentation.charts.curves
+    inventory = monitoring_audit(store, presentation)
     diagnostic_only = set(presentation.metrics.diagnostic_only)
     curves = []
     audit = []
-    found = set()
-    for key, points in series.items():
-        if "promql" not in sources[key]:
+    visible_end = max((r["t"] for r in rows), default=0)
+    for observation in observations:
+        points = observation["points"]
+        if not points:
             continue
-        _, source, metric, label_json = key.split("/", 3)
-        if metric == "up":
+        provenance = sources[observation["series_key"]]
+        identity, labels = observation["metric_id"], observation["labels"]
+        if "promql" not in provenance or identity.split("/", 1)[1] == "up":
             continue
-        labels = json.loads(label_json)
-        identity = sources[key]["metric_id"]
-        kind, metric = identity.split("/", 1)
         if labels.get("role") == "decode":
             continue
         from reporting.metric_binding import bindings
         selected_styles = bindings(presentation, identity, labels)
         if not selected_styles:
             if identity in diagnostic_only:
-                audit.append([identity, "—", "DIAGNOSTIC_ONLY", sources[key]["promql"]])
+                audit.append([identity, "—", "DIAGNOSTIC_ONLY", provenance["promql"]])
             continue
         for curve_id, definition in selected_styles:
             name = definition.name
             qualifiers = [str(value) for label, value in sorted(labels.items()) if label not in {"role"}]
             if qualifiers:
                 name += " · " + ", ".join(qualifiers)
-            found.add((kind, metric))
-            visible_end = max((r["t"] for r in rows), default=0)
             valid_points = sum(
                 value is not None and 0 <= timestamp <= visible_end
                 for timestamp, value in points
             )
-            expected = max(1, round((visible_end + 1) / max(sources[key].get("step", 1), 0.001)))
+            expected = max(1, round((visible_end + 1) / max(provenance.get("step", 1), 0.001)))
             coverage = min(1, valid_points / expected)
             curves.append(materialize(
                 curve_id, definition, points, name=name,
-                description=sources[key]["promql"], provenance=sources[key],
+                description=provenance["promql"], provenance=provenance,
             ))
-            audit.append([name, f"{coverage:.0%}", "OK" if coverage >= 0.8 else "SPARSE", sources[key]["promql"]])
-    for identity, definition in metric_defs.items():
-        kind, metric = identity.split("/", 1)
-        if (kind, metric) not in found and identity == "mock/context_completed_qps":
+            audit.append([name, f"{coverage:.0%}", "OK" if coverage >= 0.8 else "SPARSE", provenance["promql"]])
+    by_id = {curve["metric_id"]: curve for curve in curves}
+    for identity, definition in presentation.charts.curves.items():
+        if identity not in by_id and identity == "mock/context_completed_qps":
             audit.append([definition.name, "0%", "MISSING", "本次归档没有该监控序列"])
 
-    by_id = {curve["metric_id"]: curve for curve in curves}
     def values(metric_id, start=None, end=None):
         return [
             point["y"]

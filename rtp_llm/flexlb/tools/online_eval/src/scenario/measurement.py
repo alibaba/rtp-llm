@@ -123,10 +123,10 @@ class WorkloadPolicy:
                 raise ValueError("case metric finalization must return selected source metadata")
             json.dumps(metadata, allow_nan=False)
             analysis["producer_results"] = metadata
-        deadline.check()
-        from monitoring.metric_store import MetricStore
-        analysis["series"], analysis["statistic_sources"], _, _ = MetricStore.read(ctx.artifact_dir).series(
-            monitor.anchor["epoch_s"])
+            deadline.check()
+            from monitoring.metric_store import MetricStore
+            analysis["series"], analysis["statistic_sources"], _, _ = MetricStore.read(ctx.artifact_dir).series(
+                monitor.anchor["epoch_s"])
         deadline.check()
         return finalized
 

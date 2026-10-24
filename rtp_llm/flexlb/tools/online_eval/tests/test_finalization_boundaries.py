@@ -132,7 +132,10 @@ def test_new_resource_evidence_needs_no_policy_branch(tmp_path):
             raise AssertionError("implicit resource evidence")
     ctx.register_resource("unexported", NotEvidence())
     result = dict(id="example", status="PASS", error=None, stages=[], cleanup=[])
-    policy.finalize(ctx, result, Deadline(20, clock, clock.sleep))
+    from monitoring.metric_store import MetricStore
+    with mock.patch.object(MetricStore, "project", autospec=True, side_effect=MetricStore.project) as project:
+        policy.finalize(ctx, result, Deadline(20, clock, clock.sleep))
+    assert project.call_count == 1
     payload = json.loads((tmp_path / "workload-evidence.json").read_text())
     assert payload["request_resources"][0]["records"][0]["rid"] == "new"
     assert payload["expected_outages"][0]["source"] == "7/new"

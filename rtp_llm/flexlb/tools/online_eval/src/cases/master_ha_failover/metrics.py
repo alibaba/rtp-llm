@@ -112,7 +112,7 @@ def produce(directory, payload):
     fields = [field for field in STATE_FIELDS if "ha/" + field in store.document["definitions"]]
     request_path, state_path, epoch = _artifacts(payload, require_states=bool(fields))
     requests, states = _read_rows(request_path), _read_rows(state_path) if fields else []
-    configured = (payload.get("configuration") or {}).get("environment", {}).get("n_prefill")
+    configured = (payload.get("configuration") or payload.get("implementation", {}).get("configuration", {})).get("environment", {}).get("n_prefill")
     observed = len({r.get("prefill") for r in requests if r.get("prefill")})
     fleet_size = configured if type(configured) is int and configured > 0 else observed
     values = {key: [(None, points)] for key, points in _request_series(requests, anchor).items()}

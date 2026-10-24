@@ -147,6 +147,45 @@ class MetricArtifactTest(unittest.TestCase):
             for path in Path(d).glob("telemetry/*/queries.json"): path.unlink()
             self.assertEqual(MetricStore.read(d).reduce("mock/temperature",op="max"),3)
 
+    def test_structured_projection_preserves_identity_nulls_and_legacy_view(self):
+        with tempfile.TemporaryDirectory() as d:
+            archive(d, {"worker/temperature": dict(promql="temperature", result=[
+                dict(metric={"engine": "a"}, values=[[1, "0"], [2, "NaN"], [3, "3"]])])},
+                metric_plan=self.plan())
+            store = export_metrics(d)
+            rows, gaps, errors = store.project(1)
+            row, = rows
+            self.assertEqual(row["points"], [[0, 0], [1, None], [2, 3]])
+            self.assertEqual((row["metric_id"], row["epoch"], row["labels"], row["unit"]),
+                             ("mock/temperature", "1", {"engine": "a"}, "K"))
+            self.assertEqual(row["provenance"], store.document["metrics"]["mock/temperature"][0]["provenance"])
+            self.assertEqual(store.series(1), (
+                {row["series_key"]: row["points"]},
+                {row["series_key"]: dict(row["provenance"], metric_id="mock/temperature", unit="K")},
+                gaps, errors))
+            self.assertEqual(store.document["metrics"]["mock/temperature"][0]["points"][0], [1, 0])
+            store.document["metrics"]["mock/temperature"][0]["points"] = []
+            self.assertEqual(store.project(1)[0][0]["points"], [])
+            self.assertEqual(store.series(1)[:2], ({}, {}))
+
+    def test_ha_producer_uses_declared_fleet_from_compact_results(self):
+        from cases.master_ha_failover.metrics import produce
+        with tempfile.TemporaryDirectory() as d:
+            export_metrics(d, self.plan()).save(d)
+            journal = Path(d) / "client_events.jsonl"
+            journal.write_text(json.dumps(dict(send_start_epoch_ms=1000, status="ok", prefill="P0")) + "\n")
+            payload = dict(clock_anchor=dict(epoch_s=1), stages=[dict(
+                output=dict(rows=dict(kind="ha_rows", env_epoch=1)), artifacts=[str(journal)])],
+                implementation=dict(configuration=dict(environment=dict(n_prefill=125))))
+            compact = produce(d, payload)
+            self.assertEqual(compact["prefill_fleet_size"], 125)
+            self.assertEqual(compact["prefill_fleet_size_source"], "declared configuration")
+            payload["configuration"] = dict(environment=dict(n_prefill=8))
+            self.assertEqual(produce(d, payload)["prefill_fleet_size"], 8)
+            del payload["configuration"]
+            del payload["implementation"]
+            self.assertEqual(produce(d, payload)["prefill_fleet_size"], 1)
+
     def test_missing_and_invalid_data_are_not_threshold_failures(self):
         with tempfile.TemporaryDirectory() as d:
             path=archive(d, {"worker/temperature":dict(promql="temperature",result=[

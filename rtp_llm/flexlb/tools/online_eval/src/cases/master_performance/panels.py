@@ -7,8 +7,6 @@ from reporting.gate_lines import Threshold, apply_gate_lines
 
 
 def prepare_curves(directory, evidence, presentation):
-    import json
-
     lo = evidence.get("window", {}).get("start_epoch_ms", 0)
     curves, audit = [], []
 
@@ -25,24 +23,18 @@ def prepare_curves(directory, evidence, presentation):
     from reporting.metric_binding import monitoring_audit
     inventory = monitoring_audit(store, presentation)
     from reporting.metric_binding import bindings
-    for identity, rows in store.document["metrics"].items():
-        if not identity.startswith("request/"):
-            continue
-        for row in rows:
-            for curve_id, _ in bindings(presentation, identity, row["labels"]):
-                add(curve_id, [(t-lo/1000, value) for t,value in row["points"]],
-                    "逐请求证据；cohort 和完成窗口由指标生产器冻结，不替代整窗门禁 p99",
+    rows, gaps, errors = store.project(lo / 1000)
+    for row in rows:
+        if row["metric_id"].startswith("request/"):
+            for curve_id, _ in bindings(presentation, row["metric_id"], row["labels"]):
+                add(curve_id, row["points"], "逐请求证据；cohort 和完成窗口由指标生产器冻结，不替代整窗门禁 p99",
                     labels=row["labels"], provenance=row["provenance"])
 
-    series, sources, gaps, errors = MetricStore.read(directory).series(lo / 1000)
-    for key, points in series.items():
-        if "promql" not in sources[key]:
+    for row in rows:
+        provenance = dict(row["provenance"], metric_id=row["metric_id"], unit=row["unit"])
+        identity, labels = row["metric_id"], row["labels"]
+        if not row["points"] or "promql" not in provenance or identity.split("/", 1)[1] == "up":
             continue
-        epoch, source, metric, label_json = key.split("/", 3)
-        if metric == "up":
-            continue
-        labels = json.loads(label_json)
-        identity = sources[key]["metric_id"]
         selected = bindings(presentation, identity, labels)
         residual = {k:v for k,v in labels.items() if k != "role"}
         for curve_id, style in selected:
@@ -50,11 +42,10 @@ def prepare_curves(directory, evidence, presentation):
             if residual:
                 name += " · " + ", ".join(f"{k}={v}" for k, v in sorted(residual.items()))
             if any(c["name"] == name for c in curves):
-                name += " · epoch " + epoch
-            visible = points
-            add(curve_id, visible, sources[key]["promql"], name=name, labels=labels, provenance=sources[key])
-            audit.append(dict(name=name, samples=sum(v is not None for _,v in visible), **sources[key]))
-    return curves, dict(queries=audit, gaps=gaps, errors=errors, available=bool(series), metric_classification=inventory)
+                name += " · epoch " + row["epoch"]
+            add(curve_id, row["points"], provenance["promql"], name=name, labels=labels, provenance=provenance)
+            audit.append(dict(name=name, samples=sum(v is not None for _,v in row["points"]), **provenance))
+    return curves, dict(queries=audit, gaps=gaps, errors=errors, available=any(row["points"] for row in rows), metric_classification=inventory)
 
 
 def report_panels(curves, criteria, presentation):
