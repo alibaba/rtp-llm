@@ -880,7 +880,6 @@ TEST_F(P2PConnectorWriteWorkerTest, LinearPartitionsAreRejectedBeforeTransfer) {
     auto groups                     = config_.topology->groups();
     groups[0].spec                  = LinearKVCacheSpec::build(desc, context);
     groups[0].policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
-    groups[0].kv_block_stride_bytes = groups[0].spec->block_size_bytes();
     config_.topology                = CacheTopology::create(std::move(groups), config_.topology->layers());
     auto source                     = makeWriteDecodeConnector(config_, source_, sender_);
     auto target                     = makeWritePrefillConnector(config_, target_, receiver_);

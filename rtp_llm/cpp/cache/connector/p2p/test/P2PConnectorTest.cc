@@ -820,8 +820,8 @@ TEST_F(P2PConnectorTest, ExecuteFunction_RejectsMismatchedRouteTagBeforeWorkerLo
         EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
         EXPECT_NE(response.p2p_response().error_message().find("route cache tag does not match"), std::string::npos);
         // Rejection happens before registering read state or a target-write lease.
-        EXPECT_TRUE(connector->decode_->worker_->read_tasks_.empty());
-        EXPECT_TRUE(connector->decode_->worker_->lease_map_.empty());
+        EXPECT_TRUE(connector->decode_->read_worker_->read_tasks_.empty());
+        EXPECT_TRUE(connector->decode_->read_worker_->lease_map_.empty());
     }
 }
 
@@ -1250,7 +1250,7 @@ TEST_F(P2PConnectorTest, EarlyCancelRetentionUsesReceiverClockAndKeepsReadStateI
         EXPECT_TRUE(connector->executeFunction(request, response));
         EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
         const auto                  after_ms = currentTimeMs();
-        auto*                       worker   = connector->decode_->worker_.get();
+        auto*                       worker   = connector->decode_->read_worker_.get();
         std::lock_guard<std::mutex> lock(worker->read_tasks_mutex_);
         const auto                  it = worker->pending_cancel_keys_.find(key);
         ASSERT_NE(it, worker->pending_cancel_keys_.end());
@@ -1278,7 +1278,7 @@ TEST_F(P2PConnectorTest, InvalidCancelRetentionStillRegistersBoundedLocalFence) 
         FunctionResponsePB response;
         EXPECT_TRUE(connector->executeFunction(request, response));
         const auto                  after_ms = currentTimeMs();
-        auto*                       worker   = connector->decode_->worker_.get();
+        auto*                       worker   = connector->decode_->read_worker_.get();
         std::lock_guard<std::mutex> lock(worker->read_tasks_mutex_);
         const auto                  it = worker->pending_cancel_keys_.find(key);
         ASSERT_NE(it, worker->pending_cancel_keys_.end());
@@ -1308,7 +1308,7 @@ TEST_F(P2PConnectorTest, PrefillBroadcastBudgetDoesNotInterpretSourceClock) {
 
 TEST_F(P2PConnectorTest, LayerBeforeStartLoadReanchorsHorizonWithoutChangingSourceIdentity) {
     auto resource = createValidKVCacheResource();
-    auto store    = connector_->prefill_->worker_->getComputedBuffersStore();
+    auto store    = connector_->prefill_->read_worker_->getComputedBuffersStore();
     for (const int64_t skew_ms : {-3600000LL, 3600000LL}) {
         const auto request_id      = 9600 + (skew_ms > 0);
         const auto source_identity = currentTimeMs() + skew_ms + 60000;

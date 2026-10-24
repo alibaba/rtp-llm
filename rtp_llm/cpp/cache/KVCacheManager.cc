@@ -1154,6 +1154,7 @@ bool KVCacheManager::initP2PConnector() {
     p2p_config.scheduler_config.topology = active_topology;
     p2p_config.worker_config.topology    = active_topology;
     p2p_config.scheduler_config.cache_key_tokens_per_block = config_.seq_size_per_block;
+    p2p_config.scheduler_config.cache_key_hash_seed = config_.cache_key_hash_seed;
     p2p_config.worker_config.cache_key_tokens_per_block    = config_.seq_size_per_block;
     const int cp_size = parallelism_config_.prefill_cp_config.kv_cache_sharded ?
                             static_cast<int>(parallelism_config_.tp_size) :
@@ -1259,6 +1260,9 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheR
             return skip("invalid_snapshot");
         }
         const auto& source = resource->cacheResource(0);
+        if (!tokens->imageCacheIdentity(0, input_length).empty()) {
+            return skip("unsupported_image_cache_identity");
+        }
         const size_t blocks = kv_ready_token_count / config_.seq_size_per_block;
         if (blocks <= static_cast<size_t>(input_length / config_.seq_size_per_block)) {
             return skip("no_complete_suffix");
@@ -1267,7 +1271,8 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheR
         const auto      groups       = coordinator_manager_->cacheGroups();
         KVCacheResource selected;
         selected.initGroups(config_.topologyPtr());
-        selected.setCacheKeys(calculateCacheKeys(tokens->data(0), ready_tokens, config_.seq_size_per_block));
+        selected.setCacheKeys(calculateCacheKeys(tokens->data(0), ready_tokens, config_.seq_size_per_block,
+                                                 config_.cache_key_hash_seed));
         for (const auto& group : groups) {
             selected.mutableBlockIds(group->tag()).assign(source.blocks(group->tag()));
         }
