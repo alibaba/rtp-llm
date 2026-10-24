@@ -22,44 +22,44 @@ def non_rolling(case):
 
 def _cycle(case, restart_mode):
     data, windows = read_cycle(case)
-    case.step("setup", "setup", timeout_s=data.procedure["setup_timeout_s"])
+    case.step("setup", "setup", timeout_s=data['procedure']["setup_timeout_s"])
     elected = case.env.master_layout == 'dual_zookeeper'
     if elected:
         case.step('baseline_leadership', 'master_leadership', params={'targets': ['A', 'B']})
-    case.step("flow", "master_client_start", params=dict(driver(data.traffic, "ha_replay"), capture=data.observation["capture"]))
+    case.step("flow", "master_client_start", params=dict(driver(data['traffic'], "ha_replay"), capture=data['observation']["capture"]))
 
     # The producer keeps running while A and B are killed and restarted in order.
-    case.step("baseline_end", "master_mark", params=dict(data.procedure["baseline_wait"], event="baseline_end"))
-    case.step("kill_a", "master_fault", params=data.procedure["kill_a"])
-    case.step("b_ready", "master_ready", params=data.procedure["b_ready"])
+    case.step("baseline_end", "master_mark", params=dict(data['procedure']["baseline_wait"], event="baseline_end"))
+    case.step("kill_a", "master_fault", params=data['procedure']["kill_a"])
+    case.step("b_ready", "master_ready", params=data['procedure']["b_ready"])
     if elected:
         case.step('b_leadership', 'master_leadership', params={'targets': ['B'], 'leader': 'B'})
-    case.step("b_start", "master_mark", params=dict(data.procedure["settle"], event="b_start"))
-    case.step("b_end", "master_mark", params=dict(data.procedure["survivor_wait"], event="b_end"))
+    case.step("b_start", "master_mark", params=dict(data['procedure']["settle"], event="b_start"))
+    case.step("b_end", "master_mark", params=dict(data['procedure']["survivor_wait"], event="b_end"))
     if restart_mode == "non_rolling":
-        case.step("kill_b", "master_fault", params=data.procedure["kill_b"])
-        case.step("outage_start", "master_mark", params=dict(data.procedure["settle"], event="outage_start"))
-        case.step("outage_end", "master_mark", params=dict(data.procedure["outage_wait"], event="outage_end"))
-    case.step("restart_a", "master_restore", timeout_s=data.procedure["restart_timeout_s"],
+        case.step("kill_b", "master_fault", params=data['procedure']["kill_b"])
+        case.step("outage_start", "master_mark", params=dict(data['procedure']["settle"], event="outage_start"))
+        case.step("outage_end", "master_mark", params=dict(data['procedure']["outage_wait"], event="outage_end"))
+    case.step("restart_a", "master_restore", timeout_s=data['procedure']["restart_timeout_s"],
               params={"fault": output("kill_a", "fault")})
-    case.step("a_ready", "master_ready", params=data.procedure["a_ready"])
+    case.step("a_ready", "master_ready", params=data['procedure']["a_ready"])
     if elected:
         case.step('rejoin_leadership', 'master_leadership', params={'targets': ['A', 'B'], 'leader': 'B'} if restart_mode == 'rolling' else {'targets': ['A'], 'leader': 'A'})
     if restart_mode == "rolling":
-        case.step("kill_b", "master_fault", params=data.procedure["kill_b"])
+        case.step("kill_b", "master_fault", params=data['procedure']["kill_b"])
     if elected:
         case.step('a_leadership', 'master_leadership', params={'targets': ['A'], 'leader': 'A'})
-    case.step("a_start", "master_mark", params=dict(data.procedure["settle"], event="a_start"))
-    case.step("a_end", "master_mark", params=dict(data.procedure["survivor_wait"], event="a_end"))
-    case.step("restart_b", "master_restore", timeout_s=data.procedure["restart_timeout_s"],
+    case.step("a_start", "master_mark", params=dict(data['procedure']["settle"], event="a_start"))
+    case.step("a_end", "master_mark", params=dict(data['procedure']["survivor_wait"], event="a_end"))
+    case.step("restart_b", "master_restore", timeout_s=data['procedure']["restart_timeout_s"],
               params={"fault": output("kill_b", "fault")})
-    case.step("a_ready_final", "master_ready", params=data.procedure["a_ready"])
-    case.step("b_ready_final", "master_ready", params=data.procedure["b_ready"])
+    case.step("a_ready_final", "master_ready", params=data['procedure']["a_ready"])
+    case.step("b_ready_final", "master_ready", params=data['procedure']["b_ready"])
     if elected:
         case.step('final_leadership', 'master_leadership', params={'targets': ['A', 'B'], 'leader': 'A'})
-    case.step("both_start", "master_mark", params=dict(data.procedure["settle"], event="both_start"))
-    case.step("both_end", "master_mark", params=dict(data.procedure["both_wait"], event="both_end"))
-    case.step("finish", "master_client_finish", timeout_s=data.procedure["finish_timeout_s"],
+    case.step("both_start", "master_mark", params=dict(data['procedure']["settle"], event="both_start"))
+    case.step("both_end", "master_mark", params=dict(data['procedure']["both_wait"], event="both_end"))
+    case.step("finish", "master_client_finish", timeout_s=data['procedure']["finish_timeout_s"],
               params={"client": output("flow", "client"), "stop_sending": True})
 
     selected_windows = ["baseline", "b_only", "a_only", "both"]
@@ -80,7 +80,7 @@ def _cycle(case, restart_mode):
         checks.extend(["handover_errors", "late_errors", "rolling_errors"])
     checks.append("unique_requests")
     for name in checks:
-        params = dict(data.checks[name])
+        params = dict(data['checks'][name])
         window, = params.pop("windows")
         params.pop("unit")
         if window not in rows:
@@ -97,19 +97,12 @@ REPORT_VIEWS = {
 }
 
 
-from cases.master_ha_failover.metrics import produce_gates as produce_gate_metrics
 
 from scenario.registry import CaseDefinition
-from scenario.registry import MetricProducer
-from scenario.registry import ProducerPhase
-from cases.master_ha_failover.metrics import metric_contract
 from scenario.registry import EvidenceSource
-from scenario.contracts import FinalizationContext
 
 
-def produce_evidence(directory, context: FinalizationContext):
-    from cases.master_ha_failover.metrics import produce
-    return produce(directory, context.run)
+from cases.master_ha_failover import metrics
 from cases.master_ha_failover.observation import master_adapters, STATE_FIELDS
 
 from scenario.contracts import ExecutionRequirements
@@ -117,13 +110,10 @@ from scenario.contracts import ExecutionRequirements
 CASE = CaseDefinition(
     execution_requirements=ExecutionRequirements(request_evidence=True, monitoring=True),
     builders={"default": rolling, "non_rolling": non_rolling},
-    input_contract=INPUTS,
+    input_schema=INPUTS,
     actions=tuple(ACTION_HANDLERS),
     report_views=REPORT_VIEWS,
-    producers={
-        "ha_gates": MetricProducer(metric_contract, produce_gate_metrics, ProducerPhase.GATE),
-        "ha_evidence": MetricProducer(metric_contract, produce_evidence, ProducerPhase.FINALIZE),
-    },
+    metrics=metrics,
     sources={"master_inflight": EvidenceSource(master_adapters, frozenset(STATE_FIELDS),
                "master", frozenset({"http_up"}))},
 )

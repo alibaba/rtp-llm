@@ -14,10 +14,8 @@ from cases.master_performance.analysis import analyze as analyze_performance
 from cases.cache_scale_in.analysis import analyze as analyze_cache
 from cases.master_performance.report import write_report as performance_report
 from cases.cache_scale_in.report import write_report as cache_report
-from cases.master_performance.program import GATE as PERFORMANCE_GATE
-publish_performance = PERFORMANCE_GATE.publish
-from cases.cache_scale_in.program import GATE as CACHE_GATE
-publish_cache = CACHE_GATE.publish
+from delivery_fixtures import publish_performance
+from delivery_fixtures import publish_cache
 from test_performance_gate import evidence as performance_evidence
 import test_cache_scale_gate as cache_fixtures
 from reporting import load_analysis

@@ -84,10 +84,10 @@ def _prefill_balance_series(rows, anchor, fleet_size):
     return values
 
 
-from monitoring.producer_descriptions import MeasurementDescription, ProducerDescriptions
+from monitoring.measurement_descriptions import MeasurementDescription, MeasurementDescriptions
 from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
 
-_DESCRIPTIONS = ProducerDescriptions({
+_DESCRIPTIONS = MeasurementDescriptions({
     **{('ha_gates', 'ha_gate/' + name): MeasurementDescription(measure_client_metric,
         'client_journal', 'declared_request_window_and_selection', 'request_ledger', True)
         for name in HA_METRICS},
@@ -169,5 +169,32 @@ def _project_gate(store, stage, check):
     store.document["metrics"][identity] = observations + store.document["metrics"][identity]
 
 
-from scenario.gates import StagedGateProjection
-produce_gates = StagedGateProjection('master_client_check', _project_gate)
+def produce_gates(directory):
+    from monitoring.metric_store import MetricStore
+    directory = Path(directory)
+    store = MetricStore.read(directory)
+    for stage in json.loads((directory / "result.json").read_text())["stages"]:
+        if stage["action"] == "master_client_check":
+            for check in stage["checks"]:
+                if check["status"] in {"PASS", "FAIL", "WARNING"}:
+                    _project_gate(store, stage, check)
+    store.save(directory)
+
+
+CONTRACTS = dict.fromkeys(("ha_gates", "ha_evidence"), metric_contract)
+
+
+def project(directory, selected, deadline):
+    if "ha_gates" in selected:
+        deadline.check()
+        produce_gates(directory)
+        deadline.check()
+
+
+def finalize(directory, analysis, selected, deadline):
+    if "ha_evidence" not in selected:
+        return {}
+    deadline.check()
+    result = produce(directory, analysis)
+    deadline.check()
+    return {"ha_evidence": result}

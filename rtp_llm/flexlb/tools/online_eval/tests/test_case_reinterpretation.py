@@ -10,11 +10,10 @@ from unittest import mock
 import pytest
 
 from cases.master_performance.analysis import analyze
-from cases.master_performance.program import GATE as PERFORMANCE_GATE
-publish_performance = PERFORMANCE_GATE.publish
+from delivery_fixtures import publish_performance
 from cases.master_performance.replay import performance_main
-from cases.master_performance.program import GATE
-render_view = GATE.render
+from cases.master_performance.program import VIEW
+render_view = VIEW.renderer
 from reporting.view_config import view
 from test_performance_gate import evidence
 

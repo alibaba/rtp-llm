@@ -1,20 +1,19 @@
 import pytest
 from scenario.builder import CaseBuilder
-from scenario.inputs import InputContract, InputGroup, InputField
+from scenario.inputs import InputSchema
 from scenario.numeric_parameters import NONNEGATIVE
 from scenario.registry import CaseDefinition
 from scenario.check_inputs import CheckSet, CheckSpec
 
 
 def test_optional_number_is_explicit_and_does_not_consume_inputs():
-    contract = InputContract({'custom': InputGroup({'name'}, {'threshold'})},
-                             (InputField('custom.threshold', NONNEGATIVE, required=False),))
-    definition = CaseDefinition({'default': lambda case: None}, input_contract=contract)
-    case = CaseBuilder({}, {'custom': {'name': 'x'}}, number_rules=definition.numeric_parameters,
+    contract = InputSchema({'custom': {'name': None, 'threshold': NONNEGATIVE}}, optional={'custom.threshold'})
+    definition = CaseDefinition({'default': lambda case: None}, input_schema=contract)
+    case = CaseBuilder({}, {'custom': {'name': 'x'}}, number_rules=definition.input_schema.numeric_parameters,
                        optional_numbers=contract.optional_numbers)
     case.validate_numbers()
     assert case.read_parameters == set()
-    assert case.bind(contract).custom == {'name': 'x'}
+    assert contract.parse(case.parameters)['custom'] == {'name': 'x'}
     case.parameters['custom']['threshold'] = -1
     with pytest.raises(ValueError):
         case.validate_numbers()
@@ -23,7 +22,7 @@ def test_optional_number_is_explicit_and_does_not_consume_inputs():
 def test_unknown_inputs_and_environment_typo_are_rejected():
     case = CaseBuilder({'n_prefill': 2}, {'custom': {'known': 1, 'typo': 2}}, number_rules={})
     with pytest.raises(ValueError):
-        case.bind(InputContract({'custom': InputGroup({'known'})}))
+        InputSchema({'custom': {'known': None}}).parse(case.parameters)
     assert case.env.n_prefill == 2
     with pytest.raises(AttributeError):
         _ = case.env.n_prefil
@@ -44,11 +43,13 @@ def test_single_field_contract_decodes_case_owned_frozen_data():
     @dataclass(frozen=True)
     class Parameters:
         threshold: float
-    contract = InputContract.from_fields({'custom': {'threshold': NONNEGATIVE}},
-        decode=lambda sections: Parameters(sections['custom']['threshold']))
+    contract = InputSchema({'custom': {'threshold': NONNEGATIVE}})
+    def parse_config(raw):
+        sections = contract.parse(raw)
+        return Parameters(sections['custom']['threshold'])
     case = CaseBuilder({}, {'custom': {'threshold': 3}}, number_rules=contract.numeric_parameters)
     case.validate_numbers()
-    assert case.bind(contract) == Parameters(3)
+    assert parse_config(case.parameters) == Parameters(3)
 
 
 def test_generic_binding_and_explicit_threshold_dimension():
@@ -78,8 +79,8 @@ def test_nested_field_addition_derives_names_and_numeric_admission():
     declarations = {'procedure': {'timeout_s': NONNEGATIVE}}
     # One author declaration also adds the numeric rule; no second numeric table.
     declarations['procedure']['probe'] = {'min_samples': NONNEGATIVE}
-    contract = InputContract.from_fields(declarations)
-    assert contract.groups['procedure'].required == {'timeout_s', 'probe'}
+    contract = InputSchema(declarations)
+    assert set(contract.sections['procedure']) == {'timeout_s', 'probe'}
     assert set(contract.numeric_parameters) == {'procedure.timeout_s', 'procedure.probe.min_samples'}
     case = CaseBuilder({}, {'procedure': {'timeout_s': 2, 'probe': {'min_samples': -1}}},
                        number_rules=contract.numeric_parameters)
@@ -87,28 +88,28 @@ def test_nested_field_addition_derives_names_and_numeric_admission():
         case.validate_numbers()
     case.parameters['procedure']['probe']['min_samples'] = 3
     case.validate_numbers()
-    assert case.bind(contract).procedure['probe'] == {'min_samples': 3}
+    assert contract.parse(case.parameters)['procedure']['probe'] == {'min_samples': 3}
 
 
 def test_optional_nested_number_remains_unconsumed_until_binding():
-    contract = InputContract.from_fields({'checks': {'extra': {'expected': NONNEGATIVE}}},
+    contract = InputSchema({'checks': {'extra': {'expected': NONNEGATIVE}}},
                                         optional={'checks.extra'})
     assert contract.optional_numbers == {'checks.extra.expected'}
     case = CaseBuilder({}, {'checks': {}}, number_rules=contract.numeric_parameters,
                        optional_numbers=contract.optional_numbers)
     case.validate_numbers()
     assert not case.read_parameters
-    assert case.bind(contract).checks == {}
+    assert contract.parse(case.parameters)['checks'] == {}
 
 
-def test_projection_contract_checks_signature_and_external_data():
-    with pytest.raises(ValueError, match='input_contract.projection'):
-        InputContract.from_fields({}, projection=lambda value: value)
-    def admit(value, context):
-        if value['threshold'] <= context:
-            raise ValueError('threshold')
-        return value
-    contract = InputContract.from_fields({}, projection=admit)
-    with pytest.raises(ValueError, match='threshold'):
-        contract.admit_projection({'threshold': 1}, 2)
-    assert contract.admit_projection({'threshold': 3}, 2) == {'threshold': 3}
+def test_parsed_configs_are_detached_and_yaml_narrowing_is_applied():
+    from input_contract import NumberRule
+    schema = InputSchema({'custom': {'threshold': NONNEGATIVE}})
+    source = {'custom': {'threshold': 3}}
+    first, second = schema.parse(source), schema.parse(source)
+    first['custom']['threshold'] = 99
+    assert second == source == {'custom': {'threshold': 3}}
+    with pytest.raises(ValueError):
+        schema.parse(source, {'custom.threshold': NumberRule(integer=False, minimum=4)})
+    with pytest.raises(TypeError):
+        schema.sections['custom']['threshold'] = None

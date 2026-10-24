@@ -13,8 +13,7 @@ from scenario.runtime import RuntimeContext
 from reporting.workload import write_views
 from test_workload_report_views import payload
 from test_cache_scale_gate import CacheGateTest
-from cases.cache_scale_in.program import GATE as CACHE_GATE
-publish_cache = CACHE_GATE.publish
+from delivery_fixtures import publish_cache
 from cases.cache_scale_in.analysis import analyze
 from monitoring.metric_store import MetricStore
 

@@ -99,17 +99,25 @@ def _build_variant(config, row, identity, module, selected_profiles, source, num
     patch = row.environment
     from scenario.numeric_parameters import parameter_rules
     from scenario.numeric_parameters import narrow_parameters
-    defaults = parameter_rules(module.definition.numeric_parameters)
+    schema = module.definition.input_schema
+    defaults = parameter_rules(schema.numeric_parameters if schema is not None else {})
     base_rules = narrow_parameters(defaults, config.parameter_schema)
     builder = CaseBuilder(
         merge_environment(environment, patch),
         merge_data(parameters, variant_parameters),
         number_rules=narrow_parameters(base_rules, row.parameter_schema),
         profiles=profiles,
-        optional_numbers=(module.definition.input_contract.optional_numbers
-                          if module.definition.input_contract else ()),
+        optional_numbers=(schema.optional_numbers
+                          if schema is not None else ()),
     )
-    builder.validate_numbers()
+    if schema is not None:
+        try:
+            builder.config = schema.parse(builder.parameters, builder.number_rules)
+        except ValueError as exc:
+            raise ScenarioError(f"{source}.parameters: {exc}") from exc
+        builder.read_parameters.update(builder.config)
+    else:
+        builder.validate_numbers()
     numeric_contracts[identity] = {path: asdict(rule) for path, rule in builder.number_rules.items()}
     try:
         build(builder)
@@ -157,7 +165,10 @@ def _variant_contract(config, builder, source):
         from monitoring.query_plan import definitions
         for definition in definitions(selected).values():
             if definition.get("producer"):
-                registry().capability("producer", definition["producer"], case=config.case)
+                source = definition["producer"]
+                metrics = registry().cases[config.case].definition.metrics
+                if metrics is None or source not in metrics.CONTRACTS:
+                    raise ScenarioError("metric source is not declared by case: " + source)
             collection = definition.get("collection", {})
             if collection.get("source"):
                 registry().capability("source", collection["source"], case=config.case)

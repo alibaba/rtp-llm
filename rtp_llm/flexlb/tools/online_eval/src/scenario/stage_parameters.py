@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
+from copy import deepcopy
 import json
 from typing import Protocol, Optional, Union
 
@@ -62,10 +63,13 @@ class ComparisonParameters:
 @dataclass(frozen=True)
 class AdapterParameters:
     """Frozen transport for an action whose schema is owned by its registered adapter."""
-    document: str
+    _value: dict
+
+    def __post_init__(self):
+        object.__setattr__(self, '_value', deepcopy(self._value))
 
     def to_dict(self):
-        return json.loads(self.document)
+        return deepcopy(self._value)
 
 
 def decode_parameters(action, value):
@@ -91,4 +95,5 @@ def decode_parameters(action, value):
         from analysis.checks import validate_comparison
         validate_comparison(value["op"], value["expected"])
         return ComparisonParameters(OutputReference.read(value["actual"]), value["op"], value["expected"])
-    return AdapterParameters(json.dumps(value, separators=(",", ":"), allow_nan=False))
+    json.dumps(value, allow_nan=False)  # Validate the artifact boundary without storing encoded state.
+    return AdapterParameters(value)

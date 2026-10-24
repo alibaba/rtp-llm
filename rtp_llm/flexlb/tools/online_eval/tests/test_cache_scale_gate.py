@@ -15,8 +15,7 @@ def profile(path, capacities=(128, 256, 512, 1024)):
 
 from cases.cache_scale_in.analysis import align_send_counters, analyze
 from cases.cache_scale_in.report import prepare_report as read_report
-from cases.cache_scale_in.program import GATE as CACHE_GATE
-publish_cache = CACHE_GATE.publish
+from delivery_fixtures import publish_cache
 from metric_fixtures import freeze_metrics
 
 def write_report(directory, evidence, result, prepared=None):

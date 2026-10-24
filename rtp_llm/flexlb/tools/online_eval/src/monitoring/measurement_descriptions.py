@@ -24,7 +24,7 @@ class MeasurementDescription:
         return result
 
 
-class ProducerDescriptions:
+class MeasurementDescriptions:
     def __init__(self, declarations):
         if any(not isinstance(key, tuple) or len(key) != 2 or
                not isinstance(value, MeasurementDescription) for key, value in declarations.items()):

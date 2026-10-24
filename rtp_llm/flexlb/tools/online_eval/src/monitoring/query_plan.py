@@ -11,7 +11,7 @@ from document_io import DocumentError as ScenarioError, load_document
 from monitoring.identity import NAME, METRIC_ID, SOURCE_KINDS
 from monitoring.contracts import validate_measurement
 from monitoring.sources import selected_sources
-from monitoring.producer_contract import output_contract
+from monitoring.measurement_contract import output_contract
 
 CATALOG = Path(__file__).resolve().parents[2] / "config/monitoring"
 DEFAULT_PLAN = "default.yaml"

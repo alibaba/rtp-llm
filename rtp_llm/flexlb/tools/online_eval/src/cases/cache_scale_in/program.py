@@ -15,17 +15,17 @@ from scenario.metric_inputs import bind_mock_engine_metrics
 
 
 def default(case):
-    data = case.bind(INPUTS)
-    flow = driver(data.traffic, "java_flow")
-    inputs = data.observation["inputs"]
+    data = case.config
+    flow = driver(data['traffic'], "java_flow")
+    inputs = data['observation']["inputs"]
     if not isinstance(inputs, dict) or set(inputs) != {"engine_counters"}:
         raise ValueError("cache gate requires engine_counters input")
     engine_counters(inputs["engine_counters"])
     bind_mock_engine_metrics(case, inputs["engine_counters"], ENGINE_FIELDS)
     client = ClientConfiguration.read(flow["client"])
-    gate = CRITERIA.project(procedure=data.procedure, observation=data.observation,
-                            windows=observation_contract(data.observation),
-                            checks=compile_checks(case, data.checks, data.analysis["collapse"]),
+    gate = CRITERIA.project(procedure=data['procedure'], observation=data['observation'],
+                            windows=observation_contract(data['observation']),
+                            checks=compile_checks(case, data['checks'], data['analysis']["collapse"]),
                             runtime={"qps": client.playback.qps})
     budget = (
         gate["warmup_timeout_s"] + gate["topology_timeout_s"] + gate["observe_s"] + 10
@@ -34,12 +34,12 @@ def default(case):
         raise ValueError("step requires one graceful scale-in; different fault sequences require a separate case")
     uniform_gate_flow(flow, client, duration_s=budget, trace_duration_s=budget)
     case.step("setup", "setup", timeout_s=180)
-    case.step("traffic", "java_flow_start", params=flow, timeout_s=data.procedure["startup_timeout_s"])
+    case.step("traffic", "java_flow_start", params=flow, timeout_s=data['procedure']["startup_timeout_s"])
     case.step(
         "scale_in",
         "cache_scale_in_observe",
         params=dict(flow=output("traffic", "flow"), criteria=gate,
-                    gate_input=inputs["engine_counters"], observation=data.observation),
+                    gate_input=inputs["engine_counters"], observation=data['observation']),
         timeout_s=budget + 40,
     )
     case.step("stop", "java_flow_stop", params={"flow": output("traffic", "flow")})
@@ -52,7 +52,7 @@ def default(case):
     case.observe(
         "gate",
         "cache_scale_in_check",
-        timeout_s=data.procedure["analysis_timeout_s"],
+        timeout_s=data['procedure']["analysis_timeout_s"],
         params={
             "flow": output("traffic", "flow"),
             "evidence": output("scale_in", "evidence"),
@@ -61,14 +61,14 @@ def default(case):
     case.step("teardown", "teardown")
 
 
-from scenario.gates import GatePlugin
-from cases.cache_scale_in.analysis import analyze
-from cases.cache_scale_in.metrics import produce, metric_contract
 
-GATE = GatePlugin('cache', analyze, produce, write_report,
-                  producer='cache_windows', describe=metric_contract,
-                  view='cache_scale_in.yaml', validate_view=validate_view,
-                  subtitle_fields=frozenset({"expected_behavior", "observed_behavior"}))
+from functools import partial
+from artifacts.gate import render_gate
+from scenario.registry import ReportView
+from cases.cache_scale_in import metrics
+
+render = partial(render_gate, name='cache', write_report=write_report)
+VIEW = ReportView(validate_view, render, frozenset({"expected_behavior", "observed_behavior"}), render)
 
 
 from scenario.registry import CaseDefinition
@@ -78,7 +78,7 @@ from scenario.contracts import ExecutionRequirements
 CASE = CaseDefinition(
     execution_requirements=ExecutionRequirements(request_evidence=True, monitoring=True),
     builders={"default": default},
-    input_contract=INPUTS,
-    gates={'cache': GATE},
+    input_schema=INPUTS,
+    metrics=metrics, report_views={'cache_scale_in.yaml': VIEW},
     actions=tuple(ACTION_HANDLERS),
 )

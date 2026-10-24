@@ -112,3 +112,14 @@ def produce(directory, evidence, result):
                         window=evidence["window"], measurement_validity="INVALID" if result["verdict"] == "INVALID" else "VALID",
                         algorithm="absolute_performance_gate"))
     store.save(directory)
+
+
+CONTRACTS = {'performance_requests': metric_contract}
+
+
+def project(directory, selected, deadline):
+    from artifacts.gate import project_gate
+    if 'performance_requests' in selected:
+        deadline.check()
+        project_gate(directory, 'performance', produce)
+        deadline.check()

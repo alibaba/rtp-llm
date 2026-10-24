@@ -308,9 +308,11 @@ def execute(ctx, params, deadline):
     logs = list(ctx.artifact_dir.glob("environment/*/master_gc.log"))
     evidence["gc"] = gc_events(logs[0]) if len(logs) == 1 else []
     evidence["gc_available"] = len(logs) == 1
-    committed = ctx.services.gate("cache_stability").commit(ctx.artifact_dir, evidence)
-    return StageOutput({}, [CheckResult(**c) for c in committed.result["checks"]],
-                       [str(committed.path), str(directory/"evidence.json")])
+    from artifacts.gate import commit_gate
+    from cases.cache_sync_recovery.analysis import analyze
+    result, path = commit_gate(ctx.artifact_dir, 'cache_stability', evidence, analyze)
+    return StageOutput({}, [CheckResult(**c) for c in result["checks"]],
+                       [str(path), str(directory/"evidence.json")])
 
 
 HANDLERS = [StageHandler("cache_recovery_cycle", validate, execute, {}, checks=CHECK_IDS)]

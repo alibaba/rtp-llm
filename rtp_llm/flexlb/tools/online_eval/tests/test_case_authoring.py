@@ -11,11 +11,7 @@ import pytest
 from scenario import registry as module
 from scenario.registry import CaseRegistry
 from scenario.registry import CaseDefinition
-from scenario.registry import MetricProducer
-from scenario.registry import ProducerPhase
 from scenario.registry import RegisteredCase
-from scenario.registry import ReportView
-from scenario.registry import EvidenceSource
 from scenario.case_validation import validate_cases
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,18 +24,6 @@ def entry(definition):
 @pytest.mark.parametrize('definition, location', [
     (CaseDefinition(builders={'default': lambda: None}), 'builders.default'),
     (CaseDefinition(builders={'default': lambda case: None}, actions=(object(),)), 'actions'),
-    (CaseDefinition(builders={'default': lambda case: None}, producers={
-        'metric': MetricProducer(lambda a, b, c: {}, lambda a, b: None, ProducerPhase.GATE)}),
-        'producers.metric.execute'),
-    (CaseDefinition(builders={'default': lambda case: None}, producers={
-        'metric': MetricProducer(lambda a, b, c: {}, lambda a: None, ProducerPhase.FINALIZE)}),
-        'producers.metric.execute'),
-    (CaseDefinition(builders={'default': lambda case: None}, report_views={
-        'example.yaml': ReportView(lambda a, b, c: None, lambda a, b: None)}),
-        'views.example.yaml.renderer'),
-    (CaseDefinition(builders={'default': lambda case: None}, sources={
-        'example': EvidenceSource(lambda env: {}, frozenset({'value'}), 'example')}),
-        'sources.example.factory'),
 ])
 def test_capability_signature_errors_are_located_before_execution(definition, location):
     with pytest.raises(ValueError, match=re.escape(location)):
@@ -49,10 +33,9 @@ def test_capability_signature_errors_are_located_before_execution(definition, lo
 def test_registration_does_not_execute_capabilities():
     def forbidden(*args):
         raise AssertionError('registration executed a capability')
-    CaseRegistry.build([entry(CaseDefinition(builders={'default': forbidden}, producers={
-        'gate': MetricProducer(forbidden, forbidden, ProducerPhase.GATE),
-        'finalize': MetricProducer(forbidden, forbidden, ProducerPhase.FINALIZE),
-    }))])
+    from types import SimpleNamespace
+    metrics = SimpleNamespace(CONTRACTS={'metric': forbidden}, project=forbidden, finalize=forbidden)
+    CaseRegistry.build([entry(CaseDefinition(builders={'default': forbidden}, metrics=metrics))])
 
 
 def test_import_failure_identifies_case_and_preserves_cause(tmp_path, monkeypatch):
@@ -143,3 +126,16 @@ def test_full_inventory_explains_metric_consumers_and_profile_contracts(tmp_path
         assert instance['reports']
         assert instance['numeric_parameters']
         assert any(stage['check_ids'] for stage in instance['stages'])
+
+
+@pytest.mark.parametrize('target', ['describe', 'project', 'finalize'])
+def test_metric_module_signatures_are_checked_without_execution(target):
+    from types import SimpleNamespace
+    metrics = SimpleNamespace(CONTRACTS={'metric': lambda a, b, c: {}}, project=lambda a, b, c: None,
+                              finalize=lambda a, b, c, d: {})
+    if target == 'describe':
+        metrics.CONTRACTS = {'metric': lambda a: {}}
+    else:
+        setattr(metrics, target, lambda a: None)
+    with pytest.raises(ValueError, match='metrics'):
+        CaseRegistry.build([entry(CaseDefinition({'default': lambda case: None}, metrics=metrics))])

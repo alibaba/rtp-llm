@@ -251,9 +251,7 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
     monkeypatch.setattr(actions.MasterDiagnosticsClient,'snapshot',capture)
     monkeypatch.setattr(traffic,'materialize',lambda *a,**kw:tmp_path/'traffic.jsonl')
     monkeypatch.setattr(actions.grpc,'insecure_channel',lambda address:contextlib.nullcontext(address))
-    from cases.cache_sync_recovery.program import GATE
     ctx.monitor = SimpleNamespace(client=SimpleNamespace(metric_snapshot=lambda *a, **kw: []))
-    ctx.services = SimpleNamespace(gate=lambda name: GATE)
     result = actions.execute(ctx,params,deadline)
     from scenario.stage_execution import _validate_output
     _validate_output(ctx,result,{},actions.CHECK_IDS)
@@ -363,21 +361,25 @@ def test_invalid_measurement_cannot_become_valid_functional_pass(failure):
 
 @pytest.mark.parametrize('recovery', [False, True])
 def test_shared_producer_and_automatic_report_render_frozen_gate(tmp_path, monkeypatch, recovery):
-    from cases.cache_sync_recovery.program import GATE
     from monitoring.query_plan import load_plan, definitions
     from monitoring.metric_store import MetricStore
     from reporting.workload import write_views
     from reporting.core import read_bundle, load_analysis
     from test_workload_report_views import payload
     evidence = pressure_evidence(recovery)
-    committed = GATE.commit(tmp_path, evidence)
+    from artifacts.gate import commit_gate
+    from cases.cache_sync_recovery.analysis import analyze
+    from cases.cache_sync_recovery import metrics
+    from runtime.deadline import Deadline
+    import time
+    decision, result_path = commit_gate(tmp_path, 'cache_stability', evidence, analyze)
     MetricStore(dict(metrics_schema_version=1, definitions=definitions(load_plan('cache_sync_recovery.yaml')),
                      metrics={},collection_gaps={},errors=[])).save(tmp_path)
-    GATE.project(tmp_path)
+    metrics.project(tmp_path, {'cache_stability'}, Deadline(time.monotonic()+10))
     stored = MetricStore.read(tmp_path)
     assert stored.document['metrics']['cache_stability/full_gc_pause_ms'][0]['points'] == [[15,180]]
     # Delivery must not analyze, acquire telemetry, or parse mutable live logs.
-    monkeypatch.setattr(type(GATE), 'evaluate', lambda *a: pytest.fail('report re-adjudicated gate'))
+    monkeypatch.setattr('cases.cache_sync_recovery.analysis.analyze', lambda *a: pytest.fail('report re-adjudicated gate'))
     run = payload()
     paths = write_views(tmp_path, run, ['cache_sync_recovery.yaml'])
     bundle = read_bundle(paths['cache_sync_recovery.yaml'].parent)
@@ -385,7 +387,7 @@ def test_shared_producer_and_automatic_report_render_frozen_gate(tmp_path, monke
     assert len(spec['panels']) == 2
     assert all(p['title'].startswith(('recovery' if recovery else 'steady')+' · ') for p in spec['panels'])
     assert spec['timeOriginEpochS'] == 10
-    assert load_analysis(bundle)['outcome'] == dict(gate=committed.result['verdict'],validity='VALID')
+    assert load_analysis(bundle)['outcome'] == dict(gate=decision['verdict'],validity='VALID')
 
 
 def test_cache_suite_stays_out_of_default_ci():

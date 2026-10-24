@@ -46,7 +46,7 @@ def validate_cases(source, *, profile=None):
             reporting=plan.get('reporting'),
             execution=plan['execution'], resource_budget=plan['resource_budget'],
             capabilities=dict(actions=[action.name for action in capability.actions],
-                              producers=list(capability.producers), sources=list(capability.sources),
+                              producers=list(capability.metrics.CONTRACTS) if capability.metrics else [], sources=list(capability.sources),
                               report_views=list(capability.report_views)),
         ))
     return dict(case_validation_schema_version=1, status='PASS',

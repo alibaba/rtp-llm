@@ -7,10 +7,10 @@ from monitoring.contracts import validate_measurement
 def output_contract(metric_id, spec):
     """Resolve executable capabilities, not user-provided measurement labels."""
     producer = spec['producer']
-    if producer not in registry().producers:
+    if producer not in registry().metric_contracts:
         raise ValueError('unknown metric producer ' + str(producer))
-    capability = registry().producers[producer]
-    contract = capability.describe(producer, metric_id, spec.get('calculation'))
+    describe = registry().metric_contracts[producer]
+    contract = describe(producer, metric_id, spec.get('calculation'))
     for key, value in contract.items():
         if key not in {'measurement', 'collection', 'implementation'} and spec.get(key) != value:
             raise ValueError(metric_id + ': producer ' + key + ' mismatch')

@@ -44,3 +44,14 @@ def produce(directory, evidence, result):
                 producer="cache_stability", evidence=dict(path=str(directory)+"/cache_stability-gate-evidence.json",
                                                           validity=result["validity"]))
     store.save(directory)
+
+
+CONTRACTS = {'cache_stability': metric_contract}
+
+
+def project(directory, selected, deadline):
+    from artifacts.gate import project_gate
+    if 'cache_stability' in selected:
+        deadline.check()
+        project_gate(directory, 'cache_stability', produce)
+        deadline.check()

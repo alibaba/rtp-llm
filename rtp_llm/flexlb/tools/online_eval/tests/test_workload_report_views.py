@@ -78,7 +78,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             from reporting.timeline import freeze
             declaration = load_document(ROOT / "config/scenarios/master_ha_failover.yaml")["reporting"]
             analysis["report_timeline"] = freeze(declaration, events=analysis["events"], phases=analysis["phases"])
-            from monitoring.producers import produce
+            from delivery_fixtures import finalize_metrics as produce
             from metric_fixtures import freeze_metrics
             freeze_metrics(root, "master_ha_failover")
             produce(root, analysis)
@@ -203,13 +203,16 @@ class WorkloadReportViewsTest(unittest.TestCase):
             before = (Path(d) / "cache-gate-result.json").read_bytes()
             from dataclasses import replace
             from scenario import registry
-            from cases.cache_scale_in.program import GATE
+            from cases.cache_scale_in import report as case_report
+            from cases.cache_scale_in.program import VIEW
+            from artifacts.gate import render_gate
+            from functools import partial
             from case_registry_fixtures import entry, snapshot
-            render = mock.Mock(wraps=GATE.write_report)
-            gate = replace(GATE, write_report=render)
+            render = mock.Mock(wraps=case_report.write_report)
+            renderer = partial(render_gate, name='cache', write_report=render)
+            presentation = replace(VIEW, renderer=renderer, deadline_renderer=renderer)
             registered = registry.registry().cases['cache_scale_in']
-            definition = replace(registered.definition, gates={'cache': gate},
-                                 producers={}, report_views={})
+            definition = replace(registered.definition, report_views={'cache_scale_in.yaml': presentation})
             with mock.patch.object(registry, '_snapshot', snapshot(
                 entry(registered.name, definition, registered.module, registered.path), include_existing=True)):
                 links = write_views(d, payload(), ["default.yaml", "cache_scale_in.yaml"])

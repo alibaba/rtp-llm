@@ -171,7 +171,7 @@ def test_variant_identity_is_independent_of_program_and_restart_mode_is_program_
     for mode in ('rolling', 'non_rolling'):
         wrong = copy.deepcopy(data)
         wrong['parameters']['procedure']['restart_mode'] = mode
-        with pytest.raises(ScenarioError, match='owned by flow identity'):
+        with pytest.raises(ScenarioError, match='restart_mode'):
             configure_program(wrong, 'ha.yaml')
 
 @pytest.mark.parametrize('profile', PROFILES)

@@ -6,7 +6,8 @@ import math
 from concurrent.futures import ThreadPoolExecutor
 
 from scenario.contracts import StageHandler, StageOutput
-from scenario.parameters import validate_fields
+from functools import partial
+from scenario.parameters import validate_fields, reference_parameters
 from runtime.observation import SampleBudget, poll_samples
 from artifacts.json_io import write_json
 from artifacts.gate_inputs import new_evidence
@@ -228,13 +229,6 @@ def observe(ctx, p, deadline):
     )
 
 
-def check_validate(params, plan):
-    p = validate_fields(params, plan, {"flow", "evidence"}, {"flow", "evidence"})
-    plan.reference(p["flow"], "java_flow")
-    plan.reference(p["evidence"], "gate_evidence")
-    return p
-
-
 def check(ctx, p, deadline):
     evidence = ctx.resource(p["evidence"], "gate_evidence")
     flow = ctx.resource(p["flow"], "java_flow")
@@ -282,8 +276,9 @@ def check(ctx, p, deadline):
         evidence["max_pacing_lag_ms"] = max(lags)
     write_json(ctx.artifact_dir / "cache-gate-evidence.json", evidence)
     evidence["curve_source"] = "prometheus"
-    committed = ctx.services.gate('cache').commit(ctx.artifact_dir, evidence)
-    result, path = committed.result, committed.path
+    from artifacts.gate import commit_gate
+    from cases.cache_scale_in.analysis import analyze
+    result, path = commit_gate(ctx.artifact_dir, 'cache', evidence, analyze)
     return StageOutput(
         checks=[
             gate_check("cache_stability", result, path,
@@ -305,7 +300,7 @@ HANDLERS = [
     StageHandler("cache_scale_in_observe", validate, observe, {"evidence": "gate_evidence"}),
     StageHandler(
         "cache_scale_in_check",
-        check_validate,
+        partial(reference_parameters, resources={'flow': 'java_flow', 'evidence': 'gate_evidence'}),
         check,
         {},
         checks=frozenset({"cache_stability"}),

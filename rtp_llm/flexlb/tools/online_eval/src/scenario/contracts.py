@@ -1,11 +1,9 @@
 """Shared authoring, execution and evidence contracts."""
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import MappingProxyType
-from typing import TYPE_CHECKING, Callable, Mapping, Protocol
+from typing import TYPE_CHECKING, Callable, Protocol
 
 from analysis.checks import CheckResult
 
@@ -30,18 +28,6 @@ class ExecutionRequirements:
             raise ValueError('execution.monitoring.capture_metrics must be true for this consumer')
 
 
-@dataclass(frozen=True)
-class FinalizationContext:
-    """One producer's isolated snapshot; returned metadata is published by the caller."""
-    directory: Path
-    run: Mapping[str, object]
-    deadline: object = None
-
-    @classmethod
-    def snapshot(cls, directory, run, deadline=None):
-        return cls(Path(directory), MappingProxyType(deepcopy(run)), deadline)
-
-
 class StageValidator(Protocol):
     def __call__(self, params: dict, plan: PlanContext) -> dict: ...
 
@@ -60,18 +46,6 @@ class ViewValidator(Protocol):
 
 class ViewRenderer(Protocol):
     def __call__(self, directory: Path, analysis: dict, presentation: dict) -> Path: ...
-
-
-class ProducerDescription(Protocol):
-    def __call__(self, producer: str, metric_id: str, calculation: dict | None) -> dict: ...
-
-
-class GateProducer(Protocol):
-    def __call__(self, directory: Path) -> None: ...
-
-
-class FinalizeProducer(Protocol):
-    def __call__(self, directory: Path, context: FinalizationContext) -> dict: ...
 
 
 class SourceFactory(Protocol):

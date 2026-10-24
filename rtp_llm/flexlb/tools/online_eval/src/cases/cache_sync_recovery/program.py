@@ -1,17 +1,14 @@
 """Shared pressure background; only the intervention and its checks vary."""
 
-from scenario.inputs import InputContract
+from scenario.inputs import InputSchema
 from scenario.numeric_parameters import COUNT, POSITIVE_COUNT, NONNEGATIVE
 from scenario.registry import CaseDefinition
 from adapters.java_flow_spec import JavaFlowSpec
 from cases.cache_sync_recovery.actions import HANDLERS
-from cases.cache_sync_recovery.analysis import analyze
 from cases.cache_sync_recovery.report import write_report, validate_view
-from cases.cache_sync_recovery.metrics import produce, metric_contract
-from scenario.gates import GatePlugin
 from scenario.contracts import ExecutionRequirements
 
-INPUTS = InputContract.from_fields({
+INPUTS = InputSchema({
     "procedure": dict.fromkeys(("setup_timeout_s", "warmup_timeout_s", "cache_only_s",
         "traffic_warmup_s", "measurement_s", "withdraw_s", "post_s"), NONNEGATIVE)
         | dict.fromkeys(("unique_keys", "delta_keys", "churn_interval_ms", "expired_workers"), POSITIVE_COUNT)
@@ -25,8 +22,8 @@ INPUTS = InputContract.from_fields({
 
 
 def build(case, intervention):
-    data = case.bind(INPUTS)
-    p, o, c = data.procedure, data.observation, data.checks
+    data = case.config
+    p, o, c = data['procedure'], data['observation'], data['checks']
     if any(v <= 0 for k, v in p.items() if k not in {"shared_keys"}):
         raise ValueError("pressure windows and key parameters must be positive")
     if case.env.n_prefill < 2 or case.env.discovery != "discovery_file" or not 0 < p["expired_workers"] < case.env.n_prefill:
@@ -40,14 +37,14 @@ def build(case, intervention):
     expected = case.env.n_prefill*p["delta_keys"]*1000/p["churn_interval_ms"]
     if not c["min_added_keys_per_s"] <= expected <= c["max_added_keys_per_s"]:
         raise ValueError("mutation envelope excludes the configured input")
-    flow = JavaFlowSpec.read(data.traffic)
+    flow = JavaFlowSpec.read(data['traffic'])
     seconds = p["traffic_warmup_s"] + p["measurement_s"] + (p["withdraw_s"] if intervention else 0) + p["post_s"]
     if flow.client.playback.duration_s < seconds:
         raise ValueError("traffic must cover intervention and the full post window")
     case.step("setup", "setup", timeout_s=p["setup_timeout_s"])
     budget = p["warmup_timeout_s"] + p["cache_only_s"] + seconds + 360
     case.step("cycle", "cache_recovery_cycle", timeout_s=budget,
-        params={"procedure": p, "observation": o, "checks": c, "traffic": data.traffic,
+        params={"procedure": p, "observation": o, "checks": c, "traffic": data['traffic'],
                 "intervention": intervention})
     case.step("cleanup", "teardown")
 
@@ -61,11 +58,15 @@ def recovery(case):
 
 
 
-GATE = GatePlugin('cache_stability', analyze, produce, write_report,
-                  producer='cache_stability', describe=metric_contract,
-                  view='cache_sync_recovery.yaml', validate_view=validate_view)
+from functools import partial
+from artifacts.gate import render_gate
+from scenario.registry import ReportView
+from cases.cache_sync_recovery import metrics
+
+render = partial(render_gate, name='cache_stability', write_report=write_report)
+VIEW = ReportView(validate_view, render, frozenset(), render)
 
 CASE = CaseDefinition(execution_requirements=ExecutionRequirements(monitoring=True),
-                      gates={"cache_stability": GATE},
+                      metrics=metrics, report_views={'cache_sync_recovery.yaml': VIEW},
                       builders={"default": default, "recovery": recovery},
-                      input_contract=INPUTS, actions=tuple(HANDLERS))
+                      input_schema=INPUTS, actions=tuple(HANDLERS))

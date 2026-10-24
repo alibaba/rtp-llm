@@ -6,8 +6,6 @@ from unittest.mock import patch
 import pytest
 
 from scenario.builder import CaseBuilder
-from scenario.gates import GatePlugin
-from scenario.registry import CaseDefinition, MetricProducer, ProducerPhase, ReportView
 from document_io import DocumentError
 from scenario.catalog import handlers
 from scenario.compiler import ScenarioCompiler
@@ -20,48 +18,40 @@ from scenario.contracts import StageHandler
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def gate(**kwargs):
-    def report(directory, evidence, result, *, run=None, presentation=None):
-        return directory
-    return GatePlugin('example', lambda evidence: evidence, lambda a, b, c: None, report,
-                      producer='example_metrics', describe=lambda a, b, c: {},
-                      view='example.yaml', validate_view=lambda a, b, c: None, **kwargs)
+def test_custom_action_parameters_are_detached_without_json_decoding():
+    from scenario.stage_parameters import decode_parameters
+    raw = {'criteria': {'samples': [1, 2]}}
+    parameters = decode_parameters('custom_action', raw)
+    raw['criteria']['samples'].append(3)
+    with patch('scenario.stage_parameters.json.loads', side_effect=AssertionError('internal JSON decode')):
+        snapshot = parameters.to_dict()
+        assert snapshot == {'criteria': {'samples': [1, 2]}}
+        snapshot['criteria']['samples'].append(99)
+        assert parameters.to_dict() == {'criteria': {'samples': [1, 2]}}
 
 
-def test_gate_registration_derives_producer_and_report_and_survives_definition_replacement():
-    capability = gate(subtitle_fields=frozenset({'verdict'}))
-    definition = CaseDefinition({'default': lambda case: None}, gates={'example': capability})
-    assert definition.producers == {
-        'example_metrics': MetricProducer(capability.describe, capability.project, ProducerPhase.GATE),
-    }
-    assert definition.report_views == {'example.yaml': ReportView(
-        capability.validate_view, capability.render, frozenset({'verdict'}), capability.render_with_deadline,
-    )}
-    changed = replace(definition, builders={'default': lambda case: None})
-    assert changed.producers == definition.producers
-    assert changed.report_views == definition.report_views
+def test_case_config_is_parsed_once_before_building(monkeypatch):
+    from scenario.inputs import InputSchema
+    from scenario.program_compiler import configure_program
+    from document_io import load_document
+    calls = []
+    parse = InputSchema.parse
+    def traced(schema, parameters, rules=None):
+        calls.append(parameters)
+        return parse(schema, parameters, rules)
+    monkeypatch.setattr(InputSchema, 'parse', traced)
+    configure_program(load_document(ROOT / 'config/scenarios/request_completion.yaml'), 'fixture')
+    assert len(calls) == 1
 
 
-@pytest.mark.parametrize('kind', ['producer', 'view', 'second_gate'])
-def test_gate_registration_rejects_conflicting_capabilities(kind):
-    capability = gate()
-    kwargs = {'gates': {'example': capability}}
-    if kind == 'producer':
-        kwargs['producers'] = {'example_metrics': MetricProducer(lambda a, b, c: {}, lambda d: None, ProducerPhase.GATE)}
-    elif kind == 'view':
-        kwargs['report_views'] = {'example.yaml': ReportView(lambda a, b, c: None, lambda a, b, c: None)}
-    else:
-        kwargs['gates']['second'] = replace(capability, name='second')
-    with pytest.raises(ValueError, match='conflicting gate'):
-        CaseDefinition({'default': lambda case: None}, **kwargs)
-
-
-@pytest.mark.parametrize('fields', [dict(producer=None), dict(describe=None), dict(view=None),
-                                   dict(validate_view=None), dict(producer='invalid/name'),
-                                   dict(view='default.yaml'), dict(describe=lambda a: None)])
-def test_gate_registration_requires_complete_valid_bindings(fields):
+def test_reference_only_actions_validate_the_same_resource_kinds():
+    from scenario.parameters import reference_parameters
+    from scenario.contracts import PlanContext
+    context = PlanContext('finish', {'flow': {'flow': 'java_flow'}, 'read': {'evidence': 'gate_evidence'}})
+    params = dict(flow={'$ref': 'stages.flow.output.flow'}, evidence={'$ref': 'stages.read.output.evidence'})
+    assert reference_parameters(params, context, resources={'flow': 'java_flow', 'evidence': 'gate_evidence'}) == params
     with pytest.raises(ValueError):
-        replace(gate(), **fields)
+        reference_parameters(params, context, resources={'flow': 'ha_client', 'evidence': 'gate_evidence'})
 
 
 def test_builder_returns_typed_isolated_steps_and_keeps_observation_purpose():

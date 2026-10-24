@@ -11,7 +11,7 @@ from scenario.metric_inputs import metric_fields
 from monitoring.metric_store import MetricStore
 from monitoring.publication import publish
 from monitoring.archive import export_metrics
-from monitoring.producers import produce
+from delivery_fixtures import finalize_metrics as produce
 from monitoring.query_plan import definitions, load_plan, validate_export_filter
 from document_io import load_document
 from document_io import DocumentError as ScenarioError
@@ -149,9 +149,10 @@ def test_origin_does_not_control_producer_execution_or_retention(tmp_path):
     from unittest.mock import Mock
     producer = Mock(return_value={})
     case = registry.registry().cases['master_ha_failover']
-    producers = dict(case.definition.producers)
-    producers['ha_evidence'] = replace(producers['ha_evidence'], execute=producer)
-    changed = replace(case, definition=replace(case.definition, producers=producers))
+    from types import SimpleNamespace
+    metrics = SimpleNamespace(CONTRACTS=case.definition.metrics.CONTRACTS, project=case.definition.metrics.project,
+                              finalize=producer)
+    changed = replace(case, definition=replace(case.definition, metrics=metrics))
     with patch.object(registry, '_snapshot', snapshot(changed, include_existing=True)):
         produce(tmp_path / 'ha', {})
     producer.assert_called_once()

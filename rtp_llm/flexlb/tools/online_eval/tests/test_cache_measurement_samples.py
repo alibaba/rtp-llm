@@ -110,7 +110,6 @@ def test_measurement_capture_keeps_sample_budget_and_deadline():
 def test_gate_action_freezes_control_evidence_and_never_falls_back_to_poll_success(tmp_path, raw_error):
     import json
     from cases.cache_scale_in.actions import check
-    from cases.cache_scale_in.program import GATE
     from artifacts.gate import load_gate
     e, dense, monitor = prepare()
     e['capture_limits'] = dict(max_samples=1000, max_bytes=1_000_000)
@@ -125,7 +124,7 @@ def test_gate_action_freezes_control_evidence_and_never_falls_back_to_poll_succe
     flow = SimpleNamespace(evidence_snapshot=lambda: snapshot, directory=tmp_path/'flow')
     ctx = SimpleNamespace(artifact_dir=tmp_path, monitor=monitor,
         resource=lambda ref, kind: e if kind=='gate_evidence' else flow,
-        services=SimpleNamespace(gate=lambda name: GATE))
+        services=SimpleNamespace())
     check(ctx, dict(evidence='e', flow='f'), Deadline(float('inf')))
     frozen, result = load_gate(tmp_path, 'cache')
     control = json.loads((tmp_path/'cache-control-evidence.json').read_text())

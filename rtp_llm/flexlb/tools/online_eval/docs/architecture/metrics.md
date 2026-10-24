@@ -72,7 +72,7 @@ sources:
 
 `include` 合并集合，`exclude` 按完整指标 ID 显式删除。重复定义、循环引用和删除不存在的指标均失败；本契约不支持同 ID 覆盖，要调整口径时修改所属集合，或新增不同 ID 并排除旧指标。展开后的定义及 SHA 写入编译产物与运行归档。
 
-难以用 PromQL 表达的请求归因、阶段统计由注册 Python producer 实现，在 `produced` 声明输出 ID、`producer`、`source_type`、`unit`、`value_kind` 和 `labels`。请求窗口计算额外声明 `calculation`；专属计算由 producer 的输出契约提供。`source_type` 记录实际来源：`prometheus`、`client_journal`、`debug_api` 或 `process_log`；计算后的数值仍保留原始来源，不用 `derived` 代替来源。是否执行生产器由 `producer` 决定，与来源标签无关。产物记录模块、源码 SHA、计算口径和证据引用；原始证据不能作为缺失 Prometheus 指标的自动替代。
+难以用 PromQL 表达的请求归因、阶段统计由case 的普通 Python 指标函数实现，在 `produced` 声明输出 ID、`producer`、`source_type`、`unit`、`value_kind` 和 `labels`。请求窗口计算额外声明 `calculation`；专属计算由 producer 的输出契约提供。`source_type` 记录实际来源：`prometheus`、`client_journal`、`debug_api` 或 `process_log`；计算后的数值仍保留原始来源，不用 `derived` 代替来源。`producer` 保留为指标来源标识；执行由当前 case 的指标模块及已选择的定义决定，与来源标签无关。产物记录模块、源码 SHA、计算口径和证据引用；原始证据不能作为缺失 Prometheus 指标的自动替代。
 
 `measurement` 将来源与统计语义分开：
 
@@ -135,7 +135,7 @@ calculation:
 
 只有 `sources` 展开为真实查询，`produced` 即使标为 `source_type: prometheus` 也不会新增查询。`export_metrics` 只转换已归档的查询结果并保留 producer 输出，不发起抓取。查询展开可用 `queries_for_targets` 核对，实际采集清单保存在 `telemetry/<epoch>/queries.json`；报告分类审计区分已展示、门禁证据及显式诊断指标，未分类指标报错。
 
-声明层的 `monitoring.contracts` 提供测量元数据校验和指标异常，`monitoring.producer_contract` 解析注册能力的输出契约，不执行 producer 或导入指标存储。`monitoring.producers` 只负责收尾阶段的执行调度，`monitoring.publication` 校验 producer 输出并附加实现来源。`MetricStore` 负责冻结存储、选择和归约，不解析注册能力。`monitoring.archive` 只将查询归档转换成完整的 `MetricStore`，校验成功后才通过 `artifacts.json_io.write_json` 原子替换 `metrics.json`；转换失败保留上一份有效产物。离线报告和有效性检查直接使用 `MetricStore.read(...).series(...)`。
+声明层的 `monitoring.contracts` 提供测量元数据校验和指标异常，`monitoring.measurement_contract` 解析注册能力的输出契约，不执行 producer 或导入指标存储。`monitoring.producers` 只负责收尾阶段的执行调度，`monitoring.publication` 校验 producer 输出并附加实现来源。`MetricStore` 负责冻结存储、选择和归约，不解析注册能力。`monitoring.archive` 只将查询归档转换成完整的 `MetricStore`，校验成功后才通过 `artifacts.json_io.write_json` 原子替换 `metrics.json`；转换失败保留上一份有效产物。离线报告和有效性检查直接使用 `MetricStore.read(...).series(...)`。
 
 新建 session 和展开查询时必须显式提供每个 target 的来源种类，不能通过实例名称猜测。旧归档缺少 `target_kinds` 时，名称推断仅保留在归档转换边界。`monitoring.client.PrometheusClient` 显式接收 URL、冻结计划、来源种类清单及最大采集间隔；清单与资源所有者共享，动态客户端注册后立即可查询。`monitoring.session` 管理进程、配置和资源注册，通过组合持有 `client`；调用方使用 `monitor.client` 读取 TSDB。动态 client 入口为 `add_client_target(s)`，不接受隐式的其他来源种类。
 

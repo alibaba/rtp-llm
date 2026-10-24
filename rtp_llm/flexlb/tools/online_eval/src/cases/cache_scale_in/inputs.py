@@ -162,10 +162,10 @@ def validate_criteria(params, plan):
     return p
 
 
-from scenario.inputs import InputContract, section_fields
+from scenario.inputs import InputSchema, section_fields
 from scenario.traffic_inputs import java_flow_inputs
 
-INPUTS = InputContract.from_fields({
+INPUTS = InputSchema({
     'traffic': java_flow_inputs(max_requests=True),
     'procedure': PROCEDURE_INPUTS,
     'observation': {

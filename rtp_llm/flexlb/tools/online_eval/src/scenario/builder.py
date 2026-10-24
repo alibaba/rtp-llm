@@ -25,6 +25,7 @@ class CaseBuilder:
         self.steps: list[StageDefinition] = []
         self.read_parameters = set()
         self.metric_dependencies = {}
+        self.config = None
 
     def value(self, path):
         """Read required YAML data; programs provide no hidden fallback values."""
@@ -35,9 +36,6 @@ class CaseBuilder:
                 raise ScenarioError(f"missing YAML parameter {path!r}")
             value = value[part]
         return copy.deepcopy(value)
-
-    def bind(self, contract):
-        return contract.bind(self)
 
     def metric(self, identity, *, unit=None, labels=(), mode=None):
         """Declare a numeric dependency; compilation binds it to the selected plan."""

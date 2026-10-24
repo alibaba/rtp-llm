@@ -10,19 +10,19 @@ YAML 定义输入，注册的 Python program 定义流程。只改变拓扑、�
 |---|---|---|
 | 请求、操作与协议断言 | 场景 YAML、`program.py` | 基础 action 与默认报告 |
 | 标准指标时窗比较 | 增加指标集合、窗口与输入绑定 | 公共采集、`analysis.metric_checks.check_metric` 与通用图表 |
-| 特殊业务测量或数据源 | 按需增加专属 handler、producer 或 adapter | 注册、deadline、证据冻结和报告骨架 |
+| 特殊业务测量或数据源 | 按需增加专属 handler、指标投影或 adapter | 注册、deadline、证据冻结和报告骨架 |
 
 下面的最小例子验证请求终态。创建 `src/cases/protocol_terminal/`，加入空的 `__init__.py` 和下列 `program.py`，再创建 `config/scenarios/protocol_terminal.yaml`。名称仅用于演示新增目录的接入方式；所有取值由示例 YAML 明确给出，预算和阈值不是框架默认值。小型 case 不需要专属采集器、producer、报告或重判入口。
 
 ```python
 from scenario.builder import output
 from scenario.inputs import fields
-from scenario.inputs import InputContract
+from scenario.inputs import InputSchema
 from scenario.numeric_parameters import JAVA_LENGTH, POSITIVE_COUNT, NONNEGATIVE, COUNT
 from scenario.registry import CaseDefinition
 from traffic.contracts import driver
 
-INPUTS = InputContract.from_fields({
+INPUTS = InputSchema({
     'traffic': {'kind': None, 'input_len': JAVA_LENGTH,
                 'output_len': JAVA_LENGTH, 'count': POSITIVE_COUNT},
     'procedure': {'setup_timeout_s': NONNEGATIVE},
@@ -30,15 +30,15 @@ INPUTS = InputContract.from_fields({
 })
 
 def default(case):
-    data = case.bind(INPUTS)
-    criterion = data.checks["no_errors"]
+    data = case.config
+    criterion = data['checks']["no_errors"]
     fields(criterion, {"output", "unit", "windows", "op", "expected"},
            "parameters.checks.no_errors")
     if (criterion["output"] != "error_count" or criterion["unit"] != "errors"
             or criterion["windows"] != ["terminal"] or criterion["op"] != "eq"):
         raise ValueError("no_errors requires the terminal error_count equality check")
-    request = {key: case.number("traffic." + key) for key in driver(data.traffic, "request_batch")}
-    case.step("setup", "setup", timeout_s=data.procedure["setup_timeout_s"])
+    request = {key: data["traffic"][key] for key in driver(data['traffic'], "request_batch")}
+    case.step("setup", "setup", timeout_s=data['procedure']["setup_timeout_s"])
     case.step("submit", "request", params=request)
     case.step("terminal", "wait", params={"requests": output("submit", "requests")})
     case.step("no_errors", "check", params={
@@ -50,23 +50,13 @@ def default(case):
 
 CASE = CaseDefinition(
     builders={"default": default},
-    input_contract=INPUTS,
+    input_schema=INPUTS,
 )
 ```
 
-使用冻结门禁的 case 在 `GatePlugin` 中一次声明分析、指标投影和报告绑定，再通过 `CaseDefinition.gates` 注册：
+整窗门禁由 action 直接调用 `artifacts.gate.commit_gate(directory, name, evidence, analyze)`，返回 `(result, path)`。指标投影读取冻结结果，报告通过 `CASE.report_views` 声明所选视图。业务分析、指标和报告分别使用普通 Python 函数；相关边界见[用例与公共能力](../architecture/case-plugins.md)。
 
-```python
-GATE = GatePlugin(
-    "quality", analyze, project_metrics, write_report,
-    producer="quality_metrics", describe=metric_contract,
-    view="quality.yaml", validate_view=validate_view,
-)
-# CaseDefinition(..., gates={"quality": GATE})
-```
-
-不再为该门禁手动重复注册 `GATE.project` 和 `GATE.render`。独立 producer 或报告视图继续使用各自注册入口；名称冲突会报错。构建器的 `finish()` 返回类型化步骤序列，程序和变体直接传给编译器，只有冻结执行计划使用 JSON 文件协议。
-
+构建器的 `finish()` 返回类型化步骤序列，程序和变体直接传给编译器；冻结执行计划使用 JSON 文件协议。
 
 ```yaml
 case_schema_version: 2
@@ -158,7 +148,7 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 
 `traffic.kind` 显式选择 `request_batch`、`java_flow` 或 `ha_replay`，各 program 只接受自己的字段合同。`traffic` 保存请求、来源与发流条件；`procedure` 保存操作、流程等待和超时上限；`observation` 保存观测时窗、指标输入绑定与采样要求；`parameters.analysis` 保存 SLO、持续异常等证据解释规则；`checks` 保存检查条件和门槛。发流 QPS 只在 `traffic` 定义，program 将同一个值冻结到门禁证据，不维护另一份目标 QPS。环境启动配置和实例执行预算仍分别属于 `environment`、`execution`。
 
-program 用 `InputContract.from_fields(...)` 声明输入分组和字段，再通过 `case.bind(INPUTS)` 获取只读输入。基础参数和 variant 合并后都执行严格校验；未知字段、未读取参数和缺失必需值报错。嵌套业务对象复用其拥有者的输入校验，不能用“已读取父级 dict”代替子字段校验。复杂流程仍在 Python，不为每个 YAML 字段创建类或表达式语言。
+program 用 `InputSchema(...)` 声明输入分组和字段，再通过 `case.config` 获取本次构建独立的已校验配置。基础参数和 variant 合并后都执行严格校验；未知字段、未读取参数和缺失必需值报错。嵌套业务对象复用其拥有者的输入校验，不能用“已读取父级 dict”代替子字段校验。复杂流程仍在 Python，不为每个 YAML 字段创建类或表达式语言。
 
 `observation.windows` 是取证边界的权威声明，支持两种锚点：
 
@@ -224,15 +214,15 @@ Prometheus 优先适用于监控指标；请求是否完成、RPC 是否符合�
 | `report.py`、`panels.py`、`view.py` | 业务结果展示、面板装配与专属视图校验；HTML 交互和 bundle 协议复用 `reporting/` |
 | `client.py`、`observation.py` 等现场模块 | 专属客户端会话或数据源协议解释；HTTP 观测注册适配器，由公共标准 exporter 与 Prometheus 管理调度、预算和收尾 |
 | `comparison.py` | 业务声明的对齐策略校验，不重算跨 run 门禁 |
-| `replay.py` | 专属证据补充与显式离线重判；整窗门禁复用 `GatePlugin` 发布 |
+| `replay.py` | 专属证据补充与显式离线重判；整窗门禁复用 `artifacts.gate` 冻结与发布函数 |
 
 按实际需要建文件，小型 case 只需 `program.py`，不创建空的层次。这里的归属表示业务合同由谁维护，不表示代码永远不可复用：同类 program 可显式注册同一实现；跨业务一致的统计、协议、采集或渲染功能才提到公共组件。不能因文件名同为 `analysis.py` 或 `metrics.py` 就把不同业务口径合并。
 
 `scenario.registry` 自动发现 `cases` 下包含 `program.py` 的直接子目录。program 导出 `CASE: CaseDefinition`，明确声明构建器、参数约束、动作、报告、指标生产者和采集源。目录名就是稳定 case 名；新增 case 不修改公共名单。注册快照校验能力冲突并保持不可变，YAML 只能选择已发现入口，不能导入代码。通用构建接口是 `scenario.builder.CaseBuilder`；`output(stage, name)` 声明有类型的前序输出引用。
 
-`CASE.actions` 声明所属能力；单次运行的分析参数由所属 program 校验。指标用 `case.metric(id, ...)` 声明所有门禁及 producer 的采样输入依赖，编译检查 ID、单位与身份标签。采集清单来自这些依赖、报告曲线与显式诊断项的并集；目录中无人消费的能力不采集，不能靠 producer 运行时加载整份 plan 扩大清单。复杂指标的 producer 注册到 `CASE.producers`，`monitoring/producers.py` 负责调用这些能力；定义数据放在 `config/monitoring/`，规则见[指标配置](../../config/monitoring/README.md)。
+`CASE.actions` 声明所属能力；单次运行的分析参数由所属 program 校验。指标用 `case.metric(id, ...)` 声明所有门禁及 producer 的采样输入依赖，编译检查 ID、单位与身份标签。采集清单来自这些依赖、报告曲线与显式诊断项的并集；目录中无人消费的能力不采集，不能靠 producer 运行时加载整份 plan 扩大清单。复杂指标的口径与投影由 `CASE.metrics` 指向的模块维护；定义数据放在 `config/monitoring/`，规则见[指标配置](../../config/monitoring/README.md)。
 
-`CASE.producers` 注册 `MetricProducer(describe, execute, phase)`。GATE 的 `execute(directory)` 在最终遥测导出后投影已冻结的门禁数值，FINALIZE 的 `execute(directory, context)` 发布收尾证据；函数名没有自动注册含义。报告通过 `CASE.report_views` 注册 `ReportView(validator, renderer)`；renderer 接收目录、运行分析和视图定义，读取校验后的冻结判定，在统一报告阶段生成 bundle，返回 HTML 路径，不重判或重新发布指标。门禁 bundle 声明 `role="gate"`，发现与汇总通过 manifest 校验，不根据目录名猜测。报告协议见[报告契约](../architecture/reporting.md)。
+指标口径由 case 的 `metrics.CONTRACTS` 声明，`CASE.metrics` 指向所属指标模块。执行器在证据冻结后直接调用 `project(directory, selected, deadline)`；需要依赖整轮分析的模块还可提供 `finalize(directory, analysis, selected, deadline)`，返回以已选择来源 ID 为键的诊断 metadata。指标发布继续使用统一的 `monitoring.publication.publish`，逐项校验定义、身份和来源。
 
 
 注册接口的参数契约定义在 `scenario.contracts`，发现阶段检查可调用参数，不执行能力函数：
@@ -305,22 +295,22 @@ handler 的错误路径同样遵守输出合同。数值在证据不足时可以
 
 ## 收尾指标扩展
 
-注册为 `ProducerPhase.FINALIZE` 的函数签名是 `execute(directory, context: FinalizationContext) -> dict`。从 `context.run` 读取调用快照，通过返回 metadata 提交自己的诊断信息，不修改主分析结果。自定义视图、producer 和来源必须在所属 `CASE` 声明；复用另一 case 的实现也须显式声明。调用边界和源码指纹见 [Case 插件结构](../architecture/case-plugins.md)。
+指标模块的 `finalize(directory, analysis, selected, deadline)` 接收顶层只读、嵌套独立复制的分析快照，返回诊断 metadata；修改快照不回写检查与判定。所返回的来源 ID 必须已被当前 case 声明并被本轮选择。视图与来源的共享也须由各使用方显式声明。
 
 ## 扩展功能时的修改边界
 
-先区分新增配置、业务算法与新协议，不把这些独立事实合并成一段隐式推导。新增数值字段优先用 `InputContract.from_fields` 单点声明类型、必填性与准入字段；新增指标检查用 `CheckSpec` 单点声明绑定和数值规则。YAML 负责具体取值，指标定义负责来源口径，纯分析负责业务算法。它们是必要的修改点；不要再手工重复维护 RULES、数字路径及分析字段集合。
+先区分新增配置、业务算法与新协议，不把这些独立事实合并成一段隐式推导。新增数值字段优先用 `InputSchema` 单点声明类型、必填性与准入字段；新增指标检查用 `CheckSpec` 单点声明绑定和数值规则。YAML 负责具体取值，指标定义负责来源口径，纯分析负责业务算法。它们是必要的修改点；不要再手工重复维护 RULES、数字路径及分析字段集合。
 
 ```python
-from scenario.inputs import InputContract
+from scenario.inputs import InputSchema
 from scenario.numeric_parameters import NONNEGATIVE
 
-INPUTS = InputContract.from_fields(
+INPUTS = InputSchema(
     {"custom": {"name": None, "threshold": NONNEGATIVE}},
     optional={"custom.threshold"},
 )
-# CASE = CaseDefinition(builders={"default": default}, input_contract=INPUTS)
-# data = case.bind(INPUTS)
+# CASE = CaseDefinition(builders={"default": default}, input_schema=INPUTS)
+# data = case.config
 ```
 
 客户端或采样器在 case action 中调用具体 adapter，不增加公共 source 白名单或执行器分支。后台资源立即通过 `ctx.register_resource()` 或 `ctx.add_cleanup()` 登记清理；客户端必须保存真实资源句柄，采样器使用传入 deadline 限制 I/O。接口职责见[case 插件结构](../architecture/case-plugins.md)。

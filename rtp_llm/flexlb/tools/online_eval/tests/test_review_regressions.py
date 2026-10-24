@@ -148,7 +148,7 @@ def test_producer_source_without_file_has_clear_error(tmp_path,monkeypatch,spec)
     from monitoring.publication import publish
     from monitoring.contracts import MetricContractError
     store=freeze_metrics(tmp_path,"cache_scale_in")
-    module = registry().producers["cache_windows"].module
+    module = registry().metric_contracts["cache_windows"].__module__
     monkeypatch.setattr("monitoring.publication.find_spec",lambda name:
         (None if spec is None else SimpleNamespace(**spec)) if name == module else find_spec(name))
     definition=store.document["definitions"]["derived/survivor_hit_ratio"]

@@ -17,8 +17,7 @@ def metric_classification(identity, definition, presentation):
         return "DIAGNOSTIC_ONLY"
     if definition.get("producer") and definition.get("value_kind") == "scalar":
         from scenario.registry import registry
-        from scenario.registry import ProducerPhase
-        if registry().producers[definition["producer"]].phase is ProducerPhase.GATE:
+        if definition["producer"] in registry().metric_contracts:
             return "GATE_EVIDENCE"
     return None
 

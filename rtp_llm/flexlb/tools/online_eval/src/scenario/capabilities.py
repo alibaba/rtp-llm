@@ -44,9 +44,6 @@ class RuntimeCapabilities:
         from scenario.registry import registry
         return registry().capability(kind, name, case=self.case)
 
-    def gate(self, name):
-        return self.capability("gate", name)
-
     def records(self, handle, kind, deadline):
         from adapters.client_records import read_records
         return read_records(self._context.resource(handle, kind), deadline, self._context.env_epoch)

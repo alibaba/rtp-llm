@@ -8,7 +8,10 @@ from pathlib import Path
 from cases.cache_scale_in import analysis as cache_analysis
 from cases.cache_scale_in.analysis import MEASUREMENT_POLICY, align_send_counters, attribute_client
 from cases.cache_scale_in.report import prepare_report
-from cases.cache_scale_in.program import GATE
+from cases.cache_scale_in.analysis import analyze
+from cases.cache_scale_in.metrics import produce
+from cases.cache_scale_in.report import write_report
+from artifacts.gate import publish_gate
 
 
 def cache_main():
@@ -43,9 +46,9 @@ def cache_main():
             ["historical admission timing cannot be reconstructed; detach-based windows retained"],
     )
     args.output.mkdir(parents=True, exist_ok=True)
-    result = GATE.evaluate(evidence)
+    result = analyze(evidence)
     import_metrics(args.output, args.evidence.parent)
-    GATE.publish(args.output, evidence, result,
+    publish_gate(args.output, 'cache', evidence, result, produce, write_report,
                  report_options={"prepared": prepare_report(args.output, evidence)})
     print(result["verdict"])
     return {"PASS": 0, "FAIL": 1, "INVALID": 2}[result["verdict"]]

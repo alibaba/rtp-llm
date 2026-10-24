@@ -1,8 +1,11 @@
 """Fixed-window observation over the existing Java flow and runtime lifecycle."""
 
+from cases.master_performance.inputs import validate as validate_criteria
+
 from scenario.contracts import StageHandler, StageOutput
-from scenario.parameters import validate_fields
-from cases.master_performance.inputs import INPUTS, effective_profile
+from functools import partial
+from scenario.parameters import validate_fields, reference_parameters
+from cases.master_performance.inputs import effective_profile
 from artifacts.json_io import write_json
 from artifacts.gate_inputs import compact_flow, new_evidence
 from artifacts.gate import gate_check
@@ -15,7 +18,7 @@ def observe_validate(params, plan):
     fields = {"flow", "criteria", "gate_input", "observation"}
     p = validate_fields(params, plan, fields, fields)
     plan.reference(p["flow"], "java_flow")
-    INPUTS.admit_projection(p["criteria"], p["gate_input"])
+    validate_criteria(p["criteria"], p["gate_input"])
     from cases.master_performance.inputs import observation_contract
     durations = observation_contract(p["observation"])
     if any(p["criteria"][key] != value for key, value in durations.items()):
@@ -105,13 +108,6 @@ def observe(ctx, p, deadline):
     )
 
 
-def finish_validate(params, plan):
-    p = validate_fields(params, plan, {"flow", "evidence"}, {"flow", "evidence"})
-    plan.reference(p["flow"], "java_flow")
-    plan.reference(p["evidence"], "gate_evidence")
-    return p
-
-
 def finish(ctx, p, deadline):
     flow = ctx.resource(p["flow"], "java_flow")
     e = ctx.resource(p["evidence"], "gate_evidence")
@@ -135,8 +131,9 @@ def finish(ctx, p, deadline):
             e["errors"].append("engine TPS collection: " + str(exc))
     # Preserve terminal evidence even if analysis or presentation later times out.
     write_json(ctx.artifact_dir / "performance-gate-evidence.json", e)
-    committed = ctx.services.gate('performance').commit(ctx.artifact_dir, e)
-    result, path = committed.result, committed.path
+    from artifacts.gate import commit_gate
+    from cases.master_performance.analysis import analyze
+    result, path = commit_gate(ctx.artifact_dir, 'performance', e, analyze)
     return StageOutput(
         checks=[
             gate_check("absolute_performance", result, path,
@@ -156,7 +153,7 @@ HANDLERS = [
     ),
     StageHandler(
         "performance_finish",
-        finish_validate,
+        partial(reference_parameters, resources={'flow': 'java_flow', 'evidence': 'gate_evidence'}),
         finish,
         {},
         checks=frozenset({"absolute_performance"}),

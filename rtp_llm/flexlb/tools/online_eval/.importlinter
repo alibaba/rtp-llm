@@ -39,7 +39,6 @@ source_modules =
     scenario.builder
     scenario.contracts
     scenario.inputs
-    scenario.gates
 forbidden_modules =
     cases
     scenario.measurement

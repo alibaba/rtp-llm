@@ -136,7 +136,7 @@ Java 流量控制使用 `FlowState`、`FlowStatus`、`StopCommand` 和 `DrainRes
 
 ## 声明与解析结果
 
-数据型 case YAML 在入口解码为 `CaseDeclaration`、`VariantDeclaration`、`ExecutionPolicy` 和 `MonitoringPolicy`。case 的业务参数由所属程序校验，公共构建层不通过任意模块属性寻找入口。`CaseDefinition` 声明全部能力，注册器按目录发现并校验冲突。冻结门禁的 `GatePlugin` 同时声明 producer 名称与指标描述函数、报告视图名称与校验函数；`CaseDefinition` 从该声明生成指标投影和报告注册，不需要在 case 中分别重复登记。独立的指标生产器、分阶段检查投影和报告仍可直接注册。
+数据型 case YAML 在入口解码为 `CaseDeclaration`、`VariantDeclaration`、`ExecutionPolicy` 和 `MonitoringPolicy`。case 的业务参数由所属程序校验，公共构建层不通过任意模块属性寻找入口。`CaseDefinition` 声明全部能力，注册器按目录发现并校验冲突。输入由 `InputSchema` 单点声明字段和数值规则，编译器应用 YAML 收紧约束后解析为 `case.config`。case 显式调用分析和冻结函数；`CASE.metrics` 指向普通指标模块，视图由 `CASE.report_views` 声明。
 
 环境覆盖通过统一规则合并：配置字段整体替换，profile 按名称及字段继承，列表与完整模型整体替换。编译阶段将最终 Master JSON、preset 性能数据及运行选项冻结为带 SHA 的 `EnvironmentSnapshot`。运行时使用冻结数据投影进程参数，不重新读取 preset 或应用配置默认值。
 

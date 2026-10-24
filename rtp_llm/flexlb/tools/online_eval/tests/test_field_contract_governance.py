@@ -12,7 +12,7 @@ from adapters.environment import EnvManager, FlexEnv
 from adapters.environment_config import EnvSpec, MasterSpec
 from scenario.builder import CaseBuilder
 from scenario.criteria import CriteriaContract
-from scenario.inputs import InputContract
+from scenario.inputs import InputSchema
 from scenario.numeric_parameters import NONNEGATIVE
 from scenario.check_inputs import CheckSet, CheckSpec
 from scenario.traffic_inputs import java_flow_inputs
@@ -115,13 +115,13 @@ def test_reuse_compares_captured_startup_intent_even_if_caller_mutates_spec(tmp_
 
 def test_new_check_reaches_projection_without_another_field_or_numeric_list():
     checks = CheckSet('trial', {'latency': CheckSpec('max_latency', 'latency', 'le', 'ms', ('window',), number=NONNEGATIVE)})
-    inputs = InputContract.from_fields({'checks': checks.input_fields})
+    inputs = InputSchema({'checks': checks.input_fields})
     criteria = CriteriaContract({'checks': checks.criteria_fields})
     builder = CaseBuilder({}, {'checks': {'latency': dict(metric='trial/latency', unit='ms',
         windows=['window'], op='le', expected=12)}}, number_rules=inputs.numeric_parameters)
     builder.validate_numbers()
-    data = builder.bind(inputs)
-    projected = criteria.project(checks=checks.compile(builder, data.checks))
+    data = inputs.parse(builder.parameters, builder.number_rules)
+    projected = criteria.project(checks=checks.compile(builder, data['checks']))
     assert projected == {'max_latency': 12}
     assert criteria.read(projected) == projected
     with pytest.raises(ValueError):
@@ -139,7 +139,7 @@ def test_capability_scalar_addition_derives_case_numeric_admission(monkeypatch):
     monkeypatch.setattr('scenario.traffic_inputs.JavaFlowSpec', extended)
     declarations = java_flow_inputs()
     assert declarations['probe_budget'] == NumberRule(True, 1, 10)
-    inputs = InputContract.from_fields({'traffic': declarations})
+    inputs = InputSchema({'traffic': declarations})
     assert inputs.numeric_parameters['traffic.probe_budget'] == NumberRule(True, 1, 10)
     from document_io import load_document
     root = Path(__file__).resolve().parents[1]

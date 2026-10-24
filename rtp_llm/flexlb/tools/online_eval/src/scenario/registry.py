@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from scenario.contracts import ExecutionRequirements
-from enum import Enum
 from importlib import import_module
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,16 +14,8 @@ from typing import Mapping
 from scenario.contracts import ProgramBuilder
 from scenario.contracts import ViewValidator
 from scenario.contracts import ViewRenderer
-from scenario.contracts import ProducerDescription
-from scenario.contracts import GateProducer
-from scenario.contracts import FinalizeProducer
 from scenario.contracts import SourceFactory
 from input_contract import validate_call
-
-
-class ProducerPhase(str, Enum):
-    GATE = 'gate'
-    FINALIZE = 'finalize'
 
 
 @dataclass(frozen=True)
@@ -44,17 +35,6 @@ class ReportView:
 
 
 @dataclass(frozen=True)
-class MetricProducer:
-    describe: ProducerDescription
-    execute: GateProducer | FinalizeProducer
-    phase: ProducerPhase
-
-    @property
-    def module(self):
-        return self.describe.__module__
-
-
-@dataclass(frozen=True)
 class EvidenceSource:
     factory: SourceFactory
     fields: frozenset[str]
@@ -65,50 +45,25 @@ class EvidenceSource:
 @dataclass(frozen=True)
 class CaseDefinition:
     builders: Mapping[str, ProgramBuilder]
-    numeric_parameters: Mapping = field(default_factory=dict)
     actions: tuple = ()
     report_views: Mapping[str, ReportView] = field(default_factory=dict)
-    producers: Mapping[str, MetricProducer] = field(default_factory=dict)
+    metrics: object = None
     sources: Mapping[str, EvidenceSource] = field(default_factory=dict)
 
     execution_requirements: ExecutionRequirements = field(default_factory=ExecutionRequirements)
-    input_contract: object = None
-    gates: Mapping = field(default_factory=dict)
+    input_schema: object = None
 
     def __post_init__(self):
         if not isinstance(self.execution_requirements, ExecutionRequirements):
             raise ValueError('execution_requirements must be an ExecutionRequirements')
-        if self.input_contract is not None:
-            from scenario.inputs import InputContract
-            if not isinstance(self.input_contract, InputContract):
-                raise ValueError("input_contract must be an InputContract")
-            merged = dict(self.numeric_parameters)
-            for path, rule in self.input_contract.numeric_parameters.items():
-                if path in merged and merged[path] != rule:
-                    raise ValueError("conflicting numeric input: " + path)
-                merged[path] = rule
-            object.__setattr__(self, "numeric_parameters", merged)
-        for name in ('builders', 'numeric_parameters', 'report_views', 'producers', 'sources', 'gates'):
+        if self.input_schema is not None:
+            from scenario.inputs import InputSchema
+            if not isinstance(self.input_schema, InputSchema):
+                raise ValueError("input_schema must be an InputSchema")
+        for name in ('builders', 'report_views', 'sources'):
             if not isinstance(getattr(self, name), Mapping):
                 raise ValueError('case ' + name + ' must be a mapping')
-        from scenario.gates import GatePlugin
-        producers, views = dict(self.producers), dict(self.report_views)
-        for name, gate in self.gates.items():
-            if not isinstance(gate, GatePlugin):
-                raise ValueError("invalid gate capability: " + name)
-            if gate.producer is not None:
-                producer = MetricProducer(gate.describe, gate.project, ProducerPhase.GATE)
-                if gate.producer in producers and producers[gate.producer] != producer:
-                    raise ValueError('conflicting gate producer registration: ' + gate.producer)
-                producers[gate.producer] = producer
-            if gate.view is not None:
-                view = ReportView(gate.validate_view, gate.render, gate.subtitle_fields, gate.render_with_deadline)
-                if gate.view in views and views[gate.view] != view:
-                    raise ValueError('conflicting gate view registration: ' + gate.view)
-                views[gate.view] = view
-        object.__setattr__(self, 'producers', producers)
-        object.__setattr__(self, 'report_views', views)
-        for name in ('builders', 'numeric_parameters', 'report_views', 'producers', 'sources', 'gates'):
+        for name in ('builders', 'report_views', 'sources'):
             value = getattr(self, name)
             object.__setattr__(self, name, MappingProxyType(dict(value)))
         object.__setattr__(self, 'actions', tuple(self.actions))
@@ -126,12 +81,12 @@ class RegisteredCase:
 class CaseRegistry:
     cases: Mapping[str, RegisteredCase]
     views: Mapping[str, ReportView]
-    producers: Mapping[str, MetricProducer]
+    metric_contracts: Mapping
     sources: Mapping[str, EvidenceSource]
 
     def capability(self, kind, name, *, case):
         """A case may consume only capabilities it explicitly declares, including shared ones."""
-        fields = {'view': 'report_views', 'producer': 'producers', 'source': 'sources', 'gate': 'gates'}
+        fields = {'view': 'report_views', 'source': 'sources'}
         if kind not in fields:
             raise ValueError('unknown capability kind: ' + kind)
         if case not in self.cases:
@@ -145,7 +100,7 @@ class CaseRegistry:
     def build(cls, cases):
         from scenario.contracts import StageHandler
 
-        entries, views, producers, sources = {}, {}, {}, {}
+        entries, views, contracts, sources = {}, {}, {}, {}
         def add(target, name, capability, kind):
             if name in target and target[name] != capability:
                 raise ValueError('conflicting registered ' + kind + ' capability: ' + name)
@@ -168,10 +123,6 @@ class CaseRegistry:
                     raise ValueError(case.module + ': actions must contain StageHandler capabilities')
                 validate_call(action.validate, 2, case.module + '.actions.' + action.name + '.validate')
                 validate_call(action.execute, 3, case.module + '.actions.' + action.name + '.execute')
-            from scenario.gates import GatePlugin
-            for name, capability in definition.gates.items():
-                if not re.fullmatch(r'[a-z][a-z0-9_]*', name) or not isinstance(capability, GatePlugin):
-                    raise ValueError("invalid gate capability: " + name)
             entries[case.name] = case
             for name, capability in definition.report_views.items():
                 if (not re.fullmatch(r'[a-z][a-z0-9_]*\.yaml', name) or name == 'default.yaml'
@@ -183,16 +134,18 @@ class CaseRegistry:
                 if capability.deadline_renderer is not None:
                     validate_call(capability.deadline_renderer, 4, case.module + ".views." + name + ".deadline_renderer")
                 add(views, name, capability, 'view')
-            for name, capability in definition.producers.items():
-                if (not re.fullmatch(r'[a-z][a-z0-9_]*', name)
-                        or not isinstance(capability, MetricProducer)
-                        or not isinstance(capability.phase, ProducerPhase)
-                        or not callable(capability.describe) or not callable(capability.execute)):
-                    raise ValueError('invalid registered producer capability: ' + name)
-                validate_call(capability.describe, 3, case.module + '.producers.' + name + '.describe')
-                count = 1 if capability.phase is ProducerPhase.GATE else 2
-                validate_call(capability.execute, count, case.module + '.producers.' + name + '.execute')
-                add(producers, name, capability, 'producer')
+            if definition.metrics is not None:
+                declared = getattr(definition.metrics, "CONTRACTS", None)
+                if not isinstance(declared, Mapping):
+                    raise ValueError(case.module + ': metric contracts must be a mapping')
+                for name, describe in declared.items():
+                    if not isinstance(name, str) or not re.fullmatch(r'[a-z][a-z0-9_]*', name):
+                        raise ValueError('invalid metric source: ' + str(name))
+                    validate_call(describe, 3, case.module + '.metrics.' + name)
+                    add(contracts, name, describe, 'metric source')
+                validate_call(getattr(definition.metrics, "project", None), 3, case.module + '.metrics.project')
+                if hasattr(definition.metrics, 'finalize'):
+                    validate_call(definition.metrics.finalize, 4, case.module + '.metrics.finalize')
             for name, capability in definition.sources.items():
                 if (not re.fullmatch(r'[a-z][a-z0-9_]*', name)
                         or not isinstance(capability, EvidenceSource) or not callable(capability.factory)
@@ -200,7 +153,7 @@ class CaseRegistry:
                     raise ValueError('invalid registered source capability: ' + name)
                 validate_call(capability.factory, 2, case.module + '.sources.' + name + '.factory')
                 add(sources, name, capability, 'source')
-        return cls(*(MappingProxyType(v) for v in (entries, views, producers, sources)))
+        return cls(*(MappingProxyType(v) for v in (entries, views, contracts, sources)))
 
 
 def discover(root=None, *, package='cases', names=None):

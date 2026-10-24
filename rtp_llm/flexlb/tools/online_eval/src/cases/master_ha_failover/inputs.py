@@ -6,7 +6,6 @@ import math
 from scenario.inputs import fields
 from cases.master_ha_failover.analysis import HA_METRICS
 from analysis.checks import validate_comparison
-from document_io import DocumentError as ScenarioError
 from scenario.numeric_parameters import SOURCE_NUMBERS
 from scenario.numeric_parameters import OUTPUT_DISTRIBUTION_NUMBERS
 from scenario.numeric_parameters import CAPTURE_NUMBERS
@@ -18,7 +17,7 @@ from scenario.numeric_parameters import NONNEGATIVE
 from scenario.numeric_parameters import number_fields
 
 
-from scenario.inputs import InputContract, section_fields
+from scenario.inputs import InputSchema, section_fields
 
 # Each check declares its numeric leaves once. Adding a check derives both
 # section admission and numeric validation, including the common sample floor.
@@ -29,7 +28,7 @@ CHECK_INPUTS = {
     **dict.fromkeys(('handover_errors', 'late_errors', 'outage_failures',
                     'outage_no_master', 'rolling_errors', 'unique_requests'), COUNT),
 }
-INPUTS = InputContract.from_fields({
+INPUTS = InputSchema({
     'traffic': section_fields('traffic',
         {'kind', 'source', 'duration_s', 'timeout_ms', 'replay_speed', 'loop',
          'max_concurrency', 'max_requests', 'fallback'}, {
@@ -90,22 +89,20 @@ def read_cycle(case):
     from scenario.windows import ObservationWindow
     from scenario.windows import check_windows
 
-    if isinstance(case.parameters.get("procedure"), dict) and "restart_mode" in case.parameters["procedure"]:
-        raise ScenarioError("restart_mode is owned by flow identity, not parameters")
-    data = case.bind(INPUTS)
+    data = case.config
     from runtime.observation import capture_limits
-    capture_limits(data.observation["capture"], "parameters.observation.capture")
+    capture_limits(data['observation']["capture"], "parameters.observation.capture")
     for name in ("baseline_wait", "settle", "survivor_wait", "outage_wait", "both_wait"):
-        fields(data.procedure[name], {"wait_s"}, "parameters.procedure." + name)
-        validate_wait(data.procedure[name], path="parameters.procedure." + name)
+        fields(data['procedure'][name], {"wait_s"}, "parameters.procedure." + name)
+        validate_wait(data['procedure'][name], path="parameters.procedure." + name)
     window_names = {"baseline", "b_only", "a_only", "both", "outage",
                     "a_handover", "post_recovery", "all_requests"}
-    fields(data.observation["windows"], window_names, "parameters.observation.windows")
+    fields(data['observation']["windows"], window_names, "parameters.observation.windows")
     windows = {name: ObservationWindow.read(spec, "parameters.observation.windows." + name,
         timestamp_stages={"baseline_end", "b_start", "b_end", "a_start", "a_end",
                           "both_start", "both_end", "outage_start", "outage_end"})
-        for name, spec in data.observation["windows"].items()}
-    for name, criterion in data.checks.items():
+        for name, spec in data['observation']["windows"].items()}
+    for name, criterion in data['checks'].items():
         fields(criterion, {"windows", "metric", "unit", "op", "expected", "min_samples"},
                "parameters.checks." + name,
                optional={"target", "route", "warning_profiles"})

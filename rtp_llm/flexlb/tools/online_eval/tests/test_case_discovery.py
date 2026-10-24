@@ -38,10 +38,10 @@ def test_new_directory_is_discovered_without_framework_registration(tmp_path):
 
 def test_conflicting_producers_and_sources_are_rejected():
     original = registry.registry().cases['master_ha_failover']
-    producer = original.definition.producers['ha_gates']
+    from types import SimpleNamespace
     other = replace(original, name='another', definition=replace(original.definition,
-        producers={'ha_gates': replace(producer, execute=lambda directory: None)}))
-    with pytest.raises(ValueError, match='conflicting registered producer'):
+        metrics=SimpleNamespace(CONTRACTS={'ha_gates': lambda a, b, c: {}}, project=lambda a, b, c: None)))
+    with pytest.raises(ValueError, match='conflicting registered metric source'):
         registry.CaseRegistry.build([original, other])
     source = original.definition.sources['master_inflight']
     other = replace(original, name='another', definition=replace(original.definition,

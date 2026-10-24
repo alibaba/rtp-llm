@@ -1,12 +1,7 @@
-"""Plugin lifecycle: adjudication is explicit and independent of delivery."""
-
-from pathlib import Path
+"""Frozen gate functions separate adjudication from metric and HTML delivery."""
 from unittest.mock import Mock
-
 import pytest
-
-from scenario.gates import GatePlugin
-from artifacts.gate import load_gate
+from artifacts.gate import commit_gate, freeze_gate, load_gate, project_gate, render_gate, publish_gate
 from artifacts.errors import ArtifactNotProduced
 
 
@@ -14,81 +9,61 @@ def decision():
     return dict(verdict='PASS', checks=[dict(id='business', status='PASS')], errors=[])
 
 
-def plugin(tmp_path):
-    return GatePlugin('example', Mock(return_value=decision()), Mock(),
-                      Mock(return_value=tmp_path / 'report'))
-
-
 def test_live_commit_does_not_publish_or_render(tmp_path):
-    gate = plugin(tmp_path)
-    committed = gate.commit(tmp_path, {'samples': [1]})
-    assert committed.path.name == 'example-gate-result.json'
+    analyze = Mock(return_value=decision())
+    result, path = commit_gate(tmp_path, 'example', {'samples': [1]}, analyze)
+    assert path.name == 'example-gate-result.json' and result == decision()
     assert load_gate(tmp_path, 'example') == ({'samples': [1]}, decision())
-    gate.analyze.assert_called_once_with({'samples': [1]})
-    gate.project_metrics.assert_not_called()
-    gate.write_report.assert_not_called()
+    analyze.assert_called_once_with({'samples': [1]})
+    assert {p.name for p in tmp_path.iterdir()} == {'example-gate-evidence.json', 'example-gate-result.json', 'example-gate-manifest.json'}
 
 
 def test_publication_uses_committed_data_and_never_readjudicates(tmp_path):
-    gate = plugin(tmp_path)
-    gate.analyze.side_effect = AssertionError('reanalysis')
-    # Mutating an in-memory projection cannot rewrite the committed verdict.
-    gate.project_metrics.side_effect = lambda directory, evidence, result: result.update(verdict='FAIL')
-    assert gate.publish(tmp_path, {'samples': [1]}, decision()) == tmp_path / 'report'
-    assert gate.write_report.call_args.args[2]['verdict'] == 'PASS'
+    project = Mock(side_effect=lambda directory, evidence, result: result.update(verdict='FAIL'))
+    report = Mock(return_value=tmp_path / 'report')
+    assert publish_gate(tmp_path, 'example', {}, decision(), project, report) == tmp_path / 'report'
+    assert report.call_args.args[2]['verdict'] == 'PASS'
     assert load_gate(tmp_path, 'example')[1]['verdict'] == 'PASS'
-    gate.analyze.assert_not_called()
 
 
 def test_delivery_error_preserves_gate_and_never_renders(tmp_path):
-    gate = plugin(tmp_path)
-    gate.project_metrics.side_effect = RuntimeError('projection failed')
+    report = Mock()
     with pytest.raises(RuntimeError, match='projection failed'):
-        gate.publish(tmp_path, {}, decision())
+        publish_gate(tmp_path, 'example', {}, decision(), Mock(side_effect=RuntimeError('projection failed')), report)
     assert load_gate(tmp_path, 'example')[1]['verdict'] == 'PASS'
-    gate.write_report.assert_not_called()
+    report.assert_not_called()
 
 
 def test_corrupt_gate_cannot_reach_projection_or_presentation(tmp_path):
-    gate = plugin(tmp_path)
-    gate.commit(tmp_path, {})
+    freeze_gate(tmp_path, 'example', {}, decision())
     (tmp_path / 'example-gate-result.json').write_text('{}')
-    for call in (lambda: gate.project(tmp_path), lambda: gate.render(tmp_path, {}, {})):
+    project, report = Mock(), Mock()
+    for call in (lambda: project_gate(tmp_path, 'example', project),
+                 lambda: render_gate(tmp_path, {}, {}, name='example', write_report=report)):
         with pytest.raises(ValueError, match='checksum'):
             call()
-    gate.project_metrics.assert_not_called()
-    gate.write_report.assert_not_called()
+    project.assert_not_called()
+    report.assert_not_called()
 
 
-def test_render_passes_selected_view_and_does_not_analyze(tmp_path):
-    gate = plugin(tmp_path)
-    gate.commit(tmp_path, {})
-    gate.analyze.reset_mock()
-    view = {'report': {'id': 'alternate'}}
-    run = {'id': 'example::default::batch-window'}
-    assert gate.render(tmp_path, run, view) == tmp_path / 'report/report.html'
-    assert gate.write_report.call_args.kwargs == dict(run=run, presentation=view)
-    gate.analyze.assert_not_called()
+def test_selected_view_passes_run_and_presentation_without_reanalysis(tmp_path):
+    freeze_gate(tmp_path, 'example', {}, decision())
+    report = Mock(return_value=tmp_path / 'report')
+    run, presentation = {'status': 'FAIL'}, {'title': 'test'}
+    assert render_gate(tmp_path, run, presentation, name='example', write_report=report) == tmp_path / 'report/report.html'
+    assert report.call_args.kwargs == dict(run=run, presentation=presentation)
 
 
-def test_missing_gate_is_not_fabricated(tmp_path):
-    gate = plugin(tmp_path)
-    gate.project(tmp_path)  # Aborted runs need not have a committed gate.
+def test_missing_commit_skips_projection_but_selected_view_fails(tmp_path):
+    project, report = Mock(), Mock()
+    project_gate(tmp_path, 'example', project)
     with pytest.raises(ArtifactNotProduced):
-        gate.render(tmp_path, {}, {})
-    gate.analyze.assert_not_called()
-    gate.project_metrics.assert_not_called()
+        render_gate(tmp_path, {}, {}, name='example', write_report=report)
+    project.assert_not_called()
+    report.assert_not_called()
 
 
-def test_inconsistent_analysis_cannot_commit(tmp_path):
-    gate = plugin(tmp_path)
-    gate.analyze.return_value = dict(decision(), verdict='FAIL')
-    with pytest.raises(ValueError, match='verdict disagrees'):
-        gate.commit(tmp_path, {})
+def test_inconsistent_verdict_cannot_commit(tmp_path):
+    with pytest.raises(ValueError, match='verdict'):
+        commit_gate(tmp_path, 'example', {}, lambda evidence: dict(decision(), verdict='FAIL'))
     assert not list(tmp_path.iterdir())
-
-
-def test_report_callback_contract_is_checked_before_execution(tmp_path):
-    with pytest.raises(ValueError, match='presentation keywords'):
-        GatePlugin('example', lambda evidence: decision(), lambda a, b, c: None,
-                   lambda directory, evidence, result: Path(directory))

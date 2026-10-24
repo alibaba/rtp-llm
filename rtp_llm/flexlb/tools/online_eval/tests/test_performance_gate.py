@@ -11,8 +11,7 @@ from runtime.deadline import Deadline
 
 from cases.master_performance.analysis import analyze
 from cases.master_performance.inputs import validate
-from cases.master_performance.program import GATE as PERFORMANCE_GATE
-publish_performance = PERFORMANCE_GATE.publish
+from delivery_fixtures import publish_performance
 from metric_fixtures import freeze_metrics
 
 def report(directory, evidence, result):
@@ -197,10 +196,7 @@ class PerformanceGateTest(unittest.TestCase):
             (flow.directory/"client_lifecycle.jsonl").write_text("journal retained")
             ctx = SimpleNamespace(artifact_dir=Path(d), monitor=monitor,
                 resource=lambda name, kind: flow if kind == "java_flow" else e)
-            from dataclasses import replace
-            interrupted = replace(PERFORMANCE_GATE, analyze=mock.Mock(side_effect=RuntimeError("analysis interrupted")))
-            ctx.services = SimpleNamespace(gate=mock.Mock(return_value=interrupted))
-            with mock.patch.object(ctx.services, "gate", return_value=interrupted):
+            with mock.patch('cases.master_performance.analysis.analyze', side_effect=RuntimeError("analysis interrupted")):
                 with self.assertRaisesRegex(RuntimeError, "analysis interrupted"):
                     finish(ctx, dict(flow="flow", evidence="evidence"), Deadline(float('inf')))
             archived = json.loads((Path(d)/"performance-gate-evidence.json").read_text())

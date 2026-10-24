@@ -1,119 +1,56 @@
-"""Case callbacks cannot mutate canonical results; implementation identity covers siblings."""
-from pathlib import Path
+"""Direct case metric callbacks receive detached inputs and explicit deadlines."""
 from types import SimpleNamespace
-import json
-
+from unittest.mock import Mock
 import pytest
-
-from scenario.contracts import FinalizationContext
-from scenario.registry import MetricProducer, ProducerPhase
-from monitoring import producers
-from monitoring.contracts import MetricContractError
-from scenario.program_compiler import _implementation
+from scenario.context import RuntimeContext
+from scenario.measurement import WorkloadPolicy
+from runtime.deadline import Deadline
 
 
-def prepare(monkeypatch, callback):
-    capability = MetricProducer(lambda *args: {}, callback, ProducerPhase.FINALIZE)
-    monkeypatch.setattr(producers, 'registry', lambda: SimpleNamespace(producers={'example': capability}))
-    monkeypatch.setattr(producers.MetricStore, 'read', lambda _: SimpleNamespace(
-        document={'definitions': {'example/value': {'producer': 'example'}}}))
+@pytest.fixture
+def measured(tmp_path, monkeypatch):
+    from cases.master_ha_failover import metrics
+    store = SimpleNamespace(document={'definitions': {'ha/sent': {'producer': 'ha_evidence'}}},
+        save=Mock(), series=lambda *_: ({}, {}, {}, []))
+    monkeypatch.setattr('monitoring.archive.export_metrics', lambda *args: store)
+    monkeypatch.setattr('monitoring.metric_store.MetricStore.read', lambda *args: store)
+    instance = dict(workload_runtime={'capture_metrics': False}, collection_profile='request',
+                    execution={'monitoring': {}})
+    ctx = RuntimeContext(instance, None, tmp_path, lambda: 0, lambda _: None)
+    policy = WorkloadPolicy()
+    policy.attach(ctx)
+    result = dict(id='fixture', status='PASS', cleanup=[], stages=[dict(id='gate', checks=[dict(id='ok', status='PASS')])],
+                  implementation={'configuration': {'case': 'master_ha_failover'}})
+    return policy, ctx, result, metrics
 
 
-def test_finalize_callback_has_an_isolated_snapshot(monkeypatch, tmp_path):
-    canonical = {'verdict': 'FAIL', 'checks': [{'status': 'FAIL'}]}
-    def callback(directory, context):
-        assert isinstance(context, FinalizationContext)
-        assert context.directory == tmp_path
+def test_direct_finalizer_cannot_mutate_canonical_analysis(measured, monkeypatch):
+    policy, ctx, snapshot, metrics = measured
+    def finalize(directory, analysis, selected, deadline):
         with pytest.raises(TypeError):
-            context.run['verdict'] = 'PASS'
-        context.run['checks'][0]['status'] = 'PASS'
-        return {'diagnosis': 'complete'}
-    prepare(monkeypatch, callback)
-    producers.produce(tmp_path, canonical)
-    assert canonical['verdict'] == 'FAIL'
-    assert canonical['checks'][0]['status'] == 'FAIL'
-    assert canonical['producer_results'] == {'example': {'diagnosis': 'complete'}}
+            analysis['status'] = 'FAIL'
+        analysis['stages'][0]['checks'][0]['status'] = 'FAIL'
+        assert selected == {'ha_evidence'}
+        return {'ha_evidence': {'observed': True}}
+    monkeypatch.setattr(metrics, 'finalize', finalize)
+    finalized = policy.finalize(ctx, snapshot, Deadline(100, lambda: 0))
+    assert finalized.analysis['stages'][0]['checks'][0]['status'] == 'PASS'
+    assert snapshot['stages'][0]['checks'][0]['status'] == 'PASS'
+    assert finalized.analysis['producer_results'] == {'ha_evidence': {'observed': True}}
 
 
-@pytest.mark.parametrize('metadata', [None, {'value': float('nan')}, {'value': object()}])
-def test_invalid_metadata_is_not_published(monkeypatch, tmp_path, metadata):
-    prepare(monkeypatch, lambda directory, context: metadata)
-    canonical = {'verdict': 'FAIL'}
-    with pytest.raises((MetricContractError, ValueError, TypeError)):
-        producers.produce(tmp_path, canonical)
-    assert 'producer_results' not in canonical
-    assert canonical['verdict'] == 'FAIL'
+@pytest.mark.parametrize('metadata', [None, [], {'bad': float('nan')}, {'bad': object()}])
+def test_finalizer_metadata_is_json_valid(measured, monkeypatch, metadata):
+    policy, ctx, snapshot, metrics = measured
+    monkeypatch.setattr(metrics, 'finalize', lambda *args: metadata)
+    with pytest.raises((ValueError, TypeError)):
+        policy.finalize(ctx, snapshot, Deadline(100, lambda: 0))
 
 
-def test_both_phases_use_selected_metric_definitions(monkeypatch, tmp_path):
-    calls = []
-    capabilities = {
-        'selected_gate': MetricProducer(lambda *args: {}, lambda directory: calls.append('gate'), ProducerPhase.GATE),
-        'unused_gate': MetricProducer(lambda *args: {}, lambda directory: calls.append('unused'), ProducerPhase.GATE),
-        'selected_finalize': MetricProducer(lambda *args: {},
-            lambda directory, context: calls.append(context.run['verdict']) or {'done': True}, ProducerPhase.FINALIZE),
-    }
-    monkeypatch.setattr(producers, 'registry', lambda: SimpleNamespace(producers=capabilities))
-    monkeypatch.setattr(producers.MetricStore, 'read', lambda _: SimpleNamespace(document={'definitions': {
-        'trial/gate': {'producer': 'selected_gate'},
-        'trial/gate_duplicate': {'producer': 'selected_gate'},
-        'trial/finalize': {'producer': 'selected_finalize'},
-    }}))
-    producers.produce(tmp_path, {}, phase=ProducerPhase.GATE)
-    canonical = {'verdict': 'FAIL'}
-    producers.produce(tmp_path, canonical)
-    assert calls == ['gate', 'FAIL']
-    assert canonical['producer_results'] == {'selected_finalize': {'done': True}}
-
-
-def test_gate_phase_obeys_deadline_before_callback(monkeypatch, tmp_path):
-    def expired():
-        raise TimeoutError('expired')
-    callbacks = []
-    prepare(monkeypatch, lambda directory: callbacks.append(directory))
-    monkeypatch.setattr(producers, 'registry', lambda: SimpleNamespace(producers={
-        'example': MetricProducer(lambda *args: {}, lambda directory: callbacks.append(directory), ProducerPhase.GATE)}))
+def test_expired_measurement_never_calls_case_projection(measured, monkeypatch):
+    policy, ctx, snapshot, metrics = measured
+    project = Mock()
+    monkeypatch.setattr(metrics, 'project', project)
     with pytest.raises(TimeoutError):
-        producers.produce(tmp_path, {}, phase=ProducerPhase.GATE, deadline=SimpleNamespace(check=expired))
-    assert not callbacks
-
-
-def test_case_fingerprint_covers_business_modules_and_is_deterministic(tmp_path):
-    program = tmp_path / 'program.py'
-    program.write_text('CASE = None\n')
-    analysis = tmp_path / 'analysis.py'
-    analysis.write_text('threshold = 1\n')
-    config = SimpleNamespace(declaration={})
-    module = SimpleNamespace(path=program)
-    first = _implementation(config, module, 'example')
-    assert first == _implementation(config, module, 'example')
-    assert set(first['case_sources']) == {'program.py', 'analysis.py'}
-    analysis.write_text('threshold = 2\n')
-    changed = _implementation(config, module, 'example')
-    assert first['sha256'] == changed['sha256']
-    assert first['case_sources_sha256'] != changed['case_sources_sha256']
-    json.dumps(changed)
-
-
-def test_capability_sharing_requires_explicit_declaration():
-    from scenario.registry import CaseDefinition, CaseRegistry, RegisteredCase, ReportView
-    view = ReportView(lambda path, data, fail: None, lambda directory, analysis, presentation: directory)
-    def entry(name, views):
-        return RegisteredCase(name, name + '.program', Path(__file__),
-                              CaseDefinition(builders={'default': lambda case: None}, report_views=views))
-    registry = CaseRegistry.build([entry('owner', {'shared.yaml': view}), entry('foreign', {})])
-    with pytest.raises(ValueError, match='not declared by case'):
-        registry.capability('view', 'shared.yaml', case='foreign')
-    shared = CaseRegistry.build([entry('owner', {'shared.yaml': view}),
-                                 entry('consumer', {'shared.yaml': view})])
-    assert shared.capability('view', 'shared.yaml', case='consumer') is view
-
-
-def test_compiler_rejects_another_cases_view():
-    import yaml
-    from scenario.program_compiler import configure_program
-    root = Path(__file__).resolve().parents[1]
-    data = yaml.safe_load((root / 'config/scenarios/master_performance.yaml').read_text())
-    data['reports'] = ['master_ha_failover.yaml']
-    with pytest.raises(ValueError, match='not declared by case'):
-        configure_program(data, 'foreign-view.yaml')
+        policy.finalize(ctx, snapshot, Deadline(-1, lambda: 0))
+    project.assert_not_called()

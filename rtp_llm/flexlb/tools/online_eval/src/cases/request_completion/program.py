@@ -13,9 +13,9 @@ from scenario.numeric_parameters import JAVA_LENGTH
 
 
 
-from scenario.inputs import InputContract
+from scenario.inputs import InputSchema
 
-INPUTS = InputContract.from_fields({
+INPUTS = InputSchema({
     'traffic': {'kind': None, 'count': replace(POSITIVE_COUNT, maximum=10000),
                 'input_len': JAVA_LENGTH, 'output_len': JAVA_LENGTH},
     'procedure': {'setup_timeout_s': NONNEGATIVE},
@@ -25,9 +25,9 @@ INPUTS = InputContract.from_fields({
 
 def default(case):
     """Submitted requests must reach a business terminal without stream errors."""
-    data = case.bind(INPUTS)
-    request = {name: case.number("traffic." + name) for name in driver(data.traffic, "request_batch")}
-    for name, criterion in data.checks.items():
+    data = case.config
+    request = {name: data["traffic"][name] for name in driver(data['traffic'], "request_batch")}
+    for name, criterion in data['checks'].items():
         fields(criterion, {"windows", "output", "unit", "op", "expected"}, f"parameters.checks.{name}")
         check_windows(criterion["windows"], available={"terminal"},
                       path=f"parameters.checks.{name}.windows", single=True)
@@ -38,10 +38,10 @@ def default(case):
         if (unit == "boolean" and type(criterion["expected"]) is not bool
                 or unit == "errors" and type(criterion["expected"]) is not int):
             raise ValueError("completion threshold type does not match the output")
-    case.step("setup", "setup", timeout_s=data.procedure["setup_timeout_s"])
+    case.step("setup", "setup", timeout_s=data['procedure']["setup_timeout_s"])
     case.step("submit", "request", params=request)
     case.step("terminal", "wait", params={"requests": output("submit", "requests")})
-    for name, criterion in data.checks.items():
+    for name, criterion in data['checks'].items():
         case.step(
             name,
             "check",
@@ -55,5 +55,5 @@ from scenario.registry import CaseDefinition
 
 CASE = CaseDefinition(
     builders={"default": default},
-    input_contract=INPUTS,
+    input_schema=INPUTS,
 )

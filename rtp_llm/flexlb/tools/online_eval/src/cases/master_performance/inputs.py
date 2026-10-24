@@ -153,7 +153,7 @@ def validate(criteria, gate_input=None):
 
 
 def for_profile(criteria, profile, gate_input=None):
-    return effective_profile(INPUTS.admit_projection(criteria, gate_input), profile)
+    return effective_profile(validate(criteria, gate_input), profile)
 
 
 def effective_profile(criteria, profile):
@@ -166,10 +166,10 @@ def effective_profile(criteria, profile):
     return result
 
 
-from scenario.inputs import InputContract, section_fields
+from scenario.inputs import InputSchema, section_fields
 from scenario.traffic_inputs import java_flow_inputs
 
-INPUTS = InputContract.from_fields({
+INPUTS = InputSchema({
     'traffic': java_flow_inputs(numbers={
         **OUTPUT_DISTRIBUTION_NUMBERS,
         'traffic.client.playback.ramp_up_seconds': NONNEGATIVE,
@@ -186,4 +186,4 @@ INPUTS = InputContract.from_fields({
         name: {'expected': NONNEGATIVE} for name in
         ('rtp_llm_context_tps', 'rtp_llm_context_tps_with_cache', 'mock_decode_wall_tps')
     }},
-}, projection=validate)
+})

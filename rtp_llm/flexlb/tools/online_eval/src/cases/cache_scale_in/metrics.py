@@ -53,3 +53,14 @@ def produce(directory, evidence, result):
                               calculation=metric, scope=result["measurement_scope"],
                               measurement_validity="INVALID" if result["verdict"] == "INVALID" else "VALID"))
     store.save(directory)
+
+
+CONTRACTS = {'cache_windows': metric_contract}
+
+
+def project(directory, selected, deadline):
+    from artifacts.gate import project_gate
+    if 'cache_windows' in selected:
+        deadline.check()
+        project_gate(directory, 'cache', produce)
+        deadline.check()

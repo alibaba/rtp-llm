@@ -61,3 +61,36 @@ def gate_check(identity, result, path, expected):
     return CheckResult(identity, {"INVALID": "ERROR", "PASS": "PASS", "FAIL": "FAIL"}[result["verdict"]],
                        detail="; ".join(result.get("errors", [])), actual=result["verdict"], expected=expected,
                        evidence=dict(result=str(path), sha256=_sha(Path(path)), checks=result["checks"]))
+
+
+def commit_gate(directory, name, evidence, analyze):
+    result = analyze(evidence)
+    return result, freeze_gate(directory, name, evidence, result)
+
+
+def project_gate(directory, name, project):
+    if (Path(directory) / (name + "-gate-manifest.json")).is_file():
+        evidence, result = load_gate(directory, name)
+        project(directory, evidence, result)
+
+
+def render_gate(directory, run, presentation, deadline=None, *, name, write_report):
+    if deadline is not None:
+        deadline.check()
+    evidence, result = load_gate(directory, name)
+    if deadline is not None:
+        deadline.check()
+    path = write_report(directory, evidence, result, run=run, presentation=presentation) / "report.html"
+    if deadline is not None:
+        deadline.check()
+    return path
+
+
+def publish_gate(directory, name, evidence, result, project, write_report, *, report_options=None):
+    freeze_gate(directory, name, evidence, result)
+    project_gate(directory, name, project)
+    evidence, result = load_gate(directory, name)
+    options = dict(report_options or {})
+    if 'run' in options:
+        raise ValueError('offline publication does not accept a live run')
+    return write_report(directory, evidence, result, **options)

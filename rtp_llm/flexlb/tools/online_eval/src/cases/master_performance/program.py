@@ -13,21 +13,21 @@ from scenario.metric_inputs import bind_mock_engine_metrics
 
 
 def default(case):
-    data = case.bind(INPUTS)
+    data = case.config
     from input_contract import finite_number
-    analysis_timeout = data.procedure["analysis_timeout_s"]
+    analysis_timeout = data['procedure']["analysis_timeout_s"]
     if not finite_number(analysis_timeout) or analysis_timeout <= 0:
         raise ValueError("analysis_timeout_s must be finite and positive")
-    inputs = data.observation["inputs"]
+    inputs = data['observation']["inputs"]
     if not isinstance(inputs, dict) or set(inputs) != {"engine_tps"}:
         raise ValueError("performance gate requires engine_tps input")
-    flow = driver(data.traffic, "java_flow")
+    flow = driver(data['traffic'], "java_flow")
     client = ClientConfiguration.read(flow["client"])
     from scenario.inputs import fields
-    slo = fields(data.analysis["slo"], SLO_INPUTS, "parameters.analysis.slo")
-    c = CRITERIA.project(observation=data.observation,
-                         windows=observation_contract(data.observation),
-                         checks=compile_checks(case, data.checks, inputs["engine_tps"]),
+    slo = fields(data['analysis']["slo"], SLO_INPUTS, "parameters.analysis.slo")
+    c = CRITERIA.project(observation=data['observation'],
+                         windows=observation_contract(data['observation']),
+                         checks=compile_checks(case, data['checks'], inputs["engine_tps"]),
                          slo={"slo_" + key: value for key, value in slo.items()},
                          runtime={"qps": client.playback.qps})
     allowed = c["qps"] * (1 + c["qps_tolerance"])
@@ -43,7 +43,7 @@ def default(case):
         "measure",
         "performance_observe",
         params=dict(flow=output("traffic", "flow"), criteria=c, gate_input=inputs["engine_tps"],
-                    observation=data.observation),
+                    observation=data['observation']),
         timeout_s=budget + 30,
     )
     case.step("stop", "java_flow_stop", params={"flow": output("traffic", "flow")})
@@ -60,13 +60,14 @@ def default(case):
     case.step("teardown", "teardown")
 
 
-from scenario.gates import GatePlugin
-from cases.master_performance.analysis import analyze
-from cases.master_performance.metrics import produce, metric_contract
 
-GATE = GatePlugin('performance', analyze, produce, write_report,
-                  producer='performance_requests', describe=metric_contract,
-                  view='master_performance.yaml', validate_view=validate_view)
+from functools import partial
+from artifacts.gate import render_gate
+from scenario.registry import ReportView
+from cases.master_performance import metrics
+
+render = partial(render_gate, name='performance', write_report=write_report)
+VIEW = ReportView(validate_view, render, frozenset(), render)
 
 
 from scenario.registry import CaseDefinition
@@ -76,7 +77,7 @@ from scenario.contracts import ExecutionRequirements
 CASE = CaseDefinition(
     execution_requirements=ExecutionRequirements(request_evidence=True, monitoring=True),
     builders={"default": default},
-    input_contract=INPUTS,
-    gates={'performance': GATE},
+    input_schema=INPUTS,
+    metrics=metrics, report_views={'master_performance.yaml': VIEW},
     actions=tuple(ACTION_HANDLERS),
 )

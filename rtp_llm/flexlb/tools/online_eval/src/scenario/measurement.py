@@ -102,12 +102,28 @@ class WorkloadPolicy:
             report_timeline=timeline, phases=monitor.events, events=events)
         metric_store.save(ctx.artifact_dir)
         workload.details["metrics"] = str(ctx.artifact_dir / "metrics.json")
-        from monitoring.producers import produce
-        from scenario.registry import ProducerPhase
-        produce(ctx.artifact_dir, {}, phase=ProducerPhase.GATE, deadline=deadline)
+        from scenario.registry import registry
+        selected = {spec["producer"] for spec in metric_store.document["definitions"].values() if "producer" in spec}
+        case_name = result.get("implementation", {}).get("configuration", {}).get("case")
+        metrics = registry().cases[case_name].definition.metrics if selected and case_name is not None else None
+        if selected and (metrics is None or selected - metrics.CONTRACTS.keys()):
+            raise ValueError("metric sources are not owned by the executing case")
+        if metrics is not None and selected:
+            deadline.check()
+            metrics.project(ctx.artifact_dir, selected, deadline)
         finalized = analyze_evidence(ctx.artifact_dir, result, payload, workload)
         analysis = finalized.analysis
-        produce(ctx.artifact_dir, analysis, deadline=deadline)
+        analysis["metric_directory"] = str(ctx.artifact_dir)
+        if metrics is not None and selected and hasattr(metrics, "finalize"):
+            from copy import deepcopy
+            from types import MappingProxyType
+            import json
+            metadata = metrics.finalize(ctx.artifact_dir, MappingProxyType(deepcopy(analysis)), selected, deadline)
+            if not isinstance(metadata, dict) or metadata.keys() - selected:
+                raise ValueError("case metric finalization must return selected source metadata")
+            json.dumps(metadata, allow_nan=False)
+            analysis["producer_results"] = metadata
+        deadline.check()
         from monitoring.metric_store import MetricStore
         analysis["series"], analysis["statistic_sources"], _, _ = MetricStore.read(ctx.artifact_dir).series(
             monitor.anchor["epoch_s"])
