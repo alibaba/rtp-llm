@@ -198,6 +198,7 @@ protected:
     void SetUp() override {
         DeviceTestBase::SetUp();
         config_ = cacheConfig();
+        config_.cache_key_hash_seed = 42;
         source_ = std::make_shared<Allocator>(config_);
         target_ = std::make_shared<Allocator>(config_);
         ASSERT_TRUE(source_->init());
@@ -246,7 +247,7 @@ protected:
             worker.tp_rank                                      = rank;
             worker.tp_size                                      = prefillCpSize();
             worker.cp_size                                      = prefillCpSize();
-            worker.p2p_resource_store_timeout_check_interval_ms = 5;
+            worker.p2p_writeback_cleanup_interval_ms = 5;
             auto converter                                      = std::make_shared<LayerBlockConverterImpl>(allocator);
             auto connector = std::make_shared<P2PConnector>(connector_config, converter, nullptr, allocator);
             auto entry     = std::make_unique<P2PConnectorPrefill>(connector_config, converter, nullptr, allocator);
@@ -266,9 +267,9 @@ protected:
         std::array<std::array<char, 1024>, 4> host{};
         std::vector<transfer::tcp::CopyTask>  copies;
         for (size_t i = 0; i < host.size(); ++i) {
-            copies.push_back({warmup.data_ptr<uint8_t>() + i * 1024, 1024, host[i].data()});
+            copies.push_back({warmup.data_ptr<uint8_t>() + i * 1024, 1024, host[i].data(), warmup.get_device()});
         }
-        ASSERT_TRUE(sender_->sender_->tryStagedGatherCopyToHost(copies, 0));
+        ASSERT_TRUE(sender_->sender_->tryStagedGatherCopyToHost(copies, warmup.get_device()));
 
         for (auto role : {RoleType::DECODE, RoleType::PREFILL}) {
             auto               manager   = role == RoleType::DECODE ? decode_ : prefill_;
@@ -287,6 +288,7 @@ protected:
             auto& scheduler                                        = connector_config.scheduler_config;
             scheduler.topology                                     = config_.topologyPtr();
             scheduler.cache_key_tokens_per_block                           = config_.seq_size_per_block;
+            scheduler.cache_key_hash_seed = config_.cache_key_hash_seed;
             scheduler.role_type                                    = role;
             scheduler.parallelism_config                           = parallelismFor(role);
             scheduler.worker_grpc_addrs =
@@ -316,7 +318,7 @@ protected:
             }
             manager->p2p_connector_ = std::move(connector);
         }
-        keys_ = calculateCacheKeys(tokens_.data(), 12, 4);
+        keys_ = calculateCacheKeys(tokens_.data(), 12, 4, config_.cache_key_hash_seed);
         if (prefillCpSize() == 1) {
             ASSERT_TRUE(test::seedCompleteBlockTreePath(target_, {keys_.front()}).success);
         }
@@ -481,13 +483,12 @@ protected:
         const auto swa                     = test::makeMhaSpec("swa", 4, DataType::TYPE_FP16, 1, 2);
         auto       policy                  = defaultCacheGroupPolicy(CacheGroupType::SWA);
         policy.sliding_window_size         = 8;
-        config.use_independent_block_pools = true;
         config.fromGroupedSpecs({full, swa},
                                 {{0}, {1}},
                                 {CacheGroupType::FULL, CacheGroupType::SWA},
                                 {"full", "swa"},
                                 {defaultCacheGroupPolicy(CacheGroupType::FULL), policy});
-        config.setGroupBlockLayout({8, 32}, {full->block_size_bytes(), swa->block_size_bytes()}, {0, 0});
+        config.setGroupBlockLayout({"full", "swa"}, {8, 32}, {full->block_size_bytes(), swa->block_size_bytes()}, {0, 0});
         return config;
     }
 };
@@ -591,21 +592,20 @@ protected:
             }
             config.fromGroupedSpecs({spec}, {{0, 1, 2}}, {group.policy.group_type}, {group.tag}, {group.policy});
         }
-        config.use_independent_block_pools = true;
         std::vector<uint32_t> blocks(config.groupNums(), 128);
         std::vector<size_t>   strides, scales;
         for (const auto& group : config.topology().groups()) {
             strides.push_back(group.kvBlockStrideBytes());
             scales.push_back(group.kvScaleStrideBytes());
         }
-        config.setGroupBlockLayout(blocks, strides, scales);
+        config.setGroupBlockLayout(config.groupTags(), blocks, strides, scales);
         return config;
     }
 };
 
 TEST_P(DecodeWritebackHybridIntegrationTest, TransfersReusableGroupsAndPreservesSparseHoles) {
     tokens_ = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21};
-    keys_   = calculateCacheKeys(tokens_.data(), 20, 4);
+    keys_   = calculateCacheKeys(tokens_.data(), 20, 4, config_.cache_key_hash_seed);
     prepare(21, 20);
     // Keep only the configured active tail among complete source blocks.
     for (const auto& group : source_->cacheGroups()) {
@@ -638,7 +638,7 @@ TEST_P(DecodeWritebackHybridIntegrationTest, TransfersReusableGroupsAndPreserves
     const auto path  = cache->tree()->findNode(keys_);
     ASSERT_EQ(path.size(), keys_.size());
     for (const auto& group_set : cache->groupSets()) {
-        const auto&  base  = group_set->groupAt(0);
+        const auto&  base  = config_.group(group_set->groupTags().front());
         const size_t count = base.policy.active_tail_blocks == 0 ? keys_.size() : base.policy.active_tail_blocks;
         const size_t first = std::max<size_t>(1, keys_.size() - std::min(count, keys_.size()));
         const auto   gid   = group_set->groupSetId();
@@ -649,7 +649,7 @@ TEST_P(DecodeWritebackHybridIntegrationTest, TransfersReusableGroupsAndPreserves
             const auto& blocks = path[i]->group_set_resources[gid].device_blocks;
             ASSERT_EQ(blocks.size(), group_set->groupTags().size());
             for (size_t member = 0; member < blocks.size(); ++member) {
-                const auto& group = group_set->groupAt(member);
+                const auto& group = config_.group(group_set->groupTags()[member]);
                 for (int layer : config_.topology().layerIdsForGroup(group.tag)) {
                     for (const auto& block :
                          target_->convertIndexToBuffer(layer, group.tag, blocks[member], 1, 0)) {
@@ -917,7 +917,7 @@ TEST_F(DecodeWritebackIntegrationTest, KvReserveDoesNotCreditPromptHeldByAnother
     decode_                  = std::move(reserved);
     tokens_.resize(29);
     std::iota(tokens_.begin(), tokens_.end(), 1);
-    keys_ = calculateCacheKeys(tokens_.data(), 28, 4);
+    keys_ = calculateCacheKeys(tokens_.data(), 28, 4, config_.cache_key_hash_seed);
     ASSERT_TRUE(test::seedCompleteBlockTreePath(target_, CacheKeysType(keys_.begin(), keys_.begin() + 5)).success);
     prepare(29, 28, 20);
     ASSERT_EQ(source_blocks_.size(), 8u);
@@ -946,7 +946,7 @@ TEST_F(DecodeWritebackIntegrationTest, KvReserveCreditsReleasedLongPromptBeforeW
     decode_                  = std::move(reserved);
     tokens_.resize(29);
     std::iota(tokens_.begin(), tokens_.end(), 1);
-    keys_ = calculateCacheKeys(tokens_.data(), 28, 4);
+    keys_ = calculateCacheKeys(tokens_.data(), 28, 4, config_.cache_key_hash_seed);
     ASSERT_TRUE(test::seedCompleteBlockTreePath(target_, CacheKeysType(keys_.begin(), keys_.begin() + 5)).success);
     prepare(29, 28, 20);
     ASSERT_EQ(source_blocks_.size(), 8u);
