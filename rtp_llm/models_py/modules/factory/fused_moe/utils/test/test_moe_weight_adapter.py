@@ -69,6 +69,42 @@ class SplitMoeWeightAdapterTest(unittest.TestCase):
         self.assertIs(adapt_split_moe_weights(weights, 4, 0, {}), weights)
         self.assertIs(weights[W.moe_w1], tensor)
 
+    def test_fp8_block_scales_keep_their_block_rows(self):
+        experts, inter, hidden = 2, 256, 128
+        names = {
+            key: key
+            for key in (
+                "router",
+                "routed_gate",
+                "routed_up",
+                "routed_gate_scale",
+                "routed_up_scale",
+                "routed_down",
+                "routed_down_scale",
+            )
+        }
+        gate = torch.ones(experts, inter, hidden).to(torch.float8_e4m3fn)
+        up = (torch.ones(experts, inter, hidden) * 3).to(torch.float8_e4m3fn)
+        gate_scale = torch.full(
+            (experts, inter // 128, hidden // 128), 127, dtype=torch.uint8
+        )
+        up_scale = torch.full_like(gate_scale, 130)
+        weights = {
+            "router": torch.zeros(experts, hidden),
+            "routed_gate": gate,
+            "routed_up": up,
+            "routed_gate_scale": gate_scale,
+            "routed_up_scale": up_scale,
+            "routed_down": gate.transpose(1, 2),
+            "routed_down_scale": gate_scale.transpose(1, 2),
+        }
+        adapted = adapt_split_moe_weights(weights, inter, 0, names)
+        self.assertEqual(adapted[W.moe_s1].shape, (experts, 4, 1))
+        torch.testing.assert_close(adapted[W.moe_w1][:, :inter].float(), gate.float())
+        torch.testing.assert_close(adapted[W.moe_w1][:, inter:].float(), up.float())
+        torch.testing.assert_close(adapted[W.moe_s1][:, :2], gate_scale)
+        torch.testing.assert_close(adapted[W.moe_s1][:, 2:], up_scale)
+
 
 if __name__ == "__main__":
     unittest.main()

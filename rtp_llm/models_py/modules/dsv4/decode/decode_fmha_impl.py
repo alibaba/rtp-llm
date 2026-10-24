@@ -152,7 +152,7 @@ class DSv4DecodeFmhaImpl:
         # max_seq_len then decode pushes start_pos past the freqs_cis
         # range. Same clamp used in DeepSeekV4Model._forward_decode.
         max_s = self.config.max_seq_len
-        start_pos = torch.clamp(start_pos, min=0, max=max(0, max_s - 1))
+        start_pos = torch.clamp(start_pos, min=0, max=max(0, max_s - self.config.q_len))
 
         # Phase 2: pull per-tag block_tables straight off the tagged attention
         # inputs. Empty paged_pool_specs ⇒ skip (legacy path).

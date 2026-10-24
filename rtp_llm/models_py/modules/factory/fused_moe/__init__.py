@@ -84,6 +84,7 @@ else:
         CudaFp8PerTensorEpNormalStrategy,
         CudaFp8PerTensorNoDPStrategy,
         CudaGroupedFp4Strategy,
+        CudaGroupedFp8Strategy,
         CudaLocalLoopStrategy,
         CudaMegaMoeSEStrategy,
         CudaMegaMoeStrategy,
@@ -101,6 +102,7 @@ else:
     registry.register(CudaMegaMoeSEStrategy())
     registry.register(CudaMegaMoeStrategy())
     registry.register(CudaGroupedFp4Strategy())
+    registry.register(CudaGroupedFp8Strategy())
     registry.register(CudaLocalLoopStrategy())
     registry.register(CudaFp8PerTensorEpLowLatencyStrategy())
     registry.register(CudaFp8PerTensorEpNormalStrategy())

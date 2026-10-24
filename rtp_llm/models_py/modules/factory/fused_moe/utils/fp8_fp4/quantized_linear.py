@@ -38,9 +38,14 @@ _FP8_BLOCK_CONFIG = Fp8BlockWiseQuantConfig()
 
 def create_fp8_linear(weight: torch.Tensor, scale: torch.Tensor):
     """Build the CUDA FP8 linear used by FP8 shared experts."""
+    from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
     from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
-    if scale.dtype == torch.float8_e8m0fnu:
+    if scale.dtype == torch.float8_e8m0fnu and not is_deep_gemm_e8m0_used():
+        from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_scale_relabelled_fp32
+
+        weight, scale = _v4_fp8_scale_relabelled_fp32(weight, scale)
+    elif scale.dtype == torch.float8_e8m0fnu:
         from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
         if scale.dim() != 2:
