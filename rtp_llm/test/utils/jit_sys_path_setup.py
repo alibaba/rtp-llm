@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 from contextlib import suppress
+from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -360,13 +361,25 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
     )
 
 
+def _flashinfer_cache_scope():
+    # FlashInfer keys its ops by its own version and GPU, but their shared
+    # libraries also link the selected Torch/TVM FFI runtime. A runfiles path
+    # may change per action; the wheel build variant remains stable.
+    identities = []
+    for package in ("torch", "tvm_ffi"):
+        version, source = get_package_info(package)
+        identities.append(_cache_key(package, version or "absent", source or ""))
+    return sha256("\0".join(identities).encode()).hexdigest()[:16]
+
+
 def setup_jit_cache(cache_dir=None, packages=None):
     logging.info("[Package Setup] setup_jit_cache starting")
     bootstrap_remote_jit_dir()
+    flashinfer_scope = _flashinfer_cache_scope()
     cache_env.configure_writable_cache_env(
         "FLASHINFER_WORKSPACE_BASE",
-        Path.home(),
-        "flashinfer",
+        Path.home() / ".cache" / "rtp-llm" / "flashinfer" / flashinfer_scope,
+        f"flashinfer-{flashinfer_scope}",
         cache_subpath=(".cache", "flashinfer"),
     )
     _evict_dangling_flashinfer_ops(Path(os.environ["FLASHINFER_WORKSPACE_BASE"]))
