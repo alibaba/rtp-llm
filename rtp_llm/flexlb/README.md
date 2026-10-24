@@ -71,6 +71,43 @@ The following Maven Wrapper files are included in the project (do not delete):
         └── maven-wrapper.properties # Configuration file
 ```
 
+### Code Formatting
+
+FlexLB uses the repository-root [pre-commit](https://pre-commit.com/) configuration.
+Java is formatted with Spotless and google-java-format 1.28.0 (AOSP four-space style,
+preserving Javadoc layout); Python uses the repository's Black and isort versions.
+C/C++/CUDA files use the existing clang-format configuration; Protocol Buffers use
+clang-format's Google style. Shell scripts use shfmt. JavaScript, HTML, JSON, YAML,
+XML and Markdown use Prettier (with its official XML plugin).
+
+Enable the repository's Git hooks once per checkout (run from the repository root):
+
+```bash
+uv tool install pre-commit  # alternatively: pip install pre-commit
+git config --local core.hooksPath .githooks
+```
+
+Each `git commit` runs the formatters when matching files are staged. Java changes
+run `spotless:apply` across the FlexLB reactor; Spotless caches files that are already
+clean. The other formatters process staged files. If a formatter changes a file,
+review and stage the result, then commit again. Unstaged changes are preserved by pre-commit.
+Java formatting requires JDK 21; Maven is supplied by `mvnw`. The first run downloads
+the formatter dependencies. Compilation and tests remain separate build commands.
+
+To format all FlexLB code, run from the repository root:
+
+```bash
+git ls-files -z rtp_llm/flexlb | xargs -0 pre-commit run --files
+```
+
+To apply or check Java formatting across all Maven modules:
+
+```bash
+cd rtp_llm/flexlb
+./mvnw spotless:apply -Pspotless-check
+./mvnw spotless:check -Pspotless-check
+```
+
 ### Configuration
 
 `FLEXLB_CONFIG` is a required JSON environment variable. It configures scheduling,

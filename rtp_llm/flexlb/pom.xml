@@ -532,6 +532,18 @@
                         <version>3.0.0</version>
                         <configuration>
                             <java>
+                                <includes>
+                                    <include>src/main/java/**/*.java</include>
+                                    <include>src/test/java/**/*.java</include>
+                                    <include>tools/**/*.java</include>
+                                </includes>
+                                <googleJavaFormat>
+                                    <version>1.28.0</version>
+                                    <style>AOSP</style>
+                                    <reorderImports>false</reorderImports>
+                                    <formatJavadoc>false</formatJavadoc>
+                                    <reflowLongStrings>false</reflowLongStrings>
+                                </googleJavaFormat>
                                 <!-- 移除无用的 import -->
                                 <removeUnusedImports/>
                                 <importOrder>
@@ -539,37 +551,6 @@
                                     <order>,|,javax|java,|,\#</order>
                                 </importOrder>
                                 <forbidWildcardImports/>
-
-                                <replaceRegex>
-                                    <name>多个空行替换为单个空行</name>
-                                    <searchRegex>(\n\s*\n)\s*\n+</searchRegex>
-                                    <replacement>$1</replacement>
-                                </replaceRegex>
-                                <replaceRegex>
-                                    <name>控制语句括号前空格（只在行首匹配）</name>
-                                    <searchRegex>^(\s*)(if|for|while|switch|catch|synchronized)\s*\(</searchRegex>
-                                    <replacement>$1$2 (</replacement>
-                                </replaceRegex>
-                                <replaceRegex>
-                                    <name>类和接口声明大括号前空格</name>
-                                    <searchRegex>^(\s*(?:public|private|protected|abstract|final|static)?\s*(?:class|interface|enum)\s+\w+[^{]*?)\s*\{</searchRegex>
-                                    <replacement>$1 {</replacement>
-                                </replaceRegex>
-                                <replaceRegex>
-                                    <name>try语句大括号前空格</name>
-                                    <searchRegex>^(\s*(?:try|catch|finally)(?:\s*\([^)]*\))?)\s*\{</searchRegex>
-                                    <replacement>$1 {</replacement>
-                                </replaceRegex>
-                                <replaceRegex>
-                                    <name>else语句大括号前空格</name>
-                                    <searchRegex>\}\s*else\s*\{</searchRegex>
-                                    <replacement>} else {</replacement>
-                                </replaceRegex>
-                                <replaceRegex>
-                                    <name>方法声明的大括号前空格</name>
-                                    <searchRegex>^(\s*(?:public|private|protected|static|final|synchronized|native|abstract)*.*?\))\s*\{</searchRegex>
-                                    <replacement>$1 {</replacement>
-                                </replaceRegex>
                             </java>
                         </configuration>
                         <executions>
