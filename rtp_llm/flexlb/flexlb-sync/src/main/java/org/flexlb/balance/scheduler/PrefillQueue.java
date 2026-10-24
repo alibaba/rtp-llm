@@ -19,6 +19,7 @@ import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.queue.BatchCapacityView;
 import org.flexlb.balance.queue.GroupingLimits;
+import org.flexlb.balance.queue.LoadViewCache;
 import org.flexlb.balance.queue.QueueState;
 import org.flexlb.balance.queue.QueueWaitSnapshot;
 import org.flexlb.balance.queue.QueuedRequestsSnapshot;
@@ -177,14 +178,7 @@ public final class PrefillQueue {
     private final DeliveryStrategy deliveryStrategy;
     private final PrefillTtftEstimator ttftEstimator;
     private final QueueState queueState;
-    private final Comparator<GroupPlanner.Item> estimateOrder;
-    /**
-     * Immutable load view reused while this endpoint's queue and
-     * scheduling inputs are unchanged. Route decisions still evaluate every
-     * live endpoint, but do not rebuild identical queue snapshots for each
-     * request in the global planner.
-     */
-    private volatile LoadViewCache loadViewCache;
+    private final LoadViewCache loadViewCache;
     /** Canonical request ownership guarded exclusively by the queue lock. */
     private final PrefillState prefillState;
     /**
@@ -239,13 +233,18 @@ public final class PrefillQueue {
         this.ttftEstimator = ttftEstimator;
         Comparator<ScheduledRequest> queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
-        this.estimateOrder =
-                priorityOrdering
-                        ? PRIORITY_ESTIMATE_ORDER : FIFO_ESTIMATE_ORDER;
+        Comparator<GroupPlanner.Item> estimateOrder = priorityOrdering ? PRIORITY_ESTIMATE_ORDER : FIFO_ESTIMATE_ORDER;
         this.queueState = new QueueState(PrefillActiveIndex.ordered(INITIAL_QUEUE_ALLOCATION, queueOrder));
         this.prefillState = new PrefillState(queueState.reentrantLock(),
                                              queueState.activeIndex(),
                                              capacityAvailableSignal);
+        this.loadViewCache = new LoadViewCache(queueState,
+                                               prefillState,
+                                               prefillEp,
+                                               config,
+                                               groupingLimits,
+                                               estimateOrder,
+                                               this::admissionBlockUnderLock);
         this.normalStopFailure = new CancellationException(
                 "FlexLB worker scheduling queue stopped: " + key);
         this.stopAcknowledgementFailure = new IllegalStateException(
@@ -987,89 +986,8 @@ public final class PrefillQueue {
         }
     }
 
-    private record LoadViewVersion(
-            long queue,
-            long schedulingInputs,
-            long ownership,
-            long collectionWindowMs) {
-    }
-
-    /** Captured under the queue lock; the shared result is built without that lock. */
-    private final class LoadViewCache {
-        private final LoadViewVersion version;
-        private PrefillState.Snapshot ownership;
-        private final GroupPlanner.Constraints constraints;
-        private final AdmissionBlock admissionBlock;
-        private volatile PrefillTtftEstimate.LoadView materialized;
-
-        private LoadViewCache(LoadViewVersion version, PrefillState.Snapshot ownership,
-                                 GroupPlanner.Constraints constraints, AdmissionBlock admissionBlock) {
-            this.version = version;
-            this.ownership = ownership;
-            this.constraints = constraints;
-            this.admissionBlock = admissionBlock;
-        }
-
-        private PrefillTtftEstimate.LoadView materialize() {
-            PrefillTtftEstimate.LoadView result = materialized;
-            if (result != null) {
-                return result;
-            }
-            synchronized (this) {
-                if (materialized == null) {
-                    var queueSnapshot = new org.flexlb.balance.estimate.QueueView(ownership.capturedAtMs(),
-                            estimateOrder, constraints, ownership.active().plannerItems(), admissionBlock);
-                    materialized = new PrefillTtftEstimate.LoadView(
-                            queueSnapshot, ownership.work().materialize(), version.ownership());
-                    // The cached estimate must not retain completed request contexts.
-                    ownership = null;
-                }
-                return materialized;
-            }
-        }
-    }
-
     public PrefillTtftEstimate.LoadView captureLoadView() {
-        LoadViewCache source = loadViewCache;
-        if (source == null || !isLoadViewCurrent(source.version)) {
-            queueState.lock();
-            try {
-                source = loadViewCache;
-                if (source == null || !isLoadViewCurrent(source.version)) {
-                    source = captureLoadViewCacheUnderLock();
-                    loadViewCache = source;
-                }
-            } finally {
-                queueState.unlock();
-            }
-        }
-        // Concurrent callers share one source per version. A late build only
-        // fills its own source; it can never overwrite a newer capture.
-        return source.materialize();
-    }
-
-    private boolean isLoadViewCurrent(LoadViewVersion version) {
-        return version.queue() == queueState.queueVersion()
-                && version.schedulingInputs() == queueState.schedulingInputVersion()
-                && version.ownership() == prefillState.mutationVersion()
-                && version.collectionWindowMs() == groupingLimits.collectionWindowMs();
-    }
-
-    /** Caller holds the queue lock. */
-    private LoadViewCache captureLoadViewCacheUnderLock() {
-        long fixedWaitMs = groupingLimits.collectionWindowMs();
-        LoadViewVersion version = new LoadViewVersion(
-                queueState.queueVersion(), queueState.schedulingInputVersion(),
-                prefillState.mutationVersionUnderLock(), fixedWaitMs);
-        BatchCapacityView capacity = BatchCapacityView.of(prefillEndpoint, config);
-        PrefillState.Snapshot ownership = prefillState.snapshotUnderLock();
-        return new LoadViewCache(
-                version, ownership,
-                new GroupPlanner.Constraints(
-                        groupingLimits.maxRequests(), capacity.batchTokenCapacity(),
-                        Long.MAX_VALUE, groupingLimits.predictedExecutionBudgetMs(),
-                        fixedWaitMs),
-                ownership.activeItems().isEmpty() ? null : admissionBlockUnderLock());
+        return loadViewCache.capture();
     }
 
     // ==================== Delivery ownership ====================
