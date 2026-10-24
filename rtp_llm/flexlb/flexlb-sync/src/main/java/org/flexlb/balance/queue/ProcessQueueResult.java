@@ -3,8 +3,6 @@ package org.flexlb.balance.queue;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
-import java.util.Objects;
-
 /**
  * processQueue() 的返回值：调度线程跑完一轮后的结果，决定下一轮之前做什么：
  * <ul>
@@ -36,7 +34,7 @@ record ProcessQueueResult(
     }
 
     static ProcessQueueResult capacityBlocked(ScheduledRequest item, DeliveryBlockReason unavailable) {
-        return new ProcessQueueResult(false, Objects.requireNonNull(item, "item"), unavailable, 0L, 0L, 0L,
+        return new ProcessQueueResult(false, item, unavailable, 0L, 0L, 0L,
                 unavailable.estimateSemantics() == null
                         ? "Prefill delivery capacity exhausted"
                         : unavailable.estimateSemantics().blockedDetail());
@@ -49,7 +47,7 @@ record ProcessQueueResult(
             long wakeAtMs,
             String waitReason) {
         return new ProcessQueueResult(false,
-                Objects.requireNonNull(head, "head"), null,
+                head, null,
                 queueVersion, schedulingInputVersion, wakeAtMs, waitReason);
     }
 
