@@ -1223,6 +1223,61 @@ TEST_F(MtpBatchStreamProcessorTest, EmptyDSpARKDecodeRoundPreservesEmptyEngramHi
     EXPECT_EQ(input->engram_token_windows.sizes().vec(), (std::vector<int64_t>{0, 4}));
 }
 
+TEST_F(MtpBatchStreamProcessorTest, DSparkGatherReusesEngramHistoryAndDefersReplacedMetadata) {
+    autil::EnvGuard device_input("RTP_LLM_DEVICE_INPUT", "1");
+    ModelConfig     model;
+    model.max_seq_len                         = 2048;
+    model.vocab_size                          = 256;
+    model.num_layers                          = 1;
+    model.attn_config.v41_kv_source_layer_ids = {0};
+    SpeculativeExecutionConfig speculative;
+    speculative.type                    = SP_TYPE_DSPARK;
+    speculative.gen_num_per_cycle       = 3;
+    speculative.sp_dspark_mask_token_id = 255;
+    MtpBatchStreamProcessor processor(model, {}, {}, makeProcessorCacheConfig(), speculative, false);
+    const auto              options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    for (int64_t batch : {1, 7, 65}) {
+        auto history = torch::arange(batch * 4, options).reshape({batch, 4});
+        for (bool reverse : {false, true}) {
+            std::list<GenerateStreamPtr> streams;
+            for (int64_t index = 0; index < batch; ++index) {
+                const auto row    = reverse ? batch - 1 - index : index;
+                auto       stream = createContextStream(model, {}, {}, {10}, index + 1);
+                stream->setIsContextStream(false);
+                GenerateStream::MtpAsyncDeviceState state;
+                state.accept_len_gpu                    = torch::full({1}, 2, options);
+                state.accept_tokens_gpu                 = torch::full({1, 4}, 11, options);
+                state.next_seq_len_gpu                  = torch::full({1}, 12, options);
+                state.next_seq_len_upper_bound          = 12;
+                state.next_kv_cache_block_id_gpu        = torch::ones({1, 1, 3}, options);
+                state.next_kv_cache_kernel_block_id_gpu = torch::ones({1, 1, 4}, options);
+                state.engram_token_window_gpu           = history.narrow(0, row, 1);
+                stream->setMtpAsyncDeviceState(std::move(state));
+                streams.push_back(stream);
+            }
+            TensorHolder holder;
+            StreamGroups groups(streams);
+            auto         input = processor.gatherDecodeModelInput(groups, holder);
+            ASSERT_TRUE(input.ok());
+            EXPECT_TRUE(input->combo_tokens.device().is_cpu());
+            EXPECT_TRUE(input->input_lengths.device().is_cpu());
+            EXPECT_TRUE(input->lm_output_indexes.device().is_cpu());
+            EXPECT_TRUE(torch::equal(input->engram_token_windows, reverse ? history.flip({0}) : history));
+            if (!reverse) {
+                EXPECT_EQ(input->engram_token_windows.data_ptr(), history.data_ptr());
+            }
+            auto round = processor.buildDSparkRoundState(groups, *input, holder);
+            processor.prepareDSparkProposeModelInput(round, *input, holder);
+            EXPECT_TRUE(input->combo_tokens.is_cuda());
+            EXPECT_TRUE(input->input_lengths.is_cuda());
+            EXPECT_TRUE(input->prefix_lengths.is_cuda());
+            EXPECT_TRUE(input->sequence_lengths.is_cuda());
+            EXPECT_TRUE(input->lm_output_indexes.is_cuda());
+            EXPECT_EQ(input->lm_output_indexes.numel(), batch * 3);
+        }
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
@@ -2810,7 +2865,7 @@ TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotFullBatchAndWidthFallbackPr
 
     // Identical widths use direct device concatenation when enabled. Wider
     // destinations and distinct snapshot widths must retain all host padding.
-    for (int mode : {0, 1, 2}) {
+    for (int mode : {0, 1, 2, 3}) {
         GptModelInputs input;
         input.kv_cache_block_id                          = torch::full({2, 2, mode == 0 ? 3 : 5}, -7, pinned_i32);
         input.kv_cache_kernel_block_id                   = torch::full({2, 2, mode == 0 ? 4 : 7}, -9, pinned_i32);
@@ -2818,8 +2873,8 @@ TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotFullBatchAndWidthFallbackPr
         auto                           expected_kernel   = input.kv_cache_kernel_block_id.clone();
         std::vector<GenerateStreamPtr> streams{first, second};
         for (int row = 0; row < 2; ++row) {
-            int  physical_width = mode == 2 && row == 1 ? 4 : 3;
-            int  kernel_width   = mode == 2 && row == 1 ? 6 : 4;
+            int  physical_width = mode >= 2 && row == 1 ? 4 : 3;
+            int  kernel_width   = mode >= 2 && row == 1 ? 6 : 4;
             auto physical =
                 (torch::arange(2 * physical_width, torch::kInt32) + 100 * (row + 1)).reshape({2, 1, physical_width});
             auto kernel =
@@ -2829,12 +2884,59 @@ TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotFullBatchAndWidthFallbackPr
             GenerateStream::MtpAsyncDeviceState state;
             state.next_kv_cache_block_id_gpu        = physical.to(cuda_i32);
             state.next_kv_cache_kernel_block_id_gpu = kernel.to(cuda_i32);
+            if (mode == 3) {
+                auto strided = torch::empty({2, 1, 2 * physical_width}, cuda_i32).slice(2, 0, 2 * physical_width, 2);
+                strided.copy_(state.next_kv_cache_block_id_gpu);
+                state.next_kv_cache_block_id_gpu = strided;
+            }
             streams[row]->setMtpAsyncDeviceState(std::move(state));
         }
         TensorHolder holder;
         processor.overlayMtpCacheSnapshots(StreamGroups({first, second}), input, holder);
         EXPECT_TRUE(torch::equal(input.kv_cache_block_id.cpu(), expected_physical)) << "mode=" << mode;
         EXPECT_TRUE(torch::equal(input.kv_cache_kernel_block_id.cpu(), expected_kernel)) << "mode=" << mode;
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, CacheSnapshotGatherHandlesChunkedMixedRaggedBatches) {
+    ModelConfig model;
+    model.max_seq_len = 2048;
+    model.vocab_size  = 8;
+    model.num_layers  = 1;
+    RuntimeConfig              runtime;
+    ResourceContext            resources;
+    SpeculativeExecutionConfig speculative;
+    speculative.gen_num_per_cycle = 3;
+    TestableMtpBatchStreamProcessor processor(
+        model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), speculative, false);
+    const auto host_options = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    for (int batch : {7, 65, 129}) {
+        GptModelInputs input;
+        input.kv_cache_block_id                        = torch::full({2, batch, 5}, -7, host_options);
+        input.kv_cache_kernel_block_id                 = torch::full({2, batch, 7}, -9, host_options);
+        auto                         expected_physical = input.kv_cache_block_id.clone();
+        auto                         expected_kernel   = input.kv_cache_kernel_block_id.clone();
+        std::list<GenerateStreamPtr> streams;
+        for (int row = 0; row < batch; ++row) {
+            auto stream = createContextStream(model, runtime, resources, {1}, row + 1);
+            stream->setIsContextStream(false);
+            if (row % 5 != 0) {
+                const int pw = 3 + row % 3, kw = 4 + row % 4;
+                auto      physical = torch::full({2, 1, pw}, row + 100, host_options);
+                auto      kernel   = torch::full({2, 1, kw}, row + 1000, host_options);
+                expected_physical.narrow(1, row, 1).narrow(2, 0, pw).copy_(physical);
+                expected_kernel.narrow(1, row, 1).narrow(2, 0, kw).copy_(kernel);
+                GenerateStream::MtpAsyncDeviceState state;
+                state.next_kv_cache_block_id_gpu        = physical.to(torch::kCUDA);
+                state.next_kv_cache_kernel_block_id_gpu = kernel.to(torch::kCUDA);
+                stream->setMtpAsyncDeviceState(std::move(state));
+            }
+            streams.push_back(stream);
+        }
+        TensorHolder holder;
+        processor.overlayMtpCacheSnapshots(StreamGroups(streams), input, holder);
+        EXPECT_TRUE(torch::equal(input.kv_cache_block_id.cpu(), expected_physical)) << batch;
+        EXPECT_TRUE(torch::equal(input.kv_cache_kernel_block_id.cpu(), expected_kernel)) << batch;
     }
 }
 

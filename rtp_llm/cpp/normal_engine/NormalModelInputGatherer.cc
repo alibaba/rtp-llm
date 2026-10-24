@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -361,6 +362,41 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
     // TODO(async): stream state is still gathered through CPU pointers above.
     // Publish only device tensors at the model boundary.
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.publish_core_tensors_to_cuda");
+    const std::array<torch::Tensor*, 4> fields = {&model_input.combo_tokens,
+                                                  &model_input.input_lengths,
+                                                  &model_input.sequence_lengths,
+                                                  &model_input.prefix_lengths};
+    std::array<int64_t, 4>              offsets{};
+    int64_t                             total = 0;
+    int                                 count = 0;
+    for (size_t i = 0; i < fields.size(); ++i) {
+        const auto& tensor = *fields[i];
+        if (tensor.defined() && tensor.device().is_cpu() && tensor.scalar_type() == torch::kInt32
+            && tensor.is_contiguous() && tensor.numel() > 0) {
+            total      = (total + 3) / 4 * 4;  // Preserve 16-byte alignment for every device view.
+            offsets[i] = total;
+            total += tensor.numel();
+            ++count;
+        } else {
+            offsets[i] = -1;
+        }
+    }
+    if (count > 1) {
+        auto packed = torch::empty({total}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+        for (size_t i = 0; i < fields.size(); ++i) {
+            if (offsets[i] >= 0) {
+                std::memcpy(packed.data_ptr<int32_t>() + offsets[i],
+                            fields[i]->data_ptr<int32_t>(),
+                            fields[i]->numel() * sizeof(int32_t));
+            }
+        }
+        auto device = publishInt32ToCuda(packed, host_holder);
+        for (size_t i = 0; i < fields.size(); ++i) {
+            if (offsets[i] >= 0) {
+                *fields[i] = device.narrow(0, offsets[i], fields[i]->numel()).view(fields[i]->sizes());
+            }
+        }
+    }
     model_input.combo_tokens     = publishInt32ToCuda(model_input.combo_tokens, host_holder);
     model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths, host_holder);
     model_input.sequence_lengths = publishInt32ToCuda(model_input.sequence_lengths, host_holder);
@@ -849,7 +885,8 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
 
 absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups,
                                                                 TensorHolder&       host_holder,
-                                                                bool                defer_page_tables) const {
+                                                                bool                defer_page_tables,
+                                                                bool                defer_token_metadata) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
@@ -905,7 +942,12 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     // that representation for CP planning and cache-store metadata; the model
     // publishes the device views asynchronously immediately before use. Decode
     // keeps its device-state contract, including mixed-batch compatibility.
-    if (deviceInputEnabled() && stream_groups.totalDecodeBatchSize() > 0) {
+    if (deviceInputEnabled() && stream_groups.totalDecodeBatchSize() > 0 && defer_token_metadata
+        && !defer_page_tables) {
+        model_input.kv_cache_block_id        = publishInt32ToCuda(model_input.kv_cache_block_id, host_holder);
+        model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id, host_holder);
+    }
+    if (deviceInputEnabled() && stream_groups.totalDecodeBatchSize() > 0 && !defer_token_metadata) {
         publishModelInputCoreTensorsToCuda(model_input, host_holder, !defer_page_tables);
         model_input.lm_output_indexes = buildLmOutputIndexesOnCuda(model_input, stream_groups);
     } else {

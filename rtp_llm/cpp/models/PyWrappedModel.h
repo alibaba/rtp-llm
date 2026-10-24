@@ -30,6 +30,7 @@
 #endif
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
 #endif
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
@@ -85,6 +86,9 @@ public:
     ~PyWrappedModel();
 
     GptModelOutputs            forward(const GptModelInputs& inputs) override;
+    const torch::Tensor&       proposalLogitsBuffer() const {
+        return proposal_logits_buffer_;
+    }
     GptModelOutputs            forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
     void                       releaseBuffers() override;
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
@@ -93,7 +97,8 @@ public:
     void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs,
                                                       bool                  skip_forward_event_sync,
-                                                      const GptModelInputs* cache_store_host_inputs = nullptr);
+                                                      const GptModelInputs* cache_store_host_inputs = nullptr,
+                                                      bool                  defer_graph_prepare     = false);
     void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
@@ -106,7 +111,8 @@ private:
 
 private:
     // Helper functions to reduce code duplication
-    torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs);
+    torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs,
+                                                           bool                  defer_device_metadata = false);
     torch_ext::PyEmbeddingInputs    buildPyEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::PyMultimodalInputs   buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const GptModelInputs& inputs);
@@ -161,6 +167,7 @@ private:
     torch::Tensor                                   residual_scale_fp32_;
     torch::Tensor                                   residual_scale_;
     TensorHolder                                    buffer_holder_;
+    torch::Tensor                                   proposal_logits_buffer_;
 
     std::unique_ptr<GraphBase> graph_runner_;
     std::unique_ptr<GraphBase> generation_prefill_graph_runner_;
@@ -195,6 +202,9 @@ private:
     int                  pinned_check_remaining_{kPinnedCheckForwardCount};
 
     std::atomic<bool>               prepared_attention_inputs_{false};
+#if USING_CUDA
+    AttentionInputMetadataParams pending_attention_metadata_;
+#endif
     torch_ext::PyAttentionInputs    attention_inputs_;
     torch_ext::AttentionInputsByTag attention_inputs_by_tag_;
     CudaGraphState                  graph_state_;
@@ -682,6 +692,19 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         }
     }
 
+#if USING_CUDA
+    if (dspark_model_role_ == DSparkModelRole::PROPOSE && enable_cuda_graph_ && device_props_.tp_size == 1
+        && weights_.lm_head && weights_.lm_head->kernel.scalar_type() == torch::kBFloat16) {
+        const int64_t rows =
+            static_cast<int64_t>(params.concurrency_config.concurrency_limit) * params.sp_config.gen_num_per_cycle;
+        try {
+            proposal_logits_buffer_ = torch::zeros({rows, weights_.lm_head->kernel.size(0)},
+                                                   weights_.lm_head->kernel.options().dtype(torch::kFloat32));
+        } catch (const c10::OutOfMemoryError& error) {
+            RTP_LLM_LOG_WARNING("Proposal logits buffer unavailable; retaining eager sampling: %s", error.what());
+        }
+    }
+#endif
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
     (void)construction_guard.release();
 }
