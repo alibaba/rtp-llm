@@ -38,7 +38,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalLong;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
@@ -58,14 +57,6 @@ import java.util.function.Supplier;
  * snapshots and diagnostics identify queue-state changes.
  */
 public final class PrefillQueue {
-
-    private enum RuntimeState {
-        NEW,
-        STARTING,
-        RUNNING,
-        STOPPING,
-        STOPPED
-    }
 
     /** Result of one queue-lock-scoped ACTIVE publication transaction. */
     private record EnqueueAttempt(
@@ -181,19 +172,7 @@ public final class PrefillQueue {
     private final LoadViewCache loadViewCache;
     /** Canonical request ownership guarded exclusively by the queue lock. */
     private final PrefillState prefillState;
-    /**
-     * Serialized queue runtime for this worker.
-     */
-    private final Thread workerThread;
-    /** Constructed before this endpoint generation can begin retirement. */
-    private final CancellationException normalStopFailure;
-    /** Fixed diagnostic for an impossible exact stop acknowledgement loss. */
-    private final IllegalStateException stopAcknowledgementFailure;
-    private boolean terminationStarted;
-    private boolean terminationFinished;
-    private Thread terminationOwner;
-    private volatile RuntimeState runtimeState = RuntimeState.NEW;
-    private Throwable stopFailure;
+    private final PrefillQueueLifecycle lifecycle;
     private final Runnable capacityAvailableSignal =
             this::signalCapacityAvailable;
     /** Exact active head for which this worker is waiting on a capacity event. */
@@ -245,45 +224,33 @@ public final class PrefillQueue {
                                                groupingLimits,
                                                estimateOrder,
                                                this::admissionBlockUnderLock);
-        this.normalStopFailure = new CancellationException(
-                "FlexLB worker scheduling queue stopped: " + key);
-        this.stopAcknowledgementFailure = new IllegalStateException(
-                "FlexLB worker stop callback lost its exact retained owner: "
-                        + key);
-        // Waiting queue runtimes use virtual threads so a large endpoint fleet
-        // does not consume one OS thread per worker.
-        this.workerThread = Thread.ofVirtual()
-                .name("flexlb-batcher-" + key)
-                .uncaughtExceptionHandler(
-                        (thread, failure) -> Logger.error("PrefillQueue[{}] thread died unexpectedly", key, failure))
-                .unstarted(this::runLoop);
+        this.lifecycle = new PrefillQueueLifecycle(key,
+                                                   queueState,
+                                                   prefillState,
+                                                   prefillEp,
+                                                   queueCapacity,
+                                                   endpointEvents,
+                                                   () -> setCapacityBlockedHeadUnderLock(null),
+                                                   this::signalCapacityAvailable,
+                                                   this::runLoop);
     }
 
-    public synchronized void start() {
-        if (runtimeState != RuntimeState.NEW) {
-            throw new IllegalStateException(
-                    "Worker batcher cannot start from "
-                            + runtimeState);
-        }
-        runtimeState = RuntimeState.STARTING;
-        try {
-            workerThread.start();
-            runtimeState = RuntimeState.RUNNING;
-        } catch (RuntimeException | Error startFailure) {
-            Throwable cleanupFailure = stopAndDrain(
-                    startFailure,
-                    false);
-            runtimeState = RuntimeState.STOPPED;
-            notifyAll();
-            addSuppressedNoFail(startFailure, cleanupFailure);
-            throw startFailure;
-        }
+    public void start() {
+        lifecycle.start();
+    }
+
+    /**
+     * 停止调度线程，把还在排队的请求逐个交还给请求调度器，并等调度线程退出。
+     * 返回清理过程中遇到的第一个异常，没有则返回 null。
+     */
+    public Throwable stopAndAwait() {
+        return lifecycle.stopAndAwait();
     }
 
     public PrefillQueueEnqueueResult offerWithResult(ScheduledRequest exactItem) {
         ScheduledRequest item = exactItem;
         requireExactEndpoint(item, "incoming item");
-        if (runtimeState != RuntimeState.RUNNING || queueState.isStopped()) {
+        if (!lifecycle.isRunning() || queueState.isStopped()) {
             return PrefillQueueEnqueueResult.REJECTED;
         }
         return enqueue(item);
@@ -531,243 +498,6 @@ public final class PrefillQueue {
                 blocked.unavailable().estimateSemantics());
     }
 
-    public Throwable stopAndAwait() {
-        if (Thread.currentThread() == workerThread) {
-            throw new IllegalStateException(
-                    "Prefill runtime cannot await its own worker thread");
-        }
-        Throwable failure = stopAndDrain(
-                normalStopFailure,
-                true);
-        boolean interrupted = false;
-        while (true) {
-            try {
-                workerThread.join();
-                break;
-            } catch (InterruptedException interruption) {
-                interrupted = true;
-            }
-        }
-        synchronized (this) {
-            runtimeState = RuntimeState.STOPPED;
-            notifyAll();
-            failure = stopFailure;
-        }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
-        return failure;
-    }
-
-    private void stopAfterUnexpectedLoopFailure(Throwable loopFailure) {
-        try {
-            Logger.error("PrefillQueue[{}] stopped after an unexpected loop failure",
-                    key, loopFailure);
-        } catch (Throwable ignoredLoggingFailure) {
-            // The exact stop transaction must still run.
-        }
-        Throwable cleanupFailure = stopAndDrain(
-                loopFailure,
-                false);
-        if (cleanupFailure != null) {
-            try {
-                Logger.error("PrefillQueue[{}] failure cleanup exposed invariants",
-                        key, cleanupFailure);
-            } catch (Throwable ignoredLoggingFailure) {
-                // Cleanup is already complete.
-            }
-        }
-    }
-
-    private Throwable stopAndDrain(Throwable terminalFailure, boolean interruptWorker) {
-        boolean interrupted = false;
-        synchronized (this) {
-            queueState.markStopped();
-            if (terminationStarted) {
-                if (!terminationFinished
-                        && terminationOwner == Thread.currentThread()) {
-                    throw new IllegalStateException(
-                            "Prefill runtime cannot await its active stop transaction");
-                }
-                while (!terminationFinished) {
-                    try {
-                        wait();
-                    } catch (InterruptedException interruption) {
-                        interrupted = true;
-                    }
-                }
-                Throwable completedFailure = stopFailure;
-                if (interrupted) {
-                    Thread.currentThread().interrupt();
-                }
-                return completedFailure;
-            }
-            terminationStarted = true;
-            terminationOwner = Thread.currentThread();
-            runtimeState = runtimeState == RuntimeState.NEW
-                    ? RuntimeState.STOPPED : RuntimeState.STOPPING;
-        }
-
-        Throwable cleanupFailure = null;
-        try {
-            boolean queueLocked = false;
-            try {
-                queueState.lock();
-                queueLocked = true;
-                stopAcceptingUnderLock();
-                try {
-                    setCapacityBlockedHeadUnderLock(null);
-                } catch (Throwable subscriptionFailure) {
-                    cleanupFailure = appendCleanupFailure(
-                            cleanupFailure, subscriptionFailure);
-                }
-                queueState.signalAllChanges();
-            } catch (Throwable wakeFailure) {
-                cleanupFailure = appendCleanupFailure(
-                        cleanupFailure, wakeFailure);
-            } finally {
-                if (queueLocked) {
-                    try {
-                        queueState.unlock();
-                    } catch (Throwable unlockFailure) {
-                        cleanupFailure = appendCleanupFailure(
-                                cleanupFailure, unlockFailure);
-                    }
-                }
-            }
-
-            if (interruptWorker && Thread.currentThread() != workerThread) {
-                try {
-                    workerThread.interrupt();
-                } catch (Throwable interruptFailure) {
-                    cleanupFailure = appendCleanupFailure(
-                            cleanupFailure, interruptFailure);
-                }
-            }
-
-            boolean workerWasRemoved = terminalFailure == normalStopFailure;
-            while (true) {
-                ScheduledRequest item;
-                try {
-                    item = detachNextStoppedItem();
-                } catch (Throwable claimFailure) {
-                    cleanupFailure = appendCleanupFailure(
-                            cleanupFailure, claimFailure);
-                    break;
-                }
-                if (item == null) {
-                    break;
-                }
-                try {
-                    releaseUnconsumedRouteReservation(item);
-                } catch (Throwable reservationFailure) {
-                    cleanupFailure = appendCleanupFailure(
-                            cleanupFailure, reservationFailure);
-                }
-                try {
-                    if (workerWasRemoved) {
-                        endpointEvents.onQueuedWorkerStopped(item);
-                    } else {
-                        endpointEvents.onQueueOfferFailure(item, terminalFailure);
-                    }
-                } catch (Throwable callbackFailure) {
-                    try {
-                        Logger.error("PrefillQueue[{}] shutdown callback failed request_id={}",
-                                key, item.requestId(), callbackFailure);
-                    } catch (Throwable ignoredLoggingFailure) {
-                        // Cleanup ownership cannot depend on diagnostics.
-                    }
-                    cleanupFailure = appendCleanupFailure(
-                            cleanupFailure, callbackFailure);
-                    // Do not acknowledge: generation retirement still owns
-                    // this exact pending identity and will handle it again.
-                    continue;
-                }
-                try {
-                    if (!acknowledgeStoppedItem(item)) {
-                        cleanupFailure = appendCleanupFailure(
-                                cleanupFailure,
-                                stopAcknowledgementFailure);
-                    }
-                } catch (Throwable acknowledgementFailure) {
-                    // The terminal fact was already delivered. If the exact
-                    // entry remains, generation retirement converges it as a
-                    // stale/idempotent replay.
-                    cleanupFailure = appendCleanupFailure(
-                            cleanupFailure, acknowledgementFailure);
-                }
-            }
-        } catch (Throwable unexpectedCleanupFailure) {
-            cleanupFailure = appendCleanupFailure(
-                    cleanupFailure, unexpectedCleanupFailure);
-        } finally {
-            synchronized (this) {
-                stopFailure = cleanupFailure;
-                terminationFinished = true;
-                terminationOwner = null;
-                notifyAll();
-            }
-        }
-        return cleanupFailure;
-    }
-
-    /**
-     * Detach one exact ACTIVE queue index after the stop gate is closed while
-     * retaining its canonical entry. The callback result decides whether that
-     * entry is acknowledged or carried into generation retirement.
-     */
-    private ScheduledRequest detachNextStoppedItem() {
-        ScheduledRequest item;
-        queueState.lock();
-        try {
-            item = detachNextStopTerminalUnderLock();
-            queueState.signalAllChanges();
-        } finally {
-            queueState.unlock();
-        }
-        if (item != null) {
-            prefillEndpoint.reportSubQueueResidence(item);
-        }
-        if (item != null && prefillEndpoint.isEngineSubQueueMode()) {
-            signalCapacityAvailable();
-        }
-        return item;
-    }
-
-    /** Acknowledge only the retained owner whose terminal callback returned. */
-    private boolean acknowledgeStoppedItem(ScheduledRequest item) {
-        queueState.lock();
-        try {
-            return acknowledgeStopTerminalUnderLock(item);
-        } finally {
-            queueState.unlock();
-        }
-    }
-
-    private static Throwable appendCleanupFailure(
-            Throwable first,
-            Throwable next) {
-        if (first == null) {
-            return next;
-        }
-        // Preserve cleanup totality under allocation failure. The first causal
-        // failure is sufficient; later leaves were still all attempted.
-        return first;
-    }
-
-    private static void addSuppressedNoFail(
-            Throwable primary,
-            Throwable leaf) {
-        if (primary == null || leaf == null || primary == leaf) {
-            return;
-        }
-        try {
-            primary.addSuppressed(leaf);
-        } catch (Throwable ignoredAggregationFailure) {
-            // The start transaction already drained every acquired leaf.
-        }
-    }
-
     // ==================== endpoint queue operations ====================
 
     public boolean removeQueued(
@@ -778,7 +508,7 @@ public final class PrefillQueue {
         boolean removed;
         queueState.lock();
         try {
-            removed = runtimeState == RuntimeState.RUNNING
+            removed = lifecycle.isRunning()
                     && !queueState.isStopped()
                     && removeUnderLock(item);
             if (removed) {
@@ -905,32 +635,6 @@ public final class PrefillQueue {
                     "ACTIVE route reservation could not be restored request_id="
                             + item.requestId());
         }
-    }
-
-    /** Caller holds the queue lock. */
-    private void stopAcceptingUnderLock() {
-        if (!queueState.isLockedByCurrentThread()) {
-            throw new IllegalStateException(
-                    "queue mutation requires the queue lock");
-        }
-        queueState.markStopped();
-    }
-
-    /** Caller holds the queue lock. */
-    private ScheduledRequest detachNextStopTerminalUnderLock() {
-        ScheduledRequest item =
-                prefillState.detachNextActiveForStopUnderLock();
-        if (item != null) {
-            queueCapacity.releaseEngineSubQueueSlot(prefillEndpoint.getStatus().getRole());
-            queueState.incrementQueueVersion();
-        }
-        return item;
-    }
-
-    /** Caller holds the queue lock. */
-    private boolean acknowledgeStopTerminalUnderLock(
-            ScheduledRequest item) {
-        return prefillState.acknowledgeStopTerminalUnderLock(item);
     }
 
     /** Caller holds the queue lock. */
@@ -1284,18 +988,6 @@ public final class PrefillQueue {
     }
 
     /** Release the publish-time reservation only while it is still item-owned. */
-    private static void releaseUnconsumedRouteReservation(
-            ScheduledRequest item) {
-        if (item == null) {
-            return;
-        }
-        PrefillState.RouteReservation reservation =
-                item.takePublishedRouteReservation();
-        if (reservation != null) {
-            reservation.close();
-        }
-    }
-
     private static RuntimeException propagateCommitFailure(
             Throwable failure) {
         if (failure instanceof RuntimeException runtimeFailure) {
@@ -1575,15 +1267,12 @@ public final class PrefillQueue {
                     // Every expected delivery failure is terminalized inside the
                     // typed cycle. An escaping Throwable is therefore an invariant
                     // failure; retrying the same ACTIVE state can only spin.
-                    stopAfterUnexpectedLoopFailure(t);
+                    lifecycle.stopAfterUnexpectedLoopFailure(t);
                     return;
                 }
             }
         } finally {
-            synchronized (this) {
-                runtimeState = RuntimeState.STOPPED;
-                notifyAll();
-            }
+            lifecycle.markLoopFinished();
         }
     }
 
