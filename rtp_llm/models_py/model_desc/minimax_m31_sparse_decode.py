@@ -23,6 +23,8 @@ def m31_sparse_decode(
     local_blocks: int,
     output_mxfp8: bool = False,
     valid_token_mask: torch.Tensor | None = None,
+    query_cu_seqlens: torch.Tensor | None = None,
+    max_query_width: int = 1,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Select logical pages through indexer storage, then read main KV storage."""
     batch = q8.shape[0]
@@ -74,6 +76,8 @@ def m31_sparse_decode(
         local_blocks=local_blocks,
         sm_scale=128**-0.5,
         mma_scale_layout=True,
+        query_cu_seqlens=query_cu_seqlens,
+        max_query_width=max_query_width,
     )
     m31_topk16(scores, seq_lens, topk)
     partial = torch.empty(

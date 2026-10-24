@@ -26,6 +26,7 @@ class M31PrefillAddressing:
     index_slots: torch.Tensor
     main_table: torch.Tensor
     index_table: torch.Tensor
+    query_lengths: tuple[int, ...]
 
 
 def m31_prefill_addressing(
@@ -97,6 +98,7 @@ def m31_prefill_addressing(
         index_id * 128 + offset,
         main_table,
         index_table,
+        tuple(lengths),
     )
 
 
@@ -150,7 +152,8 @@ def m31_prefill_projected_attention(
             common.apply_write_cache_store(writer, inputs, cache)
 
     # On SM103, the native Q8KV4 page reader avoids staging all active pages.
-    if torch.cuda.get_device_capability(qkv.device) != (10, 3):
+    sm103 = torch.cuda.get_device_capability(qkv.device) == (10, 3)
+    if not sm103:
         try:
             return m31_sparse_prefill_fmha(
                 q8,
@@ -169,6 +172,29 @@ def m31_prefill_projected_attention(
             if error.name not in ("fmha_sm100", "fmha_sm100.cute"):
                 raise
 
+    max_width = max(address.query_lengths, default=0)
+    cu_seqlens = main_inputs.cu_seqlens_device
+    if (
+        main_inputs.is_target_verify
+        and sm103
+        and rows <= 256
+        and 2 <= max_width <= 16
+        and cu_seqlens is not None
+        and cu_seqlens.numel() == len(address.query_lengths) + 1
+    ):
+        seq_lens = (address.positions + 1).to(torch.int32)
+        return m31_sparse_decode(
+            q8,
+            index_q8,
+            views,
+            address.main_table.index_select(0, address.request_ids),
+            address.index_table.index_select(0, address.request_ids),
+            seq_lens,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+            query_cu_seqlens=cu_seqlens,
+            max_query_width=max_width,
+        )
     output = torch.empty((rows, 64, 128), dtype=torch.bfloat16, device=qkv.device)
     # Bound per-query TopK and selected-page scratch. Every chunk sees the
     # request's complete physical table while the kernels enforce each row's

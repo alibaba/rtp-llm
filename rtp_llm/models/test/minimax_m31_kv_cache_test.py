@@ -33,6 +33,7 @@ from rtp_llm.models_py.model_desc.minimax_m31_cp_prefill import (
     _working_pages,
     plan_m31_cp_prefill,
 )
+from rtp_llm.models_py.model_desc.minimax_m31_index_score import q8kv4_index_score
 from rtp_llm.models_py.model_desc.minimax_m31_kv_write import write_m31_nvfp4_rows
 from rtp_llm.models_py.model_desc.minimax_m31_model import MiniMaxM31Model
 from rtp_llm.models_py.model_desc.minimax_m31_moe import (
@@ -43,7 +44,11 @@ from rtp_llm.models_py.model_desc.minimax_m31_moe import (
     run_m31_prefill_chunks,
 )
 from rtp_llm.models_py.model_desc.minimax_m31_moe_pack import pack_m31_nvfp4_inputs
-from rtp_llm.models_py.model_desc.minimax_m31_prefill import m31_prefill_addressing
+from rtp_llm.models_py.model_desc.minimax_m31_prefill import (
+    M31PrefillAddressing,
+    m31_prefill_addressing,
+    m31_prefill_projected_attention,
+)
 from rtp_llm.models_py.model_desc.minimax_m31_prefill_fmha import stage_m31_main_pages
 from rtp_llm.ops import DataType, KVCacheSpecType
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
@@ -239,6 +244,163 @@ class MiniMaxM31KVCacheTest(unittest.TestCase):
         index.context_parallel_info = object()
         with self.assertRaisesRegex(ValueError, "CP"):
             m31_prefill_addressing(main, index, 5)
+
+    def test_target_verify_uses_grouped_index_score_only_on_supported_shape(self):
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (
+            10,
+            3,
+        ):
+            self.skipTest("grouped M3.1 IndexScore requires SM103")
+        device = torch.device("cuda")
+        rows = 5
+        req = torch.tensor([0, 0, 1, 1, 1], dtype=torch.int64, device=device)
+        slots = torch.zeros(rows, dtype=torch.int64, device=device)
+        table = torch.zeros((2, 2), dtype=torch.int32, device=device)
+        address = M31PrefillAddressing(req, slots, slots, slots, table, table, (2, 3))
+        main = SimpleNamespace(
+            is_target_verify=True,
+            cu_seqlens_device=torch.tensor([0, 2, 5], dtype=torch.int32, device=device),
+            cache_store_inputs=None,
+            input_lengths=torch.tensor([2, 3], dtype=torch.int32),
+            prefix_lengths=torch.zeros(2, dtype=torch.int32),
+        )
+        index = SimpleNamespace(cache_store_inputs=None)
+        qkv = torch.zeros((rows, 72 * 128), dtype=torch.bfloat16, device=device)
+        index_q = torch.zeros((rows, 4 * 128), dtype=torch.bfloat16, device=device)
+        index_k = torch.zeros((rows, 128), dtype=torch.bfloat16, device=device)
+        expected = torch.zeros((rows, 64, 128), dtype=torch.bfloat16, device=device)
+        with patch(
+            "rtp_llm.models_py.model_desc.minimax_m31_prefill.m31_prefill_addressing",
+            return_value=address,
+        ), patch(
+            "rtp_llm.models_py.model_desc.minimax_m31_prefill.minimax_m31_gemma_norm_rope_"
+        ), patch(
+            "rtp_llm.models_py.model_desc.minimax_m31_prefill.write_m31_nvfp4_rows"
+        ), patch(
+            "rtp_llm.models_py.model_desc.minimax_m31_prefill.m31_sparse_decode",
+            return_value=expected,
+        ) as decode:
+            output = m31_prefill_projected_attention(
+                qkv,
+                index_q,
+                index_k,
+                (),
+                torch.empty(0, device=device),
+                SimpleNamespace(),
+                main,
+                index,
+                SimpleNamespace(),
+                SimpleNamespace(),
+                norm_eps=1e-6,
+                init_blocks=2,
+                local_blocks=4,
+            )
+        self.assertIs(output, expected)
+        self.assertEqual(decode.call_count, 1)
+        self.assertIs(
+            decode.call_args.kwargs["query_cu_seqlens"], main.cu_seqlens_device
+        )
+        self.assertEqual(decode.call_args.kwargs["max_query_width"], 3)
+        self.assertEqual(decode.call_args.args[3].shape, (rows, 2))
+
+        with patch(
+            "rtp_llm.models_py.model_desc.minimax_m31_prefill.m31_prefill_addressing",
+            return_value=address,
+        ), patch(
+            "rtp_llm.models_py.model_desc.minimax_m31_prefill.minimax_m31_gemma_norm_rope_"
+        ), patch(
+            "rtp_llm.models_py.model_desc.minimax_m31_prefill.write_m31_nvfp4_rows"
+        ), patch(
+            "rtp_llm.models_py.model_desc.minimax_m31_prefill.m31_sparse_prefill_fmha",
+            side_effect=ModuleNotFoundError("missing", name="fmha_sm100"),
+        ), patch(
+            "rtp_llm.models_py.model_desc.minimax_m31_prefill.m31_sparse_decode",
+            return_value=expected,
+        ) as fallback_decode, patch(
+            "torch.cuda.get_device_capability", return_value=(9, 0)
+        ):
+            fallback = m31_prefill_projected_attention(
+                qkv,
+                index_q,
+                index_k,
+                (),
+                torch.empty(0, device=device),
+                SimpleNamespace(),
+                main,
+                index,
+                SimpleNamespace(),
+                SimpleNamespace(),
+                norm_eps=1e-6,
+                init_blocks=2,
+                local_blocks=4,
+            )
+        torch.testing.assert_close(fallback, expected)
+        self.assertEqual(fallback_decode.call_count, 1)
+        self.assertNotIn("query_cu_seqlens", fallback_decode.call_args.kwargs)
+
+    def test_grouped_index_score_matches_row_scores_after_graph_replay(self):
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (
+            10,
+            3,
+        ):
+            self.skipTest("grouped M3.1 IndexScore requires SM103")
+        device = torch.device("cuda")
+        rows, blocks = 9, 33
+        query = torch.randn((rows, 4, 128), device=device).to(torch.float8_e4m3fn)
+        packed = torch.randint(0, 256, (blocks, 8192), device=device, dtype=torch.uint8)
+        scales = torch.full((blocks, 1024), 0x38, device=device, dtype=torch.uint8)
+        table = (
+            torch.randperm(blocks, device=device)
+            .to(torch.int32)
+            .expand(rows, -1)
+            .contiguous()
+        )
+        table[:, 2] = -1
+        lengths = torch.tensor(
+            [129, 130, 256, 257, 258, 4094, 4095, 4096, 4097],
+            device=device,
+            dtype=torch.int32,
+        )
+        cu = torch.tensor([0, 2, 5, 9], device=device, dtype=torch.int32)
+        expected = torch.empty((4, rows, blocks), device=device)
+        actual = torch.empty_like(expected)
+
+        def score(out, grouped):
+            q8kv4_index_score(
+                query,
+                packed,
+                scales,
+                table,
+                lengths,
+                out,
+                init_blocks=2,
+                local_blocks=4,
+                sm_scale=128**-0.5,
+                mma_scale_layout=True,
+                query_cu_seqlens=cu if grouped else None,
+                max_query_width=4 if grouped else 1,
+            )
+
+        score(expected, False)
+        score(actual, True)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            score(actual, True)
+        query.copy_(torch.randn_like(query.float()).to(torch.float8_e4m3fn))
+        lengths.copy_(
+            torch.tensor(
+                [1, 128, 129, 130, 255, 256, 257, 258, 259],
+                device=device,
+                dtype=torch.int32,
+            )
+        )
+        table[:, 1] = 1
+        cu.copy_(torch.tensor([0, 3, 5, 9], device=device, dtype=torch.int32))
+        actual.fill_(float("nan"))
+        graph.replay()
+        score(expected, False)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
 
     def test_cp_prefill_uses_global_zigzag_positions_and_restore(self):
         info = SimpleNamespace(

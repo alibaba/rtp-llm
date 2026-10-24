@@ -150,6 +150,107 @@ def _q8kv4_index_score_kernel(
         )
 
 
+@triton.jit
+def _q8kv4_grouped_index_score_kernel(
+    q_ptr,
+    packed_ptr,
+    scale_ptr,
+    block_table_ptr,
+    seq_lens_ptr,
+    cu_seqlens_ptr,
+    out_ptr,
+    num_phys_pages,
+    max_blocks,
+    token_rows: tl.constexpr,
+    packed_page_stride,
+    scale_page_stride,
+    q_stride_batch,
+    q_stride_head,
+    q_stride_dim,
+    table_stride_batch,
+    out_stride_head,
+    out_stride_batch,
+    max_query_width: tl.constexpr,
+    init_blocks: tl.constexpr,
+    local_blocks: tl.constexpr,
+    SM_SCALE: tl.constexpr,
+    MMA_SCALE_LAYOUT: tl.constexpr,
+):
+    request = tl.program_id(0)
+    chunk = tl.program_id(1)
+    start = tl.load(cu_seqlens_ptr + request)
+    stop = tl.load(cu_seqlens_ptr + request + 1)
+    width = tl.maximum(0, tl.minimum(stop - start, max_query_width))
+    lane = tl.arange(0, 64)
+    token = lane // 4
+    head = lane % 4
+    row = start + token
+    valid = (token < width) & (row >= 0) & (row < token_rows)
+    seq_len = tl.minimum(
+        tl.load(seq_lens_ptr + row, mask=valid, other=0), max_blocks * 128
+    )
+    num_blocks = (seq_len + 127) // 128
+    longest = tl.max(num_blocks, 0)
+    blocks_per_chunk = (longest + tl.num_programs(1) - 1) // tl.num_programs(1)
+    first_block = chunk * blocks_per_chunk
+    iterations = tl.minimum(blocks_per_chunk, longest - first_block)
+    if iterations <= 0:
+        return
+
+    dim = tl.arange(0, 128)
+    query = tl.load(
+        q_ptr
+        + row[:, None] * q_stride_batch
+        + head[:, None] * q_stride_head
+        + dim[None, :] * q_stride_dim,
+        mask=valid[:, None],
+        other=0.0,
+    )
+    key_token = tl.arange(0, 128)
+    shortest = tl.min(tl.where(valid, seq_len, 2147483647), 0)
+    for offset in tl.range(iterations, num_stages=1):
+        logical_block = first_block + offset
+        physical_page = tl.load(
+            block_table_ptr + start * table_stride_batch + logical_block,
+            mask=(start >= 0) & (start < token_rows),
+            other=-1,
+        ).to(tl.int64)
+        valid_page = (physical_page >= 0) & (physical_page < num_phys_pages)
+        key = _load_index_page_fp8(
+            packed_ptr,
+            scale_ptr,
+            tl.where(valid_page, physical_page, 0),
+            valid_page,
+            packed_page_stride,
+            scale_page_stride,
+            MMA_SCALE_LAYOUT,
+        )
+        product = tl.dot(query, tl.trans(key), out_dtype=tl.float32)
+        if logical_block * 128 + 128 <= shortest:
+            maximum = tl.max(product, axis=1) * SM_SCALE
+        else:
+            product = tl.where(
+                logical_block * 128 + key_token[None, :] < seq_len[:, None],
+                product,
+                float("-inf"),
+            )
+            maximum = tl.max(product, axis=1) * SM_SCALE
+        visible = valid & valid_page & (logical_block < num_blocks)
+        local_start = tl.maximum(0, num_blocks - local_blocks)
+        maximum = tl.where(visible, maximum, float("-inf"))
+        maximum = tl.where(visible & (logical_block >= local_start), 1.0e29, maximum)
+        maximum = tl.where(
+            visible & (logical_block < init_blocks) & (logical_block < local_start),
+            1.0e30,
+            maximum,
+        )
+        tl.store(
+            out_ptr + head * out_stride_head + row * out_stride_batch + logical_block,
+            maximum,
+            mask=valid & (logical_block < num_blocks),
+        )
+
+
 @torch.no_grad()
 def q8kv4_index_score(
     q: torch.Tensor,
@@ -163,8 +264,13 @@ def q8kv4_index_score(
     local_blocks: int,
     sm_scale: float,
     mma_scale_layout: bool = False,
+    query_cu_seqlens: torch.Tensor | None = None,
+    max_query_width: int = 1,
 ) -> torch.Tensor:
-    """Score packed index-K pages without materializing historical rows."""
+    """Score packed index-K pages without materializing historical rows.
+
+    Grouped rows must share the first row's physical block table per request.
+    """
     if q.dtype != torch.float8_e4m3fn or tuple(q.shape[1:]) != (4, 128):
         raise ValueError("Q8KV4 IndexScore requires E4M3 Q [batch,4,128]")
     if packed.dtype != torch.uint8 or scales.dtype not in (
@@ -189,6 +295,47 @@ def q8kv4_index_score(
         or not out.is_contiguous()
     ):
         raise ValueError(f"score output must be contiguous float32 {expected}")
+    if query_cu_seqlens is not None:
+        if (
+            query_cu_seqlens.dtype != torch.int32
+            or query_cu_seqlens.ndim != 1
+            or query_cu_seqlens.stride(0) != 1
+            or query_cu_seqlens.device != q.device
+            or not 2 <= max_query_width <= 16
+        ):
+            raise ValueError(
+                "grouped IndexScore requires CUDA int32 cu_seqlens and width 2..16"
+            )
+        # Graph replay may reuse scores after shorter histories or fewer live rows.
+        out.fill_(float("-inf"))
+        chunks = 128 if block_table.shape[1] <= 4096 else 256
+        _q8kv4_grouped_index_score_kernel[(query_cu_seqlens.numel() - 1, chunks)](
+            q,
+            packed,
+            scales.view(torch.uint8),
+            block_table,
+            seq_lens,
+            query_cu_seqlens,
+            out,
+            packed.shape[0],
+            block_table.shape[1],
+            q.shape[0],
+            packed.stride(0),
+            scales.stride(0),
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            block_table.stride(0),
+            out.stride(0),
+            out.stride(1),
+            max_query_width=max_query_width,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+            SM_SCALE=sm_scale,
+            MMA_SCALE_LAYOUT=bool(mma_scale_layout),
+            num_warps=4,
+        )
+        return out
     chunks = 256
     if q.shape[0] >= 64 and torch.cuda.get_device_capability(q.device) == (10, 3):
         # Preserve parallelism while limiting each CTA to 32 history pages.
