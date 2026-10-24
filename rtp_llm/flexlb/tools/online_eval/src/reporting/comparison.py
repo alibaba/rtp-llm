@@ -1,5 +1,7 @@
 """Compare frozen bundles and experiment ZIPs without rerunning gates."""
 
+from __future__ import annotations
+
 import argparse
 import copy
 import json
@@ -221,6 +223,48 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels,
     return overlays + separate, pairing
 
 
+def _run_sections(run, label: str, filename: str) -> list[dict]:
+    """Keep frozen details and bounded notes without duplicating full evidence."""
+    sections = []
+    spec = run.report
+    sections.append(links(label + " · 原始报告", [dict(label="打开冻结报告", href=filename)]))
+    sections.append(
+        details(
+            label + " · 执行与判定",
+            dict(
+                analysis={
+                    key: value
+                    for key, value in run.analysis.items()
+                    if key in {"verdict", "validity", "runtime_validity", "errors", "warnings"}
+                },
+                execution={key: value for key, value in run.execution.items() if key in {"status", "outcome", "duration_ms", "cleanup"}},
+            ),
+        )
+    )
+    # Full frozen notes remain in the original report; avoid duplicating large evidence in HTML.
+    for section in spec.sections:
+        if section["type"] == "links":
+            continue
+        if len(json.dumps(section, ensure_ascii=False)) <= 65536:
+            sections.append(dict(copy.deepcopy(section), title=label + " · " + section.get("title", "")))
+    return sections
+
+
+def _prepare_panels(spec, shift, caption: str) -> tuple[list[dict], dict | None]:
+    """Align display coordinates while leaving each frozen run untouched."""
+    panels = [shifted_panel(panel, shift) for panel in spec.panels]
+    display = (
+        dict(min=spec.time_min - (shift or 0), max=spec.time_max - (shift or 0))
+        if (spec.time_min is not None and spec.time_max is not None)
+        else None
+    )
+    for panel in panels:
+        panel["caption"] = panel.get("caption", "") + " " + caption
+        if display is not None:
+            panel["timeAxis"] = copy.deepcopy(display)
+    return panels, display
+
+
 def compare(
     paths, output, *, alignment_event=None, labels=None, baseline=None, views=None, include_original_panels=False, event_merge_tolerance=1.0
 ):
@@ -288,28 +332,7 @@ def compare(
         )
         filename = f"original-run-{i + 1}.html"
         attachments[filename] = run.original_html()
-        sections.append(links(label + " · 原始报告", [dict(label="打开冻结报告", href=filename)]))
-        sections.append(
-            details(
-                label + " · 执行与判定",
-                dict(
-                    analysis={
-                        key: value
-                        for key, value in run.analysis.items()
-                        if key in {"verdict", "validity", "runtime_validity", "errors", "warnings"}
-                    },
-                    execution={
-                        key: value for key, value in run.execution.items() if key in {"status", "outcome", "duration_ms", "cleanup"}
-                    },
-                ),
-            )
-        )
-        # Full frozen notes remain in the original report; avoid duplicating large evidence in HTML.
-        for section in spec.sections:
-            if section["type"] == "links":
-                continue
-            if len(json.dumps(section, ensure_ascii=False)) <= 65536:
-                sections.append(dict(copy.deepcopy(section), title=label + " · " + section.get("title", "")))
+        sections.extend(_run_sections(run, label, filename))
         original = _original_result(run)
         kpis.append(dict(label=label + " · 原始判定", value=original["verdict"] or "未知"))
         overview.append(
@@ -326,17 +349,8 @@ def compare(
                 list(spec.kpis),
             ]
         )
-        panels = [shifted_panel(panel, shift) for panel in spec.panels]
-        display = (
-            dict(min=spec.time_min - (shift or 0), max=spec.time_max - (shift or 0))
-            if (spec.time_min is not None and spec.time_max is not None)
-            else None
-        )
+        panels, display = _prepare_panels(spec, shift, caption)
         ranges.append(display)
-        for panel in panels:
-            panel["caption"] = panel.get("caption", "") + " " + caption
-            if display is not None:
-                panel["timeAxis"] = copy.deepcopy(display)
         prepared.append(panels)
     origins = ["EVENT_ALIGNED"] * len(loaded) if aligned else [_time_origin(run, i) for i, run in enumerate(loaded)]
     baseline_index = labels.index(baseline)

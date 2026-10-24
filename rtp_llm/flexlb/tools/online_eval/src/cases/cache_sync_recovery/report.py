@@ -11,6 +11,18 @@ from reporting.components import details, run_meta, table
 from reporting.core import write_bundle
 
 
+def _maximum_age(rows: list[dict], field: str):
+    values = [row[field] for row in rows if row.get(field) is not None]
+    return max(values) if values else None
+
+
+def _counter_rate(rows: list[dict], field: str, scale: float = 1):
+    values = [row for row in rows if row.get(field) is not None]
+    if len(values) < 2 or values[-1][field] < values[0][field]:
+        return None
+    return (values[-1][field] - values[0][field]) / (values[-1]["epoch_s"] - values[0]["epoch_s"]) * scale
+
+
 def compact_report_spec(data, original, *, presentation=None, store=None):
     """同一冻结数据按变体选择两张主图；完整指标保留在汇总和证据中。"""
     spec = copy.deepcopy(original)
@@ -98,11 +110,7 @@ def compact_report_spec(data, original, *, presentation=None, store=None):
     for phase in data.get("phase_summary", {}):
         group = [r for r in rows if r["phase"] == phase]
 
-        def maximum_age(field, group=group):
-            values = [r[field] for r in group if r.get(field) is not None]
-            return max(values) if values else None
-
-        ages.append([phase, maximum_age("healthy_max_rpc_age_ms"), maximum_age("healthy_max_applied_age_ms")])
+        ages.append([phase, _maximum_age(group, "healthy_max_rpc_age_ms"), _maximum_age(group, "healthy_max_applied_age_ms")])
     spec["sections"] = spec.get("sections", []) + [
         table("轮询与状态应用", ["阶段", "最长成功轮询年龄 ms", "最长已应用观测年龄 ms"], ages),
         details(
@@ -115,6 +123,37 @@ def compact_report_spec(data, original, *, presentation=None, store=None):
         ),
     ]
     return spec
+
+
+def _phase_summaries(raw: dict, rows: list[dict], gc: list[dict]) -> dict:
+    """Calculate each phase from its own observed endpoints and GC overlap."""
+    summaries = {}
+    for phase, actual in raw["intensity"].items():
+        group = [r for r in rows if r["phase"] == phase]
+        if len(group) < 2:
+            continue
+        first, last = group[0]["epoch_s"], group[-1]["epoch_s"]
+        duration = last - first
+        pauses = [g for g in gc if first <= g["epoch_s"] <= last]
+        summaries[phase] = dict(
+            samples=len(group),
+            sample_window_s=duration,
+            actual_rpc=actual,
+            full_gc_count=sum(g["full"] for g in pauses) if raw.get("gc_available", True) else None,
+            full_gc_per_min=sum(g["full"] for g in pauses) * 60 / duration if raw.get("gc_available", True) else None,
+            gc_pause_fraction=sum(max(0, min(last, g["epoch_s"]) - max(first, g["epoch_s"] - g["duration_ms"] / 1000)) for g in gc)
+            / duration
+            if raw.get("gc_available", True)
+            else None,
+            diff_million_keys_s=_counter_rate(group, "diff_scanned_keys", 1e-6),
+            cache_success_s=_counter_rate(group, "cache_sync_commits"),
+            worker_status_success_s=_counter_rate(group, "worker_status_commits"),
+            max_healthy_age_ms=max(
+                (r["healthy_max_status_age_ms"] for r in group if r.get("healthy_max_status_age_ms") is not None), default=None
+            ),
+            affected_workers=max((r.get("affected_workers", 0) for r in group), default=0),
+        )
+    return summaries
 
 
 def write_report(directory, raw, result, *, run=None, presentation=None):
@@ -161,37 +200,7 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
     )
     data.update(verdict=data["outcome"]["gate"], runtime_validity=data["outcome"]["validity"])
     baseline_ready = any(e["id"] == "cache_baseline_ready" for e in raw["events"])
-    summaries = {}
-    for phase, actual in raw["intensity"].items():
-        group = [r for r in rows if r["phase"] == phase]
-        if len(group) < 2:
-            continue
-        first, last = group[0]["epoch_s"], group[-1]["epoch_s"]
-        duration = last - first
-        pauses = [g for g in gc if first <= g["epoch_s"] <= last]
-        overlap = lambda g, first=first, last=last: max(0, min(last, g["epoch_s"]) - max(first, g["epoch_s"] - g["duration_ms"] / 1000))
-
-        def rate(field, scale=1, group=group):
-            values = [r for r in group if r.get(field) is not None]
-            if len(values) < 2 or values[-1][field] < values[0][field]:
-                return None
-            return (values[-1][field] - values[0][field]) / (values[-1]["epoch_s"] - values[0]["epoch_s"]) * scale
-
-        summaries[phase] = dict(
-            samples=len(group),
-            sample_window_s=duration,
-            actual_rpc=actual,
-            full_gc_count=sum(g["full"] for g in pauses) if raw.get("gc_available", True) else None,
-            full_gc_per_min=sum(g["full"] for g in pauses) * 60 / duration if raw.get("gc_available", True) else None,
-            gc_pause_fraction=sum(overlap(g) for g in gc) / duration if raw.get("gc_available", True) else None,
-            diff_million_keys_s=rate("diff_scanned_keys", 1e-6),
-            cache_success_s=rate("cache_sync_commits"),
-            worker_status_success_s=rate("worker_status_commits"),
-            max_healthy_age_ms=max(
-                (r["healthy_max_status_age_ms"] for r in group if r.get("healthy_max_status_age_ms") is not None), default=None
-            ),
-            affected_workers=max((r.get("affected_workers", 0) for r in group), default=0),
-        )
+    summaries = _phase_summaries(raw, rows, gc)
     data["phase_summary"] = summaries
     spec = dict(
         report_spec_schema_version=1,
