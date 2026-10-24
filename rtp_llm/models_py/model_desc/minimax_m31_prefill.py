@@ -149,23 +149,25 @@ def m31_prefill_projected_attention(
             writer = common.create_write_cache_store_impl(inputs)
             common.apply_write_cache_store(writer, inputs, cache)
 
-    try:
-        return m31_sparse_prefill_fmha(
-            q8,
-            index_q8,
-            views,
-            address.main_table,
-            address.index_table,
-            address.request_ids,
-            address.positions,
-            main_inputs.input_lengths.to(torch.int64).tolist(),
-            main_inputs.prefix_lengths.to(torch.int64).tolist(),
-            init_blocks=init_blocks,
-            local_blocks=local_blocks,
-        )
-    except ModuleNotFoundError as error:
-        if error.name not in ("fmha_sm100", "fmha_sm100.cute"):
-            raise
+    # On SM103, the native Q8KV4 page reader avoids staging all active pages.
+    if torch.cuda.get_device_capability(qkv.device) != (10, 3):
+        try:
+            return m31_sparse_prefill_fmha(
+                q8,
+                index_q8,
+                views,
+                address.main_table,
+                address.index_table,
+                address.request_ids,
+                address.positions,
+                main_inputs.input_lengths.to(torch.int64).tolist(),
+                main_inputs.prefix_lengths.to(torch.int64).tolist(),
+                init_blocks=init_blocks,
+                local_blocks=local_blocks,
+            )
+        except ModuleNotFoundError as error:
+            if error.name not in ("fmha_sm100", "fmha_sm100.cute"):
+                raise
 
     output = torch.empty((rows, 64, 128), dtype=torch.bfloat16, device=qkv.device)
     # Bound per-query TopK and selected-page scratch. Every chunk sees the
