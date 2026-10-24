@@ -101,7 +101,7 @@ def _cache_key(package_name, version, source_path):
     key = "%s_python-%s-%s" % (package_name, version, py_tag)
     if variant is not None:
         key += "__" + variant
-    if package_name == "flashinfer":
+    if package_name in ("flashinfer", "flashinfer_cubin"):
         # Bazel wheel patches keep upstream metadata unchanged. Include Python
         # payloads so a same-version cached copy cannot hide a dependency fix.
         source = Path(source_path)
@@ -169,7 +169,11 @@ def copy_package_with_lock(package_name, cache_dir):
         # Copy the package
         try:
             if Path(source_path).is_dir():
-                shutil.copytree(source_path, target_package_path, symlinks=True)
+                shutil.copytree(
+                    source_path,
+                    target_package_path,
+                    symlinks=package_name != "flashinfer_cubin",
+                )
             else:
                 shutil.copy2(source_path, target_package_path)
 
@@ -418,7 +422,7 @@ def setup_jit_cache(cache_dir=None, packages=None):
     )
 
     if packages is None:
-        packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
+        packages = ["flashinfer", "flashinfer_cubin", "torch", "deep_gemm", "tvm_ffi"]
 
     # Copy packages to cache with file locking
     copied_paths = []
