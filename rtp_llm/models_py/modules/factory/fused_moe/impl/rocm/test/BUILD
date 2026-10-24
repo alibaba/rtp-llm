@@ -120,3 +120,8 @@ py_test (
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'4'},
 )
+
+exports_files(
+    ["rocm_fp8_fused_moe_test.py"],
+    visibility = ["//rtp_llm/models_py/modules/factory/fused_moe/impl/rocm/test/qwen4_contract:__pkg__"],
+)
