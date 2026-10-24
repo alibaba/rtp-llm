@@ -639,6 +639,7 @@ inline CacheConfig makeFullSwaLinearCacheConfig(bool reuse_swa = true) {
         {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR},
         {"full", "swa", "linear"},
         {defaultCacheGroupPolicy(CacheGroupType::FULL), swa_policy, defaultCacheGroupPolicy(CacheGroupType::LINEAR)});
+    config.finalizeBlockNums(128, RuntimeConfig{});
     return config;
 }
 

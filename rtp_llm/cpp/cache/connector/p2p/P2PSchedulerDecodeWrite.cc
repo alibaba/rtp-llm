@@ -328,7 +328,7 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
         }
         resource.cacheKeys().resize(blocks);
         resource.setLastBlockAligned(true);
-        if (calculateCacheKeys(token_ids.data(), blocks * block_size, block_size) != resource.cacheKeys()
+        if (calculateCacheKeys(token_ids.data(), blocks * block_size, block_size, config_.cache_key_hash_seed) != resource.cacheKeys()
             || std::set<int64_t>(resource.cacheKeys().begin(), resource.cacheKeys().end()).size() != blocks) {
             return invalid("writeback source key hash mismatch");
         }

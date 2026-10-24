@@ -277,7 +277,7 @@ TEST(CacheTopologyTest, ActiveModelTopologyPreservesMultiLayerDraftModule) {
 TEST(CacheTopologyTest, ActiveModelTopologyRejectsInvalidDraftConfig) {
     CacheConfig config;
     config.layer_num = 1;
-    config.setTopology({makeGroup("full", {0})}, {{0, {"full"}}});
+    config.setTopology({makeGroup("full")}, {{0, {"full"}}});
     config.mtp_sub_configs.push_back(nullptr);
     EXPECT_ANY_THROW(config.activeModelTopologyPtr());
     config.mtp_sub_configs.front() = std::make_shared<CacheConfig>();

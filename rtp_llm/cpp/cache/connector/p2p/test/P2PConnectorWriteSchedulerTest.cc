@@ -321,7 +321,7 @@ protected:
     P2PConnectorSchedulerConfig schedulerConfig(RoleType role, const std::vector<std::string>& addresses) {
         P2PConnectorSchedulerConfig config;
         config.topology                                     = config_.topologyPtr();
-        config.cache_key_tokens_per_block                   = config_.cache_key_tokens_per_block;
+        config.cache_key_tokens_per_block                   = config_.seq_size_per_block;
         config.parallelism_config.tp_size                   = 2;
         config.parallelism_config.role_type                 = role;
         config.role_type                                    = role;
@@ -758,13 +758,12 @@ TEST_F(P2PConnectorWriteSchedulerTest, ReceiverChecksEachIndependentPoolAndRelea
     auto       policy                   = defaultCacheGroupPolicy(CacheGroupType::SWA);
     policy.enable_prefix_reuse          = true;
     policy.sliding_window_size          = 8;
-    config_.use_independent_block_pools = true;
     config_.fromGroupedSpecs({full, swa},
                              {{0}, {1}},
                              {CacheGroupType::FULL, CacheGroupType::SWA},
                              {"full", "swa"},
                              {defaultCacheGroupPolicy(CacheGroupType::FULL), policy});
-    config_.setGroupBlockLayout({8, 32}, {full->block_size_bytes(), swa->block_size_bytes()}, {0, 0});
+    config_.setGroupBlockLayout({"full", "swa"}, {8, 32}, {full->block_size_bytes(), swa->block_size_bytes()}, {0, 0});
     using MultiAllocator = test::BlockTreeCacheTestAllocator<CoordinatorCacheManager>;
     auto allocator = std::make_shared<MultiAllocator>(config_, AllocationType::DEVICE, nullptr, 0, RoleType::PREFILL);
     ASSERT_TRUE(allocator->init());

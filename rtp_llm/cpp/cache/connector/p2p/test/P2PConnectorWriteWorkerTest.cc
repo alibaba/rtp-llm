@@ -731,7 +731,7 @@ TEST_F(P2PConnectorWriteWorkerTest, WritebackConfigComesFromCacheStoreConfig) {
     cache_config.p2p_writeback_enable                         = true;
     cache_config.p2p_writeback_timeout_ms                     = 173;
     auto config =
-        P2PConnectorConfig::create(RuntimeConfig{}, cache_config, ParallelismConfig{}, PDSepConfig{}, 2, false, 0);
+        P2PConnectorConfig::create(RuntimeConfig{}, cache_config, ParallelismConfig{}, PDSepConfig{}, 2, 0);
     EXPECT_TRUE(config.p2p_writeback_enable);
     EXPECT_EQ(config.scheduler_config.p2p_writeback_timeout_ms, 173);
 }
@@ -880,7 +880,6 @@ TEST_F(P2PConnectorWriteWorkerTest, LinearPartitionsAreRejectedBeforeTransfer) {
     auto groups                     = config_.topology->groups();
     groups[0].spec                  = LinearKVCacheSpec::build(desc, context);
     groups[0].policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
-    groups[0].kv_block_stride_bytes = groups[0].spec->block_size_bytes();
     config_.topology                = CacheTopology::create(std::move(groups), config_.topology->layers());
     auto source                     = makeWriteDecodeConnector(config_, source_, sender_);
     auto target                     = makeWritePrefillConnector(config_, target_, receiver_);

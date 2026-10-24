@@ -59,7 +59,7 @@
                 "output_ids": [[11, 264, 51302, 315]],
                 "aux_info": {
                     "input_len": 17,
-                    "reuse_len": 16,
+                    "reuse_len": 8,
                     "local_reuse_len": 16,
                     "prefill_total_reuse_len": 16,
                     "prefill_local_reuse_len": 16,

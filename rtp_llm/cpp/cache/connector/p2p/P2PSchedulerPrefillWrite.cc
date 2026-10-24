@@ -430,7 +430,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
     }
     const CacheKeysType keys(request.cache_keys().begin(), request.cache_keys().end());
     if (std::set<int64_t>(keys.begin(), keys.end()).size() != keys.size()
-        || calculateCacheKeys(request.token_ids().data(), blocks * block_size, block_size) != keys) {
+        || calculateCacheKeys(request.token_ids().data(), blocks * block_size, block_size, config_.cache_key_hash_seed) != keys) {
         return invalid("writeback cache key hash mismatch");
     }
     if (currentTimeMs() >= deadline_ms) {
@@ -547,7 +547,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
         if (count == 0 && !load_context)
             return ErrorInfo::OkStatus();
         // Checked after admission so each pool already reflects this writeback's real per-group, per-rank demand.
-        if (!writebackKeepsKvReserve(allocator_->cacheGroups(), config_.p2p_writeback_kv_reserve_ratio))
+        if (!writebackKeepsKvReserve(coordinator_manager_->cacheGroups(), config_.p2p_writeback_kv_reserve_ratio))
             return ErrorInfo(ErrorCode::MALLOC_FAILED, "writeback would leave too few available KV blocks");
         P2PBroadcastClient::RankRoutes routes(transfer_addrs_.size());
         P2PBroadcastClient::RankRoutes send_routes;

@@ -37,6 +37,7 @@ struct P2PConnectorSchedulerConfig {
     double                               p2p_writeback_kv_reserve_ratio               = 0.1;
     std::shared_ptr<const CacheTopology> topology;
     size_t                               cache_key_tokens_per_block = 1;
+    int64_t                              cache_key_hash_seed = 0;
     int                                  cp_rank = 0;
     int                                  cp_size = 1;
 

@@ -153,14 +153,9 @@ ShardLayout layoutFromSpec(const KVCacheSpecPtr& spec, const ParallelismConfig& 
     group.tag                       = spec->tag;
     group.spec                      = spec;
     group.policy                    = defaultCacheGroupPolicy(type);
-    group.layer_ids                 = {0};
     group.block_num                 = 8;
-    group.seq_size_per_block        = spec->seq_size_per_block;
-    group.kernel_seq_size_per_block = spec->seq_size_per_block;
-    group.kv_block_stride_bytes     = spec->block_size_bytes();
-    group.kv_scale_stride_bytes     = spec->scale_block_size_bytes();
     const auto topology             = CacheTopology::create({group}, {{0, {spec->tag}}});
-    return ShardLayoutFactory::fromTopology(*topology, pc, pc.role_type);
+    return ShardLayoutFactory::fromTopology(*topology, pc, pc.role_type, spec->seq_size_per_block);
 }
 
 }  // namespace
@@ -1176,7 +1171,7 @@ TEST(PlannerGroupD, RejectsAsymmetricLinearStateButPreservesSymmetricTransfers) 
                 EXPECT_TRUE(result.ok()) << result.error.ToString();
             } else {
                 EXPECT_FALSE(result.ok());
-                EXPECT_NE(result.error.ToString().find("LINEAR asymmetric TP"), std::string::npos);
+                EXPECT_NE(result.error.ToString().find("LinearAttention asymmetric head sharding"), std::string::npos);
                 EXPECT_TRUE(result.plan.routes.empty());
             }
         }
@@ -1225,6 +1220,7 @@ TEST(PlannerGroupD, FactoryMirrorsCpStatePayloadFromRealSpecs) {
                 };
                 const auto prefill = local_layout(prefill_pc);
                 const auto decode = local_layout(decode_pc);
+                ASSERT_EQ(prefill.group(kFixedTag).seq_size_per_block, kSeqSizePerBlock);
                 const auto inferred_prefill =
                     ShardLayoutFactory::peerOf(decode, cp_size, true, RoleType::PREFILL);
                 const auto inferred_decode =
@@ -1261,7 +1257,7 @@ TEST(PlannerGroupD, FactoryMirrorsCpStatePayloadFromRealSpecs) {
                         EXPECT_EQ(route.src_bytes, route.dst_bytes);
                         EXPECT_EQ(route.dst_bytes, prefill.group(kFixedTag).kv_block_stride_bytes);
                         EXPECT_EQ(KVCacheTransferPlanner::resolveKeys(route.src_keys, 4 * cp_size),
-                                  (std::vector<size_t>{static_cast<size_t>(3 * cp_size - 1),
+                                  (std::vector<size_t>{static_cast<size_t>(4 * cp_size - 2),
                                                        static_cast<size_t>(4 * cp_size - 1)}));
                     }
                 }
