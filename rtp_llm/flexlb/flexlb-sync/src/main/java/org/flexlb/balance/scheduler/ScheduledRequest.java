@@ -51,7 +51,7 @@ public final class ScheduledRequest implements Prioritized {
     private final boolean routeDelivery;
     /**
      * Publish-time NON_BATCH ownership. It has exactly one downstream owner:
-     * this ACTIVE item until RouteDeliveryStrategy takes it, then the route
+     * this ACTIVE item until NonBatchDeliveryStrategy takes it, then the route
      * transaction. ACTIVE terminal paths take and close the same capability.
      */
     private final AtomicReference<PrefillState.RouteReservation>

@@ -5,7 +5,7 @@ import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
 import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
-import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
+import org.flexlb.balance.scheduler.NonBatchDeliveryStrategy;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -22,14 +22,14 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 /**
  * Exact-value behavior contracts for the frozen
  * {@link PrefillTtftEstimate.DeliveryProjection} SPI as implemented by
- * {@link RouteDeliveryStrategy} and {@link BatchDeliveryStrategy}.
+ * {@link NonBatchDeliveryStrategy} and {@link BatchDeliveryStrategy}.
  *
  * <p>Route service is a lazy cumulative prefix sum (asking for member i
  * evaluates only items 0..i). Batch service independently predicts each
  * prefix length via {@code batchDurationMs(items[0..i+1])}.
  */
 @DisplayName("Delivery projection contracts")
-class RouteDeliveryProjectionTest {
+class NonBatchDeliveryProjectionTest {
 
     private static GroupPlanner.Item item(long id, long seqLen) {
         return new GroupPlanner.Item(

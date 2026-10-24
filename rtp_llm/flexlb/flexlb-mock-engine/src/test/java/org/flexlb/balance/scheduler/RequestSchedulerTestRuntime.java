@@ -64,7 +64,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         DeliveryMetrics deliveryMetrics = new DeliveryMetrics(batchReporter);
         DeliveryStrategy delivery = configService.loadBalanceConfig().getDispatcher().requiresGenerateInput()
                 ? new BatchDeliveryStrategy(prepareBatchSubmission, batchIds::incrementAndGet, lifecycle, deliveryMetrics)
-                : new RouteDeliveryStrategy(lifecycle, deliveryMetrics);
+                : new NonBatchDeliveryStrategy(lifecycle, deliveryMetrics);
         this.registry = new EndpointRegistry(
                 configService,
                 endpointEvents,

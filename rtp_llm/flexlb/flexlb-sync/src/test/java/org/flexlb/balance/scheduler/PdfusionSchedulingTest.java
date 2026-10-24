@@ -84,7 +84,7 @@ class PdfusionSchedulingTest {
                             public void close() { }
                         }), new AtomicLong()::incrementAndGet,
                         lifecycle, new DeliveryMetrics(reporter))
-                : new RouteDeliveryStrategy(lifecycle, new DeliveryMetrics(reporter));
+                : new NonBatchDeliveryStrategy(lifecycle, new DeliveryMetrics(reporter));
         EndpointRegistry endpoints = new EndpointRegistry(service, new EndpointEventProjector(lifecycle), reporter,
                 delivery, batch ? new BatchTtftEstimator() : new NonBatchTtftEstimator(),
                 availability, queueCapacity);

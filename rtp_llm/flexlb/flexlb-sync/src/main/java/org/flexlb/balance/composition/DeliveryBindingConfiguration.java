@@ -7,8 +7,8 @@ import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
+import org.flexlb.balance.scheduler.NonBatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.RequestRegistry;
-import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -71,7 +71,7 @@ public class DeliveryBindingConfiguration {
                         telemetry);
             }
             case NON_BATCH ->
-                    new RouteDeliveryStrategy(
+                    new NonBatchDeliveryStrategy(
                             requests,
                             telemetry);
         };

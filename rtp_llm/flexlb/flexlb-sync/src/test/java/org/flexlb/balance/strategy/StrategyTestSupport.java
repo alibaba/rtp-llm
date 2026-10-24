@@ -12,10 +12,10 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.NonBatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestRegistry;
-import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -202,7 +202,7 @@ final class StrategyTestSupport {
 
     /** Keep selection-owned queues parked without replacing admission internals. */
     private static DeliveryStrategy parkedDelivery(RequestRegistry requests) {
-        RouteDeliveryStrategy route = new RouteDeliveryStrategy(
+        NonBatchDeliveryStrategy route = new NonBatchDeliveryStrategy(
                 requests, NOOP_METRICS);
         DeliveryStrategy delivery = Mockito.mock(DeliveryStrategy.class);
         Mockito.when(delivery.prepare(

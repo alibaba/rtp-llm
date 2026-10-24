@@ -28,12 +28,12 @@ import static org.flexlb.balance.scheduler.PrefillAdmissionResources.sameIdentit
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.throwRollbackFailure;
 
 /** Individual route admission, ownership, publication, and projection. */
-public final class RouteDeliveryStrategy implements DeliveryStrategy {
+public final class NonBatchDeliveryStrategy implements DeliveryStrategy {
 
     private final RequestRegistry requests;
     private final DeliveryMetrics telemetry;
 
-    public RouteDeliveryStrategy(RequestRegistry requests, DeliveryMetrics telemetry) {
+    public NonBatchDeliveryStrategy(RequestRegistry requests, DeliveryMetrics telemetry) {
         this.requests = requests;
         this.telemetry = telemetry;
     }
@@ -49,17 +49,17 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         return prepareTransaction(candidates, evaluator);
     }
 
-    private RouteTransaction prepareTransaction(List<ScheduledRequest> candidates,
+    private NonBatchTransaction prepareTransaction(List<ScheduledRequest> candidates,
                                                 PrefillTimePredictor.Evaluator evaluator) {
         ScheduledRequest head = candidates.get(0);
         List<ScheduledRequest> requestsPreparedForDelivery = new ArrayList<>(candidates.size());
         PrefillEndpoint prefill = head.prefillEp();
         if (prefill == null) {
-            return RouteTransaction.blocked(
+            return NonBatchTransaction.blocked(
                     this,
                     new BlockedRequest(head, DeliveryBlockReason.failed(missingEndpoint("Prefill", head))));
         }
-        RouteTransaction transaction = new RouteTransaction(this, prefill);
+        NonBatchTransaction transaction = new NonBatchTransaction(this, prefill);
         BlockedRequest blocked = null;
         try {
             for (ScheduledRequest item : candidates) {
@@ -84,7 +84,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 if (cleanup != null) {
                     throw cleanup;
                 }
-                return RouteTransaction.blocked(this, blocked);
+                return NonBatchTransaction.blocked(this, blocked);
             }
             transaction.select(requestsPreparedForDelivery, blocked);
             return transaction;
@@ -97,7 +97,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
     }
 
-    private void deliver(RouteTransaction transaction,
+    private void deliver(NonBatchTransaction transaction,
                          PrefillAdmissionResources.CommittedAdmissionOwner admission,
                          int remainingQueueDepth,
                          WorkSnapshot precedingWork) {
@@ -194,8 +194,8 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     }
 
     /** Ordered route callback payload and sole owner of its exact members. */
-    static final class RouteTransaction implements DeliveryTransaction {
-        private final RouteDeliveryStrategy owner;
+    static final class NonBatchTransaction implements DeliveryTransaction {
+        private final NonBatchDeliveryStrategy owner;
         private final PrefillEndpoint prefill;
         private List<ScheduledRequest> items = List.of();
         private BlockedRequest blocked;
@@ -205,8 +205,8 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         private ArrayList<PrefillAdmissionResources.Member> members;
         private PrefillAdmissionResources.CommittedAdmissionOwner committed;
 
-        private RouteTransaction(
-                RouteDeliveryStrategy owner,
+        private NonBatchTransaction(
+                NonBatchDeliveryStrategy owner,
                 PrefillEndpoint prefill) {
             this.owner = owner;
             this.prefill = prefill;
@@ -215,18 +215,18 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             members = new ArrayList<>(1);
         }
 
-        private RouteTransaction(
-                RouteDeliveryStrategy owner,
+        private NonBatchTransaction(
+                NonBatchDeliveryStrategy owner,
                 BlockedRequest blocked) {
             this.owner = owner;
             this.prefill = null;
             this.blocked = blocked;
         }
 
-        private static RouteTransaction blocked(
-                RouteDeliveryStrategy owner,
+        private static NonBatchTransaction blocked(
+                NonBatchDeliveryStrategy owner,
                 BlockedRequest blocked) {
-            return new RouteTransaction(owner, blocked);
+            return new NonBatchTransaction(owner, blocked);
         }
 
         synchronized DeliveryBlockReason.Attempt<ScheduledRequest> append(
@@ -379,7 +379,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 exactCommitted = committed;
                 committed = null;
             }
-            Throwable cleanup = RouteDeliveryStrategy.close(exactCommitted);
+            Throwable cleanup = NonBatchDeliveryStrategy.close(exactCommitted);
             if (cleanup != null) {
                 throw propagate(cleanup);
             }

@@ -29,7 +29,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** Exact ordered-prefix and per-request completion contract for route delivery. */
-class RouteDeliveryStrategyTest {
+class NonBatchDeliveryStrategyTest {
 
     @Test
     void fullPrefillRouteLimitWaitsWithoutTakingDecodeDispatchPermit() {
@@ -315,8 +315,8 @@ class RouteDeliveryStrategyTest {
         private final TestRequestRegistry slots = new TestRequestRegistry();
         private final TestTelemetry telemetry = new TestTelemetry();
         private final TestContext context = new TestContext();
-        private final RouteDeliveryStrategy strategy =
-                new RouteDeliveryStrategy(
+        private final NonBatchDeliveryStrategy strategy =
+                new NonBatchDeliveryStrategy(
                         slots.requests(), telemetry.metrics());
 
         private ScheduledRequest item(long requestId) {

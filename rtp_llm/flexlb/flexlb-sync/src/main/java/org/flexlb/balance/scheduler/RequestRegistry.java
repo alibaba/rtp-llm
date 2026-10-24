@@ -726,7 +726,7 @@ public class RequestRegistry {
     }
 
     public DeliveryBlockReason.Attempt<ScheduledRequest> prepareRouteMember(
-            ScheduledRequest item, RouteDeliveryStrategy.RouteTransaction transaction,
+            ScheduledRequest item, NonBatchDeliveryStrategy.NonBatchTransaction transaction,
             PrefillTimePredictor.Evaluator evaluator) {
         RequestSlot slot = entryFor(item);
         return slot == null ? DeliveryBlockReason.Attempt.rejected(DeliveryBlockReason.OWNERSHIP_LOST)

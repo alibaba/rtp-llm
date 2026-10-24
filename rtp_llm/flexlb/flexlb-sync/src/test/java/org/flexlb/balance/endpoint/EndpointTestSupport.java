@@ -12,11 +12,11 @@ import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.NonBatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
-import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -175,7 +175,7 @@ public final class EndpointTestSupport {
     }
 
     static DeliveryStrategy routeStrategy(TestRequestRuntime runtime) {
-        RouteDeliveryStrategy route = new RouteDeliveryStrategy(
+        NonBatchDeliveryStrategy route = new NonBatchDeliveryStrategy(
                 runtime.requests(), NOOP_TELEMETRY);
         DeliveryStrategy delivery = org.mockito.Mockito.mock(
                 DeliveryStrategy.class);
@@ -195,7 +195,7 @@ public final class EndpointTestSupport {
     }
 
     static DeliveryStrategy liveRouteStrategy(TestRequestRuntime runtime) {
-        return new RouteDeliveryStrategy(
+        return new NonBatchDeliveryStrategy(
                 runtime.requests(), NOOP_TELEMETRY);
     }
 

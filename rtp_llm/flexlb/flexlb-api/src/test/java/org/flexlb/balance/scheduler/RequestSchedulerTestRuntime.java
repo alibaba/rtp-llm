@@ -77,7 +77,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         new DeliveryMetrics(batchReporter));
             }
             case NON_BATCH ->
-                    new RouteDeliveryStrategy(
+                    new NonBatchDeliveryStrategy(
                             lifecycle,
                             new DeliveryMetrics(batchReporter));
         };
