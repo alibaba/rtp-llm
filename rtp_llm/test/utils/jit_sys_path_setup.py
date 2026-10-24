@@ -90,9 +90,19 @@ def _build_variant(source_path):
 
 def _cache_key(package_name, version, source_path):
     variant = _build_variant(source_path)
-    if variant is None:
-        return "%s_python-%s" % (package_name, version)
-    return "%s_python-%s__%s" % (package_name, version, variant)
+    key = "%s_python-%s" % (package_name, version)
+    if variant is not None:
+        key += "__" + variant
+    if package_name == "flashinfer":
+        # Bazel wheel patches keep upstream metadata unchanged. Include Python
+        # payloads so a same-version cached copy cannot hide a dependency fix.
+        source = Path(source_path)
+        digest = sha256()
+        for path in sorted(source.rglob("*.py")):
+            digest.update(str(path.relative_to(source)).encode())
+            digest.update(path.read_bytes())
+        key += "__src_" + digest.hexdigest()[:16]
+    return key
 
 
 def copy_package_with_lock(package_name, cache_dir):

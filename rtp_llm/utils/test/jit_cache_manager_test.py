@@ -221,6 +221,34 @@ class K3ProducerIdentityTest(JitCacheTestBase):
 
 class WrapperCacheSetupTest(JitCacheTestBase):
 
+    def test_same_version_flashinfer_patch_replaces_cached_python_payload(self):
+        source = self.root / "pip_cuda13_flashinfer/site-packages/flashinfer"
+        source.mkdir(parents=True)
+        module = source / "kernel.py"
+        module.write_text("allocate = cute.make_fragment\n")
+        with mock.patch.object(
+            wrapper_cache, "get_package_info", return_value=("0.6.9", str(source))
+        ):
+            first = Path(wrapper_cache.copy_package_with_lock("flashinfer", self.root))
+            module.write_text("allocate = cute.make_rmem_tensor\n")
+            second = Path(wrapper_cache.copy_package_with_lock("flashinfer", self.root))
+        self.assertNotEqual(first, second)
+        self.assertIn(
+            "cute.make_fragment", (first / "flashinfer/kernel.py").read_text()
+        )
+        self.assertIn(
+            "cute.make_rmem_tensor", (second / "flashinfer/kernel.py").read_text()
+        )
+
+    def test_flashinfer_payload_key_is_independent_of_runfiles_location(self):
+        keys = []
+        for root in ("first", "second"):
+            source = self.root / root / "pip_cuda13_flashinfer/site-packages/flashinfer"
+            source.mkdir(parents=True)
+            (source / "kernel.py").write_text("same_payload = True\n")
+            keys.append(wrapper_cache._cache_key("flashinfer", "0.6.9", source))
+        self.assertEqual(keys[0], keys[1])
+
     def test_flashinfer_workspace_separates_ffi_abis_and_retains_old_cache(self):
         versions = {"torch": "2.11.0+cu130", "tvm_ffi": "0.1.13"}
 
