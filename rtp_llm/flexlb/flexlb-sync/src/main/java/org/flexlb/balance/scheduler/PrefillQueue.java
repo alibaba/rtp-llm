@@ -18,10 +18,10 @@ import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.queue.BatchCapacityView;
+import org.flexlb.balance.queue.GroupingLimits;
 import org.flexlb.balance.queue.QueueState;
 import org.flexlb.balance.queue.QueueWaitSnapshot;
 import org.flexlb.balance.queue.QueuedRequestsSnapshot;
-import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -172,8 +172,7 @@ public final class PrefillQueue {
     private final QueueCapacity queueCapacity;
     private final EndpointEventHandler endpointEvents;
     private final FlexlbConfig config;
-    private final Supplier<FlexlbConfig> configSupplier;
-    private final DecisionPolicyConfig fixedWindowDecision;
+    private final GroupingLimits groupingLimits;
     private final boolean singleDecision;
     private final DeliveryStrategy deliveryStrategy;
     private final PrefillTtftEstimator ttftEstimator;
@@ -227,16 +226,13 @@ public final class PrefillQueue {
                          PrefillTtftEstimator ttftEstimator,
                          EndpointEventHandler endpointEvents,
                          QueueCapacity queueCapacity) {
-        this.configSupplier = configSupplier;
         FlexlbConfig config = configSupplier.get();
         this.key = key;
         this.prefillEndpoint = prefillEp;
         this.queueCapacity = queueCapacity;
         this.config = config;
         this.singleDecision = config.isSingleDecision();
-        DecisionPolicyConfig resolvedDecision = config.decisionPolicy();
-        this.fixedWindowDecision =
-                resolvedDecision.getType() == DecisionPolicyConfig.Type.FIXED_WINDOW ? resolvedDecision : null;
+        this.groupingLimits = new GroupingLimits(config, configSupplier);
         boolean priorityOrdering = config.isPriorityOrdering();
         this.endpointEvents = endpointEvents;
         this.deliveryStrategy = deliveryStrategy;
@@ -854,24 +850,6 @@ public final class PrefillQueue {
 
     // ==================== Queue ownership and load view ====================
 
-    private int maxDecisionRequests() {
-        return fixedWindowDecision == null ? 1 : fixedWindowDecision.resolveMaxRequests();
-    }
-
-    private long collectionWindowMs() {
-        return fixedWindowDecision == null
-                ? 0L : Math.max(0L,
-                configSupplier.get().decisionPolicy().getMaxCollectionWaitMs());
-    }
-
-    private long predictedExecutionBudgetMs() {
-        if (fixedWindowDecision == null) {
-            return 0L;
-        }
-        Long configured = fixedWindowDecision.getMaxPredictedExecutionMs();
-        return configured == null ? 0L : configured;
-    }
-
     private static long now() {
         return System.currentTimeMillis();
     }
@@ -1074,12 +1052,12 @@ public final class PrefillQueue {
         return version.queue() == queueState.queueVersion()
                 && version.schedulingInputs() == queueState.schedulingInputVersion()
                 && version.ownership() == prefillState.mutationVersion()
-                && version.collectionWindowMs() == collectionWindowMs();
+                && version.collectionWindowMs() == groupingLimits.collectionWindowMs();
     }
 
     /** Caller holds the queue lock. */
     private LoadViewCache captureLoadViewCacheUnderLock() {
-        long fixedWaitMs = collectionWindowMs();
+        long fixedWaitMs = groupingLimits.collectionWindowMs();
         LoadViewVersion version = new LoadViewVersion(
                 queueState.queueVersion(), queueState.schedulingInputVersion(),
                 prefillState.mutationVersionUnderLock(), fixedWaitMs);
@@ -1088,8 +1066,8 @@ public final class PrefillQueue {
         return new LoadViewCache(
                 version, ownership,
                 new GroupPlanner.Constraints(
-                        maxDecisionRequests(), capacity.batchTokenCapacity(),
-                        Long.MAX_VALUE, predictedExecutionBudgetMs(),
+                        groupingLimits.maxRequests(), capacity.batchTokenCapacity(),
+                        Long.MAX_VALUE, groupingLimits.predictedExecutionBudgetMs(),
                         fixedWaitMs),
                 ownership.activeItems().isEmpty() ? null : admissionBlockUnderLock());
     }
@@ -1494,10 +1472,10 @@ public final class PrefillQueue {
         }
 
         long nowMs = now();
-        long fixedWaitMs = collectionWindowMs();
+        long fixedWaitMs = groupingLimits.collectionWindowMs();
         BatchCapacityView capacity = BatchCapacityView.of(prefillEndpoint, config);
-        int batchMaxCount = maxDecisionRequests();
-        long predictThresholdMs = predictedExecutionBudgetMs();
+        int batchMaxCount = groupingLimits.maxRequests();
+        long predictThresholdMs = groupingLimits.predictedExecutionBudgetMs();
         long batchMaxTokens = capacity.batchTokenCapacity();
 
         if (observedHead.requestExpired(nowMs)) {
@@ -1539,8 +1517,8 @@ public final class PrefillQueue {
 
         nowMs = now();
         capacity = BatchCapacityView.of(prefillEndpoint, config);
-        batchMaxCount = maxDecisionRequests();
-        predictThresholdMs = predictedExecutionBudgetMs();
+        batchMaxCount = groupingLimits.maxRequests();
+        predictThresholdMs = groupingLimits.predictedExecutionBudgetMs();
         batchMaxTokens = capacity.batchTokenCapacity();
         if (head.requestExpired(nowMs)) {
             Logger.debug("flexlb_batch_drop request_id={} "
