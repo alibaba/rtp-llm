@@ -4,11 +4,13 @@ Runs eager/graph via QWEN4_SERVING_GRAPH=0/1. Capture coverage and actual
 serving replay coverage are separate artifacts; neither proves an SLA.
 """
 
+import argparse
 import json
 import logging
 import os
 import re
 import shlex
+import sys
 import unicodedata
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -25,6 +27,8 @@ from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 class Qwen4TextContractTest(contract.Qwen4ServingContractTest):
     image_question = "animal"  # Reuse functional counting, never token parity.
+    cache_block_size = 128
+    ep_size = 1
 
     def setUp(self):
         self.model_path = os.environ["QWEN4_EXP_CHECKPOINT"]
@@ -60,7 +64,7 @@ class Qwen4TextContractTest(contract.Qwen4ServingContractTest):
         )
         captures = ",".join(str(n) for n in range(1, 17))
         llm_args = (
-            "--tp_size 4 --ep_size 1 --world_size 4 --act_type BF16 "
+            f"--tp_size 4 --ep_size {self.ep_size} --world_size 4 --act_type BF16 "
             "--quantization FP8_PER_BLOCK --use_local 1 --warm_up 0 "
             "--load_method scratch --use_deepep_moe 0 --enable_fp32_lm_head 0 "
             "--max_seq_len 8192 --max_context_batch_size 1 --concurrency_limit 16 "
@@ -70,6 +74,8 @@ class Qwen4TextContractTest(contract.Qwen4ServingContractTest):
             f"--enable_cuda_graph {graph} --decode_capture_config {captures} "
             f"--kv_cache_pool_block_weights {shlex.quote(weights)}"
         )
+        if self.ep_size == 4:
+            llm_args += " --use_all_gather 1"
         self.llm = MagaServerManager(
             env_args={
                 "LOAD_PYTHON_MODEL": "1",
@@ -77,7 +83,7 @@ class Qwen4TextContractTest(contract.Qwen4ServingContractTest):
                 "FRONTEND_SERVER_COUNT": "1",
                 "WORLD_SIZE": "4",
                 "TP_SIZE": "4",
-                "EP_SIZE": "1",
+                "EP_SIZE": str(self.ep_size),
                 "ROLE_TYPE": "PDFUSION",
                 "VIT_SEPARATION": "0",
             },
@@ -96,6 +102,9 @@ class Qwen4TextContractTest(contract.Qwen4ServingContractTest):
                     graph=int(graph),
                     requested_capture_batches=list(range(1, 17)),
                     concurrency_limit=16,
+                    ep_size=self.ep_size,
+                    generation_http_requests=29,
+                    expected_generated_responses=44,
                 ),
                 indent=2,
             )
@@ -136,6 +145,109 @@ class Qwen4TextContractTest(contract.Qwen4ServingContractTest):
             level.raise_for_status()
             self.assertEqual(level.json(), {"status": "ok"})
 
+    def assert_counting_answer(self, answer):
+        self.assertTrue(
+            all(
+                char in "0123456789"
+                or char.isspace()
+                or unicodedata.category(char).startswith("P")
+                for char in answer
+            ),
+            answer,
+        )
+        matches = list(re.finditer(r"[0-9]+", answer))
+        if matches and matches[-1].end() == len(answer):
+            tail, expected = matches[-1].group(), str(len(matches))
+            if len(tail) < len(expected) and expected.startswith(tail):
+                matches.pop()
+        numbers = [int(match.group()) for match in matches]
+        self.assertGreaterEqual(len(numbers), 20, answer)
+        self.assertEqual(numbers, list(range(1, len(numbers) + 1)), answer)
+
+    def check_atomic_batch16(self):
+        # One batch API call makes the engine batch explicit. Unlike the
+        # independent client wave, graph mode must actually replay batch16.
+        prompt = self.tokenizer.apply_chat_template(
+            [
+                dict(
+                    role="user",
+                    content="Write the integers from 1 to 1000 in order, separated by spaces.",
+                )
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        query = dict(
+            prompt_batch=[prompt] * 16,
+            generate_config=dict(
+                max_new_tokens=128,
+                top_k=1,
+                random_seed=42,
+                reuse_cache=False,
+                aux_info=True,
+            ),
+        )
+        (self.output_dir / "atomic_batch16.request.json").write_text(
+            json.dumps(query, indent=2, ensure_ascii=False)
+        )
+        log_path = Path(self.llm.log_file_path)
+        offset = log_path.stat().st_size
+        # The inherited post() asserts graph_bs=1, so use this batch-specific
+        # request and validate its serving window independently.
+        response = self.session.post(
+            f"http://127.0.0.1:{self.llm.port}/batch_infer", json=query, timeout=1200
+        )
+        (self.output_dir / "atomic_batch16.response.json").write_text(response.text)
+        response.raise_for_status()
+        actual = response.json()
+        self.assertNotIn("error", actual, actual)
+        self.assertNotIn("error_code", actual, actual)
+        items = actual["response_batch"]
+        self.assertEqual(len(items), 16)
+        for item in items:
+            self.assertNotIn("error", item, item)
+            self.assertNotIn("error_code", item, item)
+            self.assertIs(item["finished"], True)
+            self.assertEqual(item["aux_info"]["reuse_len"], 0)
+            self.assertEqual(item["aux_info"]["output_len"], 128)
+            self.assert_counting_answer(item["response"])
+        with log_path.open("rb") as log:
+            log.seek(offset)
+            runtime = log.read().decode(errors="replace")
+        (self.output_dir / "atomic_batch16.runtime.log").write_text(runtime)
+        batches = list(
+            map(
+                int,
+                re.findall(
+                    r"\[PyWrappedModel\] using CUDA graph forward, is_target_verify=0, is_prefill=0, graph_bs=(\d+)",
+                    runtime,
+                ),
+            )
+        )
+        completed = runtime.count("[PyWrappedModel] CUDA graph forward completed")
+        normal = runtime.count(
+            "[PyWrappedModel] using normal forward, is_target_verify=0, is_prefill=0"
+        )
+        (self.output_dir / "atomic_batch16_coverage.json").write_text(
+            json.dumps(
+                dict(
+                    responses_correct=len(items),
+                    graph_batches=sorted(set(batches)),
+                    batch16_forwards=batches.count(16),
+                    completed_graph_forwards=completed,
+                    normal_decode_forwards=normal,
+                    scope="atomic batch API; not independently arriving clients or a capacity SLA",
+                ),
+                indent=2,
+            )
+        )
+        if self.graph_enabled:
+            self.assertEqual(set(batches), {16}, "atomic batch must replay graph16")
+            self.assertGreaterEqual(batches.count(16), 127)
+            self.assertEqual(completed, len(batches), "incomplete graph16 replay")
+            self.assertEqual(normal, 0, "atomic batch decode fell back to eager")
+
     def test_combined_generation_and_prefix_reuse(self):
         math_result = self.post(
             "math",
@@ -173,6 +285,53 @@ class Qwen4TextContractTest(contract.Qwen4ServingContractTest):
         self.assertEqual(
             echo["choices"][0]["message"]["content"].strip(), "amber river 4729"
         )
+        # Keep an explicit text regression above the SM120 GDN CP-prefill
+        # threshold. The existing cache fixture is only about 801 input tokens.
+        # Prefix reuse is disabled so all of these tokens reach cold prefill.
+        long_records = [
+            f"Record {i:04d}: books, maps, and letters are in the library."
+            for i in range(160)
+        ]
+        long_prompt = self.tokenizer.apply_chat_template(
+            [
+                dict(
+                    role="user",
+                    content="Here is an archive of independent numbered records.\n"
+                    + "\n".join(long_records)
+                    + "\nWrite the integers from 1 to 1000 in order, separated by spaces.",
+                )
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        expected_input_len = len(self.tokenizer.encode(long_prompt))
+        self.assertGreaterEqual(expected_input_len, 2048)
+        self.assertLess(expected_input_len + 64, 8192)
+        long_prefill = self.text_request(
+            "long_text_prefill", long_prompt, False, new_tokens=64
+        )
+        # Assert the server's actual processed input, not just local estimates.
+        actual_input_len = long_prefill["aux_info"]["input_len"]
+        self.assertGreaterEqual(actual_input_len, 2048)
+        self.assertLess(actual_input_len + 64, 8192)
+        self.assertEqual(long_prefill["aux_info"]["reuse_len"], 0)
+        self.assertTrue(self.eos_token_ids.isdisjoint(long_prefill["output_ids"][0]))
+        (self.output_dir / "long_text_prefill_coverage.json").write_text(
+            json.dumps(
+                dict(
+                    estimated_input_len=expected_input_len,
+                    actual_input_len=actual_input_len,
+                    output_len=len(long_prefill["output_ids"][0]),
+                    reuse_len=0,
+                    cache_block_size=128,
+                    decode_graph_enabled=self.graph_enabled,
+                    scope="cold text prefill >=2048 tokens; graph mode checks subsequent decode replay, not prefill graph capture",
+                ),
+                indent=2,
+            )
+        )
+
         prefix = "Here is an archive of independent numbered records.\n" + "".join(
             f"Record {i:04d}: books, maps, and letters are in the library.\n"
             for i in range(40)
@@ -270,23 +429,7 @@ class Qwen4TextContractTest(contract.Qwen4ServingContractTest):
             self.assertNotIn("error", actual, actual)
             self.assertNotIn("error_code", actual, actual)
             answer = actual["choices"][0]["message"]["content"]
-            self.assertTrue(
-                all(
-                    char in "0123456789"
-                    or char.isspace()
-                    or unicodedata.category(char).startswith("P")
-                    for char in answer
-                ),
-                answer,
-            )
-            matches = list(re.finditer(r"[0-9]+", answer))
-            if matches and matches[-1].end() == len(answer):
-                tail, expected = matches[-1].group(), str(len(matches))
-                if len(tail) < len(expected) and expected.startswith(tail):
-                    matches.pop()
-            numbers = [int(match.group()) for match in matches]
-            self.assertGreaterEqual(len(numbers), 20, answer)
-            self.assertEqual(numbers, list(range(1, len(numbers) + 1)), answer)
+            self.assert_counting_answer(answer)
             return actual["usage"]
 
         with ThreadPoolExecutor(max_workers=16) as pool:
@@ -327,7 +470,13 @@ class Qwen4TextContractTest(contract.Qwen4ServingContractTest):
             self.assertGreater(completed, 0)
             self.assertEqual(normal, 0, "ordinary decode fell back to eager")
 
+        self.check_atomic_batch16()
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    unittest.main()
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--ep-size", type=int, choices=(1, 4), default=1)
+    options, test_args = parser.parse_known_args()
+    Qwen4TextContractTest.ep_size = options.ep_size
+    unittest.main(argv=[sys.argv[0], *test_args])

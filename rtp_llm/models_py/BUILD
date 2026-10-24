@@ -439,3 +439,7 @@ exports_files(
     ["model_desc/cp_mtp_hidden_handoff.py"],
     visibility = ["//rtp_llm/models_py/model_desc/test:__pkg__"],
 )
+exports_files(
+    ["utils/cutlass.py"],
+    visibility = ["//rtp_llm/models_py/utils/test:__pkg__"],
+)

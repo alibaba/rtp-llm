@@ -27,6 +27,9 @@ from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 class Qwen4ServingContractTest(unittest.TestCase):
     image_question = "description"
+    cache_block_size = 64
+    decode_capture_batches = (1, 2, 4)
+    concurrency_limit = 4
 
     def setUp(self):
         self.model_path = os.environ["QWEN4_EXP_CHECKPOINT"]
@@ -102,15 +105,16 @@ class Qwen4ServingContractTest(unittest.TestCase):
                 indexer_state=4,
             )
         )
+        captures = ",".join(map(str, self.decode_capture_batches))
         llm_args = (
             "--tp_size 4 --ep_size 1 --world_size 4 --act_type BF16 "
             "--quantization FP8_PER_BLOCK --use_local 1 --warm_up 0 "
             "--load_method scratch --use_deepep_moe 0 --enable_fp32_lm_head 0 "
-            "--max_seq_len 8192 --max_context_batch_size 1 --concurrency_limit 4 "
-            "--seq_size_per_block 64 --kernel_seq_size_per_block 64 "
+            f"--max_seq_len 8192 --max_context_batch_size 1 --concurrency_limit {self.concurrency_limit} "
+            f"--seq_size_per_block {self.cache_block_size} --kernel_seq_size_per_block {self.cache_block_size} "
             "--reuse_cache 1 --enable_device_cache 1 --enable_linear_cache_reclaim 1 "
             "--kv_cache_mem_mb 4096 --reserver_runtime_mem_mb 4096 "
-            f"--enable_cuda_graph {graph} --decode_capture_config 1,2,4 "
+            f"--enable_cuda_graph {graph} --decode_capture_config {captures} "
             f"--kv_cache_pool_block_weights {shlex.quote(weights)}"
         )
         self.llm = MagaServerManager(
@@ -138,6 +142,9 @@ class Qwen4ServingContractTest(unittest.TestCase):
                     vit_workers=2,
                     graph=int(graph),
                     image_question=self.image_question,
+                    cache_block_size=self.cache_block_size,
+                    requested_capture_batches=list(self.decode_capture_batches),
+                    concurrency_limit=self.concurrency_limit,
                 ),
                 indent=2,
             )
@@ -155,6 +162,30 @@ class Qwen4ServingContractTest(unittest.TestCase):
                 "capture success for batch size",
                 Path(self.llm.log_file_path).read_text(errors="replace"),
             )
+            if self.cache_block_size == 128:
+                startup = Path(self.llm.log_file_path).read_text(errors="replace")
+                captured = sorted(
+                    set(
+                        map(
+                            int,
+                            re.findall(
+                                r"capture success for batch size: (\d+)", startup
+                            ),
+                        )
+                    )
+                )
+                (self.output_dir / "capture_coverage.json").write_text(
+                    json.dumps(
+                        dict(
+                            captured_batches=captured,
+                            scope="startup capture; not serving concurrency",
+                        ),
+                        indent=2,
+                    )
+                )
+                self.assertTrue(
+                    set(self.decode_capture_batches).issubset(captured), captured
+                )
             level = self.session.post(
                 f"http://127.0.0.1:{self.llm.port}/set_log_level",
                 json={"log_level": "DEBUG"},
@@ -235,7 +266,7 @@ class Qwen4ServingContractTest(unittest.TestCase):
                 for token in actual["output_ids"][0]
             )
         )
-        self.assertGreater(actual["aux_info"]["input_len"], 3 * 64)
+        self.assertGreater(actual["aux_info"]["input_len"], 3 * self.cache_block_size)
         if self.image_question == "animal":
             answer = self.tokenizer.decode(
                 actual["output_ids"][0], skip_special_tokens=True
@@ -304,7 +335,7 @@ class Qwen4ServingContractTest(unittest.TestCase):
         common_len = next(
             (i for i, (a, b) in enumerate(zip(*ids)) if a != b), min(map(len, ids))
         )
-        self.assertGreaterEqual(common_len, 3 * 64)
+        self.assertGreaterEqual(common_len, 3 * self.cache_block_size)
         references = [
             self.text_request(f"uncached_{i}", prompt, False, start=i + 1)
             for i, prompt in enumerate(prompts)
@@ -326,8 +357,8 @@ class Qwen4ServingContractTest(unittest.TestCase):
                     )
             reused = actual["aux_info"]["reuse_len"]
             if expect_hit:
-                self.assertGreaterEqual(reused, 2 * 64, label)
-                self.assertEqual(reused % 64, 0)
+                self.assertGreaterEqual(reused, 2 * self.cache_block_size, label)
+                self.assertEqual(reused % self.cache_block_size, 0)
                 self.assertLess(reused, actual["aux_info"]["input_len"])
                 if label == "fork":
                     self.assertLessEqual(reused, common_len)
@@ -339,12 +370,18 @@ class Qwen4ServingContractTest(unittest.TestCase):
         # three completed pages and their subsequent allocation, even when the
         # input ends on a page boundary. Keep this inside the intended answer:
         # forced continuation after EOS is not a useful deterministic fixture.
-        long_reference = self.text_request("long_uncached", prompts[0], False, 256)
-        long_cached = self.text_request("long_cached", prompts[0], True, 256)
+        long_reference = self.text_request(
+            "long_uncached", prompts[0], False, 4 * self.cache_block_size
+        )
+        long_cached = self.text_request(
+            "long_cached", prompts[0], True, 4 * self.cache_block_size
+        )
         for actual in (long_reference, long_cached):
             self.assertTrue(self.eos_token_ids.isdisjoint(actual["output_ids"][0]))
         self.assertEqual(long_reference["aux_info"]["reuse_len"], 0)
-        self.assertGreaterEqual(long_cached["aux_info"]["reuse_len"], 2 * 64)
+        self.assertGreaterEqual(
+            long_cached["aux_info"]["reuse_len"], 2 * self.cache_block_size
+        )
         if self.image_question == "description":
             for key in ("input_ids", "output_ids", "response"):
                 self.assertEqual(long_reference[key], long_cached[key], key)
@@ -393,8 +430,8 @@ class Qwen4ServingContractTest(unittest.TestCase):
         image_hit = self.post("vision_hit", "/v1/chat/completions", vision_query)
         self.assertEqual(image_fill["aux_info"]["reuse_len"], 0)
         reused = image_hit["aux_info"]["reuse_len"]
-        self.assertGreaterEqual(reused, 64)
-        self.assertEqual(reused % 64, 0)
+        self.assertGreaterEqual(reused, self.cache_block_size)
+        self.assertEqual(reused % self.cache_block_size, 0)
         self.assertLess(reused, image_hit["aux_info"]["input_len"])
         for actual in (image_reference, image_fill, image_hit):
             self.assertGreater(actual["usage"]["prompt_tokens"], 100)
@@ -433,6 +470,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--image-question", choices=("description", "animal"), default="description"
     )
+    parser.add_argument("--cache-block-size", type=int, choices=(64, 128), default=64)
+    parser.add_argument("--decode-capture-config", default="1,2,4")
+    parser.add_argument("--concurrency-limit", type=int, choices=(4, 16), default=4)
     options, test_args = parser.parse_known_args()
+    try:
+        batches = tuple(sorted(set(map(int, options.decode_capture_config.split(",")))))
+    except ValueError:
+        parser.error("decode captures must be comma-separated integers")
+    if not batches or batches[0] != 1 or batches[-1] > options.concurrency_limit:
+        parser.error("decode captures must include 1 and fit the concurrency limit")
+    Qwen4ServingContractTest.cache_block_size = options.cache_block_size
+    Qwen4ServingContractTest.decode_capture_batches = batches
+    Qwen4ServingContractTest.concurrency_limit = options.concurrency_limit
     Qwen4ServingContractTest.image_question = options.image_question
     unittest.main(argv=[sys.argv[0], *test_args])
