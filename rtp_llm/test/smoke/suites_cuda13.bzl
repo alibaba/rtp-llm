@@ -193,6 +193,11 @@ def cuda13_suites():
                 task_info="data/model/deepseek_v4/q_r_v4_pro_cp4_sm100_arm.json",
                 smoke_args="--max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 4 --dp_size 1 --ep_size 4 --moe_strategy mega_moe_se --world_size 4 --seq_size_per_block 256 --fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --concurrency_limit 1 --max_context_batch_size 1 --reserver_runtime_mem_mb 20480",
                 envs=["DG_JIT_CPP_STANDARD=20"],
+                # The ~865GB Pro checkpoint cold-reads from NAS/scratch at rates
+                # that swung this case's runtime 760s->2524s in two days. The
+                # default 1800s watchdog kills runs that are still making
+                # progress; give this case a 3600s cap.
+                test_envs={"RTP_TEST_WATCHDOG_SECONDS": "3600"},
                 gpu_type=[cuda13_x86_test_gpu()],
             ),
         ],

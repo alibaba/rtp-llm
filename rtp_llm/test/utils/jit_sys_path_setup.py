@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlparse
@@ -313,7 +314,12 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
     ``cached_ops/tmp/<op_name>.lock``; eviction takes that same lock and re-judges
     staleness only inside it, so it cannot delete an op directory that a concurrent
     compile or load is using or has just refreshed.
+
+    The lock wait is deliberately near-non-blocking: a stale op left behind only
+    costs its consumer one rebuild, while blocking behind a long compile here
+    silently stalls test startup (observed as a 664s pre-test gap).
     """
+    started = time.monotonic()
     stale_candidates = []
     for root, _dirs, files in os.walk(workspace, followlinks=False):
         op_dir = Path(root)
@@ -323,25 +329,39 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
             continue
         if _flashinfer_op_is_stale(op_dir):
             stale_candidates.append(op_dir)
+    logging.info(
+        f"[Package Setup] FlashInfer eviction scan found "
+        f"{len(stale_candidates)} stale candidate(s) under {workspace}"
+    )
+    evicted = 0
+    skipped = 0
     for op_dir in sorted(stale_candidates):
         lock_dir = op_dir.parent / "tmp"
         try:
             lock_dir.mkdir(parents=True, exist_ok=True)
-            lock = FileLock(str(lock_dir / f"{op_dir.name}.lock"), timeout=300)
+            lock = FileLock(str(lock_dir / f"{op_dir.name}.lock"), timeout=3)
             with lock:
                 # Re-read the rules under the op's own lock: a compile that ran
                 # since the first pass may have replaced the stale rules already.
                 if _flashinfer_op_is_stale(op_dir):
                     shutil.rmtree(op_dir, ignore_errors=True)
+                    evicted += 1
                     logging.info(
                         f"[Package Setup] Evicted stale FlashInfer cache op: {op_dir}"
                     )
         except Timeout:
             # Somebody else owns the op (likely recompiling it); leave it alone.
+            skipped += 1
             logging.info(f"[Package Setup] Skipped eviction of {op_dir}: lock busy")
+    logging.info(
+        f"[Package Setup] FlashInfer eviction done in "
+        f"{time.monotonic() - started:.1f}s: evicted={evicted} skipped={skipped} "
+        f"of {len(stale_candidates)} candidate(s)"
+    )
 
 
 def setup_jit_cache(cache_dir=None, packages=None):
+    logging.info("[Package Setup] setup_jit_cache starting")
     bootstrap_remote_jit_dir()
     cache_env.configure_writable_cache_env(
         "FLASHINFER_WORKSPACE_BASE",
