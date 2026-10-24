@@ -78,7 +78,7 @@ filegroup(
 # Open-source smoke test suites (platform-grouped)
 # ============================================================================
 
-load("//rtp_llm/test/smoke:suites_h20_oss.bzl", "h20_oss_suites")
+load("//rtp_llm/test/smoke:suites_h20_oss.bzl", "h20_oss_suites", "diffusion_gemma_suites")
 load("//rtp_llm/test/smoke:suites_cuda13.bzl", "cuda13_suites")
 load("//rtp_llm/test/smoke:suites_sm8x.bzl", "sm8x_suites")
 load("//rtp_llm/test/smoke:suites_sm100.bzl", "sm100_suites")
@@ -91,6 +91,7 @@ cuda13_suites()
 sm8x_suites()
 sm100_suites()
 sm120_suites()
+diffusion_gemma_suites()
 rocm_oss_suites()
 remote_cache_suites()
 
@@ -103,6 +104,7 @@ test_suite(
     name = "maga_model_smoke_light",
     tests = [
         ":smoke_h20_dense",
+        ":smoke_h20_diffusion_gemma",
         ":smoke_h20_eagle",
         ":smoke_sm8x_basic",
         ":smoke_sm120_basic",

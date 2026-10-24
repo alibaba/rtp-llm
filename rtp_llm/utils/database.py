@@ -180,6 +180,39 @@ class CkptDatabase(BaseDatabase):
             f"filter_by_tensor_name_regexes: {original_count} -> {len(self.pretrain_file_list)} files"
         )
 
+    def filter_by_tensor_names(self, required_tensor_names: set):
+        """Keep only pretrain checkpoint files containing at least one exactly-required tensor.
+
+        Unlike filter_by_tensor_name_regexes (layer-id wildcards for whole-model
+        declarations), this narrows the shard set to the concrete tensors the
+        loader actually declared: layer-count cuts (hack_layer_num) load a layer
+        prefix, so shard files that hold only cut layers no longer stream.
+        Finetune files are left untouched, like the regex filter.
+        """
+        if len(self.pretrain_file_list) <= 1 or not required_tensor_names:
+            return
+
+        original_count = len(self.pretrain_file_list)
+        filtered_file_list = [
+            ckpt
+            for ckpt in self.pretrain_file_list
+            if required_tensor_names.intersection(ckpt.get_tensor_names())
+        ]
+        if not filtered_file_list:
+            logging.warning(
+                "filter_by_tensor_names found no matching checkpoint files; "
+                "keep original pretrain_file_list"
+            )
+            return
+
+        if len(filtered_file_list) == original_count:
+            return
+
+        self.pretrain_file_list = filtered_file_list
+        logging.info(
+            f"filter_by_tensor_names: {original_count} -> {len(self.pretrain_file_list)} files"
+        )
+
     def load_hf_meta(self, path: str):
         # avoid consolidated.safetensors in Mistral-Nemo-Instruct-2407
         index = os.path.join(path, "model.safetensors.index.json")

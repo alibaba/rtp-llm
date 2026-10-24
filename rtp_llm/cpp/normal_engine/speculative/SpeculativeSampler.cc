@@ -108,6 +108,34 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     int batch_size = streams.size();
 
+    if (diffusion_canvas_) {
+        // Block-diffusion canvas: the draft tokens ARE the final selection.
+        // Accept all gamma proposals verbatim; no rejection and no target
+        // bonus token (the canvas defines its own length).
+        RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.diffusion_canvas");
+        auto draft_token_ids = draft_sampler_output.token_ids;
+        buffer_holder_.hold_host(draft_token_ids);
+        auto draft_ids_d = draft_token_ids.to(target_device, true);
+        RTP_LLM_CHECK_WITH_INFO(draft_ids_d.dim() == 2
+                                    && draft_ids_d.size(1) == static_cast<int64_t>(propose_step_),
+                                "diffusion-canvas draft tokens must be [B, gamma=%zu]",
+                                propose_step_);
+        auto output_token_ids_d =
+            torch::zeros({(long)batch_size, (long)propose_step_ + 1},
+                         torch::TensorOptions().device(target_device).dtype(torch::kInt32));
+        output_token_ids_d.narrow(1, 0, static_cast<int64_t>(propose_step_))
+            .copy_(draft_ids_d.to(torch::kInt32));
+        auto accept_num_d = torch::full({(long)batch_size},
+                                        static_cast<int32_t>(propose_step_),
+                                        torch::TensorOptions().device(target_device).dtype(torch::kInt32));
+        sample_output.accept_tokens     = output_token_ids_d;
+        sample_output.accept_len        = accept_num_d;
+        sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
+        sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
+        sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+        return;
+    }
+
     auto draft_token_ids  = draft_sampler_output.token_ids;
     auto target_token_ids = target_sampler_output.token_ids;
 

@@ -1043,8 +1043,17 @@ def build_model_config(
     # Apply hack_layer_num if needed
     hack_layer_num = profiling_debug_logging_config.hack_layer_num
     if hack_layer_num:
-        logging.info(f"hack layernum to {hack_layer_num}")
-        apply_layer_num_override(model_config, hack_layer_num)
+        if model_config.num_layers > hack_layer_num:
+            logging.info(f"hack layernum to {hack_layer_num}")
+            apply_layer_num_override(model_config, hack_layer_num)
+        else:
+            # Tiny companion models (e.g. a 1-layer DSpark proposer config)
+            # already have fewer layers than the cut — skip instead of
+            # raising; the layer cut targets the main model only.
+            logging.info(
+                f"hack layernum {hack_layer_num} >= num_layers "
+                f"{model_config.num_layers}, skip override"
+            )
 
     if model_args.enable_fp32_lm_head is not None:
         model_config.enable_fp32_lm_head = model_args.enable_fp32_lm_head

@@ -31,18 +31,20 @@ struct MHAKVCacheSpec: public KVCacheSpec {
                                 static_cast<int>(desc.cache_type));
 
         const auto& attn = *ctx.attn_config;
-        RTP_LLM_CHECK_WITH_INFO(attn.kv_head_num > 0,
-                                "MHA KVCacheSpecDesc tag=%s requires positive attn_config.kv_head_num",
+        const int64_t desc_kv_head_num = desc.mha_kv_head_num.value_or(attn.kv_head_num);
+        const int64_t desc_size_per_head = desc.mha_size_per_head.value_or(attn.size_per_head);
+        RTP_LLM_CHECK_WITH_INFO(desc_kv_head_num > 0,
+                                "MHA KVCacheSpecDesc tag=%s requires positive kv_head_num",
                                 desc.tag.c_str());
-        RTP_LLM_CHECK_WITH_INFO(attn.size_per_head > 0,
-                                "MHA KVCacheSpecDesc tag=%s requires positive attn_config.size_per_head",
+        RTP_LLM_CHECK_WITH_INFO(desc_size_per_head > 0,
+                                "MHA KVCacheSpecDesc tag=%s requires positive size_per_head",
                                 desc.tag.c_str());
 
         const auto     seq            = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
         const auto     kernel         = SpecBuilder::kernelSeqSizePerBlock(desc, ctx, seq);
         const auto     attn_tp        = std::max<int64_t>(1, ctx.parallelism_config->get_attn_tp_size());
         const uint32_t tp             = static_cast<uint32_t>(attn_tp);
-        const uint32_t kv             = static_cast<uint32_t>(attn.kv_head_num);
+        const uint32_t kv             = static_cast<uint32_t>(desc_kv_head_num);
         const uint32_t local_kv_heads = (kv % tp == 0) ? kv / tp : kv / std::gcd(kv, tp);
         auto           spec           = std::make_shared<MHAKVCacheSpec>(desc.tag, seq, kernel, local_kv_heads);
         spec->dtype_                  = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
@@ -51,7 +53,7 @@ struct MHAKVCacheSpec: public KVCacheSpec {
                                 desc.tag.c_str(),
                                 static_cast<int>(desc.cache_type));
 
-        spec->per_token_k_elems = static_cast<size_t>(local_kv_heads) * attn.size_per_head;
+        spec->per_token_k_elems = static_cast<size_t>(local_kv_heads) * static_cast<size_t>(desc_size_per_head);
         if (spec->dtype_ == DataType::TYPE_INT8 || spec->dtype_ == DataType::TYPE_FP8_E4M3) {
             spec->per_token_k_scale_bytes = static_cast<size_t>(local_kv_heads) * sizeof(float);
         }

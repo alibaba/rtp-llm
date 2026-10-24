@@ -1,0 +1,51 @@
+{
+  "model_type": "diffusion_gemma",
+  "model_path": "/mnt/fuse/smoke-test/hf/google--diffusiongemma-26B-A4B-it--f7f5b7f5fa82ffc52addd066915886d497f5517b",
+  "query_result": [
+    {
+      "case_name": "chat_basic",
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 1792274125,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "<|channel><|channel>thought\n<channel|>The capital of France is **Paris**.",
+              "name": null,
+              "reasoning_content": null,
+              "function_call": null,
+              "tool_calls": null,
+              "partial": false,
+              "tool_call_id": null
+            },
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 14,
+          "total_tokens": 270,
+          "completion_tokens": 256,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": null
+        }
+      },
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "The capital of France is"
+          }
+        ],
+        "max_tokens": 256,
+        "temperature": 0.0,
+        "top_p": 0.01
+      }
+    }
+  ]
+}

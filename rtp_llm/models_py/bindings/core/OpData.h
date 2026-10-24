@@ -127,6 +127,11 @@ struct GptModelOutputs {
     // real graph-instance output from the ordinary decoder hidden tensor.
     torch::Tensor mtp_target_hidden_states;
 
+    // Diffusion-canvas proposer tokens [B, gamma] int32.  A DSpark executor in
+    // diffusion mode forwards them as the round's accepted proposal tokens
+    // verbatim, bypassing lm_head sampling and rejection.
+    torch::Tensor diffusion_tokens;
+
     // A single request-visible status. `REPLAYED` means this forward actually
     // executed a captured generation-prefill CUDA Graph; every other non-default value is
     // the readable fallback reason returned through AuxInfo.

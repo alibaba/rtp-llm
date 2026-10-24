@@ -108,6 +108,129 @@ flashinfer_attention_tests = [
     },
 ]
 
+# DiffusionGemma flashinfer regression: H20 (sm90) only for now.
+# Run-35 finding: on sm12x the flashinfer path is numerically wrong for the
+# sliding-layer shape (GQA 16:8, head_dim 256, window) at every length, and a
+# failing lane cascade-cancels the whole pipeline; the cross-arch backend
+# story belongs to the architecture-matrix bring-up. The fa2 variant runs in
+# its own process so an auto-backend crash cannot take it down.
+[
+    py_test(
+        name = "test_diffusion_gemma_flashinfer_prefill_" + platform["sm"],
+        srcs = ["test_flashinfer_prefill/test_diffusion_gemma_flashinfer_prefill.py"],
+        exec_properties = {
+            "gpu": platform["gpu"],
+        },
+        main = "test_flashinfer_prefill/test_diffusion_gemma_flashinfer_prefill.py",
+        tags = [platform["gpu"]],
+        target_compatible_with = CUDA13_X86_ONLY,
+        deps = flashinfer_test_deps,
+    )
+    for platform in [
+        {
+            "sm": "sm90",
+            "gpu": "H20_CU13",
+        },
+    ]
+]
+
+py_test(
+    name = "test_diffusion_gemma_flashinfer_prefill_fa2_sm90",
+    srcs = [
+        "test_flashinfer_prefill/test_diffusion_gemma_flashinfer_prefill_fa2.py",
+        "test_flashinfer_prefill/test_diffusion_gemma_flashinfer_prefill.py",
+    ],
+    exec_properties = {
+        "gpu": "H20_CU13",
+    },
+    main = "test_flashinfer_prefill/test_diffusion_gemma_flashinfer_prefill_fa2.py",
+    tags = ["H20_CU13"],
+    target_compatible_with = CUDA13_X86_ONLY,
+    deps = flashinfer_test_deps,
+)
+
+# 4c-attribution A/B (r75 stop-over, opt r5 4c lane; diagnostic only, no
+# model behavior change): the production fa3 ragged prefill kernel at the
+# dgm sliding-layer shape (Q=4096, GQA 16:8, head_dim 256, causal, bf16)
+# under window_left=-1023 vs window_left=-1, with the 4c-gate
+# effective-FLOPs accounting (2*Q*avg_kv*16*256) and the adjudicated H20
+# 148 TFLOPS peak. Manual (developer bench) so a diagnostic adds no CI
+# lane; the fa2 variant runs in its own process for crash isolation and
+# feeds the fa2/fa3/blockwise comparison rows.
+py_test(
+    name = "test_diffusion_gemm_window_ab_prefill_sm90",
+    srcs = ["test_flashinfer_prefill/test_diffusion_gemm_window_ab_prefill.py"],
+    exec_properties = {
+        "gpu": "H20_CU13",
+    },
+    main = "test_flashinfer_prefill/test_diffusion_gemm_window_ab_prefill.py",
+    tags = [
+        "H20_CU13",
+        "manual",
+    ],
+    target_compatible_with = CUDA13_X86_ONLY,
+    deps = flashinfer_test_deps,
+)
+
+py_test(
+    name = "test_diffusion_gemm_window_ab_prefill_fa2_sm90",
+    srcs = [
+        "test_flashinfer_prefill/test_diffusion_gemm_window_ab_prefill.py",
+        "test_flashinfer_prefill/test_diffusion_gemm_window_ab_prefill_fa2.py",
+    ],
+    exec_properties = {
+        "gpu": "H20_CU13",
+    },
+    main = "test_flashinfer_prefill/test_diffusion_gemm_window_ab_prefill_fa2.py",
+    tags = [
+        "H20_CU13",
+        "manual",
+    ],
+    target_compatible_with = CUDA13_X86_ONLY,
+    deps = flashinfer_test_deps,
+)
+
+# 4c contract (r8): Triton split-K windowed prefill kernel vs the fa3 ragged
+# path — numerics A/B (split_k 1/2/4), the DGM_SPLITK_ATTN gate integration
+# check, and the kernel-level MFU verdict (2*Q*avg_kv*16*256 / 148TF, the
+# >40% windowed gate). Manual (developer bench) diagnostic; the model gate
+# itself stays default-OFF in the AttnOp.
+py_test(
+    name = "test_diffusion_gemm_splitk_ab_prefill_sm90",
+    srcs = ["test_flashinfer_prefill/test_diffusion_gemm_splitk_ab_prefill.py"],
+    exec_properties = {
+        "gpu": "H20_CU13",
+    },
+    main = "test_flashinfer_prefill/test_diffusion_gemm_splitk_ab_prefill.py",
+    tags = [
+        "H20_CU13",
+        "manual",
+    ],
+    target_compatible_with = CUDA13_X86_ONLY,
+    deps = flashinfer_test_deps,
+)
+
+# 4c contract (r9, route-2 minimal increment): flashinfer fa3 sm90
+# kernel-config sweep (CTA_Q/CTA_KV/NUM_STAGES via a shadow JIT header —
+# upstream leaves the hd256 ragged tile untuned) at the r8 gate shape,
+# with numerics A/B vs the unpatched fa3 module (bf16-noise gate + the
+# lse convention check) and the 4c MFU verdict (2*Q*avg_kv*16*256 /
+# 148TF). Manual (developer bench) diagnostic; no wheel or AttnOp change.
+py_test(
+    name = "test_diffusion_gemm_4c_fi_tile_sweep_sm90",
+    srcs = ["test_flashinfer_prefill/test_diffusion_gemm_4c_fi_tile_sweep.py"],
+    exec_properties = {
+        "gpu": "H20_CU13",
+    },
+    main = "test_flashinfer_prefill/test_diffusion_gemm_4c_fi_tile_sweep.py",
+    tags = [
+        "H20_CU13",
+        "manual",
+    ],
+    target_compatible_with = CUDA13_X86_ONLY,
+    deps = flashinfer_test_deps,
+)
+
 # Generates one py_test per (test, platform): <test name>_<sm>,
 # e.g. test_py_flashinfer_hybrid_mha_prefill_sm90.
 [
