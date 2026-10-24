@@ -11,7 +11,7 @@ from reporting.view_config import DEFAULT_VIEW, view
 from reporting.workload_panels import build_panels
 
 
-def build_spec(payload, directory, *, name=DEFAULT_VIEW, presentation=None, run=None):
+def build_spec(payload, *, name=DEFAULT_VIEW, presentation=None, run=None):
     presentation = view(name) if presentation is None else presentation
     series = payload["series"]
     spec = dict(
@@ -40,7 +40,7 @@ def write_report(directory, analysis, *, name=DEFAULT_VIEW, presentation=None):
         "run",
         identity,
         payload,
-        build_spec(analysis, directory, name=name, run=run, presentation=presentation),
+        build_spec(analysis, name=name, run=run, presentation=presentation),
         meta=provenance_from(payload, run=run),
         producer="workload",
     )

@@ -302,9 +302,9 @@ class CacheGateTest(unittest.TestCase):
         e = cache_evidence(0.1)
         with tempfile.TemporaryDirectory() as d:
             write_report(d, e, analyze(e))
-            from reporting import discover_reports
+            from reporting import load_bundle
 
-            self.assertEqual(discover_reports(d, role="gate"), [str((Path(d) / "reports/run/cache-scale-in/report.html").resolve())])
+            self.assertEqual(load_bundle(Path(d) / "reports/run/cache-scale-in").manifest["role"], "gate")
             self.assertEqual(json.loads((Path(d) / "reports/run/cache-scale-in/analysis.json").read_text())["result"]["verdict"], "FAIL")
             self.assertIn("Prefill 缓存命中率 · P 数量", (Path(d) / "reports/run/cache-scale-in/report.html").read_text())
 

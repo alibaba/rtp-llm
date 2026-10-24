@@ -103,7 +103,7 @@ def test_compact_archive_reconstructs_exact_analysis_and_renders_offline(tmp_pat
     frozen = definition()
     frozen["views"] = {"default.yaml": view("default.yaml").to_dict()}
     run = RunPresentation.read(analysis, directory=root)
-    expected = render(build_spec(analysis, root, run=run))
+    expected = render(build_spec(analysis, run=run))
     archived = publish_run(root, frozen, execution, analysis=analysis)
     destination = tmp_path / "moved.eval.zip"
     shutil.copyfile(archived["experiment"], destination)

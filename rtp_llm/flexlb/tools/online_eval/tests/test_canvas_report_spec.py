@@ -15,7 +15,6 @@ class ReportSpecTest(unittest.TestCase):
             caption=label,
             type="line",
             axes={"y": {"title": "tok/s"}},
-            yMax=20,
             unit="tok/s",
             series=[dict(name=label, points=[dict(x=t, y=v) for t, v in zip([-1, 0, 2], data)])],
         )

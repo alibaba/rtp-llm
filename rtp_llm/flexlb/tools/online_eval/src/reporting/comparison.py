@@ -15,7 +15,6 @@ from reporting.comparison_colors import curve_style, metric_colors
 from reporting.comparison_inputs import load_snapshot
 from reporting.pairing import event_anchor, merge_nearby_events, shifted_panel
 from reporting.report_model import MeasurementIdentity
-from reporting.values import thaw
 
 
 def _leaves(value, prefix=""):
@@ -26,27 +25,10 @@ def _leaves(value, prefix=""):
         yield prefix, value
 
 
-def _original_result(run):
-    """Read the frozen gate and validity separately from execution status."""
-    analysis, execution = run.analysis, run.execution
-    outcome = analysis.get("outcome") or {}
-    executed = execution.get("outcome") or {}
-    workload = analysis.get("workload") or {}
-    return dict(
-        verdict=outcome.get("gate") or executed.get("gate") or analysis.get("verdict"),
-        validity=outcome.get("validity")
-        or executed.get("validity")
-        or analysis.get("runtime_validity")
-        or workload.get("runtime_validity")
-        or execution.get("workload", {}).get("runtime_validity"),
-        status=execution.get("status") or analysis.get("status"),
-    )
-
-
-def _matrix(runs, labels):
+def _matrix(runs, labels, controls):
     values = []
-    for run in runs:
-        meta = run.report.run_meta
+    for run, control in zip(runs, controls):
+        meta = run.spec["run_meta"]
         values.append(
             dict(
                 _leaves(
@@ -57,7 +39,7 @@ def _matrix(runs, labels):
                         workload=meta.get("workload"),
                         environment=meta.get("environment"),
                         clock=meta.get("clock"),
-                        criteria=thaw(run.report.controls.criteria),
+                        criteria=control["criteria"],
                     )
                 )
             )
@@ -76,12 +58,12 @@ def _series_key(panel, series, origin):
     if signature is None or panel.get("type", "line") != "line" or not panel.get("timeX"):
         return None
     # Keep worker labels, aggregation and measurement semantics; visual titles/IDs may differ.
-    return json.dumps([signature, panel["axes"][series.get("axis", "y")], origin], sort_keys=True, allow_nan=False)
+    return (signature, json.dumps(panel["axes"][series.get("axis", "y")], sort_keys=True, allow_nan=False), origin)
 
 
 def _time_origin(run, index):
     """Use frozen clock semantics, never infer identity from a display label."""
-    clock = run.report.run_meta.get("clock") or {}
+    clock = run.spec["run_meta"].get("clock") or {}
     if isinstance(clock, dict):
         timeline = clock.get("report") or {}
         if not isinstance(timeline, dict):
@@ -93,10 +75,11 @@ def _time_origin(run, index):
     return f"unknown-origin-{index}"
 
 
-def _pair(prepared, labels, origins, *, baseline_index, include_original_panels, time_range=None, event_merge_tolerance=1.0):
+def _pair(prepared, labels, origins, *, baseline_index, time_range=None, event_merge_tolerance=1.0):
     """Preserve the reference layout; match series only inside the same panel ID."""
     overlays, pairing, consumed = [], [], set()
     colors = metric_colors(prepared[baseline_index])
+    panel_indices = [{panel["id"]: panel for panel in panels} for panels in prepared]
     keys = {
         (i, p["id"], n): _series_key(p, c, origins[i])
         for i, panels in enumerate(prepared)
@@ -106,11 +89,7 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels,
     for original in prepared[baseline_index]:
         if original.get("type", "line") != "line" or not original.get("timeX"):
             continue
-        candidates = []
-        for i, panels in enumerate(prepared):
-            for panel in panels:
-                if panel["id"] == original["id"]:
-                    candidates.append((i, panel))
+        candidates = [(i, panels[original["id"]]) for i, panels in enumerate(panel_indices) if original["id"] in panels]
         # A repeated metric with different data inside one panel is ambiguous.
         maps = {}
         for i, panel in candidates:
@@ -142,7 +121,7 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels,
             )
         if not any(len(record["runs"]) > 1 for record in records):
             continue
-        panel = copy.deepcopy(original)
+        panel = {key: copy.deepcopy(value) for key, value in original.items() if key not in {"series", "events", "presets"}}
         panel.update(
             id="overlay:" + original["id"],
             title="对比 · " + original.get("title", original["id"]),
@@ -201,10 +180,10 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels,
     separate = []
     for i, panels in enumerate(prepared):
         for source in panels:
-            kept = [curve for n, curve in enumerate(source["series"]) if include_original_panels or (i, source["id"], n) not in consumed]
+            kept = [curve for n, curve in enumerate(source["series"]) if (i, source["id"], n) not in consumed]
             if not kept:
                 continue
-            panel = copy.deepcopy(source)
+            panel = {key: copy.deepcopy(value) for key, value in source.items() if key != "series"}
             panel["series"] = kept
             names = {curve["name"] for curve in kept}
             panel["presets"] = {name: [n for n in choices if n in names] for name, choices in panel.get("presets", {}).items()}
@@ -213,12 +192,7 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels,
             panel["title"] = labels[i] + " · " + source.get("title", source["id"])
             separate.append(panel)
             pairing.append(
-                dict(
-                    panel=panel["id"],
-                    status="SEPARATE",
-                    runs=[labels[i]],
-                    reasons=["ORIGINAL_REQUESTED" if include_original_panels else "PANEL_OR_MEASUREMENT_OR_CLOCK_NOT_COMPATIBLE"],
-                )
+                dict(panel=panel["id"], status="SEPARATE", runs=[labels[i]], reasons=["PANEL_OR_MEASUREMENT_OR_CLOCK_NOT_COMPATIBLE"])
             )
     return overlays + separate, pairing
 
@@ -226,7 +200,7 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels,
 def _run_sections(run, label: str, filename: str) -> list[dict]:
     """Keep frozen details and bounded notes without duplicating full evidence."""
     sections = []
-    spec = run.report
+    spec = run.spec
     sections.append(links(label + " · 原始报告", [dict(label="打开冻结报告", href=filename)]))
     sections.append(
         details(
@@ -242,7 +216,7 @@ def _run_sections(run, label: str, filename: str) -> list[dict]:
         )
     )
     # Full frozen notes remain in the original report; avoid duplicating large evidence in HTML.
-    for section in spec.sections:
+    for section in spec.get("sections", []):
         if section["type"] == "links":
             continue
         if len(json.dumps(section, ensure_ascii=False)) <= 65536:
@@ -252,10 +226,11 @@ def _run_sections(run, label: str, filename: str) -> list[dict]:
 
 def _prepare_panels(spec, shift, caption: str) -> tuple[list[dict], dict | None]:
     """Align display coordinates while leaving each frozen run untouched."""
-    panels = [shifted_panel(panel, shift) for panel in spec.panels]
+    panels = [shifted_panel(panel, shift) for panel in spec.get("panels", [])]
+    axis = spec.get("timeAxis") or {}
     display = (
-        dict(min=spec.time_min - (shift or 0), max=spec.time_max - (shift or 0))
-        if (spec.time_min is not None and spec.time_max is not None)
+        dict(min=axis["min"] - (shift or 0), max=axis["max"] - (shift or 0))
+        if axis.get("min") is not None and axis.get("max") is not None
         else None
     )
     for panel in panels:
@@ -265,9 +240,7 @@ def _prepare_panels(spec, shift, caption: str) -> tuple[list[dict], dict | None]
     return panels, display
 
 
-def compare(
-    paths, output, *, alignment_event=None, labels=None, baseline=None, views=None, include_original_panels=False, event_merge_tolerance=1.0
-):
+def compare(paths, output, *, alignment_event=None, labels=None, baseline=None, views=None, event_merge_tolerance=1.0):
     merge_nearby_events([], event_merge_tolerance)
     if len(paths) < 2:
         raise ValueError("at least two runs are required")
@@ -294,7 +267,7 @@ def compare(
     fingerprints = [(run.input_kind, run.digest, run.view) for run in loaded]
     if len(set(fingerprints)) != len(fingerprints):
         raise ValueError("duplicate frozen input; choose distinct runs")
-    anchors = [event_anchor(run.report.events, alignment_event) for run in loaded]
+    anchors = [event_anchor(run.spec.get("events", []), alignment_event) for run in loaded]
     aligned = alignment_event is not None and all(t is not None for t in anchors)
     time_alignment = dict(
         event=alignment_event,
@@ -309,7 +282,7 @@ def compare(
         if alignment_event
         else "保留各 run 原时间轴；不自动选择统计窗口。"
     )
-    controls = [dict(run.report.controls.to_dict(), implementation=run.report.run_meta.get("implementation")) for run in loaded]
+    controls = [dict(run.controls, implementation=run.spec["run_meta"].get("implementation")) for run in loaded]
     reference = controls[labels.index(baseline)]
     comparisons = {
         label: compare_controls(
@@ -321,7 +294,7 @@ def compare(
     sources, attachments, sections, prepared, kpis, overview = {}, {}, [], [], [], []
     ranges = []
     for i, (label, run, anchor) in enumerate(zip(labels, loaded, anchors)):
-        spec = run.report
+        spec = run.spec
         shift = anchor if aligned else None
         sources[label] = dict(
             path=str(run.source),
@@ -333,12 +306,12 @@ def compare(
         filename = f"original-run-{i + 1}.html"
         attachments[filename] = run.original_html()
         sections.extend(_run_sections(run, label, filename))
-        original = _original_result(run)
+        original = run.outcome
         kpis.append(dict(label=label + " · 原始判定", value=original["verdict"] or "未知"))
         overview.append(
             [
                 label,
-                spec.run_meta.get("identity"),
+                spec["run_meta"].get("identity"),
                 run.input_kind,
                 run.view,
                 original["verdict"],
@@ -346,7 +319,7 @@ def compare(
                 original["status"],
                 run.execution.get("duration_ms"),
                 run.execution.get("cleanup"),
-                list(spec.kpis),
+                list(spec.get("kpis", [])),
             ]
         )
         panels, display = _prepare_panels(spec, shift, caption)
@@ -363,7 +336,6 @@ def compare(
         labels,
         origins,
         baseline_index=baseline_index,
-        include_original_panels=include_original_panels,
         time_range=display if aligned_ranges else None,
         event_merge_tolerance=event_merge_tolerance,
     )
@@ -382,7 +354,7 @@ def compare(
     spec = dict(
         title="运行报告对照",
         subtitle="各 run 保留独立判定；差异不自动解释为因果。" + caption,
-        timeOriginLabel=(caption if aligned else loaded[baseline_index].report.time_origin_label),
+        timeOriginLabel=(caption if aligned else loaded[baseline_index].spec.get("timeOriginLabel")),
         timeAxis=display,
         events=[dict(id=alignment_event, name=alignment_event, t=0)] if aligned else [],
         panels=panels,
@@ -393,7 +365,7 @@ def compare(
                 ["名称", "实验身份", "输入", "视图", "原始 verdict", "原始 validity", "执行状态", "墙钟耗时 ms", "清理", "冻结摘要"],
                 overview,
             ),
-            _matrix(loaded, labels),
+            _matrix(loaded, labels, controls),
         ],
         sections=[
             details("控制变量（以 " + baseline + " 为参照）", result["controls"]),
@@ -409,7 +381,7 @@ def compare(
         result,
         spec,
         meta=run_meta(
-            dict(id="runs", kind="comparison"), runs={label: run.report.run_meta for label, run in zip(labels, loaded)}, evidence=sources
+            dict(id="runs", kind="comparison"), runs={label: run.spec["run_meta"] for label, run in zip(labels, loaded)}, evidence=sources
         ),
         producer="report-comparison",
         attachments=attachments,
@@ -431,7 +403,6 @@ def main(argv=None):
         default=1.0,
         help="merge equivalent events within this many seconds; 0 disables merging (default: 1)",
     )
-    parser.add_argument("--include-original-panels", action="store_true", help="also show all original panels")
     args = parser.parse_args(argv)
     try:
         compare(
@@ -441,7 +412,6 @@ def main(argv=None):
             labels=args.label,
             baseline=args.baseline,
             views=[None if v == "auto" else v for v in args.view] if args.view else None,
-            include_original_panels=args.include_original_panels,
             event_merge_tolerance=args.event_merge_tolerance,
         )
     except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as exc:

@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from file_io import read_json
-from reporting.comparison_model import FrozenReport
-from reporting.core import load_analysis, read_bundle
+from reporting.core import load_bundle
 from reporting.experiment import ExperimentReader
 from reporting.renderer import render
 
@@ -19,11 +17,19 @@ class RunSnapshot:
     source: Path
     analysis: dict
     spec: dict
-    report: FrozenReport
     digest: str
     input_kind: str
     view: str | None
     execution: dict
+    controls: dict = field(init=False)
+    outcome: dict = field(init=False)
+
+    def __post_init__(self):
+        controls = self.spec["run_meta"].get("comparison_controls")
+        if not isinstance(controls, dict):
+            raise ValueError("frozen report lacks comparison controls")
+        object.__setattr__(self, "controls", controls)
+        object.__setattr__(self, "outcome", original_result(self.analysis, self.execution))
 
     def original_html(self):
         if self.input_kind == "bundle":
@@ -38,25 +44,19 @@ def load_snapshot(path, *, view=None):
     if path.is_dir():
         if view is not None:
             raise ValueError("view selection applies only to experiment ZIP inputs")
-        directory = read_bundle(path)
-        manifest = read_json(directory / "manifest.json")
-        if manifest.get("kind") != "run":
+        bundle = load_bundle(path)
+        if bundle.manifest.get("kind") != "run":
             raise ValueError("comparison input must be a run bundle: " + str(path))
-        required = {"analysis.json", "report-spec.json", "report.html"}
-        if any(manifest["files"][name]["path"] != name for name in required):
-            raise ValueError("run bundle must verify canonical report files")
-        spec = read_json(directory / "report-spec.json")
-        analysis = load_analysis(directory)
-        digest = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
         return RunSnapshot(
             path,
-            analysis,
-            spec,
-            FrozenReport.read(spec),
-            digest,
+            bundle.analysis(),
+            bundle.spec,
+            bundle.digest,
             "bundle",
             None,
-            read_json(directory / "execution.json") if manifest["files"].get("execution.json", {}).get("path") == "execution.json" else {},
+            read_json(path / "execution.json")
+            if bundle.manifest["files"].get("execution.json", {}).get("path") == "execution.json"
+            else {},
         )
     if not path.is_file() or not zipfile.is_zipfile(path):
         raise ValueError("comparison input must be a run bundle directory or experiment ZIP: " + str(path))
@@ -69,5 +69,23 @@ def load_snapshot(path, *, view=None):
         spec = reader.view_spec(selected)
         execution = reader.read_json("execution.json")
         analysis = reader.analysis() if "analysis.json" in reader.entries else {"execution": execution}
-        digest = hashlib.sha256(reader.archive.read("manifest.json")).hexdigest()
-        return RunSnapshot(path, analysis, spec, FrozenReport.read(spec), digest, "experiment", selected, execution)
+        from hashlib import sha256
+
+        digest = sha256(reader.archive.read("manifest.json")).hexdigest()
+        return RunSnapshot(path, analysis, spec, digest, "experiment", selected, execution)
+
+
+def original_result(analysis: dict, execution: dict) -> dict:
+    """Read the frozen gate and validity separately from execution status."""
+    outcome = analysis.get("outcome") or {}
+    executed = execution.get("outcome") or {}
+    workload = analysis.get("workload") or {}
+    return dict(
+        verdict=outcome.get("gate") or executed.get("gate") or analysis.get("verdict"),
+        validity=outcome.get("validity")
+        or executed.get("validity")
+        or analysis.get("runtime_validity")
+        or workload.get("runtime_validity")
+        or execution.get("workload", {}).get("runtime_validity"),
+        status=execution.get("status") or analysis.get("status"),
+    )

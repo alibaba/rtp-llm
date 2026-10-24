@@ -84,15 +84,22 @@ def test_long_report_identity_is_bounded_and_collision_resistant(tmp_path):
 
 
 def test_directory_analysis_verifies_bundle_once(tmp_path, monkeypatch):
-    from unittest.mock import Mock
+    from collections import Counter
 
-    import reporting.core as core
+    from reporting import load_analysis, write_bundle
 
-    bundle = core.write_bundle(tmp_path, "run", "a", {"value": 1}, dict(panels=[]))
-    read = Mock(wraps=core.read_bundle)
-    monkeypatch.setattr(core, "read_bundle", read)
-    assert core.load_analysis(bundle) == {"value": 1}
-    assert read.call_count == 1
+    bundle = write_bundle(tmp_path, "run", "a", {"value": 1}, dict(panels=[]))
+    counts = Counter()
+    open_file = Path.open
+
+    def counted(path, *args, **kwargs):
+        if path.parent == bundle:
+            counts[path.name] += 1
+        return open_file(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted)
+    assert load_analysis(bundle) == {"value": 1}
+    assert counts == {"manifest.json": 1, "analysis.json": 1, "report-spec.json": 1, "report.html": 1}
 
 
 def test_uncalibrated_fidelity_profile_retains_unavailable_identity(tmp_path):

@@ -4,7 +4,6 @@ Oklab matrices: https://bottosson.github.io/posts/oklab/ (public domain).
 """
 
 import colorsys
-import json
 import math
 
 from reporting.catalog import series_color
@@ -71,8 +70,8 @@ def metric_colors(panels):
     for panel in panels:
         used = []
         for n, curve in enumerate(panel.get("series", [])):
-            identity = json.dumps(MeasurementIdentity.read(curve, panel.get("unit")).signature(), sort_keys=True)
-            if identity == "null":
+            identity = MeasurementIdentity.read(curve, panel.get("unit")).signature()
+            if identity is None:
                 identity = (panel["id"], n)
             color = registry.get(identity) or curve.get("color") or series_color(curve.get("tone"), n)
             value = normalize_color(color).lstrip("#")

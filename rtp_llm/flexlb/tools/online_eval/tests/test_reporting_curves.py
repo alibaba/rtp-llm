@@ -130,16 +130,11 @@ def test_selected_presets_and_visibility_reach_the_html(tmp_path):
     config = presentation().to_dict()
     config["charts"]["curves"]["b"]["hidden"] = True
     config["charts"]["curves"]["b"]["group"] = "Other"
-    config["charts"]["panels"][0]["presets"] = {
-        "Visible": {"visible": True},
-        "Named": {"names": ["B"]},
-        "Group": {"groups": ["Other"]},
-        "Substring": {"contains": ["A"]},
-    }
+    config["charts"]["panels"][0]["presets"] = {"A": {"ids": ["a"]}, "B": {"ids": ["b"]}}
     config = ViewDefinition.read(config)
     curves = [materialize(key, style, [[0, 0]]) for key, style in config.charts.curves.items()]
     panels = project_panels(curves, config)
-    assert panels[0]["presets"] == {"Visible": ["A"], "Named": ["B"], "Group": ["B"], "Substring": ["A"]}
+    assert panels[0]["presets"] == {"A": ["A"], "B": ["B"]}
     assert [c["hidden"] for c in panels[0]["series"]] == [True, False]
     bundle = write_bundle(tmp_path, "run", "selected-presets", {}, dict(title="Test", timeAxis={"min": 0, "max": 1}, panels=panels))
     html = (bundle / "report.html").read_text()
@@ -212,7 +207,7 @@ def test_performance_presets_include_configuration_lines_without_validating_miss
 
     config = view("master_performance.yaml").to_dict()
     descriptor = next(p for p in config["charts"]["panels"] if p["id"] == "engine-tps")
-    descriptor["presets"] = {"Floors": {"groups": ["门禁"]}}
+    descriptor["presets"] = {"Floors": {"roles": ["gate_reference"]}}
     config = ViewDefinition.read(config)
     descriptor = next(p for p in config.charts.panels if p.id == "engine-tps")
     panel = next(p for p in report_panels([], {"engine_tps": {"mock/rtp_llm_context_tps": 10}}, config) if p["id"] == "engine-tps")

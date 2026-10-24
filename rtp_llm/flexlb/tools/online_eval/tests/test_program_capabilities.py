@@ -15,7 +15,7 @@ import mode_profiles
 from case_registry_fixtures import entry, snapshot
 from flexlb_profile_data import REGISTERED_PROFILE_SPECS
 from program_fixtures import compile_scenarios
-from reporting import discover_reports, write_bundle
+from reporting import read_bundle, write_bundle
 from reporting.comparison import compare
 from reporting.workload import build_spec
 from scenario import ScenarioError, registry
@@ -80,13 +80,13 @@ class ProgramCapabilitiesTest(unittest.TestCase):
                 payload = analyze_evidence(root, result, evidence, WorkloadResult()).analysis
             self.assertNotIn("gate_reports", payload)
             self.assertNotIn("gate_report", payload)
-            report = build_spec(payload, root)
+            report = build_spec(payload)
             self.assertEqual([], report["panels"])
             self.assertEqual("门禁检查", report["sections"][0]["title"])
             self.assertNotIn("different-cache", json.dumps(report))
             Path(expected[0]).write_text("corrupt")
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
-                discover_reports(root, role="gate")
+                read_bundle(Path(expected[0]).parent)
 
     def test_new_registered_profile_and_runtime_are_table_driven(self):
         tables = mode_profiles.load_mode_tables()

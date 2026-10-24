@@ -5,13 +5,13 @@ changes a decision. report-spec.json alone is sufficient for offline rendering.
 """
 
 from reporting.components import details, links, run_meta, table
-from reporting.core import bundle_path, discover_reports, load_analysis, read_bundle, write_bundle
+from reporting.core import bundle_path, load_analysis, load_bundle, read_bundle, write_bundle
 from reporting.renderer import render
 from reporting.report_model import compare_controls
 
 __all__ = [
     "bundle_path",
-    "discover_reports",
+    "load_bundle",
     "details",
     "table",
     "links",

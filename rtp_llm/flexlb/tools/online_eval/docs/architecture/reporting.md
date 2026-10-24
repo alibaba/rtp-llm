@@ -36,7 +36,7 @@
 
 `write_bundle` 写出自包含 HTML、`analysis.json`、`report-spec.json` 和最后写入的 `manifest.json`。`read_bundle` 校验 identity、manifest 与 SHA，`load_analysis` 接受带 `report_analysis_schema_version` 的分析封装或 bundle；原始 case 分析不是报告封装。三类落盘 JSON 分别校验自己的版本字段，不按相同的版本数字推断格式，也不改写归档。
 
-`kind` 为 run 或 comparison，表示单 run 或运行对照；`role` 由生产者明确声明。`discover_reports(root, kind=..., role=...)` 按这两个字段发现并校验报告，不从目录名猜测。门禁使用 `role="gate"`。
+`kind` 为 run 或 comparison，表示单 run 或运行对照；`role` 由生产者明确声明。调用者使用发布返回的明确路径，`load_bundle(path)` 核验清单、摘要并返回已解析的报告文档，不扫描目录猜测报告。门禁使用 `role="gate"`。
 
 生产阶段未完成的失败运行生成默认报告并标明未生成的视图；已经存在但损坏的 bundle 必须报错。报告重新装配只补充归档运行信息与曲线，原始 verdict 保持不变。
 
@@ -46,7 +46,7 @@
 
 专属视图的 `charts.curves` 每条声明都必须被面板的 `curve_ids` 引用，未接入面板的样式报错。所有选中视图都显式声明 `metrics.diagnostic_only`（可以为空）：每个查询与 Python 输出序列必须被实际面板使用或列为诊断；已注册 gate producer 的标量单列为 `GATE_EVIDENCE`。编译检查当前查询集合，报告装配再次检查冻结指标，并在诊断区记录 `metric_classification`；自动 `up` 查询用于采集完整性，Python 产出的门禁标量保留既定判定与有效性证据，不强制画成曲线。
 
-面板可选的 `presets` 使用 `visible`、`names`、`contains` 或 `groups` 选择当前面板的曲线，展开结果进入 spec 和 HTML 的切换按钮。未声明时不生成额外按钮；曲线和面板的默认可见性由视图明确声明，缺采仍按实测值处理。全量默认视图的概要/明细 presets 负责不同的投影，不与专属视图的曲线选择器混用。
+面板可选的 `presets` 使用 `ids`、`roles` 或 `aggregations` 选择当前面板的曲线，展开结果进入 spec 和 HTML 的切换按钮。未声明时不生成额外按钮；曲线和面板的默认可见性由视图明确声明，缺采仍按实测值处理。全量默认视图的概要/明细 presets 负责不同的投影，不与专属视图的曲线选择器混用。
 
 单 run 标题统一由运行身份生成 `case : variant : profile`，视图 YAML 不声明或覆盖标题。副标题由视图的 `report.subtitle` 提供；离线重生成使用证据中冻结的运行身份。`run_meta` 只展示本次已归档的制品、配置、模型、拓扑、输入和播放参数，不拼接其他运行。公共组件按字段分组，长配置可展开。
 
@@ -111,7 +111,7 @@ python3 scripts/commands/compare_runs.py <run-bundle> <experiment.eval.zip> \
 
 `--alignment-event` 使用唯一且有效的事件 ID，将时间曲线和交互统计样本同时平移；任一 run 的事件缺失或重复时，所有 run 保留原时间轴。默认保留原零点，合图采用基准报告声明的显示范围，不用范围外采样点扩张横轴；未匹配图保留所属 run 的范围。未请求对齐时，原点语义由冻结的报告时间轴 origin selector 或 clock.origin_kind 明确提供，仅文字标签相同不构成兼容。不同或未知原点的图不共享选区，各 run 内的图保持同步。显式事件对齐后显示范围同步平移。采样点、窗口长度和各 run 的原判定不因对齐变化。
 
-默认仅展示合图和未配对曲线；`--include-original-panels` 同时保留全部原图。输出包含自包含 `report.html`、冻结比较分析、spec、manifest 和按输入编号保存的单 run HTML 附件；附件同样进入摘要校验。ZIP 原图只从冻结布局重绘，不执行容器中的程序，也不引用原机器。完整比较 bundle 可独立搬迁；单独 HTML 中的图表与表格可离线打开，原图链接需携带附件。
+比较页面仅展示合图和未配对曲线；完整原图由单 run HTML 附件提供。输出包含自包含 `report.html`、冻结比较分析、spec、manifest 和按输入编号保存的单 run HTML 附件；附件同样进入摘要校验。ZIP 原图只从冻结布局重绘，不执行容器中的程序，也不引用原机器。完整比较 bundle 可独立搬迁；单独 HTML 中的图表与表格可离线打开，原图链接需携带附件。
 
 ## 门禁与发布
 
@@ -139,19 +139,19 @@ ZIP 使用 Deflate level 3，已压缩文件直接存储；请求流水、日志
 
 一次多视图发布通过 `frozen_metric_reads` 复用已解析的 `metrics.json`。缓存使用绝对路径与文件设备、inode、大小和修改时间识别工件，原子替换后重新读取；发布结束或异常退出时释放缓存。该范围从报告生成开始，不覆盖采集、指标生产或门禁阶段。视图只读冻结指标，不修改共享的 `MetricStore`；原始归档与门禁判定保持独立。
 
-`RunPresentation` 在运行分析进入展示层时解析 identity、validity、检查树和 provenance；内部通过属性访问。公共 `ExperimentConditions` 和 `MeasurementIdentity` 位于 `report_model.py`，发布层不依赖对照模块；测量身份包含指标、标签、单位、缩放、计算口径和来源，计算身份不访问点数组。`FrozenReport` 在归档进入对照时校验报告契约并保存独立的面板快照，原始 case analysis 只作为附件展示。外部 YAML/JSON 在入口严格校验，序列化保持 JSON 工件格式。
+`RunPresentation` 在运行分析进入展示层时解析 identity、validity、检查树和 provenance；内部通过属性访问。公共 `ExperimentConditions` 和 `MeasurementIdentity` 位于 `report_model.py`，发布层不依赖对照模块；测量身份包含指标、标签、单位、缩放、计算口径和来源，计算身份不访问点数组。`RunSnapshot` 持有一次核验后读取的唯一 spec 数据树与独立原判定；配对修改自己的面板和曲线，不平行保存另一份点数组模型。外部 YAML/JSON 在入口严格校验，序列化保持 JSON 工件格式。
 
 `view_config.view()` 在加载边界校验并一次解码为 `ViewDefinition`，生产器通过 `presentation.report`、`presentation.charts`、`presentation.metrics` 和 `presentation.sections` 访问已解析对象。曲线、面板、章节和字幕不在投影或渲染中重复解码；`to_dict()` 只用于工件冻结或显式编辑配置。`view_model.py` 定义曲线、面板、坐标轴、预设选择、章节和字幕模板对象，渲染组件通过这些对象访问展示字段。坐标轴上下界必须有限且 `min < max`，一个面板不能重复选择同一曲线；字幕内建 `{verdict}`、`{monitoring_status}` 普通占位符，其他字段由 `ReportView.subtitle_fields` 显式注册；通用模型不按 producer 名称推断业务字段，不接受格式规格或转换。视图文件和报告产物仍采用数据格式，测量值与门禁结论不由展示模型改变。
 
 默认视图负责归档序列分组与同时间汇总，专属视图负责指标绑定与业务附录；两者共享 `panel_document` 的轴约束与最终面板合同，以及 `resolve_presets` 的选择规则。默认曲线冻结指标 ID、完整标签、采集 epoch/source 和结构化聚合口径；预设通过聚合方法和曲线角色选择，不解析描述文案。`detail_labels` 是配置中的标签名，不使用引擎或 Pod 名称白名单；epoch/source/metric 分组保留来源隔离。
 
-预设可以使用 `ids` 选择稳定 `curve_id`，显示名称变化不影响选择。`visible`、`names`、`contains`、`groups` 为显式展示选择，`roles`、`aggregations` 为结构化角色和聚合选择。默认面板投影必须显式接收已解码视图，不读 YAML；HTML 的降采样不改变完整统计样本或归档证据。
+预设可以使用 `ids` 选择稳定 `curve_id`，显示名称变化不影响选择。`roles`、`aggregations` 分别按结构化角色和聚合方法选择，不依赖名称、子串或分组文案。默认面板投影必须显式接收已解码视图，不读 YAML；HTML 的降采样不改变完整统计样本或归档证据。
 
 在线门禁使用 `write_gate_report(..., run=...)` 装配运行信息，离线发布使用 `write_archived_gate_report` 读取冻结时钟；两者共享 bundle 发布。公共原子文本写入由 `file_io.write_text` 提供，工件模块不引用报告模块私有写入函数。发布层遍历报告协议中的 run/runs 节点，证据编解码器只处理单个节点，不推断对照布局。
 
 公共输入解析由 `document_io.load_document` 提供，错误由 `DocumentError` 表示；scenario 保留场景编译入口，报告加载不依赖场景加载器。`view_schema` 只校验展示结构，`monitoring.view_binding` 在集成边界核对查询定义、曲线绑定和诊断分类。
 
-`components.py` 提供纯组件和元数据构造，`report_model.py` 提供实验条件及比较，`core.py` 管理 bundle 发布、核验和发现；公共入口由 `reporting` 包导出。视图配置与共享测量身份持有递归只读映射和元组；`to_dict()` 返回独立可编辑的数据树，显式复制不改变共享值对象。发布一次解析 `RunPresentation`，标题、检查与 provenance 复用该上下文。
+`components.py` 提供纯组件和元数据构造，`report_model.py` 提供实验条件及比较，`core.py` 管理 bundle 发布与核验；公共入口由 `reporting` 包导出。视图配置与共享测量身份持有递归只读映射和元组；`to_dict()` 返回独立可编辑的数据树，显式复制不改变共享值对象。发布一次解析 `RunPresentation`，标题、检查与 provenance 复用该上下文。
 
 `assets/report.html` 提供布局和样式，并将冻结 payload 交给 `report_controller.js`。页面控制器分派时序、散点和分类图；时序交互由 `multi_curve.js` 承担，坐标轴设置共用 `FlexReport.axisOptions`。这些脚本由 renderer 内联，HTML 无需服务器或网络资源。
 
@@ -179,3 +179,8 @@ case 报告将冻结结果和运行证据转成 `Threshold(value, start, end)`�
 运行结果中的复合门禁只保存结果文件的相对路径与 SHA-256，详细检查保存在独立门禁结果中。报告装配校验引用后展开检查；缺文件、摘要不符或判定不一致时报错，不能省略明细继续展示通过。已内嵌明细的归档仍可读取。冻结视图保存展开后的展示结果，离线渲染不重新判定。
 
 实验容器以 `execution.json` 保存执行事实；读取接口兼容 `run/result.json` 名称，不重复写入该入口。`experiment_analysis_schema_version: 2` 用 `execution_fields` 引用与执行结果相同的字段，只保存分析侧差异和专属元数据；读取时恢复原始分析内容，并由冻结指标恢复序列。版本 1 的独立元数据仍可读取。报告装配从阶段结果取得检查，从 implementation 取得声明配置，无需平行复制这两份数据。
+
+
+bundle 发布先在同一文件系统的临时目录完成全部文档与附件，再替换目标目录。正常替换失败时恢复旧目录；如果恢复本身也失败，保留临时目录中的 previous 副本供恢复。成功替换只保留本次清单的成员。发布由运行目录的单一所有者串行完成，不与同一路径的读取并发；该机制不承诺覆盖 SIGKILL 或断电的目录事务。共享压缩证据池仍按摘要复用。
+
+`load_bundle` 对 manifest、spec、analysis 各读取解析一次，对每个成员核验一次摘要，返回可复用的文档与 manifest 摘要。`read_bundle` 保留返回目录的读取接口；`load_analysis` 通过同一核验结果恢复完整分析。对照读取与实验发布消费已解析 spec，不通过公共读取接口再次打开整包。文件与 ZIP 是各自的校验边界，不跨发布缓存校验结果。

@@ -95,10 +95,11 @@ def test_mixed_zip_and_bundle_named_reference_and_series_level_pairing(tmp_path)
     assert (portable / "original-run-2.html").is_file()
 
 
-def test_original_panel_opt_in_and_unknown_measurements(tmp_path):
+def test_matched_panels_are_not_duplicated_and_originals_remain_available(tmp_path):
     a, b = bundle(tmp_path, "a"), bundle(tmp_path, "b")
-    compare([a, b], tmp_path / "out", include_original_panels=True)
-    assert len(report(tmp_path / "out")["panels"]) == 3
+    compare([a, b], tmp_path / "out")
+    assert len(report(tmp_path / "out")["panels"]) == 1
+    assert (tmp_path / "out/reports/comparison/runs/original-run-1.html").is_file()
 
 
 def test_input_validation_precedes_publication(tmp_path):
@@ -243,14 +244,16 @@ def test_selected_baseline_sets_layout_and_display_range(tmp_path):
 def test_event_aligned_comparison_does_not_clip_a_later_recovery(tmp_path, baseline):
     short = bundle(tmp_path, "short")
     spec = json.loads((short / "report-spec.json").read_text())
+    spec["panels"].append(
+        dict(id="unpaired", timeX=True, axes={"y": {"title": "unknown"}}, series=[dict(name="Unknown identity", points=[dict(x=9, y=2)])])
+    )
+    short = write_bundle(tmp_path / "short", "run", "short", {}, spec, meta=spec["run_meta"])
     spec["timeAxis"] = {"min": 0, "max": 40}
     spec["events"] = [dict(id="scale", name="Scale", t=10), dict(id="recovered", name="Recovered", t=39)]
     spec["panels"][0]["events"] = spec["events"]
     spec["panels"][0]["series"][0]["points"] = [{"x": 39, "y": 9}]
     long = write_bundle(tmp_path / "long", "run", "long", {}, spec, meta=spec["run_meta"])
-    compare(
-        [short, long], tmp_path / "out", labels=["short", "long"], baseline=baseline, alignment_event="scale", include_original_panels=True
-    )
+    compare([short, long], tmp_path / "out", labels=["short", "long"], baseline=baseline, alignment_event="scale")
     result = report(tmp_path / "out")
     assert result["timeAxis"] == {"min": -10, "max": 30}
     overlay = next(p for p in result["panels"] if p["id"].startswith("overlay:"))
@@ -262,13 +265,16 @@ def test_event_aligned_comparison_does_not_clip_a_later_recovery(tmp_path, basel
 
 
 def test_original_gate_is_not_inferred_from_execution_status():
-    from types import SimpleNamespace
+    from reporting.comparison_inputs import original_result
 
-    from reporting.comparison import _original_result
-
-    snapshot = SimpleNamespace(analysis={"status": "PASS", "outcome": {"gate": "FAIL", "validity": "VALID"}}, execution={})
-    assert _original_result(snapshot) == {"verdict": "FAIL", "validity": "VALID", "status": "PASS"}
-    snapshot = SimpleNamespace(analysis={}, execution={"status": "PASS", "outcome": {"gate": "PASS", "validity": "VALID"}})
-    assert _original_result(snapshot) == {"verdict": "PASS", "validity": "VALID", "status": "PASS"}
-    snapshot = SimpleNamespace(analysis={}, execution={"status": "PASS"})
-    assert _original_result(snapshot)["verdict"] is None
+    assert original_result({"status": "PASS", "outcome": {"gate": "FAIL", "validity": "VALID"}}, {}) == {
+        "verdict": "FAIL",
+        "validity": "VALID",
+        "status": "PASS",
+    }
+    assert original_result({}, {"status": "PASS", "outcome": {"gate": "PASS", "validity": "VALID"}}) == {
+        "verdict": "PASS",
+        "validity": "VALID",
+        "status": "PASS",
+    }
+    assert original_result({}, {"status": "PASS"})["verdict"] is None

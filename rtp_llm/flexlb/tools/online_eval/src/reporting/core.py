@@ -1,7 +1,14 @@
+"""Checked report documents and recoverable publication of portable bundles."""
+
+from __future__ import annotations
+
 import copy
 import hashlib
 import json
 import re
+import shutil
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from file_digest import sha256_file
@@ -31,7 +38,31 @@ def _json(value):
 
 
 def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=None, role=None, attachments=None):
-    """Publish one canonical report; manifest is written last as the commit record."""
+    """Finish a staged bundle before replacement; restore the previous bundle on failure."""
+    attachments = _attachments(attachments)
+    spec = _prepare_spec(kind, identity, analysis, spec, meta)
+    directory = bundle_path(root, kind, identity)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(prefix=".report-", dir=directory.parent))
+    staged, previous = scratch / "bundle", scratch / "previous"
+    try:
+        _write_bundle(root, staged, kind, identity, analysis, spec, producer=producer, role=role, attachments=attachments)
+        if directory.exists():
+            directory.replace(previous)
+        try:
+            staged.replace(directory)
+        except BaseException:
+            if previous.exists():
+                previous.replace(directory)
+            raise
+    finally:
+        # Preserve the backup if both publication and rollback fail.
+        if directory.exists() or not previous.exists():
+            shutil.rmtree(scratch, ignore_errors=True)
+    return directory
+
+
+def _attachments(attachments):
     attachments = dict((attachments or {}).items())
     for name, content in attachments.items():
         if (
@@ -43,6 +74,10 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
             or not isinstance(content, str)
         ):
             raise ValueError("invalid report attachment path or content")
+    return attachments
+
+
+def _prepare_spec(kind, identity, analysis, spec, meta):
     validate(spec)
     spec = dict(spec)
     spec["report_spec_schema_version"] = REPORT_SPEC_SCHEMA_VERSION
@@ -60,7 +95,11 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
     )
     spec["run_meta"]["comparison_controls"] = controls.to_dict()
     _validate_run_meta(spec["run_meta"])
-    directory = bundle_path(root, kind, identity)
+    return spec
+
+
+def _write_bundle(root, directory, kind, identity, analysis, spec, *, producer=None, role=None, attachments=None):
+    """Publish one canonical report; manifest is written last as the commit record."""
     directory.mkdir(parents=True, exist_ok=True)
     files = {}
     archived_analysis = _analysis_nodes(analysis, lambda node: project(root, directory, node, files))
@@ -92,51 +131,59 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
     if role is not None:
         manifest["role"] = role
     write_text(directory / "manifest.json", _json(manifest))
-    return directory
 
 
-def discover_reports(root, *, role=None, kind="run"):
-    """Find verified bundles by kind and optional producer-declared role."""
-    if kind not in {"run", "comparison"}:
-        raise ValueError("unsupported report kind: " + str(kind))
-    reports = []
-    for path in sorted((Path(root) / "reports" / kind).glob("*/manifest.json")):
-        manifest = read_json(path)
-        if role is not None and manifest.get("role") != role:
-            continue
-        directory = read_bundle(path)
-        entrypoint = manifest["entrypoint"]
-        if entrypoint not in manifest["files"]:
-            raise ValueError("report entrypoint is not a verified bundle file")
-        reports.append(str((directory / entrypoint).resolve()))
-    return reports
+@dataclass(frozen=True)
+class ReportBundle:
+    directory: Path
+    manifest: dict
+    spec: dict
+    result: dict
+    digest: str
+
+    def analysis(self) -> dict:
+        return _analysis_nodes(self.result, lambda node: restore(self.directory, node))
 
 
-def read_bundle(path):
+def load_bundle(path: str | Path) -> ReportBundle:
+    """Verify each member once and retain the decoded documents for downstream readers."""
     path = Path(path)
     directory = path if path.is_dir() else path.parent
-    manifest = read_json(directory / "manifest.json")
+    encoded = (directory / "manifest.json").read_bytes()
+    manifest = json.loads(encoded)
+    digest = hashlib.sha256(encoded).hexdigest()
     if not matches_schema(manifest, "report_manifest_schema_version", 1):
         raise ValueError("unsupported report manifest version")
     files = manifest.get("files")
     required = {"analysis.json", "report-spec.json", "report.html"}
     if not isinstance(files, dict) or not required <= files.keys() or any(files[name].get("path") != name for name in required):
         raise ValueError("report manifest lacks required bundle files")
-    for entry in files.values():
+    documents = {}
+    for name, entry in files.items():
         target = directory / entry["path"]
         if target.resolve().parent != directory.resolve():
             raise ValueError("report file escapes bundle")
-        if sha256_file(target) != entry["sha256"]:
+        if name in {"analysis.json", "report-spec.json"}:
+            encoded = target.read_bytes()
+            actual = hashlib.sha256(encoded).hexdigest()
+        else:
+            actual = sha256_file(target)
+        if actual != entry["sha256"]:
             raise ValueError("report checksum mismatch: " + entry["path"])
-    spec = read_json(directory / "report-spec.json")
+        if name in {"analysis.json", "report-spec.json"}:
+            documents[name] = json.loads(encoded)
+    spec, analysis = documents["report-spec.json"], documents["analysis.json"]
     validate(spec, versioned=True)
     _validate_run_meta(spec.get("run_meta"))
-    analysis = read_json(directory / "analysis.json")
     if not matches_schema(analysis, "report_analysis_schema_version", 1):
         raise ValueError("unsupported report analysis version")
     _validate_run_meta(analysis.get("run_meta"))
     _analysis_nodes(analysis["result"], lambda node: verify_references(node, files) or node)
-    return directory
+    return ReportBundle(directory, manifest, spec, analysis["result"], digest)
+
+
+def read_bundle(path):
+    return load_bundle(path).directory
 
 
 def _validate_run_meta(meta):
@@ -151,10 +198,8 @@ def _validate_run_meta(meta):
 
 def load_analysis(path):
     path = Path(path)
-    if path.is_dir():
-        path = read_bundle(path) / "analysis.json"
-    elif path.name == "analysis.json" and (path.parent / "manifest.json").exists():
-        read_bundle(path.parent)
+    if path.is_dir() or path.name == "analysis.json" and (path.parent / "manifest.json").exists():
+        return load_bundle(path).analysis()
     value = read_json(path)
     if not matches_schema(value, "report_analysis_schema_version", 1):
         raise ValueError("unsupported report analysis version")

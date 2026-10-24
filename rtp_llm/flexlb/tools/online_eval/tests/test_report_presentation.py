@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from artifacts.provenance import collect
-from reporting import discover_reports, load_analysis, read_bundle, render, table
+from reporting import load_analysis, load_bundle, read_bundle, render, table
 from reporting.run_context import canonical_spec, provenance_from
 from scenario.registry import write_views as write_views
 
@@ -39,7 +39,7 @@ class ReportPresentationTest(unittest.TestCase):
             source = analysis()
             paths = write_views(directory, source)
             self.assertEqual(["default.yaml"], list(paths))
-            self.assertEqual([str(next(iter(paths.values())).resolve())], discover_reports(directory))
+            self.assertEqual(load_bundle(next(iter(paths.values()))).manifest["kind"], "run")
             bundle = read_bundle(next(iter(paths.values())))
             spec = json.loads((bundle / "report-spec.json").read_text())
             self.assertEqual(1, len(spec["panels"]))
@@ -70,8 +70,8 @@ class ReportPresentationTest(unittest.TestCase):
             frozen = load_analysis(bundle)
             self.assertEqual(original, {key: frozen[key] for key in original})
             self.assertEqual(source, frozen["run"])
-            self.assertEqual(2, len(discover_reports(directory)))
-            self.assertEqual(1, len(discover_reports(directory, role="gate")))
+            self.assertEqual(2, len(paths))
+            self.assertEqual(sum(load_bundle(path).manifest.get("role") == "gate" for path in paths.values()), 1)
 
     def test_common_sections_are_idempotent_and_verdict_diagnostics_remain_frozen(self):
         source = analysis()

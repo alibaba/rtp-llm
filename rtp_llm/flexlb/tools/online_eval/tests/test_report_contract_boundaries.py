@@ -34,10 +34,10 @@ def test_default_metric_identity_retains_source_labels_and_aggregation():
     assert mean["points"][1]["y"] is None
 
 
-def test_bundle_publication_does_not_import_comparison_models(tmp_path):
+def test_bundle_publication_does_not_import_comparison_pipeline(tmp_path):
     from reporting import write_bundle
 
-    with patch.dict("sys.modules", {"reporting.comparison_model": None}):
+    with patch.dict("sys.modules", {"reporting.comparison": None, "reporting.comparison_inputs": None}):
         write_bundle(tmp_path, "run", "independent", {}, dict(panels=[], sections=[], kpis=[]))
 
 

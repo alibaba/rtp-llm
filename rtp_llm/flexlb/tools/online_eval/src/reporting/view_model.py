@@ -160,10 +160,6 @@ class SelectionKind(str, Enum):
     IDS = "ids"
     ROLES = "roles"
     AGGREGATIONS = "aggregations"
-    VISIBLE = "visible"
-    NAMES = "names"
-    CONTAINS = "contains"
-    GROUPS = "groups"
 
 
 @dataclass(frozen=True)
@@ -180,31 +176,16 @@ class PresetSelection:
             kind = SelectionKind(key)
         except (ValueError, TypeError):
             raise ValueError("invalid panel presets") from None
-        if kind == SelectionKind.VISIBLE:
-            if items is not True:
-                raise ValueError("invalid panel presets")
-            return cls(kind)
         if not isinstance(items, list) or not items or not all(map(text, items)):
             raise ValueError("invalid panel presets")
         return cls(kind, tuple(items))
 
     def to_dict(self):
-        return {self.kind.value: True if self.kind == SelectionKind.VISIBLE else list(self.values)}
+        return {self.kind.value: list(self.values)}
 
-    def matches(self, *, name, group, hidden, curve_id=None, role=None, aggregation=None):
-        if self.kind == SelectionKind.IDS:
-            return curve_id in self.values
-        if self.kind == SelectionKind.ROLES:
-            return role in self.values
-        if self.kind == SelectionKind.AGGREGATIONS:
-            return aggregation in self.values
-        if self.kind == SelectionKind.VISIBLE:
-            return not hidden
-        if self.kind == SelectionKind.NAMES:
-            return name in self.values
-        if self.kind == SelectionKind.CONTAINS:
-            return any(fragment in name for fragment in self.values)
-        return group in self.values
+    def matches(self, *, curve_id=None, role=None, aggregation=None):
+        value = {SelectionKind.IDS: curve_id, SelectionKind.ROLES: role, SelectionKind.AGGREGATIONS: aggregation}[self.kind]
+        return value in self.values
 
 
 @dataclass(frozen=True)

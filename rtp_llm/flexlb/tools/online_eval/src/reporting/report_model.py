@@ -104,10 +104,10 @@ def panel_document(*, identity, title, axes, series, caption, presets=None):
     return result
 
 
-def compare_controls(left, right, *, required=(), allowed=()):
-    """Compare all control leaves, except explicitly varied experiment subtrees.
+def compare_controls(left, right, *, required=()):
+    """Compare all control leaves, retaining every experiment difference.
 
-    required/allowed paths use JSON Pointer syntax. Missing required evidence is
+    Required paths use JSON Pointer syntax. Missing required evidence is
     unknown even when both sides omit it. Unknown added controls are compared.
     """
     missing = object()
@@ -122,8 +122,6 @@ def compare_controls(left, right, *, required=(), allowed=()):
         return value
 
     def walk(a, b, path):
-        if any(path == p or path.startswith(p + "/") for p in allowed):
-            return
         if isinstance(a, dict) and isinstance(b, dict):
             for key in sorted(set(a) | set(b)):
                 walk(a.get(key, missing), b.get(key, missing), path + "/" + key.replace("~", "~0").replace("/", "~1"))
@@ -144,5 +142,4 @@ def compare_controls(left, right, *, required=(), allowed=()):
         aligned=not absent and not differences,
         missing=absent,
         differences=differences,
-        allowed=list(allowed),
     )

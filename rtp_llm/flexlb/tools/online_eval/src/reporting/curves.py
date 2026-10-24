@@ -77,14 +77,7 @@ def resolve_presets(series, selectors):
             curve["name"]
             for curve in series
             if any(
-                selector.matches(
-                    name=curve["name"],
-                    group=curve["group"],
-                    hidden=curve["hidden"],
-                    curve_id=curve.get("curve_id"),
-                    role=curve.get("role"),
-                    aggregation=curve.get("aggregation"),
-                )
+                selector.matches(curve_id=curve.get("curve_id"), role=curve.get("role"), aggregation=curve.get("aggregation"))
                 for selector in selection
             )
         ]

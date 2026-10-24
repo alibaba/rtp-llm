@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from analysis.statistics import counter_delta, select_window
-from reporting import compare_controls, details, discover_reports, load_analysis, read_bundle, render, run_meta, table, write_bundle
+from reporting import compare_controls, details, load_analysis, load_bundle, read_bundle, render, run_meta, table, write_bundle
 from reporting.pairing import event_anchor, shifted_panel
 from reporting.renderer import render_context, render_sections
 from reporting.workload import write_report
@@ -107,9 +107,9 @@ class ReportBundleTest(unittest.TestCase):
         a = {"config": {"qps": 10, "new_option": True}, "master": "old"}
         b = copy.deepcopy(a)
         b["master"] = "new"
-        self.assertTrue(compare_controls(a, b, allowed=("/master",), required=("/config/qps",))["aligned"])
+        self.assertEqual(compare_controls(a, b, required=("/config/qps",))["differences"][0]["path"], "/master")
         b["config"]["new_option"] = False
-        self.assertEqual(compare_controls(a, b, allowed=("/master",))["differences"][0]["path"], "/config/new_option")
+        self.assertEqual(compare_controls(a, b)["differences"][0]["path"], "/config/new_option")
         self.assertEqual(compare_controls({}, {}, required=("/config/qps",))["status"], "UNKNOWN")
         self.assertFalse(compare_controls({"config": None}, {"config": None}, required=("/config",))["aligned"])
 
@@ -165,15 +165,15 @@ class ReportBundleTest(unittest.TestCase):
             result = write_bundle(d, "run", "../../other", {}, dict(panels=[]))
             self.assertEqual(result.parent, Path(d) / "reports/run")
 
-    def test_all_bundle_kinds_are_discoverable_and_verified(self):
-        with tempfile.TemporaryDirectory() as d:
+    def test_bundle_kind_and_role_are_explicit_and_verified(self):
+        with tempfile.TemporaryDirectory() as directory:
             for kind in ("run", "comparison"):
-                write_bundle(d, kind, "example", {}, dict(panels=[]), role="audit")
-                self.assertEqual(len(discover_reports(d, kind=kind, role="audit")), 1)
-                self.assertEqual(len(discover_reports(d, kind=kind)), 1)
-            self.assertEqual(discover_reports(d, role="missing"), [])
+                path = write_bundle(directory, kind, "example", {}, dict(panels=[]), role="audit")
+                bundle = load_bundle(path)
+                self.assertEqual(bundle.manifest["kind"], kind)
+                self.assertEqual(bundle.manifest["role"], "audit")
             with self.assertRaisesRegex(ValueError, "unsupported report kind"):
-                discover_reports(d, kind="timeline")
+                write_bundle(directory, "timeline", "example", {}, dict(panels=[]))
 
     def test_point_contract_preserves_gaps_and_rejects_legacy_data(self):
         source = dict(

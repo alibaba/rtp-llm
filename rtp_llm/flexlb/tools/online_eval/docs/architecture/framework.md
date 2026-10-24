@@ -183,5 +183,5 @@ Mock cluster 的 gRPC 协议调度使用独立的轻量执行器；业务回调�
 
 缓存 RPC 每次复制当前 keys、重新构造完整 protobuf，并使用生成代码的标准序列化。相同版本仍返回完整 keys；不复用成员快照、protobuf 或编码字节。真实引擎的可选缓存状态快照不作为默认行为。协议一致不代表锁竞争、CPU、GC 和 RPC 时延等价；Mock 门禁不能替代真实引擎的缓存同步性能验证。
 
-归档容器由 `artifacts.experiment_store` 管理文件索引、角色、摘要和完整性，不加载报告或监控实现。`reporting.experiment` 负责视图布局、序列数据重建和实验发布；`artifacts.experiment` 仅保留兼容导出与命令入口。通用原子文本和 JSON 读写由标准库叶子模块 `file_io` 提供。单 Master 与 HA 共用 Master 启动、进程登记、日志边界及就绪检查过程，实例地址、发现配置和资源所有权由各自规格提供。
+归档容器由 `artifacts.experiment_store` 管理文件索引、角色、摘要和完整性，不加载报告或监控实现。`reporting.experiment` 负责视图布局、序列数据重建和实验发布。通用原子文本和 JSON 读写由标准库叶子模块 `file_io` 提供。单 Master 与 HA 共用 Master 启动、进程登记、日志边界及就绪检查过程，实例地址、发现配置和资源所有权由各自规格提供。
 缓存 RPC 遵循 real 的 key 版本协议：版本变化时返回完整 key 快照，同版本省略 keys，容量实时刷新；`need_cache_keys=false` 回显请求版本。自然缓存与合成 fixture 共用这一响应规则，fixture 不占推理 KV 容量。同步强度按实际响应 entries/s 和 bytes/s 验收；冻结 churn 会减少 key 载荷。编码优化及其边界见 [Mock Engine](../../../../flexlb-mock-engine/README.md)。协议一致不代表锁竞争、CPU、GC 和 RPC 时延等价；Mock 门禁不能替代真实引擎的缓存同步性能验证。

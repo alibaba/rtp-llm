@@ -79,7 +79,7 @@ class ExperimentReader(ContainerReader):
                     return stream.read()
 
             run = RunPresentation.read(analysis, read_gate=read_gate)
-            spec = build_spec(analysis, None, presentation=ViewDefinition.read(definition["views"][name]), run=run)
+            spec = build_spec(analysis, presentation=ViewDefinition.read(definition["views"][name]), run=run)
         else:
             raise ValueError("view was not frozen in this experiment: " + name)
         write_text(output, render(spec))
@@ -156,7 +156,7 @@ def _role(path):
 
 def publish_run(directory, definition, execution, *, analysis=None, deadline=None):
     """Package settled per-run evidence. HTML is a regenerable cache, not input."""
-    from reporting.core import read_bundle
+    from reporting.core import load_bundle
 
     directory = Path(directory)
     output, raw_output = directory / "experiment.eval.zip", directory / "experiment.raw.zip"
@@ -230,13 +230,12 @@ def publish_run(directory, definition, execution, *, analysis=None, deadline=Non
             invalid_views = []
             for manifest in sorted((directory / "reports/run").glob("*/manifest.json")):
                 try:
-                    bundle = read_bundle(manifest.parent)
-                    with (bundle / "report-spec.json").open(encoding="utf-8") as stream:
-                        spec = json.load(stream)
+                    bundle = load_bundle(manifest.parent)
+                    spec = bundle.spec
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     invalid_views.append(dict(view=manifest.parent.name, error=str(exc)))
                     continue
-                name = view_names.get(str(bundle.resolve()), bundle.name)
+                name = view_names.get(str(bundle.directory.resolve()), bundle.directory.name)
                 primary.add_view(name, spec, definition.get("views", {}).get(name))
             missing = [
                 name
