@@ -613,3 +613,10 @@ models_py_test(
     gpu = "RTX_5000_PRO_CU13",
     deps = [":test_support"],
 )
+py_test(
+    name = "rocm_qsa_rope_cache_test",
+    srcs = ["rocm_qsa_rope_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
