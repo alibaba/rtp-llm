@@ -482,7 +482,13 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
 
 
 def _configure_nccl_p2p_disable(py_env_configs: PyEnvConfigs) -> None:
-    """Apply the NCCL P2P workaround without disabling healthy GPU pairs."""
+    """Disable NCCL P2P only when no participating GPU pair supports it.
+
+    Capability-based: a 2024-era name check disabled P2P for any "RTX"-named
+    consumer card, which also matched workstation GPUs (e.g. RTX PRO 5000)
+    whose P2P works. Rely on the per-pair probe instead; NCCL degrades
+    per pair when only some pairs are incapable.
+    """
     if (
         py_env_configs.role_config.role_type == RoleType.FRONTEND
         or "NCCL_P2P_DISABLE" in os.environ
@@ -502,19 +508,6 @@ def _configure_nccl_p2p_disable(py_env_configs: PyEnvConfigs) -> None:
     )
     device_ids = list(range(participating_device_count))
 
-    try:
-        device_names = [
-            torch.cuda.get_device_name(device_id) for device_id in device_ids
-        ]
-    except Exception as exc:
-        logging.warning(
-            "unable to identify CUDA devices for NCCL P2P setup; "
-            "leaving NCCL_P2P_DISABLE unset: %s",
-            exc,
-        )
-        return
-
-    model_requires_disable = any("RTX" in name.upper() for name in device_names)
     unsupported_pairs: list[tuple[int, int]] = []
     supported_pair_found = False
     try:
@@ -527,31 +520,21 @@ def _configure_nccl_p2p_disable(py_env_configs: PyEnvConfigs) -> None:
                 else:
                     unsupported_pairs.append((src, dst))
     except Exception as exc:
-        if not model_requires_disable:
-            logging.warning(
-                "unable to probe CUDA P2P access for devices %s; "
-                "leaving NCCL_P2P_DISABLE unset: %s",
-                device_ids,
-                exc,
-            )
-            return
         logging.warning(
-            "unable to probe CUDA P2P access for RTX devices %s; "
-            "retaining the RTX NCCL workaround: %s",
+            "unable to probe CUDA P2P access for devices %s; "
+            "leaving NCCL_P2P_DISABLE unset: %s",
             device_ids,
             exc,
         )
+        return
 
     no_pair_supports_p2p = len(device_ids) > 1 and not supported_pair_found
-    if model_requires_disable or no_pair_supports_p2p:
+    if no_pair_supports_p2p:
         os.environ["NCCL_P2P_DISABLE"] = "1"
         logging.warning(
-            "set NCCL_P2P_DISABLE=1 for devices %s: model_workaround=%s, "
-            "no_pair_supports_p2p=%s, unsupported_pairs=%s",
+            "set NCCL_P2P_DISABLE=1 for devices %s: no participating pair "
+            "supports CUDA P2P",
             device_ids,
-            model_requires_disable,
-            no_pair_supports_p2p,
-            unsupported_pairs,
         )
     elif unsupported_pairs:
         logging.warning(

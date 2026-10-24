@@ -280,15 +280,33 @@ class NcclP2pSetupTest(TestCase):
             _configure_nccl_p2p_disable(self._config(local_world_size))
             return os.environ.get("NCCL_P2P_DISABLE"), can_access_peer.call_args_list
 
-    def test_single_rtx_keeps_model_workaround(self):
+    def test_single_rtx_device_keeps_p2p_enabled(self):
         value, calls = self._run_probe(
             device_count=1,
             device_name="NVIDIA RTX PRO 6000 Blackwell",
             peer_access=True,
             local_world_size=1,
         )
-        self.assertEqual(value, "1")
+        self.assertIsNone(value)
         self.assertEqual(calls, [])
+
+    def test_rtx_pairs_with_p2p_support_keep_p2p_enabled(self):
+        value, _ = self._run_probe(
+            device_count=8,
+            device_name="NVIDIA RTX PRO 5000 72GB Blackwell",
+            peer_access=True,
+            local_world_size=8,
+        )
+        self.assertIsNone(value)
+
+    def test_rtx_pairs_without_p2p_support_still_disable(self):
+        value, _ = self._run_probe(
+            device_count=4,
+            device_name="NVIDIA GeForce RTX 4090",
+            peer_access=False,
+            local_world_size=4,
+        )
+        self.assertEqual(value, "1")
 
     def test_all_connected_devices_keep_p2p_enabled(self):
         value, _ = self._run_probe(
