@@ -1,14 +1,11 @@
 package org.flexlb.balance.projection;
 
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.LearningPredictor;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.scheduler.RequestRegistry;
-import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
+import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
 
 import java.util.Comparator;
 import java.util.List;
@@ -137,10 +134,7 @@ class RouteProjectionTest {
     }
 
     private static PrefillTtftEstimate.DeliveryProjection routeProjection() {
-        return new RouteDeliveryStrategy(
-                Mockito.mock(RequestRegistry.class),
-                Mockito.mock(DeliveryMetrics.class))
-                .ttftEstimationRule();
+        return new NonBatchTtftEstimator().ttftEstimationRule();
     }
 
     private static final class CountingEvaluator

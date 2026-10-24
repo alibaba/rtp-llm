@@ -3,8 +3,10 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
+import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -167,7 +169,7 @@ class WorkerBatcherQueueTest {
     @Test
     void stoppingQueueProjectsUndispatchedItemsForRequeueExactlyOnce() {
         EndpointEventProjector events = mock(EndpointEventProjector.class);
-        WorkerBatcher runtime = new WorkerBatcher("test-worker", prefillEndpoint, config, deliveryStrategy, events,
+        WorkerBatcher runtime = new WorkerBatcher("test-worker", prefillEndpoint, config, deliveryStrategy, deliveryStrategy, events,
                 new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
@@ -186,6 +188,7 @@ class WorkerBatcherQueueTest {
                 "test-worker",
                 prefillEndpoint,
                 () -> config,
+                deliveryStrategy,
                 deliveryStrategy,
                 mock(EndpointEventProjector.class), new QueueCapacity());
         runtimes.add(runtime);
@@ -239,7 +242,7 @@ class WorkerBatcherQueueTest {
 
     /** Holds every exact head ACTIVE so snapshots can exercise live ordering. */
     private static final class BlockingDeliveryStrategy
-            implements DeliveryStrategy {
+            implements DeliveryStrategy, PrefillTtftEstimator {
 
         private final AtomicInteger attempts = new AtomicInteger();
         private final CapacityBoundary.Availability availability =
@@ -276,10 +279,9 @@ class WorkerBatcherQueueTest {
         }
 
         @Override
-        public double projectGroupDurationMs(
-                List<ScheduledRequest> items,
+        public GroupPlanner.PrefixPrediction<ScheduledRequest> newGroupPredictor(
                 PrefillTimePredictor.Evaluator evaluator) {
-            return 0.0;
+            return (added, items) -> 0.0;
         }
 
         @Override

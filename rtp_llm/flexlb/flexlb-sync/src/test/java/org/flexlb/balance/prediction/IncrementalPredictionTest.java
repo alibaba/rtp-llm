@@ -1,13 +1,10 @@
 package org.flexlb.balance.prediction;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
-import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -84,9 +81,7 @@ class IncrementalPredictionTest {
     @Test
     void projectionMatchesFullEvaluationAcrossExpiryPriorityAndProbePositions() throws Exception {
         var model = new FormulaPredictor(formula());
-        var policy = new BatchDeliveryStrategy(
-                () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class)).ttftEstimationRule();
+        var policy = new BatchTtftEstimator().ttftEstimationRule();
         var full = new PrefillTimePredictor.Evaluator() {
             public long estimateMs(long t, long h) { return model.estimateMs(t, h); }
             public double predictBatchMs(PrefillBatchFeatures f) { return model.predictBatchMs(f); }
@@ -144,9 +139,7 @@ class IncrementalPredictionTest {
                 return (t, h) -> ++count[0] * 250.25;
             }
         };
-        var strategy = new BatchDeliveryStrategy(
-                () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class));
+        var strategy = new BatchTtftEstimator();
         var items = new ArrayList<org.flexlb.balance.scheduler.ScheduledRequest>();
         for (int i = 0; i < 4; i++) {
             var request = mock(org.flexlb.balance.scheduler.ScheduledRequest.class);
@@ -174,9 +167,7 @@ class IncrementalPredictionTest {
 
     @Test
     void serviceReusesOnlyEvaluatedPrefixesFromItsOwnPlanningCursor() {
-        var strategy = new BatchDeliveryStrategy(
-                () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class));
+        var strategy = new BatchTtftEstimator();
         int[] fullCalls = {0};
         var predictions = new PrefillTtftEstimate.Predictions() {
             public long itemDurationMs(GroupPlanner.Item i) { return 100; }
@@ -208,9 +199,7 @@ class IncrementalPredictionTest {
 
     @Test
     void appendCursorKeepsLatestAndOvershootPredecessorAndRecomputesOlderPrefixes() {
-        var policy = new BatchDeliveryStrategy(
-                () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class)).ttftEstimationRule();
+        var policy = new BatchTtftEstimator().ttftEstimationRule();
         int[] appended = {0};
         int[] recomputed = {0};
         var predictions = new PrefillTtftEstimate.Predictions() {

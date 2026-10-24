@@ -9,6 +9,7 @@ import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
+import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
@@ -90,6 +91,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     PrefillEndpoint(WorkerStatus status,
                     Supplier<FlexlbConfig> configSupplier,
                     DeliveryStrategy deliveryStrategy,
+                    PrefillTtftEstimator ttftEstimator,
                     EndpointEventProjector endpointEvents,
                     BatchSchedulerReporter reporter,
                     PlacementAvailability placementAvailability,
@@ -107,7 +109,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.predictor = createPredictor(startupConfig);
         this.runtime = new WorkerBatcher(
                 status.getLogicalIpPort(), this, configSupplier.get(),
-                deliveryStrategy, endpointEvents, queueCapacity);
+                deliveryStrategy, ttftEstimator, endpointEvents, queueCapacity);
         this.prefillState = runtime.ownedState();
     }
 

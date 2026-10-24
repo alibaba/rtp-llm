@@ -3,8 +3,10 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
+import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -223,6 +225,7 @@ class WorkerBatcherPerformanceTest {
                 endpoint,
                 config,
                 delivery,
+                delivery,
                 mock(EndpointEventProjector.class), new QueueCapacity());
         runtime.start();
         long now = System.currentTimeMillis();
@@ -293,7 +296,7 @@ class WorkerBatcherPerformanceTest {
     }
 
     private static final class BlockingDeliveryStrategy
-            implements DeliveryStrategy {
+            implements DeliveryStrategy, PrefillTtftEstimator {
 
         private final CapacityBoundary.Availability availability =
                 new CapacityBoundary.Availability() {
@@ -328,10 +331,9 @@ class WorkerBatcherPerformanceTest {
         }
 
         @Override
-        public double projectGroupDurationMs(
-                List<ScheduledRequest> items,
+        public GroupPlanner.PrefixPrediction<ScheduledRequest> newGroupPredictor(
                 PrefillTimePredictor.Evaluator evaluator) {
-            return 0.0;
+            return (added, items) -> 0.0;
         }
 
         @Override

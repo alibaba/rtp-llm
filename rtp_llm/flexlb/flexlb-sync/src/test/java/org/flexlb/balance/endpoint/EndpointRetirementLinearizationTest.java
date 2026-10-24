@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -35,6 +36,7 @@ class EndpointRetirementLinearizationTest {
                 requestRuntime.events(),
                 mock(BatchSchedulerReporter.class),
                 EndpointTestSupport.routeStrategy(requestRuntime),
+                new NonBatchTtftEstimator(),
                 new PlacementAvailability(),
                 new QueueCapacity());
         String prefillAddress = "127.0.0.1:8100";

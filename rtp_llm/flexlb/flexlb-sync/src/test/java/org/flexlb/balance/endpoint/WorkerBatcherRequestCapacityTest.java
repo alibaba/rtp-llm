@@ -3,6 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
@@ -615,7 +616,7 @@ class WorkerBatcherRequestCapacityTest {
         DeliveryStrategy parked = EndpointTestSupport.routeStrategy(runtime);
         DeliveryStrategy delivery = mock(DeliveryStrategy.class, delegatesTo(parked));
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
-        PrefillEndpoint endpoint = new PrefillEndpoint(status, configSupplier, delivery, runtime.events(),
+        PrefillEndpoint endpoint = new PrefillEndpoint(status, configSupplier, delivery, new NonBatchTtftEstimator(), runtime.events(),
                 reporter, availability, registry, queueCapacity);
         endpoint.startGeneration();
         return new Fixture(endpoint, delivery, parked, runtime, queueCapacity, reporter);

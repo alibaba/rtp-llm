@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
@@ -125,6 +126,7 @@ public class EndpointRegistry {
     private final EndpointEventProjector endpointEvents;
     private final BatchSchedulerReporter reporter;
     private final DeliveryStrategy deliveryStrategy;
+    private final PrefillTtftEstimator ttftEstimator;
     private final PlacementAvailability placementAvailability;
     private final QueueCapacity queueCapacity;
     private final Object lifecycleGate = new Object();
@@ -157,12 +159,14 @@ public class EndpointRegistry {
                             EndpointEventProjector endpointEvents,
                             BatchSchedulerReporter reporter,
                             DeliveryStrategy deliveryStrategy,
+                            PrefillTtftEstimator ttftEstimator,
                             PlacementAvailability placementAvailability,
                             QueueCapacity queueCapacity) {
         this.configService = configService;
         this.endpointEvents = endpointEvents;
         this.reporter = reporter;
         this.deliveryStrategy = deliveryStrategy;
+        this.ttftEstimator = ttftEstimator;
         this.placementAvailability = placementAvailability;
         this.queueCapacity = queueCapacity;
     }
@@ -740,6 +744,7 @@ public class EndpointRegistry {
                     status,
                     configService::loadBalanceConfig,
                     deliveryStrategy,
+                    ttftEstimator,
                     endpointEvents,
                     reporter,
                     placementAvailability,

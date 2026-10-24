@@ -101,6 +101,7 @@ class CacheHitFeedbackFlowTest {
                 new org.flexlb.balance.scheduler.RouteDeliveryStrategy(
                         mock(org.flexlb.balance.scheduler.RequestRegistry.class),
                         mock(org.flexlb.balance.delivery.DeliveryMetrics.class)),
+                new org.flexlb.balance.projection.estimator.NonBatchTtftEstimator(),
                 new org.flexlb.balance.scheduler.PlacementAvailability(),
                 new QueueCapacity());
         directory = new WorkerDirectory(registry);

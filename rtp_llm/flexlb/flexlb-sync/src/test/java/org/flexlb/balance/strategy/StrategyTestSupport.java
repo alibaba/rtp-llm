@@ -8,6 +8,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
+import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
@@ -48,6 +49,7 @@ final class StrategyTestSupport {
                 runtime.events(),
                 Mockito.mock(BatchSchedulerReporter.class),
                 delivery,
+                new NonBatchTtftEstimator(),
                 new PlacementAvailability(),
                 new QueueCapacity());
     }
@@ -201,12 +203,6 @@ final class StrategyTestSupport {
         RouteDeliveryStrategy route = new RouteDeliveryStrategy(
                 requests, NOOP_METRICS);
         DeliveryStrategy delivery = Mockito.mock(DeliveryStrategy.class);
-        Mockito.when(delivery.ttftEstimationRule())
-                .thenReturn(route.ttftEstimationRule());
-        Mockito.when(delivery.projectGroupDurationMs(
-                        Mockito.anyList(), Mockito.any()))
-                .thenAnswer(invocation -> route.projectGroupDurationMs(
-                        invocation.getArgument(0), invocation.getArgument(1)));
         Mockito.when(delivery.prepare(
                         Mockito.anyList(), Mockito.any(), Mockito.any()))
                 .thenAnswer(invocation -> {

@@ -1,18 +1,16 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
+import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-
-import static org.mockito.Mockito.mock;
 
 /** Frozen-value builders shared by canonical route-projection tests. */
 final class RouteProjectionTestSupport {
@@ -29,18 +27,9 @@ final class RouteProjectionTestSupport {
                     .thenComparing(GroupPlanner.Item::requestId);
 
     static final PrefillTtftEstimate.DeliveryProjection ROUTE =
-            new RouteDeliveryStrategy(
-                    mock(RequestRegistry.class),
-                    mock(DeliveryMetrics.class))
-                    .ttftEstimationRule();
+            new NonBatchTtftEstimator().ttftEstimationRule();
     static final PrefillTtftEstimate.DeliveryProjection BATCH =
-            new BatchDeliveryStrategy(
-                    () -> CapacityBoundary.Attempt.rejected(
-                            CapacityBoundary.OWNERSHIP_LOST),
-                    () -> 1L,
-                    mock(RequestRegistry.class),
-                    mock(DeliveryMetrics.class))
-                    .ttftEstimationRule();
+            new BatchTtftEstimator().ttftEstimationRule();
 
     static final PrefillTimePredictor.Evaluator TOKEN_EVALUATOR =
             new PrefillTimePredictor.Evaluator() {

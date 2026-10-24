@@ -9,6 +9,8 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
+import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.EncoderStrategy;
@@ -68,6 +70,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 endpointEvents,
                 batchReporter,
                 delivery,
+                configService.loadBalanceConfig().getDispatcher().requiresGenerateInput()
+                        ? new BatchTtftEstimator() : new NonBatchTtftEstimator(),
                 placementAvailability,
                 queueCapacity);
         this.evictionManager = new EvictionManager(

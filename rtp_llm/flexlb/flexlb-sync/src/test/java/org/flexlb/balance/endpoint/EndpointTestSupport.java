@@ -5,6 +5,10 @@ import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
+import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
+import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
+import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
+import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
@@ -44,7 +48,9 @@ public final class EndpointTestSupport {
             PlacementAvailability availability) {
         EndpointRegistry registry = org.mockito.Mockito.mock(EndpointRegistry.class);
         org.mockito.Mockito.when(registry.getEndpointCount(status.getRole())).thenReturn(1);
-        return new PrefillEndpoint(status, configSupplier, deliveryStrategy,
+        PrefillTtftEstimator ttftEstimator = deliveryStrategy instanceof BatchDeliveryStrategy
+                ? new BatchTtftEstimator() : new NonBatchTtftEstimator();
+        return new PrefillEndpoint(status, configSupplier, deliveryStrategy, ttftEstimator,
                 endpointEvents, reporter, availability, registry,
                 new QueueCapacity());
     }
@@ -171,13 +177,6 @@ public final class EndpointTestSupport {
                 runtime.requests(), NOOP_TELEMETRY);
         DeliveryStrategy delivery = org.mockito.Mockito.mock(
                 DeliveryStrategy.class);
-        org.mockito.Mockito.when(delivery.ttftEstimationRule())
-                .thenReturn(route.ttftEstimationRule());
-        org.mockito.Mockito.when(delivery.projectGroupDurationMs(
-                        org.mockito.Mockito.anyList(),
-                        org.mockito.Mockito.any()))
-                .thenAnswer(invocation -> route.projectGroupDurationMs(
-                        invocation.getArgument(0), invocation.getArgument(1)));
         org.mockito.Mockito.when(delivery.prepare(
                         org.mockito.Mockito.anyList(),
                         org.mockito.Mockito.any(),

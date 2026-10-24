@@ -8,6 +8,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
@@ -59,6 +60,7 @@ class RequestConfirmationTimeoutTest {
         var queueCapacity = new QueueCapacity();
         var endpoints = new EndpointRegistry(service, projector, reporter,
                 new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
+                new NonBatchTtftEstimator(),
                 new PlacementAvailability(), queueCapacity);
         var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter,
                 service, queueCapacity, new ModelMetaConfig());

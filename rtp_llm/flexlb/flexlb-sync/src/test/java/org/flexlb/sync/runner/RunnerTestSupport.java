@@ -3,6 +3,7 @@ package org.flexlb.sync.runner;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
@@ -36,6 +37,7 @@ public final class RunnerTestSupport {
                 NOOP_EVENT_SINK,
                 Mockito.mock(BatchSchedulerReporter.class),
                 delivery,
+                new NonBatchTtftEstimator(),
                 new PlacementAvailability(),
                 new QueueCapacity());
     }

@@ -1,12 +1,14 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
+import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
+import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -257,10 +259,7 @@ class WorkerBatcherSchedulingTest {
         assertNotNull(inputs.queue().admissionBlock());
         assertNull(inputs.queue().admissionBlock().semantics(),
                 "batch capacity waits must not impose publication restrictions");
-        PrefillTtftEstimate.DeliveryProjection projection = new BatchDeliveryStrategy(
-                () -> { throw new AssertionError("projection cannot prepare delivery"); },
-                () -> 0L, mock(RequestRegistry.class), mock(DeliveryMetrics.class))
-                .ttftEstimationRule();
+        PrefillTtftEstimate.DeliveryProjection projection = new BatchTtftEstimator().ttftEstimationRule();
         PrefillTtftEstimate.Candidate candidate = PrefillTtftEstimate.project(
                 inputs, new PrefillTtftEstimate.Probe("22", 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
                 endpoint.getPredictor().evaluator(), projection, now);
@@ -453,7 +452,7 @@ class WorkerBatcherSchedulingTest {
                     org.mockito.ArgumentMatchers.any());
             return transaction;
         });
-        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery, mock(PrefillTtftEstimator.class));
         List<ScheduledRequest> requests = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             ScheduledRequest request = item(config, endpoint, 100L + i, 50, System.currentTimeMillis());
@@ -506,7 +505,7 @@ class WorkerBatcherSchedulingTest {
         });
         EndpointEventProjector projector = mock(EndpointEventProjector.class);
         WorkerBatcher runtime = new WorkerBatcher(
-                "retired-commit", endpoint, () -> config, delivery, projector, new QueueCapacity());
+                "retired-commit", endpoint, () -> config, delivery, mock(PrefillTtftEstimator.class), projector, new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
 
@@ -525,7 +524,8 @@ class WorkerBatcherSchedulingTest {
         initial.decisionPolicy().setMaxCollectionWaitMs(100L);
         AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
         WorkerBatcher runtime = new WorkerBatcher("hot-window-projection", stableEndpoint(stableStatus()),
-                current::get, mock(DeliveryStrategy.class), mock(EndpointEventProjector.class), new QueueCapacity());
+                current::get, mock(DeliveryStrategy.class), mock(PrefillTtftEstimator.class),
+                mock(EndpointEventProjector.class), new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
 
@@ -555,7 +555,7 @@ class WorkerBatcherSchedulingTest {
         AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
-        WorkerBatcher runtime = new WorkerBatcher("hot-window-delivery", endpoint, current::get, delivery,
+        WorkerBatcher runtime = new WorkerBatcher("hot-window-delivery", endpoint, current::get, delivery, delivery,
                 mock(EndpointEventProjector.class), new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
@@ -576,9 +576,14 @@ class WorkerBatcherSchedulingTest {
         await(delivery.firstAttempt);
     }
 
-    private WorkerBatcher runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, DeliveryStrategy delivery) {
+    private WorkerBatcher runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, BoundaryDelivery delivery) {
+        return runningRuntime(config, endpoint, delivery, delivery);
+    }
+
+    private WorkerBatcher runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, DeliveryStrategy delivery,
+                                         PrefillTtftEstimator estimator) {
         WorkerBatcher runtime = new WorkerBatcher(
-                "scheduling-test", endpoint, () -> config, delivery,
+                "scheduling-test", endpoint, () -> config, delivery, estimator,
                 mock(EndpointEventProjector.class), new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
@@ -705,13 +710,12 @@ class WorkerBatcherSchedulingTest {
                         RoleType.PREFILL));
     }
 
-    private abstract static class BoundaryDelivery implements DeliveryStrategy {
+    private abstract static class BoundaryDelivery implements DeliveryStrategy, PrefillTtftEstimator {
 
         @Override
-        public double projectGroupDurationMs(
-                List<ScheduledRequest> items,
+        public GroupPlanner.PrefixPrediction<ScheduledRequest> newGroupPredictor(
                 PrefillTimePredictor.Evaluator evaluator) {
-            return 0.0;
+            return (added, items) -> 0.0;
         }
 
         @Override
@@ -812,18 +816,19 @@ class WorkerBatcherSchedulingTest {
         }
 
         @Override
-        public double projectGroupDurationMs(
-                List<ScheduledRequest> items,
+        public GroupPlanner.PrefixPrediction<ScheduledRequest> newGroupPredictor(
                 PrefillTimePredictor.Evaluator evaluator) {
-            if (groupPredictionReturned.get()) {
-                nextDecisionStarted.countDown();
-            }
-            if (items.size() == 2) {
-                groupPredictionEntered.countDown();
-                await(allowGroupPrediction);
-                groupPredictionReturned.set(true);
-            }
-            return 100.0;
+            return (added, items) -> {
+                if (groupPredictionReturned.get()) {
+                    nextDecisionStarted.countDown();
+                }
+                if (items.size() == 2) {
+                    groupPredictionEntered.countDown();
+                    await(allowGroupPrediction);
+                    groupPredictionReturned.set(true);
+                }
+                return 100.0;
+            };
         }
     }
 

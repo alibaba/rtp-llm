@@ -2,8 +2,9 @@ package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
+import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
+import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
-import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -17,7 +18,6 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.mock;
 
 /**
  * Exact-value behavior contracts for the frozen
@@ -50,9 +50,7 @@ class RouteDeliveryProjectionTest {
     class RouteService {
 
         private final PrefillTtftEstimate.DeliveryProjection projection =
-                new RouteDeliveryStrategy(
-                        mock(RequestRegistry.class),
-                        mock(DeliveryMetrics.class)).ttftEstimationRule();
+                new NonBatchTtftEstimator().ttftEstimationRule();
 
         @Test
         void completionOffsetIsTheCumulativePrefixSum() {
@@ -136,12 +134,7 @@ class RouteDeliveryProjectionTest {
     class BatchService {
 
         private final PrefillTtftEstimate.DeliveryProjection projection =
-                new BatchDeliveryStrategy(
-                        () -> CapacityBoundary.Attempt.rejected(
-                                CapacityBoundary.OWNERSHIP_LOST),
-                        () -> 1L,
-                        mock(RequestRegistry.class),
-                        mock(DeliveryMetrics.class)).ttftEstimationRule();
+                new BatchTtftEstimator().ttftEstimationRule();
 
         @Test
         void eachMemberGetsBatchDurationOfItsExactPrefix() {

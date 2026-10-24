@@ -1,3 +1,4 @@
+import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
 import com.sun.management.ThreadMXBean;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
@@ -24,6 +25,7 @@ public class SnapshotBench {
     static volatile long sink;
     static FormulaPredictor model;
     static BatchDeliveryStrategy strategy;
+    static final BatchTtftEstimator estimator = new BatchTtftEstimator();
     static RequestRegistry registry;
     static final PrefillTtftEstimate.Probe PROBE = new PrefillTtftEstimate.Probe(
             Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
@@ -68,7 +70,7 @@ public class SnapshotBench {
     static Endpoint endpoint(int depth, int seed) throws Exception {
         var config = config();
         // No scheduler thread or RPCs. Mutations still use the real ownership ledger and lock.
-        var runtime = new WorkerBatcher("bench-" + seed, null, config, strategy,
+        var runtime = new WorkerBatcher("bench-" + seed, null, config, strategy, estimator,
                 new EndpointEventProjector(registry), new QueueCapacity());
         Field lockField = WorkerBatcher.class.getDeclaredField("queueLock");
         lockField.setAccessible(true);
@@ -96,7 +98,7 @@ public class SnapshotBench {
                 var inputs = endpoint.runtime.captureRouteProjectionInputs();
                 checksum += inputs.queue().activeItems().size();
                 if (project) checksum += PrefillTtftEstimate.project(inputs, PROBE, model,
-                        strategy.ttftEstimationRule()).requiredProjectedTtftMs();
+                        estimator.ttftEstimationRule()).requiredProjectedTtftMs();
             }
         }
         return new Sample(System.nanoTime() - started, CPU.getCurrentThreadCpuTime() - cpu,

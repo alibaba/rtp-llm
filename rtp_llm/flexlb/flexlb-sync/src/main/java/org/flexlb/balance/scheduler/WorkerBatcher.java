@@ -13,6 +13,7 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.QueueSnapshot.AdmissionBlock;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -243,6 +244,7 @@ public final class WorkerBatcher {
     private final DecisionPolicyConfig fixedWindowDecision;
     private final boolean singleDecision;
     private final DeliveryStrategy deliveryStrategy;
+    private final PrefillTtftEstimator ttftEstimator;
     private final PrefillActiveIndex activeIndex;
     private final Comparator<GroupPlanner.Item> projectionOrder;
     /**
@@ -306,15 +308,17 @@ public final class WorkerBatcher {
             PrefillEndpoint prefillEp,
             FlexlbConfig config,
             DeliveryStrategy deliveryStrategy,
+            PrefillTtftEstimator ttftEstimator,
             EndpointEventProjector endpointEvents,
             QueueCapacity queueCapacity) {
-        this(key, prefillEp, () -> config, deliveryStrategy, endpointEvents, queueCapacity);
+        this(key, prefillEp, () -> config, deliveryStrategy, ttftEstimator, endpointEvents, queueCapacity);
     }
 
     public WorkerBatcher(String key,
                          PrefillEndpoint prefillEp,
                          Supplier<FlexlbConfig> configSupplier,
                          DeliveryStrategy deliveryStrategy,
+                         PrefillTtftEstimator ttftEstimator,
                          EndpointEventProjector endpointEvents,
                          QueueCapacity queueCapacity) {
         this.configSupplier = configSupplier;
@@ -330,6 +334,7 @@ public final class WorkerBatcher {
         boolean priorityOrdering = config.isPriorityOrdering();
         this.endpointEvents = endpointEvents;
         this.deliveryStrategy = deliveryStrategy;
+        this.ttftEstimator = ttftEstimator;
         Comparator<ScheduledRequest> queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
         this.projectionOrder =
@@ -595,7 +600,7 @@ public final class WorkerBatcher {
 
     /** Immutable delivery semantics used by a pure route projection. */
     public PrefillTtftEstimate.DeliveryProjection deliveryProjection() {
-        return deliveryStrategy.ttftEstimationRule();
+        return ttftEstimator.ttftEstimationRule();
     }
 
     /**
@@ -1739,7 +1744,7 @@ public final class WorkerBatcher {
                             snapshot.items(), PLANNER_ITEM_ACCESS,
                             plannerConstraints,
                             planningEvaluator == null ? null :
-                                    deliveryStrategy.newGroupPredictor(planningEvaluator));
+                                    ttftEstimator.newGroupPredictor(planningEvaluator));
             GroupPlanner.Plan<ScheduledRequest> plan =
                     GroupPlanner.evaluateReadiness(
                             selection, plannerConstraints, now());

@@ -1,3 +1,4 @@
+import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -18,9 +19,8 @@ public class ProjectionDifferential {
     public static void main(String[] args) throws Exception {
         SnapshotBench.initialize(Path.of(args[0]));
         var model = SnapshotBench.model;
-        var batchPolicy = SnapshotBench.strategy.ttftEstimationRule();
-        var routePolicy = new RouteDeliveryStrategy(SnapshotBench.registry,
-                new DeliveryMetrics(new BatchSchedulerReporter(null))).ttftEstimationRule();
+        var batchPolicy = SnapshotBench.estimator.ttftEstimationRule();
+        var routePolicy = new NonBatchTtftEstimator().ttftEstimationRule();
         var random = new Random(1729);
         var digest = MessageDigest.getInstance("SHA-256");
         var states = new TreeMap<String, Integer>();

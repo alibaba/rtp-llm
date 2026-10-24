@@ -7,6 +7,8 @@ import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
+import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.EncoderStrategy;
@@ -84,6 +86,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 endpointEvents,
                 batchReporter,
                 deliveryStrategy,
+                dispatcher.getType() == DispatcherConfig.Type.BATCH
+                        ? new BatchTtftEstimator() : new NonBatchTtftEstimator(),
                 placementAvailability,
                 queueCapacity);
         this.router = new BindingRouter(new org.flexlb.sync.status.WorkerDirectory(registry), configService, lifecycle);

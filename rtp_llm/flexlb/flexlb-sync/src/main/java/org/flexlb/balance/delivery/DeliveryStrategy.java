@@ -1,8 +1,6 @@
 package org.flexlb.balance.delivery;
 
-import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.PrefillTtftEstimate;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
@@ -22,24 +20,6 @@ public interface DeliveryStrategy {
     Transaction prepare(List<ScheduledRequest> candidates,
                         PrefillTimePredictor.Evaluator evaluator,
                         OptionalLong plannedPredictionMs);
-
-    /**
-     * 对一个确定的分组做纯规划，估算它的耗时。
-     * 返回值保留毫秒的小数部分，让 GroupPlanner 能精确比较边界。
-     */
-    double projectGroupDurationMs(List<ScheduledRequest> items, PrefillTimePredictor.Evaluator evaluator);
-
-    /**
-     * 为一次 select 调用中逐步变长的前缀，创建新的预测回调，供 GroupPlanner 使用。
-     */
-    default GroupPlanner.PrefixPrediction<ScheduledRequest> newGroupPredictor(PrefillTimePredictor.Evaluator evaluator) {
-        return (added, items) -> projectGroupDurationMs(items, evaluator);
-    }
-
-    /**
-     * 预估 TTFT 的规则：本投递模式下，请求前面排着的工作量怎么折算成等待时间。
-     */
-    PrefillTtftEstimate.DeliveryProjection ttftEstimationRule();
 
     /**
      * 一次投递事务，贯穿 prepare、入队提交和 handoff 三个阶段。

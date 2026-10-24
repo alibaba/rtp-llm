@@ -2,6 +2,9 @@ package org.flexlb.balance.composition;
 
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.projection.estimator.BatchTtftEstimator;
+import org.flexlb.balance.projection.estimator.NonBatchTtftEstimator;
+import org.flexlb.balance.projection.estimator.PrefillTtftEstimator;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.RequestRegistry;
@@ -71,6 +74,17 @@ public class DeliveryBindingConfiguration {
                     new RouteDeliveryStrategy(
                             requests,
                             telemetry);
+        };
+    }
+
+    @Bean
+    public PrefillTtftEstimator activePrefillTtftEstimator(ConfigService configService) {
+        DispatcherConfig dispatcher = Objects.requireNonNull(
+                configService.loadBalanceConfig().getDispatcher(),
+                "dispatcher");
+        return switch (dispatcher.getType()) {
+            case BATCH -> new BatchTtftEstimator();
+            case NON_BATCH -> new NonBatchTtftEstimator();
         };
     }
 
