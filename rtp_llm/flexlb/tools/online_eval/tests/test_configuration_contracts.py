@@ -25,8 +25,7 @@ def config(name):
 
 
 @pytest.mark.parametrize(
-    "name,criterion",
-    [("master_performance", "ttft"), ("cache_scale_in", "baseline_hit"), ("master_ha_failover", "outage_failures")],
+    "name,criterion", [("master_performance", "ttft"), ("cache_scale_in", "baseline_hit"), ("master_ha_failover", "outage_failures")]
 )
 @pytest.mark.parametrize("field,value", [("metric", "missing/id"), ("unit", "seconds"), ("windows", ["typo"])])
 def test_check_identity_unit_and_window_are_compile_time_contracts(name, criterion, field, value):
@@ -100,10 +99,7 @@ def test_numeric_schema_does_not_hide_unused_program_fields():
 
 
 def test_metric_projections_have_one_direction_and_no_duplicate_identity():
-    fields = dict(
-        a=dict(metric="mock/running", labels=dict(role="prefill")),
-        b=dict(metric="mock/running", labels=dict(role="decode")),
-    )
+    fields = dict(a=dict(metric="mock/running", labels=dict(role="prefill")), b=dict(metric="mock/running", labels=dict(role="decode")))
     assert metric_fields(dict(fields=fields)) == fields
     fields["b"]["labels"]["role"] = "prefill"
     with pytest.raises(ValueError, match="duplicate"):
@@ -143,11 +139,7 @@ def test_origin_does_not_control_producer_execution_or_retention(tmp_path):
     store.save(tmp_path)
     archive = tmp_path / "telemetry/1/queries.json"
     archive.parent.mkdir(parents=True)
-    archive.write_text(
-        json.dumps(
-            dict(start=1, end=2, step=1, targets={}, queries={}, query_plan="cache_scale_in.yaml", metric_plan=plan)
-        )
-    )
+    archive.write_text(json.dumps(dict(start=1, end=2, step=1, targets={}, queries={}, query_plan="cache_scale_in.yaml", metric_plan=plan)))
     assert export_metrics(tmp_path, plan).reduce(metric, op="last") == 0.5
     frozen = MetricStore.read(tmp_path).document["metrics"][metric][0]
     assert frozen["provenance"]["measurement"]["population"] == "surviving_prefill_engines"
@@ -166,9 +158,7 @@ def test_origin_does_not_control_producer_execution_or_retention(tmp_path):
     case = registry.registry().cases["master_ha_failover"]
     from types import SimpleNamespace
 
-    metrics = SimpleNamespace(
-        CONTRACTS=case.definition.metrics.CONTRACTS, project=case.definition.metrics.project, finalize=producer
-    )
+    metrics = SimpleNamespace(CONTRACTS=case.definition.metrics.CONTRACTS, project=case.definition.metrics.project, finalize=producer)
     changed = replace(case, definition=replace(case.definition, metrics=metrics))
     with patch.object(registry, "_snapshot", snapshot(changed, include_existing=True)):
         produce(tmp_path / "ha", {})
@@ -205,10 +195,7 @@ def test_composite_check_requires_both_declared_windows_and_has_no_order_semanti
 
 @pytest.mark.parametrize(
     "name,criterion,windows",
-    [
-        ("master_ha_failover", "b_success", ["b_only", "both"]),
-        ("request_completion", "completed", ["terminal", "terminal"]),
-    ],
+    [("master_ha_failover", "b_success", ["b_only", "both"]), ("request_completion", "completed", ["terminal", "terminal"])],
 )
 def test_single_window_measurements_do_not_concatenate_scopes(name, criterion, windows):
     data = config(name)
@@ -229,9 +216,7 @@ def test_analysis_policies_are_separate_from_observation_and_still_typed(name, p
         configure_program(data, "case.yaml")
 
 
-@pytest.mark.parametrize(
-    "name,input_group", [("cache_scale_in", "engine_counters"), ("master_performance", "engine_tps")]
-)
+@pytest.mark.parametrize("name,input_group", [("cache_scale_in", "engine_counters"), ("master_performance", "engine_tps")])
 def test_metric_bindings_cannot_select_a_reader_backend(name, input_group):
     data = config(name)
     data["parameters"]["observation"]["inputs"][input_group]["source"] = "metric_store"
@@ -255,12 +240,7 @@ def test_compact_fixed_checks_compile_to_the_explicit_contract(name):
         )
     if name == "master_performance":
         for key, criterion in data["parameters"]["checks"]["engine_tps"].items():
-            criterion.update(
-                metric="performance_gate/" + key + "_scrape_engine_mean",
-                op="ge",
-                unit="tokens/s",
-                windows=["measurement"],
-            )
+            criterion.update(metric="performance_gate/" + key + "_scrape_engine_mean", op="ge", unit="tokens/s", windows=["measurement"])
     assert configure_program(data, "case.yaml").variants == compact.variants
 
 
@@ -278,13 +258,7 @@ def test_query_defaults_freeze_the_same_measurement_and_labels(mode, method):
         metric_plan_schema_version=5,
         sources=dict(
             mock=dict(
-                temperature=dict(
-                    promql="temperature${selector}",
-                    mode=mode,
-                    unit="K",
-                    value_kind="gauge",
-                    exported_metrics=["temperature"],
-                )
+                temperature=dict(promql="temperature${selector}", mode=mode, unit="K", value_kind="gauge", exported_metrics=["temperature"])
             )
         ),
     )
@@ -293,17 +267,11 @@ def test_query_defaults_freeze_the_same_measurement_and_labels(mode, method):
         spec = raw["sources"]["mock"]["temperature"]
         assert "labels" not in spec and "measurement" not in spec
         spec.update(
-            labels=[],
-            measurement=dict(
-                method=method, population="mock_selector", accuracy="sampled", requires_request_identity=False
-            ),
+            labels=[], measurement=dict(method=method, population="mock_selector", accuracy="sampled", requires_request_identity=False)
         )
         assert load_plan("temperature.yaml") == compact
         spec["measurement"]["accuracy"] = "histogram_estimate"
-        assert (
-            load_plan("temperature.yaml")["sources"]["mock"]["temperature"]["measurement"]["accuracy"]
-            == "histogram_estimate"
-        )
+        assert load_plan("temperature.yaml")["sources"]["mock"]["temperature"]["measurement"]["accuracy"] == "histogram_estimate"
         del spec["measurement"]["population"]
         with pytest.raises(ScenarioError, match="measurement"):
             load_plan("temperature.yaml")

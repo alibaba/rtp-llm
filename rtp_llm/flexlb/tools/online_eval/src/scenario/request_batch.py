@@ -25,17 +25,7 @@ class RequestBatch(ClientRecords):
     def _error(self, record, phase, exc):
         code = getattr(exc, "code", lambda: None)()
         details = error_trailer_evidence(exc, self.ops.pb2) if phase == "stream" else {}
-        self.update(
-            record,
-            **{
-                phase: dict(
-                    status=getattr(code, "name", "ERROR"),
-                    error=repr(exc),
-                    ended_s=self.ctx.clock(),
-                    **details,
-                )
-            },
-        )
+        self.update(record, **{phase: dict(status=getattr(code, "name", "ERROR"), error=repr(exc), ended_s=self.ctx.clock(), **details)})
 
     def submit(self, deadline):
         for _ in range(self.params["count"]):
@@ -43,13 +33,7 @@ class RequestBatch(ClientRecords):
             if self.cancelled:
                 raise RuntimeError("request cancelled before Schedule")
             record = self.issue(self.ops.next_request_id(), self.ctx.clock)
-            entry = dict(
-                record=record,
-                response=None,
-                call=None,
-                thread=None,
-                done=threading.Event(),
-            )
+            entry = dict(record=record, response=None, call=None, thread=None, done=threading.Event())
             self.entries.append(entry)
             with self._lock:
                 record["request_shape"] = dict(self.shape)
@@ -57,10 +41,7 @@ class RequestBatch(ClientRecords):
             rid = record["wire_request_id"]
             try:
                 limit = min(self.params.get("schedule_timeout_s", 30), deadline.remaining())
-                self.update(
-                    record,
-                    schedule=dict(started_s=self.ctx.clock(), deadline_s=self.ctx.clock() + limit),
-                )
+                self.update(record, schedule=dict(started_s=self.ctx.clock(), deadline_s=self.ctx.clock() + limit))
                 stub = self.ops.schedule_pb2_grpc.FlexlbServiceStub(self.ops._channel(self.ops.master_target()))
                 rpc_options = {"timeout": limit}
                 if "qos_level" in self.params:
@@ -99,11 +80,7 @@ class RequestBatch(ClientRecords):
                 self._error(record, "schedule", exc)
                 if entry["call"] is not None:
                     entry["call"].cancel()
-                self.update(
-                    record,
-                    transport_terminal_s=self.ctx.clock(),
-                    consumer_exit_s=self.ctx.clock(),
-                )
+                self.update(record, transport_terminal_s=self.ctx.clock(), consumer_exit_s=self.ctx.clock())
                 raise
             finally:
                 self.persist()
@@ -121,21 +98,14 @@ class RequestBatch(ClientRecords):
 
     @property
     def shape(self):
-        return {
-            key: self.params[key] for key in ("input_len", "output_len", "block_keys", "priority") if key in self.params
-        }
+        return {key: self.params[key] for key in ("input_len", "output_len", "block_keys", "priority") if key in self.params}
 
     def _start_consumer(self, entry, end):
         if entry["thread"] is not None or entry["record"]["schedule"]["status"] != "OK":
             return
         if self.cancelled:
             return
-        thread = threading.Thread(
-            target=self._consume,
-            args=(entry, end),
-            name="scenario-request-consumer",
-            daemon=True,
-        )
+        thread = threading.Thread(target=self._consume, args=(entry, end), name="scenario-request-consumer", daemon=True)
         entry["thread"] = thread
         thread.start()
 
@@ -145,21 +115,11 @@ class RequestBatch(ClientRecords):
         if limit <= 0:
             raise StageTimeout("stream deadline expired before opening")
         method = "FetchResponse" if response.enqueued_by_master else "GenerateStreamCall"
-        self.update(
-            record,
-            stream=dict(
-                method=method,
-                started_s=self.ctx.clock(),
-                deadline_s=self.ctx.clock() + limit,
-            ),
-        )
+        self.update(record, stream=dict(method=method, started_s=self.ctx.clock(), deadline_s=self.ctx.clock() + limit))
         stub = self.ops.pb2_grpc.RpcServiceStub(self.ops._channel(self.ops.prefill_addr(response)))
         if response.enqueued_by_master:
             self.update(record, fetch_invocations=1)
-            call = stub.FetchResponse(
-                self.ops.pb2.FetchRequestPB(request_id=record["wire_request_id"]),
-                timeout=limit,
-            )
+            call = stub.FetchResponse(self.ops.pb2.FetchRequestPB(request_id=record["wire_request_id"]), timeout=limit)
         else:
             inp = self.ops.build_generate_input(record["wire_request_id"], **self.shape)
             self.ops._copy_role_addrs(inp, response)
@@ -192,12 +152,7 @@ class RequestBatch(ClientRecords):
         except Exception as exc:
             self._error(record, phase, exc)
         finally:
-            self.update(
-                record,
-                transport_terminal_s=self.ctx.clock(),
-                consumer_exit_s=self.ctx.clock(),
-                consumer_done=True,
-            )
+            self.update(record, transport_terminal_s=self.ctx.clock(), consumer_exit_s=self.ctx.clock(), consumer_done=True)
             with self._lock:
                 entry["call"] = None
             # Published only after all terminal record fields are committed.
@@ -239,8 +194,7 @@ class RequestBatch(ClientRecords):
                 if rpc["status"] not in (None, "OK", "REJECTED"):
                     raise RuntimeError(f"{phase} RPC failed for {record['wire_request_id']}: {rpc['error']}")
         return dict(
-            completed=bool(records) and all(request_success(r) for r in records),
-            error_count=sum(not request_success(r) for r in records),
+            completed=bool(records) and all(request_success(r) for r in records), error_count=sum(not request_success(r) for r in records)
         )
 
     def cancel(self, reason="explicit_cancel"):
@@ -252,14 +206,7 @@ class RequestBatch(ClientRecords):
                 if request_success(record) or record["cancel"]["requested_s"] is not None:
                     continue
                 count += 1
-                self.update(
-                    record,
-                    cancel=dict(
-                        requested_s=self.ctx.clock(),
-                        reason=reason,
-                        scope="client_transport",
-                    ),
-                )
+                self.update(record, cancel=dict(requested_s=self.ctx.clock(), reason=reason, scope="client_transport"))
                 try:
                     ack = bool(call.cancel()) if call is not None else None
                     self.update(record, cancel=dict(acknowledged=ack))
@@ -288,27 +235,14 @@ class RequestBatch(ClientRecords):
                 continue
             ops = self.ops
             request = ops.schedule_pb2.FlexlbCancelRequestPB(
-                request_id=record["wire_request_id"],
-                reason=ops.schedule_pb2.CANCEL_REASON_CLIENT_CANCELLED,
+                request_id=record["wire_request_id"], reason=ops.schedule_pb2.CANCEL_REASON_CLIENT_CANCELLED
             )
             if response is not None and response.HasField("lifecycle") and response.lifecycle.batch_id:
                 request.batch_id = response.lifecycle.batch_id
-            calls = [
-                (
-                    "master",
-                    ops.schedule_pb2_grpc.FlexlbServiceStub(ops._channel(ops.master_target())).Cancel,
-                    request,
-                )
-            ]
+            calls = [("master", ops.schedule_pb2_grpc.FlexlbServiceStub(ops._channel(ops.master_target())).Cancel, request)]
             if response is not None and not response.enqueued_by_master:
                 stub = ops.pb2_grpc.RpcServiceStub(ops._channel(ops.prefill_addr(response)))
-                calls.append(
-                    (
-                        "worker",
-                        stub.Cancel,
-                        ops.pb2.CancelRequestPB(request_id=record["wire_request_id"]),
-                    )
-                )
+                calls.append(("worker", stub.Cancel, ops.pb2.CancelRequestPB(request_id=record["wire_request_id"])))
             outcomes = []
             try:
                 for owner, rpc, request in calls:
@@ -318,13 +252,7 @@ class RequestBatch(ClientRecords):
                     # this synchronous unary RPC. Completion is not business FINISHED.
                     response_pb = rpc(request, timeout=limit)
                     outcomes.append(
-                        dict(
-                            owner=owner,
-                            transport_status="OK",
-                            started_s=started,
-                            ended_s=self.ctx.clock(),
-                            response=str(response_pb),
-                        )
+                        dict(owner=owner, transport_status="OK", started_s=started, ended_s=self.ctx.clock(), response=str(response_pb))
                     )
             finally:
                 self.update(record, server_cancel=outcomes)

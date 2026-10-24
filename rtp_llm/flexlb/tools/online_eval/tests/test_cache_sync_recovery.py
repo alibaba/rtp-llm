@@ -113,9 +113,7 @@ def test_withdrawal_preserves_other_roles_and_atomic_restore(tmp_path):
 def test_refresh_override_is_explicit_and_heap_parameters_are_frozen():
     default = json.loads(render_env("single-nonbatch"))
     assert "cacheStatus" not in default["workerRegistry"]
-    rendered = json.loads(
-        render_env("single-nonbatch", ConfigOverride(cache_min_refresh_ms=2400, cache_max_refresh_ms=2400))
-    )
+    rendered = json.loads(render_env("single-nonbatch", ConfigOverride(cache_min_refresh_ms=2400, cache_max_refresh_ms=2400)))
     assert rendered["workerRegistry"]["cacheStatus"] == {"minRefreshIntervalMs": 2400, "maxRefreshIntervalMs": 2400}
     with pytest.raises(ValueError):
         render_env("single-nonbatch", ConfigOverride(cache_min_refresh_ms=4000, cache_max_refresh_ms=2400))
@@ -126,9 +124,7 @@ def test_refresh_override_is_explicit_and_heap_parameters_are_frozen():
 
 
 def test_status_poll_override_is_distinct_from_rpc_timeout_and_validated():
-    rendered = json.loads(
-        render_env("single-nonbatch", ConfigOverride(status_poll_interval_ms=125, status_rpc_ms=5000))
-    )
+    rendered = json.loads(render_env("single-nonbatch", ConfigOverride(status_poll_interval_ms=125, status_rpc_ms=5000)))
     health = rendered["workerRegistry"]["health"]
     assert health["statusPollIntervalMs"] == 125
     assert health["statusRpcTimeoutMs"] == 5000
@@ -183,9 +179,7 @@ def test_report_preserves_gc_events_and_shared_time_origin(tmp_path):
     import datetime
 
     epoch = datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%S.%f%z").timestamp()
-    (logs / "master_gc.log").write_text(
-        f"[{stamp}][2.0s][info][gc] GC(9) Pause Full (G1 Compaction Pause) 63G->20G(64G) 180.000ms\n"
-    )
+    (logs / "master_gc.log").write_text(f"[{stamp}][2.0s][info][gc] GC(9) Pause Full (G1 Compaction Pause) 63G->20G(64G) 180.000ms\n")
     raw = dict(
         parameters=config()["parameters"],
         environment={},
@@ -208,12 +202,7 @@ def test_report_preserves_gc_events_and_shared_time_origin(tmp_path):
     from cases.cache_sync_recovery.telemetry import gc_events
 
     raw.update(gc=gc_events(logs / "master_gc.log"), intervention=False)
-    freeze_gate(
-        instance,
-        "cache_stability",
-        raw,
-        dict(verdict="PASS", validity="VALID", checks=raw["checks"], validity_checks=[]),
-    )
+    freeze_gate(instance, "cache_stability", raw, dict(verdict="PASS", validity="VALID", checks=raw["checks"], validity_checks=[]))
     output = tmp_path / "report"
     report(instance, output, "example")
     specs = list(output.rglob("report-spec.json"))
@@ -234,9 +223,7 @@ def test_report_preserves_gc_events_and_shared_time_origin(tmp_path):
     compare([left, right], tmp_path / "comparison", alignment_event="cache_only_started")
     compared = json.loads((tmp_path / "comparison/reports/comparison/runs/report-spec.json").read_text())
     gc_overlay = [
-        p
-        for p in compared["panels"]
-        if p["id"].startswith("overlay:") and any(s["metric_id"] == "steady.age" for s in p["series"])
+        p for p in compared["panels"] if p["id"].startswith("overlay:") and any(s["metric_id"] == "steady.age" for s in p["series"])
     ]
     assert len(gc_overlay) == 1
     assert len(gc_overlay[0]["series"]) == 2
@@ -278,12 +265,7 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
         template = page["rows"][0]
         page["rows"] = []
         for engine in engines:
-            value = dict(
-                template,
-                worker_id=engine["role"] + ":" + engine["http_addr"],
-                address=engine["http_addr"],
-                role=engine["role"],
-            )
+            value = dict(template, worker_id=engine["role"] + ":" + engine["http_addr"], address=engine["http_addr"], role=engine["role"])
             value["poll_response_age_ms"] = 10001 if engine["http_addr"] == "h1" and len(snapshots) == 3 else 20
             page["rows"].append(value)
         page["coverage"]["returned_count"] = len(engines)
@@ -295,9 +277,7 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
 
     stub = SimpleNamespace(GetWorkerStatus=lambda request, timeout: SimpleNamespace(alive=True))
     ops = SimpleNamespace(
-        master_http_port=1,
-        pb2=SimpleNamespace(StatusVersionPB=lambda: None),
-        pb2_grpc=SimpleNamespace(RpcServiceStub=lambda channel: stub),
+        master_http_port=1, pb2=SimpleNamespace(StatusVersionPB=lambda: None), pb2_grpc=SimpleNamespace(RpcServiceStub=lambda channel: stub)
     )
     ctx = SimpleNamespace(
         ops=ops,
@@ -305,11 +285,7 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
         env_epoch=1,
         instance=dict(environment={}, source_path=str(tmp_path / "case.yaml")),
         env=SimpleNamespace(
-            spec=SimpleNamespace(n_prefill=3, n_decode=1),
-            discovery_file=discovery,
-            master_management_port=2,
-            master=None,
-            mock=None,
+            spec=SimpleNamespace(n_prefill=3, n_decode=1), discovery_file=discovery, master_management_port=2, master=None, mock=None
         ),
         clock=lambda: time[0],
         wall_clock=lambda: 100 + time[0],
@@ -317,10 +293,7 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
         record_event=lambda identity: dict(id=identity, epoch_s=100 + time[0]),
     )
     deadline = SimpleNamespace(
-        clock=lambda: time[0],
-        remaining=lambda: 100,
-        check=lambda: None,
-        sleep=lambda value: time.__setitem__(0, time[0] + value),
+        clock=lambda: time[0], remaining=lambda: 100, check=lambda: None, sleep=lambda value: time.__setitem__(0, time[0] + value)
     )
     monkeypatch.setattr(actions, "control_json", control)
     monkeypatch.setattr(actions.MasterDiagnosticsClient, "snapshot", capture)
@@ -337,11 +310,9 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
     assert evidence["affected_workers"] == ["h1"]
     assert evidence["healthy_violations"][0]["direct_alive"][0]["alive"] is True
     assert evidence["runtime_incomplete"] is True
-    reason = {
-        "timeout": "later snapshot unavailable",
-        "instance": "Master instance changed",
-        "partial": "incomplete Worker directory",
-    }[late_failure]
+    reason = {"timeout": "later snapshot unavailable", "instance": "Master instance changed", "partial": "incomplete Worker directory"}[
+        late_failure
+    ]
     assert reason in evidence["errors"][0]
 
 
@@ -375,11 +346,7 @@ def test_recovery_report_keeps_two_focused_panels_and_only_distinct_events():
     assert spec["panels"][0]["series"][0]["points"] == [dict(x=430, y=11)]
     assert spec["panels"][1]["series"][0]["points"] == [dict(x=430, y=427)]
     for panel in spec["panels"]:
-        assert [e["id"] for e in panel["events"]] == [
-            "measurement_started",
-            "partial_workers_withdrawn",
-            "partial_workers_restored",
-        ]
+        assert [e["id"] for e in panel["events"]] == ["measurement_started", "partial_workers_withdrawn", "partial_workers_restored"]
     assert spec["events"][0]["id"] == "cache_only_started"
 
 
@@ -480,9 +447,7 @@ def test_core_checks_and_validity_are_separate_without_weakening_recovery(recove
     evidence = pressure_evidence(recovery)
     result = analyze(evidence)
     assert result["verdict"] == "PASS" and result["validity"] == "VALID"
-    assert {c["id"] for c in result["checks"]} == __import__(
-        "cases.cache_sync_recovery.analysis", fromlist=["CHECK_IDS"]
-    ).CHECK_IDS
+    assert {c["id"] for c in result["checks"]} == __import__("cases.cache_sync_recovery.analysis", fromlist=["CHECK_IDS"]).CHECK_IDS
     evidence["cache_progress"]["converged"] = False
     assert analyze(evidence)["verdict"] == "FAIL"
     if recovery:
@@ -510,9 +475,7 @@ def test_invalid_measurement_cannot_become_valid_functional_pass(failure):
     assert result["verdict"] == result["validity"] == "INVALID"
     from cases.cache_sync_recovery.analysis import VALIDITY_CHECKS
 
-    assert all(
-        c["status"] == "PASS" for c in result["checks"] if c["id"] not in VALIDITY_CHECKS and c["status"] != "SKIP"
-    )
+    assert all(c["status"] == "PASS" for c in result["checks"] if c["id"] not in VALIDITY_CHECKS and c["status"] != "SKIP")
 
 
 @pytest.mark.parametrize("recovery", [False, True])
@@ -546,9 +509,7 @@ def test_shared_producer_and_automatic_report_render_frozen_gate(tmp_path, monke
     stored = MetricStore.read(tmp_path)
     assert stored.document["metrics"]["cache_stability/full_gc_pause_ms"][0]["points"] == [[15, 180]]
     # Delivery must not analyze, acquire telemetry, or parse mutable live logs.
-    monkeypatch.setattr(
-        "cases.cache_sync_recovery.analysis.analyze", lambda *a: pytest.fail("report re-adjudicated gate")
-    )
+    monkeypatch.setattr("cases.cache_sync_recovery.analysis.analyze", lambda *a: pytest.fail("report re-adjudicated gate"))
     run = payload()
     paths = write_views(tmp_path, run, ["cache_sync_recovery.yaml"])
     bundle = read_bundle(paths["cache_sync_recovery.yaml"].parent)

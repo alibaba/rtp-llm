@@ -48,12 +48,7 @@ class LiveClientEvents:
             if not isinstance(row, dict):
                 raise ValueError("invalid live client row")
             rid = row.get("rid")
-            if (
-                not isinstance(rid, str)
-                or not rid
-                or type(row.get("sequence")) is not int
-                or row.get("sequence") != self.sequence + 1
-            ):
+            if not isinstance(rid, str) or not rid or type(row.get("sequence")) is not int or row.get("sequence") != self.sequence + 1:
                 raise ValueError("live client identity or sequence gap")
             for field in ("send_start_epoch_ms", "recorded_epoch_ms"):
                 value = row.get(field)
@@ -80,10 +75,7 @@ class LiveClientEvents:
                     "scheduled",
                 }:
                     raise ValueError("live terminal is not a completed stream outcome")
-                if (
-                    row.get("route_path") not in {"master", "fallback", "failed"}
-                    or type(row.get("failover")) is not bool
-                ):
+                if row.get("route_path") not in {"master", "fallback", "failed"} or type(row.get("failover")) is not bool:
                     raise ValueError("live terminal lacks route evidence")
                 self.terminal[rid] = row
             else:

@@ -88,12 +88,7 @@ class ReportPresentationTest(unittest.TestCase):
         self.assertEqual("gate-hash", meta["evidence"]["gate"]["sha256"])
         self.assertEqual("FAIL", meta["identity"]["verdict"])
         page = render(
-            dict(
-                title="case",
-                run_meta=meta,
-                panels=[],
-                sections=[table("诊断", ["原始值"], [[{"raw": "<script>" * 100}]], opened=False)],
-            )
+            dict(title="case", run_meta=meta, panels=[], sections=[table("诊断", ["原始值"], [[{"raw": "<script>" * 100}]], opened=False)])
         )
         self.assertIn("&lt;script&gt;", page)
         self.assertIn('<details class="report-block attachment"><summary>诊断', page)

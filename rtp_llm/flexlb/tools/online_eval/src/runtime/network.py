@@ -59,12 +59,7 @@ def wait_for_port(host: str, port: int, timeout_s: float) -> bool:
     return False
 
 
-def wait_for(
-    predicate: Callable[[], bool],
-    timeout_s: float,
-    interval_s: float = 0.5,
-    desc: str = "condition",
-) -> bool:
+def wait_for(predicate: Callable[[], bool], timeout_s: float, interval_s: float = 0.5, desc: str = "condition") -> bool:
     """Poll *predicate* until it returns True or *timeout_s* elapses."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:

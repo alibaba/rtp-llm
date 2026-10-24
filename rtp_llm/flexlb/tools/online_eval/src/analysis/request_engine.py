@@ -8,10 +8,7 @@ def master_incarnation(history, target, started_ms, ended_ms):
     """Resolve only an attempt wholly inside one observed process generation."""
     if target is None or started_ms is None or ended_ms is None:
         return None
-    candidates = sorted(
-        (h for h in history if h["target"] == target),
-        key=lambda h: h["started_epoch_ms"],
-    )
+    candidates = sorted((h for h in history if h["target"] == target), key=lambda h: h["started_epoch_ms"])
     before = [h for h in candidates if h["started_epoch_ms"] <= started_ms]
     if not before or any(started_ms < h["started_epoch_ms"] <= ended_ms for h in candidates):
         return None
@@ -51,14 +48,7 @@ def join_evidence(payload, environments):
             key = (epoch, str(rid), attempt)
             if key in requests:
                 if requests[key]["original"] != row:
-                    issues.append(
-                        dict(
-                            env_epoch=epoch,
-                            request_id=rid,
-                            attempt=attempt,
-                            error="conflicting duplicate request evidence",
-                        )
-                    )
+                    issues.append(dict(env_epoch=epoch, request_id=rid, attempt=attempt, error="conflicting duplicate request evidence"))
                 requests[key]["resources"].append(resource["resource"])
                 continue
             issued = row.get("issued_s")
@@ -67,10 +57,7 @@ def join_evidence(payload, environments):
             phases = [
                 e
                 for e in payload["phases"]
-                if e["event"] == "start"
-                and str(e["env_epoch"]) == epoch
-                and issued is not None
-                and e["monotonic_s"] <= issued
+                if e["event"] == "start" and str(e["env_epoch"]) == epoch and issued is not None and e["monotonic_s"] <= issued
             ]
             engine_events = events.get((epoch, str(rid)), [])
             history = payload.get("master_incarnations", {}).get(epoch, [])
@@ -80,10 +67,7 @@ def join_evidence(payload, environments):
                     dict(
                         observed,
                         master_incarnation=master_incarnation(
-                            history,
-                            observed.get("master_target"),
-                            observed.get("started_epoch_ms"),
-                            observed.get("ended_epoch_ms"),
+                            history, observed.get("master_target"), observed.get("started_epoch_ms"), observed.get("ended_epoch_ms")
                         ),
                     )
                 )
@@ -113,9 +97,7 @@ def join_evidence(payload, environments):
                 batch_ids=sorted({str(e["batch_id"]) for e in engine_events if e.get("batch_id") is not None}),
                 engine_events=engine_events,
                 schedule_attempts=attempts,
-                engine_incarnations=sorted(
-                    {e["engine_incarnation"] for e in engine_events if e.get("engine_incarnation")}
-                ),
+                engine_incarnations=sorted({e["engine_incarnation"] for e in engine_events if e.get("engine_incarnation")}),
                 original=row,
                 resources=[resource["resource"]],
             )

@@ -117,13 +117,7 @@ def test_validation_command_works_from_other_directory(tmp_path):
     assert len(report["instances"]) == 4
     assert report["scope"] == "static_compilation"
     failed = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts/commands/validate_case.py"),
-            "--source",
-            str(tmp_path / "missing.yaml"),
-            "--json",
-        ],
+        [sys.executable, str(ROOT / "scripts/commands/validate_case.py"), "--source", str(tmp_path / "missing.yaml"), "--json"],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -136,13 +130,7 @@ def test_full_inventory_explains_metric_consumers_and_profile_contracts(tmp_path
     import os
 
     completed = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts/commands/validate_case.py"),
-            "--source",
-            str(ROOT / "config/scenarios"),
-            "--json",
-        ],
+        [sys.executable, str(ROOT / "scripts/commands/validate_case.py"), "--source", str(ROOT / "config/scenarios"), "--json"],
         cwd=tmp_path,
         env=dict(os.environ, FLEXLB_FT_WORKER_PORT_CAPACITY="2048"),
         capture_output=True,
@@ -163,9 +151,7 @@ def test_full_inventory_explains_metric_consumers_and_profile_contracts(tmp_path
 def test_metric_module_signatures_are_checked_without_execution(target):
     from types import SimpleNamespace
 
-    metrics = SimpleNamespace(
-        CONTRACTS={"metric": lambda a, b, c: {}}, project=lambda a, b, c: None, finalize=lambda a, b, c, d: {}
-    )
+    metrics = SimpleNamespace(CONTRACTS={"metric": lambda a, b, c: {}}, project=lambda a, b, c: None, finalize=lambda a, b, c, d: {})
     if target == "describe":
         metrics.CONTRACTS = {"metric": lambda a: {}}
     else:

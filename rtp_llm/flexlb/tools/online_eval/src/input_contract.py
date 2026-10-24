@@ -17,11 +17,7 @@ class FieldSetError(ValueError):
 
     def __init__(self, path, extra, missing):
         self.extra, self.missing = sorted(extra), sorted(missing)
-        message = (
-            f"{path}: unknown configuration fields {self.extra}"
-            if extra
-            else f"missing YAML parameter {path}.{self.missing[0]}"
-        )
+        message = f"{path}: unknown configuration fields {self.extra}" if extra else f"missing YAML parameter {path}.{self.missing[0]}"
         super().__init__(message)
 
 

@@ -59,12 +59,7 @@ class TrafficFidelityTest(unittest.TestCase):
             self.assertEqual(expected, index.observe(row), row)
             seen.append(row)
         self.assertEqual(
-            sorted(
-                Counter(
-                    r.block_labels[:8] for r in LineageExpander(LineageModel.from_wire(*decode(self.raw)))
-                ).values(),
-                reverse=True,
-            ),
+            sorted(Counter(r.block_labels[:8] for r in LineageExpander(LineageModel.from_wire(*decode(self.raw)))).values(), reverse=True),
             model_shape(LineageModel.from_wire(*decode(self.raw)))["families"],
         )
 
@@ -74,9 +69,7 @@ class TrafficFidelityTest(unittest.TestCase):
         a = list(iter_requests(p, "x"))
         self.assertEqual(a, list(iter_requests(p, "x")))
         other = replace(p, output_distribution=WeightedDistribution.read(dict(values=[77], weights=[1])))
-        self.assertEqual(
-            [r["input_token_blocks"] for r in a], [r["input_token_blocks"] for r in iter_requests(other, "x")]
-        )
+        self.assertEqual([r["input_token_blocks"] for r in a], [r["input_token_blocks"] for r in iter_requests(other, "x")])
         legacy = json.loads(json.dumps(self.profile))
         legacy.pop("schema_version")
         legacy["parameters"].pop("joint_distribution")
@@ -86,8 +79,7 @@ class TrafficFidelityTest(unittest.TestCase):
         high = replace(p, families=1, cold_fraction=0, shape=JointShape(((20, 20),), ()))
         low = replace(high, shape=JointShape(((20, 2),), ()))
         self.assertGreater(
-            sum(generated_shape(iter_requests(high, "x"))["shared"]),
-            sum(generated_shape(iter_requests(low, "x"))["shared"]),
+            sum(generated_shape(iter_requests(high, "x"))["shared"]), sum(generated_shape(iter_requests(low, "x"))["shared"])
         )
         with tempfile.TemporaryDirectory() as directory:
             from traffic.synthetic.generator import materialize
@@ -98,10 +90,7 @@ class TrafficFidelityTest(unittest.TestCase):
             with patch("traffic.synthetic.configuration.profile_path", return_value=profile):
                 for name in ("a", "b"):
                     materialize(
-                        root / (name + ".jsonl"),
-                        dict(kind="synthetic", model="realistic", version="1", parameters=args),
-                        "x",
-                        directory,
+                        root / (name + ".jsonl"), dict(kind="synthetic", model="realistic", version="1", parameters=args), "x", directory
                     )
                 self.assertEqual((root / "a.jsonl").read_bytes(), (root / "b.jsonl").read_bytes())
                 self.assertFalse((root / "fidelity.html").exists())
@@ -117,11 +106,7 @@ class TrafficFidelityTest(unittest.TestCase):
         self.assertLess(metrics["joint"]["joint_tv"], metrics["independent"]["joint_tv"] * 0.6)
 
     def test_invalid_overrides_and_cold_only(self):
-        for fields in (
-            dict(input_distribution=dict(values=[512], weights=[1])),
-            dict(shared_blocks=1),
-            dict(sampling="unknown"),
-        ):
+        for fields in (dict(input_distribution=dict(values=[512], weights=[1])), dict(shared_blocks=1), dict(sampling="unknown")):
             args = dict(seed=1, count=2, output_tokens=1, sampling="joint")
             args.update(fields)
             with self.assertRaises(ValueError):
@@ -173,17 +158,7 @@ class TrafficFidelityTest(unittest.TestCase):
 
             with redirect_stdout(StringIO()):
                 code = main(
-                    [
-                        "--profile",
-                        str(profile),
-                        "--captures",
-                        str(source),
-                        "--out",
-                        str(root / "report"),
-                        "--count",
-                        "20",
-                        "--check",
-                    ]
+                    ["--profile", str(profile), "--captures", str(source), "--out", str(root / "report"), "--count", "20", "--check"]
                 )
             self.assertEqual(2, code)
 

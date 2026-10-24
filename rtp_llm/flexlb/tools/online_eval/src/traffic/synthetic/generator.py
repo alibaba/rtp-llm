@@ -83,11 +83,7 @@ class StatisticalTrafficGenerator:
             cumulative.append((i + 1) ** -p.zipf_alpha + (cumulative[-1] if cumulative else 0))
         shape = p.shape
         allocator = LabelAllocator(shape.pinned_blocks if isinstance(shape, IndependentShape) else ())
-        sampler = (
-            IndependentSampler(shape, p, allocator)
-            if isinstance(shape, IndependentShape)
-            else JointSampler(shape, p, allocator)
-        )
+        sampler = IndependentSampler(shape, p, allocator) if isinstance(shape, IndependentShape) else JointSampler(shape, p, allocator)
         for i in range(min(p.count, max_requests) if max_requests is not None else p.count):
             cold = rng.random() < p.cold_fraction
             family = bisect.bisect_right(cumulative, rng.random() * cumulative[-1])
@@ -141,8 +137,6 @@ def materialize(path, specification, namespace, base_dir, *, max_requests=None):
         specification,
         namespace,
         base_dir,
-        lambda temporary: write_trace(
-            temporary, specification["parameters"], namespace, base_dir, max_requests=max_requests
-        ),
+        lambda temporary: write_trace(temporary, specification["parameters"], namespace, base_dir, max_requests=max_requests),
         max_requests=max_requests,
     )

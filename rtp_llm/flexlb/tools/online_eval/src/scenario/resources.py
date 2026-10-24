@@ -118,14 +118,7 @@ class ResourceScope:
                 error = f"{type(exc).__name__}: {exc}"
                 if retain_failed:
                     retry.append(action)
-            results.append(
-                {
-                    "id": name,
-                    "status": status,
-                    "error": error,
-                    "duration_ms": int((self.clock() - started) * 1000),
-                }
-            )
+            results.append({"id": name, "status": status, "error": error, "duration_ms": int((self.clock() - started) * 1000)})
         # A failed intermediate teardown must remain reachable by the final
         # separately budgeted cleanup; do not retry it in this same loop.
         self._cleanup.extend(reversed(retry))

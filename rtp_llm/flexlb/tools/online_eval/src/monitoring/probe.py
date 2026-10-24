@@ -50,17 +50,10 @@ class PrometheusEvidence:
             if self.error is not None:
                 raise RuntimeError("probe failed") from self.error
             try:
-                families = {
-                    field: GaugeMetricFamily(name, "Observed " + field, labels=[self.label])
-                    for field, name in self.names.items()
-                }
+                families = {field: GaugeMetricFamily(name, "Observed " + field, labels=[self.label]) for field, name in self.names.items()}
                 for name, read in self.adapters.items():
                     row = read(timeout=self.timeout_s)
-                    if (
-                        not isinstance(row, dict)
-                        or row.get(self.label) != name
-                        or set(row) - {self.label} - set(self.fields)
-                    ):
+                    if not isinstance(row, dict) or row.get(self.label) != name or set(row) - {self.label} - set(self.fields):
                         raise ValueError("probe adapter returned invalid fields or identity")
                     self.budget.append(dict(row, epoch_s=time.time()))
                     for field, value in row.items():
@@ -168,9 +161,7 @@ class PrometheusEvidence:
                         number = float(value)
                         if not math.isfinite(number):
                             raise ValueError("non-finite probe archive")
-                        row = samples.setdefault(
-                            (timestamp, identity), dict(epoch_s=timestamp, **{self.label: identity})
-                        )
+                        row = samples.setdefault((timestamp, identity), dict(epoch_s=timestamp, **{self.label: identity}))
                         if field in row and row[field] != number:
                             raise ValueError("conflicting probe samples")
                         row[field] = number

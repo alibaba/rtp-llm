@@ -3,12 +3,8 @@
 from analysis.checks import CheckResult, evaluate, invalid_check
 from analysis.gates import gate_result
 
-VALIDITY_CHECKS = frozenset(
-    {"actual_sync_intensity", "response_shape", "clock_input_intensity", "sampling_complete", "client_complete"}
-)
-CHECK_IDS = (
-    frozenset({"healthy_survivors", "victims_withdrawn", "victims_rebuilt", "cache_converged"}) | VALIDITY_CHECKS
-)
+VALIDITY_CHECKS = frozenset({"actual_sync_intensity", "response_shape", "clock_input_intensity", "sampling_complete", "client_complete"})
+CHECK_IDS = frozenset({"healthy_survivors", "victims_withdrawn", "victims_rebuilt", "cache_converged"}) | VALIDITY_CHECKS
 
 
 def analyze(evidence):
@@ -61,11 +57,8 @@ def analyze(evidence):
                 checks.append(evaluate(identity, len(evidence[field]), "eq", len(evidence["victims"])))
         else:
             checks += [
-                CheckResult(id=k, status="SKIP", detail="steady has no withdrawal event")
-                for k in ("victims_withdrawn", "victims_rebuilt")
+                CheckResult(id=k, status="SKIP", detail="steady has no withdrawal event") for k in ("victims_withdrawn", "victims_rebuilt")
             ]
     present = {c.id for c in checks}
-    checks += [
-        CheckResult(id=key, status="SKIP", detail="observation interrupted") for key in sorted(CHECK_IDS - present)
-    ]
+    checks += [CheckResult(id=key, status="SKIP", detail="observation interrupted") for key in sorted(CHECK_IDS - present)]
     return dict(gate_result(checks, requirements=VALIDITY_CHECKS), errors=errors)

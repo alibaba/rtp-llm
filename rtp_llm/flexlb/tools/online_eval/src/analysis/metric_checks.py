@@ -31,9 +31,7 @@ def check_metric(
     from monitoring.contracts import MetricUnavailable
 
     validate_comparison(op, expected)
-    selection = dict(
-        labels=labels, start=start, end=end, source=source, epoch=epoch, min_samples=min_samples, max_gap_s=max_gap_s
-    )
+    selection = dict(labels=labels, start=start, end=end, source=source, epoch=epoch, min_samples=min_samples, max_gap_s=max_gap_s)
     provenance = dict(evidence or {}, metric=metric_id, selection=selection, reduction=reduction)
     try:
         snapshot = store.reduce_with_evidence(metric_id, op=reduction, **selection)

@@ -51,9 +51,7 @@ def test_policy_hook_cannot_consume_budget_and_still_start_operation(tmp_path):
     ctx = RuntimeContext(compiled, backend, tmp_path, clock, clock.sleep, False)
     ctx.plan = CompiledInstance.read(compiled)
     policy = SimpleNamespace(
-        attach=lambda ctx: None,
-        before_stage=lambda ctx, spec: clock.sleep(100000),
-        after_stage=lambda ctx, spec, row: None,
+        attach=lambda ctx: None, before_stage=lambda ctx, spec: clock.sleep(100000), after_stage=lambda ctx, spec, row: None
     )
     summary = StageExecutor().run(ctx, {}, clock(), clock() + 1000, None, policy)
     assert summary.status == "TIMEOUT"

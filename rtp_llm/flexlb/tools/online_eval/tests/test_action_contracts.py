@@ -36,10 +36,7 @@ class ActionContractsTest(unittest.TestCase):
         document = configure_program(load_document(path), str(path))
         document = replace(document, id="master_performance")
         variant = document.variants[0]
-        variant = replace(
-            variant,
-            stages=(variant.stages[0], replace(variant.stages[1], action="performance_finish"), *variant.stages[2:]),
-        )
+        variant = replace(variant, stages=(variant.stages[0], replace(variant.stages[1], action="performance_finish"), *variant.stages[2:]))
         document = replace(document, variants=(variant,))
         with self.assertRaisesRegex(ScenarioError, "belongs to cases.*master_performance"):
             compile_scenarios([(str(path), document)], handlers=handlers())
@@ -49,10 +46,7 @@ class ActionContractsTest(unittest.TestCase):
         with patch.object(
             registry,
             "_snapshot",
-            snapshot(
-                entry("master_performance", replace(master_performance.CASE, actions=(duplicate,))),
-                include_existing=True,
-            ),
+            snapshot(entry("master_performance", replace(master_performance.CASE, actions=(duplicate,))), include_existing=True),
         ):
             with self.assertRaisesRegex(ValueError, "duplicate action"):
                 handlers("master_performance")
@@ -86,21 +80,15 @@ class ActionContractsTest(unittest.TestCase):
         self.assertEqual([1], source["required"]["nested"])
 
     def test_shared_implementation_requires_each_program_to_declare_it(self):
-        with patch.object(
-            registry, "_snapshot", snapshot(entry("second_performance", master_performance.CASE), include_existing=True)
-        ):
+        with patch.object(registry, "_snapshot", snapshot(entry("second_performance", master_performance.CASE), include_existing=True)):
             catalog = handlers()
-            self.assertEqual(
-                frozenset({"master_performance", "second_performance"}),
-                catalog["performance_finish"].owners,
-            )
+            self.assertEqual(frozenset({"master_performance", "second_performance"}), catalog["performance_finish"].owners)
         descriptor = master_performance.ACTION_HANDLERS[0]
         with patch.object(
             registry,
             "_snapshot",
             snapshot(
-                entry("master_performance", replace(master_performance.CASE, actions=(descriptor, descriptor))),
-                include_existing=True,
+                entry("master_performance", replace(master_performance.CASE, actions=(descriptor, descriptor))), include_existing=True
             ),
         ):
             with self.assertRaisesRegex(ValueError, "duplicate action"):

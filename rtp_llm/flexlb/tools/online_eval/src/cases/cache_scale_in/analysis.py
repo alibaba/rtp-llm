@@ -6,11 +6,7 @@ from bisect import bisect_right
 from analysis.statistics import counter_delta, select_window
 from cases.cache_scale_in.constants import SHARED_WARMUP_AFFINITY_MS
 
-COUNTERS = (
-    "hit_tokens_total",
-    "context_tokens_total",
-    "context_requests_total",
-)
+COUNTERS = ("hit_tokens_total", "context_tokens_total", "context_requests_total")
 
 
 MEASUREMENT_POLICY = "survivor-cache-with-attributed-client-load"
@@ -63,9 +59,7 @@ def attribute_client(evidence, snapshot):
             address = engine.get("grpc_addr")
             if address:
                 addresses.setdefault(address, set()).add(name)
-    cohorts = {
-        group: {kind: [] for kind in ("sent", "terminal", "failed")} for group in ("survivor", "removed", "unknown")
-    }
+    cohorts = {group: {kind: [] for kind in ("sent", "terminal", "failed")} for group in ("survivor", "removed", "unknown")}
     failures, invalid, before_removal = [], [], []
     withdrawal = min(
         (
@@ -75,19 +69,11 @@ def attribute_client(evidence, snapshot):
         ),
         default=None,
     )
-    closed_at = {
-        r.get("engine"): r.get("admission", {}).get("admission_closed_epoch_ms") for r in evidence.get("removals", [])
-    }
+    closed_at = {r.get("engine"): r.get("admission", {}).get("admission_closed_epoch_ms") for r in evidence.get("removals", [])}
     for record in snapshot.get("records", []):
         names = addresses.get(record.get("prefill"), set())
         name = next(iter(names)) if len(names) == 1 else None
-        group = (
-            "survivor"
-            if name in evidence["survivors"]
-            else "removed"
-            if name in evidence["initial_engines"]
-            else "unknown"
-        )
+        group = "survivor" if name in evidence["survivors"] else "removed" if name in evidence["initial_engines"] else "unknown"
         start, duration = record.get("send_start_epoch_ms"), record.get("total_ms")
         if any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in (start, duration)):
             invalid.append(record.get("rid"))
@@ -100,10 +86,7 @@ def attribute_client(evidence, snapshot):
             if group == "removed" and (cutoff is None or start + duration < cutoff):
                 before_removal.append(record.get("rid"))
             failures.append(
-                {
-                    key: record.get(key)
-                    for key in ("rid", "request_id", "prefill", "status", "error", "send_start_epoch_ms", "total_ms")
-                }
+                {key: record.get(key) for key in ("rid", "request_id", "prefill", "status", "error", "send_start_epoch_ms", "total_ms")}
                 | {"cohort": group}
             )
     for counts in cohorts.values():
@@ -111,8 +94,7 @@ def attribute_client(evidence, snapshot):
             times.sort()
     for row in evidence["samples"]:
         row["client_cohorts"] = {
-            group: {kind: bisect_right(times, row["epoch_s"] * 1000) for kind, times in counts.items()}
-            for group, counts in cohorts.items()
+            group: {kind: bisect_right(times, row["epoch_s"] * 1000) for kind, times in counts.items()} for group, counts in cohorts.items()
         }
         row.setdefault("journal_observed_terminal", row["terminal"])
         row["terminal"] = sum(c["terminal"] for c in row["client_cohorts"].values())
@@ -156,9 +138,7 @@ def scope_contract(evidence):
             source="client terminal journal",
             calculation="global terminal delta; diagnostic, not successful prefill QPS",
         ),
-        client_pacing=dict(
-            scope="aggregate-with-attribution", source="issued pacing_lag_ms", calculation="global maximum"
-        ),
+        client_pacing=dict(scope="aggregate-with-attribution", source="issued pacing_lag_ms", calculation="global maximum"),
         accounting="issued sends establish offered load; terminal outcomes and request failures are diagnostic only",
         drain="diagnostic only; no verdict contribution",
     )
@@ -198,10 +178,7 @@ def window(rows, start, end, names, max_gap_s):
     if all("client_cohorts" in r for r in selected):
         result["client_cohorts"] = {
             group: {
-                kind + "_qps": (
-                    selected[-1]["client_cohorts"][group][kind] - selected[0]["client_cohorts"][group][kind]
-                )
-                / elapsed
+                kind + "_qps": (selected[-1]["client_cohorts"][group][kind] - selected[0]["client_cohorts"][group][kind]) / elapsed
                 for kind in ("sent", "terminal", "failed")
             }
             for group in ("survivor", "removed", "unknown")
@@ -210,10 +187,7 @@ def window(rows, start, end, names, max_gap_s):
     evictions = 0
     for name in names:
         values = [r["engines"].get(name) for r in selected]
-        if (
-            any(v is None for v in values)
-            or len({(v.get("grpc_addr"), v.get("engine_incarnation")) for v in values}) != 1
-        ):
+        if any(v is None for v in values) or len({(v.get("grpc_addr"), v.get("engine_incarnation")) for v in values}) != 1:
             result["errors"].append("missing or changed engine " + name)
             continue
         for field in COUNTERS:
@@ -249,11 +223,7 @@ def window(rows, start, end, names, max_gap_s):
             result["errors"].append("hit tokens exceed context tokens")
         else:
             result["hit"] = hits / tokens if tokens else None
-        result.update(
-            completed=totals["context_requests_total"],
-            context_tokens=tokens,
-            evictions=evictions,
-        )
+        result.update(completed=totals["context_requests_total"], context_tokens=tokens, evictions=evictions)
         for field in ("waiting", "running"):
             if all(all(type(r["engines"][n].get(field)) in (int, float) for n in names) for r in selected):
                 result[field] = max(sum(r["engines"][n][field] for n in names) for r in selected)
@@ -284,13 +254,7 @@ def analyze(evidence):
     scoped = evidence.get("measurement_policy") == MEASUREMENT_POLICY
     if any(b["t"] <= a["t"] for a, b in zip(rows, rows[1:])):
         errors.append("sample clock must increase")
-    baseline = window(
-        rows,
-        evidence["baseline_start"],
-        evidence["baseline_end"],
-        evidence["initial_engines"],
-        p["max_gap_s"],
-    )
+    baseline = window(rows, evidence["baseline_start"], evidence["baseline_end"], evidence["initial_engines"], p["max_gap_s"])
     errors.extend(baseline["errors"])
     if baseline["hit"] is None or baseline["hit"] < p["baseline_min_hit"]:
         errors.append("baseline not warm")
@@ -334,13 +298,7 @@ def analyze(evidence):
             if first_collapse is not None and w["valid"] and recovery is None:
                 recovery = w["end"]
             run, previous_end = 0, None
-    observed = (
-        "unknown"
-        if not windows or any(not w["valid"] for w in windows)
-        else "collapse"
-        if first_collapse is not None
-        else "stable"
-    )
+    observed = "unknown" if not windows or any(not w["valid"] for w in windows) else "collapse" if first_collapse is not None else "stable"
     from analysis.checks import evaluate
     from analysis.gates import gate_result
 
@@ -352,7 +310,7 @@ def analyze(evidence):
                 "eq",
                 int(expected == "collapse"),
                 evidence=dict(op="eq", threshold=threshold, sustain_s=p["sustain_s"], first_collapse_s=first_collapse),
-            ),
+            )
         ],
         sorted(set(errors)),
     )
@@ -374,9 +332,7 @@ def analyze(evidence):
     return dict(
         cache_scale_in_analysis_schema_version=4,
         gate_metrics=gate_metrics,
-        measurement_scope=scope_contract(evidence)
-        if scoped
-        else {"policy": "historical-detach-window", "drain": "diagnostic only"},
+        measurement_scope=scope_contract(evidence) if scoped else {"policy": "historical-detach-window", "drain": "diagnostic only"},
         drain_diagnostics=[
             dict(index=i, code="DRAIN_INCOMPLETE", remaining_work=row.get("remaining_work"))
             for i, row in enumerate(evidence.get("removals", []))

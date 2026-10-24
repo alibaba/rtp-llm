@@ -78,14 +78,7 @@ class GatePolicyTest(unittest.TestCase):
         rows = [{"status": "ok"}, {"status": "error"}]
         ctx = SimpleNamespace(env_epoch=1, instance={"profile": "batch-window"}, resource=lambda *args: rows)
         deadline = SimpleNamespace(check=lambda: None)
-        params = dict(
-            rows="rows",
-            metric="ha_gate/non_ok_count",
-            op="eq",
-            expected=0,
-            min_samples=2,
-            warning_profiles=["batch-window"],
-        )
+        params = dict(rows="rows", metric="ha_gate/non_ok_count", op="eq", expected=0, min_samples=2, warning_profiles=["batch-window"])
         check = _client_check(ctx, params, deadline).checks[0]
         self.assertEqual((check.status, check.actual, check.expected), ("WARNING", 1, 0))
         self.assertEqual(_client_check(ctx, {**params, "min_samples": 3}, deadline).checks[0].status, "ERROR")

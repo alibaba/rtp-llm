@@ -76,9 +76,7 @@ def test_failed_start_preserves_primary_error_when_sampler_cleanup_also_fails():
     sampler.stop.side_effect = RuntimeError("sampler stop failed")
     java = Mock()
     java.run_async.side_effect = OSError("Java start failed")
-    client = client_resource(
-        state_sampler=sampler, _client=java, _overrides={}, out_dir="/unused", log_file="/unused/log", name="fixture"
-    )
+    client = client_resource(state_sampler=sampler, _client=java, _overrides={}, out_dir="/unused", log_file="/unused/log", name="fixture")
     with pytest.raises(OSError, match="Java start failed") as error:
         client.start()
     assert str(error.value.__cause__) == "sampler stop failed"

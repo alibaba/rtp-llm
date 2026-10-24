@@ -66,10 +66,7 @@ class ErrorTrailerTest(unittest.TestCase):
                 self.assertEqual(record["stream"]["status"], transport)
                 self.assertEqual(record["stream"]["trailer_error_code"], 8430)
                 self.assertIsNone(record["business_error_code"])
-                self.assertEqual(
-                    base64.b64decode(record["stream"]["error_trailer"]["values"][0]["base64"]),
-                    raw,
-                )
+                self.assertEqual(base64.b64decode(record["stream"]["error_trailer"]["values"][0]["base64"]), raw)
 
     def test_bad_or_missing_evidence_never_becomes_zero(self):
         samples = [
@@ -78,10 +75,7 @@ class ErrorTrailerTest(unittest.TestCase):
             (trailer("not bytes"), "invalid_value"),
             (trailer(b"\x08"), "parse_error"),
             (trailer(b"\x18\x01"), "missing_error_code"),
-            (
-                trailer(DETAILS(error_message="only text").SerializeToString()),
-                "missing_error_code",
-            ),
+            (trailer(DETAILS(error_message="only text").SerializeToString()), "missing_error_code"),
             (trailer(b"a" * 65537), "invalid_value"),
             (trailer(b"\x08\x02") * 2, "ambiguous"),
         ]

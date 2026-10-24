@@ -37,10 +37,7 @@ def _core_action(action, ctx, params, deadline):
 
         actual = ctx.resolve(params.actual.to_dict())
         result = evaluate("comparison", actual, params.op, params.expected)
-        return StageOutput(
-            {"passed": result.status == "PASS"},
-            [result],
-        )
+        return StageOutput({"passed": result.status == "PASS"}, [result])
     if action == "teardown":
         results = ctx.cleanup(deadline.remaining(), retain_failed=True)
         if any(row["status"] != "PASS" for row in results):
@@ -56,12 +53,7 @@ def _validate_output(ctx, result, expected, check_ids):
         raise ValueError("adapter output fields do not match declared schema")
     for key, kind in expected.items():
         value = result.output[key]
-        primitive = {
-            "boolean": (bool,),
-            "integer": (int,),
-            "number": (int, float),
-            "string": (str,),
-        }.get(kind)
+        primitive = {"boolean": (bool,), "integer": (int,), "number": (int, float), "string": (str,)}.get(kind)
         if kind == "nullable_number":
             import math
 
@@ -140,9 +132,7 @@ class StageExecutor:
                             if row.status != StageStatus.ERROR:
                                 row.status = StageStatus.FAIL
                                 terminal_status = "FAIL"
-                                blocked = blocked or not (
-                                    _policy is not None and _policy.continue_after_failure(spec.to_dict())
-                                )
+                                blocked = blocked or not (_policy is not None and _policy.continue_after_failure(spec.to_dict()))
                     if _policy is not None:
                         with interruptible(deadline, enforce_deadlines):
                             _policy.after_stage(ctx, spec.to_dict(), row.to_dict())
@@ -171,6 +161,4 @@ class StageExecutor:
                 terminal_status = "FINDING-CONFIRMED"
             elif finding_passes:
                 terminal_status = "FINDING-RESOLVED"
-        return StageExecutionSummary(
-            tuple(rows), terminal_status, primary_error, tuple(finding_failures), tuple(finding_passes), cleanup
-        )
+        return StageExecutionSummary(tuple(rows), terminal_status, primary_error, tuple(finding_failures), tuple(finding_passes), cleanup)

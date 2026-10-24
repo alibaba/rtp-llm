@@ -21,14 +21,10 @@ def test_bound_monitoring_and_reports_do_not_reenter_registry(monkeypatch):
     monkeypatch.setattr(registry, "registry", forbidden)
     plan = loader("master_ha_failover.yaml")
     assert selected_sources(plan, current.sources)["master_inflight"]["fields"]
-    presentation = view(
-        "master_ha_failover.yaml", capability=current.views["master_ha_failover.yaml"], plan_loader=loader
-    )
+    presentation = view("master_ha_failover.yaml", capability=current.views["master_ha_failover.yaml"], plan_loader=loader)
     plotted = {style.metric_id for style in presentation.charts.curves.values()}
     identity, definition = next(
-        (identity, spec)
-        for identity, spec in plan["produced"].items()
-        if spec["value_kind"] == "scalar" and identity not in plotted
+        (identity, spec) for identity, spec in plan["produced"].items() if spec["value_kind"] == "scalar" and identity not in plotted
     )
     assert metric_classification(identity, definition, presentation) == "GATE_EVIDENCE"
 

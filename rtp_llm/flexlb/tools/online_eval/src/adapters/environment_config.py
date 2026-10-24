@@ -22,9 +22,7 @@ DEFAULT_DECODE_CACHE_BLOCKS = 3000
 
 DEFAULT_MASTER_HTTP_PORT = int(os.environ.get("FLEXLB_FT_MASTER_HTTP_PORT", "18080"))
 
-DEFAULT_MASTER_MANAGEMENT_PORT = int(
-    os.environ.get("FLEXLB_FT_MASTER_MANAGEMENT_PORT", str(DEFAULT_MASTER_HTTP_PORT + 1))
-)
+DEFAULT_MASTER_MANAGEMENT_PORT = int(os.environ.get("FLEXLB_FT_MASTER_MANAGEMENT_PORT", str(DEFAULT_MASTER_HTTP_PORT + 1)))
 
 MASTER_PORT_STRIDE = 10
 
@@ -171,9 +169,7 @@ class EnvSpec:
 
     def __post_init__(self):
         if self.master_profile == "none" and self.raw_config is None:
-            raise ValueError(
-                "master_profile='none' disables Master; raw_config is required for mock scheduler configuration"
-            )
+            raise ValueError("master_profile='none' disables Master; raw_config is required for mock scheduler configuration")
 
     def fingerprint(self) -> str:
         result = _fingerprint_value(self)

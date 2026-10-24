@@ -30,12 +30,7 @@ class MasterConfigContractTest(unittest.TestCase):
             "inflightMultiplier",
         ):
             self.assertNotIn(field, config["dispatcher"])
-        for key in (
-            "kvReservation",
-            "decayPerToken",
-            "loadDecayPerRequest",
-            "outlierRejection",
-        ):
+        for key in ("kvReservation", "decayPerToken", "loadDecayPerRequest", "outlierRejection"):
             self.assertNotIn(key, config["router"]["roles"]["decode"])
 
     def test_shipped_master_uses_complete_v3_contract(self):
@@ -62,10 +57,7 @@ class MasterConfigContractTest(unittest.TestCase):
                     )
                     self.assert_v3(config)
                     self.assertEqual(9876, config["requestLifecycle"]["request"]["timeoutMs"])
-                    self.assertEqual(
-                        {"type": dispatcher.upper(), "maxInflightPerPrefillWorker": 7},
-                        config["dispatcher"],
-                    )
+                    self.assertEqual({"type": dispatcher.upper(), "maxInflightPerPrefillWorker": 7}, config["dispatcher"])
                     if decision == "single":
                         self.assertEqual({"type": "SINGLE"}, config["scheduler"]["decision"])
 
@@ -73,17 +65,7 @@ class MasterConfigContractTest(unittest.TestCase):
         for dispatcher in ("batch", "non_batch"):
             config = json.loads(build_flexlb_config(dispatcher=dispatcher))
             self.assertEqual(2, config["dispatcher"]["maxInflightPerPrefillWorker"])
-            for value in (
-                None,
-                0,
-                -1,
-                1.5,
-                True,
-                "2",
-                float("inf"),
-                float("nan"),
-                2_147_483_648,
-            ):
+            for value in (None, 0, -1, 1.5, True, "2", float("inf"), float("nan"), 2_147_483_648):
                 with self.assertRaises(ValueError):
                     build_flexlb_config(dispatcher=dispatcher, max_inflight_per_prefill_worker=value)
 
@@ -105,52 +87,26 @@ class MasterConfigContractTest(unittest.TestCase):
 
     def test_master_environment_contains_config_documents_and_role_hosts(self):
         with TemporaryDirectory() as tmp:
-            spec = EnvSpec(
-                discovery="domain",
-                domain_addrs={
-                    "prefill": "10.0.0.1:8000,10.0.0.2:8000",
-                    "decode": "10.0.0.3:9000",
-                },
-            )
+            spec = EnvSpec(discovery="domain", domain_addrs={"prefill": "10.0.0.1:8000,10.0.0.2:8000", "decode": "10.0.0.3:9000"})
             env = SimpleNamespace(spec=spec, run_dir=Path(tmp), zk_connect_string="127.0.0.1:2181")
             manager = EnvManager(Path(tmp), verbose=False)
             result = manager.master_lifecycle.master_environment(env)
             self.assertTrue({"FLEXLB_CONFIG", "MODEL_SERVICE_CONFIG"} <= set(result))
             model = json.loads(result["MODEL_SERVICE_CONFIG"])
-            self.assertEqual(
-                ["10.0.0.1:8000", "10.0.0.2:8000"],
-                model["hosts"]["mock.prefill.hosts.address"],
-            )
+            self.assertEqual(["10.0.0.1:8000", "10.0.0.2:8000"], model["hosts"]["mock.prefill.hosts.address"])
             self.assertEqual(["10.0.0.3:9000"], model["hosts"]["mock.decode.hosts.address"])
             from adapters.zookeeper_config import ZooKeeperConfig
 
             spec.zk_consistency = ZooKeeperConfig()
             result = manager.master_lifecycle.master_environment(env, MasterSpec(name="A", http_port=18080))
-            self.assertEqual(
-                {"needConsistency", "zookeeperConfig"},
-                set(json.loads(result["FLEXLB_SYNC_CONSISTENCY_CONFIG"])),
-            )
+            self.assertEqual({"needConsistency", "zookeeperConfig"}, set(json.loads(result["FLEXLB_SYNC_CONSISTENCY_CONFIG"])))
 
     def test_preemption_schema_contains_only_implemented_decode_stages(self):
-        for stages in (
-            ["DECODE_RESERVED"],
-            ["DECODE_ENGINE_OWNED"],
-            ["DECODE_RESERVED", "DECODE_ENGINE_OWNED"],
-        ):
+        for stages in (["DECODE_RESERVED"], ["DECODE_ENGINE_OWNED"], ["DECODE_RESERVED", "DECODE_ENGINE_OWNED"]):
             config = json.loads(build_flexlb_config(ordering="priority", preemption={"allowed_victim_stages": stages}))
-            self.assertEqual(
-                stages,
-                config["scheduler"]["ordering"]["preemption"]["allowedVictimStages"],
-            )
+            self.assertEqual(stages, config["scheduler"]["ordering"]["preemption"]["allowedVictimStages"])
         for stages in (["PREFILL_QUEUED"], ["DECODE_RESERVED", "PREFILL_QUEUED"]):
-            self.assert_v3(
-                json.loads(
-                    build_flexlb_config(
-                        ordering="priority",
-                        preemption={"allowed_victim_stages": stages},
-                    )
-                )
-            )
+            self.assert_v3(json.loads(build_flexlb_config(ordering="priority", preemption={"allowed_victim_stages": stages})))
 
 
 if __name__ == "__main__":

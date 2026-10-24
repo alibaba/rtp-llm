@@ -82,11 +82,7 @@ def _archive(root, values):
                         if index:
                             compressed.write(b",")
                         compressed.write(json.dumps(key, ensure_ascii=False).encode("utf-8") + b":")
-                        compressed.write(
-                            json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode(
-                                "utf-8"
-                            )
-                        )
+                        compressed.write(json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"))
                     compressed.write(b"}")
                 compressed.write(b"}}")
             raw.flush()

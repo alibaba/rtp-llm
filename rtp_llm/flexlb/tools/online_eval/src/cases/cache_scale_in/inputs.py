@@ -18,9 +18,7 @@ PROCEDURE_INPUTS = {
     "startup_timeout_s": NONNEGATIVE,
 }
 OBSERVATION_INPUTS = dict.fromkeys(("warmup_timeout_s", "sample_s", "window_s", "step_s", "max_gap_s"), NONNEGATIVE)
-PROCEDURE_CRITERIA = {
-    name: rule for name, rule in PROCEDURE_INPUTS.items() if name not in {"analysis_timeout_s", "startup_timeout_s"}
-}
+PROCEDURE_CRITERIA = {name: rule for name, rule in PROCEDURE_INPUTS.items() if name not in {"analysis_timeout_s", "startup_timeout_s"}}
 COLLAPSE_INPUTS = dict.fromkeys(("absolute_min_hit", "max_drop", "sustain_s"), NONNEGATIVE)
 
 
@@ -68,18 +66,10 @@ from scenario.check_inputs import CheckSet, CheckSpec
 CHECKS = CheckSet(
     "cache_gate",
     {
-        "offered_load": CheckSpec(
-            "qps_tolerance", "offered_qps_deviation", "le", "ratio", ("baseline", "post"), number=FRACTION
-        ),
-        "baseline_hit": CheckSpec(
-            "baseline_min_hit", "baseline_min_half_hit", "ge", "ratio", ("baseline",), number=FRACTION
-        ),
-        "baseline_stability": CheckSpec(
-            "baseline_max_spread", "baseline_half_spread", "le", "ratio", ("baseline",), number=FRACTION
-        ),
-        "completed": CheckSpec(
-            "min_completed", "min_window_completed", "ge", "requests", ("baseline", "post"), number=COUNT
-        ),
+        "offered_load": CheckSpec("qps_tolerance", "offered_qps_deviation", "le", "ratio", ("baseline", "post"), number=FRACTION),
+        "baseline_hit": CheckSpec("baseline_min_hit", "baseline_min_half_hit", "ge", "ratio", ("baseline",), number=FRACTION),
+        "baseline_stability": CheckSpec("baseline_max_spread", "baseline_half_spread", "le", "ratio", ("baseline",), number=FRACTION),
+        "completed": CheckSpec("min_completed", "min_window_completed", "ge", "requests", ("baseline", "post"), number=COUNT),
     },
 )
 RULES = CHECKS.rules
@@ -122,13 +112,7 @@ def observation_contract(data):
     from runtime.observation import capture_limits
     from scenario.windows import anchored_windows
 
-    windows = anchored_windows(
-        data["windows"],
-        {
-            "baseline": "baseline_ready",
-            "post": "target_topology_observed",
-        },
-    )
+    windows = anchored_windows(data["windows"], {"baseline": "baseline_ready", "post": "target_topology_observed"})
     base, post = windows["baseline"], windows["post"]
     if base["until"] != 0 or base["from"] >= 0 or post["from"] != 0:
         raise ValueError("cache windows must end at baseline readiness and start at target readiness")
@@ -165,13 +149,7 @@ def validate_criteria(params, plan):
             raise ValueError(k + " must be a positive integer")
     if not 1 <= p["target_p"] < plan.env.n_prefill <= 512:
         raise ValueError("scale-in requires fewer target P and at most 512 initial P")
-    for k in (
-        "qps_tolerance",
-        "baseline_min_hit",
-        "baseline_max_spread",
-        "absolute_min_hit",
-        "max_drop",
-    ):
+    for k in ("qps_tolerance", "baseline_min_hit", "baseline_max_spread", "absolute_min_hit", "max_drop"):
         if p[k] > 1:
             raise ValueError(k + " must be a fraction")
     if not 0 < p["sample_s"] <= p["step_s"] <= p["window_s"] <= p["baseline_s"] / 2:
@@ -208,10 +186,7 @@ INPUTS = InputSchema(
         "observation": {
             **OBSERVATION_INPUTS,
             "inputs": None,
-            "windows": {
-                name: {boundary: {"offset_s": OFFSET} for boundary in ("from", "until")}
-                for name in ("baseline", "post")
-            },
+            "windows": {name: {boundary: {"offset_s": OFFSET} for boundary in ("from", "until")} for name in ("baseline", "post")},
             "capture": section_fields("observation", {"capture"}, CAPTURE_NUMBERS)["capture"],
         },
         "analysis": {"collapse": COLLAPSE_INPUTS},

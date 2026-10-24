@@ -67,11 +67,7 @@ class RunOutcome:
     @classmethod
     def evaluate(cls, evidence: OutcomeEvidence):
         execution = (
-            "TIMEOUT"
-            if "TIMEOUT" in evidence.error_statuses
-            else "ERROR"
-            if evidence.error_statuses or not evidence.cleanup_ok
-            else "PASS"
+            "TIMEOUT" if "TIMEOUT" in evidence.error_statuses else "ERROR" if evidence.error_statuses or not evidence.cleanup_ok else "PASS"
         )
         if evidence.empty_execution_status in {"ERROR", "TIMEOUT"}:
             execution = evidence.empty_execution_status
@@ -100,10 +96,7 @@ class RunOutcome:
             OutcomeEvidence(
                 check_statuses=tuple(check["status"] for stage in stages for check in stage["checks"]),
                 failed_checks=frozenset(
-                    stage["id"] + "." + check["id"]
-                    for stage in stages
-                    for check in stage["checks"]
-                    if check["status"] == "FAIL"
+                    stage["id"] + "." + check["id"] for stage in stages for check in stage["checks"] if check["status"] == "FAIL"
                 ),
                 finding_confirmed=frozenset(result.get("finding_confirmed", [])),
                 finding_resolved=bool(result.get("finding_resolved")),

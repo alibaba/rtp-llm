@@ -14,11 +14,7 @@ class ResourceEvidence:
 def flow_evidence(value, profile, deadline):
     deadline.check()
     snapshot = value.evidence_snapshot()
-    manifest = (
-        snapshot
-        if profile == "diagnostic"
-        else {k: v for k, v in snapshot.items() if k not in ("records", "issued", "unfinished")}
-    )
+    manifest = snapshot if profile == "diagnostic" else {k: v for k, v in snapshot.items() if k not in ("records", "issued", "unfinished")}
     if profile == "request":
         manifest["request_journal"] = str(value.directory / "client_lifecycle.jsonl")
     return ResourceEvidence(

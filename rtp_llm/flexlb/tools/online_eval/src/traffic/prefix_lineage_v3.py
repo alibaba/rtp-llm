@@ -37,9 +37,7 @@ def encode(events, provenance=None, *, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
         arrival="TRUE_TIMESTAMPS_PACED_BY_CLIENT",
         provenance=provenance or {},
     )
-    return lzma.compress(
-        json.dumps(dict(metadata=metadata, events=events), separators=(",", ":"), allow_nan=False).encode(), preset=6
-    )
+    return lzma.compress(json.dumps(dict(metadata=metadata, events=events), separators=(",", ":"), allow_nan=False).encode(), preset=6)
 
 
 def _parse_payload(data):

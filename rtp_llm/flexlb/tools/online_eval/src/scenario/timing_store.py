@@ -11,12 +11,7 @@ from schema_contract import matches_schema
 
 
 def timing_path():
-    return Path(
-        os.environ.get(
-            "FLEXLB_FT_TIMING_BASELINE",
-            "/tmp/flexlb_ft_instance_timing_v1.json",
-        )
-    )
+    return Path(os.environ.get("FLEXLB_FT_TIMING_BASELINE", "/tmp/flexlb_ft_instance_timing_v1.json"))
 
 
 def read_timings(path):
@@ -31,19 +26,11 @@ def read_timings(path):
         timings = {}
         for row in data["instances"]:
             duration = row.get("duration_ms")
-            if (
-                isinstance(row.get("id"), str)
-                and type(duration) in (int, float)
-                and math.isfinite(duration)
-                and (duration > 0)
-            ):
+            if isinstance(row.get("id"), str) and type(duration) in (int, float) and math.isfinite(duration) and (duration > 0):
                 timings[row["id"]] = duration / 1000
         return timings
     except (OSError, ValueError, TypeError, AttributeError) as exc:
-        print(
-            f"warning: cannot use instance timings {path}: {exc}; using static estimates",
-            file=sys.stderr,
-        )
+        print(f"warning: cannot use instance timings {path}: {exc}; using static estimates", file=sys.stderr)
         return {}
 
 

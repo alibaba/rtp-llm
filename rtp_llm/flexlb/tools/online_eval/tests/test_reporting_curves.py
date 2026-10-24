@@ -38,13 +38,7 @@ def presentation():
 
 
 @pytest.mark.parametrize(
-    "values,caption",
-    [
-        ([], "Missing"),
-        ([None], "Missing"),
-        ([float("nan"), float("inf")], "Missing"),
-        ([0], "Observed 缺少有效曲线：B。"),
-    ],
+    "values,caption", [([], "Missing"), ([None], "Missing"), ([float("nan"), float("inf")], "Missing"), ([0], "Observed 缺少有效曲线：B。")]
 )
 def test_null_nan_and_zero_use_one_empty_panel_rule(values, caption):
     config = presentation()
@@ -54,17 +48,10 @@ def test_null_nan_and_zero_use_one_empty_panel_rule(values, caption):
 
 def test_materialization_and_projection_keep_labels_scaling_provenance_and_order():
     config = presentation()
-    style = dict(
-        config.charts.curves["a"].to_dict(), name="{master} · A", group="{master}", scale=1000, source_unit="s"
-    )
+    style = dict(config.charts.curves["a"].to_dict(), name="{master} · A", group="{master}", scale=1000, source_unit="s")
     provenance = {"source_type": "prometheus"}
     a = materialize(
-        "a",
-        CurvePresentation.read(style),
-        [[100, 0.5], [101, None]],
-        origin=100,
-        labels={"master": "A"},
-        provenance=provenance,
+        "a", CurvePresentation.read(style), [[100, 0.5], [101, None]], origin=100, labels={"master": "A"}, provenance=provenance
     )
     b = materialize("b", config.charts.curves["b"], [[0, 1]])
     original = copy.deepcopy([a, b])
@@ -131,8 +118,7 @@ def test_shared_capability_can_be_reused_by_registered_programs():
     from case_registry_fixtures import entry, snapshot
 
     definition = registry.CaseDefinition(
-        {"default": lambda case: None},
-        report_views={"extra.yaml": registry.ReportView(lambda *args: None, lambda *args: Path("unused"))},
+        {"default": lambda case: None}, report_views={"extra.yaml": registry.ReportView(lambda *args: None, lambda *args: Path("unused"))}
     )
     with mock.patch.object(registry, "_snapshot", snapshot(entry("a", definition), entry("b", definition))):
         assert registry.view_capabilities() == definition.report_views
@@ -153,16 +139,9 @@ def test_selected_presets_and_visibility_reach_the_html(tmp_path):
     config = ViewDefinition.read(config)
     curves = [materialize(key, style, [[0, 0]]) for key, style in config.charts.curves.items()]
     panels = project_panels(curves, config)
-    assert panels[0]["presets"] == {
-        "Visible": ["A"],
-        "Named": ["B"],
-        "Group": ["B"],
-        "Substring": ["A"],
-    }
+    assert panels[0]["presets"] == {"Visible": ["A"], "Named": ["B"], "Group": ["B"], "Substring": ["A"]}
     assert [c["hidden"] for c in panels[0]["series"]] == [True, False]
-    bundle = write_bundle(
-        tmp_path, "run", "selected-presets", {}, dict(title="Test", timeAxis={"min": 0, "max": 1}, panels=panels)
-    )
+    bundle = write_bundle(tmp_path, "run", "selected-presets", {}, dict(title="Test", timeAxis={"min": 0, "max": 1}, panels=panels))
     html = (bundle / "report.html").read_text()
     import json
 
@@ -200,9 +179,7 @@ def test_frozen_archive_cannot_silently_discard_unclassified_queries(name, tmp_p
 
     store = freeze_metrics(tmp_path, name)
     audit = monitoring_audit(store, config)
-    assert {row["metric_id"] for row in audit if row["classification"] == "DIAGNOSTIC_ONLY"} == set(
-        config.metrics.diagnostic_only
-    )
+    assert {row["metric_id"] for row in audit if row["classification"] == "DIAGNOSTIC_ONLY"} == set(config.metrics.diagnostic_only)
     store.document["definitions"]["master/undeclared"] = {"promql": "undeclared"}
     with pytest.raises(ValueError, match="unclassified monitoring metric master/undeclared"):
         monitoring_audit(store, config)
@@ -238,11 +215,7 @@ def test_performance_presets_include_configuration_lines_without_validating_miss
     descriptor["presets"] = {"Floors": {"groups": ["门禁"]}}
     config = ViewDefinition.read(config)
     descriptor = next(p for p in config.charts.panels if p.id == "engine-tps")
-    panel = next(
-        p
-        for p in report_panels([], {"engine_tps": {"mock/rtp_llm_context_tps": 10}}, config)
-        if p["id"] == "engine-tps"
-    )
+    panel = next(p for p in report_panels([], {"engine_tps": {"mock/rtp_llm_context_tps": 10}}, config) if p["id"] == "engine-tps")
     assert panel["presets"]["Floors"] == [panel["series"][0]["name"]]
     assert panel["caption"] == descriptor.empty_caption
 

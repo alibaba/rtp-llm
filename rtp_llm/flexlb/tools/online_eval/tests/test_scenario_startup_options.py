@@ -16,11 +16,7 @@ from test_scenario_runtime import source
 
 
 def spec(raw):
-    return make_env_spec(
-        environment(raw, "test", "single-nonbatch"),
-        "single-nonbatch",
-        {"master_base": 28000},
-    )
+    return make_env_spec(environment(raw, "test", "single-nonbatch"), "single-nonbatch", {"master_base": 28000})
 
 
 class StartupOptionsTest(unittest.TestCase):
@@ -37,16 +33,10 @@ class StartupOptionsTest(unittest.TestCase):
                     spec({name: invalid})
 
     def test_capture_record_supplies_topology_and_rejects_untracked_edits(self):
-        for name, expected in (
-            ("glm_5_3_l20d", (125, 536, 31218, 46157)),
-            ("deepseek_v4_flash_l20c", (48, 192, 21553, 221484)),
-        ):
+        for name, expected in (("glm_5_3_l20d", (125, 536, 31218, 46157)), ("deepseek_v4_flash_l20c", (48, 192, 21553, 221484))):
             with self.subTest(name=name):
                 actual = spec({"perf_preset": name})
-                self.assertEqual(
-                    (actual.n_prefill, actual.n_decode, actual.prefill_cache_blocks, actual.decode_cache_blocks),
-                    expected,
-                )
+                self.assertEqual((actual.n_prefill, actual.n_decode, actual.prefill_cache_blocks, actual.decode_cache_blocks), expected)
                 capture = capture_defaults(name)
                 self.assertEqual(tuple(capture.values()), expected)
         source = ROOT / "data/performance/glm_5_3_l20d.json"
@@ -81,11 +71,7 @@ class StartupOptionsTest(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "model_override"):
             environment({"perf_preset": "glm_5_3_l20d", "n_prefill": 64}, "test", "single-nonbatch")
         declared = environment(
-            {
-                "perf_preset": "glm_5_3_l20d",
-                "n_prefill": 64,
-                "model_override": {"baseline": "glm_5_3_l20d", "reason": "故障注入"},
-            },
+            {"perf_preset": "glm_5_3_l20d", "n_prefill": 64, "model_override": {"baseline": "glm_5_3_l20d", "reason": "故障注入"}},
             "test",
             "single-nonbatch",
         )
@@ -94,12 +80,7 @@ class StartupOptionsTest(unittest.TestCase):
     def test_paired_master_baseline_is_rendered_and_explicit_deviations_are_audited(self):
         from flexlb_cfg import ConfigOverride, render_env, render_process_config
 
-        expected_caps = {
-            "single-nonbatch": 1024,
-            "batch-window": 2,
-            "single-batch": 2,
-            "window-nonbatch": 64,
-        }
+        expected_caps = {"single-nonbatch": 1024, "batch-window": 2, "single-batch": 2, "window-nonbatch": 64}
         for profile, cap in expected_caps.items():
             plan = environment({"perf_preset": "glm_5_3_l20d"}, "test", profile)
             override = ConfigOverride(**plan["config_overrides"])
@@ -107,33 +88,24 @@ class StartupOptionsTest(unittest.TestCase):
             self.assertEqual(config["dispatcher"]["maxInflightPerPrefillWorker"], cap)
             self.assertEqual(plan["resolved_config"], config)
             self.assertEqual(
-                plan["config_overrides"].get("max_inflight_per_prefill_worker"),
-                1024 if profile == "single-nonbatch" else None,
+                plan["config_overrides"].get("max_inflight_per_prefill_worker"), 1024 if profile == "single-nonbatch" else None
             )
             affinity = config["router"]["roles"]["prefill"]["cacheAffinity"]
             self.assertEqual(affinity, {"maxExtraTtftMs": 1000000000, "minPrefixHitPercent": 5})
             envelope = json.loads(render_process_config(profile, override))
-            self.assertEqual(
-                json.loads(dict(envelope["zone_process_setting"]["process_info"]["envs"])["FLEXLB_CONFIG"]), config
-            )
+            self.assertEqual(json.loads(dict(envelope["zone_process_setting"]["process_info"]["envs"])["FLEXLB_CONFIG"]), config)
         raw = {"perf_preset": "glm_5_3_l20d", "config_overrides": {"cache_affinity_max_extra_ttft_ms": 20}}
         with self.assertRaisesRegex(Exception, "model_override"):
             environment(raw, "test", "single-nonbatch")
         raw["model_override"] = {"baseline": "glm_5_3_l20d", "reason": "亲和策略对照"}
-        self.assertEqual(
-            environment(raw, "test", "single-nonbatch")["config_overrides"]["cache_affinity_max_extra_ttft_ms"], 20
-        )
+        self.assertEqual(environment(raw, "test", "single-nonbatch")["config_overrides"]["cache_affinity_max_extra_ttft_ms"], 20)
         batch_override = environment(
-            {"perf_preset": "glm_5_3_l20d", "config_overrides": {"max_inflight_per_prefill_worker": 3}},
-            "test",
-            "batch-window",
+            {"perf_preset": "glm_5_3_l20d", "config_overrides": {"max_inflight_per_prefill_worker": 3}}, "test", "batch-window"
         )
         self.assertEqual(batch_override["resolved_config"]["dispatcher"]["maxInflightPerPrefillWorker"], 3)
         with self.assertRaisesRegex(Exception, "model_override"):
             environment(
-                {"perf_preset": "glm_5_3_l20d", "config_overrides": {"max_inflight_per_prefill_worker": 3}},
-                "test",
-                "single-nonbatch",
+                {"perf_preset": "glm_5_3_l20d", "config_overrides": {"max_inflight_per_prefill_worker": 3}}, "test", "single-nonbatch"
             )
         self.assertNotIn("master", load_preset("glm_5_3_l20d")[0])
         for bad in (-1, True, 2**63):
@@ -202,14 +174,8 @@ class StartupOptionsTest(unittest.TestCase):
                 raw = dict(master_debug_log=logging, debug_enabled=diagnostic)
                 actual = spec(raw)
                 self.assertIs(actual.master_debug_log, logging)
-                self.assertEqual(
-                    actual.master_env,
-                    {"FLEXLB_DEBUG_ENABLED": "true"} if diagnostic else {},
-                )
-                self.assertEqual(
-                    environment(raw, "test", "single-nonbatch")["resolved_config"],
-                    baseline,
-                )
+                self.assertEqual(actual.master_env, {"FLEXLB_DEBUG_ENABLED": "true"} if diagnostic else {})
+                self.assertEqual(environment(raw, "test", "single-nonbatch")["resolved_config"], baseline)
         self.assertFalse(spec({}).master_debug_log)
 
     def test_variant_options_survive_environment_epochs_without_leaking(self):
@@ -226,31 +192,19 @@ class StartupOptionsTest(unittest.TestCase):
                 ),
             ),
         ]
-        doc["stages"].insert(
-            1,
-            dict(
-                id="replace",
-                action="environment_reconfigure",
-                params=dict(config_overrides=dict(ordering="fifo")),
-            ),
-        )
+        doc["stages"].insert(1, dict(id="replace", action="environment_reconfigure", params=dict(config_overrides=dict(ordering="fifo"))))
         plans = compile_scenarios([("test", doc)], handlers=handlers())
         for index, plan in enumerate(plans):
             initial = plan["environment"]
             later = plan["stages"][1]["params"]["environments"]["single-nonbatch"]
             self.assertEqual(initial.get("master_debug_log"), later.get("master_debug_log"))
-            self.assertEqual(
-                initial.get("prefill_max_waiting_batches"),
-                later.get("prefill_max_waiting_batches"),
-            )
+            self.assertEqual(initial.get("prefill_max_waiting_batches"), later.get("prefill_max_waiting_batches"))
             actual = make_env_spec(later, "single-nonbatch", {"master_base": 28000})
             if index:
                 self.assertTrue(actual.master_debug_log)
                 self.assertEqual(
                     actual.perf["prefill"],
-                    dict(
-                        fixed_ms=100.0, scale=1.0, max_batch_tokens=1024, max_batch_requests=0, max_waiting_batches=16
-                    ),
+                    dict(fixed_ms=100.0, scale=1.0, max_batch_tokens=1024, max_batch_requests=0, max_waiting_batches=16),
                 )
             else:
                 self.assertNotIn("prefill_max_waiting_batches", initial)
@@ -260,10 +214,7 @@ class StartupOptionsTest(unittest.TestCase):
     def test_strict_types_reject_before_process_construction(self):
         for field, values in (
             ("master_debug_log", (None, 0, 1, "true", [], {})),
-            (
-                "prefill_max_waiting_batches",
-                (None, True, False, -1, 1.5, 16.0, "16", [], {}),
-            ),
+            ("prefill_max_waiting_batches", (None, True, False, -1, 1.5, 16.0, "16", [], {})),
         ):
             for value in values:
                 with self.subTest(field=field, value=value), self.assertRaises(ValueError):

@@ -20,11 +20,7 @@ def collateral(rows, baseline, victims, maximum):
         address
         for address, old in baseline.items()
         if address not in victims
-        and (
-            address not in rows
-            or rows[address]["generation"] != old["generation"]
-            or not healthy(rows[address], maximum)
-        )
+        and (address not in rows or rows[address]["generation"] != old["generation"] or not healthy(rows[address], maximum))
     )
 
 

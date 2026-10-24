@@ -15,9 +15,7 @@ def performance_main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("evidence", type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument(
-        "--reinterpret", action="store_true", help="explicitly re-adjudicate evidence into a NEW output directory"
-    )
+    parser.add_argument("--reinterpret", action="store_true", help="explicitly re-adjudicate evidence into a NEW output directory")
     parser.add_argument("--json-only", action="store_true", help="write evidence and verdict without HTML")
     args = parser.parse_args()
     from artifacts.reinterpretation import import_metrics, load_reinterpretation

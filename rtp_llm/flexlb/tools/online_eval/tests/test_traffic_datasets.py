@@ -124,9 +124,7 @@ class TrafficDatasetsTest(unittest.TestCase):
         # 入库身份来自 Git，目录位置不意味着所有外部依赖也已入库。
         tracked = {
             (ROOT / name).resolve()
-            for name in subprocess.check_output(
-                ["git", "ls-files", "--", "data/traffic_trace"], cwd=ROOT, text=True
-            ).splitlines()
+            for name in subprocess.check_output(["git", "ls-files", "--", "data/traffic_trace"], cwd=ROOT, text=True).splitlines()
         }
         for case in (ROOT / "config/scenarios").glob("*.yaml"):
             for params in sources(load_document(case)):
@@ -147,12 +145,9 @@ class TrafficDatasetsTest(unittest.TestCase):
             path = Path(directory) / "fixed.jsonl"
             semantics = write_trace(path, {"seed": 12345, "count": 10000, "output_tokens": 420}, "fixed")
             self.assertEqual(
-                "7c4a5e5ee52c54c525d30e21a43bb441704406b0b3f09a68df8ebd8df7fb21c8",
-                hashlib.sha256(path.read_bytes()).hexdigest(),
+                "7c4a5e5ee52c54c525d30e21a43bb441704406b0b3f09a68df8ebd8df7fb21c8", hashlib.sha256(path.read_bytes()).hexdigest()
             )
-            self.assertEqual(
-                datasets.read_manifest(catalog.model_path())["provenance"], semantics["calibration"]["provenance"]
-            )
+            self.assertEqual(datasets.read_manifest(catalog.model_path())["provenance"], semantics["calibration"]["provenance"])
 
     def test_bundled_models_are_selectable_and_materialize(self):
         from traffic.traffic_source import materialize, validate_plan

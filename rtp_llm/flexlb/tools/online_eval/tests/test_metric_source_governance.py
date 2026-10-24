@@ -82,9 +82,7 @@ def test_performance_public_scalars_have_checks_or_coverage_consumers():
 
     variant = configure_program(scenario, "performance.yaml").variants[0]
     consumed = {
-        identity
-        for identity in variant.monitoring_query_plan["definition"]["demand"]["gate"]
-        if identity.startswith("performance_gate/")
+        identity for identity in variant.monitoring_query_plan["definition"]["demand"]["gate"] if identity.startswith("performance_gate/")
     }
     # Observed incarnation counts explain coverage; they are not business floors.
     coverage = {"performance_gate/" + metric + "_engine_count" for metric in checks["engine_tps"]}
@@ -97,9 +95,7 @@ def test_performance_public_scalars_have_checks_or_coverage_consumers():
 
 def test_client_trends_are_real_queries_without_journal_twins():
     plan = load_plan("master_performance.yaml")
-    queries, _ = queries_for_targets(
-        plan, {"client-flow": ""}, lambda _: '{job="client-flow"}', 1, target_kinds={"client-flow": "client"}
-    )
+    queries, _ = queries_for_targets(plan, {"client-flow": ""}, lambda _: '{job="client-flow"}', 1, target_kinds={"client-flow": "client"})
     for identity in CLIENT_CURVES:
         assert "client-flow/" + identity.partition("/")[2] in queries
     assert {identity for identity in plan["produced"] if identity.startswith("request/")} == {"request/ttft_p99_ms"}
@@ -168,9 +164,7 @@ def test_missing_required_gate_result_is_a_contract_error(tmp_path):
         produce(tmp_path, data, frozen)
 
 
-@pytest.mark.parametrize(
-    "selector,value", [("target", "A"), ("route", "master"), ("error_kind", "business"), ("code", 503)]
-)
+@pytest.mark.parametrize("selector,value", [("target", "A"), ("route", "master"), ("error_kind", "business"), ("code", 503)])
 def test_ha_rejects_selectors_that_have_no_active_measurement(selector, value):
     from cases.master_ha_failover.inputs import validate_client_criterion
 

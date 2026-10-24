@@ -22,9 +22,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     capture = CapturedDataset.read(args.model)
     raw = args.fit_report.read_bytes()
-    result = derive_parameters(
-        capture.model, json.loads(raw), hashlib.sha256(raw).hexdigest(), model_sha256=capture.sha256
-    )
+    result = derive_parameters(capture.model, json.loads(raw), hashlib.sha256(raw).hexdigest(), model_sha256=capture.sha256)
     result["source_capture"] = os.path.relpath(capture.path, args.out.resolve().parent)
     args.out.write_text(json.dumps(result, indent=2) + "\n")
 

@@ -134,9 +134,7 @@ def test_single_and_dual_master_share_topology_wait(tmp_path):
     clock = Clock()
     env = NS(run_dir=tmp_path, spec=NS(n_prefill=2, n_decode=1, master_stable_window_s=1, zk_consistency=None))
     proc = NS(alive=lambda: True)
-    data = dict(
-        ready=True, worker_summary={"PREFILL": dict(discovered=2, alive=2), "DECODE": dict(discovered=1, alive=1)}
-    )
+    data = dict(ready=True, worker_summary={"PREFILL": dict(discovered=2, alive=2), "DECODE": dict(discovered=1, alive=1)})
     lifecycle = MasterLifecycle(Mock())
     with (
         patch("adapters.master_lifecycle.port_accepting", return_value=True),
@@ -167,9 +165,7 @@ def test_zk_runtime_only_reads_verified_prepared_artifacts(tmp_path):
             ZkHelperOps.default_launch_argv("java")
         cp = runtime / "classpath.txt"
         cp.write_text(str(jar))
-        (runtime / "manifest.json").write_text(
-            json.dumps({"files": ZkHelperOps._fingerprints(ZkHelperOps._classpath_paths(cp))})
-        )
+        (runtime / "manifest.json").write_text(json.dumps({"files": ZkHelperOps._fingerprints(ZkHelperOps._classpath_paths(cp))}))
         argv = ZkHelperOps.default_launch_argv("java")
         assert ZK_LAUNCHER_CLASS in argv
         jar.write_bytes(b"changed")
@@ -184,14 +180,7 @@ def test_missing_zk_preparation_fails_before_starting_mock(tmp_path):
     from adapters.zk_helper import ZkHelperOps
     from adapters.zookeeper_config import ZooKeeperConfig
 
-    spec = EnvSpec(
-        label="fixture",
-        n_prefill=1,
-        n_decode=1,
-        perf={},
-        masters=[MasterSpec("A", 18080)],
-        zk_consistency=ZooKeeperConfig(),
-    )
+    spec = EnvSpec(label="fixture", n_prefill=1, n_decode=1, perf={}, masters=[MasterSpec("A", 18080)], zk_consistency=ZooKeeperConfig())
     manager = EnvManager(tmp_path, verbose=False)
     with (
         patch.object(manager, "_start_mock") as start,
@@ -230,9 +219,7 @@ def test_elected_master_invokes_production_online_hook(tmp_path):
     from adapters.zookeeper_config import ZooKeeperConfig
 
     clock = Clock()
-    env = NS(
-        run_dir=tmp_path, spec=NS(n_prefill=1, n_decode=1, master_stable_window_s=0, zk_consistency=ZooKeeperConfig())
-    )
+    env = NS(run_dir=tmp_path, spec=NS(n_prefill=1, n_decode=1, master_stable_window_s=0, zk_consistency=ZooKeeperConfig()))
     proc = NS(alive=lambda: True)
     response = Mock(status=200)
     response.read.return_value = b"success"

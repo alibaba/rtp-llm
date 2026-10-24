@@ -54,9 +54,7 @@ def master_adapters(env, fields):
         return HttpJsonAdapter(
             master_url(spec.bind_ip, spec.http_port, "inflight"),
             lambda data: dict(
-                master=name,
-                **({"http_up": 1} if "http_up" in fields else {}),
-                **master_state_fields(data, fields - {"http_up"}),
+                master=name, **({"http_up": 1} if "http_up" in fields else {}), **master_state_fields(data, fields - {"http_up"})
             ),
             lambda: dict(master=name, **({"http_up": 0} if "http_up" in fields else {})),
         )

@@ -2,12 +2,7 @@ import copy
 import unittest
 
 from runtime.resource_plan import ResourcePlanError
-from scenario.instance_plan import (
-    InstancePlanError,
-    parse_catalog,
-    plan_instances,
-    select_instances,
-)
+from scenario.instance_plan import InstancePlanError, parse_catalog, plan_instances, select_instances
 
 
 def catalog():
@@ -98,11 +93,7 @@ class InstancePlanTest(unittest.TestCase):
 
     def test_selection_is_bounded_and_deduplicates_requested_ids(self):
         instances = parse()
-        chosen = select_instances(
-            instances,
-            exact_ids=instances[0].id + "," + instances[0].id,
-            categories="kv",
-        )
+        chosen = select_instances(instances, exact_ids=instances[0].id + "," + instances[0].id, categories="kv")
         self.assertEqual([instances[0]], chosen)
         with self.assertRaises(InstancePlanError):
             select_instances(instances, exact_ids=instances[0].id, categories="cancel")

@@ -49,11 +49,7 @@ class WorkloadPolicy:
             if any(event["id"] == "traffic_started" for event in events):
                 raise ValueError("traffic_started is reserved for issued-request evidence")
             events.append(onset)
-        timeline = (
-            freeze(ctx.instance["reporting"], events=events, phases=monitor.events)
-            if "reporting" in ctx.instance
-            else None
-        )
+        timeline = freeze(ctx.instance["reporting"], events=events, phases=monitor.events) if "reporting" in ctx.instance else None
         payload = dict(
             workload_evidence_schema_version=1,
             instance_id=result["id"],
@@ -89,9 +85,7 @@ class WorkloadPolicy:
 
         write_json(evidence, payload)
         workload.details.update(
-            evidence=str(evidence),
-            capture_metrics=monitor.options["capture_metrics"],
-            runtime_configuration=dict(monitor.options),
+            evidence=str(evidence), capture_metrics=monitor.options["capture_metrics"], runtime_configuration=dict(monitor.options)
         )
         workload.runtime_validity = (
             "INVALID"
@@ -142,9 +136,7 @@ class WorkloadPolicy:
             deadline.check()
             from monitoring.metric_store import MetricStore
 
-            analysis["series"], analysis["statistic_sources"], _, _ = MetricStore.read(ctx.artifact_dir).series(
-                monitor.anchor["epoch_s"]
-            )
+            analysis["series"], analysis["statistic_sources"], _, _ = MetricStore.read(ctx.artifact_dir).series(monitor.anchor["epoch_s"])
         deadline.check()
         return finalized
 

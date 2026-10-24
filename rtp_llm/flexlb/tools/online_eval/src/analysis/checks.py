@@ -57,21 +57,12 @@ def compare(actual, op, expected):
 def evaluate(identity, actual, op, expected, *, evidence=None, advisory=False):
     passed = compare(actual, op, expected)
     return CheckResult(
-        identity,
-        "PASS" if passed else "WARNING" if advisory else "FAIL",
-        actual=actual,
-        expected=expected,
-        evidence=evidence or {},
+        identity, "PASS" if passed else "WARNING" if advisory else "FAIL", actual=actual, expected=expected, evidence=evidence or {}
     )
 
 
 def invalid_check(identity, *, detail="", actual=None, expected=None, evidence=None):
     """Insufficient observation cannot become a threshold failure or an advisory pass."""
     return CheckResult(
-        identity,
-        "ERROR",
-        detail=detail,
-        actual=actual,
-        expected=expected,
-        evidence=dict(evidence or {}, validity="INVALID"),
+        identity, "ERROR", detail=detail, actual=actual, expected=expected, evidence=dict(evidence or {}, validity="INVALID")
     )

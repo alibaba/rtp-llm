@@ -18,11 +18,7 @@ def test_live_commit_does_not_publish_or_render(tmp_path):
     assert path.name == "example-gate-result.json" and result == decision()
     assert load_gate(tmp_path, "example") == ({"samples": [1]}, decision())
     analyze.assert_called_once_with({"samples": [1]})
-    assert {p.name for p in tmp_path.iterdir()} == {
-        "example-gate-evidence.json",
-        "example-gate-result.json",
-        "example-gate-manifest.json",
-    }
+    assert {p.name for p in tmp_path.iterdir()} == {"example-gate-evidence.json", "example-gate-result.json", "example-gate-manifest.json"}
 
 
 def test_publication_uses_committed_data_and_never_readjudicates(tmp_path):
@@ -59,9 +55,7 @@ def test_selected_view_passes_run_and_presentation_without_reanalysis(tmp_path):
     freeze_gate(tmp_path, "example", {}, decision())
     report = Mock(return_value=tmp_path / "report")
     run, presentation = {"status": "FAIL"}, {"title": "test"}
-    assert (
-        render_gate(tmp_path, run, presentation, name="example", write_report=report) == tmp_path / "report/report.html"
-    )
+    assert render_gate(tmp_path, run, presentation, name="example", write_report=report) == tmp_path / "report/report.html"
     assert report.call_args.kwargs == dict(run=run, presentation=presentation)
 
 

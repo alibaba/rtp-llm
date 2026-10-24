@@ -25,28 +25,14 @@ def _number(value, plan, name, minimum, maximum, integer=False):
 
 
 def validate_snapshot(params, plan):
-    allowed = {
-        "sources",
-        "required",
-        "flow",
-        "requests",
-        "targets",
-        "master_include",
-        "limit",
-        "scan_limit",
-        "endpoint_limit",
-    }
+    allowed = {"sources", "required", "flow", "requests", "targets", "master_include", "limit", "scan_limit", "endpoint_limit"}
     if not isinstance(params, dict) or set(params) - allowed:
         _error(plan, "unknown snapshot parameters")
     sources = params.get("sources")
     available = set(SOURCES)
     if isinstance(sources, list) and "master_debug" in sources and "master_debug" not in available:
         _error(plan, "master_debug is not a supported source; bundled Master has no debug snapshot endpoint")
-    if (
-        not isinstance(sources, list)
-        or not sources
-        or any(not isinstance(s, str) or s not in available for s in sources)
-    ):
+    if not isinstance(sources, list) or not sources or any(not isinstance(s, str) or s not in available for s in sources):
         _error(plan, "sources must be a nonempty supported source list")
     if len(set(sources)) != len(sources):
         _error(plan, "duplicate sources")
@@ -71,9 +57,7 @@ def validate_snapshot(params, plan):
     if (
         not isinstance(include, list)
         or not include
-        or any(
-            not isinstance(x, str) or x not in {"scheduler", "queues", "prefill", "decode", "engine"} for x in include
-        )
+        or any(not isinstance(x, str) or x not in {"scheduler", "queues", "prefill", "decode", "engine"} for x in include)
     ):
         _error(plan, "invalid master_include")
     result["master_include"] = list(include)
@@ -94,15 +78,7 @@ def validate_observe(params, plan):
         return dict(params, mode=mode)
     if mode not in {"start", "window"}:
         _error(plan, "observe mode must be start/window/stop")
-    extras = {
-        "mode",
-        "interval_s",
-        "duration_s",
-        "max_duration_s",
-        "max_samples",
-        "max_bytes",
-        "cohort",
-    }
+    extras = {"mode", "interval_s", "duration_s", "max_duration_s", "max_samples", "max_bytes", "cohort"}
     base = validate_snapshot({k: v for k, v in params.items() if k not in extras}, plan)
     duration_key = "duration_s" if mode == "window" else "max_duration_s"
     forbidden = "max_duration_s" if mode == "window" else "duration_s"
@@ -120,14 +96,7 @@ def validate_observe(params, plan):
         interval_s=interval,
         cohort=cohort,
         max_samples=_number(params.get("max_samples", 10000), plan, "max_samples", 1, 10000, True),
-        max_bytes=_number(
-            params.get("max_bytes", MAX_DATASET_BYTES),
-            plan,
-            "max_bytes",
-            1024,
-            MAX_DATASET_BYTES,
-            True,
-        ),
+        max_bytes=_number(params.get("max_bytes", MAX_DATASET_BYTES), plan, "max_bytes", 1024, MAX_DATASET_BYTES, True),
     )
 
 
@@ -148,11 +117,7 @@ def _coverage(required, data, artifact=None):
                 if required
                 else "optional observation recorded; PASS does not assert source availability or completeness"
             ),
-            actual={
-                "required": required,
-                "source_status": data["status"],
-                "sample_count": data.get("sample_count"),
-            },
+            actual={"required": required, "source_status": data["status"], "sample_count": data.get("sample_count")},
             evidence={"artifact": artifact} if artifact else {},
         )
     ]
@@ -194,18 +159,6 @@ def execute_observe(ctx, params, deadline):
 
 
 HANDLERS = [
-    StageHandler(
-        "snapshot",
-        validate_snapshot,
-        execute_snapshot,
-        {"snapshot": "snapshot"},
-        checks=frozenset({"sources"}),
-    ),
-    StageHandler(
-        "observe",
-        validate_observe,
-        execute_observe,
-        {"observation": "observation"},
-        checks=frozenset({"sources"}),
-    ),
+    StageHandler("snapshot", validate_snapshot, execute_snapshot, {"snapshot": "snapshot"}, checks=frozenset({"sources"})),
+    StageHandler("observe", validate_observe, execute_observe, {"observation": "observation"}, checks=frozenset({"sources"})),
 ]

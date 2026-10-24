@@ -116,11 +116,7 @@ def load_performance_bundle(path):
         document["calibration"] = Path(path).name
     prefill = document.get("prefill", {})
     if isinstance(prefill, dict):
-        if prefill.get("fifo") is not None and {
-            "direct_batch_size_max",
-            "max_batch_requests",
-            "max_batch_tokens",
-        }.intersection(prefill):
+        if prefill.get("fifo") is not None and {"direct_batch_size_max", "max_batch_requests", "max_batch_tokens"}.intersection(prefill):
             raise ValueError("prefill.fifo cannot be combined with legacy prefill batch limits")
         memory = prefill.get("memory_cache", {})
         if isinstance(memory, dict):
@@ -134,9 +130,7 @@ def load_performance_bundle(path):
         record = (json.dumps(document, indent=2) + "\n").encode()
         if hashlib.sha256(record).hexdigest() != capture.get("record_sha256"):
             raise ValueError("performance capture record checksum mismatch")
-        if capture["status"] == "verified" and (
-            not capture.get("identity", {}).get("deployment") or not capture.get("capture_window")
-        ):
+        if capture["status"] == "verified" and (not capture.get("identity", {}).get("deployment") or not capture.get("capture_window")):
             raise ValueError("verified capture requires deployment and window")
     master = document.pop("master", {})
     PairedMasterSettings.from_record(master)
@@ -181,8 +175,7 @@ def load_preset_bundle(name):
     if "mock_heap" in runtime and not isinstance(runtime["mock_heap"], str):
         raise ValueError(f"perf_preset {name!r} has invalid mock_heap")
     if "mock_extra_args" in runtime and (
-        not isinstance(runtime["mock_extra_args"], list)
-        or not all(isinstance(arg, str) for arg in runtime["mock_extra_args"])
+        not isinstance(runtime["mock_extra_args"], list) or not all(isinstance(arg, str) for arg in runtime["mock_extra_args"])
     ):
         raise ValueError(f"perf_preset {name!r} has invalid mock_extra_args")
     if capture and capture["status"] != "orphan" and "mock_extra_args" in capture:

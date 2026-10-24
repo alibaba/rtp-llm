@@ -13,12 +13,7 @@ from document_io import DocumentError as ScenarioError
 from scenario.backend import BoundedOps
 from scenario.lease import validate_lease
 from scenario.request_batch import RequestBatch
-from scenario.runtime import (
-    Deadline,
-    RuntimeContext,
-    StageTimeout,
-    interruptible,
-)
+from scenario.runtime import Deadline, RuntimeContext, StageTimeout, interruptible
 
 
 class Stream:
@@ -47,9 +42,7 @@ class Ops:
         self.streams, self.fetch_count, self.generate_count, self.counter = [], 0, 0, 0
         self.responses = []
         self.schedule_pb2_grpc = NS(FlexlbServiceStub=lambda channel: NS(Schedule=NS(future=self.future)))
-        self.pb2_grpc = NS(
-            RpcServiceStub=lambda channel: NS(FetchResponse=self.fetch, GenerateStreamCall=self.generate)
-        )
+        self.pb2_grpc = NS(RpcServiceStub=lambda channel: NS(FetchResponse=self.fetch, GenerateStreamCall=self.generate))
         self.pb2 = NS(FetchRequestPB=lambda **kw: kw)
 
     def future(self, req, timeout, metadata=None):
@@ -109,10 +102,7 @@ def lease_manifest():
         master_base=m,
         mock_base=b,
         worker_capacity=6,
-        intervals=[
-            dict(side="master", first=m, last=m + 5),
-            dict(side="mock", first=b - 1, last=b + 151),
-        ],
+        intervals=[dict(side="master", first=m, last=m + 5), dict(side="mock", first=b - 1, last=b + 151)],
         lock_names=[f"m{m}_{m + 5}.lock", f"g{b - 1}_{b + 151}.lock"],
         child_env=env,
     )
@@ -146,16 +136,7 @@ class BackendTest(unittest.TestCase):
                 return NS(result=result, cancel=lambda: True)
 
             ctx.ops.future = future
-            requests = RequestBatch(
-                ctx,
-                dict(
-                    count=1,
-                    input_len=10,
-                    output_len=2,
-                    consume="immediate",
-                    schedule_timeout_s=0.02,
-                ),
-            )
+            requests = RequestBatch(ctx, dict(count=1, input_len=10, output_len=2, consume="immediate", schedule_timeout_s=0.02))
             with self.assertRaises(RpcDeadline):
                 requests.submit(Deadline(time.monotonic() + 1))
             record = requests.snapshot_records()[0]
@@ -189,10 +170,7 @@ class BackendTest(unittest.TestCase):
                 def future(req, timeout):
                     created.append(True)
                     requests.cancel("race during Schedule.future")
-                    return NS(
-                        cancel=lambda: cancelled.append(True),
-                        result=lambda **kw: waited.append(True),
-                    )
+                    return NS(cancel=lambda: cancelled.append(True), result=lambda **kw: waited.append(True))
 
                 ctx.ops.schedule_pb2_grpc = NS(FlexlbServiceStub=lambda channel: NS(Schedule=NS(future=future)))
                 with self.assertRaisesRegex(RuntimeError, "cancelled during Schedule startup"):
@@ -218,14 +196,9 @@ class BackendTest(unittest.TestCase):
         requests, ctx = self.run_batch("deferred")
         self.assertEqual(ctx.ops.fetch_count, 0)
         self.assertTrue(all(r["consumer_exit_s"] is None for r in requests.snapshot_records()))
-        self.assertEqual(
-            requests.wait(Deadline(time.monotonic() + 1)),
-            dict(completed=True, error_count=0),
-        )
+        self.assertEqual(requests.wait(Deadline(time.monotonic() + 1)), dict(completed=True, error_count=0))
         self.assertEqual(ctx.ops.fetch_count, 2)
-        self.assertTrue(
-            all(r["fetch_invocations"] == 1 and r["business_finished"] for r in requests.snapshot_records())
-        )
+        self.assertTrue(all(r["fetch_invocations"] == 1 and r["business_finished"] for r in requests.snapshot_records()))
         self.assertEqual([r["status"] for r in ctx.cleanup(1)], ["PASS"])
 
     def test_nonbatch_opens_generate_once(self):
@@ -293,10 +266,7 @@ class BackendTest(unittest.TestCase):
             ctx.register_resource("requests", batch, batch.cleanup)
             batch.submit(Deadline(time.monotonic() + 1))
             batch.wait(Deadline(time.monotonic() + 1))
-            self.assertEqual(
-                batch.snapshot_records()[0]["request_shape"],
-                ctx.ops.last_schedule[0][1],
-            )
+            self.assertEqual(batch.snapshot_records()[0]["request_shape"], ctx.ops.last_schedule[0][1])
             self.assertEqual(ctx.cleanup(1)[0]["status"], "PASS")
 
     def test_paced_deferred_wave_preserves_each_post_issue_delay_without_fetch(self):
@@ -310,16 +280,7 @@ class BackendTest(unittest.TestCase):
             ctx = RuntimeContext({}, None, root, clock, sleep)
             ctx.ops = Ops()
             ctx.instance_deadline_s = 10
-            batch = RequestBatch(
-                ctx,
-                dict(
-                    count=3,
-                    input_len=10,
-                    output_len=2,
-                    consume="deferred",
-                    post_issue_delay_s=0.12,
-                ),
-            )
+            batch = RequestBatch(ctx, dict(count=3, input_len=10, output_len=2, consume="deferred", post_issue_delay_s=0.12))
             ctx.register_resource("requests", batch, batch.cleanup)
             batch.submit(Deadline(5, clock, sleep))
             self.assertEqual([row["issued_s"] for row in batch.snapshot_records()], [0, 0.12, 0.24])
@@ -351,12 +312,7 @@ class BackendTest(unittest.TestCase):
 
     def test_lease_is_exact_and_worker_budget_cannot_exceed_capacity(self):
         lease = lease_manifest()
-        budget = dict(
-            backend="java_mock",
-            bounded=True,
-            initial_workers=4,
-            max_dynamic_additions=2,
-        )
+        budget = dict(backend="java_mock", bounded=True, initial_workers=4, max_dynamic_additions=2)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "lease.json"
             path.write_text(json.dumps(lease))

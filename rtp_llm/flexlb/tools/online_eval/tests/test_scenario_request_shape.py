@@ -23,13 +23,7 @@ class RequestShapeTests(unittest.TestCase):
     def test_unset_is_not_materialized_and_protocol_values_preserved(self):
         source = self.source()
         params = source["stages"][1]["params"]
-        for extra in (
-            {},
-            {"priority": 0},
-            {"priority": 70, "qos_level": 30},
-            {"priority": -1},
-            {"block_keys": [-(2**63), 0, 2**63 - 1]},
-        ):
+        for extra in ({}, {"priority": 0}, {"priority": 70, "qos_level": 30}, {"priority": -1}, {"block_keys": [-(2**63), 0, 2**63 - 1]}):
             source["stages"][1]["params"] = dict(params, **extra)
             compiled = compile_scenarios([("shape.yaml", source)])[0]["stages"][1]["params"]
             if "priority" not in extra:

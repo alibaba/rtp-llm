@@ -58,9 +58,7 @@ class ExperimentParams:
     def require_cases(self, cases):
         missing = set(self.values) - set(cases)
         if missing:
-            raise ScenarioError(
-                "experiment parameters target unselected or unknown cases: " + ", ".join(sorted(missing))
-            )
+            raise ScenarioError("experiment parameters target unselected or unknown cases: " + ", ".join(sorted(missing)))
 
     def for_cases(self, cases):
         return ExperimentParams({case: patches for case, patches in self.values.items() if case in cases})

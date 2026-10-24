@@ -69,10 +69,7 @@ def build_panels(series, sources, presentation):
     panels = []
     for (epoch, source, metric, residual), members in sorted(grouped.items()):
         members.sort(key=lambda row: row[0])
-        if any(
-            key not in sources or type(sources[key].get("unit")) is not str or not sources[key]["unit"]
-            for key, _, _ in members
-        ):
+        if any(key not in sources or type(sources[key].get("unit")) is not str or not sources[key]["unit"] for key, _, _ in members):
             raise ValueError("missing frozen metric unit: " + metric)
         units = {sources[key]["unit"] for key, _, _ in members}
         if len(units) != 1:
@@ -139,11 +136,7 @@ def build_panels(series, sources, presentation):
         for name, kinds in presets.items():
             selectors[name] = tuple(
                 [PresetSelection(SelectionKind.AGGREGATIONS, tuple(k for k in kinds if k != "detail"))]
-                + (
-                    [PresetSelection(SelectionKind.ROLES, ("detail",))]
-                    if "detail" in kinds or not high_cardinality
-                    else []
-                )
+                + ([PresetSelection(SelectionKind.ROLES, ("detail",))] if "detail" in kinds or not high_cardinality else [])
             )
         choices = resolve_presets(curves, selectors)
         panels.append(

@@ -140,9 +140,7 @@ def test_performance_sampling_uses_framework_clock_and_freezes_failure(tmp_path)
     from cases.master_performance.actions import observe
 
     data = configuration("master_performance")
-    params = next(
-        stage for stage in configure_program(data, "performance.yaml").variants[0].stages if stage.id == "measure"
-    ).params
+    params = next(stage for stage in configure_program(data, "performance.yaml").variants[0].stages if stage.id == "measure").params
     params["observation"]["capture"]["max_samples"] = 1
     value = [0]
     ctx = RuntimeContext(
@@ -215,8 +213,7 @@ def test_ha_sampler_budget_failure_is_reported_at_join(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "name,check",
-    [("cache_scale_in", "baseline_hit"), ("master_performance", "input_tps"), ("master_ha_failover", "b_success")],
+    "name,check", [("cache_scale_in", "baseline_hit"), ("master_performance", "input_tps"), ("master_ha_failover", "b_success")]
 )
 def test_semantic_program_errors_share_a_configuration_boundary(name, check):
     data = configuration(name)

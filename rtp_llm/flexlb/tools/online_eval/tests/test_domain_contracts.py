@@ -76,9 +76,7 @@ def test_final_effective_mock_settings_are_frozen_before_backend_projection():
         "batch-window",
     )
     snapshot = EnvironmentSnapshot.read(plan["rendered"])
-    assert snapshot.performance["prefill"]["memory_cache"] == dict(
-        enabled=True, capacity_blocks=42, enable_prefix_tree=True
-    )
+    assert snapshot.performance["prefill"]["memory_cache"] == dict(enabled=True, capacity_blocks=42, enable_prefix_tree=True)
     assert snapshot.performance["prefill"]["max_waiting_batches"] == 0
     # Live declaration patches cannot silently reinterpret the frozen effective configuration.
     plan["prefill_perf"]["fixed_ms"] = 999
@@ -93,9 +91,7 @@ def test_each_environment_declaration_loads_preset_once_and_checks_excluded_prof
 
     with patch("scenario.environment_resolver.load_preset_bundle", wraps=presets.load_preset_bundle) as load:
         environment(
-            dict(profile_overrides={"single-nonbatch": {"max_requests": 2}, "single-batch": {"max_requests": 3}}),
-            "env",
-            "batch-window",
+            dict(profile_overrides={"single-nonbatch": {"max_requests": 2}, "single-batch": {"max_requests": 3}}), "env", "batch-window"
         )
     assert load.call_count == 1
     with pytest.raises(ScenarioError):
@@ -175,9 +171,7 @@ def test_report_adapter_cannot_rewrite_frozen_gate_verdict(tmp_path, fails):
             raise RuntimeError("report unavailable")
 
     clock = Clock()
-    result = ScenarioRunner().run(
-        instance, Backend(clock), artifact_dir=tmp_path, clock=clock, sleeper=clock.sleep, policy=Policy()
-    )
+    result = ScenarioRunner().run(instance, Backend(clock), artifact_dir=tmp_path, clock=clock, sleeper=clock.sleep, policy=Policy())
     outcome = result.adjudicate()
     assert outcome.gate == ("FAIL" if fails else "PASS")
     assert outcome.delivery == "ERROR"

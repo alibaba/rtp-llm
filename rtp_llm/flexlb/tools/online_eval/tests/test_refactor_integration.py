@@ -44,8 +44,7 @@ def test_cache_controls_share_inputs_and_keep_independent_gap_budgets():
             pair = [
                 p
                 for p in plans
-                if p["profile"] == profile
-                and p["implementation"]["variant_axes"][p["variant_id"]]["data_archive"] == archive
+                if p["profile"] == profile and p["implementation"]["variant_axes"][p["variant_id"]]["data_archive"] == archive
             ]
             assert len(pair) == 2
             assert pair[0]["environment"]["rendered"] == pair[1]["environment"]["rendered"]

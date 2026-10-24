@@ -156,10 +156,7 @@ def _validate_produced(spec, metric, path, contracts):
         contract = output_contract(metric, spec, contracts or {})
     except ValueError as exc:
         raise ScenarioError(f"{path}: {exc}") from exc
-    return dict(
-        spec,
-        **{key: value for key, value in contract.items() if key in {"measurement", "collection", "implementation"}},
-    )
+    return dict(spec, **{key: value for key, value in contract.items() if key in {"measurement", "collection", "implementation"}})
 
 
 def _exclude(sources, produced, value, path):
@@ -207,10 +204,7 @@ def definitions(plan):
             value_kind="gauge",
             labels=[],
             measurement=dict(
-                method="promql_evaluation",
-                population=kind + "_selector",
-                accuracy="sampled",
-                requires_request_identity=False,
+                method="promql_evaluation", population=kind + "_selector", accuracy="sampled", requires_request_identity=False
             ),
         )
     if set(result) & set(plan["produced"]):
@@ -234,9 +228,7 @@ def validate_export_filter(plan, environment):
     """
     filters = [environment.get("metric_whitelist")]
     filters.extend(
-        patch.get("metric_whitelist")
-        for patch in environment.get("profile_overrides", {}).values()
-        if "metric_whitelist" in patch
+        patch.get("metric_whitelist") for patch in environment.get("profile_overrides", {}).values() if "metric_whitelist" in patch
     )
     for value in filters:
         if value is None:
@@ -265,9 +257,7 @@ def queries_for_targets(plan, targets, selector, interval, target_kinds=None):
         required.add(source + "/up")
         for metric, definition in plan["sources"][kind].items():
             key = source + "/" + metric
-            queries[key] = (
-                definition["promql"].replace("${selector}", selector(source)).replace("${window_ms}", str(window_ms))
-            )
+            queries[key] = definition["promql"].replace("${selector}", selector(source)).replace("${window_ms}", str(window_ms))
             if definition.get("required", False):
                 required.add(key)
     return queries, required

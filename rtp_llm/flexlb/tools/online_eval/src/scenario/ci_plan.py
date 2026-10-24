@@ -38,16 +38,12 @@ class CiPlan:
 
     def to_dict(self, worker=None):
         selected = self.identities(worker)
-        selected_profiles = [
-            profile for profile in self.profiles if any(identity.endswith("::" + profile) for identity in selected)
-        ]
+        selected_profiles = [profile for profile in self.profiles if any(identity.endswith("::" + profile) for identity in selected)]
         return {
             "ci_partition_schema_version": 2,
             "job": self.job,
             "suite": self.suite,
-            "prepare_zookeeper": any(
-                instance.prepare_zookeeper for instance in self.instances if instance.identity in selected
-            ),
+            "prepare_zookeeper": any(instance.prepare_zookeeper for instance in self.instances if instance.identity in selected),
             "experiment_params": json.loads(self.experiment_params),
             "profiles": list(self.profiles),
             "parallel": self.parallel,
@@ -73,9 +69,7 @@ class CiPlanner:
         suite = job.suite if suite is None else suite
         exact = tuple(value.strip() for value in instances.split(",")) if instances else None
         if exact is not None:
-            if len(set(exact)) != len(exact) or any(
-                len(value.split("::")) != 3 or not all(value.split("::")) for value in exact
-            ):
+            if len(set(exact)) != len(exact) or any(len(value.split("::")) != 3 or not all(value.split("::")) for value in exact):
                 raise ScenarioError("instances requires unique complete case::variant::profile IDs")
             requested_profiles = {identity.rsplit("::", 1)[-1] for identity in exact}
             if requested_profiles - set(job.profiles):
@@ -83,11 +77,7 @@ class CiPlanner:
             selected_profiles = tuple(profile for profile in job.profiles if profile in requested_profiles)
         else:
             selected_profiles = job.profiles if profiles is None else tuple(profiles)
-            if (
-                not selected_profiles
-                or len(set(selected_profiles)) != len(selected_profiles)
-                or set(selected_profiles) - set(job.profiles)
-            ):
+            if not selected_profiles or len(set(selected_profiles)) != len(selected_profiles) or set(selected_profiles) - set(job.profiles):
                 raise ScenarioError("profiles requires unique profiles supported by the CI job")
         from scenario.experiment_params import ExperimentParams
 
@@ -109,12 +99,7 @@ class CiPlanner:
                 catalog=self.catalog_path,
             )
             selected.extend(
-                CiInstance(
-                    p["id"],
-                    p["scenario_id"],
-                    p["profile"],
-                    p["environment"].get("zookeeper", {}).get("mode") == "helper",
-                )
+                CiInstance(p["id"], p["scenario_id"], p["profile"], p["environment"].get("zookeeper", {}).get("mode") == "helper")
                 for p in plans
                 if exact is None or p["id"] in exact
             )
@@ -126,9 +111,7 @@ class CiPlanner:
         overrides.require_cases(instance.case for instance in selected)
         groups = {worker: [] for worker in job.workers}
         for instance in selected:
-            owners = [
-                worker for worker, policy in job.workers.items() if policy.matches(instance.case, instance.profile)
-            ]
+            owners = [worker for worker, policy in job.workers.items() if policy.matches(instance.case, instance.profile)]
             if len(owners) != 1:
                 raise ScenarioError(f"CI instance must have exactly one worker: {instance.identity}; matches={owners}")
             groups[owners[0]].append(instance.identity)

@@ -43,12 +43,8 @@ class ContractTest(unittest.TestCase):
     def test_explicit_target_kinds_cover_dynamic_clients(self):
         plan = load_plan("default.yaml")
         with self.assertRaisesRegex(ValueError, "target kinds"):
-            queries_for_targets(
-                plan, {"mock": "", "client-flow": ""}, lambda source: '{job="' + source + '"}', 1, {"mock": "mock"}
-            )
-        queries, _ = queries_for_targets(
-            plan, {"worker": ""}, lambda source: '{job="' + source + '"}', 1, {"worker": "client"}
-        )
+            queries_for_targets(plan, {"mock": "", "client-flow": ""}, lambda source: '{job="' + source + '"}', 1, {"mock": "mock"})
+        queries, _ = queries_for_targets(plan, {"worker": ""}, lambda source: '{job="' + source + '"}', 1, {"worker": "client"})
         self.assertIn("worker/schedule_p99_seconds", queries)
 
     def test_prefill_batch_size_uses_histogram(self):
@@ -63,10 +59,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn('rate(mock_prefill_batch_size_sum{job="mock"}[10000ms])', expression)
             self.assertIn('rate(mock_prefill_batch_size_count{job="mock"}[10000ms])', expression)
             self.assertIn("histogram_quantile(0.9", queries["mock/prefill_batch_size_p90"]["promql"])
-            self.assertIn(
-                'rate(mock_prefill_batch_size_bucket{job="mock"}[10000ms])',
-                queries["mock/prefill_batch_size_p90"]["promql"],
-            )
+            self.assertIn('rate(mock_prefill_batch_size_bucket{job="mock"}[10000ms])', queries["mock/prefill_batch_size_p90"]["promql"])
 
     def test_schedule_response_query_uses_current_api_timer(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,9 +82,7 @@ class ContractTest(unittest.TestCase):
         monitor = PrometheusSession(
             "unused", {"mock": "http://unused/metrics"}, query_plan="cache_scale_in.yaml", target_kinds={"mock": "mock"}
         )
-        labels = dict(
-            role="prefill", engine_name="P0", engine_incarnation="one", engine_ip="127.0.0.1", grpc_port="7000"
-        )
+        labels = dict(role="prefill", engine_name="P0", engine_incarnation="one", engine_ip="127.0.0.1", grpc_port="7000")
         monitor.client.instant = Mock(
             return_value=[
                 dict(metric=dict(labels, __name__="rtp_llm_running_stream_size"), value=[1, "2"]),
@@ -126,9 +117,7 @@ class ContractTest(unittest.TestCase):
 
     def test_snapshot_files_never_supply_curves(self):
         with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "cache-gate-evidence.json").write_text(
-                json.dumps({"samples": [{"waiting": 999, "running": 999}]})
-            )
+            (Path(tmp) / "cache-gate-evidence.json").write_text(json.dumps({"samples": [{"waiting": 999, "running": 999}]}))
             with self.assertRaises(FileNotFoundError):
                 MetricStore.read(tmp).series(0)
 
@@ -154,31 +143,16 @@ class ContractTest(unittest.TestCase):
             export_metrics(tmp)
             _, _, _, errors = MetricStore.read(tmp).series(0)
             self.assertEqual(
-                errors,
-                [
-                    {
-                        "source": "1",
-                        "query": "master/completions_qps",
-                        "error": "monitor series absent",
-                        "severity": "diagnostic",
-                    }
-                ],
+                errors, [{"source": "1", "query": "master/completions_qps", "error": "monitor series absent", "severity": "diagnostic"}]
             )
 
     def test_missing_binary_has_no_private_fallback(self):
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            patch.dict(os.environ, {"PROMETHEUS_BIN": ""}),
-            patch("shutil.which", return_value=None),
-        ):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"PROMETHEUS_BIN": ""}), patch("shutil.which", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "Prometheus is required"):
                 PrometheusSession(tmp, {"mock": "http://127.0.0.1:1/metrics"}, target_kinds={"mock": "mock"}).start()
 
 
-@unittest.skipUnless(
-    os.environ.get("PROMETHEUS_BIN") or shutil.which("prometheus"),
-    "requires real Prometheus",
-)
+@unittest.skipUnless(os.environ.get("PROMETHEUS_BIN") or shutil.which("prometheus"), "requires real Prometheus")
 class RealPrometheusTest(unittest.TestCase):
     def test_owned_scrape_query_archive_failure_and_cleanup(self):
         state = {"bad": False}
@@ -201,28 +175,15 @@ class RealPrometheusTest(unittest.TestCase):
         url = f"http://127.0.0.1:{server.server_port}/metrics"
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                session = PrometheusSession(
-                    Path(tmp) / "telemetry" / "1",
-                    {"mock": url},
-                    0.2,
-                    1,
-                    target_kinds={"mock": "mock"},
-                )
+                session = PrometheusSession(Path(tmp) / "telemetry" / "1", {"mock": url}, 0.2, 1, target_kinds={"mock": "mock"})
                 try:
                     session.start()
                     time.sleep(0.5)
                     self.assertTrue(
-                        any(
-                            row["metric"]["__name__"] == "rtp_llm_running_stream_size"
-                            for row in session.client.instant("mock")
-                        )
+                        any(row["metric"]["__name__"] == "rtp_llm_running_stream_size" for row in session.client.instant("mock"))
                     )
                     self.assertEqual(session.client.query('unused_large_metric{job="mock"}'), [])
-                    self.assertFalse(
-                        any(
-                            row["metric"]["__name__"] == "unused_large_metric" for row in session.client.instant("mock")
-                        )
-                    )
+                    self.assertFalse(any(row["metric"]["__name__"] == "unused_large_metric" for row in session.client.instant("mock")))
                     self.assertTrue(session.client.query('up{job="mock"}'))
                     session.query_plan["sources"]["mock"]["raw_context_tps"] = dict(
                         promql="rtp_llm_context_tps${selector}",
@@ -235,9 +196,7 @@ class RealPrometheusTest(unittest.TestCase):
                     from monitoring.query_plan import plan_hash
 
                     session.query_plan_sha256 = plan_hash(session.query_plan)
-                    raw = session.client.metric_rows(
-                        "mock/raw_context_tps", source="mock", start=session.started, end=time.time()
-                    )
+                    raw = session.client.metric_rows("mock/raw_context_tps", source="mock", start=session.started, end=time.time())
                     self.assertTrue(raw)
                     self.assertTrue(all(float(value) == 9 for row in raw for _, value in row["values"]))
                     self.assertTrue(session.client.metric_snapshot(["mock/raw_context_tps"], source="mock"))

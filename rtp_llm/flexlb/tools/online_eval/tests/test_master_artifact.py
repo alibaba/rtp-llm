@@ -16,11 +16,7 @@ class MasterArtifactTest(unittest.TestCase):
             root = Path(d)
             jar = root / "master.jar"
             jar.write_bytes(b"unversioned-jar")
-            env = SimpleNamespace(
-                run_dir=root,
-                discovery_file=root / "discovery.json",
-                spec=SimpleNamespace(discovery="discovery_file"),
-            )
+            env = SimpleNamespace(run_dir=root, discovery_file=root / "discovery.json", spec=SimpleNamespace(discovery="discovery_file"))
             menv = dict(FLEXLB_CONFIG='{"schemaVersion":3}', MODEL_SERVICE_CONFIG='{"discovery_file":"x"}')
             with patch.dict(os.environ, {}, clear=True):
                 result = configure_master(env, menv, jar)
@@ -37,18 +33,10 @@ class MasterArtifactTest(unittest.TestCase):
             jar.write_bytes(b"old-jar")
             config = root / "config.json"
             config.write_text('{"schemaVersion":1,"dispatcher":{"type":"NON_BATCH"}}')
-            env = SimpleNamespace(
-                run_dir=root,
-                discovery_file=root / "discovery.json",
-                spec=SimpleNamespace(discovery="discovery_file"),
-            )
-            menv = dict(
-                FLEXLB_CONFIG='{"schemaVersion":3}', MODEL_SERVICE_CONFIG='{"discovery_file":"x","role_endpoints":[]}'
-            )
+            env = SimpleNamespace(run_dir=root, discovery_file=root / "discovery.json", spec=SimpleNamespace(discovery="discovery_file"))
+            menv = dict(FLEXLB_CONFIG='{"schemaVersion":3}', MODEL_SERVICE_CONFIG='{"discovery_file":"x","role_endpoints":[]}')
             with patch.dict(
-                os.environ,
-                {"FLEXLB_FT_MASTER_CONFIG_FILE": str(config), "FLEXLB_FT_MASTER_SOURCE_COMMIT": "a" * 40},
-                clear=True,
+                os.environ, {"FLEXLB_FT_MASTER_CONFIG_FILE": str(config), "FLEXLB_FT_MASTER_SOURCE_COMMIT": "a" * 40}, clear=True
             ):
                 configure_master(env, menv, jar)
             self.assertEqual(json.loads(menv["FLEXLB_CONFIG"])["schemaVersion"], 1)

@@ -25,13 +25,7 @@ from adapters.java_mock_resources import plan_lane_leases
 from file_io import write_json
 from reporting.view_config import DEFAULT_VIEW
 from runtime.resource_plan import ResourcePlanError
-from scenario.instance_plan import (
-    InstancePlanError,
-    order_instances,
-    parse_catalog,
-    plan_instances,
-    select_instances,
-)
+from scenario.instance_plan import InstancePlanError, order_instances, parse_catalog, plan_instances, select_instances
 
 SCENARIO_RUNNER = Path(__file__).with_name("child_cli.py")
 from scenario.outcome import TERMINAL_STATUSES as STATUSES
@@ -121,9 +115,7 @@ class ChildProcesses:
             finally:
                 self._signal(child, signal.SIGKILL)
 
-        operations = [
-            (str(child.pid) + " signal", lambda child=child: self._signal(child, signal.SIGTERM)) for child in children
-        ]
+        operations = [(str(child.pid) + " signal", lambda child=child: self._signal(child, signal.SIGTERM)) for child in children]
         operations.extend((str(child.pid) + " reap", lambda child=child: settle(child)) for child in children)
         cleanup_all(operations)
 
@@ -133,9 +125,7 @@ def _catalog(args):
 
     instances = []
     if not SCENARIO_RUNNER.is_file():
-        raise InstancePlanError(
-            "list_cases.py is unavailable; install the scenario compiler/runner before selecting YAML"
-        )
+        raise InstancePlanError("list_cases.py is unavailable; install the scenario compiler/runner before selecting YAML")
     proc = subprocess.run(
         [
             sys.executable,
@@ -209,26 +199,11 @@ def _run_segment(index, part, instance, lease, args, out, children):
             command.append("--retain-tsdb")
         execution = instance.metadata["execution"]
         timeout = (
-            sum(
-                execution[key]
-                for key in (
-                    "timeout_s",
-                    "cleanup_timeout_s",
-                    "finalize_timeout_s",
-                    "report_timeout_s",
-                    "archive_timeout_s",
-                )
-            )
+            sum(execution[key] for key in ("timeout_s", "cleanup_timeout_s", "finalize_timeout_s", "report_timeout_s", "archive_timeout_s"))
             + 30
         )
         cleanup_timeout = execution["cleanup_timeout_s"] + 15
-        rc = children.run(
-            command,
-            env,
-            segment / "runner.log",
-            timeout=timeout,
-            cleanup_timeout=cleanup_timeout,
-        )
+        rc = children.run(command, env, segment / "runner.log", timeout=timeout, cleanup_timeout=cleanup_timeout)
         rows = read_results(result_path, [instance])
     except Exception as exc:
         rc = 1
@@ -284,13 +259,7 @@ def _run_lane(index, lane, lease, args, out, children, dispatch=None):
             break
     if failure and dispatch is None:
         results.extend(dict(error_result(instance, failure), not_started=True, lane=index) for instance in pending)
-    return {
-        "lane": index,
-        "segments": segments,
-        "instances": results,
-        "reusable": failure is None,
-        "retirement_reason": failure,
-    }
+    return {"lane": index, "segments": segments, "instances": results, "reusable": failure is None, "retirement_reason": failure}
 
 
 def _aggregate(lanes, instances, args, elapsed):
@@ -343,10 +312,7 @@ def _print_planned_reports(instances):
 def _print_generated_reports(rows):
     for row in rows:
         if row.get("artifacts"):
-            print(
-                "experiment artifacts: "
-                + json.dumps(dict(instance=row["id"], artifacts=row["artifacts"]), ensure_ascii=False)
-            )
+            print("experiment artifacts: " + json.dumps(dict(instance=row["id"], artifacts=row["artifacts"]), ensure_ascii=False))
         if row.get("test_kind") != "workload":
             continue
         workload = row.get("workload")
@@ -354,11 +320,7 @@ def _print_generated_reports(rows):
         print(
             "workload reports: "
             + json.dumps(
-                {
-                    "instance": row["id"],
-                    "status": row["status"],
-                    "reports": reports if isinstance(reports, dict) else None,
-                },
+                {"instance": row["id"], "status": row["status"], "reports": reports if isinstance(reports, dict) else None},
                 ensure_ascii=False,
             )
         )
@@ -366,10 +328,7 @@ def _print_generated_reports(rows):
 
 def run_structured(args: argparse.Namespace) -> int:
     """Own window and output locks before listing, releasing them on every exit."""
-    explicit = any(
-        (os.environ.get(key) or "").strip()
-        for key in ("FLEXLB_FT_PARALLEL_MASTER_BASE", "FLEXLB_FT_PARALLEL_MOCK_BASE")
-    )
+    explicit = any((os.environ.get(key) or "").strip() for key in ("FLEXLB_FT_PARALLEL_MASTER_BASE", "FLEXLB_FT_PARALLEL_MOCK_BASE"))
     with port_windows.admit_port_window(
         args.parallel,
         args.mock_stride,
@@ -404,20 +363,11 @@ def _run_admitted(args, out, admission):
             if scheduling == "dynamic"
             else [[instance.budget for instance in lane] for lane in lanes]
         )
-        leases = plan_lane_leases(
-            budgets,
-            master_base=admission.master_base,
-            mock_base=admission.mock_base,
-            mock_stride=args.mock_stride,
-        )
+        leases = plan_lane_leases(budgets, master_base=admission.master_base, mock_base=admission.mock_base, mock_stride=args.mock_stride)
         for i, lease in enumerate(leases):
-            if list(lease.ports()) != port_windows.lane_ports(
-                i, args.mock_stride, admission.master_base, admission.mock_base
-            ):
+            if list(lease.ports()) != port_windows.lane_ports(i, args.mock_stride, admission.master_base, admission.mock_base):
                 raise ResourcePlanError("resource planner and port preflight disagree")
-            if lease.child_env() != port_windows.lane_env(
-                i, args.mock_stride, admission.master_base, admission.mock_base
-            ):
+            if lease.child_env() != port_windows.lane_env(i, args.mock_stride, admission.master_base, admission.mock_base):
                 raise ResourcePlanError("resource planner and child environment disagree")
         from mode_profiles import master_mode_for_profile, resolve_mode
 
@@ -435,19 +385,14 @@ def _run_admitted(args, out, admission):
             "port_provenance": args.port_provenance,
             "instances": [instance.metadata for instance in instances],
             "lanes": [
-                {
-                    **lease.to_manifest(),
-                    "instance_ids": [instance.id for instance in lane] if scheduling == "static" else [],
-                }
+                {**lease.to_manifest(), "instance_ids": [instance.id for instance in lane] if scheduling == "static" else []}
                 for (lease, lane) in zip(leases, lanes)
             ],
         }
     except (InstancePlanError, ResourcePlanError, subprocess.TimeoutExpired) as exc:
         print(f"error: instance planning failed: {exc}", file=sys.stderr)
         return 2
-    print(
-        f"instance plan: source={args.source} profile={args.profile} instances={len(instances)} lanes={len(lanes)} out_dir={out}"
-    )
+    print(f"instance plan: source={args.source} profile={args.profile} instances={len(instances)} lanes={len(lanes)} out_dir={out}")
     print("  scheduling: " + scheduling)
     if scheduling == "dynamic":
         print("  dispatch queue: " + ", ".join(instance.id for instance in ordered))
@@ -466,9 +411,7 @@ def _run_admitted(args, out, admission):
     if dispatch is not None:
         for instance in ordered:
             dispatch.put(instance)
-    futures = [
-        pool.submit(_run_lane, i, lane, leases[i], args, out, children, dispatch) for (i, lane) in enumerate(lanes)
-    ]
+    futures = [pool.submit(_run_lane, i, lane, leases[i], args, out, children, dispatch) for (i, lane) in enumerate(lanes)]
     interrupted = False
 
     def terminate(signum, frame):

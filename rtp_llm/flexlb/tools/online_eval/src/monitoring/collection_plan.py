@@ -19,9 +19,7 @@ def physical_metrics(plan, kind):
 def collection_plan(plan, sources=None):
     return dict(
         prometheus={
-            kind: dict(
-                metric_ids=[kind + "/" + name for name in queries], exported_metrics=physical_metrics(plan, kind)
-            )
+            kind: dict(metric_ids=[kind + "/" + name for name in queries], exported_metrics=physical_metrics(plan, kind))
             for kind, queries in plan["sources"].items()
             if queries
         },
@@ -90,10 +88,6 @@ def scrape_job(plan, name, url, kind):
         params=parse_qs(parsed.query),
         static_configs=[dict(targets=[parsed.netloc])],
         metric_relabel_configs=[
-            dict(
-                source_labels=["__name__"],
-                action="keep",
-                regex="(" + "|".join(re.escape(metric) for metric in names) + ")",
-            )
+            dict(source_labels=["__name__"], action="keep", regex="(" + "|".join(re.escape(metric) for metric in names) + ")")
         ],
     )

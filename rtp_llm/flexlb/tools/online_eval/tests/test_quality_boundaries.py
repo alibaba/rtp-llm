@@ -25,9 +25,7 @@ def test_ruff_rejects_undefined_names_with_project_configuration(tmp_path):
         pytest.skip("install requirements-quality.txt to exercise Ruff admission")
     source = tmp_path / "broken.py"
     source.write_text("def execute():\n    return missing_backend\n")
-    result = subprocess.run(
-        [command, "check", "--config", str(ROOT / "pyproject.toml"), str(source)], capture_output=True, text=True
-    )
+    result = subprocess.run([command, "check", "--config", str(ROOT / "pyproject.toml"), str(source)], capture_output=True, text=True)
     assert result.returncode != 0
     assert "F821" in result.stdout
 
@@ -49,17 +47,7 @@ def architecture(tmp_path):
     for name in ("analysis", "inputs", "report", "panels"):
         (case / (name + ".py")).write_text("")
     (tmp_path / "artifacts" / "experiment_store.py").write_text("")
-    for name in (
-        "compiler",
-        "program_compiler",
-        "stage_compiler",
-        "builder",
-        "contracts",
-        "inputs",
-        "gates",
-        "measurement",
-        "registry",
-    ):
+    for name in ("compiler", "program_compiler", "stage_compiler", "builder", "contracts", "inputs", "gates", "measurement", "registry"):
         (tmp_path / "scenario" / (name + ".py")).write_text("")
     (tmp_path / ".importlinter").write_text((ROOT / ".importlinter").read_text())
 
@@ -118,10 +106,7 @@ def test_type_checker_rejects_bad_calls_with_project_configuration(tmp_path):
     source = tmp_path / "bad_call.py"
     source.write_text('def identity(value: int) -> int:\n    return value\nidentity("wrong")\n')
     result = subprocess.run(
-        [sys.executable, "-m", "mypy", "--config-file", str(ROOT / "pyproject.toml"), str(source)],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
+        [sys.executable, "-m", "mypy", "--config-file", str(ROOT / "pyproject.toml"), str(source)], cwd=ROOT, capture_output=True, text=True
     )
     assert result.returncode != 0
     assert "arg-type" in result.stdout

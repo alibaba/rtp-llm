@@ -36,9 +36,7 @@ class RequestParameters:
     post_issue_delay_s: Optional[float] = None
 
     def to_dict(self):
-        result = {
-            field.name: getattr(self, field.name) for field in fields(self) if getattr(self, field.name) is not None
-        }
+        result = {field.name: getattr(self, field.name) for field in fields(self) if getattr(self, field.name) is not None}
         if self.block_keys is not None:
             result["block_keys"] = list(self.block_keys)
         return result

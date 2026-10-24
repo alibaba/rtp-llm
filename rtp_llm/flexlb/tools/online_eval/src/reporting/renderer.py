@@ -19,9 +19,7 @@ from reporting.spec import validate
 def _present(value):
     """Remove absent metadata without treating zero or false as missing."""
     if isinstance(value, dict):
-        cleaned = {
-            k: item for k, v in value.items() if (item := _present(v)) is not None and not k.endswith("_schema_version")
-        }
+        cleaned = {k: item for k, v in value.items() if (item := _present(v)) is not None and not k.endswith("_schema_version")}
         return cleaned or None
     if isinstance(value, list):
         cleaned = [item for v in value if (item := _present(v)) is not None]
@@ -57,13 +55,7 @@ def _cell(value):
     encoded = _text(value)
     if len(encoded) <= 240:
         return encoded
-    return (
-        '<details class="cell-detail"><summary>'
-        + _text(_brief(value)[:260])
-        + "</summary><pre>"
-        + encoded
-        + "</pre></details>"
-    )
+    return '<details class="cell-detail"><summary>' + _text(_brief(value)[:260]) + "</summary><pre>" + encoded + "</pre></details>"
 
 
 def render_context(spec):
@@ -94,17 +86,11 @@ def render_context(spec):
                     for child, entry in item.items():
                         walk(entry, path + "." + child if path else child, depth + 1)
                 else:
-                    leaves.append(
-                        '<div class="context-field"><dt>' + _text(path) + "</dt><dd>" + _cell(item) + "</dd></div>"
-                    )
+                    leaves.append('<div class="context-field"><dt>' + _text(path) + "</dt><dd>" + _cell(item) + "</dd></div>")
 
             walk(fields, "", 0)
             groups.append(
-                '<article class="context-card"><h3>'
-                + _text(names.get(key, key))
-                + "</h3><dl>"
-                + "".join(leaves)
-                + "</dl></article>"
+                '<article class="context-card"><h3>' + _text(names.get(key, key)) + "</h3><dl>" + "".join(leaves) + "</dl></article>"
             )
         if groups:
             heading = "<h3>" + _text(label) + "</h3>" if label else ""
@@ -128,16 +114,8 @@ def render_sections(sections):
             body = "<pre>" + _text(section["value"]) + "</pre>"
         elif kind == "table":
             heads = "".join("<th>" + _text(c) + "</th>" for c in section["columns"])
-            rows = "".join(
-                "<tr>" + "".join("<td>" + _cell(v) + "</td>" for v in row) + "</tr>" for row in section["rows"]
-            )
-            body = (
-                '<div class="table-scroll"><table><thead><tr>'
-                + heads
-                + "</tr></thead><tbody>"
-                + rows
-                + "</tbody></table></div>"
-            )
+            rows = "".join("<tr>" + "".join("<td>" + _cell(v) + "</td>" for v in row) + "</tr>" for row in section["rows"])
+            body = '<div class="table-scroll"><table><thead><tr>' + heads + "</tr></thead><tbody>" + rows + "</tbody></table></div>"
         elif kind == "links":
             items = []
             for item in section["items"]:
@@ -193,14 +171,7 @@ def _render_validated(spec):
         "summary": {
             "title": title,
             "subtitle": subtitle,
-            "kpis": [
-                {
-                    "label": k.get("label", ""),
-                    "value": k.get("value", ""),
-                    "tone": k.get("tone") or "",
-                }
-                for k in kpis
-            ],
+            "kpis": [{"label": k.get("label", ""), "value": k.get("value", ""), "tone": k.get("tone") or ""} for k in kpis],
         },
         "timeAxis": spec.get("timeAxis"),
         "timeOriginEpochS": spec.get("timeOriginEpochS"),
@@ -266,10 +237,7 @@ def _render_validated(spec):
         template.replace("__SECTIONS__", render_sections(sections))
         .replace("__CONTEXT__", render_context(spec) + render_sections(spec.get("summary_sections", [])))
         .replace("__PAGE_TITLE__", page_title)
-        .replace(
-            "__SPEC_JSON__",
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).replace("<", "\\u003c"),
-        )
+        .replace("__SPEC_JSON__", json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).replace("<", "\\u003c"))
         .replace("__CHARTJS_JS__", chartjs)
         .replace("__REPORT_CONTROLLER_JS__", controller)
         .replace("__LEGEND_INTERACTION_JS__", interaction)

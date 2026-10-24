@@ -24,11 +24,7 @@ def provenance_from(analysis, inherited=None, *, run=None):
     run = RunPresentation.read(analysis) if run is None else run
     meta = copy.deepcopy(inherited or {})
     configuration = copy.deepcopy(meta.get("configuration") or {})
-    for name, value in (
-        ("declared", run.configuration),
-        ("sha256", run.configuration_sha256),
-        ("runtime", run.runtime_configuration),
-    ):
+    for name, value in (("declared", run.configuration), ("sha256", run.configuration_sha256), ("runtime", run.runtime_configuration)):
         if value is not None:
             configuration[name] = value
         elif name not in configuration:
@@ -44,10 +40,7 @@ def provenance_from(analysis, inherited=None, *, run=None):
         workload=run.traffic_manifests if run.traffic_manifests is not None else meta.get("workload"),
         configuration=configuration,
         environment=run.runtime_provenance if run.runtime_provenance is not None else meta.get("environment"),
-        clock=dict(
-            acquisition=run.clock_anchor if run.clock_anchor is not None else meta.get("clock"),
-            report=run.report_timeline,
-        )
+        clock=dict(acquisition=run.clock_anchor if run.clock_anchor is not None else meta.get("clock"), report=run.report_timeline)
         if run.report_timeline is not None
         else run.clock_anchor
         if run.clock_anchor is not None
@@ -76,9 +69,7 @@ def canonical_spec(spec, analysis, *, run=None):
         item for item in result.get("kpis", []) if item.get("id") not in {"run." + key for key in common}
     ]
     result["sections"] = [checks_section(run), validity_section(run)] + [
-        section
-        for section in result.get("sections", [])
-        if section.get("id") not in {"run.checks", "run.validity", "case.checks"}
+        section for section in result.get("sections", []) if section.get("id") not in {"run.checks", "run.validity", "case.checks"}
     ]
     return apply(result, analysis)
 
@@ -88,9 +79,5 @@ def selected_spec(spec, analysis, presentation, *, run=None):
     if (analysis.get("report_timeline") or {}).get("status") == "UNAVAILABLE":
         return result
     return attach_events(
-        result,
-        presentation,
-        origin=result["timeOriginEpochS"],
-        phases=analysis.get("phases", []),
-        events=analysis.get("events", []),
+        result, presentation, origin=result["timeOriginEpochS"], phases=analysis.get("phases", []), events=analysis.get("events", [])
     )

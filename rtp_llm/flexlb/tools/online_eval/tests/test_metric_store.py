@@ -17,28 +17,14 @@ from scenario.registry import load_metric_plan as load_plan
 
 
 def definition(**kwargs):
-    return dict(
-        promql="temperature${selector}",
-        unit="K",
-        value_kind="gauge",
-        labels=[],
-        exported_metrics=["temperature"],
-        **kwargs,
-    )
+    return dict(promql="temperature${selector}", unit="K", value_kind="gauge", labels=[], exported_metrics=["temperature"], **kwargs)
 
 
 def archive(root, queries, **kwargs):
     path = Path(root) / "telemetry/1/queries.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     data = dict(
-        start=1,
-        end=3,
-        step=1,
-        targets={},
-        queries=queries,
-        target_kinds={"worker": "mock"},
-        query_plan="temperature.yaml",
-        **kwargs,
+        start=1, end=3, step=1, targets={}, queries=queries, target_kinds={"worker": "mock"}, query_plan="temperature.yaml", **kwargs
     )
     path.write_text(json.dumps(data))
     return path
@@ -63,11 +49,7 @@ class MetricPlanTest(unittest.TestCase):
 
         good = dict(scheduler_inflight=0, prefill_endpoints=[], decode_endpoints=[])
         self.assertEqual(master_state_fields(good)["prefill_inflight_requests"], 0)
-        for broken in [
-            dict(scheduler_inflight=0),
-            dict(good, prefill_endpoints=[{}]),
-            dict(good, scheduler_inflight=float("nan")),
-        ]:
+        for broken in [dict(scheduler_inflight=0), dict(good, prefill_endpoints=[{}]), dict(good, scheduler_inflight=float("nan"))]:
             with self.assertRaises(ValueError):
                 master_state_fields(broken)
 
@@ -77,13 +59,7 @@ class MetricPlanTest(unittest.TestCase):
             base = dict(metric_plan_schema_version=5, sources=dict(mock=dict(temperature=definition())))
             (root / "base.yaml").write_text(json.dumps(base))
             (root / "case.yaml").write_text(
-                json.dumps(
-                    dict(
-                        metric_plan_schema_version=5,
-                        include=["base.yaml"],
-                        sources=dict(mock=dict(second=definition())),
-                    )
-                )
+                json.dumps(dict(metric_plan_schema_version=5, include=["base.yaml"], sources=dict(mock=dict(second=definition()))))
             )
             original = load_plan("case.yaml")
             self.assertEqual(set(original["sources"]["mock"]), {"temperature", "second"})
@@ -111,20 +87,12 @@ class MetricPlanTest(unittest.TestCase):
             (dict(include=["base.yaml"], exclude=["mock/missing"]), "does not exist"),
             (
                 dict(
-                    produced={
-                        "derived/x": dict(
-                            producer="unknown", source_type="client_journal", unit="K", value_kind="scalar", labels=[]
-                        )
-                    }
+                    produced={"derived/x": dict(producer="unknown", source_type="client_journal", unit="K", value_kind="scalar", labels=[])}
                 ),
                 "unknown metric producer",
             ),
         ]:
-            with (
-                self.subTest(changes=changes),
-                tempfile.TemporaryDirectory() as d,
-                patch("monitoring.query_plan.CATALOG", Path(d)),
-            ):
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as d, patch("monitoring.query_plan.CATALOG", Path(d)):
                 (Path(d) / "base.yaml").write_text(
                     json.dumps(dict(metric_plan_schema_version=5, sources=dict(mock=dict(temperature=definition()))))
                 )
@@ -136,14 +104,10 @@ class MetricPlanTest(unittest.TestCase):
         from metric_fixtures import PrometheusSession
 
         session = PrometheusSession(
-            "unused",
-            {"mock": "http://unused/metrics"},
-            query_plan="master_performance.yaml",
-            target_kinds={"mock": "mock"},
+            "unused", {"mock": "http://unused/metrics"}, query_plan="master_performance.yaml", target_kinds={"mock": "mock"}
         )
         row = dict(
-            metric=dict(__name__="rtp_llm_context_tps", role="prefill", engine_name="P0", engine_incarnation="one"),
-            values=[[1.7, "9"]],
+            metric=dict(__name__="rtp_llm_context_tps", role="prefill", engine_name="P0", engine_incarnation="one"), values=[[1.7, "9"]]
         )
         with patch.object(session.client, "query", return_value=[row]) as query:
             result = session.client.metric_rows("mock/rtp_llm_context_tps", source="mock", start=1, end=2)
@@ -190,30 +154,20 @@ class MetricArtifactTest(unittest.TestCase):
             (Path(d) / "result.json").write_text(json.dumps(dict(stages=checks)))
             produce_gates(d)
             rows = MetricStore.read(d).document["metrics"]["ha_gate/success_rate"]
-            self.assertEqual(
-                [row["provenance"]["evidence"]["observed_request_bounds"] for row in rows], [[1, 1], [2, 2]]
-            )
+            self.assertEqual([row["provenance"]["evidence"]["observed_request_bounds"] for row in rows], [[1, 1], [2, 2]])
             self.assertTrue(all(len(row["provenance"]["producer_sha256"]) == 64 for row in rows))
             # The same archived evidence also projects from one batch analysis stage.
             batch = dict(
-                id="analysis",
-                action="master_client_analyze",
-                checks=[dict(stage["checks"][0], id=stage["id"]) for stage in checks],
+                id="analysis", action="master_client_analyze", checks=[dict(stage["checks"][0], id=stage["id"]) for stage in checks]
             )
             (Path(d) / "result.json").write_text(json.dumps(dict(stages=[batch])))
             produce_gates(d)
             rows = MetricStore.read(d).document["metrics"]["ha_gate/success_rate"]
             self.assertEqual(len(rows), 2)
-            self.assertEqual(
-                [row["provenance"]["evidence"]["check"] for row in rows], ["analysis.before", "analysis.after"]
-            )
+            self.assertEqual([row["provenance"]["evidence"]["check"] for row in rows], ["analysis.before", "analysis.after"])
 
     def plan(self):
-        return dict(
-            metric_plan_schema_version=5,
-            sources=dict(mock=dict(temperature=definition()), client={}, master={}),
-            produced={},
-        )
+        return dict(metric_plan_schema_version=5, sources=dict(mock=dict(temperature=definition()), client={}, master={}), produced={})
 
     def test_query_id_survives_exported_name_and_chunk_boundaries(self):
         with tempfile.TemporaryDirectory() as d:
@@ -237,8 +191,7 @@ class MetricArtifactTest(unittest.TestCase):
                 d,
                 {
                     "worker/temperature": dict(
-                        promql="temperature",
-                        result=[dict(metric={"engine": "a"}, values=[[1, "0"], [2, "NaN"], [3, "3"]])],
+                        promql="temperature", result=[dict(metric={"engine": "a"}, values=[[1, "0"], [2, "NaN"], [3, "3"]])]
                     )
                 },
                 metric_plan=self.plan(),
@@ -247,10 +200,7 @@ class MetricArtifactTest(unittest.TestCase):
             rows, gaps, errors = store.project(1)
             (row,) = rows
             self.assertEqual(row["points"], [[0, 0], [1, None], [2, 3]])
-            self.assertEqual(
-                (row["metric_id"], row["epoch"], row["labels"], row["unit"]),
-                ("mock/temperature", "1", {"engine": "a"}, "K"),
-            )
+            self.assertEqual((row["metric_id"], row["epoch"], row["labels"], row["unit"]), ("mock/temperature", "1", {"engine": "a"}, "K"))
             self.assertEqual(row["provenance"], store.document["metrics"]["mock/temperature"][0]["provenance"])
             self.assertEqual(
                 store.series(1),
@@ -291,11 +241,7 @@ class MetricArtifactTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = archive(
                 d,
-                {
-                    "worker/temperature": dict(
-                        promql="temperature", result=[dict(metric={}, values=[[1, "0"], [2, "NaN"], [3, "3"]])]
-                    )
-                },
+                {"worker/temperature": dict(promql="temperature", result=[dict(metric={}, values=[[1, "0"], [2, "NaN"], [3, "3"]])])},
                 metric_plan=self.plan(),
             )
             store = export_metrics(d)
@@ -318,11 +264,7 @@ class MetricArtifactTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             archive(
                 d,
-                {
-                    "worker/temperature": dict(
-                        promql="temperature", result=[dict(metric={}, values=[[1, "1"], [1, "2"]])]
-                    )
-                },
+                {"worker/temperature": dict(promql="temperature", result=[dict(metric={}, values=[[1, "1"], [1, "2"]])])},
                 metric_plan=self.plan(),
             )
             with self.assertRaisesRegex(ValueError, "conflicting monitor samples"):
@@ -334,8 +276,7 @@ class MetricArtifactTest(unittest.TestCase):
                 d,
                 {
                     "worker/temperature": dict(
-                        promql="temperature",
-                        result=[dict(metric={"engine": name}, values=[[1, "1"], [3, "3"]]) for name in ["a", "b"]],
+                        promql="temperature", result=[dict(metric={"engine": name}, values=[[1, "1"], [3, "3"]]) for name in ["a", "b"]]
                     )
                 },
                 metric_plan=self.plan(),
@@ -364,9 +305,7 @@ class MetricArtifactTest(unittest.TestCase):
             publish(store, "ha/scheduler_inflight", spec, rows, producer="ha_evidence", evidence={"endpoint": "/debug"})
             store.save(d)
             frozen = MetricStore.read(d)
-            self.assertEqual(
-                frozen.document["metrics"]["ha/scheduler_inflight"][0]["provenance"]["source_type"], "debug_api"
-            )
+            self.assertEqual(frozen.document["metrics"]["ha/scheduler_inflight"][0]["provenance"]["source_type"], "debug_api")
             with self.assertRaises(MetricUnavailable):
                 frozen.select("ha/scheduler_inflight")
 
@@ -385,9 +324,7 @@ class MetricArtifactTest(unittest.TestCase):
             curve.update(name=key, group="temperature", axis="y")
         presentation.update(kind="selected", report={"subtitle": "test"}, sections={})
         presentation = ViewDefinition.read(presentation)
-        self.assertEqual(
-            [key for key, _ in bindings(presentation, "mock/temperature", {"role": "prefill"})], ["p_curve"]
-        )
+        self.assertEqual([key for key, _ in bindings(presentation, "mock/temperature", {"role": "prefill"})], ["p_curve"])
         self.assertEqual(bindings(presentation, "mock/temperature", {"role": "unknown"}), [])
 
     def test_reinterpretation_only_writes_new_destination(self):
@@ -401,9 +338,7 @@ class MetricArtifactTest(unittest.TestCase):
             )
             before = {str(p.relative_to(source)): p.read_bytes() for p in source.rglob("*") if p.is_file()}
             export_metrics(destination, self.plan(), archive_directory=source)
-            self.assertEqual(
-                before, {str(p.relative_to(source)): p.read_bytes() for p in source.rglob("*") if p.is_file()}
-            )
+            self.assertEqual(before, {str(p.relative_to(source)): p.read_bytes() for p in source.rglob("*") if p.is_file()})
             self.assertEqual(MetricStore.read(destination).reduce("mock/temperature", op="last"), 1)
 
 

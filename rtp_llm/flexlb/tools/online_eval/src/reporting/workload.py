@@ -25,11 +25,7 @@ def build_spec(payload, directory, *, name=DEFAULT_VIEW, presentation=None, run=
     if payload.get("unavailable_report_views"):
         spec["sections"].append(details("未生成的报告视角", payload["unavailable_report_views"]))
     attach_events(
-        spec,
-        presentation,
-        origin=payload["clock_anchor"]["epoch_s"],
-        phases=payload.get("phases", []),
-        events=payload.get("events", []),
+        spec, presentation, origin=payload["clock_anchor"]["epoch_s"], phases=payload.get("phases", []), events=payload.get("events", [])
     )
     return canonical_spec(spec, payload, run=run)
 
@@ -83,8 +79,7 @@ def _write_views(directory, analysis, names=None, *, deadline=None, selected=Non
     for name in names:
         if name == DEFAULT_VIEW:
             paths[name] = (
-                write_report(directory, analysis, name=name, presentation=(selected or {}).get(name, (None, None))[0])
-                / "report.html"
+                write_report(directory, analysis, name=name, presentation=(selected or {}).get(name, (None, None))[0]) / "report.html"
             )
     if not paths:
         paths[DEFAULT_VIEW] = write_report(directory, analysis) / "report.html"

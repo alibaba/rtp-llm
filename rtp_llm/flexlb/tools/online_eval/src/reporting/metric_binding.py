@@ -36,17 +36,10 @@ def monitoring_audit(store, presentation):
             continue
         classification = metric_classification(identity, definition, presentation)
         if classification is None and any(
-            identity in plan["definition"].get("demand", {}).get("gate", [])
-            for plan in store.document.get("plans", {}).values()
+            identity in plan["definition"].get("demand", {}).get("gate", []) for plan in store.document.get("plans", {}).values()
         ):
             classification = "GATE_INPUT"
         if classification is None:
             raise ValueError("unclassified monitoring metric " + identity)
-        audit.append(
-            dict(
-                metric_id=identity,
-                classification=classification,
-                series_count=len(store.document["metrics"].get(identity, [])),
-            )
-        )
+        audit.append(dict(metric_id=identity, classification=classification, series_count=len(store.document["metrics"].get(identity, []))))
     return audit

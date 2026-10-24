@@ -24,9 +24,7 @@ def selected_sources(plan, sources=None):
         allowed = capability.fields
         if not capability.required_fields <= allowed or dependency["field"] not in allowed:
             raise ValueError("unknown collection field: " + identity)
-        source = selected.setdefault(
-            dependency["source"], dict(fields=sorted(capability.required_fields), metric_ids=[])
-        )
+        source = selected.setdefault(dependency["source"], dict(fields=sorted(capability.required_fields), metric_ids=[]))
         if dependency["field"] not in source["fields"]:
             source["fields"].append(dependency["field"])
         source["metric_ids"].append(identity)

@@ -36,46 +36,24 @@ CHECK_INPUTS = {
         ),
         FRACTION,
     ),
-    **dict.fromkeys(
-        ("handover_errors", "late_errors", "outage_failures", "outage_no_master", "rolling_errors", "unique_requests"),
-        COUNT,
-    ),
+    **dict.fromkeys(("handover_errors", "late_errors", "outage_failures", "outage_no_master", "rolling_errors", "unique_requests"), COUNT),
 }
 INPUTS = InputSchema(
     {
         "traffic": section_fields(
             "traffic",
-            {
-                "kind",
-                "source",
-                "duration_s",
-                "timeout_ms",
-                "replay_speed",
-                "loop",
-                "max_concurrency",
-                "max_requests",
-                "fallback",
-            },
+            {"kind", "source", "duration_s", "timeout_ms", "replay_speed", "loop", "max_concurrency", "max_requests", "fallback"},
             {
                 **SOURCE_NUMBERS,
                 **OUTPUT_DISTRIBUTION_NUMBERS,
-                **number_fields(
-                    COUNT,
-                    "traffic.max_concurrency",
-                    "traffic.max_requests",
-                    "traffic.replay_speed",
-                    "traffic.timeout_ms",
-                ),
+                **number_fields(COUNT, "traffic.max_concurrency", "traffic.max_requests", "traffic.replay_speed", "traffic.timeout_ms"),
                 "traffic.duration_s": NONNEGATIVE,
             },
         ),
         "procedure": {
             **dict.fromkeys(("setup_timeout_s", "restart_timeout_s", "finish_timeout_s"), NONNEGATIVE),
             **dict.fromkeys(("kill_a", "kill_b", "b_ready", "a_ready")),
-            **{
-                name: {"wait_s": NONNEGATIVE}
-                for name in ("baseline_wait", "settle", "survivor_wait", "outage_wait", "both_wait")
-            },
+            **{name: {"wait_s": NONNEGATIVE} for name in ("baseline_wait", "settle", "survivor_wait", "outage_wait", "both_wait")},
         },
         "observation": {
             "windows": {"baseline": {"until": {"offset_s": OFFSET}}},
@@ -88,11 +66,7 @@ INPUTS = InputSchema(
 
 def validate_client_criterion(params, *, path="client criterion"):
     """Validate selected and inactive YAML criteria without accessing live resources."""
-    p = copy.deepcopy(
-        fields(
-            params, {"metric", "op", "expected"}, path, optional={"target", "route", "min_samples", "warning_profiles"}
-        )
-    )
+    p = copy.deepcopy(fields(params, {"metric", "op", "expected"}, path, optional={"target", "route", "min_samples", "warning_profiles"}))
     if type(p["metric"]) is not str or p["metric"] not in {"ha_gate/" + name for name in HA_METRICS}:
         raise ValueError("unknown client metric/comparison")
     if type(p["expected"]) not in (int, float) or not math.isfinite(p["expected"]):
@@ -101,18 +75,13 @@ def validate_client_criterion(params, *, path="client criterion"):
     from flexlb_profile_data import PROFILES
 
     warnings = p.get("warning_profiles", [])
-    if not isinstance(warnings, list) or any(
-        type(profile) is not str or profile not in PROFILES for profile in warnings
-    ):
+    if not isinstance(warnings, list) or any(type(profile) is not str or profile not in PROFILES for profile in warnings):
         raise ValueError("warning_profiles must contain registered profiles")
     if "min_samples" not in p:
         raise ValueError(path + ": min_samples is required")
     if type(p["min_samples"]) is not int or p["min_samples"] < 1:
         raise ValueError("client check must require actual samples")
-    required = {
-        "target_share": "target",
-        "route_count": "route",
-    }.get(p["metric"].split("/", 1)[1])
+    required = {"target_share": "target", "route_count": "route"}.get(p["metric"].split("/", 1)[1])
     if required and required not in p:
         raise ValueError(f"{p['metric']} requires {required}")
     if "target" in p and p["target"] not in ("A", "B"):
@@ -162,15 +131,8 @@ def read_cycle(case):
             "parameters.checks." + name,
             optional={"target", "route", "warning_profiles"},
         )
-        check_windows(
-            criterion["windows"],
-            available=window_names | {"full_run"},
-            path=f"parameters.checks.{name}.windows",
-            single=True,
-        )
-        validate_client_criterion(
-            {k: v for k, v in criterion.items() if k not in {"windows", "unit"}}, path="parameters.checks." + name
-        )
+        check_windows(criterion["windows"], available=window_names | {"full_run"}, path=f"parameters.checks.{name}.windows", single=True)
+        validate_client_criterion({k: v for k, v in criterion.items() if k not in {"windows", "unit"}}, path="parameters.checks." + name)
         case.metric(criterion["metric"], unit=criterion["unit"])
     return data, windows
 

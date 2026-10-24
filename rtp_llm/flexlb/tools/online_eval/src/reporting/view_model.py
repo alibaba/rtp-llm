@@ -106,13 +106,11 @@ class CurvePresentation:
             raise ValueError("scaled metric requires source_unit and unit")
         labels = value.get("labels")
         if "labels" in value and (
-            not isinstance(labels, dict)
-            or any(type(key) is not str or type(val) is not str for key, val in labels.items())
+            not isinstance(labels, dict) or any(type(key) is not str or type(val) is not str for key, val in labels.items())
         ):
             raise ValueError("invalid metric labels binding")
         return cls(
-            **{key: val for key, val in value.items() if key != "labels"},
-            labels=tuple(labels.items()) if labels is not None else None,
+            **{key: val for key, val in value.items() if key != "labels"}, labels=tuple(labels.items()) if labels is not None else None
         )
 
     def to_dict(self):
@@ -240,9 +238,7 @@ class PanelPresentation:
 
     @classmethod
     def read(cls, value):
-        mapping(
-            value, {"id", "title", "curve_ids"}, {field.name for field in fields(cls)}, "invalid panel presentation"
-        )
+        mapping(value, {"id", "title", "curve_ids"}, {field.name for field in fields(cls)}, "invalid panel presentation")
         if not all(text(value[key]) for key in ("id", "title")):
             raise ValueError("invalid panel id or title")
         for key in ("caption", "empty_caption"):
@@ -257,9 +253,7 @@ class PanelPresentation:
         if not isinstance(presets, dict) or not all(map(text, presets)):
             raise ValueError("invalid panel presets")
         events = value.get("event_ids")
-        if events is not None and (
-            not isinstance(events, list) or not all(map(text, events)) or len(set(events)) != len(events)
-        ):
+        if events is not None and (not isinstance(events, list) or not all(map(text, events)) or len(set(events)) != len(events)):
             raise ValueError("invalid panel event_ids")
         lines = value.get("gate_lines", [])
         if not isinstance(lines, list):
@@ -361,8 +355,7 @@ class ChartDefinition:
             )
         else:
             result.update(
-                curves={key: value.to_dict() for key, value in self.curves.items()},
-                panels=[value.to_dict() for value in self.panels],
+                curves={key: value.to_dict() for key, value in self.curves.items()}, panels=[value.to_dict() for value in self.panels]
             )
         return result
 
@@ -389,9 +382,7 @@ class ViewDefinition:
             if "metrics" in data
             else None,
             charts=ChartDefinition(
-                curves={
-                    key: CurvePresentation.read(value, curve_id=key) for key, value in charts.get("curves", {}).items()
-                },
+                curves={key: CurvePresentation.read(value, curve_id=key) for key, value in charts.get("curves", {}).items()},
                 panels=tuple(PanelPresentation.read(value) for value in charts.get("panels", [])),
                 events=copy.deepcopy(charts.get("events", {})),
                 event_ids=tuple(charts.get("event_ids", [])),
@@ -401,10 +392,7 @@ class ViewDefinition:
                 max_points_per_series=charts.get("max_points_per_series", 256),
                 default_presets={key: tuple(values) for key, values in charts.get("presets", {}).items()},
             ),
-            sections={
-                key: _read_at(SectionPresentation, value, "sections." + key)
-                for key, value in data.get("sections", {}).items()
-            },
+            sections={key: _read_at(SectionPresentation, value, "sections." + key) for key, value in data.get("sections", {}).items()},
             subtitle=SubtitleTemplate(report["subtitle"], fields=subtitle_fields),
         )
 

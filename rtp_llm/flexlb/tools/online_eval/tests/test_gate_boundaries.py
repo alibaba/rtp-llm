@@ -47,9 +47,7 @@ with patch('builtins.__import__', side_effect=guarded_import), \\
     assert measure_client_metric({'metric':'ha_gate/non_ok_count'}, [{'status':'error'}]) == 1
 assert not any(name.split('.')[0] in {'reporting', 'runtime'} or name.startswith('cases.') and name.rsplit('.', 1)[-1] in {'program', 'actions', 'publication', 'report', 'metrics', 'panels', 'runtime'} for name in sys.modules)
 """
-    process = subprocess.run(
-        [sys.executable, "-c", script], input=json.dumps(documents), text=True, cwd=ROOT, capture_output=True
-    )
+    process = subprocess.run([sys.executable, "-c", script], input=json.dumps(documents), text=True, cwd=ROOT, capture_output=True)
     assert process.returncode == 0, process.stderr
 
 
@@ -179,14 +177,10 @@ def test_registered_view_extension_needs_no_workload_case_branch():
 
         definition = registry.CaseDefinition({"default": lambda case: None}, report_views=module.REPORT_VIEWS)
         with (
-            mock.patch.object(
-                registry, "_snapshot", snapshot(entry("another_case", definition), include_existing=True)
-            ),
+            mock.patch.object(registry, "_snapshot", snapshot(entry("another_case", definition), include_existing=True)),
             mock.patch("reporting.view_config.VIEWS", root),
         ):
-            assert write_views(root, {"status": "PASS"}, ["another.yaml"]) == {
-                "another.yaml": Path("/unused/new/report.html")
-            }
+            assert write_views(root, {"status": "PASS"}, ["another.yaml"]) == {"another.yaml": Path("/unused/new/report.html")}
         validator.assert_called_once()
         assert render.call_args.args[1] == {"status": "PASS"}
 

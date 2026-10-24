@@ -22,9 +22,7 @@ def finalize_metrics(directory, analysis):
     from monitoring.metric_store import MetricStore
     from scenario.registry import registry
 
-    selected = {
-        spec["producer"] for spec in MetricStore.read(directory).document["definitions"].values() if "producer" in spec
-    }
+    selected = {spec["producer"] for spec in MetricStore.read(directory).document["definitions"].values() if "producer" in spec}
     analysis["metric_directory"] = str(directory)
     deadline = Deadline(time.monotonic() + 30)
     for case in registry().cases.values():

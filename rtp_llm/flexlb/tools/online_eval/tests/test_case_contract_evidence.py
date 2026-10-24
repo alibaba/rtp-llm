@@ -5,10 +5,7 @@ from unittest.mock import Mock, patch
 
 from adapters.engine_ops import EngineOps
 from cases.master_ha_failover.client import HaReplayClient
-from scenario.actions.master import (
-    decode_residual_bound,
-    owner_clean,
-)
+from scenario.actions.master import decode_residual_bound, owner_clean
 
 
 class ExecutionEvidenceTests(unittest.TestCase):

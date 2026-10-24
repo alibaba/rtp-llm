@@ -20,9 +20,7 @@ def test_omitted_sections_resolve_without_leaking_environment(monkeypatch):
     for key in DEFAULTS:
         monkeypatch.setenv(key, "poison")
     environment, playback = client_environment({"playback": {"duration_s": 30}})
-    assert environment == dict(
-        DEFAULTS, DURATION_S="30", REPLAY_SPEED="1.0", SEND_MODE_QPS="0.0", RAMP_UP_SECONDS="0.0", PRIORITY="50"
-    )
+    assert environment == dict(DEFAULTS, DURATION_S="30", REPLAY_SPEED="1.0", SEND_MODE_QPS="0.0", RAMP_UP_SECONDS="0.0", PRIORITY="50")
     assert playback["mode"] == "true-ts"
     assert playback["speed"] == 1
 

@@ -82,9 +82,7 @@ def describe_calculation(spec, *, windows):
         raise ValueError("unknown calculation window: " + str(window))
     if not finite_number(spec["bucket_s"]) or spec["bucket_s"] <= 0:
         raise ValueError("calculation.bucket_s must be finite and positive")
-    selection = mapping_fields(
-        spec["selection"], {"time_basis", "status"}, "calculation.selection", required={"time_basis", "status"}
-    )
+    selection = mapping_fields(spec["selection"], {"time_basis", "status"}, "calculation.selection", required={"time_basis", "status"})
     if (
         type(selection["time_basis"]) is not str
         or selection["time_basis"] not in {"arrival", "completion", "lifetimes"}
@@ -102,14 +100,10 @@ def describe_calculation(spec, *, windows):
     if "token_field" in spec and spec["token_field"] not in ("input_len", "observed_output_tokens"):
         raise ValueError("unknown request token field")
     if "field" in spec:
-        fields = (
-            ("ttft_ms", "total_ms", "tpot_ms") if calculator.percentile else ("input_len", "observed_output_tokens")
-        )
+        fields = ("ttft_ms", "total_ms", "tpot_ms") if calculator.percentile else ("input_len", "observed_output_tokens")
         if spec["field"] not in fields:
             raise ValueError("unknown request calculation field")
-    if {spec.get("field"), spec.get("token_field")} & {"observed_output_tokens", "tpot_ms", "ttft_ms"} and selection[
-        "status"
-    ] != "ok":
+    if {spec.get("field"), spec.get("token_field")} & {"observed_output_tokens", "tpot_ms", "ttft_ms"} and selection["status"] != "ok":
         raise ValueError("successful-stream fields require status=ok")
     if calculator.percentile and (not finite_number(spec["percentile"]) or not 0 < spec["percentile"] <= 1):
         raise ValueError("calculation.percentile must be in (0,1]")

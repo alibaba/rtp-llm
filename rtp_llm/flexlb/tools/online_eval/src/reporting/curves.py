@@ -13,18 +13,7 @@ def has_data(curve):
 
 
 def materialize(
-    curve_id,
-    style,
-    points,
-    *,
-    origin=0,
-    labels=None,
-    name=None,
-    unit=None,
-    hidden=None,
-    provenance=None,
-    description=None,
-    color_index=0,
+    curve_id, style, points, *, origin=0, labels=None, name=None, unit=None, hidden=None, provenance=None, description=None, color_index=0
 ):
     if name is None:
         name = style.name if labels is None else style.name.format(**labels)
@@ -42,8 +31,7 @@ def materialize(
         color=style.color or PALETTE[color_index % len(PALETTE)],
         hidden=style.hidden if hidden is None else hidden,
         points=[
-            dict(x=t - origin, y=value * scale if type(value) in (int, float) and math.isfinite(value) else None)
-            for t, value in points
+            dict(x=t - origin, y=value * scale if type(value) in (int, float) and math.isfinite(value) else None) for t, value in points
         ],
     )
     if provenance is not None:
@@ -58,13 +46,9 @@ def project_panels(curves, presentation):
     panels = []
     for value in presentation.charts.panels:
         descriptor = value
-        selected = [
-            dict(curve) for curve_id in descriptor.curve_ids for curve in curves if curve["curve_id"] == curve_id
-        ]
+        selected = [dict(curve) for curve_id in descriptor.curve_ids for curve in curves if curve["curve_id"] == curve_id]
         populated = {curve["curve_id"] for curve in selected if has_data(curve)}
-        missing = [
-            presentation.charts.curves[curve_id].name for curve_id in descriptor.curve_ids if curve_id not in populated
-        ]
+        missing = [presentation.charts.curves[curve_id].name for curve_id in descriptor.curve_ids if curve_id not in populated]
         caption = descriptor.caption if populated else descriptor.empty_caption
         if populated and missing:
             caption += " 缺少有效曲线：" + "、".join(missing) + "。"
@@ -83,9 +67,7 @@ def project_panels(curves, presentation):
 def apply_panel_presets(panel, descriptor):
     """Resolve against final series, including explicitly added configuration lines."""
     if descriptor.presets:
-        panel["presets"] = resolve_presets(
-            panel["series"], {name: (selector,) for name, selector in descriptor.presets}
-        )
+        panel["presets"] = resolve_presets(panel["series"], {name: (selector,) for name, selector in descriptor.presets})
 
 
 def resolve_presets(series, selectors):

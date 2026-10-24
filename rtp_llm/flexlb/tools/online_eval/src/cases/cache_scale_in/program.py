@@ -2,14 +2,7 @@
 
 from adapters.client_configuration import ClientConfiguration
 from cases.cache_scale_in.actions import HANDLERS as ACTION_HANDLERS
-from cases.cache_scale_in.inputs import (
-    CRITERIA,
-    ENGINE_FIELDS,
-    INPUTS,
-    compile_checks,
-    engine_counters,
-    observation_contract,
-)
+from cases.cache_scale_in.inputs import CRITERIA, ENGINE_FIELDS, INPUTS, compile_checks, engine_counters, observation_contract
 from cases.cache_scale_in.report import validate_view, write_report
 from scenario.builder import output
 from scenario.metric_inputs import bind_mock_engine_metrics
@@ -41,29 +34,16 @@ def default(case):
     case.step(
         "scale_in",
         "cache_scale_in_observe",
-        params=dict(
-            flow=output("traffic", "flow"),
-            criteria=gate,
-            gate_input=inputs["engine_counters"],
-            observation=data["observation"],
-        ),
+        params=dict(flow=output("traffic", "flow"), criteria=gate, gate_input=inputs["engine_counters"], observation=data["observation"]),
         timeout_s=budget + 40,
     )
     case.step("stop", "java_flow_stop", params={"flow": output("traffic", "flow")})
-    case.step(
-        "drain",
-        "java_flow_drain",
-        params={"flow": output("traffic", "flow")},
-        timeout_s=client.limits.drain_timeout_s + 30,
-    )
+    case.step("drain", "java_flow_drain", params={"flow": output("traffic", "flow")}, timeout_s=client.limits.drain_timeout_s + 30)
     case.observe(
         "gate",
         "cache_scale_in_check",
         timeout_s=data["procedure"]["analysis_timeout_s"],
-        params={
-            "flow": output("traffic", "flow"),
-            "evidence": output("scale_in", "evidence"),
-        },
+        params={"flow": output("traffic", "flow"), "evidence": output("scale_in", "evidence")},
     )
     case.step("teardown", "teardown")
 

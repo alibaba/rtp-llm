@@ -62,12 +62,7 @@ def _archive_series(directory, anchor, *, archives=None):
                 points = [[float(t) - anchor, _finite(v)] for t, v in row["values"]]
                 series.setdefault(key, []).extend(points)
                 sources[key] = dict(
-                    path=str(path),
-                    promql=query["promql"],
-                    start=data["start"],
-                    end=data["end"],
-                    step=data["step"],
-                    backend="prometheus",
+                    path=str(path), promql=query["promql"], start=data["start"], end=data["end"], step=data["step"], backend="prometheus"
                 )
                 if metric == "up":
                     gaps.setdefault(f"{epoch}/{source}/collection", []).extend(t for t, value in points if value != 1)
@@ -78,15 +73,9 @@ def _archive_series(directory, anchor, *, archives=None):
                 errors.append(dict(source=f"{epoch}/{source}", error="no Prometheus up samples"))
             elif (
                 points[0][0] - data.get("target_bounds", {}).get(source, [data["start"], None])[0] > 2 * data["step"]
-                or (data.get("target_bounds", {}).get(source, [None, None])[1] or data["end"]) - points[-1][0]
-                > 2 * data["step"]
+                or (data.get("target_bounds", {}).get(source, [None, None])[1] or data["end"]) - points[-1][0] > 2 * data["step"]
             ):
-                errors.append(
-                    dict(
-                        source=f"{epoch}/{source}",
-                        error="incomplete monitoring coverage",
-                    )
-                )
+                errors.append(dict(source=f"{epoch}/{source}", error="incomplete monitoring coverage"))
     # A failed scrape is a gap in every associated curve; never bridge it.
     for key, points in series.items():
         source = "/".join(key.split("/")[:2])
@@ -138,14 +127,7 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
             identity = kind + "/" + metric
             spec = frozen.get(
                 identity,
-                dict(
-                    source_type="prometheus",
-                    source_kind=kind,
-                    unit="unspecified",
-                    value_kind="gauge",
-                    labels=[],
-                    promql=query["promql"],
-                ),
+                dict(source_type="prometheus", source_kind=kind, unit="unspecified", value_kind="gauge", labels=[], promql=query["promql"]),
             )
             if identity in declared and declared[identity] != spec:
                 raise MetricContractError("conflicting frozen metric definitions: " + identity)
@@ -226,13 +208,7 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
     for identity in declared:
         observations.setdefault(identity, [])
     document = dict(
-        metrics_schema_version=1,
-        run=metadata,
-        plans=plans,
-        definitions=declared,
-        metrics=observations,
-        collection_gaps=gaps,
-        errors=errors,
+        metrics_schema_version=1, run=metadata, plans=plans, definitions=declared, metrics=observations, collection_gaps=gaps, errors=errors
     )
     store = MetricStore(document)
     write_json(destination, store.document)

@@ -52,26 +52,11 @@ def load_document(path):
 
             class Loader(yaml.SafeLoader):
                 def construct_mapping(self, node, deep=False):
-                    return strict_pairs(
-                        (
-                            self.construct_object(k, deep=deep),
-                            self.construct_object(v, deep=deep),
-                        )
-                        for k, v in node.value
-                    )
+                    return strict_pairs((self.construct_object(k, deep=deep), self.construct_object(v, deep=deep)) for k, v in node.value)
 
             for token in yaml.scan(text):
-                if isinstance(
-                    token,
-                    (
-                        yaml.tokens.AnchorToken,
-                        yaml.tokens.AliasToken,
-                        yaml.tokens.TagToken,
-                    ),
-                ):
-                    raise DocumentError(
-                        f"anchors, aliases and tags are not supported at line {token.start_mark.line + 1}"
-                    )
+                if isinstance(token, (yaml.tokens.AnchorToken, yaml.tokens.AliasToken, yaml.tokens.TagToken)):
+                    raise DocumentError(f"anchors, aliases and tags are not supported at line {token.start_mark.line + 1}")
             doc = yaml.load(text, Loader=Loader)
         else:
             raise DocumentError("expected .json, .yaml or .yml")

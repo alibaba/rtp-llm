@@ -90,8 +90,5 @@ def metric_colors(panels):
 
 def curve_style(metric_color, run_index, run_count):
     return dict(
-        color=run_color(metric_color, run_index, run_count),
-        dash=[],
-        point_style=RUN_MARKERS[run_index % len(RUN_MARKERS)],
-        marker_count=12,
+        color=run_color(metric_color, run_index, run_count), dash=[], point_style=RUN_MARKERS[run_index % len(RUN_MARKERS)], marker_count=12
     )

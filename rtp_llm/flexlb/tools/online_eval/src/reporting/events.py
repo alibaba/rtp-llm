@@ -60,13 +60,7 @@ def project_events(presentation, *, origin, phases=(), events=()):
             if source == "stage" and row.get("status") in {"FAIL", "ERROR", "TIMEOUT", "BLOCKED"}:
                 label += " · " + row["status"]
             projected.append(
-                dict(
-                    id=identity,
-                    name=label,
-                    t=epoch - origin,
-                    epoch_s=epoch,
-                    source=dict(type=source, record=copy.deepcopy(row)),
-                )
+                dict(id=identity, name=label, t=epoch - origin, epoch_s=epoch, source=dict(type=source, record=copy.deepcopy(row)))
             )
     return sorted(projected, key=lambda event: (event["t"], event["id"]))
 
@@ -79,11 +73,7 @@ def attach_events(spec, presentation, *, origin, phases=(), events=()):
     descriptors = {panel.id: panel for panel in presentation.charts.panels}
     for panel in spec["panels"]:
         descriptor = descriptors.get(panel["id"])
-        ids = (
-            descriptor.event_ids
-            if descriptor is not None and descriptor.event_ids is not None
-            else presentation.charts.event_ids
-        )
+        ids = descriptor.event_ids if descriptor is not None and descriptor.event_ids is not None else presentation.charts.event_ids
         panel["events"] = [copy.deepcopy(event) for event in markers if event["id"] in ids]
     return spec
 

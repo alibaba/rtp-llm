@@ -17,13 +17,7 @@ PALETTE = (
     "#fadb14",
     "#08979c",
 )
-ACCENT_COLORS = {
-    "blue": "#2563eb",
-    "amber": "#d97706",
-    "green": "#059669",
-    "red": "#be123c",
-    "gray": "#e5e7eb",
-}
+ACCENT_COLORS = {"blue": "#2563eb", "amber": "#d97706", "green": "#059669", "red": "#be123c", "gray": "#e5e7eb"}
 
 TONE_TO_COLOR = {
     "primary": PALETTE[0],

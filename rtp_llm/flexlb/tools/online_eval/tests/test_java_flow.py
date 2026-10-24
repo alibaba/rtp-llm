@@ -70,13 +70,7 @@ class JavaFlowTest(unittest.TestCase):
         flow = JavaFlowGroup(None, "/unused", run_id="r", group_id="g", phase_id="p", poll_s=0.001)
         draining = dict(**flow.identity, state="DRAINING", process_returncode=None)
         drained = dict(
-            **flow.identity,
-            state="DRAINED",
-            submitted=1,
-            terminal=1,
-            process_returncode=0,
-            observed_terminal=1,
-            unfinished_ids=[],
+            **flow.identity, state="DRAINED", submitted=1, terminal=1, process_returncode=0, observed_terminal=1, unfinished_ids=[]
         )
 
         def final_journal():
@@ -108,9 +102,7 @@ class JavaFlowTest(unittest.TestCase):
         from unittest.mock import Mock
 
         flow = JavaFlowGroup(None, "/unused", run_id="r", group_id="g", phase_id="p", poll_s=0.01)
-        drained = control_row(
-            **flow.identity, state="DRAINED", process_returncode=0, observed_terminal=0, unfinished_ids=[]
-        )
+        drained = control_row(**flow.identity, state="DRAINED", process_returncode=0, observed_terminal=0, unfinished_ids=[])
         flow.observe_control = Mock(return_value=observation(drained))
         flow.status = Mock(return_value=drained)
         first = flow.drain(Deadline(time.monotonic() + 1))
@@ -126,13 +118,7 @@ class JavaFlowTest(unittest.TestCase):
 
         flow = JavaFlowGroup(None, "/unused", run_id="r", group_id="g", phase_id="p", poll_s=0.01)
         final = control_row(
-            **flow.identity,
-            state="DRAINED",
-            submitted=1,
-            terminal=1,
-            process_returncode=0,
-            observed_terminal=1,
-            unfinished_ids=[],
+            **flow.identity, state="DRAINED", submitted=1, terminal=1, process_returncode=0, observed_terminal=1, unfinished_ids=[]
         )
         flow.observe_control = Mock(return_value=observation(final))
         flow.status = Mock(side_effect=[dict(final, observed_terminal=0), final])
@@ -167,12 +153,7 @@ class JavaFlowTest(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 validate_drain(dict(state, **extra), identity, terminal_count=1, command_id="s")
-        validate_drain(
-            dict(state, applied_command_id="s", sending_end_reason="stop_command"),
-            identity,
-            terminal_count=1,
-            command_id="s",
-        )
+        validate_drain(dict(state, applied_command_id="s", sending_end_reason="stop_command"), identity, terminal_count=1, command_id="s")
         with self.assertRaisesRegex(ValueError, "retain every"):
             validate_drain(
                 dict(state, state="DRAINING", sending_end_reason="natural", terminal=0, outstanding=1),
@@ -199,35 +180,17 @@ class JavaFlowTest(unittest.TestCase):
                 flow.control_status()
 
     def test_large_flow_event_budget_is_explicit_and_bounded(self):
-        flow = JavaFlowGroup(
-            None,
-            "/unused",
-            run_id="r",
-            group_id="g",
-            phase_id="p",
-            poll_s=1,
-            max_events=201600,
-        )
+        flow = JavaFlowGroup(None, "/unused", run_id="r", group_id="g", phase_id="p", poll_s=1, max_events=201600)
         self.assertEqual(flow.journal.max_events, 201600)
         with self.assertRaises(ValueError):
-            JavaFlowGroup(
-                None,
-                "/unused",
-                run_id="r",
-                group_id="g",
-                phase_id="p",
-                poll_s=1,
-                max_events=2000001,
-            )
+            JavaFlowGroup(None, "/unused", run_id="r", group_id="g", phase_id="p", poll_s=1, max_events=2000001)
 
     def test_no_process_exit_is_not_drain_even_with_terminal_status(self):
         with tempfile.TemporaryDirectory() as d:
             flow = JavaFlowGroup(None, d, run_id="run", group_id="group", phase_id="formal", poll_s=0.01)
             flow.control.mkdir()
             flow.proc = SimpleNamespace(proc=SimpleNamespace(poll=lambda: None))
-            (flow.control / "status.json").write_text(
-                json.dumps(control_row(**flow.identity, state="DRAINED", submitted=0))
-            )
+            (flow.control / "status.json").write_text(json.dumps(control_row(**flow.identity, state="DRAINED", submitted=0)))
             with self.assertRaises(TimeoutError):
                 flow.drain(Deadline(0))
             self.assertFalse(flow.evidence_snapshot()["complete"])
@@ -237,9 +200,7 @@ class JavaFlowTest(unittest.TestCase):
             flow = JavaFlowGroup(None, d, run_id="run", group_id="group", phase_id="formal", poll_s=0.01)
             flow.control.mkdir()
             flow.proc = SimpleNamespace(proc=SimpleNamespace(poll=lambda: None))
-            (flow.control / "status.json").write_text(
-                json.dumps(control_row(**flow.identity, state="SENDING", submitted=1))
-            )
+            (flow.control / "status.json").write_text(json.dumps(control_row(**flow.identity, state="SENDING", submitted=1)))
             with self.assertRaises(TimeoutError):
                 flow.stop_sending(Deadline(0))
             command = json.loads((flow.control / "stop.json").read_text())
@@ -276,10 +237,7 @@ class JavaFlowTest(unittest.TestCase):
     def test_partial_evidence_keeps_unfinished_requests(self):
         with tempfile.TemporaryDirectory() as d:
             flow = JavaFlowGroup(None, d, run_id="run", group_id="group", phase_id="formal", poll_s=0.01)
-            flow.journal.issued = {
-                "done": {"request_id": "done"},
-                "pending": {"request_id": "pending"},
-            }
+            flow.journal.issued = {"done": {"request_id": "done"}, "pending": {"request_id": "pending"}}
             flow.journal.terminal = {"done": {"request_id": "done", "status": "engine_error"}}
             snapshot = flow.evidence_snapshot()
             self.assertFalse(snapshot["complete"])

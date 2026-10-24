@@ -62,9 +62,7 @@ def select_engines(snapshot, targets):
 
 def topology_pools(ctx, deadline, address_field="grpc_addr"):
     raw = control_json(ctx.ops, "snapshot?view=topology", deadline)
-    pools = {
-        role: sorted(r[address_field] for r in raw["engines"] if r["role"] == role) for role in ("prefill", "decode")
-    }
+    pools = {role: sorted(r[address_field] for r in raw["engines"] if r["role"] == role) for role in ("prefill", "decode")}
     expected = {"prefill": ctx.env.spec.n_prefill, "decode": ctx.env.spec.n_decode}
     if any(len(pools[role]) != expected[role] or len(set(pools[role])) != expected[role] for role in pools):
         raise ValueError("mock pool differs from configured topology")

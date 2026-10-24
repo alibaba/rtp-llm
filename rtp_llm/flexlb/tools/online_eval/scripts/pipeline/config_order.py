@@ -84,16 +84,7 @@ BLOCK_FIELDS = {
     "client": ("playback",),
 }
 # Sampling settings, metric bindings, capture bounds, then windows.
-OBSERVATION_FIELDS = (
-    "warmup_timeout_s",
-    "sample_s",
-    "window_s",
-    "step_s",
-    "max_gap_s",
-    "inputs",
-    "capture",
-    "windows",
-)
+OBSERVATION_FIELDS = ("warmup_timeout_s", "sample_s", "window_s", "step_s", "max_gap_s", "inputs", "capture", "windows")
 
 QUERY_FIELDS = (
     "promql",
@@ -132,11 +123,7 @@ def fields(kind, path):
         if len(path) == 2 and path[0] == "sections":
             return ("title", "columns", "opened")
     if kind == "scenarios" and (
-        path
-        in {
-            ("parameters", "observation"),
-            ("variants", "[]", "parameters", "observation"),
-        }
+        path in {("parameters", "observation"), ("variants", "[]", "parameters", "observation")}
         or len(path) == 5
         and path[:2] == ("data_archives", "entries")
         and path[-2:] == ("parameters", "observation")
@@ -179,9 +166,7 @@ def ordered_yaml(text, kind):
                 line -= 1
             starts.append(line)
         end = node.end_mark.line + (node.end_mark.column > first.column)
-        chunks = [
-            (key.value, lines[start:stop]) for (key, _), start, stop in zip(node.value, starts, starts[1:] + [end])
-        ]
+        chunks = [(key.value, lines[start:stop]) for (key, _), start, stop in zip(node.value, starts, starts[1:] + [end])]
         rank = {name: i for i, name in enumerate(order)}
         chunks.sort(key=lambda item: rank.get(item[0], len(order)))
         replacement = [line for _, chunk in chunks for line in chunk]

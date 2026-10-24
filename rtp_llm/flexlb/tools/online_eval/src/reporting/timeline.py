@@ -48,11 +48,7 @@ def traffic_event(resources):
     stamp, resource = min(candidates, key=lambda item: item[0]["epoch_s"])
     if not _finite(stamp["epoch_s"]) or stamp["epoch_s"] <= 0:
         raise ValueError("invalid first-request timestamp")
-    return dict(
-        id="traffic_started",
-        epoch_s=stamp["epoch_s"],
-        source=dict(resource=copy.deepcopy(resource), request=copy.deepcopy(stamp)),
-    )
+    return dict(id="traffic_started", epoch_s=stamp["epoch_s"], source=dict(resource=copy.deepcopy(resource), request=copy.deepcopy(stamp)))
 
 
 def freeze(data, *, events, phases):
@@ -91,11 +87,7 @@ def apply(spec, analysis):
     # Own the containers mutated by projection; full sample arrays stay read-only.
     spec = dict(spec)
     spec["panels"] = [
-        dict(
-            panel,
-            series=[dict(curve) for curve in panel.get("series", [])],
-            events=copy.deepcopy(panel.get("events", [])),
-        )
+        dict(panel, series=[dict(curve) for curve in panel.get("series", [])], events=copy.deepcopy(panel.get("events", [])))
         for panel in spec.get("panels", [])
     ]
     spec["events"] = copy.deepcopy(spec.get("events", []))
@@ -104,15 +96,7 @@ def apply(spec, analysis):
         return spec
     spec["reportTimeline"] = copy.deepcopy(timeline)
     if timeline["status"] == "UNAVAILABLE":
-        if analysis["status"] not in {
-            "FAIL",
-            "ERROR",
-            "TIMEOUT",
-            "BLOCKED",
-            "SKIP",
-            "FINDING-CONFIRMED",
-            "FINDING-RESOLVED",
-        }:
+        if analysis["status"] not in {"FAIL", "ERROR", "TIMEOUT", "BLOCKED", "SKIP", "FINDING-CONFIRMED", "FINDING-RESOLVED"}:
             raise ValueError("configured report time boundary did not occur: " + str(timeline["missing"]))
         spec.pop("timeOriginEpochS", None)
         spec.pop("timeAxis", None)
@@ -156,7 +140,5 @@ def archived(spec, directory, presentation, *, status):
     context = MetricStore.read(directory).document.get("run", {})
     result = apply(spec, dict(context, status=status))
     if (context.get("report_timeline") or {}).get("status") == "AVAILABLE":
-        attach_events(
-            result, presentation, origin=result["timeOriginEpochS"], events=context["events"], phases=context["phases"]
-        )
+        attach_events(result, presentation, origin=result["timeOriginEpochS"], events=context["events"], phases=context["phases"])
     return result

@@ -3,14 +3,7 @@
 from input_contract import finite_number as finite
 from scenario.criteria import CriteriaContract
 from scenario.metric_inputs import metric_fields
-from scenario.numeric_parameters import (
-    CAPTURE_NUMBERS,
-    COUNT,
-    FRACTION,
-    NONNEGATIVE,
-    OFFSET,
-    OUTPUT_DISTRIBUTION_NUMBERS,
-)
+from scenario.numeric_parameters import CAPTURE_NUMBERS, COUNT, FRACTION, NONNEGATIVE, OFFSET, OUTPUT_DISTRIBUTION_NUMBERS
 
 OBSERVATION_INPUTS = {"sample_s": NONNEGATIVE, "max_gap_s": NONNEGATIVE}
 SLO_INPUTS = dict.fromkeys(("ttft_ms", "e2e_ms", "tpot_ms"), COUNT)
@@ -44,18 +37,12 @@ from scenario.check_inputs import CheckSet, CheckSpec
 CHECKS = CheckSet(
     "performance_gate",
     {
-        "offered_load": CheckSpec(
-            "qps_tolerance", "offered_qps_deviation", "le", "ratio", ("measurement",), number=FRACTION
-        ),
+        "offered_load": CheckSpec("qps_tolerance", "offered_qps_deviation", "le", "ratio", ("measurement",), number=FRACTION),
         "requests": CheckSpec("min_requests", "cohort_requests", "ge", "requests", ("measurement",), number=COUNT),
-        "pacing_lag": CheckSpec(
-            "max_pacing_lag_ms", "pacing_lag_max_ms", "le", "ms", ("measurement",), number=NONNEGATIVE
-        ),
+        "pacing_lag": CheckSpec("max_pacing_lag_ms", "pacing_lag_max_ms", "le", "ms", ("measurement",), number=NONNEGATIVE),
         "input_tps": CheckSpec("min_input_tps", "input_tps", "ge", "tokens/s", ("measurement",), number=NONNEGATIVE),
         "output_tps": CheckSpec("min_output_tps", "output_tps", "ge", "tokens/s", ("measurement",), number=NONNEGATIVE),
-        "goodput": CheckSpec(
-            "min_goodput_rps", "goodput_rps", "ge", "requests/s", ("measurement",), number=NONNEGATIVE
-        ),
+        "goodput": CheckSpec("min_goodput_rps", "goodput_rps", "ge", "requests/s", ("measurement",), number=NONNEGATIVE),
         "slo_fraction": CheckSpec("min_slo_fraction", "slo_fraction", "ge", "ratio", ("measurement",), number=FRACTION),
         "errors": CheckSpec("max_error_rate", "error_rate", "le", "ratio", ("full_run",), number=FRACTION),
         "ttft": CheckSpec("max_ttft_p99_ms", "ttft_p99_ms", "le", "ms", ("measurement",), number=NONNEGATIVE),
@@ -115,12 +102,7 @@ def observation_contract(data):
     from runtime.observation import capture_limits
     from scenario.windows import anchored_windows
 
-    bounds = anchored_windows(
-        data["windows"],
-        {
-            "measurement": "observation_start",
-        },
-    )["measurement"]
+    bounds = anchored_windows(data["windows"], {"measurement": "observation_start"})["measurement"]
     if bounds["from"] < 0:
         raise ValueError("measurement cannot start before observation")
     capture_limits(data["capture"], "parameters.observation.capture")

@@ -72,10 +72,7 @@ def validate_environment(environment):
 
     if not isinstance(environment, dict) or set(environment) - set(LOAD_CLIENT_ENV_VARS):
         raise ValueError("unknown Java client configuration names")
-    if any(
-        type(value) not in (str, int, float) or (type(value) is float and not math.isfinite(value))
-        for value in environment.values()
-    ):
+    if any(type(value) not in (str, int, float) or (type(value) is float and not math.isfinite(value)) for value in environment.values()):
         raise ValueError("Java client environment values must be finite scalars")
     if environment.get("GRPC_TARGET") and environment.get("MASTER_DISCOVERY_FILE"):
         raise ValueError("GRPC_TARGET and MASTER_DISCOVERY_FILE are mutually exclusive")

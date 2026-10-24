@@ -58,10 +58,7 @@ class SuiteCatalog:
                 raise ScenarioError("reserved suite name: " + name)
             if (
                 not isinstance(members, list)
-                or any(
-                    type(member) is not str or not re.fullmatch(r"[A-Za-z0-9_-]+::[A-Za-z0-9_-]+", member)
-                    for member in members
-                )
+                or any(type(member) is not str or not re.fullmatch(r"[A-Za-z0-9_-]+::[A-Za-z0-9_-]+", member) for member in members)
                 or len(set(members)) != len(members)
             ):
                 raise ScenarioError("suite requires unique case::variant identities: " + name)
@@ -77,12 +74,7 @@ class SuiteCatalog:
         jobs = {}
         for name, value in data["ci_jobs"].items():
             identifier(name, "ci_jobs.name")
-            mapping(
-                value,
-                "ci_jobs." + name,
-                {"suite", "profiles", "parallel", "workers"},
-                {"suite", "profiles", "parallel"},
-            )
+            mapping(value, "ci_jobs." + name, {"suite", "profiles", "parallel", "workers"}, {"suite", "profiles", "parallel"})
             if type(value["suite"]) is not str or value["suite"] not in suites:
                 raise ScenarioError("CI job must name a declared suite: " + name)
             if not suites[value["suite"]]:
@@ -101,11 +93,7 @@ class SuiteCatalog:
                 groups = {}
                 for key in ("cases", "exclude_cases"):
                     group = placement.get(key, [])
-                    if (
-                        not isinstance(group, list)
-                        or any(type(case) is not str for case in group)
-                        or len(set(group)) != len(group)
-                    ):
+                    if not isinstance(group, list) or any(type(case) is not str for case in group) or len(set(group)) != len(group):
                         raise ScenarioError("CI worker cases must be unique names: " + worker)
                     for case in group:
                         identifier(case, "CI worker case")
@@ -154,11 +142,7 @@ def preselect_documents(documents, suite=None, catalog=CATALOG, *, kind=None):
     selection = Selection.read(suite, kind, SuiteCatalog.read(catalog))
     selected = []
     for path, document in documents:
-        variants = [
-            v
-            for v in document.variants
-            if selection.matches(document.id + "::" + v.id, normalize_metadata(v.metadata)["kind"])
-        ]
+        variants = [v for v in document.variants if selection.matches(document.id + "::" + v.id, normalize_metadata(v.metadata)["kind"])]
         if variants:
             doc = copy.deepcopy(replace(document, variants=tuple(variants)))
             selected.append((path, doc))
@@ -176,9 +160,7 @@ def classify(plans, suite=None, catalog=CATALOG, *, kind=None):
         actual = {p["scenario_id"] + "::" + p["variant_id"] for p in selected}
         missing = set(selection.members) - actual
         if missing:
-            raise ScenarioError(
-                "suite is unsupported by the selected source/profile; missing: " + ", ".join(sorted(missing))
-            )
+            raise ScenarioError("suite is unsupported by the selected source/profile; missing: " + ", ".join(sorted(missing)))
     return selected
 
 
@@ -186,11 +168,7 @@ def exact_documents(documents, identities):
     if identities is None:
         return documents
     ids = identities.split(",") if isinstance(identities, str) else identities
-    if (
-        not ids
-        or len(set(ids)) != len(ids)
-        or any(len(value.split("::")) != 3 or not all(value.split("::")) for value in ids)
-    ):
+    if not ids or len(set(ids)) != len(ids) or any(len(value.split("::")) != 3 or not all(value.split("::")) for value in ids):
         raise ScenarioError("instances requires unique complete case::variant::profile IDs")
     cases = {value.split("::")[0] for value in ids}
     return [(source, document) for source, document in documents if document.id in cases]

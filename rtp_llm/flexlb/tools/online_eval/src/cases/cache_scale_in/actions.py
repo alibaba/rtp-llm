@@ -8,14 +8,7 @@ from adapters.mock_control import mock_json
 from artifacts.gate import gate_check
 from artifacts.gate_inputs import new_evidence
 from artifacts.provenance import gate_provenance
-from cases.cache_scale_in.analysis import (
-    MEASUREMENT_POLICY,
-    align_send_counters,
-    attribute_client,
-    scope_contract,
-    topology_ready,
-    window,
-)
+from cases.cache_scale_in.analysis import MEASUREMENT_POLICY, align_send_counters, attribute_client, scope_contract, topology_ready, window
 from cases.cache_scale_in.constants import SHARED_WARMUP_AFFINITY_MS
 from cases.cache_scale_in.inputs import validate_criteria
 from file_io import write_json
@@ -26,10 +19,7 @@ from scenario.parameters import reference_parameters, validate_fields
 
 def validate(params, plan):
     grouped = validate_fields(
-        params,
-        plan,
-        {"flow", "criteria", "gate_input", "observation"},
-        {"flow", "criteria", "gate_input", "observation"},
+        params, plan, {"flow", "criteria", "gate_input", "observation"}, {"flow", "criteria", "gate_input", "observation"}
     )
     from cases.cache_scale_in.inputs import observation_contract
 
@@ -44,9 +34,7 @@ def _master_count(ctx, deadline):
     from adapters.master_control import master_url
     from runtime.network import http_post_json
 
-    code, data = http_post_json(
-        master_url("127.0.0.1", ctx.env.master_http_port, "info"), {}, timeout=min(3, deadline.remaining())
-    )
+    code, data = http_post_json(master_url("127.0.0.1", ctx.env.master_http_port, "info"), {}, timeout=min(3, deadline.remaining()))
     if code != 200 or not isinstance(data, dict):
         raise ValueError("master topology HTTP unavailable")
     value = data["worker_summary"]["PREFILL"]["alive"]
@@ -156,23 +144,9 @@ def observe(ctx, p, deadline):
                 baseline_rows = measurement_samples(
                     ctx.monitor, evidence, deadline, evidence["capture_limits"], windows=[(t - p["baseline_s"], t)]
                 )
-                align_send_counters(
-                    dict(samples=baseline_rows), flow.issued_snapshot(deadline, fields=("send_start_epoch_ms",))
-                )
-                left = window(
-                    baseline_rows,
-                    t - p["baseline_s"],
-                    t - p["baseline_s"] / 2,
-                    initial,
-                    p["max_gap_s"],
-                )
-                right = window(
-                    baseline_rows,
-                    t - p["baseline_s"] / 2,
-                    t,
-                    initial,
-                    p["max_gap_s"],
-                )
+                align_send_counters(dict(samples=baseline_rows), flow.issued_snapshot(deadline, fields=("send_start_epoch_ms",)))
+                left = window(baseline_rows, t - p["baseline_s"], t - p["baseline_s"] / 2, initial, p["max_gap_s"])
+                right = window(baseline_rows, t - p["baseline_s"] / 2, t, initial, p["max_gap_s"])
                 ready = all(
                     not w["errors"]
                     and w["hit"] is not None
@@ -235,10 +209,7 @@ def observe(ctx, p, deadline):
                 evidence.setdefault("removal_errors", []).append(dict(index=index, error=str(exc)))
         evidence["measurement_scope"] = scope_contract(evidence)
         write_json(path, evidence)
-    return StageOutput(
-        {"evidence": ctx.register_resource("gate_evidence", evidence, historical=True)},
-        artifacts=[str(path)],
-    )
+    return StageOutput({"evidence": ctx.register_resource("gate_evidence", evidence, historical=True)}, artifacts=[str(path)])
 
 
 def check(ctx, p, deadline):
@@ -253,16 +224,11 @@ def check(ctx, p, deadline):
     evidence["control_evidence"] = dict(file=control_path.name, sha256=sha256_file(control_path))
     try:
         evidence["samples"] = measurement_samples(
-            ctx.monitor,
-            evidence,
-            deadline,
-            evidence["capture_limits"],
-            directory=ctx.artifact_dir / "cache-measurement",
+            ctx.monitor, evidence, deadline, evidence["capture_limits"], directory=ctx.artifact_dir / "cache-measurement"
         )
         evidence["gate_sample_source"] = "prometheus_raw_scrape"
         evidence["raw_evidence"] = dict(
-            path="cache-measurement/manifest.json",
-            sha256=sha256_file(ctx.artifact_dir / "cache-measurement/manifest.json"),
+            path="cache-measurement/manifest.json", sha256=sha256_file(ctx.artifact_dir / "cache-measurement/manifest.json")
         )
     except TimeoutError:
         raise
@@ -285,11 +251,7 @@ def check(ctx, p, deadline):
         if path.is_file()
     ]
     times = [r["epoch_s"] for r in evidence["samples"]]
-    issued = [
-        r
-        for r in snapshot["issued"]
-        if times and times[0] * 1000 <= r.get("send_start_epoch_ms", -1) <= times[-1] * 1000
-    ]
+    issued = [r for r in snapshot["issued"] if times and times[0] * 1000 <= r.get("send_start_epoch_ms", -1) <= times[-1] * 1000]
     lags = [r.get("pacing_lag_ms") for r in issued]
     if lags and all(type(v) in (int, float) and math.isfinite(v) for v in lags):
         evidence["max_pacing_lag_ms"] = max(lags)
@@ -300,19 +262,10 @@ def check(ctx, p, deadline):
 
     result, path = commit_gate(ctx.artifact_dir, "cache", evidence, analyze)
     return StageOutput(
-        checks=[
-            gate_check(
-                "cache_stability", result, path, "valid survivor cache measurement without sustained hit collapse"
-            )
-        ],
+        checks=[gate_check("cache_stability", result, path, "valid survivor cache measurement without sustained hit collapse")],
         artifacts=[
             str(ctx.artifact_dir / name)
-            for name in (
-                "cache-control-evidence.json",
-                "cache-gate-evidence.json",
-                "cache-gate-result.json",
-                "cache-gate-manifest.json",
-            )
+            for name in ("cache-control-evidence.json", "cache-gate-evidence.json", "cache-gate-result.json", "cache-gate-manifest.json")
         ],
     )
 

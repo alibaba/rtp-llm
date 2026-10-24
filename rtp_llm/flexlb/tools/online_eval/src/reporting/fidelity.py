@@ -115,8 +115,7 @@ def markdown(report):
         lines.append(
             "| "
             + " | ".join(
-                "—" if value is None else f"{value:.4f}" if isinstance(value, float) else str(value).replace("|", "\\|")
-                for value in row
+                "—" if value is None else f"{value:.4f}" if isinstance(value, float) else str(value).replace("|", "\\|") for value in row
             )
             + " |"
         )
@@ -139,9 +138,7 @@ def build_spec(report):
     result = FidelityResult.read(report)
     panels = []
     sections = [
-        table(
-            "分布诊断", ["捕获", "方法", "length KS", "depth KS", "joint TV", "长度分布", "cache 使用"], result.rows()
-        ),
+        table("分布诊断", ["捕获", "方法", "length KS", "depth KS", "joint TV", "长度分布", "cache 使用"], result.rows()),
         details(
             "诊断口径",
             dict(
@@ -158,13 +155,8 @@ def build_spec(report):
     if not result.captures:
         sections.append(details("UNASSESSED", "无对照捕获，不能判断输入保真度。", opened=True))
     for index, capture in enumerate(result.captures):
-        summaries = [("real", capture.real)] + [
-            (method.name, method.summary) for method in capture.methods if method.summary is not None
-        ]
-        for key, title, unit in [
-            ("length_counts", "输入长度 ECDF", "tokens"),
-            ("depth_counts", "共享深度 ECDF", "blocks"),
-        ]:
+        summaries = [("real", capture.real)] + [(method.name, method.summary) for method in capture.methods if method.summary is not None]
+        for key, title, unit in [("length_counts", "输入长度 ECDF", "tokens"), ("depth_counts", "共享深度 ECDF", "blocks")]:
             panels.append(
                 dict(
                     id=f"{index}.{key}",
@@ -199,19 +191,9 @@ def build_spec(report):
                 + [round(grid[j][i] / summary["requests"], 6) for j in range(bins["length_bins"])]
                 for i in reversed(range(bins["depth_bins"]))
             ]
-            sections.append(
-                table(
-                    capture.name + " · " + METHOD_LABELS[name] + " · 联合密度（请求占比）", columns, rows, opened=False
-                )
-            )
+            sections.append(table(capture.name + " · " + METHOD_LABELS[name] + " · 联合密度（请求占比）", columns, rows, opened=False))
     sections.append(details("冻结分析", report))
-    return dict(
-        title="合成流量保真度",
-        subtitle="展示冻结的输入分布诊断；不重判运行门禁。",
-        panels=panels,
-        sections=sections,
-        kpis=[],
-    )
+    return dict(title="合成流量保真度", subtitle="展示冻结的输入分布诊断；不重判运行门禁。", panels=panels, sections=sections, kpis=[])
 
 
 def render(report):

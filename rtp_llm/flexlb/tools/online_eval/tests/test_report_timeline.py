@@ -16,10 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def declaration(origin=None, start="origin"):
     return dict(
-        time_axis=dict(
-            origin=origin or {"event": "traffic_started"},
-            range={"from": start, "until": {"stage": "drain", "boundary": "end"}},
-        )
+        time_axis=dict(origin=origin or {"event": "traffic_started"}, range={"from": start, "until": {"stage": "drain", "boundary": "end"}})
     )
 
 
@@ -111,9 +108,7 @@ def test_duplicate_event_and_reversed_range_fail_loud():
         freeze(declaration(), events=events(), phases=[dict(stage="drain", event="end", epoch_s=90)])
 
 
-@pytest.mark.parametrize(
-    "name,end", [("master_performance", "drain"), ("cache_scale_in", "drain"), ("master_ha_failover", "finish")]
-)
+@pytest.mark.parametrize("name,end", [("master_performance", "drain"), ("cache_scale_in", "drain"), ("master_ha_failover", "finish")])
 def test_yaml_time_axis_is_frozen_into_every_variant_and_does_not_change_stages(name, end):
     config = load_document(ROOT / f"config/scenarios/{name}.yaml")
     document = configure_program(config, name)
@@ -142,9 +137,7 @@ def test_performance_display_includes_warmup_and_drain_without_changing_measurem
             ]
         },
     )
-    calculation = dict(
-        calculator="request_rate", window="traffic", selection={"time_basis": "arrival", "status": "all"}, bucket_s=1
-    )
+    calculation = dict(calculator="request_rate", window="traffic", selection={"time_basis": "arrival", "status": "all"}, bucket_s=1)
     definitions = {"request/sent": {"producer": "performance_requests", "calculation": calculation}}
     original = copy.deepcopy(evidence)
     displayed = values(evidence, definitions)["request/sent"]
@@ -161,13 +154,9 @@ def test_offline_publication_uses_frozen_clock_and_event_records(tmp_path):
     from monitoring.metric_store import MetricStore
     from reporting.timeline import archived
 
-    context = dict(
-        report_timeline=freeze(declaration(), events=events(), phases=phases()), events=events(), phases=phases()
-    )
+    context = dict(report_timeline=freeze(declaration(), events=events(), phases=phases()), events=events(), phases=phases())
     MetricStore(dict(metrics_schema_version=1, definitions={}, metrics={}, run=context)).save(tmp_path)
-    presentation = dict(
-        charts=dict(events={"fault": dict(label="Fault", source="case", event="fault_injected")}, event_ids=["fault"])
-    )
+    presentation = dict(charts=dict(events={"fault": dict(label="Fault", source="case", event="fault_injected")}, event_ids=["fault"]))
     from reporting.view_model import ViewDefinition
 
     presentation = ViewDefinition.read(dict(kind="default", report={"subtitle": "test"}, **presentation))
@@ -191,16 +180,11 @@ def test_runtime_freezes_resource_onset_into_evidence_metrics_analysis_and_repor
     from scenario.measurement import WorkloadPolicy
 
     instance = dict(
-        reporting=declaration(),
-        execution={"monitoring": {}},
-        workload_runtime={"capture_metrics": False},
-        collection_profile="request",
+        reporting=declaration(), execution={"monitoring": {}}, workload_runtime={"capture_metrics": False}, collection_profile="request"
     )
     ctx = RuntimeContext(instance, None, tmp_path, lambda: 1, lambda _: None)
     stamp = first_request([dict(rid="first-failed", send_start_epoch_ms=100000, status="exception")])
-    ctx.register_resource(
-        "java_flow", None, evidence=lambda *_: ResourceEvidence(requests={"traffic_start": stamp}, producer="client")
-    )
+    ctx.register_resource("java_flow", None, evidence=lambda *_: ResourceEvidence(requests={"traffic_start": stamp}, producer="client"))
     policy = WorkloadPolicy()
     policy.attach(ctx)
     policy.monitoring.events = [dict(row, action="java_flow_drain", env_epoch=1) for row in phases()]

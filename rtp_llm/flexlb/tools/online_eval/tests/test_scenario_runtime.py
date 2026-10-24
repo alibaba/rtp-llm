@@ -5,15 +5,8 @@ import unittest
 from pathlib import Path
 
 from program_fixtures import compile_scenarios
-from scenario.contracts import (
-    CheckResult,
-    StageHandler,
-    StageOutput,
-)
-from scenario.runtime import (
-    RuntimeContext,
-    execute_instance,
-)
+from scenario.contracts import CheckResult, StageHandler, StageOutput
+from scenario.runtime import RuntimeContext, execute_instance
 
 
 def source():
@@ -28,19 +21,11 @@ def source():
         "stages": [
             {"id": "setup", "action": "setup"},
             {"id": "submit", "action": "request"},
-            {
-                "id": "wait",
-                "action": "wait",
-                "params": {"requests": {"$ref": "stages.submit.output.requests"}},
-            },
+            {"id": "wait", "action": "wait", "params": {"requests": {"$ref": "stages.submit.output.requests"}}},
             {
                 "id": "check",
                 "action": "check",
-                "params": {
-                    "actual": {"$ref": "stages.wait.output.completed"},
-                    "op": "eq",
-                    "expected": True,
-                },
+                "params": {"actual": {"$ref": "stages.wait.output.completed"}, "op": "eq", "expected": True},
             },
         ],
     }
@@ -108,21 +93,13 @@ class RuntimeTest(unittest.TestCase):
     def run_plan(self, doc=None, handlers=None):
         plan = compile_scenarios([("fixture.json", doc or source())], handlers=handlers)[0]
         return execute_instance(
-            plan,
-            self.backend,
-            handlers=handlers,
-            artifact_dir=self.tmp.name,
-            clock=self.clock,
-            sleeper=self.clock.sleep,
+            plan, self.backend, handlers=handlers, artifact_dir=self.tmp.name, clock=self.clock, sleeper=self.clock.sleep
         )
 
     def test_order_resources_cross_stage_and_reverse_cleanup(self):
         result = self.run_plan()
         self.assertEqual(result["status"], "PASS")
-        self.assertEqual(
-            self.backend.calls,
-            ["setup", "submit", "wait", "request_cleanup", "teardown"],
-        )
+        self.assertEqual(self.backend.calls, ["setup", "submit", "wait", "request_cleanup", "teardown"])
         self.assertEqual([r["status"] for r in result["cleanup"]], ["PASS", "PASS"])
         self.assertTrue((Path(self.tmp.name) / "result.json").is_file())
 
@@ -165,15 +142,7 @@ class RuntimeTest(unittest.TestCase):
         doc = source()
         doc["findings"] = ["check.comparison"]
         doc["stages"].append(
-            {
-                "id": "normal",
-                "action": "check",
-                "params": {
-                    "actual": {"$ref": "stages.wait.output.error_count"},
-                    "op": "eq",
-                    "expected": 0,
-                },
-            }
+            {"id": "normal", "action": "check", "params": {"actual": {"$ref": "stages.wait.output.error_count"}, "op": "eq", "expected": 0}}
         )
         self.backend.completed = False
         result = self.run_plan(doc)

@@ -74,10 +74,7 @@ class WhaleIndependentStartTest(unittest.TestCase):
                 self.assertNotIn("-jar", result.stdout)
 
     def test_packaged_shell_defaults_match_shared_mode_table(self):
-        self.assertEqual(
-            (START.parent / "mode_defaults.sh").read_text(),
-            render_shell_defaults("whale_independent"),
-        )
+        self.assertEqual((START.parent / "mode_defaults.sh").read_text(), render_shell_defaults("whale_independent"))
 
     def test_jsonl_can_be_opted_in(self):
         result = self.launch({"MOCK_EVENT_LOG_ENABLED": "1"})

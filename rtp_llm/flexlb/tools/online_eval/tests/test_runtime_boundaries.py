@@ -9,17 +9,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-CALLERS = {
-    "adapters",
-    "analysis",
-    "artifacts",
-    "cases",
-    "input_contract",
-    "monitoring",
-    "reporting",
-    "scenario",
-    "traffic",
-}
+CALLERS = {"adapters", "analysis", "artifacts", "cases", "input_contract", "monitoring", "reporting", "scenario", "traffic"}
 
 
 def test_runtime_has_no_static_or_lazy_imports_of_callers():
@@ -86,9 +76,4 @@ validate_disjoint_intervals([('service', 11000, 11001), ('other', 11002, 11003)]
 )
 def test_moved_components_load_in_a_fresh_interpreter(name):
     env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(ROOT / "src"), str(ROOT)]))
-    subprocess.run(
-        [sys.executable, "-c", "import importlib; importlib.import_module(" + repr(name) + ")"],
-        cwd=ROOT,
-        env=env,
-        check=True,
-    )
+    subprocess.run([sys.executable, "-c", "import importlib; importlib.import_module(" + repr(name) + ")"], cwd=ROOT, env=env, check=True)

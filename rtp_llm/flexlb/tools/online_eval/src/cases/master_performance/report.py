@@ -30,12 +30,7 @@ def write_report(directory, evidence, result, *, run=None, presentation=None):
                 presentation,
                 "checks",
                 [
-                    [
-                        x["id"],
-                        x["actual"],
-                        str(x["evidence"].get("op", "")) + " " + str(x["expected"]),
-                        x["status"],
-                    ]
+                    [x["id"], x["actual"], str(x["evidence"].get("op", "")) + " " + str(x["expected"]), x["status"]]
                     for x in result["checks"]
                 ],
             ),
@@ -65,28 +60,11 @@ def write_report(directory, evidence, result, *, run=None, presentation=None):
             directory, result, presentation, spec, identity="master-performance", producer="performance-gate", meta=meta
         )
     return write_gate_report(
-        directory,
-        result,
-        presentation,
-        spec,
-        identity="master-performance",
-        producer="performance-gate",
-        meta=meta,
-        run=run,
+        directory, result, presentation, spec, identity="master-performance", producer="performance-gate", meta=meta, run=run
     )
 
 
 def validate_view(path, data, fail):
     from reporting.view_schema import validate_section_contract
 
-    validate_section_contract(
-        path,
-        data,
-        {
-            "checks": 4,
-            "monitoring": None,
-            "validity": None,
-            "metrics": None,
-        },
-        fail,
-    )
+    validate_section_contract(path, data, {"checks": 4, "monitoring": None, "validity": None, "metrics": None}, fail)

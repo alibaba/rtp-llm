@@ -13,19 +13,12 @@ def validate_checks(checks):
     fields(checks, {"completed", "no_errors"}, "completion checks")
     for name, criterion in checks.items():
         fields(criterion, {"windows", "output", "unit", "op", "expected"}, f"parameters.checks.{name}")
-        check_windows(
-            criterion["windows"], available={"terminal"}, path=f"parameters.checks.{name}.windows", single=True
-        )
+        check_windows(criterion["windows"], available={"terminal"}, path=f"parameters.checks.{name}.windows", single=True)
         field = criterion["output"]
         unit = {"completed": "boolean", "error_count": "errors"}.get(field) if type(field) is str else None
         if unit is None or criterion["unit"] != unit:
             raise ValueError("completion checks require declared terminal outputs and their units")
-        if (
-            unit == "boolean"
-            and type(criterion["expected"]) is not bool
-            or unit == "errors"
-            and type(criterion["expected"]) is not int
-        ):
+        if unit == "boolean" and type(criterion["expected"]) is not bool or unit == "errors" and type(criterion["expected"]) is not int:
             raise ValueError("completion threshold type does not match the output")
         validate_comparison(criterion["op"], criterion["expected"])
 
@@ -50,16 +43,9 @@ def execute(ctx, params, deadline):
     requests = ctx.resource(handle, "requests")
     with deadline.operation(params["operation_timeout_s"], ctx.enforce_deadlines) as operation:
         terminal = ctx.backend.wait_requests(ctx, requests, operation)
-    return StageOutput(
-        terminal,
-        [evaluate(name, terminal[c["output"]], c["op"], c["expected"]) for name, c in params["checks"].items()],
-    )
+    return StageOutput(terminal, [evaluate(name, terminal[c["output"]], c["op"], c["expected"]) for name, c in params["checks"].items()])
 
 
 COMPLETE = StageHandler(
-    "request_complete",
-    validate,
-    execute,
-    {"completed": "boolean", "error_count": "integer"},
-    checks=frozenset({"completed", "no_errors"}),
+    "request_complete", validate, execute, {"completed": "boolean", "error_count": "integer"}, checks=frozenset({"completed", "no_errors"})
 )

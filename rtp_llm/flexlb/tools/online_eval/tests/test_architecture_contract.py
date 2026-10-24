@@ -41,9 +41,7 @@ def run(check="PASS", **changes):
 def test_insufficient_ha_samples_survive_runtime_contract_without_a_fake_number(tmp_path):
     ctx = RuntimeContext({}, None, tmp_path, lambda: 0, lambda _: None)
     rows = ctx.register_resource("ha_rows", [])
-    output = _client_check(
-        ctx, dict(rows=rows, metric="ha_gate/success_rate", min_samples=100, expected=0.95), Deadline(10, lambda: 0)
-    )
+    output = _client_check(ctx, dict(rows=rows, metric="ha_gate/success_rate", min_samples=100, expected=0.95), Deadline(10, lambda: 0))
     _validate_output(ctx, output, {"actual": "nullable_number"}, {"criterion"})
     assert output.output["actual"] is None
     assert output.checks[0].detail == "insufficient request samples"
@@ -55,9 +53,7 @@ def test_ha_decision_needs_neither_a_metric_store_nor_a_monitor(tmp_path):
     rows = ctx.register_resource("ha_rows", [dict(status="ok", send_start_epoch_ms=1000)])
     with patch("monitoring.publication.publish", side_effect=AssertionError("publish during gate")):
         output = _client_check(
-            ctx,
-            dict(rows=rows, metric="ha_gate/success_rate", min_samples=1, expected=1, op="eq"),
-            Deadline(10, lambda: 0),
+            ctx, dict(rows=rows, metric="ha_gate/success_rate", min_samples=1, expected=1, op="eq"), Deadline(10, lambda: 0)
         )
     _validate_output(ctx, output, {"actual": "nullable_number"}, {"criterion"})
     assert output.checks[0].status == "PASS"
@@ -129,10 +125,7 @@ def test_report_structure_uses_ids_and_expands_checks_without_window_payloads():
     first = canonical_spec(spec, source)
     assert first == canonical_spec(first, source)
     assert [section["id"] for section in first["sections"]] == ["run.checks", "run.validity", "case.extra"]
-    assert first["sections"][0]["rows"] == [
-        ["gate/absolute", "FAIL", "FAIL", "contract"],
-        ["gate/absolute/ttft", "FAIL", 12, 10],
-    ]
+    assert first["sections"][0]["rows"] == [["gate/absolute", "FAIL", "FAIL", "contract"], ["gate/absolute/ttft", "FAIL", 12, 10]]
     assert sum(kpi.get("id") == "run.execution" for kpi in first["kpis"]) == 1
     assert "windows" not in json.dumps(first)
 

@@ -100,16 +100,9 @@ class WorkloadReportViewsTest(unittest.TestCase):
             analysis["status"] = "FAIL"
             analysis["configuration"] = {"environment": {"n_prefill": 2}}
             analysis["stages"] = [
-                dict(
-                    id="finish",
-                    output=dict(rows=dict(kind="ha_rows", env_epoch=1)),
-                    artifacts=[str(requests), str(state)],
-                )
+                dict(id="finish", output=dict(rows=dict(kind="ha_rows", env_epoch=1)), artifacts=[str(requests), str(state)])
             ]
-            analysis["phases"] = [
-                dict(stage="kill_a", event="end", epoch_s=11),
-                dict(stage="finish", event="end", epoch_s=15),
-            ]
+            analysis["phases"] = [dict(stage="kill_a", event="end", epoch_s=11), dict(stage="finish", event="end", epoch_s=15)]
             analysis["events"] = [dict(id="traffic_started", epoch_s=11.1)]
             from reporting.timeline import freeze
 
@@ -137,9 +130,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertEqual([1, 0], [point["y"] for point in balance[3]["points"]])
             self.assertEqual([0], [point["y"] for point in balance[4]["points"]])
             self.assertTrue(all(curve["axis"] == "up" for curve in balance[3:]))
-            self.assertTrue(
-                all(panel["axes"]["up"]["position"] == "right" and panel["events"] for panel in panels.values())
-            )
+            self.assertTrue(all(panel["axes"]["up"]["position"] == "right" and panel["events"] for panel in panels.values()))
             self.assertAlmostEqual(-0.1, panels["request_qps"]["events"][0]["t"])
             self.assertAlmostEqual(3.9, spec["timeAxis"]["max"])
             self.assertEqual(11.1, spec["timeOriginEpochS"])
@@ -152,11 +143,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
 
     def test_ha_balance_chart_matches_five_second_gate_window(self):
         rows = [
-            {
-                "send_start_epoch_ms": 11_000 + (i // 60) * 1000,
-                "status": "exception" if i < 30 else "ok",
-                "prefill": f"P{i % 125}",
-            }
+            {"send_start_epoch_ms": 11_000 + (i // 60) * 1000, "status": "exception" if i < 30 else "ok", "prefill": f"P{i % 125}"}
             for i in range(300)
         ]
         series = _prefill_balance_series(rows, 10, 125)
@@ -166,9 +153,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
 
     def test_per_engine_metrics_share_one_chart_with_switchable_detail(self):
         series = {
-            f'1/mock/running_streams/{{"engine_name":"p-{i}"}}': [
-                [t, None if t == 201 else i + t % 11] for t in range(1800)
-            ]
+            f'1/mock/running_streams/{{"engine_name":"p-{i}"}}': [[t, None if t == 201 else i + t % 11] for t in range(1800)]
             for i in range(128)
         }
         with tempfile.TemporaryDirectory() as d:
@@ -356,9 +341,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             )
             spec = json.loads((bundle / "report-spec.json").read_text())
             self.assertEqual(spec["title"], "master_performance : default : single-nonbatch")
-            self.assertEqual(
-                [panel["title"] for panel in spec["panels"]], [panel.title for panel in presentation.charts.panels]
-            )
+            self.assertEqual([panel["title"] for panel in spec["panels"]], [panel.title for panel in presentation.charts.panels])
             self.assertEqual(
                 [panel["id"] for panel in spec["panels"]],
                 ["engine-tps", "client-qps", "latency", "cache-hit", "prefill-batch", "prefill-state"],

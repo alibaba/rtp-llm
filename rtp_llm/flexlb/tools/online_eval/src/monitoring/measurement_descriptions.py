@@ -22,10 +22,7 @@ class MeasurementDescription:
             source_type=self.source,
             implementation=implementation_identity(self.function),
             measurement=implementation_measurement(
-                self.function,
-                population=self.population,
-                accuracy=self.accuracy,
-                request_identity=self.request_identity,
+                self.function, population=self.population, accuracy=self.accuracy, request_identity=self.request_identity
             ),
         )
         if self.collection is not None:

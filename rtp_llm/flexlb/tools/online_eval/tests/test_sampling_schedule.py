@@ -37,9 +37,7 @@ def test_background_sampling_skips_overruns_without_drift_or_catchup():
 
 def test_background_failure_and_unjoined_exit_are_not_success():
     worker = SampleWorker(
-        Mock(side_effect=RuntimeError("source failed")),
-        lambda: 0,
-        dict(duration_s=10, interval_s=0.001, max_samples=10, max_bytes=100),
+        Mock(side_effect=RuntimeError("source failed")), lambda: 0, dict(duration_s=10, interval_s=0.001, max_samples=10, max_bytes=100)
     )
     worker._run()
     assert "source failed" in worker.error

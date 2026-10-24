@@ -17,13 +17,7 @@ def gate_checks(checks, errors):
 def gate_result(checks, errors=(), *, requirements=()):
     """Derive validity and verdict once; unmet experiment requirements are invalid."""
     checks = [
-        invalid_check(
-            c.id,
-            detail="workload evidence requirement not satisfied",
-            actual=c.actual,
-            expected=c.expected,
-            evidence=c.evidence,
-        )
+        invalid_check(c.id, detail="workload evidence requirement not satisfied", actual=c.actual, expected=c.expected, evidence=c.evidence)
         if c.id in requirements and c.status == "FAIL"
         else c
         for c in checks

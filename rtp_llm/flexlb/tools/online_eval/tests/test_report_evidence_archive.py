@@ -187,12 +187,7 @@ def test_write_views_shares_metric_reads_and_archives_across_renderers(tmp_path)
         patch("monitoring.metric_store.json.load", wraps=json.load) as decoder,
         patch("reporting.evidence_archive.gzip.GzipFile", wraps=gzip.GzipFile) as encoder,
     ):
-        paths = write_views(
-            tmp_path,
-            source,
-            names=["a.yaml", "b.yaml"],
-            selected={name: ({}, cap) for name, cap in capabilities.items()},
-        )
+        paths = write_views(tmp_path, source, names=["a.yaml", "b.yaml"], selected={name: ({}, cap) for name, cap in capabilities.items()})
         assert list(paths) == ["a.yaml", "b.yaml"]
         assert decoder.call_count == encoder.call_count == 1
     assert load_analysis(paths["b.yaml"].parent)["run"] == source

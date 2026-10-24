@@ -48,9 +48,7 @@ def test_admitted_snapshot_is_decoded_once_and_reused_without_reading_source(tmp
         captured = datasets.CapturedDataset.read(path)
         assert decode.call_count == 1
     path.unlink()  # The admitted snapshot is the exact input consumed by this run.
-    spec = dict(
-        kind="trace", model="prefix_lineage", parameters=dict(path=path.name, count=2, output_tokens=3, priority=50)
-    )
+    spec = dict(kind="trace", model="prefix_lineage", parameters=dict(path=path.name, count=2, output_tokens=3, priority=50))
     with patch("traffic.traffic_source.decode_model", side_effect=AssertionError("second decode")):
         plan = materialize(tmp_path / "plan", spec, "snapshot", tmp_path, captured=captured)
     assert validate_plan(plan) == 2

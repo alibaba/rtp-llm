@@ -33,9 +33,7 @@ class InputSchema:
             return {key: snapshot(child) if isinstance(child, Mapping) else child for key, child in value.items()}
 
         def freeze(value):
-            return MappingProxyType(
-                {key: freeze(child) if isinstance(child, Mapping) else child for key, child in value.items()}
-            )
+            return MappingProxyType({key: freeze(child) if isinstance(child, Mapping) else child for key, child in value.items()})
 
         sections = snapshot(self.sections)
         optional, paths, numbers, omitted = frozenset(self.optional), set(), {}, set()

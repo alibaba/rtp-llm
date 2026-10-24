@@ -18,11 +18,7 @@ from flexlb_profile_data import REGISTERED_PROFILE_SPECS as PROFILE_SPECS
 
 _ROOT = Path(__file__).resolve().parent
 # The Whale bundle copies these two files without the source-tree config directory.
-TABLE_PATH = (
-    _ROOT / "config/mode_profiles.yaml"
-    if (_ROOT / "config/mode_profiles.yaml").is_file()
-    else _ROOT / "mode_profiles.yaml"
-)
+TABLE_PATH = _ROOT / "config/mode_profiles.yaml" if (_ROOT / "config/mode_profiles.yaml").is_file() else _ROOT / "mode_profiles.yaml"
 
 
 def load_mode_tables(path: Path = TABLE_PATH) -> dict:
@@ -46,10 +42,7 @@ def load_mode_tables(path: Path = TABLE_PATH) -> dict:
         if profile not in PROFILE_SPECS:
             raise ValueError(f"{name}: unknown master profile {profile}")
         spec = PROFILE_SPECS[profile]
-        if (
-            mode.get("decision", "").lower() != spec["decision"]
-            or mode.get("dispatcher", "").lower() != spec["dispatcher"]
-        ):
+        if mode.get("decision", "").lower() != spec["decision"] or mode.get("dispatcher", "").lower() != spec["dispatcher"]:
             raise ValueError(f"{name}: profile axes disagree with flexlb_cfg")
     for name, mode in runtime.items():
         if mode.get("address") not in {"loopback_per_engine", "pod_when_external", "pod_per_engine"}:
@@ -65,10 +58,7 @@ def load_mode_tables(path: Path = TABLE_PATH) -> dict:
             profile = mode.get("default_profile")
             if profile not in PROFILE_SPECS or default_mode not in master:
                 raise ValueError(f"{name}: unknown default profile/master mode")
-            if any(
-                PROFILE_SPECS[profile][axis] != master[default_mode][axis].lower()
-                for axis in ("decision", "dispatcher")
-            ):
+            if any(PROFILE_SPECS[profile][axis] != master[default_mode][axis].lower() for axis in ("decision", "dispatcher")):
                 raise ValueError(f"{name}: default profile axes disagree with master mode")
     return doc
 
@@ -95,11 +85,7 @@ def resolve_mode(
         tables=tables,
         unique_loopback_supported=unique_loopback_supported,
     )
-    selected_profile = (
-        runtime_cfg.get("default_profile")
-        if runtime_cfg.get("default_master_mode") == master
-        else master_cfg["profile"]
-    )
+    selected_profile = runtime_cfg.get("default_profile") if runtime_cfg.get("default_master_mode") == master else master_cfg["profile"]
     return {
         "runtime": runtime,
         "master_mode": master,
@@ -197,9 +183,7 @@ def main(argv=None):
             return
         if not args.master:
             parser.error("--master is required unless --render-shell is used")
-        plan = resolve_mode(
-            args.runtime, args.master, pod_ip=args.pod_ip, external_engine_clients=args.external_engine_clients
-        )
+        plan = resolve_mode(args.runtime, args.master, pod_ip=args.pod_ip, external_engine_clients=args.external_engine_clients)
     except ValueError as exc:
         parser.error(str(exc))
     print(plan[args.field] if args.field else json.dumps(plan, sort_keys=True))

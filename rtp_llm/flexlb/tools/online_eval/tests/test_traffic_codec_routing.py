@@ -24,9 +24,7 @@ class CodecRoutingTest(unittest.TestCase):
             manifest = dict(codec=dict(name="prefix_lineage", version=version), version=version, block_size=512)
             for selected in (None, manifest):
                 with self.subTest(version=version, manifest=selected):
-                    with patch(
-                        "traffic.lineage_envelope.lzma.LZMADecompressor", wraps=lzma.LZMADecompressor
-                    ) as decoder:
+                    with patch("traffic.lineage_envelope.lzma.LZMADecompressor", wraps=lzma.LZMADecompressor) as decoder:
                         actual = decode_model(raw, selected).to_wire()
                     self.assertEqual(expected, actual)
                     self.assertEqual(1, decoder.call_count)
@@ -37,10 +35,7 @@ class CodecRoutingTest(unittest.TestCase):
             manifest = dict(codec=dict(name="prefix_lineage", version=version), version=version, block_size=512)
             for invalid in (raw[:-1], raw + b"trailing", raw + raw):
                 for selected in (None, manifest):
-                    with (
-                        self.subTest(version=version, manifest=selected),
-                        self.assertRaisesRegex(ValueError, "envelope"),
-                    ):
+                    with self.subTest(version=version, manifest=selected), self.assertRaisesRegex(ValueError, "envelope"):
                         decode_model(invalid, selected)
 
     def test_detection_uses_header_not_length_or_file_name(self):
@@ -68,20 +63,14 @@ class CodecRoutingTest(unittest.TestCase):
                 sidecar = model.with_suffix(".manifest.json")
                 sidecar.write_text(json.dumps(manifest))
                 self.assertEqual(manifest, datasets.read_manifest(model))
-                profile = derive_parameters(
-                    decode_model(raw, manifest), {}, None, model_sha256=hashlib.sha256(raw).hexdigest()
-                )
-                self.assertEqual(
-                    (1539 if version == 3 else 2048) / 3, profile["calibration"]["targets"]["mean_input_tokens"]
-                )
+                profile = derive_parameters(decode_model(raw, manifest), {}, None, model_sha256=hashlib.sha256(raw).hexdigest())
+                self.assertEqual((1539 if version == 3 else 2048) / 3, profile["calibration"]["targets"]["mean_input_tokens"])
                 templates = derive(model, count=3)["templates"]
                 self.assertEqual([513, 1025, 1] if version == 3 else [512, 1024, 512], [row["il"] for row in templates])
                 if version == 3:
                     self.assertEqual(templates[0]["labels"][0], templates[1]["labels"][0])
                     self.assertNotEqual(templates[0]["labels"][1], templates[1]["labels"][1])
-                materialize_main(
-                    ["--lineage-model", str(model), "--out", str(root / "cli.jsonl"), "--namespace", "test"]
-                )
+                materialize_main(["--lineage-model", str(model), "--out", str(root / "cli.jsonl"), "--namespace", "test"])
                 from traffic.traffic_source import materialize
 
                 specification = dict(
@@ -98,9 +87,7 @@ class CodecRoutingTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "version disagrees"):
                     materialize(root / "conflict.jsonl", pinned, "test", model.parent)
                 self.assertFalse((root / "conflict.jsonl").exists())
-                self.assertEqual(
-                    [row["il"] for row in templates], [json.loads(line)["il"] for line in plan.read_text().splitlines()]
-                )
+                self.assertEqual([row["il"] for row in templates], [json.loads(line)["il"] for line in plan.read_text().splitlines()])
                 for wrong in (None, 99, 2 if version == 3 else 3):
                     bad = dict(manifest, codec=dict(name="prefix_lineage", version=wrong))
                     sidecar.write_text(json.dumps(bad))

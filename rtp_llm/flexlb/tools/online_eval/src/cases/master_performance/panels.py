@@ -59,11 +59,7 @@ def prepare_curves(directory, evidence, presentation):
             add(curve_id, row["points"], provenance["promql"], name=name, labels=labels, provenance=provenance)
             audit.append(dict(name=name, samples=sum(v is not None for _, v in row["points"]), **provenance))
     return curves, dict(
-        queries=audit,
-        gaps=gaps,
-        errors=errors,
-        available=any(row["points"] for row in rows),
-        metric_classification=inventory,
+        queries=audit, gaps=gaps, errors=errors, available=any(row["points"] for row in rows), metric_classification=inventory
     )
 
 

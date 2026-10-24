@@ -43,13 +43,7 @@ class ClientOps:
             "org.flexlb.mockengine.JavaLoadClient",
         ]
 
-    def run_async(
-        self,
-        overrides: dict,
-        output_dir: Path,
-        log_file: Path,
-        label: str = "load_client_async",
-    ) -> tuple[ManagedProcess, Path]:
+    def run_async(self, overrides: dict, output_dir: Path, log_file: Path, label: str = "load_client_async") -> tuple[ManagedProcess, Path]:
         """Start JavaLoadClient WITHOUT waiting for it (HA background flow).
 
         HA cases keep a steady client running ACROSS fault injections

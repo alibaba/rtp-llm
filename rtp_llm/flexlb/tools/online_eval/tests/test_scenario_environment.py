@@ -12,20 +12,12 @@ from unittest.mock import patch
 from environment_expectations import configuration
 from flexlb_cfg import render_env
 from program_fixtures import compile_scenarios
-from scenario.actions.environment import (
-    _validate,
-    mutate_config,
-    reconfigure,
-    startup_probe,
-)
+from scenario.actions.environment import _validate, mutate_config, reconfigure, startup_probe
 from scenario.backend import JavaMockBackend
 from scenario.catalog import handlers
 from scenario.contracts import PlanContext
 from scenario.environment_config import environment
-from scenario.runtime import (
-    Deadline,
-    RuntimeContext,
-)
+from scenario.runtime import Deadline, RuntimeContext
 from scenario.stage_execution import _core_action
 from test_scenario_backend import lease_manifest
 from test_scenario_runtime import source
@@ -59,18 +51,11 @@ class EnvironmentTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.raw_env = {
-            "n_prefill": 1,
-            "n_decode": 4,
-            "config_overrides": {"ordering": "priority"},
-        }
+        self.raw_env = {"n_prefill": 1, "n_decode": 4, "config_overrides": {"ordering": "priority"}}
         self.plan = PlanContext("test", {}, self.raw_env, (PROFILE,))
         self.backend = FakeBackend()
         self.ctx = RuntimeContext(
-            {
-                "profile": PROFILE,
-                "environment": environment(self.raw_env, "test", PROFILE),
-            },
+            {"profile": PROFILE, "environment": environment(self.raw_env, "test", PROFILE)},
             self.backend,
             self.tmp.name,
             time.monotonic,
@@ -82,14 +67,7 @@ class EnvironmentTest(unittest.TestCase):
         doc = source()
         doc["profiles"] = [PROFILE]
         doc["environment"] = self.raw_env
-        doc["stages"].insert(
-            1,
-            {
-                "id": "fifo",
-                "action": "environment_reconfigure",
-                "params": {"config_overrides": {"ordering": "fifo"}},
-            },
-        )
+        doc["stages"].insert(1, {"id": "fifo", "action": "environment_reconfigure", "params": {"config_overrides": {"ordering": "fifo"}}})
         instance = compile_scenarios([("test", doc)], handlers=handlers())[0]
         plan = instance["stages"][1]["params"]["environments"][PROFILE]
         self.assertEqual(plan["effective_axes"]["ordering"], "FIFO")
@@ -101,26 +79,11 @@ class EnvironmentTest(unittest.TestCase):
 
     def test_consumers_clean_before_replacement_old_handles_stale(self):
         initial = _core_action("setup", self.ctx, {}, self.deadline).output["environment"]
-        self.ctx.add_cleanup(
-            "consumer",
-            lambda d: self.backend.calls.append(("consumer", self.ctx.env_epoch)),
-        )
+        self.ctx.add_cleanup("consumer", lambda d: self.backend.calls.append(("consumer", self.ctx.env_epoch)))
         historical = self.ctx.register_resource("snapshot", {"first": True}, historical=True)
         self.ctx.outputs["old"] = {"passed": True}
-        reconfigure(
-            self.ctx,
-            _validate({"config_overrides": {"ordering": "fifo"}}, self.plan),
-            self.deadline,
-        )
-        self.assertEqual(
-            self.backend.calls,
-            [
-                ("setup", 1, "PRIORITY"),
-                ("consumer", 1),
-                ("cleanup", 1),
-                ("setup", 2, "FIFO"),
-            ],
-        )
+        reconfigure(self.ctx, _validate({"config_overrides": {"ordering": "fifo"}}, self.plan), self.deadline)
+        self.assertEqual(self.backend.calls, [("setup", 1, "PRIORITY"), ("consumer", 1), ("cleanup", 1), ("setup", 2, "FIFO")])
         with self.assertRaisesRegex(ValueError, "stale"):
             self.ctx.resource(initial, "environment")
         self.assertEqual(self.ctx.resource(historical, "snapshot", allow_stale=True), {"first": True})
@@ -151,10 +114,7 @@ class EnvironmentTest(unittest.TestCase):
         cases = [
             ("removed_auto_tpm", configuration("priority", PROFILE)),
             ("fifo_default_priority", configuration("fifo", PROFILE)),
-            (
-                "removed_engine_cancellation",
-                configuration("decode_preemption", PROFILE),
-            ),
+            ("removed_engine_cancellation", configuration("decode_preemption", PROFILE)),
         ]
         for name, overrides in cases:
             base = overrides
@@ -164,23 +124,13 @@ class EnvironmentTest(unittest.TestCase):
             elif name == "fifo_default_priority":
                 expected["scheduler"]["ordering"]["defaultPriority"] = 50
             else:
-                expected["scheduler"]["ordering"]["preemption"]["engineCancellation"] = {
-                    "ackTimeoutMs": 50,
-                    "completionTimeoutMs": 1000,
-                }
+                expected["scheduler"]["ordering"]["preemption"]["engineCancellation"] = {"ackTimeoutMs": 50, "completionTimeoutMs": 1000}
             self.assertEqual(mutate_config(base, name), expected)
         with self.assertRaises(ValueError):
             mutate_config(json.loads(render_env(PROFILE)), "removed_engine_cancellation")
 
     def test_probe_does_not_turn_cleanup_or_generic_failure_into_parser_pass(self):
-        params = _validate(
-            {
-                "config_overrides": {"ordering": "priority"},
-                "mutation": "removed_auto_tpm",
-            },
-            self.plan,
-            probe=True,
-        )
+        params = _validate({"config_overrides": {"ordering": "priority"}, "mutation": "removed_auto_tpm"}, self.plan, probe=True)
         cases = [
             (False, "RuntimeError: startup", 1, "Unrecognized field", True, True),
             (True, None, None, "Unrecognized field", False, False),
@@ -206,34 +156,15 @@ class EnvironmentTest(unittest.TestCase):
     def test_backend_epochs_keep_configuration_artifacts(self):
         backend = JavaMockBackend(lease_manifest())
         self.ctx.backend = backend
-        self.ctx.instance["resource_budget"] = {
-            "max_dynamic_additions": 0,
-            "initial_workers": 5,
-        }
-        env = NS(
-            base_grpc_port=55000,
-            master_http_port=28000,
-            master_management_port=28001,
-            mock_http_port=54999,
-        )
-        with (
-            patch("adapters.environment.EnvManager.ensure", return_value=env) as ensure,
-            patch("adapters.engine_ops.EngineOps"),
-        ):
+        self.ctx.instance["resource_budget"] = {"max_dynamic_additions": 0, "initial_workers": 5}
+        env = NS(base_grpc_port=55000, master_http_port=28000, master_management_port=28001, mock_http_port=54999)
+        with patch("adapters.environment.EnvManager.ensure", return_value=env) as ensure, patch("adapters.engine_ops.EngineOps"):
             self.ctx.env_epoch = 1
             first = environment(self.raw_env, "test", PROFILE)
             backend.setup(self.ctx, first, self.deadline)
             initial = (Path(self.tmp.name) / "environment.json").read_bytes()
             self.ctx.env_epoch = 2
-            second = environment(
-                {
-                    "n_prefill": 1,
-                    "n_decode": 4,
-                    "config_overrides": {"ordering": "fifo"},
-                },
-                "test",
-                PROFILE,
-            )
+            second = environment({"n_prefill": 1, "n_decode": 4, "config_overrides": {"ordering": "fifo"}}, "test", PROFILE)
             backend.setup(self.ctx, second, self.deadline)
             log_args = [
                 next(arg for arg in call.args[0].master_extra_args if arg.startswith("--flexlb.log.path="))
@@ -266,10 +197,7 @@ class EnvironmentTest(unittest.TestCase):
             result = backend.probe_startup(self.ctx, {}, "{}", self.deadline)
         self.assertEqual(result["master_pids"], [321])
         self.assertEqual(result["master_returncodes"], [1])
-        self.assertEqual(
-            [x["tail"] for x in result["logs"]],
-            ["ConfigValidationException", "owned stdout"],
-        )
+        self.assertEqual([x["tail"] for x in result["logs"]], ["ConfigValidationException", "owned stdout"])
         with patch.object(backend, "_setup", side_effect=RuntimeError("before JVM")):
             with self.assertRaisesRegex(RuntimeError, "no owned Master"):
                 backend.probe_startup(self.ctx, {}, "{}", self.deadline)

@@ -52,9 +52,7 @@ def test_clock_projection_shifts_full_statistics_and_owns_containers():
         timeAxis=dict(min=0, max=10),
         panels=[
             dict(
-                id="a",
-                timeX=True,
-                series=[dict(name="a", points=[dict(x=1, y=2)], statistics_points=[dict(x=1, y=2), dict(x=2, y=None)])],
+                id="a", timeX=True, series=[dict(name="a", points=[dict(x=1, y=2)], statistics_points=[dict(x=1, y=2), dict(x=2, y=None)])]
             )
         ],
     )
@@ -89,10 +87,7 @@ def test_projection_accepts_absent_series_and_optional_statistics():
     )
     source = dict(
         timeOriginEpochS=100,
-        panels=[
-            dict(id="empty", timeX=True),
-            dict(id="a", timeX=True, series=[dict(points=[dict(x=1, y=2)], statistics_points=None)]),
-        ],
+        panels=[dict(id="empty", timeX=True), dict(id="a", timeX=True, series=[dict(points=[dict(x=1, y=2)], statistics_points=None)])],
     )
     result = canonical_spec(source, analysis)
     assert result["panels"][0]["series"] == []

@@ -45,9 +45,7 @@ class MetricStore:
             or set(document["metrics"]) - set(document["definitions"])
         ):
             raise MetricContractError("invalid metric artifact inventory")
-        if not isinstance(document.get("collection_gaps", {}), dict) or not isinstance(
-            document.get("errors", []), list
-        ):
+        if not isinstance(document.get("collection_gaps", {}), dict) or not isinstance(document.get("errors", []), list):
             raise MetricContractError("invalid metric artifact diagnostics")
         for metric_id, definition in document["definitions"].items():
             validate_definition(definition, metric_id)
@@ -77,9 +75,7 @@ class MetricStore:
         MetricStore(self.document)
         write_json(Path(directory) / "metrics.json", self.document)
 
-    def select(
-        self, metric_id, *, labels=None, start=None, end=None, source=None, epoch=None, min_samples=1, max_gap_s=None
-    ):
+    def select(self, metric_id, *, labels=None, start=None, end=None, source=None, epoch=None, min_samples=1, max_gap_s=None):
         """Select without filling gaps; max_gap_s bounds coverage, not failed samples."""
         if metric_id not in self.document["definitions"]:
             raise MetricContractError("undeclared metric id: " + metric_id)
@@ -87,9 +83,7 @@ class MetricStore:
             raise MetricContractError("metric definition was not frozen: " + metric_id)
         if type(min_samples) is not int or min_samples < 1:
             raise MetricContractError("min_samples must be a positive integer")
-        if (start is None) != (end is None) or (
-            start is not None and (not math.isfinite(start) or not math.isfinite(end) or start >= end)
-        ):
+        if (start is None) != (end is None) or (start is not None and (not math.isfinite(start) or not math.isfinite(end) or start >= end)):
             raise MetricContractError("selection requires an increasing finite window")
         if max_gap_s is not None and (not math.isfinite(max_gap_s) or max_gap_s <= 0):
             raise MetricContractError("max_gap_s must be positive")
@@ -167,18 +161,13 @@ class MetricStore:
             for row in observations:
                 key = row.get("series_key")
                 if key is None:
-                    key = "/".join(
-                        (str(row["epoch"]), row["source"], row["metric_id"], json.dumps(row["labels"], sort_keys=True))
-                    )
+                    key = "/".join((str(row["epoch"]), row["source"], row["metric_id"], json.dumps(row["labels"], sort_keys=True)))
                 if row["points"] and key in seen:
                     raise MetricContractError("duplicate archived series key: " + key)
                 if row["points"]:
                     seen.add(key)
                 points = list(_ordered_points(row))
-                if any(
-                    value is not None and (type(value) not in (int, float) or not math.isfinite(value))
-                    for _, value in points
-                ):
+                if any(value is not None and (type(value) not in (int, float) or not math.isfinite(value)) for _, value in points):
                     raise MetricUnavailable(row["metric_id"] + ": non-finite observation")
                 rows.append(
                     dict(

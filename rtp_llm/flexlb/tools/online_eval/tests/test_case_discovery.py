@@ -47,8 +47,7 @@ def test_conflicting_producers_and_sources_are_rejected():
         original,
         name="another",
         definition=replace(
-            original.definition,
-            metrics=SimpleNamespace(CONTRACTS={"ha_gates": lambda a, b, c: {}}, project=lambda a, b, c: None),
+            original.definition, metrics=SimpleNamespace(CONTRACTS={"ha_gates": lambda a, b, c: {}}, project=lambda a, b, c: None)
         ),
     )
     with pytest.raises(ValueError, match="conflicting registered metric source"):
@@ -57,9 +56,7 @@ def test_conflicting_producers_and_sources_are_rejected():
     other = replace(
         original,
         name="another",
-        definition=replace(
-            original.definition, sources={"master_inflight": replace(source, factory=lambda *args: None)}
-        ),
+        definition=replace(original.definition, sources={"master_inflight": replace(source, factory=lambda *args: None)}),
     )
     with pytest.raises(ValueError, match="conflicting registered source"):
         registry.CaseRegistry.build([original, other])
@@ -87,18 +84,14 @@ def test_startup_consumes_snapshot_without_reading_preset_again():
 
 
 def test_yaml_preemption_omit_matches_renderer_capability():
-    plan = environment(
-        {"config_overrides": {"ordering": "priority", "preemption": {"omit": True}}}, "fixture", "batch-window"
-    )
+    plan = environment({"config_overrides": {"ordering": "priority", "preemption": {"omit": True}}}, "fixture", "batch-window")
     assert "preemption" not in plan["resolved_config"]["scheduler"]["ordering"]
 
 
 def test_report_preserves_inherited_provenance_and_failed_parent():
     meta = provenance_from({"id": "fixture"}, {"configuration": {"declared": {"known": 1}, "sha256": "known"}})
     assert meta["configuration"]["sha256"] == "known"
-    rows = checks_section(
-        {"id": "fixture", "checks": [dict(stage="s", id="parent", status="FAIL", evidence={"checks": []})]}
-    )["rows"]
+    rows = checks_section({"id": "fixture", "checks": [dict(stage="s", id="parent", status="FAIL", evidence={"checks": []})]})["rows"]
     assert rows == [["s/parent", "FAIL", None, None]]
 
 
@@ -108,22 +101,10 @@ def test_pairing_uses_measurement_not_display_names():
         axes={"y": {}},
         timeX=True,
         series=[
-            dict(
-                name="TTFT",
-                metric_id="request/ttft",
-                unit="ms",
-                points=[],
-                provenance={"measurement": {"population": "arrival:ok"}},
-            )
+            dict(name="TTFT", metric_id="request/ttft", unit="ms", points=[], provenance={"measurement": {"population": "arrival:ok"}})
         ],
     )
     renamed = dict(panel, series=[dict(panel["series"][0], name="显示名称变化")])
-    completion = dict(
-        panel, series=[dict(panel["series"][0], provenance={"measurement": {"population": "completion:ok"}})]
-    )
-    assert _series_key(panel, panel["series"][0], "same-origin") == _series_key(
-        renamed, renamed["series"][0], "same-origin"
-    )
-    assert _series_key(panel, panel["series"][0], "same-origin") != _series_key(
-        completion, completion["series"][0], "same-origin"
-    )
+    completion = dict(panel, series=[dict(panel["series"][0], provenance={"measurement": {"population": "completion:ok"}})])
+    assert _series_key(panel, panel["series"][0], "same-origin") == _series_key(renamed, renamed["series"][0], "same-origin")
+    assert _series_key(panel, panel["series"][0], "same-origin") != _series_key(completion, completion["series"][0], "same-origin")

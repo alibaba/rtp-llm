@@ -17,18 +17,7 @@ VIEWS = sorted(path.name for path in (ROOT / "config/report_views").glob("*.yaml
 @pytest.mark.parametrize("filename", VIEWS)
 def test_top_level_is_only_shared_core_blocks(filename):
     data = view(filename).to_dict()
-    assert list(data) == [
-        key
-        for key in (
-            "report_view_schema_version",
-            "kind",
-            "report",
-            "metrics",
-            "charts",
-            "sections",
-        )
-        if key in data
-    ]
+    assert list(data) == [key for key in ("report_view_schema_version", "kind", "report", "metrics", "charts", "sections") if key in data]
     assert not {"meta", "kpis", "audit_columns", "criteria_columns", "time_origin"} & data.keys()
 
 
@@ -42,9 +31,7 @@ def test_flat_or_private_top_level_fields_are_rejected(filename, key):
             view(filename)
 
 
-@pytest.mark.parametrize(
-    "block,key", [("report", "meta"), ("report", "kpis"), ("metrics", "fallback"), ("charts", "audit_columns")]
-)
+@pytest.mark.parametrize("block,key", [("report", "meta"), ("report", "kpis"), ("metrics", "fallback"), ("charts", "audit_columns")])
 def test_nested_blocks_are_not_an_unvalidated_options_bag(block, key):
     filename = "cache_scale_in.yaml"
     data = view(filename).to_dict()
@@ -56,12 +43,7 @@ def test_nested_blocks_are_not_an_unvalidated_options_bag(block, key):
 
 @pytest.mark.parametrize(
     "header",
-    [
-        {"schema_version": 1},
-        {"report_spec_schema_version": 1},
-        {"report_view_schema_version": True},
-        {"report_view_schema_version": 1.0},
-    ],
+    [{"schema_version": 1}, {"report_spec_schema_version": 1}, {"report_view_schema_version": True}, {"report_view_schema_version": 1.0}],
 )
 def test_view_loader_rejects_other_version_one_formats(header):
     data = view("default.yaml").to_dict()
@@ -73,12 +55,7 @@ def test_view_loader_rejects_other_version_one_formats(header):
 
 
 @pytest.mark.parametrize(
-    "filename, key",
-    [
-        ("cache_scale_in.yaml", "audit"),
-        ("master_performance.yaml", "checks"),
-        ("master_ha_failover.yaml", "sources"),
-    ],
+    "filename, key", [("cache_scale_in.yaml", "audit"), ("master_performance.yaml", "checks"), ("master_ha_failover.yaml", "sources")]
 )
 @pytest.mark.parametrize("mutation", ["missing", "unknown", "wrong_opened", "wrong_columns"])
 def test_case_sections_fail_at_load_instead_of_report_generation(filename, key, mutation):

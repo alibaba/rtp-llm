@@ -11,30 +11,14 @@ from scenario.environment_config import environment as _environment
 from scenario.environment_config import read_environment
 from scenario.environment_declaration import EnvironmentDeclaration, variant_environment_fields
 from scenario.environment_resolver import CAPABILITIES, EnvironmentResolver
-from scenario.execution_policy import (
-    DEFAULT_BUDGETS,
-    EXECUTION_BUDGETS,
-    EXECUTION_FIELDS,
-    normalize_execution,
-    normalize_metadata,
-)
+from scenario.execution_policy import DEFAULT_BUDGETS, EXECUTION_BUDGETS, EXECUTION_FIELDS, normalize_execution, normalize_metadata
 from scenario.plan import CompiledInstance, EnvironmentPlan, ExecutionBudgets, StagePlan, json_document
 from scenario.program import ProgramPlan, VariantPlan
 from scenario.stage_compiler import OUTPUTS, stages
 from scenario.stage_parameters import AdapterParameters
 from scenario.validation import fail, identifier, mapping, names, number
 
-CATEGORIES = {
-    "cancel",
-    "status",
-    "kv",
-    "balance",
-    "elastic",
-    "engine_fault",
-    "master",
-    "admission",
-    "priority",
-}
+CATEGORIES = {"cancel", "status", "kv", "balance", "elastic", "engine_fault", "master", "admission", "priority"}
 
 
 def plan_counts(plans):
@@ -110,34 +94,19 @@ def _compile_document(source, doc, profile, handlers, grade, seen):
     for key, items in (("tags", tags),):
         if not isinstance(items, tuple) or any(not isinstance(x, str) for x in items) or len(set(items)) != len(items):
             fail(source + "." + key, "expected unique string list")
-    estimate = number(
-        doc.estimated_duration_s,
-        source + ".estimated_duration_s",
-        minimum=0.001,
-    )
+    estimate = number(doc.estimated_duration_s, source + ".estimated_duration_s", minimum=0.001)
     profiles = names(list(doc.profiles), source + ".profiles", PROFILES)
     if not profiles:
         fail(source + ".profiles", "must not be empty")
-    requires = names(
-        list(doc.requires),
-        source + ".requires",
-        CAPABILITIES,
-    )
-    execution = mapping(
-        doc.execution,
-        source + ".execution",
-        EXECUTION_BUDGETS,
-    )
+    requires = names(list(doc.requires), source + ".requires", CAPABILITIES)
+    execution = mapping(doc.execution, source + ".execution", EXECUTION_BUDGETS)
     budgets = {
-        key: number(execution.get(key, default), source + ".execution." + key, minimum=0.001)
-        for key, default in DEFAULT_BUDGETS.items()
+        key: number(execution.get(key, default), source + ".execution." + key, minimum=0.001) for key, default in DEFAULT_BUDGETS.items()
     }
     variants = doc.variants
     if not isinstance(variants, tuple) or not variants:
         fail(source + ".variants", "expected nonempty typed variant sequence")
-    context = _DocumentCompilation(
-        source, doc, profile, handlers, grade, sid, tags, estimate, profiles, requires, budgets
-    )
+    context = _DocumentCompilation(source, doc, profile, handlers, grade, sid, tags, estimate, profiles, requires, budgets)
     variant_ids = set()
     instances = []
     for variant in variants:
@@ -168,21 +137,13 @@ def _compile_variant(document, variant, variant_ids):
         if key not in budgets:
             continue
         variant_budgets[key] = number(value, loc + ".execution." + key, minimum=0.001)
-    variant_requires = set(requires) | set(
-        names(
-            list(variant.requires),
-            loc + ".requires",
-            CAPABILITIES,
-        )
-    )
+    variant_requires = set(requires) | set(names(list(variant.requires), loc + ".requires", CAPABILITIES))
     env = copy.deepcopy(doc.environment)
     if not isinstance(env, dict):
         fail(source + ".environment", "expected mapping")
     from scenario.config_data import merge_environment
 
-    env = merge_environment(
-        env, mapping(variant.environment_overrides, loc + ".environment_overrides", variant_environment_fields())
-    )
+    env = merge_environment(env, mapping(variant.environment_overrides, loc + ".environment_overrides", variant_environment_fields()))
     declaration, resolver = read_environment(env, source + f"::{vid}.environment")
     # Action validation receives the same resolved topology as execution.
     for field in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
@@ -190,19 +151,11 @@ def _compile_variant(document, variant, variant_ids):
         if value is not None:
             env[field] = value
     steps = tuple(
-        replace(step, timeout_s=variant_budgets["cleanup_timeout_s"])
-        if step.action == "teardown" and step.timeout_s is None
-        else step
+        replace(step, timeout_s=variant_budgets["cleanup_timeout_s"]) if step.action == "teardown" and step.timeout_s is None else step
         for step in variant.stages
     )
     compiled = stages(
-        steps,
-        source + f"::{vid}.stages",
-        variant_budgets["stage_timeout_s"],
-        handlers,
-        env,
-        selected,
-        doc.implementation.get("program"),
+        steps, source + f"::{vid}.stages", variant_budgets["stage_timeout_s"], handlers, env, selected, doc.implementation.get("program")
     )
     check_ids = set()
     action_requires = set(variant_requires)
@@ -215,18 +168,10 @@ def _compile_variant(document, variant, variant_ids):
             action_requires.update(descriptor.requires)
             bound = descriptor.max_dynamic_additions
             bound = bound(stage.parameters.to_dict()) if callable(bound) else bound
-            additions += number(
-                bound,
-                source + f"::{vid}.{stage.id}.max_dynamic_additions",
-                integer=True,
-            )
+            additions += number(bound, source + f"::{vid}.{stage.id}.max_dynamic_additions", integer=True)
     if not check_ids:
         fail(source + f"::{vid}", "scenario must declare at least one check")
-    findings = names(
-        list(variant.findings if variant.findings is not None else doc.findings),
-        source + ".findings",
-        check_ids,
-    )
+    findings = names(list(variant.findings if variant.findings is not None else doc.findings), source + ".findings", check_ids)
     context = _VariantCompilation(
         document,
         variant,
@@ -281,12 +226,7 @@ def _compile_profile(context, p):
             bound = handlers[stage.action].max_environment_workers
             bound = bound(stage.parameters.to_dict(), p) if callable(bound) else bound
             max_environment_workers = max(
-                max_environment_workers,
-                number(
-                    bound,
-                    source + f"::{vid}.{stage.id}.max_environment_workers",
-                    integer=True,
-                ),
+                max_environment_workers, number(bound, source + f"::{vid}.{stage.id}.max_environment_workers", integer=True)
             )
     caps = set(resolved.effective_capabilities)
     stage_caps = caps
@@ -299,45 +239,20 @@ def _compile_profile(context, p):
                 fail(source + f"::{vid}.{stage.id}.execution", str(exc))
         stage_requires = set(variant_requires) | (set(descriptor.requires) if descriptor else set())
         if stage_requires - stage_caps:
-            fail(
-                source,
-                f"profile {p} stage {stage.id} effective environment lacks capabilities {sorted(stage_requires - stage_caps)}",
-            )
-        if (
-            stage.action == "request"
-            and stage.parameters.to_dict()["consume"] == "deferred"
-            and "enqueue_batch" not in stage_caps
-        ):
-            fail(
-                source,
-                f"profile {p} stage {stage.id}: deferred consumption requires enqueue_batch",
-            )
+            fail(source, f"profile {p} stage {stage.id} effective environment lacks capabilities {sorted(stage_requires - stage_caps)}")
+        if stage.action == "request" and stage.parameters.to_dict()["consume"] == "deferred" and "enqueue_batch" not in stage_caps:
+            fail(source, f"profile {p} stage {stage.id}: deferred consumption requires enqueue_batch")
         if descriptor and descriptor.next_environment is not None:
-            next_env = _environment(
-                descriptor.next_environment(stage.parameters.to_dict()),
-                source + f"::{vid}.{stage.id}.environment",
-                p,
-            )
+            next_env = _environment(descriptor.next_environment(stage.parameters.to_dict()), source + f"::{vid}.{stage.id}.environment", p)
             stage_caps = set(next_env["effective_capabilities"])
     if max_environment_workers + additions > VICTIM_OFFSETS[0]:
-        fail(
-            source,
-            "maximum environment workers plus cumulative additions overlap the reserved victim port range",
-        )
+        fail(source, "maximum environment workers plus cumulative additions overlap the reserved victim port range")
     if profile is not None and p != profile:
         return []
     metadata = normalize_metadata(
-        variant.metadata
-        if variant.metadata is not None
-        else {
-            "kind": "functional",
-            "description": doc.description,
-        }
+        variant.metadata if variant.metadata is not None else {"kind": "functional", "description": doc.description}
     )
-    policy_data = {
-        **variant_budgets,
-        **{key: copy.deepcopy(value) for key, value in variant_execution.items() if key not in budgets},
-    }
+    policy_data = {**variant_budgets, **{key: copy.deepcopy(value) for key, value in variant_execution.items() if key not in budgets}}
     policy_data.setdefault("collection", "diagnostic")
     policy = normalize_execution(policy_data, kind=metadata["kind"])
     from scenario.registry import registry
@@ -370,9 +285,7 @@ def _compile_profile(context, p):
             tags=tuple(tags),
             estimated_duration_s=estimate,
             resource_budget=JavaMockBudget(
-                initial_workers,
-                additions,
-                max_environment_workers if max_environment_workers > initial_workers else None,
+                initial_workers, additions, max_environment_workers if max_environment_workers > initial_workers else None
             ),
             environment=EnvironmentPlan(
                 resolved.declaration,
@@ -385,10 +298,7 @@ def _compile_profile(context, p):
             stages=compiled,
             findings=tuple(findings),
             metadata=AdapterParameters(metadata),
-            **{
-                key: tuple(value) if key == "reports" else AdapterParameters(value)
-                for key, value in attachments.items()
-            },
+            **{key: tuple(value) if key == "reports" else AdapterParameters(value) for key, value in attachments.items()},
         )
     )
     return instances

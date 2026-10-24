@@ -97,18 +97,7 @@ def test_unknown_or_empty_worker_cannot_be_a_successful_run(tmp_path):
     with pytest.raises(SystemExit):
         run_ci.main(["--job", "workload", "--worker", "missing", "--out-dir", str(tmp_path)])
     with pytest.raises(SystemExit):
-        run_ci.main(
-            [
-                "--job",
-                "workload",
-                "--worker",
-                "workload_cache_single",
-                "--profiles",
-                "batch-window",
-                "--out-dir",
-                str(tmp_path),
-            ]
-        )
+        run_ci.main(["--job", "workload", "--worker", "workload_cache_single", "--profiles", "batch-window", "--out-dir", str(tmp_path)])
     assert not (tmp_path / "ci-results.json").exists()
 
 
@@ -123,9 +112,7 @@ def test_experiment_parameters_reach_compilation_and_execution(tmp_path):
     from scenario.catalog import handlers
 
     docs = load_scenarios(ROOT / "config/scenarios", experiment_params=raw)
-    baseline = compile_scenarios(
-        load_scenarios(ROOT / "config/scenarios/master_performance.yaml"), "batch-window", handlers()
-    )[0]
+    baseline = compile_scenarios(load_scenarios(ROOT / "config/scenarios/master_performance.yaml"), "batch-window", handlers())[0]
     actual = next(p for p in compile_scenarios(docs, "batch-window", handlers()) if p["id"] == baseline["id"])
     assert actual["implementation"]["configuration_sha256"] != baseline["implementation"]["configuration_sha256"]
     assert actual["implementation"]["configuration"]["parameters"]["traffic"]["client"]["playback"]["qps"] == 1600.0

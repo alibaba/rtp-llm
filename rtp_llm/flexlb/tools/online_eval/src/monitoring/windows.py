@@ -79,10 +79,7 @@ def capture_window(client, fields, *, source, windows, epoch, deadline, limits, 
         ):
             raise ValueError("invalid raw field binding")
     windows = [list(w) for w in windows]
-    if any(
-        len(w) != 2 or any(type(v) not in (int, float) or not math.isfinite(v) for v in w) or w[0] >= w[1]
-        for w in windows
-    ):
+    if any(len(w) != 2 or any(type(v) not in (int, float) or not math.isfinite(v) for v in w) or w[0] >= w[1] for w in windows):
         raise ValueError("invalid raw measurement window")
     if directory is not None:
         directory = Path(directory)
@@ -95,13 +92,7 @@ def capture_window(client, fields, *, source, windows, epoch, deadline, limits, 
         errors=[],
         collection_gaps={},
         capture=dict(
-            status="INCOMPLETE",
-            fields=fields,
-            source=source,
-            epoch=str(epoch),
-            windows=windows,
-            boundary="(start,end]",
-            limits=limits,
+            status="INCOMPLETE", fields=fields, source=source, epoch=str(epoch), windows=windows, boundary="(start,end]", limits=limits
         ),
     )
     retained = len(json.dumps(document, separators=(",", ":"), allow_nan=False).encode())
@@ -133,9 +124,7 @@ def capture_window(client, fields, *, source, windows, epoch, deadline, limits, 
         for identity, selector in sorted(requests):
             labels = json.loads(selector)
             for start, end in windows:
-                for chunk in client.metric_chunks(
-                    identity, source=source, start=start, end=end, deadline=deadline, labels=labels
-                ):
+                for chunk in client.metric_chunks(identity, source=source, start=start, end=end, deadline=deadline, labels=labels):
                     deadline.check()
                     for raw in chunk:
                         raw_labels = dict(raw["metric"])

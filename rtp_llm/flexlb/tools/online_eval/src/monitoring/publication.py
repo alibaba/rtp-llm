@@ -79,9 +79,7 @@ def publish(store, metric_id, definition, rows, *, producer, evidence, describe)
         if any(not isinstance(point, (list, tuple)) or len(point) != 2 for point in points):
             raise MetricContractError("malformed produced samples: " + metric_id)
         if any(
-            type(t) not in (int, float)
-            or not math.isfinite(t)
-            or (v is not None and (type(v) not in (int, float) or not math.isfinite(v)))
+            type(t) not in (int, float) or not math.isfinite(t) or (v is not None and (type(v) not in (int, float) or not math.isfinite(v)))
             for t, v in points
         ) or any(b[0] <= a[0] for a, b in zip(points, points[1:])):
             raise MetricContractError("invalid or unordered produced samples: " + metric_id)

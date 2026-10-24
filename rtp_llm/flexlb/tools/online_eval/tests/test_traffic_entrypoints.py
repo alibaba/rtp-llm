@@ -54,14 +54,7 @@ class TrafficEntrypointTest(unittest.TestCase):
                         model="realistic",
                         version="1",
                         parameters=dict(
-                            seed=7,
-                            count=3,
-                            families=2,
-                            prefix_blocks=1,
-                            suffix_blocks=1,
-                            zipf_alpha=1,
-                            cold_fraction=0,
-                            output_tokens=4,
+                            seed=7, count=3, families=2, prefix_blocks=1, suffix_blocks=1, zipf_alpha=1, cold_fraction=0, output_tokens=4
                         ),
                     )
                 )
@@ -124,15 +117,12 @@ class TrafficEntrypointTest(unittest.TestCase):
         generated = derive(model)
         core = {key: value for key, value in generated.items() if key != "transformations"}
         legacy_bytes = (json.dumps(core, separators=(",", ":")) + "\n").encode()
-        self.assertEqual(
-            hashlib.sha256(legacy_bytes).hexdigest(), "44b68a7c6912281b7059aaa77ac2c45b2134ad1c7040efbc466e32e6285a298f"
-        )
+        self.assertEqual(hashlib.sha256(legacy_bytes).hexdigest(), "44b68a7c6912281b7059aaa77ac2c45b2134ad1c7040efbc466e32e6285a298f")
         transformations = generated["transformations"]
         self.assertEqual(transformations["source_sha256"], generated["source_sha256"])
         self.assertEqual(transformations["selected_requests"], len(generated["templates"]))
         self.assertEqual(
-            [item["kind"] for item in transformations["applied"]],
-            ["fixture_shape_clip", "request_limit", "fixed_output_length"],
+            [item["kind"] for item in transformations["applied"]], ["fixture_shape_clip", "request_limit", "fixed_output_length"]
         )
         self.assertGreaterEqual(len({row["il"] for row in generated["templates"]}), 32)
         with tempfile.TemporaryDirectory() as directory:

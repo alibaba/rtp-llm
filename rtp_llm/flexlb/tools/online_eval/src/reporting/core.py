@@ -49,10 +49,7 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
     spec["run_meta"] = copy.deepcopy(
         meta
         or spec.get("run_meta")
-        or run_meta(
-            dict(id=str(identity), kind=kind),
-            clock=dict(axis=spec.get("timeAxis"), origin=spec.get("timeOriginLabel")),
-        )
+        or run_meta(dict(id=str(identity), kind=kind), clock=dict(axis=spec.get("timeAxis"), origin=spec.get("timeOriginLabel")))
     )
     controls = ExperimentConditions(
         spec["run_meta"].get("configuration"),
@@ -67,13 +64,7 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
     directory.mkdir(parents=True, exist_ok=True)
     files = {}
     archived_analysis = _analysis_nodes(analysis, lambda node: project(root, directory, node, files))
-    result = dict(
-        report_analysis_schema_version=1,
-        kind=kind,
-        producer=producer,
-        run_meta=spec["run_meta"],
-        result=archived_analysis,
-    )
+    result = dict(report_analysis_schema_version=1, kind=kind, producer=producer, run_meta=spec["run_meta"], result=archived_analysis)
     # Serialize and release each output before building the next large document.
     for name, produce in (
         ("analysis.json", lambda: _json(result)),
@@ -129,11 +120,7 @@ def read_bundle(path):
         raise ValueError("unsupported report manifest version")
     files = manifest.get("files")
     required = {"analysis.json", "report-spec.json", "report.html"}
-    if (
-        not isinstance(files, dict)
-        or not required <= files.keys()
-        or any(files[name].get("path") != name for name in required)
-    ):
+    if not isinstance(files, dict) or not required <= files.keys() or any(files[name].get("path") != name for name in required):
         raise ValueError("report manifest lacks required bundle files")
     for entry in files.values():
         target = directory / entry["path"]

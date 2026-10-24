@@ -17,14 +17,7 @@ class ClientRecords:
             return copy.deepcopy(self._records)
 
     def issue(self, rid, clock):
-        rpc = dict(
-            method=None,
-            started_s=None,
-            ended_s=None,
-            deadline_s=None,
-            status=None,
-            error=None,
-        )
+        rpc = dict(method=None, started_s=None, ended_s=None, deadline_s=None, status=None, error=None)
         record = dict(
             client_record_schema_version=1,
             wire_request_id=rid,
@@ -39,14 +32,7 @@ class ClientRecords:
             business_error_message=None,
             transport_terminal_s=None,
             consumer_exit_s=None,
-            cancel=dict(
-                scope="transport",
-                requested_s=None,
-                reason=None,
-                acknowledged=None,
-                ended_s=None,
-                error=None,
-            ),
+            cancel=dict(scope="transport", requested_s=None, reason=None, acknowledged=None, ended_s=None, error=None),
             prefill_addr=None,
         )
         with self._lock:

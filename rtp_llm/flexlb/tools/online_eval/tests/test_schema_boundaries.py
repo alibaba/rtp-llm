@@ -69,26 +69,10 @@ def test_query_plan_reader_checks_included_format_too(tmp_path, monkeypatch, hea
     monkeypatch.setattr(query_plan, "CATALOG", tmp_path)
     document = {
         **header,
-        "sources": {
-            "mock": {
-                "count": {
-                    "promql": "count${selector}",
-                    "unit": "count",
-                    "value_kind": "gauge",
-                    "labels": [],
-                }
-            }
-        },
+        "sources": {"mock": {"count": {"promql": "count${selector}", "unit": "count", "value_kind": "gauge", "labels": []}}},
     }
     (tmp_path / "wrong.yaml").write_text(yaml.safe_dump(document))
-    (tmp_path / "outer.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "metric_plan_schema_version": 5,
-                "include": ["wrong.yaml"],
-            }
-        )
-    )
+    (tmp_path / "outer.yaml").write_text(yaml.safe_dump({"metric_plan_schema_version": 5, "include": ["wrong.yaml"]}))
     with pytest.raises(ScenarioError, match="invalid query plan header"):
         load_plan("outer.yaml")
 

@@ -35,12 +35,7 @@ def main(argv=None):
         spec = dict(
             kind="trace",
             model="prefix_lineage",
-            parameters=dict(
-                path=model.name,
-                count=manifest["count"],
-                output_tokens=args.output_tokens,
-                priority=args.priority,
-            ),
+            parameters=dict(path=model.name, count=manifest["count"], output_tokens=args.output_tokens, priority=args.priority),
         )
         base_dir = model.parent
     materialize(args.out, spec, args.namespace, base_dir, max_requests=args.max_requests, captured=captured)

@@ -32,14 +32,7 @@ variants:
 """
     result = ordered_yaml(source, "scenarios")
     assert yaml.safe_load(result) == yaml.safe_load(source)
-    assert list(yaml.safe_load(result)) == [
-        "case_schema_version",
-        "case",
-        "program",
-        "parameters",
-        "variants",
-        "reports",
-    ]
+    assert list(yaml.safe_load(result)) == ["case_schema_version", "case", "program", "parameters", "variants", "reports"]
     assert "quoted: 'false'" in result
     assert "timeout_ms: 10 # budget" in result
     assert "# describes the chosen source\n    source:" in result
@@ -123,13 +116,7 @@ variants:
     result = ordered_yaml(source, "scenarios")
     parsed = yaml.safe_load(result)
     assert parsed == yaml.safe_load(source)
-    assert list(parsed["parameters"]["observation"]) == [
-        "sample_s",
-        "max_gap_s",
-        "inputs",
-        "capture",
-        "windows",
-    ]
+    assert list(parsed["parameters"]["observation"]) == ["sample_s", "max_gap_s", "inputs", "capture", "windows"]
     assert list(parsed["parameters"]["observation"]["windows"]) == ["second", "first"]
     assert list(parsed["variants"][0]["parameters"]["observation"]) == ["sample_s", "capture", "windows"]
     assert ordered_yaml(result, "scenarios") == result
@@ -145,7 +132,4 @@ def test_observation_order_does_not_rewrite_a_traffic_producers_parameters():
           sample_s: 1
 """
     result = ordered_yaml(source, "scenarios")
-    assert list(yaml.safe_load(result)["parameters"]["traffic"]["source"]["parameters"]["observation"]) == [
-        "windows",
-        "sample_s",
-    ]
+    assert list(yaml.safe_load(result)["parameters"]["traffic"]["source"]["parameters"]["observation"]) == ["windows", "sample_s"]

@@ -46,11 +46,7 @@ class FrontendPrefixFitTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "logs").mkdir()
-            inputs = [
-                [11] * 512 + [22] * 513,
-                [11] * 512 + [33] * 513,
-                [11] * 512 + [22] * 513,
-            ]
+            inputs = [[11] * 512 + [22] * 513, [11] * 512 + [33] * 513, [11] * 512 + [22] * 513]
             rows = [
                 dict(
                     request_id=str(i),
@@ -63,20 +59,9 @@ class FrontendPrefixFitTest(unittest.TestCase):
                 )
                 for i, tokens in enumerate(inputs)
             ]
-            (root / "logs/dash_sc_grpc_access_r0_s0.log").write_text(
-                "\n".join(json.dumps(row) for row in rows + rows[-1:]) + "\n"
-            )
+            (root / "logs/dash_sc_grpc_access_r0_s0.log").write_text("\n".join(json.dumps(row) for row in rows + rows[-1:]) + "\n")
             subprocess.run(
-                [
-                    sys.executable,
-                    str(scripts / "capture_frontend_prefix.py"),
-                    "--start",
-                    "1000",
-                    "--end",
-                    "10000",
-                    "--out",
-                    "pod-0",
-                ],
+                [sys.executable, str(scripts / "capture_frontend_prefix.py"), "--start", "1000", "--end", "10000", "--out", "pod-0"],
                 cwd=root,
                 check=True,
                 capture_output=True,
@@ -127,12 +112,7 @@ class FrontendPrefixFitTest(unittest.TestCase):
                     kind="trace",
                     model="prefix_lineage",
                     version="3",
-                    parameters=dict(
-                        path=str(model),
-                        count=3,
-                        output_tokens=420,
-                        priority=50,
-                    ),
+                    parameters=dict(path=str(model), count=3, output_tokens=420, priority=50),
                 ),
                 "test:flow",
                 root,

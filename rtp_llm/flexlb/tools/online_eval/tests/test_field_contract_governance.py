@@ -121,9 +121,7 @@ def test_reuse_compares_captured_startup_intent_even_if_caller_mutates_spec(tmp_
 
 
 def test_new_check_reaches_projection_without_another_field_or_numeric_list():
-    checks = CheckSet(
-        "trial", {"latency": CheckSpec("max_latency", "latency", "le", "ms", ("window",), number=NONNEGATIVE)}
-    )
+    checks = CheckSet("trial", {"latency": CheckSpec("max_latency", "latency", "le", "ms", ("window",), number=NONNEGATIVE)})
     inputs = InputSchema({"checks": checks.input_fields})
     criteria = CriteriaContract({"checks": checks.criteria_fields})
     builder = CaseBuilder(
@@ -175,8 +173,6 @@ def test_capability_scalar_addition_derives_case_numeric_admission(monkeypatch):
 def test_new_environment_field_cannot_be_accepted_without_a_decoder(monkeypatch):
     from scenario.environment_declaration import environment_fields
 
-    monkeypatch.setattr(
-        "scenario.environment_config.environment_fields", lambda: environment_fields() | {"forgotten_option"}
-    )
+    monkeypatch.setattr("scenario.environment_config.environment_fields", lambda: environment_fields() | {"forgotten_option"})
     with pytest.raises(ValueError, match="no decoder"):
         environment({"forgotten_option": 12}, "env", "single-nonbatch")

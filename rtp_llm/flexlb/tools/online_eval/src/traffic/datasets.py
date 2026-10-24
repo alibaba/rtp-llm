@@ -19,9 +19,7 @@ def build_manifest(path, source=None):
     provenance = metadata["provenance"]
     local = timezone(timedelta(hours=8))
     window = {
-        key: datetime.fromtimestamp(provenance[field] / 1000, local).isoformat()
-        if provenance.get(field) is not None
-        else None
+        key: datetime.fromtimestamp(provenance[field] / 1000, local).isoformat() if provenance.get(field) is not None else None
         for key, field in (("start", "source_start"), ("end", "source_end"))
     }
     return dict(

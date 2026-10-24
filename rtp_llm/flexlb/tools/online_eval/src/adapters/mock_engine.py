@@ -64,11 +64,7 @@ class MockEngineControl:
         return self._post("add_engine", body)
 
     def remove_engine(
-        self,
-        engine_name: Optional[str] = None,
-        port: Optional[int] = None,
-        mode: str = "graceful",
-        drain_timeout_ms: Optional[int] = None,
+        self, engine_name: Optional[str] = None, port: Optional[int] = None, mode: str = "graceful", drain_timeout_ms: Optional[int] = None
     ) -> tuple[int, Optional[dict]]:
         """POST /remove_engine {"engine": name} or {"port": grpcPort}.
 

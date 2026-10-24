@@ -8,12 +8,7 @@ from scenario.actions.master import HANDLERS as MASTER_HANDLERS
 from scenario.actions.observation import HANDLERS as OBSERVATION_HANDLERS
 from scenario.registry import registry
 
-FOUNDATION_HANDLERS = (
-    *ENVIRONMENT_HANDLERS,
-    *JAVA_FLOW_HANDLERS,
-    *MASTER_HANDLERS,
-    *OBSERVATION_HANDLERS,
-)
+FOUNDATION_HANDLERS = (*ENVIRONMENT_HANDLERS, *JAVA_FLOW_HANDLERS, *MASTER_HANDLERS, *OBSERVATION_HANDLERS)
 
 
 def handlers(case=None):

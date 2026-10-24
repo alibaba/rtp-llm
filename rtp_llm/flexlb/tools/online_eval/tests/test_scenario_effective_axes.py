@@ -28,27 +28,14 @@ class EffectiveAxesTests(unittest.TestCase):
         return source
 
     def test_actual_nonbatch_priority_axes_are_not_inferred_from_profile_label(self):
-        source = self.source(
-            dict(
-                ordering="priority",
-                decision="single",
-                dispatcher="non_batch",
-                max_inflight_per_prefill_worker=1,
-            )
-        )
+        source = self.source(dict(ordering="priority", decision="single", dispatcher="non_batch", max_inflight_per_prefill_worker=1))
         source["profiles"] = ["single-nonbatch"]
         source["requires"] = ["priority", "single", "generate_stream"]
         plans = compile_scenarios([("axes.yaml", source)])
         self.assertEqual(len(plans), 1)
         for plan in plans:
             self.assertEqual(
-                plan["effective_axes"],
-                dict(
-                    scheduler="QUEUE",
-                    ordering="PRIORITY",
-                    decision="SINGLE",
-                    dispatcher="NON_BATCH",
-                ),
+                plan["effective_axes"], dict(scheduler="QUEUE", ordering="PRIORITY", decision="SINGLE", dispatcher="NON_BATCH")
             )
             self.assertIn("generate_stream", plan["effective_capabilities"])
             self.assertNotIn("enqueue_batch", plan["effective_capabilities"])
@@ -65,54 +52,25 @@ class EffectiveAxesTests(unittest.TestCase):
             compile_scenarios([("axes.yaml", source)])
 
     def test_preemption_is_preserved_through_backend_ssot_rendering(self):
-        preemption = dict(
-            allowed_victim_stages=[
-                "PREFILL_QUEUED",
-                "DECODE_RESERVED",
-                "DECODE_ENGINE_OWNED",
-            ],
-            timeout_ms=2000,
-        )
+        preemption = dict(allowed_victim_stages=["PREFILL_QUEUED", "DECODE_RESERVED", "DECODE_ENGINE_OWNED"], timeout_ms=2000)
         source = self.source(dict(ordering="priority", preemption=preemption))
         source["requires"] = ["preemption", "engine_cancellation"]
         plan = compile_scenarios([("axes.yaml", source)])[0]
         spec = make_env_spec(plan["environment"], plan["profile"], dict(master_base=28000))
         self.assertEqual(spec.config_overrides.preemption, preemption)
-        self.assertEqual(
-            json.loads(render_env(plan["profile"], spec.config_overrides)),
-            plan["environment"]["resolved_config"],
-        )
+        self.assertEqual(json.loads(render_env(plan["profile"], spec.config_overrides)), plan["environment"]["resolved_config"])
 
     def test_nested_preemption_rejects_unknown_duplicate_or_cross_field_errors(self):
         for preemption in (
             {"allowed_victim_stages": []},
             {"allowed_victim_stages": ["invented"]},
             {"allowed_victim_stages": ["PREFILL_QUEUED"] * 2},
-            {
-                "allowed_victim_stages": ["PREFILL_QUEUED"],
-                "engine_cancellation": {
-                    "ack_timeout_ms": 1,
-                    "completion_timeout_ms": 2,
-                },
-            },
-            {
-                "allowed_victim_stages": ["DECODE_ENGINE_OWNED"],
-                "engine_cancellation": {
-                    "ack_timeout_ms": True,
-                    "completion_timeout_ms": 2,
-                },
-            },
+            {"allowed_victim_stages": ["PREFILL_QUEUED"], "engine_cancellation": {"ack_timeout_ms": 1, "completion_timeout_ms": 2}},
+            {"allowed_victim_stages": ["DECODE_ENGINE_OWNED"], "engine_cancellation": {"ack_timeout_ms": True, "completion_timeout_ms": 2}},
             {"allowed_victim_stages": ["PREFILL_QUEUED"], "invented": 1},
         ):
             with self.subTest(preemption=preemption), self.assertRaises(ValueError):
-                compile_scenarios(
-                    [
-                        (
-                            "axes.yaml",
-                            self.source(dict(ordering="priority", preemption=preemption)),
-                        )
-                    ]
-                )
+                compile_scenarios([("axes.yaml", self.source(dict(ordering="priority", preemption=preemption)))])
 
 
 if __name__ == "__main__":

@@ -6,12 +6,7 @@ import os
 from dataclasses import dataclass
 from typing import Sequence
 
-from runtime.resource_plan import (
-    ResourcePlanError,
-    port_numbers,
-    validate_disjoint_intervals,
-    validate_integer,
-)
+from runtime.resource_plan import ResourcePlanError, port_numbers, validate_disjoint_intervals, validate_integer
 
 MASTER_PORT_COUNT = 6
 MOCK_CONTROL_OFFSET = -1
@@ -57,11 +52,7 @@ class JavaMockBudget:
         validate_integer(self.initial_workers, "initial_workers", 1)
         validate_integer(self.dynamic_additions, "dynamic_additions", 0)
         if self.max_environment_workers is not None:
-            validate_integer(
-                self.max_environment_workers,
-                "max_environment_workers",
-                self.initial_workers,
-            )
+            validate_integer(self.max_environment_workers, "max_environment_workers", self.initial_workers)
         if self.worker_capacity > min(VICTIM_OFFSETS):
             raise ResourcePlanError(
                 f"environment worker bound + cumulative dynamic additions = {self.worker_capacity} "
@@ -77,11 +68,7 @@ class JavaMockBudget:
         return {
             "backend": "java_mock",
             "initial_workers": self.initial_workers,
-            **(
-                {"max_environment_workers": self.max_environment_workers}
-                if self.max_environment_workers is not None
-                else {}
-            ),
+            **({"max_environment_workers": self.max_environment_workers} if self.max_environment_workers is not None else {}),
             "dynamic_additions": self.dynamic_additions,
             "worker_capacity": self.worker_capacity,
             "mock_control_offset": MOCK_CONTROL_OFFSET,
@@ -95,11 +82,7 @@ class JavaMockBudget:
             bounded=True,
             initial_workers=self.initial_workers,
             max_dynamic_additions=self.dynamic_additions,
-            **(
-                {"max_environment_workers": self.max_environment_workers}
-                if self.max_environment_workers is not None
-                else {}
-            ),
+            **({"max_environment_workers": self.max_environment_workers} if self.max_environment_workers is not None else {}),
             mock_control_offset=MOCK_CONTROL_OFFSET,
             victim_control_offset=VICTIM_OFFSETS[0],
             victim_grpc_offset=VICTIM_OFFSETS[1],
@@ -118,21 +101,14 @@ class JavaMockBudget:
             "reserved_tail_offset": VICTIM_OFFSETS[2],
         }
         required = set(fixed) | {"initial_workers", "max_dynamic_additions"}
-        if not isinstance(raw, dict) or set(raw) not in (
-            required,
-            required | {"max_environment_workers"},
-        ):
+        if not isinstance(raw, dict) or set(raw) not in (required, required | {"max_environment_workers"}):
             raise ResourcePlanError("invalid resource_budget v1 fields")
         for name, expected in fixed.items():
             if type(raw[name]) is not type(expected) or raw[name] != expected:
                 raise ResourcePlanError(f"unsupported resource budget {name}={raw[name]!r}")
         if "max_environment_workers" in raw:
             validate_integer(raw["max_environment_workers"], "max_environment_workers", 1)
-        return cls(
-            raw["initial_workers"],
-            raw["max_dynamic_additions"],
-            raw.get("max_environment_workers"),
-        )
+        return cls(raw["initial_workers"], raw["max_dynamic_additions"], raw.get("max_environment_workers"))
 
 
 @dataclass(frozen=True)
@@ -184,23 +160,14 @@ class LaneLease:
 
 
 def plan_lane_leases(
-    budgets_by_lane: Sequence[Sequence[JavaMockBudget]],
-    *,
-    master_base: int,
-    mock_base: int,
-    mock_stride: int = 500,
+    budgets_by_lane: Sequence[Sequence[JavaMockBudget]], *, master_base: int, mock_base: int, mock_stride: int = 500
 ) -> list[LaneLease]:
     """Reserve each lane's maximum demand; lanes execute their instances serially."""
     validate_integer(mock_stride, "mock_stride", MIN_MOCK_STRIDE)
     if not budgets_by_lane or any(not lane for lane in budgets_by_lane):
         raise ResourcePlanError("resource plan must contain nonempty lanes")
     leases = [
-        LaneLease(
-            i,
-            master_base + 10 * i,
-            mock_base + mock_stride * i,
-            max(budget.worker_capacity for budget in budgets),
-        )
+        LaneLease(i, master_base + 10 * i, mock_base + mock_stride * i, max(budget.worker_capacity for budget in budgets))
         for i, budgets in enumerate(budgets_by_lane)
     ]
     intervals = [(lease.lane, side, lo, hi) for lease in leases for side, lo, hi in lease.intervals()]

@@ -64,13 +64,7 @@ def _matrix(runs, labels):
     for key in sorted(set().union(*(v.keys() for v in values))):
         cells = [v.get(key) for v in values]
         # Missing information is never proof of equal conditions.
-        state = (
-            "未知"
-            if any(cell is None for cell in cells)
-            else "相同"
-            if all(cell == cells[0] for cell in cells)
-            else "不同"
-        )
+        state = "未知" if any(cell is None for cell in cells) else "相同" if all(cell == cells[0] for cell in cells) else "不同"
         rows.append([key, state, *cells])
     return table("实验条件与差异", ["字段", "状态", *labels], rows)
 
@@ -97,9 +91,7 @@ def _time_origin(run, index):
     return f"unknown-origin-{index}"
 
 
-def _pair(
-    prepared, labels, origins, *, baseline_index, include_original_panels, time_range=None, event_merge_tolerance=1.0
-):
+def _pair(prepared, labels, origins, *, baseline_index, include_original_panels, time_range=None, event_merge_tolerance=1.0):
     """Preserve the reference layout; match series only inside the same panel ID."""
     overlays, pairing, consumed = [], [], set()
     colors = metric_colors(prepared[baseline_index])
@@ -192,8 +184,7 @@ def _pair(
         for i, source in candidates:
             if any(entry[0] == i for entry in entries):
                 panel["events"].extend(
-                    dict(e, name=labels[i] + " · " + e["name"], run=labels[i], event_name=e["name"])
-                    for e in source.get("events", [])
+                    dict(e, name=labels[i] + " · " + e["name"], run=labels[i], event_name=e["name"]) for e in source.get("events", [])
                 )
         panel["events"] = merge_nearby_events(panel["events"], event_merge_tolerance)
         range_note = "时间范围取各 run 对齐后的显示范围并集。" if time_range is not None else "保留基准报告的显示范围。"
@@ -208,19 +199,13 @@ def _pair(
     separate = []
     for i, panels in enumerate(prepared):
         for source in panels:
-            kept = [
-                curve
-                for n, curve in enumerate(source["series"])
-                if include_original_panels or (i, source["id"], n) not in consumed
-            ]
+            kept = [curve for n, curve in enumerate(source["series"]) if include_original_panels or (i, source["id"], n) not in consumed]
             if not kept:
                 continue
             panel = copy.deepcopy(source)
             panel["series"] = kept
             names = {curve["name"] for curve in kept}
-            panel["presets"] = {
-                name: [n for n in choices if n in names] for name, choices in panel.get("presets", {}).items()
-            }
+            panel["presets"] = {name: [n for n in choices if n in names] for name, choices in panel.get("presets", {}).items()}
             panel["timeSelectionKey"] = f"run-{i + 1}"
             panel["id"] = f"run-{i + 1}:" + source["id"]
             panel["title"] = labels[i] + " · " + source.get("title", source["id"])
@@ -230,26 +215,14 @@ def _pair(
                     panel=panel["id"],
                     status="SEPARATE",
                     runs=[labels[i]],
-                    reasons=[
-                        "ORIGINAL_REQUESTED"
-                        if include_original_panels
-                        else "PANEL_OR_MEASUREMENT_OR_CLOCK_NOT_COMPATIBLE"
-                    ],
+                    reasons=["ORIGINAL_REQUESTED" if include_original_panels else "PANEL_OR_MEASUREMENT_OR_CLOCK_NOT_COMPATIBLE"],
                 )
             )
     return overlays + separate, pairing
 
 
 def compare(
-    paths,
-    output,
-    *,
-    alignment_event=None,
-    labels=None,
-    baseline=None,
-    views=None,
-    include_original_panels=False,
-    event_merge_tolerance=1.0,
+    paths, output, *, alignment_event=None, labels=None, baseline=None, views=None, include_original_panels=False, event_merge_tolerance=1.0
 ):
     merge_nearby_events([], event_merge_tolerance)
     if len(paths) < 2:
@@ -292,9 +265,7 @@ def compare(
         if alignment_event
         else "保留各 run 原时间轴；不自动选择统计窗口。"
     )
-    controls = [
-        dict(run.report.controls.to_dict(), implementation=run.report.run_meta.get("implementation")) for run in loaded
-    ]
+    controls = [dict(run.report.controls.to_dict(), implementation=run.report.run_meta.get("implementation")) for run in loaded]
     reference = controls[labels.index(baseline)]
     comparisons = {
         label: compare_controls(
@@ -328,9 +299,7 @@ def compare(
                         if key in {"verdict", "validity", "runtime_validity", "errors", "warnings"}
                     },
                     execution={
-                        key: value
-                        for key, value in run.execution.items()
-                        if key in {"status", "outcome", "duration_ms", "cleanup"}
+                        key: value for key, value in run.execution.items() if key in {"status", "outcome", "duration_ms", "cleanup"}
                     },
                 ),
             )
@@ -374,9 +343,7 @@ def compare(
     display = ranges[baseline_index] or dict(min=0, max=1)
     aligned_ranges = [value for value in ranges if value is not None] if aligned else []
     if aligned_ranges:
-        display = dict(
-            min=min(value["min"] for value in aligned_ranges), max=max(value["max"] for value in aligned_ranges)
-        )
+        display = dict(min=min(value["min"] for value in aligned_ranges), max=max(value["max"] for value in aligned_ranges))
     panels, pairing = _pair(
         prepared,
         labels,
@@ -409,18 +376,7 @@ def compare(
         summary_sections=[
             table(
                 "运行清单",
-                [
-                    "名称",
-                    "实验身份",
-                    "输入",
-                    "视图",
-                    "原始 verdict",
-                    "原始 validity",
-                    "执行状态",
-                    "墙钟耗时 ms",
-                    "清理",
-                    "冻结摘要",
-                ],
+                ["名称", "实验身份", "输入", "视图", "原始 verdict", "原始 validity", "执行状态", "墙钟耗时 ms", "清理", "冻结摘要"],
                 overview,
             ),
             _matrix(loaded, labels),
@@ -439,9 +395,7 @@ def compare(
         result,
         spec,
         meta=run_meta(
-            dict(id="runs", kind="comparison"),
-            runs={label: run.report.run_meta for label, run in zip(labels, loaded)},
-            evidence=sources,
+            dict(id="runs", kind="comparison"), runs={label: run.report.run_meta for label, run in zip(labels, loaded)}, evidence=sources
         ),
         producer="report-comparison",
         attachments=attachments,

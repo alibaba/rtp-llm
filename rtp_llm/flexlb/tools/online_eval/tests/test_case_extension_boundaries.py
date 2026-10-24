@@ -15,15 +15,11 @@ def measured(tmp_path, monkeypatch):
     from cases.master_ha_failover import metrics
 
     store = SimpleNamespace(
-        document={"definitions": {"ha/sent": {"producer": "ha_evidence"}}},
-        save=Mock(),
-        series=lambda *_: ({}, {}, {}, []),
+        document={"definitions": {"ha/sent": {"producer": "ha_evidence"}}}, save=Mock(), series=lambda *_: ({}, {}, {}, [])
     )
     monkeypatch.setattr("monitoring.archive.export_metrics", lambda *args: store)
     monkeypatch.setattr("monitoring.metric_store.MetricStore.read", lambda *args: store)
-    instance = dict(
-        workload_runtime={"capture_metrics": False}, collection_profile="request", execution={"monitoring": {}}
-    )
+    instance = dict(workload_runtime={"capture_metrics": False}, collection_profile="request", execution={"monitoring": {}})
     ctx = RuntimeContext(instance, None, tmp_path, lambda: 0, lambda _: None)
     policy = WorkloadPolicy()
     policy.attach(ctx)

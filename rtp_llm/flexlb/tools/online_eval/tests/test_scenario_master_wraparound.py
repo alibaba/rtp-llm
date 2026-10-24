@@ -7,11 +7,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 from scenario.actions import master
-from scenario.runtime import (
-    Deadline,
-    RuntimeContext,
-    StageTimeout,
-)
+from scenario.runtime import Deadline, RuntimeContext, StageTimeout
 
 
 class Clock:
@@ -37,19 +33,10 @@ class WraparoundTests(unittest.TestCase):
             self.assertEqual("/rtp_llm/inflight_status", endpoint)
             return response
 
-        return (
-            ctx,
-            clock,
-            patch.object(master, "_master_json", side_effect=http),
-            Deadline(budget, clock, clock.sleep),
-        )
+        return (ctx, clock, patch.object(master, "_master_json", side_effect=http), Deadline(budget, clock, clock.sleep))
 
     def test_clean_ledger_needs_no_topology_or_health_response(self):
-        raw = {
-            "scheduler_inflight": 0,
-            "prefill_endpoints": [{"inflight_batches": 0}],
-            "decode_endpoints": [{"total_load": 0}],
-        }
+        raw = {"scheduler_inflight": 0, "prefill_endpoints": [{"inflight_batches": 0}], "decode_endpoints": [{"total_load": 0}]}
         ctx, clock, mocked, deadline = self.run_gate(master._wrap_inflight, raw, 10)
         with mocked:
             out = master._wrap_inflight(ctx, {"target": "A"}, deadline)
@@ -66,11 +53,7 @@ class WraparoundTests(unittest.TestCase):
         ]
         for sched, prefill, decode in cases:
             with self.subTest(sched=sched, prefill=prefill, decode=decode):
-                raw = {
-                    "scheduler_inflight": sched,
-                    "prefill_endpoints": [{"inflight_batches": prefill}],
-                    "decode_endpoints": [decode],
-                }
+                raw = {"scheduler_inflight": sched, "prefill_endpoints": [{"inflight_batches": prefill}], "decode_endpoints": [decode]}
                 ctx, clock, mocked, deadline = self.run_gate(master._wrap_inflight, raw, 10)
                 with mocked, self.assertRaises(StageTimeout):
                     master._wrap_inflight(ctx, {"target": "A"}, deadline)

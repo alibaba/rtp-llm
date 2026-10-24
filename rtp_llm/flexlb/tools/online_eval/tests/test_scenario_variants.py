@@ -42,14 +42,8 @@ class VariantProgramsTest(unittest.TestCase):
         disabled = dict(fixed_ms=3000, scale=1, max_batch_tokens=0, max_batch_requests=0)
         limited = dict(disabled, max_batch_tokens=1024, max_batch_requests=2)
         doc["environment"]["prefill_perf"] = disabled
-        doc["variants"] = [
-            dict(id="disabled"),
-            dict(id="limited", environment_overrides=dict(prefill_perf=limited)),
-        ]
-        for plan, expected in zip(
-            compile_scenarios([("budget.yaml", doc)], "batch-window"),
-            (disabled, limited),
-        ):
+        doc["variants"] = [dict(id="disabled"), dict(id="limited", environment_overrides=dict(prefill_perf=limited))]
+        for plan, expected in zip(compile_scenarios([("budget.yaml", doc)], "batch-window"), (disabled, limited)):
             spec = make_env_spec(plan["environment"], plan["profile"], dict(master_base=28000))
             self.assertEqual(spec.perf["prefill"], expected)
             self.assertEqual(spec.perf["decode"], default_perf()["decode"])
@@ -57,9 +51,7 @@ class VariantProgramsTest(unittest.TestCase):
             self.assertEqual(plan["environment"]["prefill_perf"]["fixed_ms"], 3000)
         self.assertEqual(doc["environment"]["prefill_perf"], disabled)
 
-    def test_startup_prefill_budget_rejects_incomplete_unknown_and_nonfinite_values(
-        self,
-    ):
+    def test_startup_prefill_budget_rejects_incomplete_unknown_and_nonfinite_values(self):
         valid = dict(fixed_ms=3000, scale=1, max_batch_tokens=0, max_batch_requests=0)
         invalid = [{}, dict(valid, unknown=1)]
         for key in valid:
@@ -77,10 +69,7 @@ class VariantProgramsTest(unittest.TestCase):
         alternate = copy.deepcopy(doc["stages"])
         alternate[1]["id"] = "other_submit"
         alternate[2]["params"]["requests"]["$ref"] = "stages.other_submit.output.requests"
-        doc["variants"] = [
-            dict(id="base"),
-            dict(id="alternate", stages=alternate, execution=dict(timeout_s=33)),
-        ]
+        doc["variants"] = [dict(id="base"), dict(id="alternate", stages=alternate, execution=dict(timeout_s=33))]
         original = copy.deepcopy(doc)
         plans = compile_scenarios([("variants.yaml", doc)], "batch-window")
         self.assertEqual([p["stages"][1]["id"] for p in plans], ["submit", "other_submit"])
@@ -104,11 +93,7 @@ class VariantProgramsTest(unittest.TestCase):
 
     def test_dual_layout_and_coldstart_are_rendered_not_ambient(self):
         doc = scenario()
-        doc["environment"].update(
-            master_layout="dual_standalone",
-            master_stable_window_s=0,
-            debug_enabled=True,
-        )
+        doc["environment"].update(master_layout="dual_standalone", master_stable_window_s=0, debug_enabled=True)
         plan = compile_scenarios([("dual.yaml", doc)], "batch-window")[0]
         spec = make_env_spec(plan["environment"], plan["profile"], dict(master_base=28000))
         self.assertEqual([(m.name, m.http_port) for m in spec.masters], [("A", 28000), ("B", 28003)])
@@ -135,10 +120,7 @@ class VariantProgramsTest(unittest.TestCase):
         doc["stages"].insert(1, dict(id="probe", action="probe"))
         handler = StageHandler("probe", validate, lambda *_: None, {})
         compile_scenarios([("context.yaml", doc)], handlers={"probe": handler})
-        self.assertEqual(
-            seen[0][1],
-            ("batch-window", "single-nonbatch", "single-batch", "window-nonbatch"),
-        )
+        self.assertEqual(seen[0][1], ("batch-window", "single-nonbatch", "single-batch", "window-nonbatch"))
         self.assertNotIn("master_layout", doc["environment"])
 
 

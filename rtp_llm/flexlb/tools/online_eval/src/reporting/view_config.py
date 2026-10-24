@@ -7,12 +7,7 @@ from document_io import load_document
 from input_contract import fail
 from reporting.events import validate_events
 from reporting.view_model import ViewDefinition
-from reporting.view_schema import (
-    validate_default,
-    validate_panels,
-    validate_selected,
-    validate_structure,
-)
+from reporting.view_schema import validate_default, validate_panels, validate_selected, validate_structure
 
 VIEWS = Path(__file__).resolve().parents[2] / "config/report_views"
 DEFAULT_VIEW = "default.yaml"

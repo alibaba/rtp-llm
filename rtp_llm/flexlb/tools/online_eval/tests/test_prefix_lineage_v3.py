@@ -57,9 +57,7 @@ class ExactLineageTest(unittest.TestCase):
 
             def project(name, parameters, limit=None):
                 file = root / name
-                provenance = LineageProjector(decode_model).write_trace(
-                    file, parameters, name, root, max_requests=limit
-                )
+                provenance = LineageProjector(decode_model).write_trace(file, parameters, name, root, max_requests=limit)
                 self.assertEqual(provenance["output_semantics"], "EXPLICIT_GEOMETRIC_SPLITMIX64_EVENT_INDEX_V1")
                 return {int(r["rid"].split(":")[-1]): r["ol"] for r in map(json.loads, file.read_text().splitlines())}
 

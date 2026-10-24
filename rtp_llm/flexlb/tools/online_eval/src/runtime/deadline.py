@@ -33,11 +33,7 @@ def interruptible(deadline, enabled=False):
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
         if previous_timer[0] > 0:
-            signal.setitimer(
-                signal.ITIMER_REAL,
-                max(0.001, previous_timer[0] - (time.monotonic() - entered)),
-                previous_timer[1],
-            )
+            signal.setitimer(signal.ITIMER_REAL, max(0.001, previous_timer[0] - (time.monotonic() - entered)), previous_timer[1])
 
 
 class Deadline:

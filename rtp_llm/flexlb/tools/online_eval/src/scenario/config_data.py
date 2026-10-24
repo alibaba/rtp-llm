@@ -26,15 +26,7 @@ def merge_data(base, patch):
 
 def data_only(value, path):
     if isinstance(value, dict):
-        forbidden = set(value) & {
-            "stages",
-            "stage_overrides",
-            "steps",
-            "action",
-            "$ref",
-            "needs",
-            "when",
-        }
+        forbidden = set(value) & {"stages", "stage_overrides", "steps", "action", "$ref", "needs", "when"}
         if forbidden:
             raise ScenarioError(f"{path}: YAML cannot orchestrate steps ({sorted(forbidden)}); edit the Python case")
         for key, child in value.items():

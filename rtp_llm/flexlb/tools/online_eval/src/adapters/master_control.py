@@ -29,9 +29,7 @@ def master_json(ctx, target, path, deadline, post=False):
     port = ctx.env.master_http_port if target == "single" else ctx.env.master_specs[target].http_port
     host = "127.0.0.1" if target == "single" else ctx.env.master_specs[target].bind_ip
     request = urllib.request.Request(
-        f"http://{host}:{port}{path}",
-        data=b"{}" if post else None,
-        headers={"Content-Type": "application/json"},
+        f"http://{host}:{port}{path}", data=b"{}" if post else None, headers={"Content-Type": "application/json"}
     )
     with urllib.request.urlopen(request, timeout=min(5, deadline.remaining())) as response:
         data = json.load(response)

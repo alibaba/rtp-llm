@@ -52,9 +52,7 @@ def metric_spec(directory, evidence, result, prepared):
     from monitoring.metric_store import MetricStore
     from reporting.metric_binding import monitoring_audit
 
-    prepared = dict(
-        prepared, metric_classification=monitoring_audit(MetricStore.read(directory), view("cache_scale_in.yaml"))
-    )
+    prepared = dict(prepared, metric_classification=monitoring_audit(MetricStore.read(directory), view("cache_scale_in.yaml")))
     return build_spec(directory, evidence, result, prepared)
 
 
@@ -62,9 +60,7 @@ class CacheGateTest(unittest.TestCase):
     def test_derived_curve_label_comes_from_yaml_presentation(self):
         template = view("cache_scale_in.yaml").to_dict()
         template["charts"]["curves"]["derived/survivor_hit_ratio"]["name"] = "YAML survivor"
-        prepared = dict(
-            curves=[], audit=[], sources={}, gaps={}, errors=[], monitoring_status="OK", monitor_warnings=[]
-        )
+        prepared = dict(curves=[], audit=[], sources={}, gaps={}, errors=[], monitoring_status="OK", monitor_warnings=[])
         evidence = self.evidence()
         with (
             tempfile.TemporaryDirectory() as d,
@@ -167,14 +163,7 @@ class CacheGateTest(unittest.TestCase):
     def test_split_panels_keep_metric_values_and_missing_annotations(self):
         from reporting.curves import project_panels
 
-        names = [
-            "P cache hit ratio",
-            "P engine count",
-            "Client sent QPS",
-            "Client success QPS",
-            "Client error QPS",
-            "P Waiting / engine",
-        ]
+        names = ["P cache hit ratio", "P engine count", "Client sent QPS", "Client success QPS", "Client error QPS", "P Waiting / engine"]
         metric_ids = [
             "mock/cache_hit_ratio",
             "mock/engine_count",
@@ -319,9 +308,7 @@ class CacheGateTest(unittest.TestCase):
         evidence["criteria"].update(expected_behavior="collapse", post_affinity_ms=0)
         self.assertEqual(analyze(evidence)["verdict"], "INVALID")
         evidence["affinity_transition"] = dict(
-            before=dict(maxExtraTtftMs=1000000000),
-            update=dict(before=1000000000, maxExtraTtftMs=0),
-            readback=dict(maxExtraTtftMs=0),
+            before=dict(maxExtraTtftMs=1000000000), update=dict(before=1000000000, maxExtraTtftMs=0), readback=dict(maxExtraTtftMs=0)
         )
         self.assertEqual(analyze(evidence)["verdict"], "PASS")
         evidence["affinity_transition"]["readback"]["maxExtraTtftMs"] = 1000000000
@@ -344,11 +331,7 @@ class CacheGateTest(unittest.TestCase):
         e = self.evidence()
         for r in e["samples"][21:]:
             for engine in r["engines"].values():
-                engine.update(
-                    hit_tokens_total=16000,
-                    context_tokens_total=20000,
-                    context_requests_total=200,
-                )
+                engine.update(hit_tokens_total=16000, context_tokens_total=20000, context_requests_total=200)
         self.assertEqual(analyze(e)["verdict"], "INVALID")
 
     def test_missing_cache_data_and_off_target_load_are_invalid(self):
@@ -385,17 +368,9 @@ class CacheGateTest(unittest.TestCase):
             write_report(d, e, analyze(e))
             from reporting import discover_reports
 
-            self.assertEqual(
-                discover_reports(d, role="gate"), [str((Path(d) / "reports/run/cache-scale-in/report.html").resolve())]
-            )
-            self.assertEqual(
-                json.loads((Path(d) / "reports/run/cache-scale-in/analysis.json").read_text())["result"]["verdict"],
-                "FAIL",
-            )
-            self.assertIn(
-                "Prefill 缓存命中率 · P 数量",
-                (Path(d) / "reports/run/cache-scale-in/report.html").read_text(),
-            )
+            self.assertEqual(discover_reports(d, role="gate"), [str((Path(d) / "reports/run/cache-scale-in/report.html").resolve())])
+            self.assertEqual(json.loads((Path(d) / "reports/run/cache-scale-in/analysis.json").read_text())["result"]["verdict"], "FAIL")
+            self.assertIn("Prefill 缓存命中率 · P 数量", (Path(d) / "reports/run/cache-scale-in/report.html").read_text())
 
     def test_report_includes_warmup_and_survivor_transition(self):
         e = self.evidence(0.1)
@@ -404,12 +379,8 @@ class CacheGateTest(unittest.TestCase):
             write_report(d, e, result)
             html = (Path(d) / "reports/run/cache-scale-in/report.html").read_text()
             spec, _ = json.JSONDecoder().raw_decode(html.split("const SPEC = ", 1)[1])
-            curves = {
-                s["name"]: s["points"] for s in spec["panels"][0]["series"] if s.get("source_type") != "configuration"
-            }
-            self.assertEqual(
-                curves, {"Survivor window hit ratio": [dict(x=w["end"], y=w["hit"]) for w in result["windows"]]}
-            )
+            curves = {s["name"]: s["points"] for s in spec["panels"][0]["series"] if s.get("source_type") != "configuration"}
+            self.assertEqual(curves, {"Survivor window hit ratio": [dict(x=w["end"], y=w["hit"]) for w in result["windows"]]})
             self.assertIn("缺少有效曲线", spec["panels"][0]["caption"])
             self.assertNotIn("P cache hit ratio", curves)
             self.assertEqual(spec["summary"]["kpis"][1]["value"], "WARN")
@@ -444,8 +415,7 @@ class CacheGateTest(unittest.TestCase):
             )
             spec = write_report(root, e, analyze(e))
             self.assertEqual(
-                [s["name"] for s in spec["panels"][0]["series"] if s.get("source_type") != "configuration"],
-                ["Survivor window hit ratio"],
+                [s["name"] for s in spec["panels"][0]["series"] if s.get("source_type") != "configuration"], ["Survivor window hit ratio"]
             )
             self.assertEqual(spec["panels"][2]["id"], "prefill-queue")
             self.assertEqual([s["name"] for s in spec["panels"][2]["series"]], ["P Waiting / engine"])
@@ -466,10 +436,7 @@ class CacheGateTest(unittest.TestCase):
         envelope = json.loads(render_process_config("single-nonbatch", override))
         envs = dict(envelope["zone_process_setting"]["process_info"]["envs"])
         self.assertEqual(json.loads(envs["FLEXLB_CONFIG"]), config)
-        self.assertEqual(
-            config["router"]["roles"]["prefill"]["executionTimeEstimator"]["expression"],
-            expression,
-        )
+        self.assertEqual(config["router"]["roles"]["prefill"]["executionTimeEstimator"]["expression"], expression)
 
     def test_report_keeps_withdrawal_failures_visible_when_cache_passes(self):
         evidence = self.evidence(0.8)
@@ -497,10 +464,7 @@ class CacheGateTest(unittest.TestCase):
             mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)),
             mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)),
         ):
-            plans = compile_scenarios(
-                load_scenarios(ROOT / "config/scenarios/cache_scale_in.yaml"),
-                handlers=handlers(),
-            )
+            plans = compile_scenarios(load_scenarios(ROOT / "config/scenarios/cache_scale_in.yaml"), handlers=handlers())
         self.assertEqual(len(plans), 8)
         self.assertEqual(plans[0]["environment"]["prefill_cache_policy"]["memory_tree"], False)
         self.assertIn("cache_scale_in_check", [s["action"] for s in plans[0]["stages"]])
@@ -548,19 +512,12 @@ class CacheGateTest(unittest.TestCase):
                 row["engines"]["p1"] = dict(row["engines"]["p0"], grpc_addr="p1", waiting=9999, admission_open=0)
         self.assertTrue(topology_ready(evidence["samples"][-1], ["p0"], ["p0", "p1"]))
         evidence["events"] = [dict(id="withdraw_start", epoch_s=1020, t=20)]
-        records = [
-            dict(rid=1, prefill="p1", status="exception", error="removed", send_start_epoch_ms=1021000, total_ms=200)
-        ]
+        records = [dict(rid=1, prefill="p1", status="exception", error="removed", send_start_epoch_ms=1021000, total_ms=200)]
         attribute_client(evidence, dict(complete=True, records=records))
         evidence["removals"] = [
             dict(
                 engine="p1",
-                admission=dict(
-                    admission_open=0,
-                    admission_closed_epoch_ms=1020000,
-                    admitted_rpcs_total=42,
-                    admitted_rpcs_at_close=42,
-                ),
+                admission=dict(admission_open=0, admission_closed_epoch_ms=1020000, admitted_rpcs_total=42, admitted_rpcs_at_close=42),
                 drained=False,
             )
         ]
@@ -673,14 +630,8 @@ class WorkloadTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = materialize(Path(d) / "input.jsonl", self.spec(), "g", d)
             result = profile(path, (1, 10000))
-            self.assertLess(
-                result["lru_hit_by_capacity"]["1"],
-                result["lru_hit_by_capacity"]["10000"],
-            )
-            self.assertEqual(
-                result["lru_hit_by_capacity"]["10000"],
-                result["infinite_cache_potential_hit"],
-            )
+            self.assertLess(result["lru_hit_by_capacity"]["1"], result["lru_hit_by_capacity"]["10000"])
+            self.assertEqual(result["lru_hit_by_capacity"]["10000"], result["infinite_cache_potential_hit"])
             self.assertEqual(result["requests"], 80)
 
     def test_production_512_block_source_is_published_and_profiled(self):
@@ -695,11 +646,7 @@ class WorkloadTest(unittest.TestCase):
 
     def test_reject_nan_and_wrong_block_before_publication(self):
         with tempfile.TemporaryDirectory() as d:
-            for key, value in [
-                ("qps", float("nan")),
-                ("block_size", 513),
-                ("families", 0),
-            ]:
+            for key, value in [("qps", float("nan")), ("block_size", 513), ("families", 0)]:
                 spec = self.spec()
                 spec["parameters"][key] = value
                 with self.assertRaises(ValueError):

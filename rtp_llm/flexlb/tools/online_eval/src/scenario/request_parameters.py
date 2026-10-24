@@ -21,12 +21,7 @@ def normalize_request_parameters(params, loc):
         },
     )
     for key, default in (("input_len", 2048), ("output_len", 10), ("count", 1)):
-        params[key] = number(
-            params.get(key, default),
-            loc + ".params." + key,
-            minimum=1,
-            integer=True,
-        )
+        params[key] = number(params.get(key, default), loc + ".params." + key, minimum=1, integer=True)
     params.setdefault("consume", "immediate")
     if params["consume"] not in ("immediate", "deferred"):
         fail(loc, "consume must be immediate or deferred")
@@ -36,11 +31,7 @@ def normalize_request_parameters(params, loc):
             fail(loc, "post_issue_delay_s cannot exceed two seconds")
     if "block_keys" in params:
         keys = params["block_keys"]
-        if (
-            not isinstance(keys, list)
-            or not 1 <= len(keys) <= 4096
-            or any(type(k) is not int or not -(2**63) <= k < 2**63 for k in keys)
-        ):
+        if not isinstance(keys, list) or not 1 <= len(keys) <= 4096 or any(type(k) is not int or not -(2**63) <= k < 2**63 for k in keys):
             fail(loc, "block_keys must be 1..4096 explicit int64 keys")
     for key in ("priority", "qos_level"):
         if key in params and (type(params[key]) is not int or not -(2**31) <= params[key] < 2**31):

@@ -22,10 +22,7 @@ def plan():
         dict(
             id="default",
             metadata=dict(kind="workload", description=document["description"]),
-            execution=dict(
-                collection="request",
-                monitoring=dict(capture_metrics=False, sample_interval_s=1, collector_shutdown_s=2),
-            ),
+            execution=dict(collection="request", monitoring=dict(capture_metrics=False, sample_interval_s=1, collector_shutdown_s=2)),
         )
     ]
     return compile_scenarios([("fixture", document)])[0]
@@ -40,16 +37,10 @@ def test_online_gate_never_calls_metric_or_html_delivery(tmp_path, kind):
     case = "cache_scale_in" if kind == "cache" else "master_performance"
     module = __import__("cases." + case + ".actions", fromlist=["actions"])
     e = CacheGateTest().evidence(0.8) if kind == "cache" else performance_evidence()
-    snapshot = (
-        e["flow"]
-        if kind == "performance"
-        else dict(issued=[], records=[], complete=True, errors=[], status=dict(submitted=0))
-    )
+    snapshot = e["flow"] if kind == "performance" else dict(issued=[], records=[], complete=True, errors=[], status=dict(submitted=0))
     flow = SimpleNamespace(directory=tmp_path, evidence_snapshot=lambda: snapshot)
     (tmp_path / "client_lifecycle.jsonl").write_text("")
-    ctx = RuntimeContext(
-        {"implementation": {"configuration": {"case": case}}}, None, tmp_path, lambda: 0, lambda _: None
-    )
+    ctx = RuntimeContext({"implementation": {"configuration": {"case": case}}}, None, tmp_path, lambda: 0, lambda _: None)
     if kind == "cache":
         e["client_attribution"] = {}
         e["capture_limits"] = dict(max_samples=1000, max_bytes=1000000)
@@ -132,9 +123,7 @@ def test_uncooperative_finalization_is_interrupted(tmp_path):
 
     started = time.monotonic()
     with mock.patch.object(WorkloadPolicy, "finalize", side_effect=lambda *args, **kwargs: time.sleep(5)):
-        result = execute_workload(
-            instance, NoWaitBackend(time.monotonic), artifact_dir=tmp_path, enforce_deadlines=True
-        )
+        result = execute_workload(instance, NoWaitBackend(time.monotonic), artifact_dir=tmp_path, enforce_deadlines=True)
     assert time.monotonic() - started < 1
     assert result["finalization"][0]["status"] == "TIMEOUT"
     assert result["execution_status"] == "PASS"

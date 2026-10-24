@@ -51,17 +51,10 @@ class HaReplayClient:
         self.state_sampler = None
         if "master_inflight" in selected_sources(monitor.query_plan, monitor.sources):
             self.state_sampler = evidence_collector(
-                monitor.query_plan,
-                "master_inflight",
-                env,
-                case_dir / "master_states.jsonl",
-                limits=sampler_limits,
-                session=monitor,
+                monitor.query_plan, "master_inflight", env, case_dir / "master_states.jsonl", limits=sampler_limits, session=monitor
             )
         # The environment registry owns membership and candidate order.
-        specs_by_target = {
-            manager.master_instance_target(env, master_name): spec for master_name, spec in env.master_specs.items()
-        }
+        specs_by_target = {manager.master_instance_target(env, master_name): spec for master_name, spec in env.master_specs.items()}
         if not specs_by_target:
             raise ValueError("HA discovery requires registered Masters")
         self.targets = list(specs_by_target)
@@ -70,10 +63,7 @@ class HaReplayClient:
             json.dumps(
                 {
                     "hosts": [
-                        {
-                            "http": f"{specs_by_target[target].bind_ip}:{specs_by_target[target].http_port}",
-                            "grpc": target,
-                        }
+                        {"http": f"{specs_by_target[target].bind_ip}:{specs_by_target[target].http_port}", "grpc": target}
                         for target in self.targets
                     ]
                 }
@@ -104,11 +94,7 @@ class HaReplayClient:
             raise ValueError("HA timeout_ms must be whole seconds")
         settings = dict(
             playback=dict(
-                mode="true-ts",
-                duration_s=int(duration_s),
-                speed=replay_speed,
-                max_laps=0 if loop else 1,
-                identity="structural-relabel",
+                mode="true-ts", duration_s=int(duration_s), speed=replay_speed, max_laps=0 if loop else 1, identity="structural-relabel"
             ),
             limits=dict(
                 max_concurrency=max_concurrency,
@@ -155,10 +141,7 @@ class HaReplayClient:
         from adapters.flow_control import read_status, validate_drain
 
         validate_drain(
-            read_status(self.control, self.flow_identity),
-            self.flow_identity,
-            terminal_count=len(rows),
-            command_id=self.stop_command,
+            read_status(self.control, self.flow_identity), self.flow_identity, terminal_count=len(rows), command_id=self.stop_command
         )
 
     def start(self, deadline=None) -> None:
@@ -172,9 +155,7 @@ class HaReplayClient:
         try:
             from adapters.client_session import launch_client
 
-            self.proc, self.out_dir = launch_client(
-                self._client, self._overrides, self.out_dir, self.log_file, deadline, label=self.name
-            )
+            self.proc, self.out_dir = launch_client(self._client, self._overrides, self.out_dir, self.log_file, deadline, label=self.name)
             with startup_phase(self.out_dir, "client/sending", deadline):
                 wait_flow_started(self.control, self.flow_identity, self.proc, deadline)
         except Exception as start_error:
@@ -263,14 +244,7 @@ class HaReplayClient:
         if not rows:
             raise ValueError("HA client produced no request evidence")
         for row in rows:
-            if not isinstance(row, dict) or not {
-                "rid",
-                "route_path",
-                "master_target",
-                "failover",
-                "error_kind",
-                "status",
-            } <= set(row):
+            if not isinstance(row, dict) or not {"rid", "route_path", "master_target", "failover", "error_kind", "status"} <= set(row):
                 raise ValueError("HA client evidence lacks required route fields")
             if row["route_path"] not in {"master", "fallback", "failed"} or type(row["failover"]) is not bool:
                 raise ValueError("invalid HA route evidence")

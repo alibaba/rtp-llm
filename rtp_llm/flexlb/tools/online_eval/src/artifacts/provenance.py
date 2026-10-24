@@ -39,9 +39,7 @@ def gate_provenance(ctx, flow, *, source_files, analyzer_file):
 
     epoch = str(ctx.env_epoch)
     observed = collect(
-        ctx.artifact_dir,
-        {epoch: ctx.env.run_dir},
-        required={"master_artifact", "actual_master_config", "master_config", "performance"},
+        ctx.artifact_dir, {epoch: ctx.env.run_dir}, required={"master_artifact", "actual_master_config", "master_config", "performance"}
     )
     launch = observed["environments"][epoch]
     trace = dict(flow.trace_manifest)
@@ -94,15 +92,7 @@ def validate_gate_provenance(value):
     identity = value.get("instance")
     if type(identity) is not str or not identity.strip():
         raise ValueError("missing/invalid instance identity")
-    for name in (
-        "master_artifact",
-        "actual_master_config",
-        "performance",
-        "topology",
-        "capacity",
-        "trace",
-        "client_environment",
-    ):
+    for name in ("master_artifact", "actual_master_config", "performance", "topology", "capacity", "trace", "client_environment"):
         if not isinstance(value.get(name), dict) or not value[name]:
             raise ValueError("missing/invalid provenance mapping: " + name)
     hashes = {
@@ -116,10 +106,7 @@ def validate_gate_provenance(value):
     for name, digest in hashes.items():
         if type(digest) is not str or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             raise ValueError("missing/invalid artifact or workload SHA256: " + name)
-    for group, fields in (
-        ("topology", ("prefill", "decode")),
-        ("capacity", ("prefill_cache_blocks", "decode_cache_blocks")),
-    ):
+    for group, fields in (("topology", ("prefill", "decode")), ("capacity", ("prefill_cache_blocks", "decode_cache_blocks"))):
         for name in fields:
             number = value[group].get(name)
             if type(number) is not int or number < 0:

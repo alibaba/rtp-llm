@@ -18,13 +18,7 @@ def main(argv=None):
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--max-requests", type=int)
     args = parser.parse_args(argv)
-    materialize(
-        args.out,
-        json.loads(args.spec.read_text()),
-        args.namespace,
-        args.spec.resolve().parent,
-        max_requests=args.max_requests,
-    )
+    materialize(args.out, json.loads(args.spec.read_text()), args.namespace, args.spec.resolve().parent, max_requests=args.max_requests)
     print(args.out.with_suffix(".manifest.json"))
 
 

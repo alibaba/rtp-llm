@@ -55,9 +55,7 @@ def prepare_report(directory, evidence, *, presentation=None):
     store = MetricStore.read(directory)
     observations, gaps, errors = store.project(anchor)
     sources = {
-        row["series_key"]: dict(row["provenance"], metric_id=row["metric_id"], unit=row["unit"])
-        for row in observations
-        if row["points"]
+        row["series_key"]: dict(row["provenance"], metric_id=row["metric_id"], unit=row["unit"]) for row in observations if row["points"]
     }
     presentation = presentation if presentation is not None else view("cache_scale_in.yaml")
     from reporting.metric_binding import monitoring_audit
@@ -92,16 +90,7 @@ def prepare_report(directory, evidence, *, presentation=None):
             valid_points = sum(value is not None and 0 <= timestamp <= visible_end for timestamp, value in points)
             expected = max(1, round((visible_end + 1) / max(provenance.get("step", 1), 0.001)))
             coverage = min(1, valid_points / expected)
-            curves.append(
-                materialize(
-                    curve_id,
-                    definition,
-                    points,
-                    name=name,
-                    description=provenance["promql"],
-                    provenance=provenance,
-                )
-            )
+            curves.append(materialize(curve_id, definition, points, name=name, description=provenance["promql"], provenance=provenance))
             audit.append([name, f"{coverage:.0%}", "OK" if coverage >= 0.8 else "SPARSE", provenance["promql"]])
     by_id = {curve["metric_id"]: curve for curve in curves}
     for identity, definition in presentation.charts.curves.items():
@@ -177,11 +166,7 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
         timeOriginLabel="秒；t=0 为观测开始",
         kpis=[
             dict(label=KPI_LABELS["verdict"], value=result["verdict"]),
-            dict(
-                label=KPI_LABELS["monitoring"],
-                value=monitoring_status,
-                tone="danger" if monitor_warnings else "success",
-            ),
+            dict(label=KPI_LABELS["monitoring"], value=monitoring_status, tone="danger" if monitor_warnings else "success"),
         ]
         + request_kpis,
         panels=project_panels(curves, presentation),
@@ -203,9 +188,7 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
             view_details(
                 presentation,
                 "sources",
-                dict(
-                    queries=sources, gaps=gaps, errors=errors, metric_classification=prepared["metric_classification"]
-                ),
+                dict(queries=sources, gaps=gaps, errors=errors, metric_classification=prepared["metric_classification"]),
             ),
         ],
         timeAxis=dict(min=0, max=max((r["t"] for r in rows), default=1)),
@@ -218,7 +201,7 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
         {
             "survivor_hit_floor": Threshold(result["threshold"], evidence["post_start"], evidence["post_end"])
             if evidence["post_start"] < evidence["post_end"]
-            else None,
+            else None
         },
     )
     from reporting.events import attach_events
@@ -238,10 +221,7 @@ def write_report(directory, evidence, result, prepared=None, *, run=None, presen
         dict(id=provenance["instance"]),
         implementation=dict(files=provenance.get("files"), master=provenance.get("master_artifact")),
         workload=provenance.get("trace"),
-        configuration={
-            k: provenance.get(k)
-            for k in ("topology", "capacity", "performance", "master_config", "actual_master_config")
-        },
+        configuration={k: provenance.get(k) for k in ("topology", "capacity", "performance", "master_config", "actual_master_config")},
         environment=provenance.get("client_environment"),
         evidence=[
             dict(
@@ -254,24 +234,12 @@ def write_report(directory, evidence, result, prepared=None, *, run=None, presen
         return write_archived_gate_report(
             directory, result, presentation, spec, identity="cache-scale-in", producer="cache-gate", meta=meta
         )
-    return write_gate_report(
-        directory, result, presentation, spec, identity="cache-scale-in", producer="cache-gate", meta=meta, run=run
-    )
+    return write_gate_report(directory, result, presentation, spec, identity="cache-scale-in", producer="cache-gate", meta=meta, run=run)
 
 
 def validate_view(path, data, fail):
     from reporting.view_schema import validate_section_contract
 
     validate_section_contract(
-        path,
-        data,
-        {
-            "request_outcomes": 4,
-            "audit": 4,
-            "monitoring": None,
-            "checks": None,
-            "measurement": None,
-            "sources": None,
-        },
-        fail,
+        path, data, {"request_outcomes": 4, "audit": 4, "monitoring": None, "checks": None, "measurement": None, "sources": None}, fail
     )

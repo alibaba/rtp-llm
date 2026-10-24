@@ -23,11 +23,7 @@ def _cycle(case, restart_mode):
     elected = case.env.master_layout == "dual_zookeeper"
     if elected:
         case.step("baseline_leadership", "master_leadership", params={"targets": ["A", "B"]})
-    case.step(
-        "flow",
-        "master_client_start",
-        params=dict(driver(data["traffic"], "ha_replay"), capture=data["observation"]["capture"]),
-    )
+    case.step("flow", "master_client_start", params=dict(driver(data["traffic"], "ha_replay"), capture=data["observation"]["capture"]))
 
     # The producer keeps running while A and B are killed and restarted in order.
     period(case, "baseline", data, "baseline_wait", baseline=True)
@@ -39,32 +35,20 @@ def _cycle(case, restart_mode):
     if restart_mode == "non_rolling":
         case.step("kill_b", "master_fault", params=data["procedure"]["kill_b"])
         period(case, "outage", data, "outage_wait")
-    case.step(
-        "restart_a",
-        "master_restore",
-        timeout_s=data["procedure"]["restart_timeout_s"],
-        params={"fault": output("kill_a", "fault")},
-    )
+    case.step("restart_a", "master_restore", timeout_s=data["procedure"]["restart_timeout_s"], params={"fault": output("kill_a", "fault")})
     case.step("a_ready", "master_ready", params=data["procedure"]["a_ready"])
     if elected:
         case.step(
             "rejoin_leadership",
             "master_leadership",
-            params={"targets": ["A", "B"], "leader": "B"}
-            if restart_mode == "rolling"
-            else {"targets": ["A"], "leader": "A"},
+            params={"targets": ["A", "B"], "leader": "B"} if restart_mode == "rolling" else {"targets": ["A"], "leader": "A"},
         )
     if restart_mode == "rolling":
         case.step("kill_b", "master_fault", params=data["procedure"]["kill_b"])
     if elected:
         case.step("a_leadership", "master_leadership", params={"targets": ["A"], "leader": "A"})
     period(case, "a", data, "survivor_wait")
-    case.step(
-        "restart_b",
-        "master_restore",
-        timeout_s=data["procedure"]["restart_timeout_s"],
-        params={"fault": output("kill_b", "fault")},
-    )
+    case.step("restart_b", "master_restore", timeout_s=data["procedure"]["restart_timeout_s"], params={"fault": output("kill_b", "fault")})
     case.step("a_ready_final", "master_ready", params=data["procedure"]["a_ready"])
     case.step("b_ready_final", "master_ready", params=data["procedure"]["b_ready"])
     if elected:
@@ -120,12 +104,7 @@ def _cycle(case, restart_mode):
     case.observe(
         "analysis",
         "master_client_analyze",
-        params=dict(
-            rows=output("finish", "rows"),
-            windows=boundaries,
-            checks=criteria,
-            operation_timeout_s=case.stage_timeout_s,
-        ),
+        params=dict(rows=output("finish", "rows"), windows=boundaries, checks=criteria, operation_timeout_s=case.stage_timeout_s),
         timeout_s=(len(selected_windows) + len(criteria)) * case.stage_timeout_s,
     )
     case.step("clean_a", "master_inflight_clean", params={"target": "A"})
@@ -147,9 +126,7 @@ def period(case, name, data, duration, *, baseline=False):
     )
 
 
-REPORT_VIEWS = {
-    "master_ha_failover.yaml": ReportView(validate_view, write_report),
-}
+REPORT_VIEWS = {"master_ha_failover.yaml": ReportView(validate_view, write_report)}
 
 
 from cases.master_ha_failover import metrics
@@ -164,7 +141,5 @@ CASE = CaseDefinition(
     actions=tuple(ACTION_HANDLERS),
     report_views=REPORT_VIEWS,
     metrics=metrics,
-    sources={
-        "master_inflight": EvidenceSource(master_adapters, frozenset(STATE_FIELDS), "master", frozenset({"http_up"}))
-    },
+    sources={"master_inflight": EvidenceSource(master_adapters, frozenset(STATE_FIELDS), "master", frozenset({"http_up"}))},
 )

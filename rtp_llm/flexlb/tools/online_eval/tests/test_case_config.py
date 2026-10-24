@@ -54,20 +54,11 @@ class CaseConfigTest(unittest.TestCase):
     def test_core_contract_keeps_production_master_configuration(self):
         from flexlb_cfg import ConfigOverride, render_env
 
-        plans = compile_scenarios(
-            load_scenarios(ROOT / "config/scenarios/request_completion.yaml"),
-            handlers=handlers(),
-        )
+        plans = compile_scenarios(load_scenarios(ROOT / "config/scenarios/request_completion.yaml"), handlers=handlers())
         self.assertEqual(len(plans), 4)
         for plan in plans:
-            self.assertEqual(
-                (plan["environment"]["n_prefill"], plan["environment"]["n_decode"]),
-                (2, 2),
-            )
-            self.assertEqual(
-                plan["environment"]["resolved_config"],
-                json.loads(render_env(plan["profile"], ConfigOverride())),
-            )
+            self.assertEqual((plan["environment"]["n_prefill"], plan["environment"]["n_decode"]), (2, 2))
+            self.assertEqual(plan["environment"]["resolved_config"], json.loads(render_env(plan["profile"], ConfigOverride())))
 
     def config(self):
         config = load_document(ROOT / "config/scenarios/request_completion.yaml")
@@ -75,10 +66,7 @@ class CaseConfigTest(unittest.TestCase):
         return config
 
     def compile(self, config):
-        return compile_scenarios(
-            [("config.yaml", configure_program(config, "config.yaml"))],
-            handlers=handlers(),
-        )
+        return compile_scenarios([("config.yaml", configure_program(config, "config.yaml"))], handlers=handlers())
 
     def test_pd_scale_reaches_environment_and_resource_budget(self):
         config = self.config()
@@ -93,12 +81,7 @@ class CaseConfigTest(unittest.TestCase):
         config = self.config()
         config["profiles"] = ["single-nonbatch"]
         config["parameters"]["traffic"].update(input_len=8192, output_len=16, count=3)
-        config["variants"] = [
-            {
-                "id": "large_pd",
-                "environment": {"n_prefill": 4, "n_decode": 8},
-            }
-        ]
+        config["variants"] = [{"id": "large_pd", "environment": {"n_prefill": 4, "n_decode": 8}}]
         default, plan = self.compile(config)
         self.assertEqual(default["variant_id"], "default")
         self.assertEqual(default["environment"]["n_decode"], 2)
@@ -112,21 +95,11 @@ class CaseConfigTest(unittest.TestCase):
         config = self.config()
         config["parameters"]["traffic"]["count"] = 2
         config["variants"][0]["parameters"] = {"traffic": {"count": 4}}
-        config["variants"].append(
-            {
-                "id": "default_count",
-            }
-        )
+        config["variants"].append({"id": "default_count"})
         original = copy.deepcopy(config)
         plans = self.compile(config)
-        self.assertEqual(
-            {p["stages"][1]["params"]["count"] for p in plans if p["variant_id"] == "immediate"},
-            {4},
-        )
-        self.assertEqual(
-            {p["stages"][1]["params"]["count"] for p in plans if p["variant_id"] == "default_count"},
-            {2},
-        )
+        self.assertEqual({p["stages"][1]["params"]["count"] for p in plans if p["variant_id"] == "immediate"}, {4})
+        self.assertEqual({p["stages"][1]["params"]["count"] for p in plans if p["variant_id"] == "default_count"}, {2})
         self.assertEqual(config, original)
         self.assertEqual(self.compile(self.config())[0]["stages"][1]["params"]["count"], 1)
 
@@ -134,28 +107,14 @@ class CaseConfigTest(unittest.TestCase):
         config = self.config()
         config["id"] = "another_pd_scale"
         with tempfile.TemporaryDirectory() as directory:
-            for name, data in (
-                ("original.json", self.config()),
-                ("extra.json", config),
-            ):
+            for name, data in (("original.json", self.config()), ("extra.json", config)):
                 (Path(directory) / name).write_text(json.dumps(data))
             plans = compile_scenarios(load_scenarios(directory), handlers=handlers())
         self.assertEqual(len(plans), 16)
-        self.assertEqual(
-            {p["scenario_id"] for p in plans},
-            {"request_completion", "another_pd_scale"},
-        )
+        self.assertEqual({p["scenario_id"] for p in plans}, {"request_completion", "another_pd_scale"})
 
     def test_rejects_orchestration_anywhere_in_yaml(self):
-        for key in (
-            "stages",
-            "steps",
-            "stage_overrides",
-            "action",
-            "$ref",
-            "when",
-            "needs",
-        ):
+        for key in ("stages", "steps", "stage_overrides", "action", "$ref", "when", "needs"):
             with self.subTest(key=key):
                 config = self.config()
                 config["variants"][0]["parameters"] = {key: "anything"}
@@ -163,13 +122,7 @@ class CaseConfigTest(unittest.TestCase):
                     self.compile(config)
 
     def test_rejects_missing_parameters_and_invalid_numeric_values(self):
-        for parameters in (
-            {"coutn": 2},
-            {"count": True},
-            {"count": 0},
-            {"count": 10001},
-            {"input_len": "2048"},
-        ):
+        for parameters in ({"coutn": 2}, {"count": True}, {"count": 0}, {"count": 10001}, {"input_len": "2048"}):
             with self.subTest(parameters=parameters):
                 config = self.config()
                 config["parameters"]["traffic"].update(parameters)
@@ -177,11 +130,7 @@ class CaseConfigTest(unittest.TestCase):
                     self.compile(config)
 
     def test_configuration_cannot_import_or_orchestrate(self):
-        for patch in (
-            {"case": "os.system"},
-            {"findings": ["no_errors.comparison"]},
-            {"stages": []},
-        ):
+        for patch in ({"case": "os.system"}, {"findings": ["no_errors.comparison"]}, {"stages": []}):
             with self.subTest(patch=patch):
                 config = self.config()
                 config.update(patch)
@@ -189,10 +138,7 @@ class CaseConfigTest(unittest.TestCase):
                     self.compile(config)
 
     def test_rejects_unknown_and_duplicate_programs(self):
-        variants = (
-            [{"id": "unknown", "program": "unknown"}],
-            [{"id": "immediate"}, {"id": "immediate"}],
-        )
+        variants = ([{"id": "unknown", "program": "unknown"}], [{"id": "immediate"}, {"id": "immediate"}])
         for value in variants:
             with self.subTest(variants=value):
                 config = self.config()
@@ -283,11 +229,7 @@ class CaseConfigTest(unittest.TestCase):
                 if isinstance(node, ast.Assign):
                     for target in node.targets:
                         if isinstance(target, ast.Name):
-                            self.assertNotIn(
-                                target.id,
-                                {"VARIANTS", "PROFILES", "METADATA"},
-                                str(path),
-                            )
+                            self.assertNotIn(target.id, {"VARIANTS", "PROFILES", "METADATA"}, str(path))
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                     if node.func.attr == "number":
                         self.assertEqual(len(node.args), 1, str(path))

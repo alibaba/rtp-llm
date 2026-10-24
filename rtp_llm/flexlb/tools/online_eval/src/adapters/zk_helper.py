@@ -42,14 +42,7 @@ class ZkHelperOps:
             raise RuntimeError(f"mvnw not found: {mvnw}")
         cmd = [str(mvnw), "-q", *args]
         # First run may compile reactor modules — allow a long window.
-        proc = subprocess.run(
-            cmd,
-            cwd=str(FLEXLB_DIR),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-        )
+        proc = subprocess.run(cmd, cwd=str(FLEXLB_DIR), env=env, capture_output=True, text=True, timeout=timeout_s)
         if proc.returncode != 0:
             raise RuntimeError(f"{what} failed (rc={proc.returncode}):\n{(proc.stderr or proc.stdout)[-2000:]}")
 
@@ -93,11 +86,7 @@ class ZkHelperOps:
     @staticmethod
     def _classpath_paths(cp_file):
         target = FLEXLB_DIR / "flexlb-sync" / "target"
-        return [
-            target / "test-classes",
-            target / "classes",
-            *[Path(path) for path in cp_file.read_text().strip().split(os.pathsep)],
-        ]
+        return [target / "test-classes", target / "classes", *[Path(path) for path in cp_file.read_text().strip().split(os.pathsep)]]
 
     @staticmethod
     def _fingerprints(paths):
@@ -119,9 +108,7 @@ class ZkHelperOps:
         directory = FLEXLB_DIR / "flexlb-sync" / "target" / "online-eval-runtime"
         cp_file, manifest = directory / "classpath.txt", directory / "manifest.json"
         if not cp_file.is_file() or not manifest.is_file():
-            raise RuntimeError(
-                "ZooKeeper runtime is not prepared; run tools/online_eval/scripts/commands/prepare_runtime.py"
-            )
+            raise RuntimeError("ZooKeeper runtime is not prepared; run tools/online_eval/scripts/commands/prepare_runtime.py")
         paths = ZkHelperOps._classpath_paths(cp_file)
         if ZkHelperOps._fingerprints(paths) != read_json(manifest)["files"]:
             raise RuntimeError("ZooKeeper runtime changed after preparation; run prepare_runtime.py again")

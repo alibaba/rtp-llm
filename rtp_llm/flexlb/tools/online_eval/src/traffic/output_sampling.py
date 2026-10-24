@@ -21,11 +21,7 @@ def output_sampler(parameters):
         mean = policy["mean_tokens"]
         if type(mean) not in (int, float) or not math.isfinite(mean) or mean < 1:
             raise ValueError("invalid output distribution parameters")
-        return lambda index: (
-            1
-            if mean == 1
-            else min(cap, 1 + math.floor(math.log1p(-event_uniform(index, seed)) / math.log1p(-1 / mean)))
-        )
+        return lambda index: (1 if mean == 1 else min(cap, 1 + math.floor(math.log1p(-event_uniform(index, seed)) / math.log1p(-1 / mean))))
     if policy.get("kind") == "discrete":
         if set(policy) != {"kind", "values", "weights", "seed"}:
             raise ValueError("invalid output distribution fields")

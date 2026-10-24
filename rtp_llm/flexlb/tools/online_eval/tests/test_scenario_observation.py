@@ -9,13 +9,7 @@ from unittest.mock import patch
 from adapters.observation_sources import Sources
 from adapters.observation_window import Observer
 from runtime.sample_worker import CaptureDeadline
-from scenario.actions.observation import (
-    DebugUnavailable,
-    execute_observe,
-    execute_snapshot,
-    validate_observe,
-    validate_snapshot,
-)
+from scenario.actions.observation import DebugUnavailable, execute_observe, execute_snapshot, validate_observe, validate_snapshot
 
 
 class Plan:
@@ -53,11 +47,7 @@ class Context:
         return self.resources[value["id"]]
 
     def register_resource(self, kind, value, cleanup=None, historical=False):
-        handle = {
-            "kind": kind,
-            "id": str(len(self.resources)),
-            "env_epoch": self.env_epoch,
-        }
+        handle = {"kind": kind, "id": str(len(self.resources)), "env_epoch": self.env_epoch}
         self.resources[handle["id"]] = value
         if cleanup:
             self.cleanups.append(cleanup)
@@ -103,10 +93,7 @@ class ObservationTest(unittest.TestCase):
     def test_required_source_failure_is_error_optional_preserves_failure(self):
         for required in (True, False):
             p = validate_snapshot({"sources": ["engine_snapshot"], "required": required}, Plan())
-            with patch(
-                "adapters.observation_sources._read_json",
-                side_effect=OSError("offline"),
-            ):
+            with patch("adapters.observation_sources._read_json", side_effect=OSError("offline")):
                 result = execute_snapshot(self.ctx, p, deadline())
             frozen = self.ctx.resource(result.output["snapshot"], "snapshot").to_dict()
             self.assertEqual("partial", frozen["status"])
@@ -126,14 +113,8 @@ class ObservationTest(unittest.TestCase):
         self.assertEqual("epoch_changed", result["sources"]["engine_snapshot"]["status"])
 
     def test_membership_and_missing_targets_preserved(self):
-        source = Sources(
-            self.ctx,
-            validate_snapshot({"sources": ["engine_snapshot"], "targets": ["p1"]}, Plan()),
-        )
-        with patch(
-            "adapters.observation_sources._read_json",
-            side_effect=[{"engines": [{"name": "p1"}]}, {"engines": [{"name": "p2"}]}],
-        ):
+        source = Sources(self.ctx, validate_snapshot({"sources": ["engine_snapshot"], "targets": ["p1"]}, Plan()))
+        with patch("adapters.observation_sources._read_json", side_effect=[{"engines": [{"name": "p1"}]}, {"engines": [{"name": "p2"}]}]):
             source.capture(deadline())
             result = source.capture(deadline()).to_dict()["sources"]["engine_snapshot"]
         self.assertEqual("partial", result["status"])
@@ -253,23 +234,13 @@ class ObservationTest(unittest.TestCase):
                 environment={},
                 stages=[
                     {"id": "setup", "action": "setup"},
-                    {
-                        "id": "capture",
-                        "action": "snapshot",
-                        "params": {
-                            "sources": ["engine_snapshot"],
-                            "required": required,
-                        },
-                    },
+                    {"id": "capture", "action": "snapshot", "params": {"sources": ["engine_snapshot"], "required": required}},
                 ],
             )
             if required:
                 doc["findings"] = ["capture.sources"]
             plan = compile_scenarios([("coverage.json", doc)], handlers=handlers)[0]
-            with patch(
-                "adapters.observation_sources._read_json",
-                side_effect=OSError("missing"),
-            ):
+            with patch("adapters.observation_sources._read_json", side_effect=OSError("missing")):
                 result = execute_instance(plan, Backend(), handlers=handlers, artifact_dir=self.temp.name)
             self.assertEqual("ERROR" if required else "PASS", result["status"], result)
             self.assertEqual([], result["finding_confirmed"])

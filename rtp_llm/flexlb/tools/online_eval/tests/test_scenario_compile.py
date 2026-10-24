@@ -26,19 +26,11 @@ def scenario():
         "stages": [
             {"id": "setup", "action": "setup"},
             {"id": "submit", "action": "request", "params": {"output_len": 2}},
-            {
-                "id": "finish",
-                "action": "wait",
-                "params": {"requests": {"$ref": "stages.submit.output.requests"}},
-            },
+            {"id": "finish", "action": "wait", "params": {"requests": {"$ref": "stages.submit.output.requests"}}},
             {
                 "id": "complete",
                 "action": "check",
-                "params": {
-                    "actual": {"$ref": "stages.finish.output.completed"},
-                    "op": "eq",
-                    "expected": True,
-                },
+                "params": {"actual": {"$ref": "stages.finish.output.completed"}, "op": "eq", "expected": True},
             },
         ],
     }
@@ -52,10 +44,7 @@ class CompileTest(unittest.TestCase):
         plans = self.compile(scenario())
         self.assertEqual(len(plans), 4)
         for plan in plans:
-            self.assertEqual(
-                plan["environment"]["resolved_config"],
-                json.loads(render_env(plan["profile"])),
-            )
+            self.assertEqual(plan["environment"]["resolved_config"], json.loads(render_env(plan["profile"])))
         proc = subprocess.run(
             [
                 sys.executable,
@@ -71,11 +60,7 @@ class CompileTest(unittest.TestCase):
     def test_explicit_variants_do_not_form_cartesian_products_or_mutate_inputs(self):
         doc = scenario()
         doc["variants"] = [
-            {
-                "id": "short",
-                "profiles": ["single-batch"],
-                "stage_overrides": {"submit": {"output_len": 1}},
-            },
+            {"id": "short", "profiles": ["single-batch"], "stage_overrides": {"submit": {"output_len": 1}}},
             {
                 "id": "long",
                 "profiles": ["window-nonbatch"],
@@ -85,10 +70,7 @@ class CompileTest(unittest.TestCase):
         ]
         original = copy.deepcopy(doc)
         plans = self.compile(doc)
-        self.assertEqual(
-            [p["id"] for p in plans],
-            ["completion::short::single-batch", "completion::long::window-nonbatch"],
-        )
+        self.assertEqual([p["id"] for p in plans], ["completion::short::single-batch", "completion::long::window-nonbatch"])
         self.assertEqual([p["stages"][1]["params"]["output_len"] for p in plans], [1, 20])
         plans[0]["stages"][1]["params"]["output_len"] = 999
         self.assertEqual(plans[1]["stages"][1]["params"]["output_len"], 20)
@@ -97,10 +79,7 @@ class CompileTest(unittest.TestCase):
     def test_profile_filter_does_not_relabel_environment(self):
         plans = self.compile(scenario(), "single-nonbatch")
         self.assertEqual(len(plans), 1)
-        self.assertEqual(
-            plans[0]["environment"]["resolved_config"]["dispatcher"]["type"],
-            "NON_BATCH",
-        )
+        self.assertEqual(plans[0]["environment"]["resolved_config"]["dispatcher"]["type"], "NON_BATCH")
 
     def test_raw_program_dictionaries_are_rejected_with_source(self):
         from scenario.compiler import compile_scenarios
@@ -110,12 +89,7 @@ class CompileTest(unittest.TestCase):
                 compile_scenarios([("test.yaml", document)])
 
     def test_setup_order_and_references_are_checked_before_runtime(self):
-        for ref in (
-            "stages.later.output.requests",
-            "stages.setup.output.environment",
-            "__import__('os')",
-            "stages.submit.output.missing",
-        ):
+        for ref in ("stages.later.output.requests", "stages.setup.output.environment", "__import__('os')", "stages.submit.output.missing"):
             doc = scenario()
             doc["stages"][2]["params"]["requests"] = {"$ref": ref}
             with self.subTest(ref=ref), self.assertRaisesRegex(ScenarioError, r"stages\[2\]"):
@@ -126,10 +100,7 @@ class CompileTest(unittest.TestCase):
             self.compile(doc)
 
     def test_forged_handle_or_ref_with_extra_keys_is_rejected(self):
-        for value in (
-            {"kind": "requests", "id": "fake", "env_epoch": 0},
-            {"$ref": "stages.submit.output.requests", "value": 1},
-        ):
+        for value in ({"kind": "requests", "id": "fake", "env_epoch": 0}, {"$ref": "stages.submit.output.requests", "value": 1}):
             doc = scenario()
             doc["stages"][2]["params"]["requests"] = value
             with self.assertRaises(ScenarioError):
@@ -159,11 +130,7 @@ class CompileTest(unittest.TestCase):
             self.compile(doc)
 
     def test_unknown_backend_axes_or_unimplemented_action_rejected(self):
-        for environment in (
-            {"backend": "gpu"},
-            {"tp": 2},
-            {"config_overrides": {"dispatcher": "invented"}},
-        ):
+        for environment in ({"backend": "gpu"}, {"tp": 2}, {"config_overrides": {"dispatcher": "invented"}}):
             doc = scenario()
             doc["environment"] = environment
             with self.subTest(environment=environment), self.assertRaises(ScenarioError):
@@ -263,26 +230,11 @@ class LoaderTest(unittest.TestCase):
             doc = self.config()
             doc["profiles"] = ["single-batch"]
             p.write_text(json.dumps(doc))
-            result = subprocess.run(
-                [sys.executable, "-m", "scenario", str(p)],
-                cwd=TOOLS,
-                capture_output=True,
-                text=True,
-            )
+            result = subprocess.run([sys.executable, "-m", "scenario", str(p)], cwd=TOOLS, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)["mode"], "compile")
             result = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "scenario",
-                    str(p),
-                    "--profile",
-                    "single-nonbatch",
-                ],
-                cwd=TOOLS,
-                capture_output=True,
-                text=True,
+                [sys.executable, "-m", "scenario", str(p), "--profile", "single-nonbatch"], cwd=TOOLS, capture_output=True, text=True
             )
             self.assertEqual(result.returncode, 2)
 

@@ -53,11 +53,7 @@ def merge_nearby_events(events, tolerance_s=1.0):
     for (identity, name), candidates in groups.items():
         clusters = []
         for event in sorted(candidates, key=lambda e: e["t"]):
-            if (
-                not clusters
-                or event["t"] - clusters[-1][0]["t"] > tolerance_s
-                or any(e["run"] == event["run"] for e in clusters[-1])
-            ):
+            if not clusters or event["t"] - clusters[-1][0]["t"] > tolerance_s or any(e["run"] == event["run"] for e in clusters[-1]):
                 clusters.append([])
             clusters[-1].append(event)
         for members in clusters:

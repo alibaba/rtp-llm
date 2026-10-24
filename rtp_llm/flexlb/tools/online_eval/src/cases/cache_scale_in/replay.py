@@ -17,13 +17,9 @@ def cache_main():
     parser.add_argument("evidence", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
-        "--reinterpret",
-        action="store_true",
-        help="explicitly re-adjudicate historical evidence into a NEW output directory",
+        "--reinterpret", action="store_true", help="explicitly re-adjudicate historical evidence into a NEW output directory"
     )
-    parser.add_argument(
-        "--client-snapshot", type=Path, help="complete java_flow evidence_snapshot JSON for historical attribution"
-    )
+    parser.add_argument("--client-snapshot", type=Path, help="complete java_flow evidence_snapshot JSON for historical attribution")
     args = parser.parse_args()
     from artifacts.reinterpretation import import_metrics, load_reinterpretation
 
@@ -41,10 +37,7 @@ def cache_main():
         attribute_client(evidence, snapshot)
     evidence["reinterpretation"].update(
         client_snapshot=(
-            dict(
-                path=str(args.client_snapshot.resolve()),
-                sha256=hashlib.sha256(args.client_snapshot.read_bytes()).hexdigest(),
-            )
+            dict(path=str(args.client_snapshot.resolve()), sha256=hashlib.sha256(args.client_snapshot.read_bytes()).hexdigest())
             if args.client_snapshot
             else None
         ),
@@ -58,13 +51,7 @@ def cache_main():
     result = analyze(evidence)
     import_metrics(args.output, args.evidence.parent)
     publish_gate(
-        args.output,
-        "cache",
-        evidence,
-        result,
-        produce,
-        write_report,
-        report_options={"prepared": prepare_report(args.output, evidence)},
+        args.output, "cache", evidence, result, produce, write_report, report_options={"prepared": prepare_report(args.output, evidence)}
     )
     print(result["verdict"])
     return {"PASS": 0, "FAIL": 1, "INVALID": 2}[result["verdict"]]

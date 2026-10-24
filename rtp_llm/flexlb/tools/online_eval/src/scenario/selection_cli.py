@@ -12,9 +12,7 @@ def add_selection_arguments(parser, *, allow_all_profiles=True):
     group.add_argument("--kind", choices=KINDS, help="all variants of this kind")
     group.add_argument("--all", action="store_true", help="all cases and variants")
     parser.add_argument(
-        "--profile",
-        choices=(*PROFILES, "all") if allow_all_profiles else PROFILES,
-        help="profile; all expands every supported profile",
+        "--profile", choices=(*PROFILES, "all") if allow_all_profiles else PROFILES, help="profile; all expands every supported profile"
     )
     parser.add_argument("--master-mode", choices=("sb", "sn", "wb", "wn"))
 

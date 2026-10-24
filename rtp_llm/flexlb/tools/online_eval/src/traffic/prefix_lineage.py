@@ -55,11 +55,7 @@ def encode(events, provenance=None, *, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
         ts, il, parent, shared = event
         if not last <= ts <= 9223372036854775807 or not 1 <= il <= 2147483647 or not -1 <= parent < i:
             raise ValueError("invalid lineage ordering/shape")
-        if (
-            not 0 <= shared <= il // block_size
-            or (parent == -1 and shared)
-            or (parent >= 0 and shared > lengths[parent] // block_size)
-        ):
+        if not 0 <= shared <= il // block_size or (parent == -1 and shared) or (parent >= 0 and shared > lengths[parent] // block_size):
             raise ValueError("invalid lineage parent reference")
         blocks = max(1, il // block_size)
         if il >= block_size and il % block_size:
@@ -128,19 +124,9 @@ def _parse_payload(data):
     for i, (delta, blocks, distance, shared) in enumerate(zip(*columns)):
         ts += (delta >> 1) ^ -(delta & 1)
         parent = i - distance if distance else -1
-        if (
-            ts < 0
-            or ts > 9223372036854775807
-            or (events and ts < events[-1][0])
-            or not 1 <= blocks <= 2147483647 // block_size
-        ):
+        if ts < 0 or ts > 9223372036854775807 or (events and ts < events[-1][0]) or not 1 <= blocks <= 2147483647 // block_size:
             raise ValueError("invalid lineage shape/timestamp")
-        if (
-            not -1 <= parent < i
-            or shared > blocks
-            or (parent == -1 and shared)
-            or (parent >= 0 and shared > events[parent][1])
-        ):
+        if not -1 <= parent < i or shared > blocks or (parent == -1 and shared) or (parent >= 0 and shared > events[parent][1]):
             raise ValueError("invalid lineage reference")
         events.append((ts, blocks, parent, shared, (allocation[i // 8] >> (i % 8)) & 1))
     return metadata, events

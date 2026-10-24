@@ -41,13 +41,7 @@ class SuiteOwnershipTest(unittest.TestCase):
             )
             metadata = dict(kind="workload", description="Load under restart")
             execution = dict(collection="request")
-            plan = dict(
-                scenario_id="custom",
-                variant_id="load",
-                source_path="/any/core/place.yaml",
-                metadata=metadata,
-                execution=execution,
-            )
+            plan = dict(scenario_id="custom", variant_id="load", source_path="/any/core/place.yaml", metadata=metadata, execution=execution)
             self.assertEqual("smoke", default_suite(path))
             self.assertEqual(("smoke",), suite_names(path))
             self.assertEqual("workload", classify([plan], "smoke", path)[0]["metadata"]["kind"])
@@ -79,6 +73,4 @@ class SuiteOwnershipTest(unittest.TestCase):
         with self.assertRaisesRegex(ScenarioError, "collection"):
             normalize_execution({}, kind="workload")
         with self.assertRaisesRegex(ScenarioError, "shorter"):
-            normalize_execution(
-                dict(collection="request", monitoring={"sample_interval_s": 10, "max_sample_gap_s": 5}), kind="workload"
-            )
+            normalize_execution(dict(collection="request", monitoring={"sample_interval_s": 10, "max_sample_gap_s": 5}), kind="workload")

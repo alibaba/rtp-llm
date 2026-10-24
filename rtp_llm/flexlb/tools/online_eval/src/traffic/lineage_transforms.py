@@ -62,23 +62,11 @@ class LineageProjector:
     def project(self, path, parameters: LineageProjection, namespace, base_dir, *, max_requests=None) -> dict:
         raw = (Path(base_dir) / parameters.path).read_bytes()
         return self.project_model(
-            path,
-            parameters,
-            namespace,
-            self.decode(raw),
-            source_sha256=hashlib.sha256(raw).hexdigest(),
-            max_requests=max_requests,
+            path, parameters, namespace, self.decode(raw), source_sha256=hashlib.sha256(raw).hexdigest(), max_requests=max_requests
         )
 
     def project_model(
-        self,
-        path,
-        parameters: LineageProjection,
-        namespace,
-        model: LineageModel,
-        *,
-        source_sha256: str,
-        max_requests=None,
+        self, path, parameters: LineageProjection, namespace, model: LineageModel, *, source_sha256: str, max_requests=None
     ) -> dict:
         sampler = output_sampler(parameters.to_dict())
         cap = parameters.max_input_tokens
@@ -89,12 +77,7 @@ class LineageProjector:
         selected = excluded = 0
         with Path(path).open("w") as out:
             for request in LineageExpander(model):
-                i, ts, length, labels = (
-                    request.source_index,
-                    request.timestamp_ms,
-                    request.input_tokens,
-                    request.block_labels,
-                )
+                i, ts, length, labels = (request.source_index, request.timestamp_ms, request.input_tokens, request.block_labels)
                 if cap is not None and length > cap:
                     excluded += 1
                     continue
@@ -121,14 +104,10 @@ class LineageProjector:
         transformations = []
         if cap is not None:
             transformations.append(
-                dict(
-                    kind="input_length_filter", max_input_tokens=cap, selected=selected, excluded_before_limit=excluded
-                )
+                dict(kind="input_length_filter", max_input_tokens=cap, selected=selected, excluded_before_limit=excluded)
             )
         if parameters.output_distribution:
-            transformations.append(
-                dict(kind="output_distribution", parameters=parameters.output_distribution, affected_requests=selected)
-            )
+            transformations.append(dict(kind="output_distribution", parameters=parameters.output_distribution, affected_requests=selected))
         if max_requests is not None:
             transformations.append(
                 dict(
@@ -146,10 +125,7 @@ class LineageProjector:
             model_sha256=source_sha256,
             provenance=metadata.provenance,
             transformations=dict(
-                source_sha256=source_sha256,
-                applied=transformations,
-                source_requests=len(model.events),
-                selected_requests=selected,
+                source_sha256=source_sha256, applied=transformations, source_requests=len(model.events), selected_requests=selected
             ),
         )
         if cap is not None:
@@ -164,9 +140,7 @@ class LineageProjector:
                 )
         else:
             if cap is None:
-                result["length_filter"] = dict(
-                    max_input_tokens=2147483647, selected=selected, excluded_before_limit=excluded
-                )
+                result["length_filter"] = dict(max_input_tokens=2147483647, selected=selected, excluded_before_limit=excluded)
             result.update(
                 output_semantics=output_semantics(parameters.to_dict()),
                 output_distribution=parameters.output_distribution,

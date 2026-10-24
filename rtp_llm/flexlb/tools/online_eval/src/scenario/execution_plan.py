@@ -13,9 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _sha(value):
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-    ).hexdigest()
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
 def selected_cases(instances):
@@ -64,9 +62,7 @@ def dependency_files(instances=None):
     paths += [
         path
         for path in (ROOT / "config").rglob("*")
-        if path.is_file()
-        and "scenarios" not in path.relative_to(ROOT / "config").parts
-        and path.suffix in {".yaml", ".json", ".bzl"}
+        if path.is_file() and "scenarios" not in path.relative_to(ROOT / "config").parts and path.suffix in {".yaml", ".json", ".bzl"}
     ]
     selected = {str(path.relative_to(ROOT)): path for path in sorted(paths)}
     if instances is not None:
@@ -114,8 +110,7 @@ class ExecutionPlanCodec:
     def read(self, path, expected_sha):
         document = self.read_document(path, expected_sha)
         return ExecutionPlan(
-            tuple(CompiledInstance.read(instance) for instance in document["instances"]),
-            tuple(sorted(document["dependencies"].items())),
+            tuple(CompiledInstance.read(instance) for instance in document["instances"]), tuple(sorted(document["dependencies"].items()))
         )
 
 
@@ -123,9 +118,7 @@ def freeze_plan(path, plans, *, dependencies=None):
     """Artifact-facing projection; internal callers can write ExecutionPlan directly."""
     plans = tuple(plans)
     dependencies = dependency_files(plans) if dependencies is None else scope_dependencies(dependencies, plans)
-    plan = ExecutionPlan(
-        tuple(CompiledInstance.read(instance) for instance in plans), tuple(sorted(dependencies.items()))
-    )
+    plan = ExecutionPlan(tuple(CompiledInstance.read(instance) for instance in plans), tuple(sorted(dependencies.items())))
     return ExecutionPlanCodec().write(path, plan)
 
 

@@ -8,12 +8,7 @@ import pytest
 
 from adapters.java_client import ClientOps
 from adapters.java_flow import JavaFlowGroup
-from adapters.load_client import (
-    FRAMEWORK_CLIENT_ENV_VARS,
-    bind_environment,
-    client_environment,
-    collection_environment,
-)
+from adapters.load_client import FRAMEWORK_CLIENT_ENV_VARS, bind_environment, client_environment, collection_environment
 from scenario.runtime import Deadline
 
 
@@ -59,16 +54,13 @@ def test_subprocess_boundary_also_validates_before_creating_artifacts(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "profile,latency,events",
-    [("request", "true", "true"), ("aggregate", "true", "false"), ("diagnostic", "false", "true")],
+    "profile,latency,events", [("request", "true", "true"), ("aggregate", "true", "false"), ("diagnostic", "false", "true")]
 )
 def test_collection_policy_is_frozen_and_matches_launch(tmp_path, profile, latency, events):
     client = mock.Mock()
     process = SimpleNamespace(alive=lambda: True)
     client.run_async.return_value = (process, None)
-    flow = JavaFlowGroup(
-        client, tmp_path / "flow", run_id="r", group_id="g", phase_id="p", poll_s=1, collection_profile=profile
-    )
+    flow = JavaFlowGroup(client, tmp_path / "flow", run_id="r", group_id="g", phase_id="p", poll_s=1, collection_profile=profile)
     trace = tmp_path / "trace.jsonl"
     trace.write_text("{}\n")
 
@@ -129,9 +121,7 @@ def test_unknown_client_settings_use_standard_validation(field):
 def test_routing_sources_are_exclusive_and_static_list_is_removed():
     from adapters.load_client import validate_environment
 
-    assert validate_environment({"MASTER_DISCOVERY_FILE": "/masters.json"}) == {
-        "MASTER_DISCOVERY_FILE": "/masters.json"
-    }
+    assert validate_environment({"MASTER_DISCOVERY_FILE": "/masters.json"}) == {"MASTER_DISCOVERY_FILE": "/masters.json"}
     with pytest.raises(ValueError, match="mutually exclusive"):
         validate_environment({"GRPC_TARGET": "a:7003", "MASTER_DISCOVERY_FILE": "/masters.json"})
     with pytest.raises(ValueError, match="unknown"):

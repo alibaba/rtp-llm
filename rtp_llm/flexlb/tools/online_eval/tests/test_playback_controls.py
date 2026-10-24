@@ -53,15 +53,7 @@ class PlaybackControlsTest(unittest.TestCase):
             client_environment(dict(playback=dict(mode="uniform", qps=10, max_laps=0)))
 
     def test_unknown_fields_and_invalid_values_are_rejected(self):
-        for key in (
-            "arrival",
-            "rate_curve",
-            "retain_schedule",
-            "retain_probability",
-            "seed",
-            "burst_factor",
-            "diurnal_amplitude",
-        ):
+        for key in ("arrival", "rate_curve", "retain_schedule", "retain_probability", "seed", "burst_factor", "diurnal_amplitude"):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 client_environment(dict(playback=dict(mode="uniform", qps=10, **{key: 1})))
         for mode in ("burst", "gradient"):
@@ -75,9 +67,7 @@ class PlaybackControlsTest(unittest.TestCase):
     def test_discrete_lineage_preserves_snapshot_filter_and_original_index(self):
         for version, module in [(2, prefix_lineage), (3, prefix_lineage_v3)]:
             events = (
-                [[i, 1024, -1, 0] for i in range(100)]
-                if version == 2
-                else [[i, 32769 if i % 3 == 0 else 513, -1, 0] for i in range(100)]
+                [[i, 1024, -1, 0] for i in range(100)] if version == 2 else [[i, 32769 if i % 3 == 0 else 513, -1, 0] for i in range(100)]
             )
             # Both encoders consume original four-column source events.
             raw = module.encode(events)

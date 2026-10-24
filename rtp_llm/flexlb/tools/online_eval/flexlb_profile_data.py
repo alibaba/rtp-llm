@@ -54,12 +54,7 @@ DSV4_PREFILL_EXPRESSION = load_mock_calibration()["prefill_expression"]
 #
 # Functional profile axes and capabilities. The stress profile is render-only.
 
-PROFILES = (
-    "batch-window",
-    "single-nonbatch",
-    "single-batch",
-    "window-nonbatch",
-)
+PROFILES = ("batch-window", "single-nonbatch", "single-batch", "window-nonbatch")
 
 # decision x dispatcher axes per profile (scheduler is QUEUE, ordering FIFO).
 PROFILE_SPECS = {
@@ -71,38 +66,10 @@ PROFILE_SPECS = {
 
 # Semantic capabilities per profile, used by CaseDef.requires filtering.
 PROFILE_CAPS = {
-    "batch-window": {
-        "queue",
-        "fifo",
-        "fixed_window",
-        "batch_dispatch",
-        "enqueue_batch",
-        "fetch_response",
-    },
-    "single-nonbatch": {
-        "queue",
-        "fifo",
-        "single",
-        "non_batch_dispatch",
-        "frontend_send",
-        "generate_stream",
-    },
-    "single-batch": {
-        "queue",
-        "fifo",
-        "single",
-        "batch_dispatch",
-        "enqueue_batch",
-        "fetch_response",
-    },
-    "window-nonbatch": {
-        "queue",
-        "fifo",
-        "fixed_window",
-        "non_batch_dispatch",
-        "frontend_send",
-        "generate_stream",
-    },
+    "batch-window": {"queue", "fifo", "fixed_window", "batch_dispatch", "enqueue_batch", "fetch_response"},
+    "single-nonbatch": {"queue", "fifo", "single", "non_batch_dispatch", "frontend_send", "generate_stream"},
+    "single-batch": {"queue", "fifo", "single", "batch_dispatch", "enqueue_batch", "fetch_response"},
+    "window-nonbatch": {"queue", "fifo", "fixed_window", "non_batch_dispatch", "frontend_send", "generate_stream"},
 }
 
 # The stress-line baseline profile is render-only: not part of PROFILES.
@@ -147,11 +114,7 @@ FUNCTIONAL_PROFILE_KWARGS = {
 
 
 # Defaults for direct low-level schema construction, not a profile merge layer.
-GENERATOR_DEFAULTS = {
-    **FUNCTIONAL_DEFAULTS,
-    **FUNCTIONAL_PROFILE_KWARGS["batch-window"],
-    "queue_timeout_ms": None,
-}
+GENERATOR_DEFAULTS = {**FUNCTIONAL_DEFAULTS, **FUNCTIONAL_PROFILE_KWARGS["batch-window"], "queue_timeout_ms": None}
 
 
 # ===========================================================================
@@ -168,60 +131,34 @@ STRESS_BASE: dict = {
             "preemption": {"allowedVictimStages": ["PREFILL_QUEUED", "DECODE_RESERVED"]},
         },
         "queueTimeoutMs": 60000,
-        "decision": {
-            "type": "FIXED_WINDOW",
-            "maxRequests": 32,
-            "maxCollectionWaitMs": 400,
-            "maxPredictedExecutionMs": 550,
-        },
+        "decision": {"type": "FIXED_WINDOW", "maxRequests": 32, "maxCollectionWaitMs": 400, "maxPredictedExecutionMs": 550},
     },
     "dispatcher": {"type": "BATCH", "maxInflightPerPrefillWorker": 2},
     "router": {
         "roles": {
             "prefill": {
-                "executionTimeEstimator": {
-                    "type": "FORMULA",
-                    "expression": DSV4_PREFILL_EXPRESSION,
-                },
+                "executionTimeEstimator": {"type": "FORMULA", "expression": DSV4_PREFILL_EXPRESSION},
                 "cacheAffinity": {"maxExtraTtftMs": 20, "minPrefixHitPercent": 20},
             },
             "decode": {"availability": {"maxKvUsagePercent": 95, "maxEngineRequests": 384}},
         }
     },
     "workerRegistry": {
-        "health": {
-            "statusPollIntervalMs": 20,
-            "statusRpcTimeoutMs": 5000,
-            "statusStaleAfterMs": 10000,
-            "cleanupIntervalMs": 3000,
-        },
-        "cacheStatus": {
-            "targetDiffSize": 30,
-            "minRefreshIntervalMs": 50,
-            "maxRefreshIntervalMs": 3000,
-            "fullSnapshotDebugMode": False,
-        },
+        "health": {"statusPollIntervalMs": 20, "statusRpcTimeoutMs": 5000, "statusStaleAfterMs": 10000, "cleanupIntervalMs": 3000},
+        "cacheStatus": {"targetDiffSize": 30, "minRefreshIntervalMs": 50, "maxRefreshIntervalMs": 3000, "fullSnapshotDebugMode": False},
     },
     "observability": {
         "cacheHit": {
-            "recentKeyWindow": {
-                "writeEnabled": True,
-                "durationMs": 1800000,
-                "maxKeyOccurrences": 80000000,
-            },
+            "recentKeyWindow": {"writeEnabled": True, "durationMs": 1800000, "maxKeyOccurrences": 80000000},
             "metricsEnabled": True,
             "requestTraceLogEnabled": False,
         }
     },
-    "requestLifecycle": {
-        "request": {"timeoutMs": 300000},
-        "decision": {"lifetime": 2.0},
-    },
+    "requestLifecycle": {"request": {"timeoutMs": 300000}, "decision": {"lifetime": 2.0}},
 }
 
 STRESS_DECISION_RETYPE_DEFAULTS = {
-    key: STRESS_BASE["scheduler"]["decision"][key]
-    for key in ("maxRequests", "maxCollectionWaitMs", "maxPredictedExecutionMs")
+    key: STRESS_BASE["scheduler"]["decision"][key] for key in ("maxRequests", "maxCollectionWaitMs", "maxPredictedExecutionMs")
 }
 
 # All renderable profiles, including workload defaults, share axis metadata.

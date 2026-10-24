@@ -33,15 +33,7 @@ assert 'traffic.catalog' not in sys.modules
 
 
 def test_core_analysis_does_not_hide_lazy_workflow_imports():
-    for name in (
-        "checks",
-        "gates",
-        "request_metrics",
-        "statistics",
-        "time_buckets",
-        "traffic_fidelity",
-        "workload_profile",
-    ):
+    for name in ("checks", "gates", "request_metrics", "statistics", "time_buckets", "traffic_fidelity", "workload_profile"):
         tree = ast.parse((ROOT / "src/analysis" / (name + ".py")).read_text())
         for node in ast.walk(tree):
             modules = (
@@ -81,10 +73,7 @@ def test_lru_command_uses_the_library_and_rejects_invalid_capacity(tmp_path):
 
     trace = tmp_path / "trace.jsonl"
     trace.write_text(
-        "".join(
-            json.dumps(dict(ts=i, il=4, cache_key_block_size=2, input_ids=[1, 2, 3, 4], family="same")) + "\n"
-            for i in range(3)
-        )
+        "".join(json.dumps(dict(ts=i, il=4, cache_key_block_size=2, input_ids=[1, 2, 3, 4], family="same")) + "\n" for i in range(3))
     )
     output = tmp_path / "profile.json"
     command = [sys.executable, str(ROOT / "scripts/commands/profile_workload.py"), str(trace), "--output", str(output)]

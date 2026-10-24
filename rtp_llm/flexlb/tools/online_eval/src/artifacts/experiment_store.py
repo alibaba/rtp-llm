@@ -94,11 +94,7 @@ def _verify_gate_inputs(entries, read_json):
         for key in ("evidence", "result"):
             target = stem + "-" + key + ".json"
             reference = document[key]
-            if (
-                reference["file"] != PurePosixPath(target).name
-                or target not in entries
-                or entries[target].sha256 != reference["sha256"]
-            ):
+            if reference["file"] != PurePosixPath(target).name or target not in entries or entries[target].sha256 != reference["sha256"]:
                 raise ValueError("frozen gate evidence checksum mismatch")
 
 
@@ -124,9 +120,7 @@ class ExperimentWriter:
         with tempfile.TemporaryDirectory(dir=self.output.parent, prefix=".experiment-") as directory:
             temporary = Path(directory) / "artifact.zip"
             self.scratch = Path(directory)
-            with zipfile.ZipFile(
-                temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3, allowZip64=True
-            ) as archive:
+            with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3, allowZip64=True) as archive:
                 self.archive = archive
                 yield self
                 self.check()
@@ -215,14 +209,10 @@ class ExperimentReader:
             expected = {"manifest.json"} | {entry.blob for entry in self.entries.values()}
             if set(names) != expected:
                 raise ValueError("experiment ZIP inventory mismatch")
-            if (
-                self.kind == "experiment"
-                and not {"experiment.json", "execution.json", "completeness.json"} <= self.entries.keys()
-            ):
+            if self.kind == "experiment" and not {"experiment.json", "execution.json", "completeness.json"} <= self.entries.keys():
                 raise ValueError("experiment lacks required facts")
             if any(
-                view.layout not in self.entries or self.entries[view.layout].role is not ArtifactRole.VIEW
-                for view in self.views.values()
+                view.layout not in self.entries or self.entries[view.layout].role is not ArtifactRole.VIEW for view in self.views.values()
             ):
                 raise ValueError("experiment view layout is not indexed")
         except Exception:

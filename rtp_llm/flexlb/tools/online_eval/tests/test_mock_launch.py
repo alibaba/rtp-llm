@@ -43,9 +43,7 @@ def test_launch_preserves_explicit_zero_false_and_empty_values_and_jvm_options()
 
 
 def test_optional_flags_preserve_java_defaults_and_discovery_follows_explicit_overrides():
-    spec = MockLaunchSpec(
-        "java", "mock.jar", 1, 1, 28001, discovery_file="owned.json", extra_args=("--auto-fetch", "false")
-    )
+    spec = MockLaunchSpec("java", "mock.jar", 1, 1, 28001, discovery_file="owned.json", extra_args=("--auto-fetch", "false"))
     assert spec.argv()[3:] == [
         "--n-prefill",
         "1",
@@ -62,8 +60,7 @@ def test_optional_flags_preserve_java_defaults_and_discovery_follows_explicit_ov
 
 
 @pytest.mark.parametrize(
-    "action,fields",
-    [("inject", {"config": {"delay_ms": 10}}), ("clear_inject", {}), ("start_engine", {}), ("stop_engine", {})],
+    "action,fields", [("inject", {"config": {"delay_ms": 10}}), ("clear_inject", {}), ("start_engine", {}), ("stop_engine", {})]
 )
 def test_engine_commands_keep_wire_body_and_error_contract(action, fields):
     control = MockEngineControl()
@@ -83,9 +80,7 @@ def test_perf_commands_keep_boolean_results_and_do_not_confuse_body_fields_with_
     control.mock_http_port = 29000
     with patch("adapters.mock_engine.http_post_json", return_value=(status, {})) as send:
         assert control.set_perf("prefill-0", engine="decode-0", action="body-field", decode_step_ms=2) is expected
-    send.assert_called_once_with(
-        "http://127.0.0.1:29000/set_perf", dict(engine="decode-0", action="body-field", decode_step_ms=2)
-    )
+    send.assert_called_once_with("http://127.0.0.1:29000/set_perf", dict(engine="decode-0", action="body-field", decode_step_ms=2))
 
 
 @pytest.mark.parametrize("mode,timeout", [("graceful", 95.0), ("abrupt", 5.0)])
@@ -94,9 +89,7 @@ def test_topology_commands_keep_target_selection_and_drain_budget(mode, timeout)
     control.mock_http_port = 29000
     with patch("adapters.mock_engine.http_post_json", return_value=(404, None)) as send:
         assert control.remove_engine(port=28001, mode=mode, drain_timeout_ms=300) == (404, None)
-    send.assert_called_once_with(
-        "http://127.0.0.1:29000/remove_engine", dict(port=28001, mode=mode, drain_timeout_ms=300), timeout=timeout
-    )
+    send.assert_called_once_with("http://127.0.0.1:29000/remove_engine", dict(port=28001, mode=mode, drain_timeout_ms=300), timeout=timeout)
 
 
 def test_typed_client_configuration_is_reused_and_projects_the_same_wire_environment():

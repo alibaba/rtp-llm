@@ -30,10 +30,7 @@ def mutate_config(config, mutation):
         preemption = ordering.get("preemption", {})
         if ordering["type"] != "PRIORITY" or "DECODE_ENGINE_OWNED" not in preemption.get("allowedVictimStages", []):
             raise ValueError("removed_engine_cancellation requires a valid owned-cancellation base")
-        preemption["engineCancellation"] = {
-            "ackTimeoutMs": 50,
-            "completionTimeoutMs": 1000,
-        }
+        preemption["engineCancellation"] = {"ackTimeoutMs": 50, "completionTimeoutMs": 1000}
     else:
         raise ValueError("unknown startup mutation")
     return raw
@@ -66,11 +63,7 @@ def _validate(params, plan, probe=False):
         compiled[profile] = target
     if not compiled:
         raise ValueError("environment replacement needs selected profiles")
-    return dict(
-        environments=compiled,
-        environment=replacement,
-        **({"mutation": params["mutation"]} if probe else {}),
-    )
+    return dict(environments=compiled, environment=replacement, **({"mutation": params["mutation"]} if probe else {}))
 
 
 def _close(ctx, deadline):
@@ -147,11 +140,6 @@ HANDLERS = [
         "environment_startup_probe",
         lambda params, plan: _validate(params, plan, probe=True),
         startup_probe,
-        {
-            "rejected": "boolean",
-            "parser_matched": "boolean",
-            "environment_absent": "boolean",
-            "evidence": "environment_probe",
-        },
+        {"rejected": "boolean", "parser_matched": "boolean", "environment_absent": "boolean", "evidence": "environment_probe"},
     ),
 ]

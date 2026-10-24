@@ -46,16 +46,10 @@ class ObservationClock:
 
     def stamp(self, monotonic_s):
         elapsed = monotonic_s - self.origin_monotonic_s
-        return dict(
-            elapsed_s=elapsed, epoch_s=self.origin_epoch_s + elapsed, monotonic_s=self.origin_monotonic_s + elapsed
-        )
+        return dict(elapsed_s=elapsed, epoch_s=self.origin_epoch_s + elapsed, monotonic_s=self.origin_monotonic_s + elapsed)
 
     def to_dict(self):
-        return dict(
-            origin_epoch_s=self.origin_epoch_s,
-            origin_monotonic_s=self.origin_monotonic_s,
-            epoch_policy="anchored_monotonic",
-        )
+        return dict(origin_epoch_s=self.origin_epoch_s, origin_monotonic_s=self.origin_monotonic_s, epoch_policy="anchored_monotonic")
 
 
 class SampleSchedule:

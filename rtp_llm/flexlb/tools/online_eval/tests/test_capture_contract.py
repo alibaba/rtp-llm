@@ -23,22 +23,14 @@ class CaptureContractTest(unittest.TestCase):
     def fixture(self, root, count=2):
         logs = root / "logs"
         logs.mkdir()
-        row = dict(
-            request_id="private-id",
-            request_enter_ts_epoch_ms=2000,
-            ts_epoch_ms=2100,
-            input_ids=[11] * 1025,
-            status="OK",
-        )
+        row = dict(request_id="private-id", request_enter_ts_epoch_ms=2000, ts_epoch_ms=2100, input_ids=[11] * 1025, status="OK")
         (logs / "dash_sc_grpc_access_r0_s0.log").write_text(
             "\n".join(json.dumps(dict(row, request_id=str(i))) for i in range(count)) + "\n"
         )
         return logs
 
     def run_capture(self, root, logs, extra=(), clock=None):
-        args = parser().parse_args(
-            ["--start", "1000", "--end", "3000", "--out", str(root / "pod-0"), "--log-dir", str(logs), *extra]
-        )
+        args = parser().parse_args(["--start", "1000", "--end", "3000", "--out", str(root / "pod-0"), "--log-dir", str(logs), *extra])
         with contextlib.redirect_stdout(io.StringIO()):
             return capture(args, **({"clock": clock} if clock else {}))
 
@@ -109,8 +101,7 @@ class CaptureContractTest(unittest.TestCase):
             with gzip.open(root / "pod-0.jsonl.gz", "rt") as stream:
                 captured = [json.loads(line) for line in stream]
             self.assertEqual(
-                [hashlib.sha256(row["request_id"].encode()).hexdigest()[:32] for row in rows],
-                [row["rid"] for row in captured],
+                [hashlib.sha256(row["request_id"].encode()).hexdigest()[:32] for row in rows], [row["rid"] for row in captured]
             )
             self.assertEqual(2, len({(row["rid"], row["ts"]) for row in captured}))
 
@@ -223,10 +214,7 @@ class CaptureContractTest(unittest.TestCase):
                 capture_output=True,
             )
             summary = self.run_capture(root, logs)
-            with (
-                gzip.open(root / "pod-cwd.jsonl.gz", "rt") as first,
-                gzip.open(root / "pod-0.jsonl.gz", "rt") as second,
-            ):
+            with gzip.open(root / "pod-cwd.jsonl.gz", "rt") as first, gzip.open(root / "pod-0.jsonl.gz", "rt") as second:
                 self.assertEqual(first.read(), second.read())
             other = json.loads((root / "pod-cwd.summary.json").read_text())
             for key in ("stats", "schema_version", "block_size", "hash", "complete", "truncated", "start", "end"):
@@ -238,9 +226,7 @@ class CaptureContractTest(unittest.TestCase):
             logs = self.fixture(root, count=1000)
             for policy in ("truncate", "error"):
                 times = iter([0, 0, 2, 2])
-                run = lambda: self.run_capture(
-                    root, logs, ["--time-budget-s", "1", "--on-budget", policy], clock=lambda: next(times)
-                )
+                run = lambda: self.run_capture(root, logs, ["--time-budget-s", "1", "--on-budget", policy], clock=lambda: next(times))
                 if policy == "error":
                     with self.assertRaisesRegex(RuntimeError, "capture incomplete"):
                         run()

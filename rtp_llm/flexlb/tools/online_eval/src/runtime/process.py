@@ -70,9 +70,7 @@ class ProcessOps:
     """Static process utilities (kill by pid / pgrep pattern sweep)."""
 
     @staticmethod
-    def start(
-        argv: list[str], env: dict, log_file: Path, cwd: Optional[Path] = None, *, keep_stdin: bool = False
-    ) -> ManagedProcess:
+    def start(argv: list[str], env: dict, log_file: Path, cwd: Optional[Path] = None, *, keep_stdin: bool = False) -> ManagedProcess:
         log_file.parent.mkdir(parents=True, exist_ok=True)
         out = open(log_file, "wb")
         try:

@@ -18,11 +18,7 @@ from scenario.runtime import Deadline, RuntimeContext
 
 class ChildTest(unittest.TestCase):
     def test_storage_key_cannot_be_parsed_as_jvm_log_options(self):
-        ids = [
-            "request_completion::default::batch-window",
-            "request_completion::deferred_fetch::batch-window",
-            "../odd:id",
-        ]
+        ids = ["request_completion::default::batch-window", "request_completion::deferred_fetch::batch-window", "../odd:id"]
         keys = [instance_directory(value) for value in ids]
         self.assertEqual(len(set(keys)), len(ids))
         for key in keys:
@@ -59,10 +55,7 @@ class ChildTest(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rows = json.loads(proc.stdout)["instances"]
-        self.assertEqual(
-            {r["variant_id"] for r in rows},
-            {"default"},
-        )
+        self.assertEqual({r["variant_id"] for r in rows}, {"default"})
         self.assertTrue(all(row["grade"] == "loose" for row in rows))
         self.assertNotIn("stages", rows[0])
         self.assertNotIn("environment", rows[0])
@@ -103,16 +96,7 @@ class ChildTest(unittest.TestCase):
         try:
             managed = NS(pid=owned.pid, proc=owned, alive=lambda: owned.poll() is None)
             backend = JavaMockBackend({})
-            backend.environments = [
-                NS(
-                    load_clients=[],
-                    victims={},
-                    masters={},
-                    master=managed,
-                    zk_helper=None,
-                    mock=None,
-                )
-            ]
+            backend.environments = [NS(load_clients=[], victims={}, masters={}, master=managed, zk_helper=None, mock=None)]
             backend.remember_processes(backend.environments[0])
             # A restart/kill helper can clear this slot before final teardown.
             backend.environments[0].master = None

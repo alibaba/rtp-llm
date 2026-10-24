@@ -11,10 +11,7 @@ def test_optional_number_is_explicit_and_does_not_consume_inputs():
     contract = InputSchema({"custom": {"name": None, "threshold": NONNEGATIVE}}, optional={"custom.threshold"})
     definition = CaseDefinition({"default": lambda case: None}, input_schema=contract)
     case = CaseBuilder(
-        {},
-        {"custom": {"name": "x"}},
-        number_rules=definition.input_schema.numeric_parameters,
-        optional_numbers=contract.optional_numbers,
+        {}, {"custom": {"name": "x"}}, number_rules=definition.input_schema.numeric_parameters, optional_numbers=contract.optional_numbers
     )
     case.validate_numbers()
     assert case.read_parameters == set()
@@ -70,23 +67,12 @@ def test_generic_binding_and_explicit_threshold_dimension():
 
     case = CaseBuilder({}, {}, number_rules={})
     bind_metrics(
-        case,
-        {"fields": {"latency": {"metric": "hardware/latency", "labels": {}}}},
-        {"latency": "ms"},
-        labels=("machine",),
-        mode="scrape",
+        case, {"fields": {"latency": {"metric": "hardware/latency", "labels": {}}}}, {"latency": "ms"}, labels=("machine",), mode="scrape"
     )
     assert case.metric_dependencies["hardware/latency"]["labels"] == ("machine",)
     expected, overrides = metric_criterion(
         case,
-        dict(
-            metric="trial/latency",
-            unit="ms",
-            windows=["measurement"],
-            op="le",
-            expected=10,
-            expected_by_profile={"gpu_a": 20},
-        ),
+        dict(metric="trial/latency", unit="ms", windows=["measurement"], op="le", expected=10, expected_by_profile={"gpu_a": 20}),
         metric="trial/latency",
         unit="ms",
         windows=("measurement",),
@@ -102,9 +88,7 @@ def test_case_owned_timestamp_field_is_explicitly_epoch_seconds():
     from scenario.windows import ObservationWindow, TimestampOutput
 
     window = ObservationWindow.read(
-        {"from": {"stage": "ready", "field": "ready_at"}},
-        "window",
-        timestamp_stages={"ready": TimestampOutput("ready", "ready_at")},
+        {"from": {"stage": "ready", "field": "ready_at"}}, "window", timestamp_stages={"ready": TimestampOutput("ready", "ready_at")}
     )
     assert window.boundaries["from"] == {"$ref": "stages.ready.output.ready_at"}
     with pytest.raises(ValueError):
@@ -118,9 +102,7 @@ def test_nested_field_addition_derives_names_and_numeric_admission():
     contract = InputSchema(declarations)
     assert set(contract.sections["procedure"]) == {"timeout_s", "probe"}
     assert set(contract.numeric_parameters) == {"procedure.timeout_s", "procedure.probe.min_samples"}
-    case = CaseBuilder(
-        {}, {"procedure": {"timeout_s": 2, "probe": {"min_samples": -1}}}, number_rules=contract.numeric_parameters
-    )
+    case = CaseBuilder({}, {"procedure": {"timeout_s": 2, "probe": {"min_samples": -1}}}, number_rules=contract.numeric_parameters)
     with pytest.raises(ValueError, match="min_samples"):
         case.validate_numbers()
     case.parameters["procedure"]["probe"]["min_samples"] = 3
@@ -131,9 +113,7 @@ def test_nested_field_addition_derives_names_and_numeric_admission():
 def test_optional_nested_number_remains_unconsumed_until_binding():
     contract = InputSchema({"checks": {"extra": {"expected": NONNEGATIVE}}}, optional={"checks.extra"})
     assert contract.optional_numbers == {"checks.extra.expected"}
-    case = CaseBuilder(
-        {}, {"checks": {}}, number_rules=contract.numeric_parameters, optional_numbers=contract.optional_numbers
-    )
+    case = CaseBuilder({}, {"checks": {}}, number_rules=contract.numeric_parameters, optional_numbers=contract.optional_numbers)
     case.validate_numbers()
     assert not case.read_parameters
     assert contract.parse(case.parameters)["checks"] == {}

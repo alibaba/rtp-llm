@@ -62,12 +62,7 @@ def test_reserved_suite_cannot_be_default_or_ci_job(tmp_path, target):
 
 @pytest.mark.parametrize(
     "argv",
-    [
-        ["--suite", "quick", "--kind", "workload"],
-        ["--all", "--suite", "quick"],
-        ["--all", "--kind", "functional"],
-        ["--suite", "all"],
-    ],
+    [["--suite", "quick", "--kind", "workload"], ["--all", "--suite", "quick"], ["--all", "--kind", "functional"], ["--suite", "all"]],
 )
 def test_selectors_are_exclusive_and_suite_is_not_a_filter(argv):
     with pytest.raises(SystemExit):
@@ -127,9 +122,7 @@ def test_ci_failure_stops_remaining_profiles_and_records_partial_run(tmp_path):
     from types import SimpleNamespace
 
     ids = tuple(CiInstance("case::default::" + p, "case", p) for p in ("batch-window", "single-nonbatch"))
-    plan = CiPlan(
-        "quick", "core", tuple(x.profile for x in ids), 1, ids, {"quick": tuple(x.identity for x in ids)}, "normal"
-    )
+    plan = CiPlan("quick", "core", tuple(x.profile for x in ids), 1, ids, {"quick": tuple(x.identity for x in ids)}, "normal")
     with (
         patch("scripts.commands.run_ci.resolve_ci_selection", return_value=plan),
         patch("scripts.commands.run_ci.subprocess.run", return_value=SimpleNamespace(returncode=1)) as run,

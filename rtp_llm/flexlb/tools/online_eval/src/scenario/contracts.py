@@ -27,8 +27,7 @@ class ExecutionRequirements:
         if self.request_evidence and execution.get("collection", "request") == "aggregate":
             raise ValueError("execution.collection requires request or diagnostic evidence")
         if self.monitoring and (
-            not isinstance(execution.get("monitoring"), dict)
-            or execution["monitoring"].get("capture_metrics", True) is False
+            not isinstance(execution.get("monitoring"), dict) or execution["monitoring"].get("capture_metrics", True) is False
         ):
             raise ValueError("execution.monitoring.capture_metrics must be true for this consumer")
 
@@ -50,9 +49,7 @@ class ViewValidator(Protocol):
 
 
 class ViewRenderer(Protocol):
-    def __call__(
-        self, directory: Path, analysis: dict, presentation: dict, deadline: Deadline | None = None
-    ) -> Path: ...
+    def __call__(self, directory: Path, analysis: dict, presentation: dict, deadline: Deadline | None = None) -> Path: ...
 
 
 class SourceFactory(Protocol):

@@ -41,9 +41,7 @@ assert load_document(DOCUMENT) == {'value': 1}
 assert reference({'$ref': 'stages.ready.output.count'}, 'r', {'ready': {'count': 'integer'}}, 'integer') == 'integer'
 assert OutputReference.read({'$ref': 'stages.ready.output.count'}).stage_id == 'ready'
 """.replace("DOCUMENT", repr(str(document)))
-    subprocess.run(
-        [sys.executable, "-c", script], cwd=ROOT, env=dict(os.environ, PYTHONPATH=str(ROOT / "src")), check=True
-    )
+    subprocess.run([sys.executable, "-c", script], cwd=ROOT, env=dict(os.environ, PYTHONPATH=str(ROOT / "src")), check=True)
 
 
 def test_contracts_never_import_stage_compilation():
@@ -52,8 +50,7 @@ def test_contracts_never_import_stage_compilation():
 
 
 @pytest.mark.parametrize(
-    "value",
-    [None, {"$ref": False}, {"$ref": "stages.future.output"}, {"$ref": "stages.future.output.count", "other": 1}],
+    "value", [None, {"$ref": False}, {"$ref": "stages.future.output"}, {"$ref": "stages.future.output.count", "other": 1}]
 )
 def test_reference_grammar_is_shared_and_strict(value):
     with pytest.raises(ScenarioError):
@@ -104,11 +101,7 @@ def test_partial_mock_failure_retains_exact_owned_process_for_bounded_cleanup(tm
     process = Mock()
     spec = EnvSpec(label="partial", n_prefill=1, n_decode=1, perf={})
     manager = EnvManager(
-        tmp_path,
-        verbose=False,
-        on_environment=created.append,
-        on_processes=lambda env: remembered.append(env.mock),
-        defer_cleanup=True,
+        tmp_path, verbose=False, on_environment=created.append, on_processes=lambda env: remembered.append(env.mock), defer_cleanup=True
     )
 
     def start(env, **kwargs):
@@ -177,10 +170,7 @@ def test_master_evidence_never_turns_invalid_counts_into_zero(value):
 
 
 def test_zero_owner_decoder_preserves_both_decode_counters():
-    data = {
-        "prefill_endpoints": [{"inflight_batches": []}],
-        "decode_endpoints": [{"inflight_requests": 1, "total_load": 0}],
-    }
+    data = {"prefill_endpoints": [{"inflight_batches": []}], "decode_endpoints": [{"inflight_requests": 1, "total_load": 0}]}
     assert endpoint_loads(data)["decode"] == [0]
     assert zero_owner_loads(data)["decode"] == [1]
 

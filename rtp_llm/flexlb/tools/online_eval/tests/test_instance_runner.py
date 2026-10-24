@@ -36,11 +36,7 @@ class InstanceRunnerTest(unittest.TestCase):
             mock.patch.object(ports, "PORT_WINDOW_LOCK_DIR", self.root / "locks"),
             mock.patch.object(ports, "port_in_use", return_value=False),
             mock.patch.object(runner, "SCENARIO_RUNNER", self.child),
-            mock.patch.dict(
-                os.environ,
-                {"FLEXLB_FT_TIMING_BASELINE": str(self.root / "timing.json")},
-                clear=True,
-            ),
+            mock.patch.dict(os.environ, {"FLEXLB_FT_TIMING_BASELINE": str(self.root / "timing.json")}, clear=True),
         ]
         for patch in patches:
             patch.start()
@@ -68,10 +64,7 @@ class InstanceRunnerTest(unittest.TestCase):
         return argparse.Namespace(**values)
 
     def fixture_child(self, command, env, log_path, **kwargs):
-        self.assertEqual(
-            5,
-            len([key for key in env if key.startswith("FLEXLB_FT_") and key.endswith("PORT")]),
-        )
+        self.assertEqual(5, len([key for key in env if key.startswith("FLEXLB_FT_") and key.endswith("PORT")]))
         if "--instances" in command:
             lease_path = Path(command[command.index("--lease-json") + 1])
             lease = json.loads(lease_path.read_text())
@@ -83,13 +76,7 @@ class InstanceRunnerTest(unittest.TestCase):
                     **row,
                     "status": "PASS",
                     "duration_ms": 100,
-                    "stages": [
-                        {
-                            "id": "check",
-                            "status": "PASS",
-                            "checks": [{"id": "done", "status": "PASS"}],
-                        }
-                    ],
+                    "stages": [{"id": "check", "status": "PASS", "checks": [{"id": "done", "status": "PASS"}]}],
                     "cleanup": [],
                     "error": None,
                 }
@@ -97,11 +84,7 @@ class InstanceRunnerTest(unittest.TestCase):
                 if row["id"] in selected
             ]
             path = Path(command[command.index("--out-dir") + 1]) / "scenarios.json"
-            payload = {
-                "scenario_results_schema_version": 1,
-                "summary": {"exit_code": 0},
-                "instances": rows,
-            }
+            payload = {"scenario_results_schema_version": 1, "summary": {"exit_code": 0}, "instances": rows}
         path.write_text(json.dumps(payload))
         return 0
 
@@ -126,10 +109,7 @@ class InstanceRunnerTest(unittest.TestCase):
         source = Path(__file__).resolve().parents[1] / "config/scenarios/master_ha_failover.yaml"
         names = load_document(source)["reports"]
         self.assertEqual(["default.yaml", "master_ha_failover.yaml"], names)
-        self.data["instances"][0].update(
-            test_kind="workload",
-            reports=names,
-        )
+        self.data["instances"][0].update(test_kind="workload", reports=names)
         dry = self.args(dry_run=True, instances=identity, parallel=1)
         rc, _, child = self.run_fixture(dry)
         self.assertEqual(0, rc)
@@ -145,21 +125,14 @@ class InstanceRunnerTest(unittest.TestCase):
             self.fixture_child(command, env, log, **kwargs)
             path = Path(command[command.index("--out-dir") + 1]) / "scenarios.json"
             result = json.loads(path.read_text())
-            result["instances"][0]["workload"] = {
-                "telemetry_gaps": {"large": "x" * 5000},
-                "reports": paths,
-            }
+            result["instances"][0]["workload"] = {"telemetry_gaps": {"large": "x" * 5000}, "reports": paths}
             path.write_text(json.dumps(result))
             return 0
 
         target = self.root / "output/selected-aggregate.json"
         rc, _, _ = self.run_fixture(self.args(instances=identity, parallel=1, json=str(target)), spawn=completed_child)
         self.assertEqual(0, rc)
-        lines = [
-            line.removeprefix("workload reports: ")
-            for line in self.stdout.splitlines()
-            if line.startswith("workload reports: ")
-        ]
+        lines = [line.removeprefix("workload reports: ") for line in self.stdout.splitlines() if line.startswith("workload reports: ")]
         self.assertEqual(1, len(lines))
         self.assertEqual({"instance": identity, "status": "PASS", "reports": paths}, json.loads(lines[0]))
         self.assertEqual(paths, json.loads(target.read_text())["instances"][0]["workload"]["reports"])
@@ -272,25 +245,15 @@ program: default
         self.assertEqual(0, rc)
         command = listing.call_args.args[0]
         self.assertIn("--list-json", command)
-        self.assertEqual(
-            str((self.root / "config/scenarios").resolve()),
-            command[command.index("--source") + 1],
-        )
+        self.assertEqual(str((self.root / "config/scenarios").resolve()), command[command.index("--source") + 1])
         doc = json.loads((self.root / "output/manifest.json").read_text())
         result = json.loads((self.root / "output/aggregate.json").read_text())
         self.assertEqual(7, result["summary"]["total"])
-        self.assertCountEqual(
-            [row["id"] for row in self.data["instances"]],
-            [row["id"] for row in result["instances"]],
-        )
+        self.assertCountEqual([row["id"] for row in self.data["instances"]], [row["id"] for row in result["instances"]])
         for call in child.call_args_list:
             command, env, _ = call.args
             self.assertEqual(str(self.child), command[1])
-            lease = next(
-                row
-                for row in doc["lanes"]
-                if row["child_env"]["FLEXLB_FT_MASTER_HTTP_PORT"] == env["FLEXLB_FT_MASTER_HTTP_PORT"]
-            )
+            lease = next(row for row in doc["lanes"] if row["child_env"]["FLEXLB_FT_MASTER_HTTP_PORT"] == env["FLEXLB_FT_MASTER_HTTP_PORT"])
             self.assertEqual(lease["child_env"], {key: env[key] for key in lease["child_env"]})
         timings = json.loads((self.root / "timing.json").read_text())
         self.assertEqual(1, timings["timings_schema_version"])
@@ -316,11 +279,7 @@ program: default
     def test_missing_duplicate_and_unexpected_results_are_errors(self):
         rows = parse_catalog(self.data, source="yaml", profile="batch-window")[:2]
         path = self.root / "result.json"
-        for fixture in [
-            [],
-            [rows[0].metadata] * 2,
-            [{"id": "unselected", "status": "PASS"}],
-        ]:
+        for fixture in [[], [rows[0].metadata] * 2, [{"id": "unselected", "status": "PASS"}]]:
             path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": fixture}))
             result = result_validation.read_results(path, rows)
             self.assertEqual(2, len(result))
@@ -358,26 +317,10 @@ program: default
     def test_diagnostic_skip_is_valid_but_does_not_replace_executed_checks(self):
         group = parse_catalog(self.data, source="yaml", profile="batch-window")[:1]
         path = self.root / "diagnostic.json"
-        diagnostic = {
-            "id": "retired",
-            "status": "PASS",
-            "checks": [{"id": "diagnostic", "status": "SKIP", "detail": "retired contract"}],
-        }
-        behavioral = {
-            "id": "completion",
-            "status": "PASS",
-            "checks": [{"id": "complete", "status": "PASS"}],
-        }
-        for stages, expected in (
-            ([diagnostic, behavioral], "PASS"),
-            ([diagnostic], "ERROR"),
-        ):
-            payload = {
-                **group[0].metadata,
-                "status": "PASS",
-                "stages": stages,
-                "cleanup": [],
-            }
+        diagnostic = {"id": "retired", "status": "PASS", "checks": [{"id": "diagnostic", "status": "SKIP", "detail": "retired contract"}]}
+        behavioral = {"id": "completion", "status": "PASS", "checks": [{"id": "complete", "status": "PASS"}]}
+        for stages, expected in (([diagnostic, behavioral], "PASS"), ([diagnostic], "ERROR")):
+            payload = {**group[0].metadata, "status": "PASS", "stages": stages, "cleanup": []}
             path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
             result = result_validation.read_results(path, group)
             self.assertEqual(expected, result[0]["status"])
@@ -386,12 +329,7 @@ program: default
         group = parse_catalog(self.data, source="yaml", profile="batch-window")[:1]
         path = self.root / "warning.json"
         check = {"id": "known_error", "status": "WARNING", "actual": 2}
-        base = {
-            **group[0].metadata,
-            "status": "PASS",
-            "stages": [{"id": "handover", "status": "PASS", "checks": [check]}],
-            "cleanup": [],
-        }
+        base = {**group[0].metadata, "status": "PASS", "stages": [{"id": "handover", "status": "PASS", "checks": [check]}], "cleanup": []}
         for execution_error, expected in ((None, "PASS"), ("query failed", "ERROR")):
             payload = copy.deepcopy(base)
             payload["stages"][0]["checks"][0]["error"] = execution_error
@@ -399,12 +337,7 @@ program: default
             rows = result_validation.read_results(path, group)
             self.assertEqual(expected, rows[0]["status"])
             self.assertEqual("WARNING", rows[0]["stages"][0]["checks"][0]["status"])
-            aggregate = runner._aggregate(
-                [{"lane": 0, "instances": rows, "segments": [{"exit_code": 0}]}],
-                group,
-                self.args(),
-                1,
-            )
+            aggregate = runner._aggregate([{"lane": 0, "instances": rows, "segments": [{"exit_code": 0}]}], group, self.args(), 1)
             self.assertEqual(int(expected == "ERROR"), aggregate["summary"]["exit_code"])
 
     def test_nested_execution_errors_cannot_be_hidden_by_green_rows(self):
@@ -414,13 +347,7 @@ program: default
             **group[0].metadata,
             "status": "PASS",
             "error": None,
-            "stages": [
-                {
-                    "id": "verify",
-                    "status": "PASS",
-                    "checks": [{"id": "ok", "status": "PASS"}],
-                }
-            ],
+            "stages": [{"id": "verify", "status": "PASS", "checks": [{"id": "ok", "status": "PASS"}]}],
             "cleanup": [],
         }
         mutations = []
@@ -436,12 +363,7 @@ program: default
             with self.subTest(payload=payload):
                 path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
                 rows = result_validation.read_results(path, group)
-                aggregate = runner._aggregate(
-                    [{"lane": 0, "instances": rows, "segments": [{"exit_code": 0}]}],
-                    group,
-                    self.args(),
-                    1,
-                )
+                aggregate = runner._aggregate([{"lane": 0, "instances": rows, "segments": [{"exit_code": 0}]}], group, self.args(), 1)
                 self.assertEqual("ERROR", rows[0]["status"])
                 self.assertEqual(1, aggregate["summary"]["exit_code"])
 
@@ -452,13 +374,7 @@ program: default
             **group[0].metadata,
             "status": "FINDING-CONFIRMED",
             "cleanup": [],
-            "stages": [
-                {
-                    "id": "verify",
-                    "status": "FAIL",
-                    "checks": [{"id": "known", "status": "FAIL"}],
-                }
-            ],
+            "stages": [{"id": "verify", "status": "FAIL", "checks": [{"id": "known", "status": "FAIL"}]}],
             "finding_confirmed": ["verify.known"],
         }
         path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
@@ -560,9 +476,7 @@ program: default
             return rc
 
         with mock.patch.object(ports, "port_in_use", side_effect=lambda port, host=None: port in occupied):
-            rc, _, child = self.run_fixture(
-                self.args(parallel=1, instances=self.data["instances"][0]["id"]), spawn=spawn
-            )
+            rc, _, child = self.run_fixture(self.args(parallel=1, instances=self.data["instances"][0]["id"]), spawn=spawn)
         self.assertEqual(1, rc)
         self.assertEqual(1, child.call_count)
         result = json.loads((self.root / "output/aggregate.json").read_text())
@@ -624,11 +538,7 @@ class ChildProcessesTest(unittest.TestCase):
         children = runner.ChildProcesses()
         with tempfile.TemporaryDirectory() as tmp:
             rc = children.run(
-                [
-                    sys.executable,
-                    "-c",
-                    "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
-                ],
+                [sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"],
                 dict(os.environ),
                 Path(tmp) / "child.log",
                 timeout=0.2,
@@ -641,12 +551,7 @@ class ChildProcessesTest(unittest.TestCase):
         children = runner.ChildProcesses()
         with tempfile.TemporaryDirectory() as tmp, ThreadPoolExecutor(max_workers=1) as pool:
             log = Path(tmp) / "child.log"
-            future = pool.submit(
-                children.run,
-                [sys.executable, "-c", "import time; time.sleep(60)"],
-                dict(os.environ),
-                log,
-            )
+            future = pool.submit(children.run, [sys.executable, "-c", "import time; time.sleep(60)"], dict(os.environ), log)
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 with children.lock:

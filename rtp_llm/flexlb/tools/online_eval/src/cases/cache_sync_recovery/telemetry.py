@@ -40,9 +40,7 @@ def worker_rows(capture):
                 cache_indexed=row["index_initialized"],
                 cache_key_size=row["cached_key_count"],
                 cache_version=None if row["received_cache_version"] is None else int(row["received_cache_version"]),
-                cache_indexed_version=None
-                if row["indexed_cache_version"] is None
-                else int(row["indexed_cache_version"]),
+                cache_indexed_version=None if row["indexed_cache_version"] is None else int(row["indexed_cache_version"]),
             )
         result[address] = projected
     return result
@@ -97,9 +95,5 @@ def gc_events(path):
         if match:
             stamp, identity, name, duration = match.groups()
             end = datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%S.%f%z").timestamp()
-            result.append(
-                dict(
-                    epoch_s=end, duration_ms=float(duration), full="Pause Full" in name, gc_id=int(identity), name=name
-                )
-            )
+            result.append(dict(epoch_s=end, duration_ms=float(duration), full="Pause Full" in name, gc_id=int(identity), name=name))
     return result

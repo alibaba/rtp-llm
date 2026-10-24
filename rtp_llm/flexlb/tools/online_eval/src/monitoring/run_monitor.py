@@ -50,25 +50,14 @@ class RunMonitor:
     def _stop_monitor(self, ctx, source, deadline):
         shutdown = self.options["collector_shutdown_s"]
         remaining = max(0, deadline.expires_at - ctx.clock())
-        source.stop(
-            shutdown,
-            export=remaining > 0,
-            materialize=False,
-            archive_timeout=max(0, remaining - shutdown),
-            deadline=deadline,
-        )
+        source.stop(shutdown, export=remaining > 0, materialize=False, archive_timeout=max(0, remaining - shutdown), deadline=deadline)
 
     def before_stage(self, ctx, spec):
         if spec["action"] == "teardown" and ctx.env_epoch in self.monitors:
             # Stop the monitoring interval before intentional target teardown.
             self._stop_monitor(ctx, self.monitors[ctx.env_epoch], ctx.stage_deadline)
         if spec["action"] == "teardown" and ctx.env is not None and self.options["capture_metrics"]:
-            self._snapshot_servers(
-                ctx,
-                ctx.env,
-                ctx.env_epoch,
-                max(0, ctx.instance_deadline_s - ctx.clock()),
-            )
+            self._snapshot_servers(ctx, ctx.env, ctx.env_epoch, max(0, ctx.instance_deadline_s - ctx.clock()))
         self.events.append(
             dict(
                 stage=spec["id"],
@@ -98,9 +87,7 @@ class RunMonitor:
         env = ctx.env
         self.environments[str(ctx.env_epoch)] = str(env.run_dir)
         self.environment_metadata[str(ctx.env_epoch)] = dict(
-            n_prefill=env.spec.n_prefill,
-            n_decode=env.spec.n_decode,
-            send_mode="case program",
+            n_prefill=env.spec.n_prefill, n_decode=env.spec.n_decode, send_mode="case program"
         )
         self.master_incarnations[str(ctx.env_epoch)] = getattr(env, "master_incarnations", [])
         specs = getattr(env, "master_specs", {})
@@ -140,6 +127,5 @@ class RunMonitor:
         ctx.monitor = source
         epoch = ctx.env_epoch
         ctx.add_cleanup(
-            "final-server-snapshot-" + str(epoch),
-            lambda deadline: self._snapshot_servers(ctx, env, epoch, deadline.remaining()),
+            "final-server-snapshot-" + str(epoch), lambda deadline: self._snapshot_servers(ctx, env, epoch, deadline.remaining())
         )

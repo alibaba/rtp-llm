@@ -21,12 +21,7 @@ class ReportSpecTest(unittest.TestCase):
         )
         panel.update(id="p1", timeX=True)
         page = renderer.render(
-            {
-                "run_id": label,
-                "panels": [panel],
-                "kpis": [dict(label=label, value=label, tone="warn")],
-                "timeAxis": {"min": 0, "max": 2},
-            }
+            {"run_id": label, "panels": [panel], "kpis": [dict(label=label, value=label, tone="warn")], "timeAxis": {"min": 0, "max": 2}}
         )
         self.assertNotIn("</script><script>bad()</script>", page)
         payload, _ = json.JSONDecoder().raw_decode(page.split("const SPEC = ", 1)[1])
@@ -36,10 +31,7 @@ class ReportSpecTest(unittest.TestCase):
         self.assertEqual(result["title"], label)
         self.assertEqual(result["caption"], label)
         self.assertEqual([p["x"] for p in result["series"][0]["points"]], [-1, 0, 2])
-        self.assertEqual(
-            payload["summary"]["kpis"][0],
-            {"label": label, "value": label, "tone": "warn"},
-        )
+        self.assertEqual(payload["summary"]["kpis"][0], {"label": label, "value": label, "tone": "warn"})
 
 
 if __name__ == "__main__":

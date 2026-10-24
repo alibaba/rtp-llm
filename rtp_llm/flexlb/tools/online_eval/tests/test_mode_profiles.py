@@ -29,9 +29,7 @@ class ModeProfilesTest(unittest.TestCase):
 
     def test_reachability_is_independent_of_master_mode(self):
         self.assertTrue(resolve_address_plan("whale_embedded", pod_ip="10.0.0.1")["unique_engine_ips"])
-        self.assertFalse(
-            resolve_address_plan("whale_embedded", external_engine_clients=True, pod_ip="10.0.0.1")["unique_engine_ips"]
-        )
+        self.assertFalse(resolve_address_plan("whale_embedded", external_engine_clients=True, pod_ip="10.0.0.1")["unique_engine_ips"])
         with self.assertRaisesRegex(ValueError, "external engine clients"):
             resolve_address_plan("scenario", external_engine_clients=True)
         with self.assertRaisesRegex(ValueError, "routable Pod IP"):

@@ -58,11 +58,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
                 end=2,
                 step=1,
                 targets={},
-                queries={
-                    "mock/running_avg": dict(
-                        promql="running", result=[dict(metric={"role": "prefill"}, values=[[1, "1"]])]
-                    )
-                },
+                queries={"mock/running_avg": dict(promql="running", result=[dict(metric={"role": "prefill"}, values=[[1, "1"]])])},
                 missing_queries=["master-single/optional"],
                 errors=[],
             )
@@ -100,40 +96,18 @@ class EvidenceIntegrityTest(unittest.TestCase):
             (telemetry / "mock.prom").write_text("".join(raw))
             (telemetry / "mock-samples.jsonl").write_text("\n".join(journal) + "\n")
             result = executed_result(
-                id="sparse",
-                workload=dict(
-                    capture_metrics=True,
-                    runtime_validity="VALID",
-                    runtime_configuration=dict(max_sample_gap_s=5),
-                ),
+                id="sparse", workload=dict(capture_metrics=True, runtime_validity="VALID", runtime_configuration=dict(max_sample_gap_s=5))
             )
-            analyze_report(
-                root,
-                result,
-                dict(
-                    clock_anchor={"epoch_s": 0},
-                    phases=[],
-                    expected_telemetry=["1/mock"],
-                ),
-            )
+            analyze_report(root, result, dict(clock_anchor={"epoch_s": 0}, phases=[], expected_telemetry=["1/mock"]))
             self.assertEqual(result["status"], "ERROR")
             self.assertEqual(result["workload"]["runtime_validity"], "INVALID")
             self.assertEqual(result["workload"]["collection_gaps"], {})
             self.assertIn("1/mock", result["workload"]["missing_telemetry"])
 
     def test_invalid_evidence_cannot_pass_or_confirm_probe(self):
-        for status in (
-            "PASS",
-            "FINDING-CONFIRMED",
-            "FINDING-RESOLVED",
-            "FAIL",
-            "TIMEOUT",
-        ):
+        for status in ("PASS", "FINDING-CONFIRMED", "FINDING-RESOLVED", "FAIL", "TIMEOUT"):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as d:
-                result = executed_result(
-                    status=status,
-                    workload=dict(capture_metrics=False, runtime_validity="INVALID"),
-                )
+                result = executed_result(status=status, workload=dict(capture_metrics=False, runtime_validity="INVALID"))
                 analyze_report(d, result, dict(clock_anchor={"epoch_s": 0}, phases=[]))
                 self.assertEqual(result["status"], "TIMEOUT" if status == "TIMEOUT" else "ERROR")
                 self.assertEqual(result["outcome"]["validity"], "INVALID")
@@ -156,13 +130,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
             rows = [
-                dict(
-                    rid="a",
-                    sequence=1,
-                    event="issued",
-                    send_start_epoch_ms=1000,
-                    recorded_epoch_ms=1000,
-                ),
+                dict(rid="a", sequence=1, event="issued", send_start_epoch_ms=1000, recorded_epoch_ms=1000),
                 dict(
                     rid="a",
                     sequence=2,
@@ -173,13 +141,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
                     route_path="master",
                     failover=False,
                 ),
-                dict(
-                    rid="b",
-                    sequence=3,
-                    event="issued",
-                    send_start_epoch_ms=1002,
-                    recorded_epoch_ms=1002,
-                ),
+                dict(rid="b", sequence=3, event="issued", send_start_epoch_ms=1002, recorded_epoch_ms=1002),
             ]
             (p / "client_lifecycle.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
             evidence = client_resource(out_dir=p).evidence_snapshot()
@@ -203,27 +165,15 @@ class EvidenceIntegrityTest(unittest.TestCase):
                         errors=[],
                         queries={
                             name + "/up": dict(
-                                promql="up",
-                                result=[
-                                    dict(
-                                        metric={"job": name, "__name__": "up"},
-                                        values=[[1, "1"], [2, "1"]],
-                                    )
-                                ],
+                                promql="up", result=[dict(metric={"job": name, "__name__": "up"}, values=[[1, "1"], [2, "1"]])]
                             )
                             for name in ("mock", "master-A")
                         },
                     )
                 )
             )
-            r = executed_result(
-                workload=dict(capture_metrics=True, runtime_validity="VALID"),
-            )
-            e = dict(
-                clock_anchor={"epoch_s": 0},
-                phases=[],
-                expected_telemetry=["1/mock", "1/master-A", "1/master-B"],
-            )
+            r = executed_result(workload=dict(capture_metrics=True, runtime_validity="VALID"))
+            e = dict(clock_anchor={"epoch_s": 0}, phases=[], expected_telemetry=["1/mock", "1/master-A", "1/master-B"])
             analyze_report(p, r, e)
             self.assertEqual(r["status"], "ERROR")
             self.assertEqual(r["workload"]["missing_telemetry"], ["1/master-B"])
@@ -233,9 +183,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
         from monitoring.quality import classify_gaps
 
         evidence = dict(
-            clock_anchor={"epoch_s": 100},
-            phases=[],
-            expected_outages=[dict(source="1/master-A", started_epoch_s=102, ended_epoch_s=104)],
+            clock_anchor={"epoch_s": 100}, phases=[], expected_outages=[dict(source="1/master-A", started_epoch_s=102, ended_epoch_s=104)]
         )
         gaps = {"1/master-A/x": [1, 3, 5], "1/master-B/x": [3]}
         expected, unexpected = classify_gaps(gaps, evidence)

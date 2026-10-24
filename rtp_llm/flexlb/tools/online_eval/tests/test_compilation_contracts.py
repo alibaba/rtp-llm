@@ -46,12 +46,7 @@ def test_selection_preserves_the_complete_execution_contract():
 
 
 @pytest.mark.parametrize(
-    "field,value",
-    [
-        ("test_kind", "workload"),
-        ("collection_profile", "aggregate"),
-        ("workload_runtime", {"capture_metrics": False}),
-    ],
+    "field,value", [("test_kind", "workload"), ("collection_profile", "aggregate"), ("workload_runtime", {"capture_metrics": False})]
 )
 def test_frozen_policy_projection_cannot_override_canonical_policy(field, value):
     plan = plans()[0]

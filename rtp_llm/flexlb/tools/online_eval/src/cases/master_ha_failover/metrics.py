@@ -96,12 +96,7 @@ _DESCRIPTIONS = MeasurementDescriptions(
         },
         **{
             ("ha_evidence", "ha/" + name): MeasurementDescription(
-                _state_series,
-                "debug_api",
-                "master_instance",
-                "sampled",
-                False,
-                dict(source="master_inflight", field=name),
+                _state_series, "debug_api", "master_instance", "sampled", False, dict(source="master_inflight", field=name)
             )
             for name in STATE_FIELDS
         },
@@ -132,17 +127,13 @@ def produce(directory, payload):
     request_path, state_path, epoch = _artifacts(payload, require_states=bool(fields))
     requests, states = _read_rows(request_path), _read_rows(state_path) if fields else []
     configured = (
-        (payload.get("configuration") or payload.get("implementation", {}).get("configuration", {}))
-        .get("environment", {})
-        .get("n_prefill")
+        (payload.get("configuration") or payload.get("implementation", {}).get("configuration", {})).get("environment", {}).get("n_prefill")
     )
     observed = len({r.get("prefill") for r in requests if r.get("prefill")})
     fleet_size = configured if type(configured) is int and configured > 0 else observed
     values = {key: [(None, points)] for key, points in _request_series(requests, anchor).items()}
     if fleet_size:
-        values.update(
-            {key: [(None, points)] for key, points in _prefill_balance_series(requests, anchor, fleet_size).items()}
-        )
+        values.update({key: [(None, points)] for key, points in _prefill_balance_series(requests, anchor, fleet_size).items()})
     states_by_key = _state_series(states, anchor, fields)
     for field in fields:
         values[field] = [(master, states_by_key.get((master, field), [])) for master in ("A", "B")]
@@ -159,10 +150,7 @@ def produce(directory, payload):
             definition,
             [
                 series_row(
-                    [[p["x"] + anchor, p["y"]] for p in points],
-                    epoch=epoch,
-                    source="ha",
-                    labels={"master": master} if master else {},
+                    [[p["x"] + anchor, p["y"]] for p in points], epoch=epoch, source="ha", labels={"master": master} if master else {}
                 )
                 for master, points in members
             ],

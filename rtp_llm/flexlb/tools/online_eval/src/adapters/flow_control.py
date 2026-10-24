@@ -54,23 +54,14 @@ class FlowStatus:
                 started=row["started"],
                 terminal=row["terminal"],
                 outstanding=row["outstanding"],
-                sending_end_reason=(
-                    SendingEndReason(row["sending_end_reason"]) if "sending_end_reason" in row else None
-                ),
+                sending_end_reason=(SendingEndReason(row["sending_end_reason"]) if "sending_end_reason" in row else None),
                 applied_command_id=row.get("applied_command_id"),
                 revision=row["revision"],
                 recorded_epoch_ms=row["recorded_epoch_ms"],
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("invalid flow control status") from exc
-        for value in (
-            result.submitted,
-            result.started,
-            result.terminal,
-            result.outstanding,
-            result.revision,
-            result.recorded_epoch_ms,
-        ):
+        for value in (result.submitted, result.started, result.terminal, result.outstanding, result.revision, result.recorded_epoch_ms):
             if type(value) is not int or value < 0:
                 raise ValueError("invalid flow control counter")
         if result.terminal > result.submitted or result.started > result.submitted:
@@ -134,11 +125,7 @@ class DrainResult:
     def validate(self, command_id):
         if self.process_returncode != 0 or self.status.state != FlowState.DRAINED:
             raise RuntimeError("flow drain incomplete")
-        if (
-            self.observed_started != self.status.submitted
-            or self.observed_terminal != self.status.terminal
-            or self.unfinished_ids
-        ):
+        if self.observed_started != self.status.submitted or self.observed_terminal != self.status.terminal or self.unfinished_ids:
             raise RuntimeError("flow drain journal does not account for every submission")
         self.status.validate_completion(self.observed_terminal, command_id)
 

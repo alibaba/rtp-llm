@@ -79,9 +79,7 @@ class CaseDeclaration:
             source,
         )
         if type(value.get("case_schema_version")) is not int or value["case_schema_version"] != 2:
-            raise ScenarioError(
-                f"{source}: only data-only case_schema_version 2 is accepted; move orchestration into Python"
-            )
+            raise ScenarioError(f"{source}: only data-only case_schema_version 2 is accepted; move orchestration into Python")
         metadata = normalize_metadata(value.get("metadata"))
         execution = ExecutionPolicy.read(value.get("execution"), metadata["kind"])
         profiles = value.get("profiles")

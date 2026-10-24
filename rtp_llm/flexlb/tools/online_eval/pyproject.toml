@@ -1,7 +1,13 @@
 [tool.ruff]
 target-version = "py39"
-line-length = 120
+line-length = 140
 src = ["src", ".", "tests"]
+
+[tool.ruff.lint.isort]
+split-on-trailing-comma = false
+
+[tool.ruff.format]
+skip-magic-trailing-comma = true
 
 [tool.ruff.lint]
 select = ["F", "E9", "I"]

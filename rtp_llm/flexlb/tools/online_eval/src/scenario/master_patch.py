@@ -25,11 +25,9 @@ class MasterPatch:
             if val is None:
                 continue
             if key in {"ordering", "decision", "dispatcher"}:
-                choices = {
-                    "ordering": ("fifo", "priority"),
-                    "decision": ("single", "fixed_window"),
-                    "dispatcher": ("batch", "non_batch"),
-                }[key]
+                choices = {"ordering": ("fifo", "priority"), "decision": ("single", "fixed_window"), "dispatcher": ("batch", "non_batch")}[
+                    key
+                ]
                 if val not in choices:
                     fail(field, f"expected one of {choices}")
             elif key == "cache_affinity_max_extra_ttft_ms":
@@ -40,17 +38,8 @@ class MasterPatch:
                 if not isinstance(val, str) or not val.strip() or len(val) > 4096:
                     fail(field, "expected a nonempty formula of at most 4096 characters")
             elif key == "preemption" and val != {"omit": True}:
-                mapping(
-                    val,
-                    field,
-                    {"allowed_victim_stages", "timeout_ms"},
-                    {"allowed_victim_stages"},
-                )
-                victim_stages = names(
-                    val["allowed_victim_stages"],
-                    field + ".allowed_victim_stages",
-                    VICTIM_STAGES,
-                )
+                mapping(val, field, {"allowed_victim_stages", "timeout_ms"}, {"allowed_victim_stages"})
+                victim_stages = names(val["allowed_victim_stages"], field + ".allowed_victim_stages", VICTIM_STAGES)
                 if not victim_stages:
                     fail(field, "preemption victim stages cannot be empty")
                 if "timeout_ms" in val:
@@ -68,6 +57,5 @@ class MasterPatch:
 
     def overlay(self, other):
         return MasterPatch.read(
-            {**self.declared, **{key: value for key, value in other.declared.items() if value is not None}},
-            "config_overrides",
+            {**self.declared, **{key: value for key, value in other.declared.items() if value is not None}}, "config_overrides"
         )

@@ -7,9 +7,7 @@ from monitoring.contracts import implementation_measurement
 from monitoring.metric_store import series_row
 
 GATE_POPULATIONS = {
-    "arrival_cohort": frozenset(
-        {"cohort_requests", "slo_fraction", "goodput_rps", "offered_qps_deviation", "pacing_lag_max_ms"}
-    ),
+    "arrival_cohort": frozenset({"cohort_requests", "slo_fraction", "goodput_rps", "offered_qps_deviation", "pacing_lag_max_ms"}),
     "whole_run_terminals": frozenset({"error_rate"}),
     "completion_window_successes": frozenset({"input_tps", "output_tps"}),
     "arrival_cohort_successes": frozenset({"ttft_p99_ms", "e2e_p99_ms", "tpot_p99_ms"}),
@@ -36,10 +34,7 @@ def metric_contract(producer, identity, calculation):
             source_type="prometheus",
             implementation=implementation_identity(engine_tps_checks),
             measurement=implementation_measurement(
-                engine_tps_checks,
-                population="measurement_window_engine_incarnations",
-                accuracy="sampled",
-                request_identity=False,
+                engine_tps_checks, population="measurement_window_engine_incarnations", accuracy="sampled", request_identity=False
             ),
         )
     for population, keys in GATE_POPULATIONS.items():
@@ -47,9 +42,7 @@ def metric_contract(producer, identity, calculation):
             return dict(
                 source_type="client_journal",
                 implementation=implementation_identity(analyze),
-                measurement=implementation_measurement(
-                    analyze, population=population, accuracy="request_ledger", request_identity=True
-                ),
+                measurement=implementation_measurement(analyze, population=population, accuracy="request_ledger", request_identity=True),
             )
     raise ValueError("unknown performance metric: " + identity)
 
@@ -139,14 +132,7 @@ def produce(directory, evidence, result):
                 store,
                 identity,
                 definition,
-                [
-                    series_row(
-                        [[evidence["window"]["end_epoch_ms"] / 1000, value]],
-                        epoch=epoch,
-                        source="performance_gate",
-                        labels={},
-                    )
-                ],
+                [series_row([[evidence["window"]["end_epoch_ms"] / 1000, value]], epoch=epoch, source="performance_gate", labels={})],
                 producer="performance_requests",
                 evidence=dict(
                     path=str(directory) + "/performance-gate-evidence.json",

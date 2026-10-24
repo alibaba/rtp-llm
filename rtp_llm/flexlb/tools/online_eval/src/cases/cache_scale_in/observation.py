@@ -22,11 +22,7 @@ def engine_metric_snapshot(monitor, fields, timeout=5):
         if not math.isfinite(value):
             raise ValueError("non-finite engine metric")
         row = engines.setdefault(
-            identity,
-            dict(
-                engine_incarnation=labels["engine_incarnation"],
-                grpc_addr=labels["engine_ip"] + ":" + labels["grpc_port"],
-            ),
+            identity, dict(engine_incarnation=labels["engine_incarnation"], grpc_addr=labels["engine_ip"] + ":" + labels["grpc_port"])
         )
         field = reverse[observation["metric_id"]]
         if field in row or row["engine_incarnation"] != labels["engine_incarnation"]:
@@ -45,10 +41,7 @@ def measurement_samples(monitor, evidence, deadline, limits, *, directory=None, 
     clock = evidence["clock"]
     origin = clock["origin_epoch_s"]
     if windows is None:
-        windows = [
-            (evidence[start], evidence[end])
-            for start, end in (("baseline_start", "baseline_end"), ("post_start", "post_end"))
-        ]
+        windows = [(evidence[start], evidence[end]) for start, end in (("baseline_start", "baseline_end"), ("post_start", "post_end"))]
     windows = [(origin + start, origin + end) for start, end in windows]
     frozen = capture_window(
         monitor.client,
@@ -67,10 +60,7 @@ def measurement_samples(monitor, evidence, deadline, limits, *, directory=None, 
             name = labels.get("engine_name")
             if not name or not all(labels.get(k) for k in ("engine_incarnation", "engine_ip", "grpc_port")):
                 raise ValueError("raw metric lacks engine identity/incarnation")
-            identity = dict(
-                engine_incarnation=labels["engine_incarnation"],
-                grpc_addr=labels["engine_ip"] + ":" + labels["grpc_port"],
-            )
+            identity = dict(engine_incarnation=labels["engine_incarnation"], grpc_addr=labels["engine_ip"] + ":" + labels["grpc_port"])
             for epoch, value in row["values"]:
                 deadline.check()
                 sample = samples.setdefault(

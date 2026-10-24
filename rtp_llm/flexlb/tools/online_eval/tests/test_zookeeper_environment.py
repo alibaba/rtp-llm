@@ -53,18 +53,13 @@ def test_invalid_dependency_cannot_start(config):
 def state(ip, leader, address):
     return {
         "success": True,
-        "lbStatus": json.dumps(
-            {"consistency_enabled": True, "master": leader, "local_host": ip, "master_host": address}
-        ),
+        "lbStatus": json.dumps({"consistency_enabled": True, "master": leader, "local_host": ip, "master_host": address}),
     }
 
 
 def test_leadership_rejects_split_brain(tmp_path):
     ctx = NS(
-        artifact_dir=tmp_path,
-        resource_count=0,
-        clock=lambda: 0,
-        env=NS(master_specs={"A": NS(http_port=28000), "B": NS(http_port=28000)}),
+        artifact_dir=tmp_path, resource_count=0, clock=lambda: 0, env=NS(master_specs={"A": NS(http_port=28000), "B": NS(http_port=28000)})
     )
     deadline = NS(check=lambda: None)
     with patch(

@@ -20,12 +20,7 @@ def load_capture(path):
     metadata = model.metadata.to_dict()
     shape = model_shape(model)
     return dict(
-        path=str(path.resolve()),
-        name=path.stem,
-        sha256=hashlib.sha256(raw).hexdigest(),
-        metadata=metadata,
-        shape=shape,
-        model=model,
+        path=str(path.resolve()), name=path.stem, sha256=hashlib.sha256(raw).hexdigest(), metadata=metadata, shape=shape, model=model
     )
 
 
@@ -92,13 +87,9 @@ def run(profile_file, capture_paths=None, *, seed=42, count=None, refit=False, l
         methods = {}
         for method in ("independent", "joint"):
             if method == "joint" and "joint_distribution" not in selected["parameters"]:
-                methods[method] = dict(
-                    status="UNAVAILABLE", reason="profile has no joint distribution; recalibrate explicitly"
-                )
+                methods[method] = dict(status="UNAVAILABLE", reason="profile has no joint distribution; recalibrate explicitly")
                 continue
-            output = (
-                {} if {"output_distribution", "output_tokens"} & set(selected["parameters"]) else {"output_tokens": 420}
-            )
+            output = {} if {"output_distribution", "output_tokens"} & set(selected["parameters"]) else {"output_tokens": 420}
             parameters = dict(seed=seed, count=count or cap["model"].metadata.count, sampling=method, **output)
             if progress:
                 progress(f"{cap['name']}: {method}, {parameters['count']} requests")

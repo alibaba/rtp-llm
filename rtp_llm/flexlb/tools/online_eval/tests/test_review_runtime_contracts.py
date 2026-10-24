@@ -65,9 +65,7 @@ def test_sampling_distinguishes_cooperative_end_from_transport_timeout(ending):
             now[0] = worker.end
         raise TimeoutError("capture stopped")
 
-    worker = SampleWorker(
-        capture, lambda: now[0], dict(duration_s=10, interval_s=0.001, max_samples=10, max_bytes=1000)
-    )
+    worker = SampleWorker(capture, lambda: now[0], dict(duration_s=10, interval_s=0.001, max_samples=10, max_bytes=1000))
     worker._run()
     assert worker.done_event.is_set()
     assert (worker.error is not None) == (ending == "unexpected")
@@ -82,9 +80,7 @@ def test_series_labels_are_not_split_at_slashes_inside_json():
     assert actual == labels
 
 
-@pytest.mark.parametrize(
-    "color, canonical", [("red", "#ff0000"), ("#f00", "#ff0000"), ("rebeccapurple", "#663399"), ("#abcd", "#aabbcc")]
-)
+@pytest.mark.parametrize("color, canonical", [("red", "#ff0000"), ("#f00", "#ff0000"), ("rebeccapurple", "#663399"), ("#abcd", "#aabbcc")])
 def test_comparison_accepts_view_color_keywords_and_short_hex(color, canonical):
     from reporting.comparison_colors import run_color
 
@@ -97,9 +93,7 @@ def test_bad_metric_definitions_fail_at_admission_and_nonfinite_series_fail_at_r
         MetricStore(document)
     document["definitions"]["x"] = {"unit": "count"}
     document["metrics"]["x"] = [
-        dict(
-            metric_id="x", source="mock", epoch="1", status="PASS", labels={}, provenance={}, points=[[1, float("nan")]]
-        )
+        dict(metric_id="x", source="mock", epoch="1", status="PASS", labels={}, provenance={}, points=[[1, float("nan")]])
     ]
     store = MetricStore(document)
     with pytest.raises(MetricUnavailable, match="non-finite"):
@@ -140,10 +134,7 @@ def test_shared_proto_cache_survives_concurrent_generators_and_repairs_damage(tm
     code = "from adapters.proto_utils import ensure_proto_modules; ensure_proto_modules()"
     # Use a fresh interpreter per consumer so import caches cannot mask corruption.
     env = dict(os.environ, FLEXLB_EVAL_PROTO_OUT=str(tmp_path), PYTHONPATH="src:.")
-    children = [
-        subprocess.Popen([sys.executable, "-c", code], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        for _ in range(3)
-    ]
+    children = [subprocess.Popen([sys.executable, "-c", code], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(3)]
     for child in children:
         out, err = child.communicate(timeout=30)
         assert child.returncode == 0, (out, err)
@@ -185,10 +176,7 @@ def test_live_zero_warmup_starts_with_a_real_covered_sample(tmp_path):
     criteria = evidence()["criteria"]
     assert criteria["warmup_s"] == 0
     params = dict(
-        flow="flow",
-        criteria=criteria,
-        gate_input=None,
-        observation=dict(capture=dict(max_samples=100, max_bytes=100000), windows={}),
+        flow="flow", criteria=criteria, gate_input=None, observation=dict(capture=dict(max_samples=100, max_bytes=100000), windows={})
     )
     deadline = Deadline(100, lambda: now[0], ctx.sleeper)
     with patch("cases.master_performance.actions.provenance", return_value={}):

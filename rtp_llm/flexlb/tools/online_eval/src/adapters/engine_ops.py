@@ -24,10 +24,7 @@ DEFAULT_INPUT_LEN = 2048
 DEFAULT_OUTPUT_LEN = 10
 RECOVERY_TIMEOUT_S = 30.0
 
-CHANNEL_OPTIONS = [
-    ("grpc.max_receive_message_length", 64 * 1024 * 1024),
-    ("grpc.max_send_message_length", 64 * 1024 * 1024),
-]
+CHANNEL_OPTIONS = [("grpc.max_receive_message_length", 64 * 1024 * 1024), ("grpc.max_send_message_length", 64 * 1024 * 1024)]
 
 # DashScope inner QoS header — the secondary Auto-TPM priority channel,
 # read by the master's GrpcQosHeaderInterceptor into the gRPC Context and
@@ -39,13 +36,7 @@ QOS_LEVEL_HEADER = "x-dashscope-inner-qos-level"
 class EngineOps(MockEngineControl):
     """Mock-engine HTTP control plane + master/worker gRPC client."""
 
-    def __init__(
-        self,
-        master_ip: str,
-        master_http_port: int,
-        mock_http_port: int,
-        master_management_port: Optional[int] = None,
-    ):
+    def __init__(self, master_ip: str, master_http_port: int, mock_http_port: int, master_management_port: Optional[int] = None):
         self.master_ip = master_ip
         self.master_http_port = master_http_port
         self.mock_http_port = mock_http_port
@@ -53,9 +44,7 @@ class EngineOps(MockEngineControl):
         # Defaults to the harness constant (FLEXLB_FT_MASTER_MANAGEMENT_PORT
         # env, falling back to http+1) — the port start_master actually binds
         # via --management.server.port.
-        self.master_management_port = (
-            master_management_port if master_management_port is not None else DEFAULT_MASTER_MANAGEMENT_PORT
-        )
+        self.master_management_port = master_management_port if master_management_port is not None else DEFAULT_MASTER_MANAGEMENT_PORT
         self.pb2, self.pb2_grpc = ensure_proto_modules()
         self.schedule_pb2, self.schedule_pb2_grpc = ensure_schedule_proto_modules()
         self._channels: dict = {}
@@ -132,11 +121,7 @@ class EngineOps(MockEngineControl):
             timeout_ms=30_000,
             unique_key=encode_unique_key(meta),
         )
-        info = self.pb2.RequestInfoPB(
-            request_id=str(request_id),
-            trace_id=f"cancel_smoke_{request_id}",
-            source_role="cancel_smoke",
-        )
+        info = self.pb2.RequestInfoPB(request_id=str(request_id), trace_id=f"cancel_smoke_{request_id}", source_role="cancel_smoke")
         return self.pb2.GenerateInputPB(
             request_id=request_id,
             token_ids=[0] * min(input_len, 4096),
@@ -160,12 +145,7 @@ class EngineOps(MockEngineControl):
         # Auto-TPM admission (same lesson as flexlb_smoke_base.py).
         priority: int = 0,
     ):
-        input_pb = self.build_generate_input(
-            request_id,
-            input_len=input_len,
-            output_len=output_len,
-            block_keys=block_keys,
-        )
+        input_pb = self.build_generate_input(request_id, input_len=input_len, output_len=output_len, block_keys=block_keys)
         keys = block_keys or [request_id * 100 + 1]
         return self.schedule_pb2.FlexlbScheduleRequestPB(
             request_id=request_id,
@@ -188,14 +168,7 @@ class EngineOps(MockEngineControl):
     def master_target(self) -> str:
         return f"{self.master_ip}:{self.master_http_port + 2}"
 
-    def schedule(
-        self,
-        request_id: int,
-        timeout_s: float = 30.0,
-        *,
-        qos_level: Optional[int] = None,
-        **kwargs,
-    ):
+    def schedule(self, request_id: int, timeout_s: float = 30.0, *, qos_level: Optional[int] = None, **kwargs):
         """Schedule RPC against the master.
 
         ``timeout_s`` is the *client-side gRPC deadline* — the v2 QUEUE
@@ -213,11 +186,7 @@ class EngineOps(MockEngineControl):
         stub = self.schedule_pb2_grpc.FlexlbServiceStub(self._channel(self.master_target()))
         req = self.build_schedule_request(request_id, **kwargs)
         if qos_level is not None:
-            return stub.Schedule(
-                req,
-                timeout=timeout_s,
-                metadata=((QOS_LEVEL_HEADER, str(qos_level)),),
-            )
+            return stub.Schedule(req, timeout=timeout_s, metadata=((QOS_LEVEL_HEADER, str(qos_level)),))
         return stub.Schedule(req, timeout=timeout_s)
 
     def role_addr(self, response, role: str) -> str:
@@ -239,10 +208,7 @@ class EngineOps(MockEngineControl):
         del input_pb.generate_config.role_addrs[:]
         for status in response.server_status:
             input_pb.generate_config.role_addrs.add(
-                role=status.role,
-                ip=status.server_ip,
-                http_port=status.http_port,
-                grpc_port=status.grpc_port,
+                role=status.role, ip=status.server_ip, http_port=status.http_port, grpc_port=status.grpc_port
             )
 
     def start_stream(self, response, request_id: int, input_pb=None) -> StreamHandle:
@@ -270,8 +236,7 @@ class EngineOps(MockEngineControl):
         """Cancel via master (always) + worker (NON_BATCH/frontend path only)."""
         stub = self.schedule_pb2_grpc.FlexlbServiceStub(self._channel(self.master_target()))
         cancel_request = self.schedule_pb2.FlexlbCancelRequestPB(
-            request_id=request_id,
-            reason=self.schedule_pb2.CANCEL_REASON_CLIENT_CANCELLED,
+            request_id=request_id, reason=self.schedule_pb2.CANCEL_REASON_CLIENT_CANCELLED
         )
         if response is not None and response.HasField("lifecycle"):
             lifecycle = response.lifecycle
@@ -302,11 +267,7 @@ class EngineOps(MockEngineControl):
             # carry the SAME shape/block-keys the ScheduleRequest carried,
             # otherwise the engine sees a different request than the master
             # scheduled (input_len/block cache keys diverge).
-            input_pb = (
-                None
-                if response.enqueued_by_master
-                else self.build_generate_input(rid, output_len=output_len, block_keys=block_keys)
-            )
+            input_pb = None if response.enqueued_by_master else self.build_generate_input(rid, output_len=output_len, block_keys=block_keys)
             handle = self.start_stream(response, rid, input_pb=input_pb)
             handle.thread.join(RECOVERY_TIMEOUT_S)
             snap = handle.snap
@@ -321,7 +282,4 @@ class EngineOps(MockEngineControl):
     # -- Master debug read -------------------------------------------------
 
     def master_inflight(self) -> Optional[dict]:
-        return http_get_json(
-            master_url("127.0.0.1", self.master_http_port, "inflight"),
-            timeout=5,
-        )
+        return http_get_json(master_url("127.0.0.1", self.master_http_port, "inflight"), timeout=5)

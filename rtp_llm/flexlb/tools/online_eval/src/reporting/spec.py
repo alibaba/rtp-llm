@@ -14,9 +14,7 @@ def _finite(value):
 def validate(spec, *, versioned=False):
     if not isinstance(spec, dict):
         raise ValueError("report spec must be an object")
-    if (versioned or version_fields(spec)) and not matches_schema(
-        spec, "report_spec_schema_version", REPORT_SPEC_SCHEMA_VERSION
-    ):
+    if (versioned or version_fields(spec)) and not matches_schema(spec, "report_spec_schema_version", REPORT_SPEC_SCHEMA_VERSION):
         raise ValueError("unsupported report spec version")
     if "timeOriginEpochS" in spec and not _finite(spec["timeOriginEpochS"]):
         raise ValueError("invalid report time origin")
@@ -39,12 +37,7 @@ def validate(spec, *, versioned=False):
         _validate_events(panel.get("events", []))
         if panel.get("timeAxis") is not None:
             axis = panel["timeAxis"]
-            if (
-                not isinstance(axis, dict)
-                or not _finite(axis.get("min"))
-                or not _finite(axis.get("max"))
-                or axis["min"] >= axis["max"]
-            ):
+            if not isinstance(axis, dict) or not _finite(axis.get("min")) or not _finite(axis.get("max")) or axis["min"] >= axis["max"]:
                 raise ValueError("invalid panel timeAxis: " + identity)
         kind = panel.get("type", "line")
         if kind not in {"line", "bar", "scatter"}:
@@ -57,10 +50,7 @@ def validate(spec, *, versioned=False):
         if (
             not isinstance(axes, dict)
             or not axes
-            or any(
-                type(key) is not str or not key or key == "x" or not isinstance(settings, dict)
-                for key, settings in axes.items()
-            )
+            or any(type(key) is not str or not key or key == "x" or not isinstance(settings, dict) for key, settings in axes.items())
         ):
             raise ValueError("panel lacks axes: " + identity)
         for series in panel.get("series", []):

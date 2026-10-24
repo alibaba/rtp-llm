@@ -16,9 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def build(parameters):
-    case = CaseBuilder(
-        {}, parameters, number_rules=INPUTS.numeric_parameters, profiles=("single-nonbatch", "batch-window")
-    )
+    case = CaseBuilder({}, parameters, number_rules=INPUTS.numeric_parameters, profiles=("single-nonbatch", "batch-window"))
     case.config = INPUTS.parse(case.parameters, case.number_rules)
     default(case)
     return {step.id: step for step in case.steps}

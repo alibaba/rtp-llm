@@ -8,17 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from analysis.statistics import counter_delta, select_window
-from reporting import (
-    compare_controls,
-    details,
-    discover_reports,
-    load_analysis,
-    read_bundle,
-    render,
-    run_meta,
-    table,
-    write_bundle,
-)
+from reporting import compare_controls, details, discover_reports, load_analysis, read_bundle, render, run_meta, table, write_bundle
 from reporting.pairing import event_anchor, shifted_panel
 from reporting.renderer import render_context, render_sections
 from reporting.workload import write_report
@@ -40,9 +30,7 @@ class ReportBundleTest(unittest.TestCase):
                 {"id": "comparison"},
                 runs={
                     "old": run_meta({"id": "old"}, implementation={"master": {"source_commit": "abc"}}, workload=None),
-                    "new": run_meta(
-                        {"id": "new"}, implementation={"master": {"source_commit": "def"}}, workload={"sha256": "trace"}
-                    ),
+                    "new": run_meta({"id": "new"}, implementation={"master": {"source_commit": "def"}}, workload={"sha256": "trace"}),
                 },
             )
         }
@@ -78,20 +66,8 @@ class ReportBundleTest(unittest.TestCase):
                         "timeX": True,
                         "axes": {"ratio": {"title": "命中率"}},
                         "series": [
-                            {
-                                "name": "old · hit",
-                                "axis": "ratio",
-                                "color": "#123456",
-                                "dash": [6, 4],
-                                "points": [{"x": 0, "y": 0.9}],
-                            },
-                            {
-                                "name": "new · hit",
-                                "axis": "ratio",
-                                "color": "#654321",
-                                "dash": [],
-                                "points": [{"x": 0, "y": 0.9}],
-                            },
+                            {"name": "old · hit", "axis": "ratio", "color": "#123456", "dash": [6, 4], "points": [{"x": 0, "y": 0.9}]},
+                            {"name": "new · hit", "axis": "ratio", "color": "#654321", "dash": [], "points": [{"x": 0, "y": 0.9}]},
                         ],
                     }
                 ],
@@ -108,21 +84,10 @@ class ReportBundleTest(unittest.TestCase):
                 run_id="x",
                 title="x < y",
                 panels=[],
-                sections=[
-                    details("Evidence", data),
-                    table("Checks", ["name", "state"], [["<script>", "FAIL"]]),
-                ],
+                sections=[details("Evidence", data), table("Checks", ["name", "state"], [["<script>", "FAIL"]])],
             )
             original = copy.deepcopy(spec)
-            bundle = write_bundle(
-                root / "original",
-                "run",
-                "x",
-                data,
-                spec,
-                meta=run_meta({"id": "x"}),
-                producer="test",
-            )
+            bundle = write_bundle(root / "original", "run", "x", data, spec, meta=run_meta({"id": "x"}), producer="test")
             shutil.copytree(bundle, root / "relocated")
             shutil.rmtree(root / "original")
             moved = read_bundle(root / "relocated")
@@ -132,8 +97,7 @@ class ReportBundleTest(unittest.TestCase):
             self.assertEqual(spec, original)
             self.assertIn("&lt;script&gt;", render(saved))
             self.assertEqual(
-                set(json.loads((moved / "manifest.json").read_text())["files"]),
-                {"analysis.json", "report-spec.json", "report.html"},
+                set(json.loads((moved / "manifest.json").read_text())["files"]), {"analysis.json", "report-spec.json", "report.html"}
             )
             (moved / "analysis.json").write_text("{}")
             with self.assertRaisesRegex(ValueError, "checksum"):
@@ -145,10 +109,7 @@ class ReportBundleTest(unittest.TestCase):
         b["master"] = "new"
         self.assertTrue(compare_controls(a, b, allowed=("/master",), required=("/config/qps",))["aligned"])
         b["config"]["new_option"] = False
-        self.assertEqual(
-            compare_controls(a, b, allowed=("/master",))["differences"][0]["path"],
-            "/config/new_option",
-        )
+        self.assertEqual(compare_controls(a, b, allowed=("/master",))["differences"][0]["path"], "/config/new_option")
         self.assertEqual(compare_controls({}, {}, required=("/config/qps",))["status"], "UNKNOWN")
         self.assertFalse(compare_controls({"config": None}, {"config": None}, required=("/config",))["aligned"])
 
@@ -162,9 +123,7 @@ class ReportBundleTest(unittest.TestCase):
 
     def test_shared_pairing_supports_stage_and_event_anchors_without_zero_fill(self):
         self.assertEqual(event_anchor([dict(id="start", name="start", t=12)], "start"), 12)
-        self.assertIsNone(
-            event_anchor([dict(id="start", name="start", t=12), dict(id="start", name="start", t=13)], "start")
-        )
+        self.assertIsNone(event_anchor([dict(id="start", name="start", t=12), dict(id="start", name="start", t=13)], "start"))
         panel = dict(
             timeX=True,
             events=[dict(id="start", name="开始", t=12)],
@@ -195,10 +154,7 @@ class ReportBundleTest(unittest.TestCase):
         original = copy.deepcopy(payload)
         with (
             tempfile.TemporaryDirectory() as d,
-            patch(
-                "monitoring.metric_store.MetricStore.series",
-                side_effect=AssertionError("renderer read telemetry"),
-            ),
+            patch("monitoring.metric_store.MetricStore.series", side_effect=AssertionError("renderer read telemetry")),
         ):
             result = write_report(d, payload)
             self.assertEqual(load_analysis(result)["status"], "ERROR")
@@ -229,7 +185,7 @@ class ReportBundleTest(unittest.TestCase):
                     timeX=True,
                     axes={"y": dict(title="count")},
                     series=[dict(name="x", points=[dict(x=0, y=3), dict(x=1, y=None)])],
-                ),
+                )
             ],
         )
         original = copy.deepcopy(source)
@@ -270,7 +226,7 @@ class ReportBundleTest(unittest.TestCase):
                                 timeX=True,
                                 axes={"count": {"title": "数量"}},
                                 series=[dict(name="waiting", axis="queue", points=[dict(x=0, y=1)])],
-                            ),
+                            )
                         ]
                     ),
                 )

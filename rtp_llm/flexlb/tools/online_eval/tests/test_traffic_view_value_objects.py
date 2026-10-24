@@ -116,10 +116,7 @@ def test_timestamp_playback_roundtrip():
 def test_cache_subtitle_fields_are_producer_scoped():
     with pytest.raises(ValueError, match="unknown subtitle"):
         SubtitleTemplate("{expected_behavior} {observed_behavior}")
-    template = SubtitleTemplate(
-        "{expected_behavior} {observed_behavior}", fields=frozenset({"expected_behavior", "observed_behavior"})
-    )
+    template = SubtitleTemplate("{expected_behavior} {observed_behavior}", fields=frozenset({"expected_behavior", "observed_behavior"}))
     assert (
-        template.render(verdict="PASS", monitoring_status="OK", expected_behavior="stable", observed_behavior="stable")
-        == "stable stable"
+        template.render(verdict="PASS", monitoring_status="OK", expected_behavior="stable", observed_behavior="stable") == "stable stable"
     )

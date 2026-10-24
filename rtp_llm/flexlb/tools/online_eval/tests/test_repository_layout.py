@@ -33,11 +33,7 @@ class RepositoryLayoutTest(unittest.TestCase):
 
     def test_removed_source_is_rejected(self):
         with (
-            mock.patch.object(
-                sys,
-                "argv",
-                ["scripts/pipeline/execute_cases.py", "--source", "legacy", "--case-dir", "config/scenarios"],
-            ),
+            mock.patch.object(sys, "argv", ["scripts/pipeline/execute_cases.py", "--source", "legacy", "--case-dir", "config/scenarios"]),
             self.assertRaises(SystemExit) as error,
         ):
             parallel_runner.main()
@@ -55,11 +51,7 @@ class RepositoryLayoutTest(unittest.TestCase):
             for command, arguments in commands:
                 with self.subTest(command=command):
                     result = subprocess.run(
-                        [sys.executable, str(ROOT / command), *arguments],
-                        cwd=cwd,
-                        text=True,
-                        capture_output=True,
-                        timeout=30,
+                        [sys.executable, str(ROOT / command), *arguments], cwd=cwd, text=True, capture_output=True, timeout=30
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertTrue(result.stdout.strip())
@@ -78,7 +70,4 @@ class RepositoryLayoutTest(unittest.TestCase):
         self.assertEqual(expected, sorted(p["id"] for p in plans))
 
     def test_cases_root_contains_only_concrete_case_packages(self):
-        self.assertEqual(
-            {"__init__.py"},
-            {path.name for path in (ROOT / "src/cases").glob("*.py")},
-        )
+        self.assertEqual({"__init__.py"}, {path.name for path in (ROOT / "src/cases").glob("*.py")})

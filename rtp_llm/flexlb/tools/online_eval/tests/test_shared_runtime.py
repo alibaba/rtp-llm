@@ -21,8 +21,7 @@ class SharedRuntimeTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "import sys; import adapters.requests; "
-                'assert not any(k.startswith("flexlb_test_framework") for k in sys.modules)',
+                'import sys; import adapters.requests; assert not any(k.startswith("flexlb_test_framework") for k in sys.modules)',
             ],
             cwd=ROOT,
             capture_output=True,
@@ -33,12 +32,7 @@ class SharedRuntimeTests(unittest.TestCase):
     def test_unfinished_output_is_not_business_success(self):
         rows = ClientRecords("run1")
         record = rows.issue(42, lambda: 1)
-        rows.update(
-            record,
-            schedule={"status": "OK"},
-            stream={"status": "OK", "first_output_s": 2},
-            consumer_exit_s=3,
-        )
+        rows.update(record, schedule={"status": "OK"}, stream={"status": "OK", "first_output_s": 2}, consumer_exit_s=3)
         self.assertFalse(request_success(record))
         rows.update(record, business_finished=True)
         self.assertTrue(request_success(record))
@@ -46,14 +40,7 @@ class SharedRuntimeTests(unittest.TestCase):
         self.assertFalse(request_success(record))
 
     def test_python_blanks_ambient_priority_and_preserves_explicit_override(self):
-        with patch.dict(
-            os.environ,
-            {
-                "FORCE_PRIORITY": "99",
-                "RAMP_UP_SECONDS": "500",
-                "REPLAY_UNIQUE_PREFIX": "false",
-            },
-        ):
+        with patch.dict(os.environ, {"FORCE_PRIORITY": "99", "RAMP_UP_SECONDS": "500", "REPLAY_UNIQUE_PREFIX": "false"}):
             env = ClientOps(None)._base_env({"PRIORITY": 70})
         self.assertEqual(env["PRIORITY"], "70")
         for name in ("FORCE_PRIORITY", "RAMP_UP_SECONDS", "REPLAY_UNIQUE_PREFIX"):
@@ -69,8 +56,7 @@ class SharedRuntimeTests(unittest.TestCase):
         for source in sources:
             names.update(
                 re.findall(
-                    r'(?:System\.getenv|env(?:Int|Long|Double|Bool)?|input\.(?:text|integer|longValue|number|flag))\("([A-Z_]+)"',
-                    source,
+                    r'(?:System\.getenv|env(?:Int|Long|Double|Bool)?|input\.(?:text|integer|longValue|number|flag))\("([A-Z_]+)"', source
                 )
             )
             names.update(re.findall(r'System\.getenv\(\)\.getOrDefault\("([A-Z_]+)"', source))

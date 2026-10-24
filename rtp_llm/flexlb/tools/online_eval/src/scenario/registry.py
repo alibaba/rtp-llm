@@ -110,8 +110,7 @@ class CaseRegistry:
             if not isinstance(definition, CaseDefinition):
                 raise ValueError(case.module + ": CASE must be a CaseDefinition")
             if "default" not in definition.builders or any(
-                not re.fullmatch(r"[a-z][a-z0-9_]*", name) or not callable(build)
-                for name, build in definition.builders.items()
+                not re.fullmatch(r"[a-z][a-z0-9_]*", name) or not callable(build) for name, build in definition.builders.items()
             ):
                 raise ValueError(case.module + ": invalid case builders")
             for name, builder in definition.builders.items():
@@ -233,9 +232,7 @@ def view(name, *, capabilities=None):
     from reporting.view_config import view as read_view
 
     current = registry() if capabilities is None else capabilities
-    return read_view(
-        name, capability=current.views.get(name), plan_loader=partial(load_metric_plan, capabilities=current)
-    )
+    return read_view(name, capability=current.views.get(name), plan_loader=partial(load_metric_plan, capabilities=current))
 
 
 def _selected_views(names):
@@ -248,9 +245,7 @@ def write_views(directory, analysis, names=None, *, deadline=None, selected=None
     from reporting.workload import write_views as render
 
     names = names or ["default.yaml"]
-    return render(
-        directory, analysis, names, deadline=deadline, selected=_selected_views(names) if selected is None else selected
-    )
+    return render(directory, analysis, names, deadline=deadline, selected=_selected_views(names) if selected is None else selected)
 
 
 def report_declaration(value, *, kind, path="reports"):

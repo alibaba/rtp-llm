@@ -6,12 +6,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from adapters.java_mock_resources import (
-    JavaMockBudget,
-    LaneLease,
-    ResourcePlanError,
-    plan_lane_leases,
-)
+from adapters.java_mock_resources import JavaMockBudget, LaneLease, ResourcePlanError, plan_lane_leases
 
 
 class ResourcePlanTest(unittest.TestCase):
@@ -48,11 +43,7 @@ with tempfile.TemporaryDirectory() as d:
     path.write_text(json.dumps(dict(lease_schema_version=1, **lease.to_manifest())))
     validate_lease(path, dict(backend='java_mock', bounded=True, initial_workers=661, max_dynamic_additions=0), lease.child_env())
 """
-        env = dict(
-            os.environ,
-            FLEXLB_FT_WORKER_PORT_CAPACITY="700",
-            PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"),
-        )
+        env = dict(os.environ, FLEXLB_FT_WORKER_PORT_CAPACITY="700", PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
         subprocess.run([sys.executable, "-c", script], env=env, check=True)
 
     def test_cumulative_adds_not_peak_live_workers_bound_ports(self):
@@ -77,42 +68,22 @@ with tempfile.TemporaryDirectory() as d:
         self.assertTrue({55300, 55301, 55302} <= set(ports))
 
     def test_lane_uses_maximum_sequential_demand_not_sum(self):
-        leases = plan_lane_leases(
-            [[JavaMockBudget(100, 0), JavaMockBudget(2, 100)]],
-            master_base=18080,
-            mock_base=55151,
-        )
+        leases = plan_lane_leases([[JavaMockBudget(100, 0), JavaMockBudget(2, 100)]], master_base=18080, mock_base=55151)
         self.assertEqual(102, leases[0].worker_capacity)
 
     def test_minimum_stride_keeps_full_mock_windows_disjoint(self):
-        leases = plan_lane_leases(
-            [[JavaMockBudget(6, 16)]] * 3,
-            master_base=18080,
-            mock_base=55151,
-            mock_stride=153,
-        )
+        leases = plan_lane_leases([[JavaMockBudget(6, 16)]] * 3, master_base=18080, mock_base=55151, mock_stride=153)
         ports = [p for lease in leases for p in lease.ports()]
         self.assertEqual(len(ports), len(set(ports)))
         with self.assertRaises(ResourcePlanError):
-            plan_lane_leases(
-                [[JavaMockBudget(6, 16)]],
-                master_base=18080,
-                mock_base=55151,
-                mock_stride=152,
-            )
+            plan_lane_leases([[JavaMockBudget(6, 16)]], master_base=18080, mock_base=55151, mock_stride=152)
 
     def test_cross_lane_and_cross_side_overlap_rejected(self):
         with self.assertRaisesRegex(ResourcePlanError, "overlap"):
             plan_lane_leases([[JavaMockBudget(6, 16)]] * 2, master_base=18080, mock_base=18091)
 
     def test_port_limits_and_self_overlap_rejected(self):
-        for master, base in [
-            (1023, 55151),
-            (18080, 1024),
-            (65531, 55151),
-            (18080, 65400),
-            (18080, 18081),
-        ]:
+        for master, base in [(1023, 55151), (18080, 1024), (65531, 55151), (18080, 65400), (18080, 18081)]:
             with self.subTest(master=master, base=base), self.assertRaises(ResourcePlanError):
                 LaneLease(0, master, base, 6)
 

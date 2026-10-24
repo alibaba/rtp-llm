@@ -33,9 +33,7 @@ def joint_distribution(model: LineageModel, strata=1024):
         strata=strata,
         sort_key=["blocks", "shared_blocks"],
         sampling="equal_mass_midpoint_strata",
-        warm_pairs=[
-            list(pair) for pair in stratified([(blocks, shared) for blocks, shared in events if shared], strata)
-        ],
+        warm_pairs=[list(pair) for pair in stratified([(blocks, shared) for blocks, shared in events if shared], strata)],
         cold_blocks=stratified([blocks for blocks, shared in events if not shared], strata),
     )
 
@@ -90,9 +88,6 @@ def generated_shape(rows):
         blocks.append(row["il"] / BLOCK)
         shared.append(index.observe(labels) * row["cache_key_block_size"] / BLOCK)
         families[
-            tuple(
-                tuple(v) if isinstance(v, list) else v
-                for v in row["input_token_blocks"][: 4096 // row["cache_key_block_size"]]
-            )
+            tuple(tuple(v) if isinstance(v, list) else v for v in row["input_token_blocks"][: 4096 // row["cache_key_block_size"]])
         ] += 1
     return dict(blocks=blocks, shared=shared, families=sorted(families.values(), reverse=True))

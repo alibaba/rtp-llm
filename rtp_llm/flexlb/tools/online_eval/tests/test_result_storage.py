@@ -34,10 +34,7 @@ def test_common_gate_summary_preserves_status_semantics(status, verdict, validit
 
 
 def test_requirement_failure_dominates_business_failure_without_mutating_checks():
-    checks = [
-        CheckResult("business", "FAIL", actual=1, expected=2),
-        CheckResult("coverage", "FAIL", actual=1, expected=3),
-    ]
+    checks = [CheckResult("business", "FAIL", actual=1, expected=2), CheckResult("coverage", "FAIL", actual=1, expected=3)]
     summary = gate_result(checks, requirements={"coverage"})
     assert summary["verdict"] == summary["validity"] == "INVALID"
     assert [row["status"] for row in summary["checks"]] == ["FAIL", "ERROR"]
@@ -127,12 +124,7 @@ def test_archive_keeps_intentionally_distinct_presentation_metadata(tmp_path):
     MetricStore(dict(metrics_schema_version=1, definitions={}, metrics={})).save(tmp_path)
     execution = dict(id="execution", status="ERROR", workload={}, stages=[], test_kind="functional")
     analysis = dict(
-        id="presentation",
-        status="FAIL",
-        workload={"report_status": "PASS"},
-        clock_anchor={"epoch_s": 1},
-        series={},
-        statistic_sources={},
+        id="presentation", status="FAIL", workload={"report_status": "PASS"}, clock_anchor={"epoch_s": 1}, series={}, statistic_sources={}
     )
     published = publish_run(tmp_path, definition(), execution, analysis=analysis)
     with ExperimentReader(published["experiment"]) as reader:
@@ -149,9 +141,7 @@ def test_version_one_analysis_remains_readable(tmp_path):
         writer.add_json("experiment.json", definition(), ArtifactRole.DEFINITION)
         writer.add_json("execution.json", {}, ArtifactRole.EXECUTION)
         writer.add_json("completeness.json", {}, ArtifactRole.EXECUTION)
-        writer.add_json(
-            "run/metrics.json", dict(metrics_schema_version=1, definitions={}, metrics={}), ArtifactRole.OBSERVATIONS
-        )
+        writer.add_json("run/metrics.json", dict(metrics_schema_version=1, definitions={}, metrics={}), ArtifactRole.OBSERVATIONS)
         writer.add_json(
             "analysis.json",
             dict(experiment_analysis_schema_version=1, metadata=metadata, metrics="run/metrics.json", anchor_epoch_s=1),

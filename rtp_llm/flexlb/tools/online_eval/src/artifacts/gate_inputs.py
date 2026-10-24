@@ -35,16 +35,7 @@ def trace_workload_sha(path):
 def compact_flow(snapshot):
     """Keep every request and gate field; verbose RPC metadata stays in the journal."""
     issued = {"rid", "send_start_epoch_ms", "input_len", "output_len", "pacing_lag_ms"}
-    terminal = {
-        "rid",
-        "send_start_epoch_ms",
-        "input_len",
-        "output_len",
-        "status",
-        "total_ms",
-        "ttft_ms",
-        "observed_output_tokens",
-    }
+    terminal = {"rid", "send_start_epoch_ms", "input_len", "output_len", "status", "total_ms", "ttft_ms", "observed_output_tokens"}
     result = {k: v for k, v in snapshot.items() if k not in {"issued", "records"}}
     result["issued"] = [{k: v for k, v in row.items() if k in issued} for row in snapshot["issued"]]
     result["records"] = [{k: v for k, v in row.items() if k in terminal} for row in snapshot["records"]]

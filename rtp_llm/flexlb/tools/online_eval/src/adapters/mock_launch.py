@@ -49,9 +49,7 @@ class MockLaunchSpec:
                 continue
             value = getattr(self, field.name)
             if value is not None:
-                args.extend(
-                    ["--" + field.name.replace("_", "-"), str(value).lower() if type(value) is bool else str(value)]
-                )
+                args.extend(["--" + field.name.replace("_", "-"), str(value).lower() if type(value) is bool else str(value)])
         args.extend(self.extra_args)
         # Local launchers reserve discovery ownership after caller-supplied flags.
         if self.discovery_file is not None:

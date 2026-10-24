@@ -11,21 +11,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from adapters.environment_config import (
-    DEFAULT_MASTER_HTTP_PORT,
-    MASTER_PORT_MAX_SHIFTS,
-    MASTER_PORT_STRIDE,
-    EnvSpec,
-    MasterSpec,
-)
+from adapters.environment_config import DEFAULT_MASTER_HTTP_PORT, MASTER_PORT_MAX_SHIFTS, MASTER_PORT_STRIDE, EnvSpec, MasterSpec
 from adapters.java_mock_resources import VICTIM_OFFSETS
 from adapters.master_lifecycle import MasterLifecycle
 from adapters.mock_launch import MockLaunchSpec
-from adapters.zk_helper import (
-    ZK_LAUNCH_CMD_ENV,
-    ZK_READY_TIMEOUT_S,
-    ZkHelperOps,
-)
+from adapters.zk_helper import ZK_LAUNCH_CMD_ENV, ZK_READY_TIMEOUT_S, ZkHelperOps
 from artifacts.startup import startup_phase
 from flexlb_cfg import render_process_config
 from mode_profiles import resolve_address_plan
@@ -87,12 +77,7 @@ def _write_master_config(env: "FlexEnv", spec=None) -> Path:
     path = env.run_dir / "master_config.json"
     spec = env.spec if spec is None else spec
     path.write_text(
-        render_process_config(
-            spec.master_profile,
-            spec.config_overrides,
-            jvm_heap=spec.master_jvm_heap,
-            raw_config=spec.raw_config,
-        ),
+        render_process_config(spec.master_profile, spec.config_overrides, jvm_heap=spec.master_jvm_heap, raw_config=spec.raw_config),
         encoding="utf-8",
     )
     return path
@@ -276,9 +261,7 @@ class EnvManager:
         if spec.masters and spec.zk_consistency is not None and spec.zk_consistency.mode == "helper":
             with startup_phase(env.run_dir, "zookeeper/artifacts", deadline):
                 override = os.environ.get(ZK_LAUNCH_CMD_ENV)
-                env.zk_launch_argv = (
-                    shlex.split(override) if override else ZkHelperOps.default_launch_argv(resolve_java21())
-                )
+                env.zk_launch_argv = shlex.split(override) if override else ZkHelperOps.default_launch_argv(resolve_java21())
 
         # perf config
         env.perf_file.write_text(json.dumps(spec.perf, indent=2))
@@ -330,9 +313,9 @@ class EnvManager:
             n_prefill=spec.n_prefill,
             n_decode=spec.n_decode,
             base_grpc_port=env.base_grpc_port,
-            unique_engine_ips=resolve_address_plan(
-                spec.runtime_mode, unique_loopback_supported=sys.platform != "darwin"
-            )["unique_engine_ips"],
+            unique_engine_ips=resolve_address_plan(spec.runtime_mode, unique_loopback_supported=sys.platform != "darwin")[
+                "unique_engine_ips"
+            ],
             event_loop_threads=spec.event_loop_threads,
             completion_threads=spec.completion_threads,
             rpc_threads=spec.rpc_threads,
@@ -356,13 +339,7 @@ class EnvManager:
         with startup_phase(env.run_dir, "mock", deadline):
             wait_ready(deadline, "mock/http", lambda: port_accepting(env.mock_http_port), process=proc)
             for label, path in [("endpoints", env.endpoint_file), ("discovery", env.discovery_file)]:
-                wait_ready(
-                    deadline,
-                    "mock/" + label,
-                    lambda: path.exists() and path.stat().st_size > 0,
-                    process=proc,
-                    interval_s=0.1,
-                )
+                wait_ready(deadline, "mock/" + label, lambda: path.exists() and path.stat().st_size > 0, process=proc, interval_s=0.1)
         self._log(f"mock cluster up (pid={proc.pid}, http={env.mock_http_port})")
 
     # -- master ------------------------------------------------------------
@@ -378,12 +355,8 @@ class EnvManager:
 
     # -- HA dual-master orchestration (gated on spec.masters) --------------
 
-    def start_master_instance(
-        self, env: FlexEnv, mspec: MasterSpec, log_name: Optional[str] = None, *, deadline=None
-    ) -> ManagedProcess:
-        return self._master_operation(
-            self.master_lifecycle.start_master_instance, env, mspec, log_name, deadline=deadline
-        )
+    def start_master_instance(self, env: FlexEnv, mspec: MasterSpec, log_name: Optional[str] = None, *, deadline=None) -> ManagedProcess:
+        return self._master_operation(self.master_lifecycle.start_master_instance, env, mspec, log_name, deadline=deadline)
 
     def master_instance_target(self, env: FlexEnv, name: str) -> str:
         return self.master_lifecycle.master_instance_target(env, name)
@@ -417,24 +390,14 @@ class EnvManager:
         deadline = startup_deadline(deadline, ZK_READY_TIMEOUT_S)
         with startup_phase(env.run_dir, "zookeeper", deadline):
             connect = wait_ready(
-                deadline,
-                "zookeeper/ready",
-                lambda: ZkHelperOps.find_ready_connect_string(log_file),
-                process=proc,
-                interval_s=0.2,
+                deadline, "zookeeper/ready", lambda: ZkHelperOps.find_ready_connect_string(log_file), process=proc, interval_s=0.2
             )
         env.zk_connect_string = connect
         self._log(f"ZK helper up (pid={proc.pid}, connectString={connect})")
 
     # -- victims (engine-kill chaos) --------------------------------------
 
-    def start_victim(
-        self,
-        env: FlexEnv,
-        role: str,
-        perf_file: Optional[Path] = None,
-        heap: str = "1g",
-    ) -> ManagedProcess:
+    def start_victim(self, env: FlexEnv, role: str, perf_file: Optional[Path] = None, heap: str = "1g") -> ManagedProcess:
         """Start a standalone single-engine JVM (role: prefill|decode) at base+150."""
         grpc_port = env.base_grpc_port + VICTIM_OFFSETS[1]
         http_port = grpc_port - 1

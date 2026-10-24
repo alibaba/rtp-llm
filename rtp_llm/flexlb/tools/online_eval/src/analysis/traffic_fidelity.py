@@ -11,14 +11,7 @@ from traffic.lineage_model import DEFAULT_PREFIX_BLOCK_SIZE as BLOCK
 from traffic.statistics import distribution
 
 DEFAULT_THRESHOLDS = dict(length_ks=[0.03, 0.10], joint_tv=[0.15, 0.35], depth_ks=[0.05, 0.25])
-BINS = dict(
-    length_log2_min=9,
-    length_log2_max=21,
-    length_bins=32,
-    depth_max_blocks=2000,
-    depth_bins=16,
-    overflow="clamped_to_edge_bin",
-)
+BINS = dict(length_log2_min=9, length_log2_max=21, length_bins=32, depth_max_blocks=2000, depth_bins=16, overflow="clamped_to_edge_bin")
 
 
 def ks(a, b):
@@ -105,12 +98,6 @@ def grade(metrics, limits=None, valid=True):
     if not valid:
         return dict(length="UNASSESSED", cache="UNASSESSED", structure="UNASSESSED")
     limits = thresholds(limits)
-    scores = {
-        key: 0 if value <= limits[key][0] else 1 if value <= limits[key][1] else 2 for key, value in metrics.items()
-    }
+    scores = {key: 0 if value <= limits[key][0] else 1 if value <= limits[key][1] else 2 for key, value in metrics.items()}
     names = ["PASS", "WARN", "FAIL"]
-    return dict(
-        length=names[scores["length_ks"]],
-        structure=names[max(scores.values())],
-        cache=names[max(1, max(scores.values()))],
-    )
+    return dict(length=names[scores["length_ks"]], structure=names[max(scores.values())], cache=names[max(1, max(scores.values()))])

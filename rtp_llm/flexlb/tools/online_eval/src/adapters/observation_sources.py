@@ -28,9 +28,7 @@ class Sources:
         self.env = ctx.env
         if self.env is None:
             raise DebugUnavailable("snapshot requires setup")
-        self.mock_port = (
-            self.env.mock_http_port if {"engine_snapshot", "engine_requests"} & set(params["sources"]) else None
-        )
+        self.mock_port = self.env.mock_http_port if {"engine_snapshot", "engine_requests"} & set(params["sources"]) else None
         if set(params["sources"]) - SOURCES:
             raise DebugUnavailable("unsupported observation source")
         self.records = None
@@ -77,10 +75,7 @@ class Sources:
                         members = set(data)
                     initial = self.initial_members.setdefault(name, frozenset(members))
                     sample["membership"] = dict(
-                        initial=sorted(initial),
-                        present=sorted(members),
-                        added=sorted(members - initial),
-                        removed=sorted(initial - members),
+                        initial=sorted(initial), present=sorted(members), added=sorted(members - initial), removed=sorted(initial - members)
                     )
                     sample["engine_generation"] = None  # Mock HTTP does not provide restart identity.
                     sample["targets"] = self.params["targets"]
@@ -93,10 +88,7 @@ class Sources:
                 if sample["status"] == "ok":
                     sample["status"] = "error"
                 sample["errors"].append(dict(type=type(error).__name__, message=str(error)))
-            sample.update(
-                finished_mono=self.ctx.clock(),
-                finished_epoch_ms=int(time.time() * 1000),
-            )
+            sample.update(finished_mono=self.ctx.clock(), finished_epoch_ms=int(time.time() * 1000))
             sources[name] = sample
         payload = dict(
             observation_snapshot_schema_version=1,

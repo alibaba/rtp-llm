@@ -33,12 +33,8 @@ def default(case):
     )
     allowed = c["qps"] * (1 + c["qps_tolerance"])
     if c["min_requests"] > allowed * c["measure_s"] or c["min_goodput_rps"] > allowed:
-        raise ValueError(
-            "request/goodput floors exceed the declared offered-load envelope; review thresholds after changing playback.qps"
-        )
-    bind_mock_engine_metrics(
-        case, inputs["engine_tps"], {field: "tokens/s" for field in inputs["engine_tps"]["fields"]}
-    )
+        raise ValueError("request/goodput floors exceed the declared offered-load envelope; review thresholds after changing playback.qps")
+    bind_mock_engine_metrics(case, inputs["engine_tps"], {field: "tokens/s" for field in inputs["engine_tps"]["fields"]})
     budget = c["warmup_s"] + c["measure_s"]
     uniform_gate_flow(flow, client, duration_s=budget + 10, trace_duration_s=client.playback.duration_s)
     case.step("setup", "setup", timeout_s=180)
@@ -46,18 +42,11 @@ def default(case):
     case.step(
         "measure",
         "performance_observe",
-        params=dict(
-            flow=output("traffic", "flow"), criteria=c, gate_input=inputs["engine_tps"], observation=data["observation"]
-        ),
+        params=dict(flow=output("traffic", "flow"), criteria=c, gate_input=inputs["engine_tps"], observation=data["observation"]),
         timeout_s=budget + 30,
     )
     case.step("stop", "java_flow_stop", params={"flow": output("traffic", "flow")})
-    case.step(
-        "drain",
-        "java_flow_drain",
-        params={"flow": output("traffic", "flow")},
-        timeout_s=client.limits.drain_timeout_s + 30,
-    )
+    case.step("drain", "java_flow_drain", params={"flow": output("traffic", "flow")}, timeout_s=client.limits.drain_timeout_s + 30)
     case.observe(
         "gate",
         "performance_finish",

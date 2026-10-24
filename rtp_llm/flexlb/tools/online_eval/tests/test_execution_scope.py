@@ -34,8 +34,7 @@ def frozen(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "changed",
-    ["src/cases/other_case/program.py", "config/report_views/unselected.yaml", "src/reporting/assets/chart.js"],
+    "changed", ["src/cases/other_case/program.py", "config/report_views/unselected.yaml", "src/reporting/assets/chart.js"]
 )
 def test_unrelated_case_or_unused_presentation_does_not_invalidate_frozen_plan(frozen, changed):
     root, plan, sha = frozen

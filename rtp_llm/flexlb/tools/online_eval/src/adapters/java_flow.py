@@ -11,9 +11,7 @@ from adapters.playback_evidence import PlaybackEvidence
 from file_digest import sha256_file
 from file_io import read_json, write_json
 
-RUN_LOCAL_ENVIRONMENT = frozenset(
-    {"TRACE_FILE", "FLOW_CONTROL_DIR", "FLOW_RUN_ID", "GRPC_TARGET", "MASTER_DISCOVERY_FILE", "OUTPUT_DIR"}
-)
+RUN_LOCAL_ENVIRONMENT = frozenset({"TRACE_FILE", "FLOW_CONTROL_DIR", "FLOW_RUN_ID", "GRPC_TARGET", "MASTER_DISCOVERY_FILE", "OUTPUT_DIR"})
 
 
 def evidence_environment(environment):
@@ -23,17 +21,7 @@ def evidence_environment(environment):
 
 class JavaFlowGroup:
     def __init__(
-        self,
-        client,
-        directory,
-        *,
-        run_id,
-        group_id,
-        phase_id,
-        poll_s,
-        max_events=50_000,
-        collection_profile="request",
-        monitor=None,
+        self, client, directory, *, run_id, group_id, phase_id, poll_s, max_events=50_000, collection_profile="request", monitor=None
     ):
         if not all(isinstance(x, str) and x for x in (run_id, group_id, phase_id)):
             raise ValueError("flow identities must be explicit nonempty strings")
@@ -84,10 +72,7 @@ class JavaFlowGroup:
             ),
         )
         (self.directory / "flow-input.json").write_text(
-            json.dumps(
-                dict(**self.identity, trace=self.trace_manifest, environment=env),
-                indent=2,
-            )
+            json.dumps(dict(**self.identity, trace=self.trace_manifest, environment=env), indent=2)
         )
         deadline.check()
         from adapters.client_session import launch_client
@@ -95,11 +80,7 @@ class JavaFlowGroup:
         self.proc, _ = launch_client(self.client, env, self.directory, self.directory / "client.log", deadline)
         if self.monitor is not None:
             target_path = self.directory / "metrics-target.json"
-            self._wait_control(
-                lambda observation: target_path.exists(),
-                deadline,
-                "client monitor endpoint absent",
-            )
+            self._wait_control(lambda observation: target_path.exists(), deadline, "client monitor endpoint absent")
             self.monitor.add_client_target(self.monitor_target, read_json(target_path)["url"], deadline=deadline)
             write_json(self.directory / "metrics-ready", int(time.time() * 1000) + 500)
         from adapters.flow_control import wait_flow_started
@@ -180,10 +161,7 @@ class JavaFlowGroup:
 
             self.stop_command = stop_sending(self.control, self.identity, self.stop_command)
             observation = self._wait_control(
-                lambda o: o.status.state.sending_finished,
-                deadline,
-                "flow did not stop accepting new trace records",
-                on_poll=on_poll,
+                lambda o: o.status.state.sending_finished, deadline, "flow did not stop accepting new trace records", on_poll=on_poll
             )
         return dict(self.identity, **observation.status.encode(), process_returncode=observation.process_returncode)
 
@@ -191,10 +169,7 @@ class JavaFlowGroup:
         if self._drain_result is not None:
             return self._drain_result.encode(self.identity)
         self._wait_control(
-            lambda o: o.status.state.terminal and o.process_returncode is not None,
-            deadline,
-            "flow did not drain and exit",
-            on_poll=on_poll,
+            lambda o: o.status.state.terminal and o.process_returncode is not None, deadline, "flow did not drain and exit", on_poll=on_poll
         )
         # Read evidence once after the producer has exited; failures remain retryable.
         state = self.status()
@@ -207,10 +182,7 @@ class JavaFlowGroup:
         )
         result.validate(self.stop_command)
         if self.monitor is not None:
-            self.monitor.end_target(
-                self.monitor_target,
-                result.status.recorded_epoch_ms / 1000,
-            )
+            self.monitor.end_target(self.monitor_target, result.status.recorded_epoch_ms / 1000)
         self._drain_result = result
         return self._drain_result.encode(self.identity)
 

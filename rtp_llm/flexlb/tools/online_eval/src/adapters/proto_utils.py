@@ -77,9 +77,7 @@ def _generate_proto(proto_name: str) -> tuple:
                 try:
                     subprocess.run(command, check=True, capture_output=True)
                 except subprocess.CalledProcessError as exc:
-                    raise RuntimeError(
-                        "protobuf generation failed: " + exc.stderr.decode("utf-8", errors="replace")
-                    ) from exc
+                    raise RuntimeError("protobuf generation failed: " + exc.stderr.decode("utf-8", errors="replace")) from exc
                 generated = {file.name: hashlib.sha256(file.read_bytes()).hexdigest() for file in stage.glob("*.py")}
                 (stage / "generated.json").write_text(json.dumps(generated), encoding="utf-8")
                 if out_dir.exists():

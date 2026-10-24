@@ -12,9 +12,7 @@ def source_priority(source):
     try:
         return PRIORITY.validate(priority, "traffic.source.parameters.priority")
     except ValueError as exc:
-        raise ValueError(
-            f"traffic.source.parameters.priority must be an integer in [{PRIORITY.minimum},{PRIORITY.maximum}]"
-        ) from exc
+        raise ValueError(f"traffic.source.parameters.priority must be an integer in [{PRIORITY.minimum},{PRIORITY.maximum}]") from exc
 
 
 def uniform_gate_flow(flow, client, *, duration_s, trace_duration_s):

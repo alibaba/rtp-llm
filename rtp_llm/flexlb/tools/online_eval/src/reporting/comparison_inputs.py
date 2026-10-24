@@ -56,9 +56,7 @@ def load_snapshot(path, *, view=None):
             digest,
             "bundle",
             None,
-            read_json(directory / "execution.json")
-            if manifest["files"].get("execution.json", {}).get("path") == "execution.json"
-            else {},
+            read_json(directory / "execution.json") if manifest["files"].get("execution.json", {}).get("path") == "execution.json" else {},
         )
     if not path.is_file() or not zipfile.is_zipfile(path):
         raise ValueError("comparison input must be a run bundle directory or experiment ZIP: " + str(path))

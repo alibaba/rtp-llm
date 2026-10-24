@@ -47,13 +47,7 @@ def test_numeric_constraints_apply_to_nested_traffic_paths():
     assert plan.variants[0].stages[1].params["count"] == 10000
 
 
-@pytest.mark.parametrize(
-    "name,stage",
-    [
-        ("master_performance", "measure"),
-        ("cache_scale_in", "scale_in"),
-    ],
-)
+@pytest.mark.parametrize("name,stage", [("master_performance", "measure"), ("cache_scale_in", "scale_in")])
 def test_qps_has_one_yaml_source_and_is_frozen_into_observation(name, stage):
     data = config(name)
     qps = data["parameters"]["traffic"]["client"]["playback"]["qps"] * 1.01
@@ -69,15 +63,7 @@ def test_qps_has_one_yaml_source_and_is_frozen_into_observation(name, stage):
 
 
 @pytest.mark.parametrize(
-    "patch",
-    [
-        dict(metric="ha_gate/typo"),
-        dict(typo=1),
-        dict(min_samples=0),
-        dict(metric={}),
-        dict(op=[]),
-        dict(warning_profiles=[{}]),
-    ],
+    "patch", [dict(metric="ha_gate/typo"), dict(typo=1), dict(min_samples=0), dict(metric={}), dict(op=[]), dict(warning_profiles=[{}])]
 )
 def test_inactive_ha_checks_are_validated_without_running_their_program(patch):
     data = config("master_ha_failover")
@@ -95,10 +81,7 @@ def test_ha_windows_and_check_binding_are_yaml_data_and_compile_to_typed_outputs
     stages = {s.id: s for s in document.variants[0].stages}
     assert stages["analysis"].params["windows"]["baseline"]["until_offset_s"] == -3
     assert stages["analysis"].params["checks"]["b_success"]["window"] == "both"
-    with (
-        patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)),
-        patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)),
-    ):
+    with patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
         assert len(compile_scenarios([("ha.yaml", document)], handlers=handlers())) == 4
 
 

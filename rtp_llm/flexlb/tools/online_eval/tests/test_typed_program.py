@@ -95,9 +95,7 @@ def test_real_case_builds_typed_program_and_compiles_without_dictionary_decoders
     assert [instance.to_dict() for instance in ScenarioCompiler(handlers()).compile(documents)] == projected
 
 
-@pytest.mark.parametrize(
-    "reference", ["stages.future.output.count", "stages.setup.output.missing", "stages.adapter.output.count"]
-)
+@pytest.mark.parametrize("reference", ["stages.future.output.count", "stages.setup.output.missing", "stages.adapter.output.count"])
 def test_adapter_payload_references_are_checked_before_publishing_current_outputs(reference):
     program = load_scenarios(ROOT / "config/scenarios/request_completion.yaml")[0][1]
     variant = program.variants[0]

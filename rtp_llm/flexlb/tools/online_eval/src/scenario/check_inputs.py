@@ -10,12 +10,7 @@ def metric_criterion(case, spec, *, metric, unit, windows, op, path, profiles=Fa
     fields(spec, {"expected"}, path, optional=set(binding) | ({"expected_by_profile"} if profiles else set()))
     declared = {**binding, **spec}
     check_windows(declared["windows"], available=windows, path=path + ".windows")
-    if (
-        declared["metric"] != metric
-        or declared["unit"] != unit
-        or set(declared["windows"]) != set(windows)
-        or declared["op"] != op
-    ):
+    if declared["metric"] != metric or declared["unit"] != unit or set(declared["windows"]) != set(windows) or declared["op"] != op:
         raise ValueError(path + ": metric, unit, windows or comparison does not match the measurement contract")
     validate_comparison(op, spec["expected"])
     if type(spec["expected"]) not in (int, float):
@@ -39,13 +34,7 @@ def compile_metric_checks(case, checks, rules, *, namespace, path="parameters.ch
     result = {}
     for name, (key, metric, op, unit, windows) in rules.items():
         result[key], _ = metric_criterion(
-            case,
-            checks[name],
-            metric=namespace + "/" + metric,
-            unit=unit,
-            windows=windows,
-            op=op,
-            path=path + "." + name,
+            case, checks[name], metric=namespace + "/" + metric, unit=unit, windows=windows, op=op, path=path + "." + name
         )
     return result
 

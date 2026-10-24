@@ -13,11 +13,7 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
-from scenario import (
-    ScenarioError,
-    compile_scenarios,
-    load_scenarios,
-)
+from scenario import ScenarioError, compile_scenarios, load_scenarios
 from scenario.catalog import handlers
 from scenario.compiler import plan_counts
 from scenario.lease import validate_lease
@@ -84,10 +80,7 @@ def select(plans, exact_ids):
 
 
 def summarize(rows):
-    failed = sum(
-        row["status"] in ("FAIL", "ERROR", "TIMEOUT") or any(c["status"] != "PASS" for c in row["cleanup"])
-        for row in rows
-    )
+    failed = sum(row["status"] in ("FAIL", "ERROR", "TIMEOUT") or any(c["status"] != "PASS" for c in row["cleanup"]) for row in rows)
     return dict(
         passed_count=sum(r["status"] == "PASS" for r in rows),
         failed_count=failed,
@@ -108,9 +101,7 @@ def main(argv=None):
     parser.add_argument("--plan-sha256", help="expected frozen plan checksum")
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--archive", type=Path, help="optional single-file scenario experiment archive")
-    parser.add_argument(
-        "--retain-tsdb", action="store_true", help="keep stopped TSDB directories after verified archiving"
-    )
+    parser.add_argument("--retain-tsdb", action="store_true", help="keep stopped TSDB directories after verified archiving")
     parser.add_argument("--lease-json", type=Path)
     parser.add_argument("--experiment-params", help="JSON: case -> dotted YAML field -> scalar value")
     args = parser.parse_args(argv)
@@ -158,9 +149,7 @@ def run_selected(args):
                     compile_scenarios(
                         exact_documents(
                             preselect_documents(
-                                load_scenarios(args.source, experiment_params=args.experiment_params),
-                                args.suite,
-                                kind=args.kind,
+                                load_scenarios(args.source, experiment_params=args.experiment_params), args.suite, kind=args.kind
                             ),
                             args.instances,
                         ),
@@ -210,11 +199,7 @@ def run_selected(args):
             if retirement is not None:
                 rows.append(
                     dict(
-                        {
-                            key: plan[key]
-                            for key in ("id", "scenario_id", "variant_id", "profile", "grade", "test_kind")
-                            if key in plan
-                        },
+                        {key: plan[key] for key in ("id", "scenario_id", "variant_id", "profile", "grade", "test_kind") if key in plan},
                         status="ERROR",
                         duration_ms=0,
                         not_started=True,
@@ -261,12 +246,7 @@ def run_selected(args):
                 {"run": args.out_dir},
                 kind="scenario",
                 status="incomplete" if cancelled.is_set() or len(rows) != len(plans) else "complete",
-                metadata={
-                    "profile": args.profile,
-                    "grade": args.grade,
-                    "instance_count": len(rows),
-                    "planned_count": len(plans),
-                },
+                metadata={"profile": args.profile, "grade": args.grade, "instance_count": len(rows), "planned_count": len(plans)},
             )
     return summarize(rows)["exit_code"]
 

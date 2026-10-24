@@ -30,9 +30,7 @@ def test_invalid_metric_binding_reports_configuration_error(filename, metric_id)
     identity = next(iter(data["charts"]["curves"]))
     style = data["charts"]["curves"][identity]
     style["metric_id"] = metric_id
-    message = (
-        "metric_id must be a string" if metric_id is None or isinstance(metric_id, (list, dict)) else "curve must bind"
-    )
+    message = "metric_id must be a string" if metric_id is None or isinstance(metric_id, (list, dict)) else "curve must bind"
     with patch("reporting.view_config.load_document", return_value=data):
         with pytest.raises(ScenarioError, match=message):
             view(filename)
@@ -100,9 +98,7 @@ def test_query_definition_errors_are_strict_and_path_aware(tmp_path, change, mes
 def test_produced_definition_errors_are_configuration_errors(tmp_path, change, message):
     spec = dict(producer="ha_evidence", source_type="client_journal", unit="count", value_kind="scalar", labels=[])
     spec.update(change)
-    (tmp_path / "test.yaml").write_text(
-        json.dumps(dict(metric_plan_schema_version=5, produced={"derived/count": spec}))
-    )
+    (tmp_path / "test.yaml").write_text(json.dumps(dict(metric_plan_schema_version=5, produced={"derived/count": spec})))
     with patch("monitoring.query_plan.CATALOG", tmp_path):
         with pytest.raises(ScenarioError, match=message):
             load_plan("test.yaml")

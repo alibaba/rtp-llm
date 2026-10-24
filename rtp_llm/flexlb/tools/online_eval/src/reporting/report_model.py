@@ -126,11 +126,7 @@ def compare_controls(left, right, *, required=(), allowed=()):
             return
         if isinstance(a, dict) and isinstance(b, dict):
             for key in sorted(set(a) | set(b)):
-                walk(
-                    a.get(key, missing),
-                    b.get(key, missing),
-                    path + "/" + key.replace("~", "~0").replace("/", "~1"),
-                )
+                walk(a.get(key, missing), b.get(key, missing), path + "/" + key.replace("~", "~0").replace("/", "~1"))
         elif a is missing or b is missing or a != b:
             differences.append(
                 dict(

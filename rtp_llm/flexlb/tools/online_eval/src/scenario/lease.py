@@ -39,10 +39,7 @@ def validate_lease(path, budget, environ=None):
     }
     if data["child_env"] != expected or any(env.get(k) != v for k, v in expected.items()):
         raise ScenarioError("process port environment differs from parent lease")
-    intervals = [
-        dict(side="master", first=m, last=m + 5),
-        dict(side="mock", first=b - 1, last=b + MOCK_WINDOW_LAST),
-    ]
+    intervals = [dict(side="master", first=m, last=m + 5), dict(side="mock", first=b - 1, last=b + MOCK_WINDOW_LAST)]
     if data["intervals"] != intervals or not (m + 5 < b - 1 or b + MOCK_WINDOW_LAST < m):
         raise ScenarioError("lease intervals invalid or overlap")
     if data["lock_names"] != [f"m{m}_{m + 5}.lock", f"g{b - 1}_{b + MOCK_WINDOW_LAST}.lock"]:

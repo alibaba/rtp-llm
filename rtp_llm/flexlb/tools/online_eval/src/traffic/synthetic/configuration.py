@@ -123,9 +123,7 @@ def distribution(spec):
         raise ValueError("invalid distribution dimensions")
     if any(type(v) is not int or not 1 <= v <= 2147483647 for v in values):
         raise ValueError("distribution values must be positive int32")
-    if any(type(w) not in (int, float) or not math.isfinite(w) or w < 0 for w in weights) or not 0 < sum(
-        weights
-    ) < float("inf"):
+    if any(type(w) not in (int, float) or not math.isfinite(w) or w < 0 for w in weights) or not 0 < sum(weights) < float("inf"):
         raise ValueError("invalid distribution weights")
     return spec
 
@@ -133,11 +131,7 @@ def distribution(spec):
 def resolve(parameters: dict, *, document=None) -> tuple[SyntheticWorkload, dict | None]:
     if not isinstance(parameters, dict) or set(parameters) - FIELDS:
         raise ValueError("unknown realistic parameter; arrival controls belong to client")
-    if (
-        type(parameters.get("seed")) is not int
-        or type(parameters.get("count")) is not int
-        or not 1 <= parameters["count"] <= 1000000
-    ):
+    if type(parameters.get("seed")) is not int or type(parameters.get("count")) is not int or not 1 <= parameters["count"] <= 1000000:
         raise ValueError("explicit integer seed and bounded count required")
     p = dict(parameters)
     profile = p.pop("profile", DEFAULT_PROFILE if "families" not in p else None)
@@ -167,22 +161,10 @@ def resolve(parameters: dict, *, document=None) -> tuple[SyntheticWorkload, dict
         if k not in p:
             raise ValueError("explicit shape or synthetic parameter profile required: " + k)
     p["block_size"] = prefix_block_size(p["block_size"])
-    for k in (
-        "families",
-        "shared_blocks",
-        "prefix_blocks",
-        "suffix_blocks",
-        "session_requests",
-        "session_growth_blocks",
-        "priority",
-    ):
+    for k in ("families", "shared_blocks", "prefix_blocks", "suffix_blocks", "session_requests", "session_growth_blocks", "priority"):
         if type(p[k]) is not int or p[k] < 0:
             raise ValueError("invalid " + k)
-    if (
-        not 1 <= p["families"] <= 1000000
-        or p["session_requests"] < 1
-        or not PRIORITY.minimum <= p["priority"] <= PRIORITY.maximum
-    ):
+    if not 1 <= p["families"] <= 1000000 or p["session_requests"] < 1 or not PRIORITY.minimum <= p["priority"] <= PRIORITY.maximum:
         raise ValueError("invalid family/session/priority")
     for k, hi in (("zipf_alpha", 4), ("cold_fraction", 1)):
         if type(p[k]) not in (int, float) or not math.isfinite(p[k]) or not 0 <= p[k] <= hi:
@@ -198,9 +180,7 @@ def resolve(parameters: dict, *, document=None) -> tuple[SyntheticWorkload, dict
         distribution(p["input_distribution"])
     pinned = p["pinned_blocks"]
     if not isinstance(pinned, list) or any(
-        not isinstance(block, list)
-        or len(block) != p["block_size"]
-        or any(type(t) is not int or not 0 <= t <= 2147483647 for t in block)
+        not isinstance(block, list) or len(block) != p["block_size"] or any(type(t) is not int or not 0 <= t <= 2147483647 for t in block)
         for block in pinned
     ):
         raise ValueError("pinned_blocks must contain exact full blocks of int32 tokens")
@@ -211,11 +191,7 @@ def resolve(parameters: dict, *, document=None) -> tuple[SyntheticWorkload, dict
         raise ValueError("unknown sampling method")
     if p["sampling"] == "joint":
         joint = p.get("joint_distribution")
-        if (
-            not isinstance(joint, dict)
-            or type(joint.get("schema_version")) is not int
-            or joint.get("schema_version") != 1
-        ):
+        if not isinstance(joint, dict) or type(joint.get("schema_version")) is not int or joint.get("schema_version") != 1:
             raise ValueError("joint sampling requires joint_distribution schema_version 1")
         warm, cold = joint.get("warm_pairs"), joint.get("cold_blocks")
         if not isinstance(warm, list) or not isinstance(cold, list):

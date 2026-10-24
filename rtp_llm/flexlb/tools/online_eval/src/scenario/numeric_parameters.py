@@ -21,9 +21,7 @@ SOURCE_NUMBERS = {
     "traffic.source.parameters.priority": PRIORITY,
 }
 OUTPUT_DISTRIBUTION_NUMBERS = number_fields(
-    COUNT,
-    "traffic.source.parameters.output_distribution.mean_tokens",
-    "traffic.source.parameters.output_distribution.seed",
+    COUNT, "traffic.source.parameters.output_distribution.mean_tokens", "traffic.source.parameters.output_distribution.seed"
 )
 JAVA_FLOW_NUMBERS = {
     **number_fields(NONNEGATIVE, "traffic.client.playback.qps", "traffic.poll_s"),
@@ -63,12 +61,7 @@ def parameter_rules(defaults):
     if not isinstance(defaults, Mapping):
         raise ScenarioError("numeric parameter contract must be a mapping")
     for path, rule in defaults.items():
-        if (
-            type(path) is not str
-            or not path
-            or any(not part for part in path.split("."))
-            or not isinstance(rule, NumberRule)
-        ):
+        if type(path) is not str or not path or any(not part for part in path.split(".")) or not isinstance(rule, NumberRule):
             raise ScenarioError("invalid program numeric parameter contract")
         if path in COMMON_NUMBERS:
             bounds = {key: getattr(rule, key) for key in ("minimum", "maximum") if getattr(rule, key) is not None}
@@ -90,8 +83,6 @@ def narrow_parameters(rules, refinements):
     if unknown:
         raise ScenarioError("parameter_schema: unknown configuration fields " + str(sorted(unknown)))
     try:
-        return {
-            path: rule.narrow(refinements[path], path) if path in refinements else rule for path, rule in rules.items()
-        }
+        return {path: rule.narrow(refinements[path], path) if path in refinements else rule for path, rule in rules.items()}
     except ValueError as exc:
         raise ScenarioError(str(exc)) from exc

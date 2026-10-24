@@ -21,9 +21,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
     def test_core_inventory_does_not_compile_large_workload(self):
         documents = preselect_documents(load_scenarios(ROOT / "config/scenarios"), "quick")
         self.assertNotIn("cache_scale_in", {doc.id for _, doc in documents})
-        self.assertEqual(
-            len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "quick")), 1
-        )
+        self.assertEqual(len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "quick")), 1)
 
     def run_plan(self, workload, observation=True, setup_error=False, cleanup_error=False):
         doc = source()
@@ -33,10 +31,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
             dict(
                 id="default",
                 metadata=dict(kind="workload" if workload else "functional", description=doc["description"]),
-                execution=dict(
-                    collection="request",
-                    monitoring=dict(capture_metrics=False, sample_interval_s=1, collector_shutdown_s=2),
-                ),
+                execution=dict(collection="request", monitoring=dict(capture_metrics=False, sample_interval_s=1, collector_shutdown_s=2)),
             )
         ]
         plan = compile_scenarios([("fixture", doc)])[0]
@@ -46,9 +41,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
         backend.fail_setup = setup_error
         backend.fail_cleanup = cleanup_error
         with tempfile.TemporaryDirectory() as out:
-            result = (execute_workload if workload else execute_instance)(
-                plan, backend, artifact_dir=out, clock=clock, sleeper=clock.sleep
-            )
+            result = (execute_workload if workload else execute_instance)(plan, backend, artifact_dir=out, clock=clock, sleeper=clock.sleep)
             if workload:
                 self.assertTrue(Path(result["workload"]["report"]).is_file())
                 report = json.loads(Path(result["workload"]["report"]).with_name("analysis.json").read_text())["result"]
@@ -93,13 +86,9 @@ class WorkloadRuntimeTests(unittest.TestCase):
         self.assertIn("master_ha_failover::default::batch-window", w)
         self.assertEqual(
             {plan["scenario_id"] + "::" + plan["variant_id"] for plan in classify(plans, kind="functional")},
-            {
-                "request_completion::default",
-            },
+            {"request_completion::default"},
         )
-        self.assertTrue(
-            {"cache_sync_recovery::steady::batch-window", "cache_sync_recovery::recovery::batch-window"} <= w
-        )
+        self.assertTrue({"cache_sync_recovery::steady::batch-window", "cache_sync_recovery::recovery::batch-window"} <= w)
         self.assertEqual(len(plans), 22)
         self.assertIn("cache_scale_in::default::single-nonbatch", w)
 
@@ -109,21 +98,11 @@ class WorkloadRuntimeTests(unittest.TestCase):
             mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)),
         ):
             plans = compile_scenarios(load_scenarios(ROOT / "config/scenarios"), handlers=handlers())
-        expected = {
-            "request_completion::default",
-        }
-        for profile in (
-            "batch-window",
-            "single-batch",
-            "single-nonbatch",
-            "window-nonbatch",
-        ):
+        expected = {"request_completion::default"}
+        for profile in ("batch-window", "single-batch", "single-nonbatch", "window-nonbatch"):
             selected = classify([plan for plan in plans if plan["profile"] == profile], "quick")
             self.assertEqual(len(selected), 1)
-            self.assertEqual(
-                {plan["scenario_id"] + "::" + plan["variant_id"] for plan in selected},
-                expected,
-            )
+            self.assertEqual({plan["scenario_id"] + "::" + plan["variant_id"] for plan in selected}, expected)
 
 
 def test_teardown_collects_queries_without_materializing_metrics():
@@ -138,6 +117,4 @@ def test_teardown_collects_queries_without_materializing_metrics():
     policy.events = []
     ctx = SimpleNamespace(env_epoch=1, env=None, clock=lambda: 0, stage_deadline=mock.Mock(expires_at=60))
     policy.before_stage(ctx, {"id": "stop", "action": "teardown"})
-    monitor.stop.assert_called_once_with(
-        5, export=True, materialize=False, archive_timeout=55, deadline=ctx.stage_deadline
-    )
+    monitor.stop.assert_called_once_with(5, export=True, materialize=False, archive_timeout=55, deadline=ctx.stage_deadline)

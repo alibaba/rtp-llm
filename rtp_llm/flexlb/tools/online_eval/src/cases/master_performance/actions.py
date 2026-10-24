@@ -79,9 +79,7 @@ def observe(ctx, p, deadline):
             else:
                 state = flow.control_status()
                 timestamp = ctx.clock()
-            row = dict(
-                clock.stamp(timestamp), state=state.get("state"), process_returncode=state.get("process_returncode")
-            )
+            row = dict(clock.stamp(timestamp), state=state.get("state"), process_returncode=state.get("process_returncode"))
             row["epoch_ms"] = row["epoch_s"] * 1000
             budget.append(row)
             evidence["samples"].append(row)
@@ -96,8 +94,7 @@ def observe(ctx, p, deadline):
                 raise ValueError("traffic ended before measurement completed")
             if epoch >= lo and not measurement_started:
                 ctx.record_event(
-                    "measurement_started",
-                    timestamp=dict(epoch_s=lo / 1000, monotonic_s=clock.origin_monotonic_s + c["warmup_s"]),
+                    "measurement_started", timestamp=dict(epoch_s=lo / 1000, monotonic_s=clock.origin_monotonic_s + c["warmup_s"])
                 )
                 measurement_started = True
             if epoch >= hi:
@@ -108,10 +105,7 @@ def observe(ctx, p, deadline):
         evidence["errors"].append(str(exc))
     path = ctx.artifact_dir / "performance-gate-evidence.json"
     write_json(path, evidence)
-    return StageOutput(
-        {"evidence": ctx.register_resource("gate_evidence", evidence, historical=True)},
-        artifacts=[str(path)],
-    )
+    return StageOutput({"evidence": ctx.register_resource("gate_evidence", evidence, historical=True)}, artifacts=[str(path)])
 
 
 def finish(ctx, p, deadline):
@@ -139,8 +133,7 @@ def finish(ctx, p, deadline):
             )
             e["engine_tps_samples"] = [row for rows in raw.field_rows().values() for row in rows]
             e["raw_evidence"] = dict(
-                path="performance-measurement/manifest.json",
-                sha256=sha256_file(ctx.artifact_dir / "performance-measurement/manifest.json"),
+                path="performance-measurement/manifest.json", sha256=sha256_file(ctx.artifact_dir / "performance-measurement/manifest.json")
             )
         except Exception as exc:
             e["errors"].append("engine TPS collection: " + str(exc))

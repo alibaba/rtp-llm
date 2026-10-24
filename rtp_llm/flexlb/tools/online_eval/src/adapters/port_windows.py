@@ -91,9 +91,7 @@ def mock_base() -> int:
     return _env_int("FLEXLB_FT_PARALLEL_MOCK_BASE", MOCK_BASE_GRPC_PORT)
 
 
-def lane_env(
-    lane_idx: int, mock_stride: int = MOCK_PORT_STRIDE, master: int | None = None, mock: int | None = None
-) -> dict[str, str]:
+def lane_env(lane_idx: int, mock_stride: int = MOCK_PORT_STRIDE, master: int | None = None, mock: int | None = None) -> dict[str, str]:
     """Port-partition env overlay for lane *lane_idx* (0-based).
 
     Every key below is process-global in adapters.environment_config (read at import), so a
@@ -310,11 +308,7 @@ def _probe_candidate(master, mock, stride, lanes):
 
 
 def _admission(master, mock, provenance, holders, probe=None, warnings=(), *, dry_run=False, admitted=True):
-    status = (
-        {lane: f"BUSY(:{_fmt_taken(ports)})" if ports else "FREE" for lane, ports in probe.items()}
-        if probe is not None
-        else None
-    )
+    status = {lane: f"BUSY(:{_fmt_taken(ports)})" if ports else "FREE" for lane, ports in probe.items()} if probe is not None else None
     if dry_run:
         _close_window_locks(holders)
         holders = []
@@ -324,18 +318,13 @@ def _admission(master, mock, provenance, holders, probe=None, warnings=(), *, dr
 def _infrastructure_failure(exc, where, master, mock, provenance, warnings, dry_run):
     detail = f"port-window preflight infrastructure failure ({where}: {exc!r})"
     if not dry_run:
-        raise PortAdmissionError(
-            f"error: {detail} — refusing to run: a false all-free result would burn port timeouts"
-        ) from exc
+        raise PortAdmissionError(f"error: {detail} — refusing to run: a false all-free result would burn port timeouts") from exc
     return _admission(
         master,
         mock,
         provenance,
         [],
-        warnings=[
-            *warnings,
-            f"warning: {detail} — dry-run continues without the port status column; a real run fails fast here",
-        ],
+        warnings=[*warnings, f"warning: {detail} — dry-run continues without the port status column; a real run fails fast here"],
         admitted=False,
     )
 
@@ -373,9 +362,7 @@ def admit_port_window(
         if mock - 1 < 1024 or master < 1024:
             detail = f"base below the privileged floor 1024 (master {master}, mock window starts {mock - 1})"
             if not dry_run:
-                raise PortAdmissionError(
-                    f"error: explicit port window unusable: {detail} (explicit base env is a contract, never shifted)"
-                )
+                raise PortAdmissionError(f"error: explicit port window unusable: {detail} (explicit base env is a contract, never shifted)")
             return _admission(
                 master,
                 mock,
@@ -395,12 +382,8 @@ def admit_port_window(
             )
         if detail:
             if not dry_run:
-                raise PortAdmissionError(
-                    f"error: explicit port window unusable: {detail} (explicit base env is a contract, never shifted)"
-                )
-            warnings.append(
-                f"warning: {detail} — dry-run continues, a real run will fail-fast here (explicit base env is a contract)"
-            )
+                raise PortAdmissionError(f"error: explicit port window unusable: {detail} (explicit base env is a contract, never shifted)")
+            warnings.append(f"warning: {detail} — dry-run continues, a real run will fail-fast here (explicit base env is a contract)")
         return _admission(master, mock, provenance, holders, probe, warnings, dry_run=dry_run, admitted=detail is None)
 
     rejections: list[str] = []

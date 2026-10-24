@@ -33,14 +33,10 @@ SECRET_WORDS = (
 
 def _secret_like(path: Path) -> bool:
     name = path.name.lower()
-    return name in {"token", "token.txt", "token.json", "token.yaml", "token.yml", ".env"} or any(
-        word in name for word in SECRET_WORDS
-    )
+    return name in {"token", "token.txt", "token.json", "token.yaml", "token.yml", ".env"} or any(word in name for word in SECRET_WORDS)
 
 
-def create_archive(
-    output: Path, sources: dict[str, Path], *, kind: str, status: str = "complete", metadata: dict | None = None
-) -> dict:
+def create_archive(output: Path, sources: dict[str, Path], *, kind: str, status: str = "complete", metadata: dict | None = None) -> dict:
     """Archive named run directories/files; never follow symlinks or include output."""
     output = Path(output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -57,9 +53,7 @@ def create_archive(
     fd, temp_name = tempfile.mkstemp(prefix=".experiment-", suffix=".zip", dir=output.parent)
     os.close(fd)
     try:
-        with zipfile.ZipFile(
-            temp_name, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3, allowZip64=True
-        ) as archive:
+        with zipfile.ZipFile(temp_name, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3, allowZip64=True) as archive:
             for label, root in sources.items():
                 if not label or "/" in label or label in (".", ".."):
                     raise ValueError(f"invalid source label: {label!r}")
@@ -78,11 +72,7 @@ def create_archive(
                     size = path.stat().st_size
                     record = {"path": name, "size": size, "sha256": sha256_file(path)}
                     archive.write(
-                        path,
-                        name,
-                        compress_type=zipfile.ZIP_STORED
-                        if path.suffix.lower() in PRECOMPRESSED
-                        else zipfile.ZIP_DEFLATED,
+                        path, name, compress_type=zipfile.ZIP_STORED if path.suffix.lower() in PRECOMPRESSED else zipfile.ZIP_DEFLATED
                     )
                     record["completeness"] = "full"
                     manifest["files"].append(record)
@@ -100,9 +90,7 @@ def main(argv=None):
     create = sub.add_parser("create")
     create.add_argument("--out", type=Path, required=True)
     create.add_argument("--kind", choices=("case", "scenario", "ab"), required=True)
-    create.add_argument(
-        "--source", action="append", required=True, help="label=directory or label=file; repeat as needed"
-    )
+    create.add_argument("--source", action="append", required=True, help="label=directory or label=file; repeat as needed")
     create.add_argument("--status", choices=("complete", "incomplete"), default="complete")
     create.add_argument("--metadata-json", default="{}", help="small provenance/verdict object")
     inspect = sub.add_parser("inspect")

@@ -110,8 +110,6 @@ def test_analysis_profiles_a_one_pass_iterator_without_a_file():
     from analysis.workload_profile import profile
     from traffic.token_plan import TokenPlanRequest
 
-    requests = iter(
-        [TokenPlanRequest(0, 4, 2, (b"a", b"b"), "shared"), TokenPlanRequest(1, 4, 2, (b"a", b"b"), "shared")]
-    )
+    requests = iter([TokenPlanRequest(0, 4, 2, (b"a", b"b"), "shared"), TokenPlanRequest(1, 4, 2, (b"a", b"b"), "shared")])
     assert profile(requests, (2,))["infinite_cache_potential_hit"] == 0.5
     assert list(requests) == []

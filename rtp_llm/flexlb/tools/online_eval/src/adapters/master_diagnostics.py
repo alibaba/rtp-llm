@@ -42,11 +42,7 @@ def validate_snapshot(payload):
             if page["status"] not in ("ok", "partial"):
                 continue
             capability = payload["capabilities"][name]
-            if (
-                type(capability["version"]) is not int
-                or capability["version"] != 1
-                or not isinstance(capability["features"], list)
-            ):
+            if type(capability["version"]) is not int or capability["version"] != 1 or not isinstance(capability["features"], list):
                 raise ValueError("unsupported component version")
             if name == "scheduler":
                 if not all(_integer(page["data"][k]) for k in ("queued_requests", "inflight_requests")):
@@ -135,9 +131,7 @@ class MasterDiagnosticsClient:
         params = urllib.parse.urlencode(dict(include=",".join(include), limit=limit, budget_ms=budget_ms))
         started = time.monotonic()
         try:
-            with urllib.request.urlopen(
-                f"{self.base_url}/rtp_llm/debug/snapshot?{params}", timeout=self.timeout_s
-            ) as response:
+            with urllib.request.urlopen(f"{self.base_url}/rtp_llm/debug/snapshot?{params}", timeout=self.timeout_s) as response:
                 body = response.read(MAX_BYTES + 1)
             if len(body) > MAX_BYTES:
                 raise DebugUnavailable("diagnostic response exceeds byte budget")

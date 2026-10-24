@@ -16,10 +16,7 @@ class Threshold:
     end: float
 
     def __post_init__(self):
-        if (
-            any(type(x) not in (int, float) or not math.isfinite(x) for x in (self.value, self.start, self.end))
-            or self.start >= self.end
-        ):
+        if any(type(x) not in (int, float) or not math.isfinite(x) for x in (self.value, self.start, self.end)) or self.start >= self.end:
             raise ValueError("gate line requires a finite value and increasing window")
 
 

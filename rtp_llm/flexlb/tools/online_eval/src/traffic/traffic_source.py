@@ -47,10 +47,7 @@ def validate_plan(path, namespace=None):
                 return type(t) is int and 0 <= t <= 2147483647
 
             if any(
-                not (
-                    valid_token(t)
-                    or (compact and isinstance(t, list) and len(t) == block_size and all(valid_token(v) for v in t))
-                )
+                not (valid_token(t) or (compact and isinstance(t, list) and len(t) == block_size and all(valid_token(v) for v in t)))
                 for t in tokens
             ):
                 raise ValueError("invalid token id")
@@ -128,29 +125,20 @@ class SourceSpecification:
                 if self.version is not None and self.version != str(captured.model.metadata.version):
                     raise ValueError("source version disagrees with model contents")
                 return projector.project_model(
-                    path,
-                    parameters,
-                    namespace,
-                    captured.model,
-                    source_sha256=captured.sha256,
-                    max_requests=max_requests,
+                    path, parameters, namespace, captured.model, source_sha256=captured.sha256, max_requests=max_requests
                 )
             return projector.write_trace(path, self.parameters, namespace, base_dir, max_requests=max_requests)
         raise ValueError("scenario source must be trace/prefix_lineage")
 
 
-def materialize(
-    path, specification, namespace, base_dir, *, max_requests=None, captured: CapturedDataset | None = None
-):
+def materialize(path, specification, namespace, base_dir, *, max_requests=None, captured: CapturedDataset | None = None):
     source = SourceSpecification.read(specification)
     return publish_plan(
         path,
         specification,
         namespace,
         base_dir,
-        lambda temporary: source.write_trace(
-            temporary, namespace, base_dir, max_requests=max_requests, captured=captured
-        ),
+        lambda temporary: source.write_trace(temporary, namespace, base_dir, max_requests=max_requests, captured=captured),
         max_requests=max_requests,
     )
 

@@ -74,9 +74,7 @@ def startup_options(plan):
 
 
 def captured_fields():
-    return {
-        item.name: item.metadata["capture"] for item in fields(EnvironmentDeclaration) if item.metadata.get("capture")
-    }
+    return {item.name: item.metadata["capture"] for item in fields(EnvironmentDeclaration) if item.metadata.get("capture")}
 
 
 def reconfigurable_fields():
@@ -102,9 +100,7 @@ class PrefillCachePolicy:
         if type(capacity) is not int or capacity < 0:
             raise ValueError("prefill memory cache policy requires captured capacity or explicit memory_blocks")
         prefill["enable_gpu_prefix_tree"] = self.device_tree
-        prefill["memory_cache"] = dict(
-            enabled=capacity > 0, capacity_blocks=capacity, enable_prefix_tree=self.memory_tree
-        )
+        prefill["memory_cache"] = dict(enabled=capacity > 0, capacity_blocks=capacity, enable_prefix_tree=self.memory_tree)
 
 
 @dataclass(frozen=True)
@@ -113,12 +109,7 @@ class ModelDeviation:
     reason: str
 
     def __post_init__(self):
-        if (
-            type(self.baseline) is not str
-            or not self.baseline.strip()
-            or type(self.reason) is not str
-            or not self.reason.strip()
-        ):
+        if type(self.baseline) is not str or not self.baseline.strip() or type(self.reason) is not str or not self.reason.strip():
             raise ValueError("model deviation requires baseline and reason")
 
 
@@ -206,11 +197,7 @@ class EnvironmentDeclaration:
         )
 
     def to_dict(self):
-        result = {
-            field.name: copy.deepcopy(getattr(self, field.name))
-            for field in fields(self)
-            if getattr(self, field.name) is not None
-        }
+        result = {field.name: copy.deepcopy(getattr(self, field.name)) for field in fields(self) if getattr(self, field.name) is not None}
         for name in ("prefill_perf", "model_override", "zookeeper"):
             value = getattr(self, name)
             if value is not None:
@@ -237,6 +224,4 @@ class EnvironmentDeclaration:
 
 
 # Simple field rules are metadata of their typed declaration, not a second schema.
-OPTIONAL_SCALARS = {
-    item.name: item.metadata["scalar"] for item in fields(EnvironmentDeclaration) if "scalar" in item.metadata
-}
+OPTIONAL_SCALARS = {item.name: item.metadata["scalar"] for item in fields(EnvironmentDeclaration) if "scalar" in item.metadata}

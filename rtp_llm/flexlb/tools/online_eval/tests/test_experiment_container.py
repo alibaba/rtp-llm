@@ -19,10 +19,7 @@ from test_scenario_runtime import Backend, Clock, source
 
 def definition():
     return dict(
-        experiment_definition_schema_version=1,
-        plan={"id": "case::default::profile"},
-        dependencies={"renderer.py": "a" * 64},
-        views={},
+        experiment_definition_schema_version=1, plan={"id": "case::default::profile"}, dependencies={"renderer.py": "a" * 64}, views={}
     )
 
 
@@ -165,9 +162,7 @@ def test_analysis_restored_from_canonical_metrics_without_duplicate_series(tmp_p
     store = MetricStore(document)
     store.save(tmp_path)
     series, sources, _, _ = store.series(100)
-    analysis = dict(
-        id="case", clock_anchor={"epoch_s": 100}, series=series, statistic_sources=sources, status="PASS", workload={}
-    )
+    analysis = dict(id="case", clock_anchor={"epoch_s": 100}, series=series, statistic_sources=sources, status="PASS", workload={})
     original = copy.deepcopy(analysis)
     published = publish_run(tmp_path, definition(), execution(), analysis=analysis)
     with ExperimentReader(published["experiment"]) as reader:
@@ -318,9 +313,7 @@ def test_preferred_view_selects_case_before_default(tmp_path):
     frozen = definition()
     frozen["plan"]["reports"] = ["default.yaml", "case.yaml"]
     result = execution()
-    result["workload"] = {
-        "reports": {"default.yaml": str(first / "report.html"), "case.yaml": str(second / "report.html")}
-    }
+    result["workload"] = {"reports": {"default.yaml": str(first / "report.html"), "case.yaml": str(second / "report.html")}}
     published = publish_run(tmp_path, frozen, result)
     with ExperimentReader(published["experiment"]) as reader:
         assert reader.preferred_view == "case.yaml"

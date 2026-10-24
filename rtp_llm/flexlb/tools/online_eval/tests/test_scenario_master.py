@@ -30,14 +30,8 @@ class MasterActionsTest(unittest.TestCase):
             },
         )
         manager = Mock()
-        manager.master_instance_target.side_effect = lambda _env, name: {
-            "A": "127.0.0.1:18082",
-            "B": "127.0.0.1:18085",
-        }[name]
-        with (
-            patch("cases.master_ha_failover.client.ClientOps"),
-            patch("traffic.traffic_source.materialize", side_effect=replay_trace),
-        ):
+        manager.master_instance_target.side_effect = lambda _env, name: {"A": "127.0.0.1:18082", "B": "127.0.0.1:18085"}[name]
+        with patch("cases.master_ha_failover.client.ClientOps"), patch("traffic.traffic_source.materialize", side_effect=replay_trace):
             runner = HaReplayClient(
                 manager,
                 env,
@@ -49,12 +43,7 @@ class MasterActionsTest(unittest.TestCase):
             )
         path = Path(runner._overrides["MASTER_DISCOVERY_FILE"])
         self.assertEqual(
-            {
-                "hosts": [
-                    {"http": "127.0.0.1:18080", "grpc": "127.0.0.1:18082"},
-                    {"http": "127.0.0.1:18083", "grpc": "127.0.0.1:18085"},
-                ]
-            },
+            {"hosts": [{"http": "127.0.0.1:18080", "grpc": "127.0.0.1:18082"}, {"http": "127.0.0.1:18083", "grpc": "127.0.0.1:18085"}]},
             json.loads(path.read_text()),
         )
         frozen = json.loads((runner.out_dir / "flow-input.json").read_text())
@@ -113,10 +102,7 @@ class MasterActionsTest(unittest.TestCase):
         manager.master_instance_target.side_effect = lambda env, name: (
             f"{env.master_specs[name].bind_ip}:{env.master_specs[name].http_port + 2}"
         )
-        with (
-            patch("cases.master_ha_failover.client.ClientOps"),
-            patch("traffic.traffic_source.materialize", side_effect=replay_trace),
-        ):
+        with patch("cases.master_ha_failover.client.ClientOps"), patch("traffic.traffic_source.materialize", side_effect=replay_trace):
             runner = HaReplayClient(
                 manager,
                 env,
@@ -129,12 +115,7 @@ class MasterActionsTest(unittest.TestCase):
         self.assertNotIn("GRPC_TARGETS", runner._overrides)
         self.assertNotIn("GRPC_TARGET", runner._overrides)
         self.assertEqual(
-            {
-                "hosts": [
-                    {"http": "127.0.0.1:18080", "grpc": "127.0.0.1:18082"},
-                    {"http": "127.0.0.2:18080", "grpc": "127.0.0.2:18082"},
-                ]
-            },
+            {"hosts": [{"http": "127.0.0.1:18080", "grpc": "127.0.0.1:18082"}, {"http": "127.0.0.2:18080", "grpc": "127.0.0.2:18082"}]},
             json.loads(Path(runner._overrides["MASTER_DISCOVERY_FILE"]).read_text()),
         )
 
@@ -153,10 +134,7 @@ class MasterActionsTest(unittest.TestCase):
             },
         )
         manager = Mock()
-        manager.master_instance_target.side_effect = lambda _env, name: {
-            "A": "127.0.0.1:18082",
-            "B": "127.0.0.1:18085",
-        }[name]
+        manager.master_instance_target.side_effect = lambda _env, name: {"A": "127.0.0.1:18082", "B": "127.0.0.1:18085"}[name]
 
         def short_trace(path, *_args, **_kwargs):
             path.write_text('{"ts":0}\n{"ts":1000}\n')
@@ -234,38 +212,19 @@ class MasterActionsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.proc = SimpleNamespace(
-            pid=123,
-            alive=Mock(return_value=True),
-            proc=Mock(),
-            freeze=Mock(),
-            unfreeze=Mock(),
-        )
+        self.proc = SimpleNamespace(pid=123, alive=Mock(return_value=True), proc=Mock(), freeze=Mock(), unfreeze=Mock())
         self.manager = Mock()
-        self.ctx = RuntimeContext(
-            {},
-            SimpleNamespace(manager=self.manager),
-            self.tmp.name,
-            time.monotonic,
-            time.sleep,
-        )
+        self.ctx = RuntimeContext({}, SimpleNamespace(manager=self.manager), self.tmp.name, time.monotonic, time.sleep)
         from metric_fixtures import PrometheusSession
 
         self.ctx.monitor = PrometheusSession(
-            self.tmp.name,
-            {"mock": "http://unused/metrics"},
-            query_plan="master_ha_failover.yaml",
-            target_kinds={"mock": "mock"},
+            self.tmp.name, {"mock": "http://unused/metrics"}, query_plan="master_ha_failover.yaml", target_kinds={"mock": "mock"}
         )
         self.ctx.ops = Mock()
         self.ctx.ops.master_target.return_value = "master"
         self.ctx.env_epoch = 1
         self.ctx.env = SimpleNamespace(
-            master=self.proc,
-            masters={},
-            master_specs={},
-            master_http_port=18080,
-            spec=SimpleNamespace(n_prefill=2, n_decode=4),
+            master=self.proc, masters={}, master_specs={}, master_http_port=18080, spec=SimpleNamespace(n_prefill=2, n_decode=4)
         )
         self.deadline = Deadline(time.monotonic() + 10, time.monotonic, time.sleep)
 
@@ -316,53 +275,24 @@ class MasterActionsTest(unittest.TestCase):
         self.ctx.cleanup(5)
 
     def test_readiness_records_topology_and_scheduler_owner(self):
-        info = dict(
-            ready=True,
-            worker_summary={
-                "PREFILL": dict(discovered=2, alive=2),
-                "DECODE": dict(discovered=4, alive=4),
-            },
-        )
+        info = dict(ready=True, worker_summary={"PREFILL": dict(discovered=2, alive=2), "DECODE": dict(discovered=4, alive=4)})
         with patch.object(
             master,
             "_master_json",
             side_effect=[
                 info,
-                {
-                    "scheduler_inflight": 0,
-                    "prefill_endpoints": [{"inflight_batches": 0}],
-                    "decode_endpoints": [{"total_load": 0}],
-                },
+                {"scheduler_inflight": 0, "prefill_endpoints": [{"inflight_batches": 0}], "decode_endpoints": [{"total_load": 0}]},
             ],
         ):
             result = master._ready(self.ctx, dict(target="single", inflight_zero=True), self.deadline)
         self.assertEqual(["topology", "inflight"], [c.id for c in result.checks])
-        self.assertEqual(
-            0,
-            json.loads(Path(result.artifacts[0]).read_text())[0]["scheduler_inflight"],
-        )
+        self.assertEqual(0, json.loads(Path(result.artifacts[0]).read_text())[0]["scheduler_inflight"])
 
     def test_rejoining_topology_waits_before_reading_absent_endpoint_ledgers(self):
-        offline = dict(
-            ready=False,
-            worker_summary={
-                "PREFILL": dict(discovered=2, alive=0),
-                "DECODE": dict(discovered=4, alive=0),
-            },
-        )
-        online = dict(
-            ready=True,
-            worker_summary={
-                "PREFILL": dict(discovered=2, alive=2),
-                "DECODE": dict(discovered=4, alive=4),
-            },
-        )
+        offline = dict(ready=False, worker_summary={"PREFILL": dict(discovered=2, alive=0), "DECODE": dict(discovered=4, alive=0)})
+        online = dict(ready=True, worker_summary={"PREFILL": dict(discovered=2, alive=2), "DECODE": dict(discovered=4, alive=4)})
         empty = dict(scheduler_inflight=0, prefill_endpoints=[], decode_endpoints=[])
-        clean = dict(
-            scheduler_inflight=0,
-            prefill_endpoints=[dict(inflight_batches=0)],
-            decode_endpoints=[dict(total_load=0)],
-        )
+        clean = dict(scheduler_inflight=0, prefill_endpoints=[dict(inflight_batches=0)], decode_endpoints=[dict(total_load=0)])
         with patch.object(
             master,
             "_master_json",
@@ -385,11 +315,7 @@ class MasterActionsTest(unittest.TestCase):
         self.assertIsNone(samples[0]["endpoint_loads"])
         self.assertIsNone(samples[1]["topology"]["PREFILL"])
         self.assertIsNone(samples[2]["topology"]["DECODE"])
-        with patch.object(
-            master,
-            "_master_json",
-            side_effect=[online, dict(empty, prefill_endpoints="invalid")],
-        ):
+        with patch.object(master, "_master_json", side_effect=[online, dict(empty, prefill_endpoints="invalid")]):
             with self.assertRaisesRegex(ValueError, "invalid endpoint ledger"):
                 master._ready(self.ctx, dict(target="single", inflight_zero=True), self.deadline)
 
@@ -397,18 +323,10 @@ class MasterActionsTest(unittest.TestCase):
         for value in ({}, {"scheduler_inflight": -1}, {"scheduler_inflight": True}):
             with patch.object(master, "_master_json", side_effect=[{"worker_summary": {}}, value]):
                 with self.assertRaises((KeyError, ValueError)):
-                    master._ready(
-                        self.ctx,
-                        dict(target="single", inflight_zero=True),
-                        self.deadline,
-                    )
+                    master._ready(self.ctx, dict(target="single", inflight_zero=True), self.deadline)
 
     def test_endpoint_owner_counts_are_not_replaced_by_scheduler_zero(self):
-        data = {
-            "scheduler_inflight": 0,
-            "prefill_endpoints": [{"inflight_batches": 2}],
-            "decode_endpoints": [{"total_load": 3}],
-        }
+        data = {"scheduler_inflight": 0, "prefill_endpoints": [{"inflight_batches": 2}], "decode_endpoints": [{"total_load": 3}]}
         self.assertEqual({"prefill": [2], "decode": [3]}, endpoint_loads(data))
         for rows in ([], [{}], [{"total_load": -1}], [{"total_load": True}]):
             with self.assertRaises((ValueError, KeyError)):
@@ -430,22 +348,12 @@ class MasterActionsTest(unittest.TestCase):
     def test_discovery_client_rejects_environment_without_zookeeper(self):
         env = SimpleNamespace(spec=SimpleNamespace(zk_consistency=None))
         with self.assertRaisesRegex(ValueError, "ZK"):
-            HaReplayClient(
-                Mock(),
-                env,
-                Path(self.tmp.name),
-                "flow",
-                source=replay_source(),
-                monitor=self.ctx.monitor,
-                sampler_limits={},
-            )
+            HaReplayClient(Mock(), env, Path(self.tmp.name), "flow", source=replay_source(), monitor=self.ctx.monitor, sampler_limits={})
 
     def test_empty_client_rows_fail_even_zero_error_assertion(self):
         handle = self.ctx.register_resource("ha_rows", [])
         result = ha._client_check(
-            self.ctx,
-            dict(rows=handle, metric="ha_gate/failed_count", op="eq", expected=0, min_samples=1),
-            self.deadline,
+            self.ctx, dict(rows=handle, metric="ha_gate/failed_count", op="eq", expected=0, min_samples=1), self.deadline
         )
         self.assertEqual("ERROR", result.checks[0].status)
         self.assertEqual("INVALID", result.checks[0].evidence["validity"])
@@ -453,9 +361,7 @@ class MasterActionsTest(unittest.TestCase):
     def test_schedule_only_rows_are_not_successful_streams(self):
         handle = self.ctx.register_resource("ha_rows", [{"status": "scheduled"}])
         result = ha._client_check(
-            self.ctx,
-            dict(rows=handle, metric="ha_gate/success_rate", op="eq", expected=1, min_samples=1),
-            self.deadline,
+            self.ctx, dict(rows=handle, metric="ha_gate/success_rate", op="eq", expected=1, min_samples=1), self.deadline
         )
         self.assertEqual(0, result.output["actual"])
         self.assertEqual("FAIL", result.checks[0].status)
@@ -470,9 +376,7 @@ class MasterActionsTest(unittest.TestCase):
             ],
         )
         result = ha._client_check(
-            self.ctx,
-            dict(rows=rows, metric="ha_gate/non_ok_count", op="eq", expected=0, min_samples=3),
-            self.deadline,
+            self.ctx, dict(rows=rows, metric="ha_gate/non_ok_count", op="eq", expected=0, min_samples=3), self.deadline
         )
         self.assertEqual(2, result.output["actual"])
         self.assertEqual("FAIL", result.checks[0].status)
@@ -506,24 +410,11 @@ class MasterActionsTest(unittest.TestCase):
         for row in rows:
             row["wall_clock_ts"] = 1000
             row.setdefault("send_start_epoch_ms", 1000000)
-        out = ha._select_rows(
-            self.ctx,
-            rows,
-            {"status": "schedule_error", "error_kind": "business"},
-            self.deadline,
-        )
+        out = ha._select_rows(self.ctx, rows, {"status": "schedule_error", "error_kind": "business"}, self.deadline)
         self.assertEqual([rows[1]], out)
         empty = self.ctx.register_resource("ha_rows", [])
         verdict = ha._client_check(
-            self.ctx,
-            {
-                "rows": empty,
-                "metric": "ha_gate/non_ok_count",
-                "op": "eq",
-                "expected": 0,
-                "min_samples": 5,
-            },
-            self.deadline,
+            self.ctx, {"rows": empty, "metric": "ha_gate/non_ok_count", "op": "eq", "expected": 0, "min_samples": 5}, self.deadline
         )
         self.assertEqual("ERROR", verdict.checks[0].status)
 
@@ -533,14 +424,7 @@ class MasterActionsTest(unittest.TestCase):
         handle = self.ctx.register_resource("ha_rows", rows)
         verdict = ha._client_check(
             self.ctx,
-            {
-                "rows": handle,
-                "metric": "ha_gate/target_share",
-                "target": "B",
-                "op": "ge",
-                "expected": 0.001,
-                "min_samples": 1,
-            },
+            {"rows": handle, "metric": "ha_gate/target_share", "target": "B", "op": "ge", "expected": 0.001, "min_samples": 1},
             self.deadline,
         )
         self.assertEqual("PASS", verdict.checks[0].status)
@@ -563,8 +447,7 @@ class MasterActionsTest(unittest.TestCase):
             patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)),
         ):
             plans = compile_scenarios(
-                load_scenarios(root / "master_ha_failover.yaml"),
-                handlers={h.name: h for h in master.HANDLERS + ha.HANDLERS},
+                load_scenarios(root / "master_ha_failover.yaml"), handlers={h.name: h for h in master.HANDLERS + ha.HANDLERS}
             )
         self.assertEqual(4, len(plans))
         self.assertEqual(1, len({p["scenario_id"] for p in plans}))
@@ -623,12 +506,7 @@ class MasterActionsTest(unittest.TestCase):
 
     def test_ha_prefill_balance_uses_successful_requests_and_known_pool(self):
         rows = self.ctx.register_resource(
-            "ha_rows",
-            [
-                {"status": "ok", "prefill": "P0"},
-                {"status": "ok", "prefill": "P1"},
-                {"status": "schedule_error", "prefill": None},
-            ],
+            "ha_rows", [{"status": "ok", "prefill": "P0"}, {"status": "ok", "prefill": "P1"}, {"status": "schedule_error", "prefill": None}]
         )
         params = dict(rows=rows, metric="ha_gate/prefill_max_share", op="le", expected=0.75, min_samples=3)
         with patch("adapters.mock_control.topology_pools", return_value={"prefill": ["P0", "P1"]}):
@@ -643,11 +521,7 @@ class MasterActionsTest(unittest.TestCase):
 
     def test_strict_parameters_and_typed_prior_fault(self):
         plan = PlanContext("fault", {})
-        for params in (
-            {"mode": "kill", "pid": 2},
-            {"mode": "stop"},
-            {"mode": "kill", "target": "foreign"},
-        ):
+        for params in ({"mode": "kill", "pid": 2}, {"mode": "stop"}, {"mode": "kill", "target": "foreign"}):
             with self.assertRaises(ValueError):
                 master._fault_validate(params, plan)
         with self.assertRaises(ValueError):

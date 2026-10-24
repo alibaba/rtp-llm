@@ -91,11 +91,7 @@ class FinalizationResult:
 
     def to_dict(self):
         return dict(
-            phase=self.phase.value,
-            status=self.status.value,
-            budget_s=self.budget_s,
-            error=self.error,
-            duration_ms=self.duration_ms,
+            phase=self.phase.value, status=self.status.value, budget_s=self.budget_s, error=self.error, duration_ms=self.duration_ms
         )
 
 
@@ -112,11 +108,7 @@ class WorkloadResult:
 
     @property
     def validity(self):
-        return (
-            "INVALID"
-            if self.runtime_validity == "INVALID" or self.quality is not None and not self.quality.valid
-            else "VALID"
-        )
+        return "INVALID" if self.runtime_validity == "INVALID" or self.quality is not None and not self.quality.valid else "VALID"
 
     def to_dict(self):
         result = deepcopy(self.details)
@@ -139,10 +131,7 @@ class ReportResult:
     reports: dict
 
     def to_dict(self):
-        return dict(
-            report=str(next(iter(self.reports.values()))),
-            reports={name: str(path) for name, path in self.reports.items()},
-        )
+        return dict(report=str(next(iter(self.reports.values()))), reports={name: str(path) for name, path in self.reports.items()})
 
 
 @dataclass
@@ -163,9 +152,7 @@ class RunResult:
         self.outcome = RunOutcome.evaluate(
             OutcomeEvidence(
                 check_statuses=tuple(check.status for check in checks),
-                failed_checks=frozenset(
-                    stage.id + "." + check.id for stage in stages for check in stage.checks if check.status == "FAIL"
-                ),
+                failed_checks=frozenset(stage.id + "." + check.id for stage in stages for check in stage.checks if check.status == "FAIL"),
                 finding_confirmed=frozenset(self.execution.finding_confirmed),
                 finding_resolved=bool(self.execution.finding_resolved),
                 error_statuses=tuple(stage.status.value for stage in stages if stage.error),

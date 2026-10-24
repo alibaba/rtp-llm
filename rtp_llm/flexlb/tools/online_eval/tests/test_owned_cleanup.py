@@ -43,9 +43,7 @@ def test_all_stop_requests_precede_any_join_and_retries_keep_order():
     events = []
     for name in ("one", "two"):
         ctx.add_cleanup(
-            name,
-            lambda d, name=name: events.append("join-" + name),
-            request_stop=lambda name=name: events.append("stop-" + name),
+            name, lambda d, name=name: events.append("join-" + name), request_stop=lambda name=name: events.append("stop-" + name)
         )
     assert all(row["status"] == "PASS" for row in ctx.cleanup(1))
     assert events == ["stop-two", "stop-one", "join-two", "join-one"]
@@ -130,9 +128,7 @@ def test_parent_sigkill_closes_owner_pipe_and_reclaims_workload_group(tmp_path):
         parent.kill()
         parent.wait(timeout=5)
         while time.monotonic() < end:
-            status = subprocess.run(
-                ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
-            ).stdout.strip()
+            status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
             if not status or status.startswith("Z"):
                 break
             time.sleep(0.02)

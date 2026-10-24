@@ -29,10 +29,7 @@ if TYPE_CHECKING:
     from adapters.environment import FlexEnv
 
 
-BASE_MASTER_ENV = {
-    "OTEL_TRACE_SKIP_PATTERN": ".*",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "none",
-}
+BASE_MASTER_ENV = {"OTEL_TRACE_SKIP_PATTERN": ".*", "OTEL_EXPORTER_OTLP_ENDPOINT": "none"}
 
 
 def master_jvm_options(spec):
@@ -61,13 +58,7 @@ def master_arguments(env, mspec=None):
     ]
     if mspec:
         log_dir = env.run_dir / (mspec.log_dir_name or f"logs_{mspec.name}")
-        argv.extend(
-            (
-                f"--server.address={mspec.bind_ip}",
-                f"--management.server.address={mspec.bind_ip}",
-                f"--flexlb.log.path={log_dir}",
-            )
-        )
+        argv.extend((f"--server.address={mspec.bind_ip}", f"--management.server.address={mspec.bind_ip}", f"--flexlb.log.path={log_dir}"))
     if not (spec.master_pv_log if spec.master_pv_log is not None else spec.diagnostic_events):
         argv.append("--logging.level.pvLogger=WARN")
     if spec.master_debug_log:
@@ -120,16 +111,8 @@ class MasterLifecycle:
                     "role_endpoints": [
                         {
                             "group": "mock",
-                            "prefill_endpoint": {
-                                "address": "mock.prefill.hosts.address",
-                                "protocol": "http",
-                                "path": "/",
-                            },
-                            "decode_endpoint": {
-                                "address": "mock.decode.hosts.address",
-                                "protocol": "http",
-                                "path": "/",
-                            },
+                            "prefill_endpoint": {"address": "mock.prefill.hosts.address", "protocol": "http", "path": "/"},
+                            "decode_endpoint": {"address": "mock.decode.hosts.address", "protocol": "http", "path": "/"},
                         }
                     ],
                 },
@@ -137,9 +120,7 @@ class MasterLifecycle:
             )
             service_config = json.loads(menv["MODEL_SERVICE_CONFIG"])
             service_config["hosts"] = {
-                f"mock.{role}.hosts.address": [
-                    host.strip() for host in spec.domain_addrs[role].split(",") if host.strip()
-                ]
+                f"mock.{role}.hosts.address": [host.strip() for host in spec.domain_addrs[role].split(",") if host.strip()]
                 for role in ("prefill", "decode")
             }
             menv["MODEL_SERVICE_CONFIG"] = json.dumps(service_config)
@@ -150,18 +131,13 @@ class MasterLifecycle:
             if mspec.advertised_ip is not None:
                 menv["FLEXLB_ADVERTISED_IP"] = mspec.advertised_ip
             if spec.zk_consistency is not None:
-                menv["HIPPO_ROLE"] = (
-                    mspec.hippo_role
-                    or "flexlb_ft_" + hashlib.sha256(str(env.run_dir.resolve()).encode()).hexdigest()[:16]
-                )
+                menv["HIPPO_ROLE"] = mspec.hippo_role or "flexlb_ft_" + hashlib.sha256(str(env.run_dir.resolve()).encode()).hexdigest()[:16]
                 if not env.zk_connect_string:
                     # Fail-closed: a master must never boot with
                     # needConsistency=true against a missing/dead ZK —
                     # a dual-master pair without the election quorum
                     # would split-brain.
-                    raise RuntimeError(
-                        "zk_consistency spec requires a live ZK helper (connectString missing) — fail-closed"
-                    )
+                    raise RuntimeError("zk_consistency spec requires a live ZK helper (connectString missing) — fail-closed")
                 menv["FLEXLB_SYNC_CONSISTENCY_CONFIG"] = json.dumps(
                     {
                         "needConsistency": True,
@@ -180,11 +156,7 @@ class MasterLifecycle:
 
     def _master_ports_in_use(self, env: FlexEnv) -> list[int]:
         """Master's fixed ports: HTTP / management / gRPC (= http + 2)."""
-        ports = [
-            env.master_http_port,
-            env.master_management_port,
-            env.master_http_port + 2,
-        ]
+        ports = [env.master_http_port, env.master_management_port, env.master_http_port + 2]
         return [p for p in ports if port_accepting(p)]
 
     def start_master(self, env: FlexEnv, log_name: Optional[str] = None, *, deadline=None) -> ManagedProcess:
@@ -209,9 +181,7 @@ class MasterLifecycle:
             env.master_start_count += 1
             generation = env.master_start_count
         suffix = f"_{name}" if mspec else ""
-        log_name = log_name or (
-            f"flexlb_master{suffix}.log" if generation == 1 else f"flexlb_master{suffix}_restart{generation}.log"
-        )
+        log_name = log_name or (f"flexlb_master{suffix}.log" if generation == 1 else f"flexlb_master{suffix}_restart{generation}.log")
         argv = master_arguments(env, mspec)
         log_root = Path.home() / "ai-whale" / "logs"
         for arg in argv:
@@ -227,9 +197,7 @@ class MasterLifecycle:
         if not mspec:
             env.flexlb_log_offset = offsets["flexlb.log"]
             env.pv_log_offset = offsets["pv.log"]
-        proc = ProcessOps.start(
-            argv, configure_master(env, self.master_environment(env, mspec), API_JAR), env.run_dir / log_name
-        )
+        proc = ProcessOps.start(argv, configure_master(env, self.master_environment(env, mspec), API_JAR), env.run_dir / log_name)
         host = mspec.bind_ip if mspec else "127.0.0.1"
         http = mspec.http_port if mspec else env.master_http_port
         grpc = mspec.grpc_port() if mspec else http + 2
@@ -239,13 +207,7 @@ class MasterLifecycle:
         else:
             env.master = proc
         env.master_incarnations.append(
-            dict(
-                name=name,
-                target=f"{host}:{grpc}",
-                generation=generation,
-                pid=proc.pid,
-                started_epoch_ms=time.time() * 1000,
-            )
+            dict(name=name, target=f"{host}:{grpc}", generation=generation, pid=proc.pid, started_epoch_ms=time.time() * 1000)
         )
         try:
             self._wait_master(env, proc, name, host, http, deadline)
@@ -270,9 +232,7 @@ class MasterLifecycle:
                 # Production sidecars invoke this hook to join the election.
                 # Opening the HTTP listener alone does not register a leader.
                 deadline.check()
-                with urllib.request.urlopen(
-                    f"http://{host}:{port}/hook/after_start", timeout=min(10, deadline.remaining())
-                ) as response:
+                with urllib.request.urlopen(f"http://{host}:{port}/hook/after_start", timeout=min(10, deadline.remaining())) as response:
                     if response.status != 200 or response.read().decode().strip() != "success":
                         raise RuntimeError("Master online hook failed")
 
@@ -299,13 +259,7 @@ class MasterLifecycle:
                             return False
                     return True
 
-                wait_ready(
-                    deadline,
-                    f"master/{name}/topology",
-                    topology,
-                    process=proc,
-                    stable_s=env.spec.master_stable_window_s,
-                )
+                wait_ready(deadline, f"master/{name}/topology", topology, process=proc, stable_s=env.spec.master_stable_window_s)
 
     def stop_master(self, env: FlexEnv, settle_s: float = 2.0) -> None:
         if env.master is not None:
@@ -330,9 +284,7 @@ class MasterLifecycle:
         ports = [mspec.http_port, mspec.management(), mspec.grpc_port()]
         return [p for p in ports if port_accepting(p, mspec.bind_ip)]
 
-    def start_master_instance(
-        self, env: FlexEnv, mspec: MasterSpec, log_name: Optional[str] = None, *, deadline=None
-    ) -> ManagedProcess:
+    def start_master_instance(self, env: FlexEnv, mspec: MasterSpec, log_name: Optional[str] = None, *, deadline=None) -> ManagedProcess:
         return self._start_master(env, mspec, log_name, deadline)
 
     def _live_instance(self, env: FlexEnv, name: str) -> ManagedProcess:

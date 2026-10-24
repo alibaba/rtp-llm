@@ -93,14 +93,7 @@ def test_program_budget_can_only_narrow_a_shared_field():
 
 @pytest.mark.parametrize(
     "spec",
-    [
-        dict(minimum=0),
-        dict(maximum=1 << 31),
-        dict(integer=False),
-        dict(maximum=math.inf),
-        dict(minimum=True),
-        dict(minimum=10, maximum=5),
-    ],
+    [dict(minimum=0), dict(maximum=1 << 31), dict(integer=False), dict(maximum=math.inf), dict(minimum=True), dict(minimum=10, maximum=5)],
 )
 def test_yaml_cannot_weaken_protocol_type_or_range(spec):
     data = config("request_completion")
@@ -111,9 +104,7 @@ def test_yaml_cannot_weaken_protocol_type_or_range(spec):
 
 def test_case_and_variant_constraints_intersect_and_are_frozen():
     data = config("request_completion")
-    data["variants"] = [
-        dict(id="small", parameters=dict(traffic=dict(count=2)), parameter_schema={"traffic.count": {"maximum": 2}})
-    ]
+    data["variants"] = [dict(id="small", parameters=dict(traffic=dict(count=2)), parameter_schema={"traffic.count": {"maximum": 2}})]
     document = configure_program(data, "case.yaml")
     assert document.implementation["numeric_parameters"]["default"]["traffic.count"]["maximum"] == 10000
     assert document.implementation["numeric_parameters"]["small"]["traffic.count"]["maximum"] == 2
@@ -138,9 +129,7 @@ def test_every_declared_field_rejects_bool_before_program_build(name):
 
     data = config(name)
     module = program_module(name, "fixture")
-    rules = narrow_parameters(
-        parameter_rules(module.definition.input_schema.numeric_parameters), data.get("parameter_schema", {})
-    )
+    rules = narrow_parameters(parameter_rules(module.definition.input_schema.numeric_parameters), data.get("parameter_schema", {}))
     for path in rules:
         parameters = copy.deepcopy(data["parameters"])
         target = parameters
@@ -171,11 +160,7 @@ def test_master_state_archive_rejects_negative_ledger_counts():
 def test_variant_can_narrow_another_declared_parameter():
     data = config("request_completion")
     data["variants"] = [
-        dict(
-            id="small",
-            parameters={"traffic": {"input_len": 64}},
-            parameter_schema={"traffic.input_len": {"maximum": 100}},
-        )
+        dict(id="small", parameters={"traffic": {"input_len": 64}}, parameter_schema={"traffic.input_len": {"maximum": 100}})
     ]
     document = configure_program(data, "case.yaml")
     assert document.variants[1].stages[1].params["input_len"] == 64

@@ -13,9 +13,7 @@ from runtime.deadline import Deadline, StageTimeout
 @pytest.fixture
 def draining_flow(tmp_path, monkeypatch):
     now = [0.0]
-    flow = JavaFlowGroup(
-        None, tmp_path, run_id="run", group_id="g", phase_id="p", poll_s=0.2, collection_profile="aggregate"
-    )
+    flow = JavaFlowGroup(None, tmp_path, run_id="run", group_id="g", phase_id="p", poll_s=0.2, collection_profile="aggregate")
     flow.control.mkdir()
     fault = {"exit_early": False, "bad_accounting": False}
 
@@ -43,9 +41,7 @@ def draining_flow(tmp_path, monkeypatch):
     flow.status = status
     flow.observe_control = lambda: FlowObservation(FlowStatus.decode(status()), status()["process_returncode"])
     monkeypatch.setattr("adapters.java_flow.time.sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
-    return SimpleNamespace(
-        flow=flow, now=now, fault=fault, deadline=Deadline(80, clock=lambda: now[0]), samples=[], events=[]
-    )
+    return SimpleNamespace(flow=flow, now=now, fault=fault, deadline=Deadline(80, clock=lambda: now[0]), samples=[], events=[])
 
 
 def run_cycle(state, sample=None):

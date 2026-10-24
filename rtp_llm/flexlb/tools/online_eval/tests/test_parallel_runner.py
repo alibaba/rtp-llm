@@ -37,30 +37,17 @@ class LaneEnvTest(unittest.TestCase):
             footprints.append(ports)
         for i in range(len(footprints)):
             for j in range(i + 1, len(footprints)):
-                self.assertEqual(
-                    set(),
-                    footprints[i] & footprints[j],
-                    f"lane {i} and lane {j} share ports",
-                )
+                self.assertEqual(set(), footprints[i] & footprints[j], f"lane {i} and lane {j} share ports")
 
     def test_single_master_and_ha_tier_ports_share_the_group_head(self):
         # By design (harness port plan): the single-master path and HA
         # Tier-1 A both bind the group head — they are two MUTUALLY
         # EXCLUSIVE env shapes inside one runner process, never concurrent.
         env = parallel_runner.lane_env(2)
-        self.assertEqual(
-            env["FLEXLB_FT_MASTER_HTTP_PORT"],
-            env["FLEXLB_FT_HA_MASTER_A_HTTP_PORT"],
-        )
-        self.assertEqual(
-            int(env["FLEXLB_FT_HA_MASTER_B_HTTP_PORT"]) - int(env["FLEXLB_FT_HA_MASTER_A_HTTP_PORT"]),
-            3,
-        )
+        self.assertEqual(env["FLEXLB_FT_MASTER_HTTP_PORT"], env["FLEXLB_FT_HA_MASTER_A_HTTP_PORT"])
+        self.assertEqual(int(env["FLEXLB_FT_HA_MASTER_B_HTTP_PORT"]) - int(env["FLEXLB_FT_HA_MASTER_A_HTTP_PORT"]), 3)
 
-    @mock.patch.dict(
-        os.environ,
-        {"FLEXLB_FT_PARALLEL_MASTER_BASE": "", "FLEXLB_FT_PARALLEL_MOCK_BASE": ""},
-    )
+    @mock.patch.dict(os.environ, {"FLEXLB_FT_PARALLEL_MASTER_BASE": "", "FLEXLB_FT_PARALLEL_MOCK_BASE": ""})
     def test_formulas_match_documented_strides(self):
         for i in range(DEFAULT_LANES):
             env = parallel_runner.lane_env(i)
@@ -70,8 +57,7 @@ class LaneEnvTest(unittest.TestCase):
             self.assertEqual(str(m), env["FLEXLB_FT_HA_MASTER_A_HTTP_PORT"])
             self.assertEqual(str(m + 3), env["FLEXLB_FT_HA_MASTER_B_HTTP_PORT"])
             self.assertEqual(
-                str(parallel_runner.MOCK_BASE_GRPC_PORT + parallel_runner.MOCK_PORT_STRIDE * i),
-                env["FLEXLB_FT_MOCK_BASE_GRPC_PORT"],
+                str(parallel_runner.MOCK_BASE_GRPC_PORT + parallel_runner.MOCK_PORT_STRIDE * i), env["FLEXLB_FT_MOCK_BASE_GRPC_PORT"]
             )
 
     def test_overlay_touches_only_the_five_port_keys(self):
@@ -92,32 +78,17 @@ class LaneEnvTest(unittest.TestCase):
         # FLEXLB_FT_PARALLEL_MASTER_BASE / FLEXLB_FT_PARALLEL_MOCK_BASE
         # shift the whole partition (e.g. to dodge a concurrent default-
         # band user on a shared host) while keeping the lane strides.
-        with mock.patch.dict(
-            os.environ,
-            {
-                "FLEXLB_FT_PARALLEL_MASTER_BASE": "20080",
-                "FLEXLB_FT_PARALLEL_MOCK_BASE": "50000",
-            },
-        ):
+        with mock.patch.dict(os.environ, {"FLEXLB_FT_PARALLEL_MASTER_BASE": "20080", "FLEXLB_FT_PARALLEL_MOCK_BASE": "50000"}):
             e0 = parallel_runner.lane_env(0)
             e1 = parallel_runner.lane_env(1)
         self.assertEqual("20080", e0["FLEXLB_FT_MASTER_HTTP_PORT"])
         self.assertEqual("20081", e0["FLEXLB_FT_MASTER_MANAGEMENT_PORT"])
         self.assertEqual("20090", e1["FLEXLB_FT_MASTER_HTTP_PORT"])
         self.assertEqual("50000", e0["FLEXLB_FT_MOCK_BASE_GRPC_PORT"])
-        self.assertEqual(
-            str(50000 + parallel_runner.MOCK_PORT_STRIDE),
-            e1["FLEXLB_FT_MOCK_BASE_GRPC_PORT"],
-        )
+        self.assertEqual(str(50000 + parallel_runner.MOCK_PORT_STRIDE), e1["FLEXLB_FT_MOCK_BASE_GRPC_PORT"])
 
     def test_base_offset_footprints_stay_disjoint(self):
-        with mock.patch.dict(
-            os.environ,
-            {
-                "FLEXLB_FT_PARALLEL_MASTER_BASE": "20080",
-                "FLEXLB_FT_PARALLEL_MOCK_BASE": "50000",
-            },
-        ):
+        with mock.patch.dict(os.environ, {"FLEXLB_FT_PARALLEL_MASTER_BASE": "20080", "FLEXLB_FT_PARALLEL_MOCK_BASE": "50000"}):
             footprints = []
             for i in range(parallel_runner.max_lanes(2000, 50000)):
                 m = parallel_runner.master_base() + 10 * i
@@ -126,11 +97,7 @@ class LaneEnvTest(unittest.TestCase):
                 footprints.append(ports)
         for i in range(len(footprints)):
             for j in range(i + 1, len(footprints)):
-                self.assertEqual(
-                    set(),
-                    footprints[i] & footprints[j],
-                    f"lane {i} and lane {j} share ports",
-                )
+                self.assertEqual(set(), footprints[i] & footprints[j], f"lane {i} and lane {j} share ports")
 
     def test_invalid_base_env_is_rejected(self):
         with mock.patch.dict(os.environ, {"FLEXLB_FT_PARALLEL_MASTER_BASE": "not-a-port"}):
@@ -148,21 +115,12 @@ class MockStrideTest(unittest.TestCase):
         # default band: 55151 + 500*20 + 151 = 65302 → 21 lanes
         self.assertEqual(21, parallel_runner.max_lanes(500, 55151))
 
-    @mock.patch.dict(
-        os.environ,
-        {"FLEXLB_FT_PARALLEL_MASTER_BASE": "", "FLEXLB_FT_PARALLEL_MOCK_BASE": ""},
-    )
+    @mock.patch.dict(os.environ, {"FLEXLB_FT_PARALLEL_MASTER_BASE": "", "FLEXLB_FT_PARALLEL_MOCK_BASE": ""})
     def test_lane_env_honors_mock_stride(self):
         e = parallel_runner.lane_env(3, mock_stride=500)
-        self.assertEqual(
-            str(parallel_runner.MOCK_BASE_GRPC_PORT + 500 * 3),
-            e["FLEXLB_FT_MOCK_BASE_GRPC_PORT"],
-        )
+        self.assertEqual(str(parallel_runner.MOCK_BASE_GRPC_PORT + 500 * 3), e["FLEXLB_FT_MOCK_BASE_GRPC_PORT"])
         # master group stride is untouched by --mock-stride
-        self.assertEqual(
-            str(parallel_runner.MASTER_HTTP_BASE + 10 * 3),
-            e["FLEXLB_FT_MASTER_HTTP_PORT"],
-        )
+        self.assertEqual(str(parallel_runner.MASTER_HTTP_BASE + 10 * 3), e["FLEXLB_FT_MASTER_HTTP_PORT"])
 
     def test_compressed_stride_footprints_stay_disjoint(self):
         stride = 500
@@ -173,11 +131,7 @@ class MockStrideTest(unittest.TestCase):
             footprints.append(set(range(base - 1, base + 152)))
         for i in range(len(footprints)):
             for j in range(i + 1, len(footprints)):
-                self.assertEqual(
-                    set(),
-                    footprints[i] & footprints[j],
-                    f"lane {i} and lane {j} share ports",
-                )
+                self.assertEqual(set(), footprints[i] & footprints[j], f"lane {i} and lane {j} share ports")
 
 
 class LanePortsTest(unittest.TestCase):
@@ -187,11 +141,7 @@ class LanePortsTest(unittest.TestCase):
         # 6 master-group ports + the full 153-port mock window
         # (http control base-1, engines, victim zone) — fixed width
         # regardless of engine count or lane index.
-        cases = [
-            (0, 500, 18080, 55151),
-            (3, 500, 18080, 55151),
-            (2, 2000, 20080, 50000),
-        ]
+        cases = [(0, 500, 18080, 55151), (3, 500, 18080, 55151), (2, 2000, 20080, 50000)]
         for lane, stride, m, b in cases:
             ports = parallel_runner.lane_ports(lane, stride, m, b)
             self.assertEqual(159, len(ports), (lane, stride, m, b))
@@ -215,17 +165,13 @@ class LanePortsTest(unittest.TestCase):
                 m = int(env["FLEXLB_FT_MASTER_HTTP_PORT"])
                 b = int(env["FLEXLB_FT_MOCK_BASE_GRPC_PORT"])
                 self.assertEqual(
-                    set(range(m, m + 6)) | set(range(b - 1, b + 152)),
-                    set(parallel_runner.lane_ports(lane, stride, 18080, 55151)),
+                    set(range(m, m + 6)) | set(range(b - 1, b + 152)), set(parallel_runner.lane_ports(lane, stride, 18080, 55151))
                 )
 
 
 class PortAdmissionMixin:
     def admit(self, args):
-        explicit = any(
-            (os.environ.get(key) or "").strip()
-            for key in ("FLEXLB_FT_PARALLEL_MASTER_BASE", "FLEXLB_FT_PARALLEL_MOCK_BASE")
-        )
+        explicit = any((os.environ.get(key) or "").strip() for key in ("FLEXLB_FT_PARALLEL_MASTER_BASE", "FLEXLB_FT_PARALLEL_MOCK_BASE"))
         result = parallel_runner.admit_port_window(
             args.parallel,
             args.mock_stride,
@@ -294,30 +240,20 @@ class PortPreflightResolveTest(PortAdmissionMixin, unittest.TestCase):
         self.assertIn("auto-shifting bases 18080/55151 -> 18020/52151", warning)
         self.assertIn("to make it a contract", warning)
         # The selected matrix stays under the lease band.
-        self.assertLess(
-            parallel_runner._matrix_tail(52151, 500, 6),
-            parallel_runner.LEASE_BAND_FLOOR,
-        )
+        self.assertLess(parallel_runner._matrix_tail(52151, 500, 6), parallel_runner.LEASE_BAND_FLOOR)
 
     def test_explicit_busy_fails_fast_with_lane_diagnosis(self):
         def busy(port, host):
             return 18300 <= port <= 18305
 
-        with mock.patch.dict(
-            os.environ,
-            {"FLEXLB_FT_PARALLEL_MASTER_BASE": "18300"},
-            clear=True,
-        ):
+        with mock.patch.dict(os.environ, {"FLEXLB_FT_PARALLEL_MASTER_BASE": "18300"}, clear=True):
             with mock.patch.object(parallel_runner, "port_in_use", side_effect=busy):
                 args = self._args()
                 with self.assertRaises(parallel_runner.PortAdmissionError) as caught:
                     self.admit(args)
                 # The contract env survives verbatim — never shifted,
                 # never rewritten.
-                self.assertEqual(
-                    "18300",
-                    os.environ["FLEXLB_FT_PARALLEL_MASTER_BASE"],
-                )
+                self.assertEqual("18300", os.environ["FLEXLB_FT_PARALLEL_MASTER_BASE"])
         message = str(caught.exception)
         self.assertIn("lane 0", message)
         self.assertIn("18300", message)
@@ -356,11 +292,7 @@ class PortPreflightResolveTest(PortAdmissionMixin, unittest.TestCase):
         # An explicit base landing in the 61000+ lease band must
         # NOT exit (leased-but-unlistened ports are invisible to bind
         # probing — refusing would false-positive); it warns.
-        with mock.patch.dict(
-            os.environ,
-            {"FLEXLB_FT_PARALLEL_MOCK_BASE": "62000"},
-            clear=True,
-        ):
+        with mock.patch.dict(os.environ, {"FLEXLB_FT_PARALLEL_MOCK_BASE": "62000"}, clear=True):
             with mock.patch.object(parallel_runner, "port_in_use", return_value=False):
                 buf = io.StringIO()
                 with contextlib.redirect_stderr(buf):
@@ -375,11 +307,7 @@ class PortPreflightResolveTest(PortAdmissionMixin, unittest.TestCase):
         def busy(port, host):
             return 18300 <= port <= 18305
 
-        with mock.patch.dict(
-            os.environ,
-            {"FLEXLB_FT_PARALLEL_MASTER_BASE": "18300"},
-            clear=True,
-        ):
+        with mock.patch.dict(os.environ, {"FLEXLB_FT_PARALLEL_MASTER_BASE": "18300"}, clear=True):
             with mock.patch.object(parallel_runner, "port_in_use", side_effect=busy):
                 buf = io.StringIO()
                 with contextlib.redirect_stderr(buf):
@@ -410,9 +338,7 @@ class WindowLockTest(PortAdmissionMixin, unittest.TestCase):
         enough to block the whole matrix: locks are per conflict
         domain, so partial overlap is still mutual exclusion.
         """
-        lockfiles = [
-            p for p in parallel_runner._window_lock_paths(master, mock, stride, n_lanes) if p.name.startswith("g")
-        ]
+        lockfiles = [p for p in parallel_runner._window_lock_paths(master, mock, stride, n_lanes) if p.name.startswith("g")]
         return subprocess.Popen(
             [
                 sys.executable,
@@ -453,10 +379,7 @@ class WindowLockTest(PortAdmissionMixin, unittest.TestCase):
     def test_lock_dies_with_the_holding_process(self):
         child = self._spawn_mock_lock_holder(18080, 55151)
         try:
-            self.assertTrue(
-                self._wait_until_child_holds(18080, 55151),
-                "child never acquired the lock",
-            )
+            self.assertTrue(self._wait_until_child_holds(18080, 55151), "child never acquired the lock")
         finally:
             child.kill()
             child.wait()
@@ -469,10 +392,7 @@ class WindowLockTest(PortAdmissionMixin, unittest.TestCase):
     def test_dry_run_skips_locked_candidate_and_shifts(self):
         child = self._spawn_mock_lock_holder(18080, 55151)
         try:
-            self.assertTrue(
-                self._wait_until_child_holds(18080, 55151),
-                "child never acquired the lock",
-            )
+            self.assertTrue(self._wait_until_child_holds(18080, 55151), "child never acquired the lock")
             with mock.patch.dict(os.environ, {}, clear=True):
                 with mock.patch.object(parallel_runner, "port_in_use", return_value=False):
                     buf = io.StringIO()
@@ -480,14 +400,8 @@ class WindowLockTest(PortAdmissionMixin, unittest.TestCase):
                         args = argparse.Namespace(parallel=6, mock_stride=500, dry_run=True)
                         self.admit(args)
                     # k=0 is LOCKED → k=1 selected and pinned into env.
-                    self.assertEqual(
-                        18020,
-                        args.admission.master_base,
-                    )
-                    self.assertEqual(
-                        52151,
-                        args.admission.mock_base,
-                    )
+                    self.assertEqual(18020, args.admission.master_base)
+                    self.assertEqual(52151, args.admission.mock_base)
                     self.assertIn("auto", args.port_provenance)
                     # Probe-and-release: the dry-run holds nothing.
                     retake = parallel_runner._try_window_lock(18020, 52151, 500, 6)
@@ -558,12 +472,7 @@ class WindowLockTest(PortAdmissionMixin, unittest.TestCase):
         try:
             with (
                 mock.patch.dict(
-                    os.environ,
-                    {
-                        "FLEXLB_FT_PARALLEL_MASTER_BASE": "18083",
-                        "FLEXLB_FT_PARALLEL_MOCK_BASE": "56000",
-                    },
-                    clear=True,
+                    os.environ, {"FLEXLB_FT_PARALLEL_MASTER_BASE": "18083", "FLEXLB_FT_PARALLEL_MOCK_BASE": "56000"}, clear=True
                 ),
                 mock.patch.object(parallel_runner, "port_in_use", return_value=False),
             ):

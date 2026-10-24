@@ -50,12 +50,7 @@ def engine_tps_checks(evidence):
     metrics, checks = {}, []
     for name, engines in groups.items():
         expected = evidence["provenance"]["topology"][roles[name]]
-        if (
-            type(expected) is not int
-            or expected <= 0
-            or len(engines) != expected
-            or len({key[0] for key in engines}) != expected
-        ):
+        if type(expected) is not int or expected <= 0 or len(engines) != expected or len({key[0] for key in engines}) != expected:
             raise ValueError("engine TPS coverage/epoch mismatch: " + name)
         means = []
         for priorities in engines.values():
@@ -79,14 +74,7 @@ def percentile(values, q=0.99):
 
 def analyze(evidence):
     errors = []
-    result = dict(
-        performance_analysis_schema_version=2,
-        verdict="INVALID",
-        errors=errors,
-        checks=[],
-        metrics={},
-        windows=[],
-    )
+    result = dict(performance_analysis_schema_version=2, verdict="INVALID", errors=errors, checks=[], metrics={}, windows=[])
     try:
         if not isinstance(evidence, dict):
             raise ValueError("evidence must be an object")
@@ -99,15 +87,9 @@ def analyze(evidence):
         from artifacts.provenance import validate_gate_provenance
 
         p = validate_gate_provenance(evidence["provenance"])
-        if str(p["client_environment"].get("FETCH_OUTPUT_STREAM")).lower() not in {
-            "1",
-            "true",
-        }:
+        if str(p["client_environment"].get("FETCH_OUTPUT_STREAM")).lower() not in {"1", "true"}:
             raise ValueError("complete Fetch chain required")
-        lo, hi = (
-            evidence["window"]["start_epoch_ms"],
-            evidence["window"]["end_epoch_ms"],
-        )
+        lo, hi = (evidence["window"]["start_epoch_ms"], evidence["window"]["end_epoch_ms"])
         if not all(finite(x) for x in (lo, hi)) or hi <= lo:
             raise ValueError("invalid measurement window")
         duration = (hi - lo) / 1000
@@ -133,11 +115,7 @@ def analyze(evidence):
                     raise ValueError("missing or inconsistent request field: " + k)
             if not finite(row.get("pacing_lag_ms")) or row["pacing_lag_ms"] < 0:
                 raise ValueError("missing pacing lag")
-            if not isinstance(terminal.get("status"), str) or terminal["status"] in {
-                "scheduled",
-                "unknown",
-                "",
-            }:
+            if not isinstance(terminal.get("status"), str) or terminal["status"] in {"scheduled", "unknown", ""}:
                 raise ValueError("request lacks a full inference terminal status")
             if not finite(terminal.get("total_ms")) or terminal["total_ms"] < 0:
                 raise ValueError("missing terminal duration")
@@ -150,11 +128,7 @@ def analyze(evidence):
         stamps = [x["epoch_ms"] for x in evidence["samples"]]
         if len(stamps) < 2 or any(not finite(x) for x in stamps):
             raise ValueError("missing observer coverage")
-        if (
-            stamps[0] > lo
-            or stamps[-1] < hi
-            or any(y <= x or y - x > c["max_gap_s"] * 1000 for x, y in zip(stamps, stamps[1:]))
-        ):
+        if stamps[0] > lo or stamps[-1] < hi or any(y <= x or y - x > c["max_gap_s"] * 1000 for x, y in zip(stamps, stamps[1:])):
             # Coverage invalidates the run, not the independently validated request ledger.
             errors.append("observer coverage gap")
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -177,11 +151,7 @@ def analyze(evidence):
         return (r["total_ms"] - r["ttft_ms"]) / (n - 1) if n > 1 else None
 
     def slo(r):
-        return (
-            r["ttft_ms"] <= c["slo_ttft_ms"]
-            and r["total_ms"] <= c["slo_e2e_ms"]
-            and (tpot(r) is None or tpot(r) <= c["slo_tpot_ms"])
-        )
+        return r["ttft_ms"] <= c["slo_ttft_ms"] and r["total_ms"] <= c["slo_e2e_ms"] and (tpot(r) is None or tpot(r) <= c["slo_tpot_ms"])
 
     good = [r for r in ok if slo(r)]
     all_rows = list(b.values())

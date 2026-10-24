@@ -46,9 +46,7 @@ import math
 from dataclasses import dataclass, fields
 from typing import Mapping, Optional, Union
 
-from flexlb_profile_data import (
-    DSV4_PREFILL_EXPRESSION as DSV4_PREFILL_EXPRESSION,
-)
+from flexlb_profile_data import DSV4_PREFILL_EXPRESSION as DSV4_PREFILL_EXPRESSION
 from flexlb_profile_data import (
     FUNCTIONAL_DEFAULTS,
     FUNCTIONAL_PROFILE_KWARGS,
@@ -59,9 +57,7 @@ from flexlb_profile_data import (
     STRESS_DECISION_RETYPE_DEFAULTS,
     STRESS_PROFILE,
 )
-from flexlb_profile_data import (
-    PROFILE_CAPS as PROFILE_CAPS,
-)
+from flexlb_profile_data import PROFILE_CAPS as PROFILE_CAPS
 
 # scheduler.ordering.preemption.allowedVictimStages enum values
 # (flexlb-common VictimStage.java; see PreemptionPolicy).
@@ -118,9 +114,7 @@ def _validate_affinity(extra_ms, percent):
 
     if extra_ms is not None and (type(extra_ms) is not int or not 0 <= extra_ms <= 9223372036854775807):
         raise ValueError("cache_affinity_max_extra_ttft_ms must be a nonnegative Java long")
-    if percent is not None and (
-        type(percent) not in (int, float) or not math.isfinite(percent) or not 0 <= percent <= 100
-    ):
+    if percent is not None and (type(percent) not in (int, float) or not math.isfinite(percent) or not 0 <= percent <= 100):
         raise ValueError("cache_affinity_min_prefix_hit_percent must be finite and in [0, 100]")
 
 
@@ -171,9 +165,7 @@ class ConfigOverride:
     def __post_init__(self):
         _validate_decode_availability(self.decode_max_engine_requests, self.decode_max_kv_usage_percent)
         if self.decision_lifetime is not None and (
-            type(self.decision_lifetime) not in (int, float)
-            or not math.isfinite(self.decision_lifetime)
-            or self.decision_lifetime < 1
+            type(self.decision_lifetime) not in (int, float) or not math.isfinite(self.decision_lifetime) or self.decision_lifetime < 1
         ):
             raise ValueError("decision_lifetime must be finite and >= 1")
         if self.cache_min_refresh_ms is not None or self.cache_max_refresh_ms is not None:
@@ -247,9 +239,7 @@ class PriorityOrdering:
     preemption: Optional[PreemptionPolicy] = None
 
     def __post_init__(self):
-        if self.default_priority is not None and (
-            type(self.default_priority) is not int or not 1 <= self.default_priority <= 100
-        ):
+        if self.default_priority is not None and (type(self.default_priority) is not int or not 1 <= self.default_priority <= 100):
             raise ValueError(f"default_priority must be in [1, 100], got {self.default_priority}")
         if self.preemption is not None and not isinstance(self.preemption, PreemptionPolicy):
             raise TypeError("preemption must be a PreemptionPolicy")
@@ -301,17 +291,11 @@ class DispatcherPolicy:
     def __post_init__(self):
         if self.kind not in ("batch", "non_batch"):
             raise ValueError("dispatcher must be batch or non_batch")
-        if (
-            type(self.max_inflight_per_prefill_worker) is not int
-            or not 1 <= self.max_inflight_per_prefill_worker <= 2_147_483_647
-        ):
+        if type(self.max_inflight_per_prefill_worker) is not int or not 1 <= self.max_inflight_per_prefill_worker <= 2_147_483_647:
             raise ValueError("max_inflight_per_prefill_worker must be a positive Java integer")
 
     def to_json(self) -> dict:
-        return {
-            "type": self.kind.upper(),
-            "maxInflightPerPrefillWorker": self.max_inflight_per_prefill_worker,
-        }
+        return {"type": self.kind.upper(), "maxInflightPerPrefillWorker": self.max_inflight_per_prefill_worker}
 
 
 def _ordering_policy(ordering, default_priority, preemption):
@@ -322,13 +306,10 @@ def _ordering_policy(ordering, default_priority, preemption):
     if kind == "fifo":
         if default_priority is not None or preemption is not None:
             raise ValueError(
-                "default_priority/preemption apply only to ordering='priority' "
-                "(the strict FLEXLB_CONFIG parser rejects them under FIFO)"
+                "default_priority/preemption apply only to ordering='priority' (the strict FLEXLB_CONFIG parser rejects them under FIFO)"
             )
         return FifoOrdering()
-    return PriorityOrdering(
-        default_priority, PreemptionPolicy.from_input(preemption) if preemption is not None else None
-    )
+    return PriorityOrdering(default_priority, PreemptionPolicy.from_input(preemption) if preemption is not None else None)
 
 
 # ===========================================================================
@@ -380,9 +361,7 @@ def build_flexlb_config(
     if type(status_poll_interval_ms) is not int or status_poll_interval_ms <= 0:
         raise ValueError("status_poll_interval_ms must be a positive integer")
     _validate_health(
-        status_rpc_ms,
-        max(10_000, status_rpc_ms * 2) if status_stale_after_ms is None else status_stale_after_ms,
-        cleanup_interval_ms,
+        status_rpc_ms, max(10_000, status_rpc_ms * 2) if status_stale_after_ms is None else status_stale_after_ms, cleanup_interval_ms
     )
     if decision not in ("single", "fixed_window") or dispatcher not in ("batch", "non_batch"):
         raise ValueError("unsupported decision or dispatcher")
@@ -418,27 +397,18 @@ def build_flexlb_config(
             "schemaVersion": 3,
             "scheduler": scheduler_cfg,
             "dispatcher": DispatcherPolicy(dispatcher, max_inflight_per_prefill_worker).to_json(),
-            "requestLifecycle": {
-                "request": {"timeoutMs": request_timeout_ms},
-                "decision": {"lifetime": decision_lifetime},
-            },
+            "requestLifecycle": {"request": {"timeoutMs": request_timeout_ms}, "decision": {"lifetime": decision_lifetime}},
             "router": {
                 "roles": {
                     "prefill": {
-                        "executionTimeEstimator": {
-                            "type": "FORMULA",
-                            "expression": prefill_expression,
-                        },
+                        "executionTimeEstimator": {"type": "FORMULA", "expression": prefill_expression},
                         "cacheAffinity": {
                             "maxExtraTtftMs": cache_affinity_max_extra_ttft_ms,
                             "minPrefixHitPercent": cache_affinity_min_prefix_hit_percent,
                         },
                     },
                     "decode": {
-                        "availability": {
-                            "maxEngineRequests": decode_max_engine_requests,
-                            "maxKvUsagePercent": decode_max_kv_usage_percent,
-                        }
+                        "availability": {"maxEngineRequests": decode_max_engine_requests, "maxKvUsagePercent": decode_max_kv_usage_percent}
                     },
                 }
             },
@@ -446,9 +416,7 @@ def build_flexlb_config(
                 "health": {
                     "statusPollIntervalMs": status_poll_interval_ms,
                     "statusRpcTimeoutMs": status_rpc_ms,
-                    "statusStaleAfterMs": (
-                        max(10_000, status_rpc_ms * 2) if status_stale_after_ms is None else status_stale_after_ms
-                    ),
+                    "statusStaleAfterMs": (max(10_000, status_rpc_ms * 2) if status_stale_after_ms is None else status_stale_after_ms),
                     "cleanupIntervalMs": cleanup_interval_ms,
                 }
             },
@@ -473,20 +441,8 @@ _STRESS_DOC_PATHS = {
     "queue_timeout_ms": ("scheduler", "queueTimeoutMs"),
     "status_rpc_ms": ("workerRegistry", "health", "statusRpcTimeoutMs"),
     "status_poll_interval_ms": ("workerRegistry", "health", "statusPollIntervalMs"),
-    "decode_max_engine_requests": (
-        "router",
-        "roles",
-        "decode",
-        "availability",
-        "maxEngineRequests",
-    ),
-    "decode_max_kv_usage_percent": (
-        "router",
-        "roles",
-        "decode",
-        "availability",
-        "maxKvUsagePercent",
-    ),
+    "decode_max_engine_requests": ("router", "roles", "decode", "availability", "maxEngineRequests"),
+    "decode_max_kv_usage_percent": ("router", "roles", "decode", "availability", "maxKvUsagePercent"),
     "request_timeout_ms": ("requestLifecycle", "request", "timeoutMs"),
     "decision_lifetime": ("requestLifecycle", "decision", "lifetime"),
     "status_stale_after_ms": ("workerRegistry", "health", "statusStaleAfterMs"),
@@ -515,8 +471,7 @@ def _edit_doc(doc: dict, path: tuple, value, field_name: str) -> None:
     leaf = path[-1]
     if leaf not in node:
         raise ValueError(
-            f"ConfigOverride.{field_name}: the profile document has no "
-            f"{'.'.join(path)} key — overrides may only change existing fields"
+            f"ConfigOverride.{field_name}: the profile document has no {'.'.join(path)} key — overrides may only change existing fields"
         )
     node[leaf] = value
 
@@ -535,25 +490,19 @@ def _retype_ordering(doc: dict, overrides: ConfigOverride) -> None:
             if new_type == "fifo"
             else PriorityOrdering(
                 current.get("defaultPriority") if current_type == "priority" else None,
-                PreemptionPolicy.from_json(current["preemption"])
-                if current_type == "priority" and "preemption" in current
-                else None,
+                PreemptionPolicy.from_json(current["preemption"]) if current_type == "priority" and "preemption" in current else None,
             )
         )
     elif current_type == "priority":
         policy = PriorityOrdering(
-            current.get("defaultPriority"),
-            PreemptionPolicy.from_json(current["preemption"]) if "preemption" in current else None,
+            current.get("defaultPriority"), PreemptionPolicy.from_json(current["preemption"]) if "preemption" in current else None
         )
     else:
         policy = FifoOrdering()
     if isinstance(policy, FifoOrdering):
-        if overrides.default_priority is not None or (
-            overrides.preemption is not None and overrides.preemption is not OMIT
-        ):
+        if overrides.default_priority is not None or (overrides.preemption is not None and overrides.preemption is not OMIT):
             raise ValueError(
-                "default_priority/preemption apply only to ordering='priority' "
-                "(the strict FLEXLB_CONFIG parser rejects them under FIFO)"
+                "default_priority/preemption apply only to ordering='priority' (the strict FLEXLB_CONFIG parser rejects them under FIFO)"
             )
         scheduler["ordering"] = policy.to_json()
         return
@@ -563,17 +512,13 @@ def _retype_ordering(doc: dict, overrides: ConfigOverride) -> None:
         preemption = PreemptionPolicy.from_input(overrides.preemption)
     if overrides.strip_preemption:
         preemption = None
-    scheduler["ordering"] = PriorityOrdering(
-        priority,
-        preemption,
-    ).to_json()
+    scheduler["ordering"] = PriorityOrdering(priority, preemption).to_json()
 
 
 def _retype_decision(doc: dict, overrides: ConfigOverride) -> None:
     decision = doc["scheduler"]["decision"]
     if overrides.decision is None and all(
-        getattr(overrides, name) is None
-        for name in ("max_requests", "max_collection_wait_ms", "max_predicted_execution_ms")
+        getattr(overrides, name) is None for name in ("max_requests", "max_collection_wait_ms", "max_predicted_execution_ms")
     ):
         return
     new_type = overrides.decision.lower() if overrides.decision is not None else decision["type"].lower()
@@ -595,9 +540,7 @@ def _retype_decision(doc: dict, overrides: ConfigOverride) -> None:
         value = getattr(overrides, field)
         values[key] = decision.get(key, STRESS_DECISION_RETYPE_DEFAULTS[key]) if value is None else value
     doc["scheduler"]["decision"] = FixedWindowDecision(
-        values["maxRequests"],
-        values["maxCollectionWaitMs"],
-        values["maxPredictedExecutionMs"],
+        values["maxRequests"], values["maxCollectionWaitMs"], values["maxPredictedExecutionMs"]
     ).to_json()
 
 
@@ -608,10 +551,7 @@ def _retype_dispatcher(doc: dict, overrides: ConfigOverride) -> None:
     if cap is None:
         cap = doc["dispatcher"]["maxInflightPerPrefillWorker"]
     kind = overrides.dispatcher or doc["dispatcher"]["type"]
-    doc["dispatcher"] = DispatcherPolicy(
-        kind.lower() if type(kind) is str else kind,
-        cap,
-    ).to_json()
+    doc["dispatcher"] = DispatcherPolicy(kind.lower() if type(kind) is str else kind, cap).to_json()
 
 
 def _render_stress(overrides: Optional[ConfigOverride]) -> str:
@@ -685,10 +625,7 @@ def render_env(profile: str, overrides: Optional[ConfigOverride] = None) -> str:
 
 
 def render_process_config(
-    profile: str,
-    overrides: Optional[ConfigOverride] = None,
-    jvm_heap: str = "32g",
-    raw_config: Optional[str] = None,
+    profile: str, overrides: Optional[ConfigOverride] = None, jvm_heap: str = "32g", raw_config: Optional[str] = None
 ) -> str:
     """zone_process_setting envelope (the --master-config document).
 
@@ -711,17 +648,8 @@ def render_process_config(
         "zone_name": "master",
         "zone_process_setting": {
             "global": {},
-            "resource_plan": {
-                "resources": [{"slot_resources": [{"name": "mem", "type": "SCALAR", "amount": 57344}]}],
-                "meta_tag_list": [],
-            },
-            "process_info": {
-                "args": [],
-                "envs": [
-                    ["FLEXLB_CONFIG", env_str],
-                    ["FLEXLB_JVM_HEAP_SIZE", jvm_heap],
-                ],
-            },
+            "resource_plan": {"resources": [{"slot_resources": [{"name": "mem", "type": "SCALAR", "amount": 57344}]}], "meta_tag_list": []},
+            "process_info": {"args": [], "envs": [["FLEXLB_CONFIG", env_str], ["FLEXLB_JVM_HEAP_SIZE", jvm_heap]]},
         },
     }
     # Trailing newline mirrors the retired master_fixed_window.json byte

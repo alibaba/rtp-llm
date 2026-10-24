@@ -116,8 +116,7 @@ def test_request_failures_include_removed_unknown_and_late_timeouts():
                 removed=dict(sent=6, terminal=6, failed=6),
                 unknown=dict(sent=4, terminal=4, failed=4),
             ),
-            failures=[dict(error="queue stopped") for _ in range(6)]
-            + [dict(error="REQUEST_INACTIVE") for _ in range(4)],
+            failures=[dict(error="queue stopped") for _ in range(6)] + [dict(error="REQUEST_INACTIVE") for _ in range(4)],
         )
     )
     rows, kpis = request_outcomes(evidence)

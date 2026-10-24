@@ -58,10 +58,7 @@ class RunFinalizer:
             else:
                 result.finalization.append(
                     FinalizationResult(
-                        FinalizationPhase.REPORT,
-                        budgets.report_timeout_s,
-                        DeliveryStatus.BLOCKED,
-                        "evidence finalization failed",
+                        FinalizationPhase.REPORT, budgets.report_timeout_s, DeliveryStatus.BLOCKED, "evidence finalization failed"
                     )
                 )
         snapshot = result.to_dict()
@@ -91,12 +88,8 @@ class RunFinalizer:
     def _archive(ctx, result, document, analysis, deadline):
         from reporting.experiment import publish_run
 
-        result.artifacts = publish_run(
-            ctx.artifact_dir, ctx.experiment_definition, document, analysis=analysis, deadline=deadline
-        )
-        if not getattr(ctx.backend, "retain_tsdb", True) and all(
-            row["status"] == "PASS" for row in document["cleanup"]
-        ):
+        result.artifacts = publish_run(ctx.artifact_dir, ctx.experiment_definition, document, analysis=analysis, deadline=deadline)
+        if not getattr(ctx.backend, "retain_tsdb", True) and all(row["status"] == "PASS" for row in document["cleanup"]):
             from artifacts.retention import prune_tsdb
 
             prune_tsdb(ctx.artifact_dir, result.artifacts, deadline)

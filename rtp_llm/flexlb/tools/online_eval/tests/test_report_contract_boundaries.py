@@ -74,9 +74,7 @@ def test_default_labels_are_configured_and_no_projection_reads_yaml():
         panel = build_panels({key: [[0, 2]] for key in keys}, {key: dict(unit="req/s") for key in keys}, definition)[0]
     assert len(panel["series"]) == 4
     raw["charts"]["presets"] = {"mixed": ["mean", "detail"]}
-    mixed = build_panels(
-        {key: [[0, 2]] for key in keys}, {key: dict(unit="req/s") for key in keys}, ViewDefinition.read(raw)
-    )[0]
+    mixed = build_panels({key: [[0, 2]] for key in keys}, {key: dict(unit="req/s") for key in keys}, ViewDefinition.read(raw))[0]
     assert len(mixed["presets"]["mixed"]) == 3
 
 

@@ -67,13 +67,7 @@ def evidence():
     issued = []
     records = []
     for i in range(100):
-        r = dict(
-            rid=str(i),
-            send_start_epoch_ms=100000 + i * 100,
-            input_len=1024,
-            output_len=8,
-            pacing_lag_ms=0,
-        )
+        r = dict(rid=str(i), send_start_epoch_ms=100000 + i * 100, input_len=1024, output_len=8, pacing_lag_ms=0)
         issued.append(r)
         records.append(dict(r, status="ok", total_ms=100, ttft_ms=50, observed_output_tokens=8))
     return dict(
@@ -109,9 +103,7 @@ class PerformanceGateTest(unittest.TestCase):
         renamed["fields"]["rtp_llm_context_tps"]["metric"] = "mock/replacement_context_tps"
         with self.assertRaisesRegex(ValueError, "match YAML metric fields"):
             validate(e["criteria"], renamed)
-        e["criteria"]["engine_tps"]["mock/replacement_context_tps"] = e["criteria"]["engine_tps"].pop(
-            "mock/rtp_llm_context_tps"
-        )
+        e["criteria"]["engine_tps"]["mock/replacement_context_tps"] = e["criteria"]["engine_tps"].pop("mock/rtp_llm_context_tps")
         e["gate_input"] = renamed
         for row in e["engine_tps_samples"]:
             if row["metric_id"] == "mock/rtp_llm_context_tps":
@@ -188,12 +180,7 @@ class PerformanceGateTest(unittest.TestCase):
             from scenario.context import RuntimeContext
 
             ctx = RuntimeContext(
-                dict(id=identity, profile="single-nonbatch"),
-                None,
-                Path(d),
-                lambda: 1,
-                lambda _: None,
-                wall_clock=lambda: 100,
+                dict(id=identity, profile="single-nonbatch"), None, Path(d), lambda: 1, lambda _: None, wall_clock=lambda: 100
             )
             ctx.env_epoch = 2
             ctx.resource = lambda name, kind: mock.Mock()
@@ -227,20 +214,14 @@ class PerformanceGateTest(unittest.TestCase):
         flow = mock.Mock()
         flow.evidence_snapshot.return_value = snapshot
         monitor = mock.Mock()
-        monitor.client.metric_chunks.side_effect = lambda identity, **kw: [
-            [row for row in raw if row["metric_id"] == identity]
-        ]
+        monitor.client.metric_chunks.side_effect = lambda identity, **kw: [[row for row in raw if row["metric_id"] == identity]]
         monitor.client.metric_definition.return_value = dict(unit="tokens/s", labels=["role", "engine_name"])
         e["capture_limits"] = dict(max_samples=1000, max_bytes=10000000)
         with tempfile.TemporaryDirectory() as d:
             flow.directory = Path(d)
             (flow.directory / "client_lifecycle.jsonl").write_text("journal retained")
-            ctx = SimpleNamespace(
-                artifact_dir=Path(d), monitor=monitor, resource=lambda name, kind: flow if kind == "java_flow" else e
-            )
-            with mock.patch(
-                "cases.master_performance.analysis.analyze", side_effect=RuntimeError("analysis interrupted")
-            ):
+            ctx = SimpleNamespace(artifact_dir=Path(d), monitor=monitor, resource=lambda name, kind: flow if kind == "java_flow" else e)
+            with mock.patch("cases.master_performance.analysis.analyze", side_effect=RuntimeError("analysis interrupted")):
                 with self.assertRaisesRegex(RuntimeError, "analysis interrupted"):
                     finish(ctx, dict(flow="flow", evidence="evidence"), Deadline(float("inf")))
             archived = json.loads((Path(d) / "performance-gate-evidence.json").read_text())
@@ -252,9 +233,7 @@ class PerformanceGateTest(unittest.TestCase):
                 {call.args[0] for call in monitor.client.metric_chunks.call_args_list},
                 {b["metric"] for b in e["gate_input"]["fields"].values()},
             )
-            self.assertTrue(
-                all(call.kwargs["deadline"] is not None for call in monitor.client.metric_chunks.call_args_list)
-            )
+            self.assertTrue(all(call.kwargs["deadline"] is not None for call in monitor.client.metric_chunks.call_args_list))
             monitor.archive.assert_not_called()
             monitor.client.query.assert_not_called()
             monitor.raw.assert_not_called()
@@ -262,9 +241,9 @@ class PerformanceGateTest(unittest.TestCase):
     def engine_evidence(self):
         import yaml
 
-        gate_input = yaml.safe_load((ROOT / "config/scenarios/master_performance.yaml").read_text())["parameters"][
-            "observation"
-        ]["inputs"]["engine_tps"]
+        gate_input = yaml.safe_load((ROOT / "config/scenarios/master_performance.yaml").read_text())["parameters"]["observation"]["inputs"][
+            "engine_tps"
+        ]
         roles = {b["metric"]: b["labels"]["role"] for b in gate_input["fields"].values()}
         e = evidence()
         e["gate_input"] = gate_input
@@ -298,7 +277,7 @@ class PerformanceGateTest(unittest.TestCase):
                             "mock/mock_decode_wall_tps_engine_mean": dict(
                                 promql='avg by (role) (mock_decode_wall_tps{job="mock"})',
                                 result=[dict(metric=dict(role="decode"), values=[[100, "120"], [110, "130"]])],
-                            ),
+                            )
                         },
                     )
                 )
@@ -314,8 +293,7 @@ class PerformanceGateTest(unittest.TestCase):
             self.assertEqual([c["name"] for c in measured], ["D generate TPS"])
             self.assertTrue(all(not c["hidden"] for c in measured))
             self.assertEqual(
-                next(curve for curve in curves if curve["name"] == "D generate TPS")["points"],
-                [dict(x=0, y=120), dict(x=10, y=130)],
+                next(curve for curve in curves if curve["name"] == "D generate TPS")["points"], [dict(x=0, y=120), dict(x=10, y=130)]
             )
             self.assertNotIn("成功 QPS", [c["name"] for p in panels for c in p["series"]])
             archive.unlink()
@@ -393,10 +371,7 @@ class PerformanceGateTest(unittest.TestCase):
                         step=1,
                         targets={},
                         queries={
-                            "mock/" + name: dict(
-                                promql=name,
-                                result=[dict(metric=dict(role="prefill"), values=[[100, str(value)]])],
-                            )
+                            "mock/" + name: dict(promql=name, result=[dict(metric=dict(role="prefill"), values=[[100, str(value)]])])
                             for name, value in metrics.items()
                         },
                     )
@@ -497,18 +472,14 @@ class PerformanceGateTest(unittest.TestCase):
             self.assertTrue((path / "report.html").is_file())
             spec = json.loads((path / "report-spec.json").read_text())
             self.assertEqual(
-                [p["id"] for p in spec["panels"]],
-                ["engine-tps", "client-qps", "latency", "cache-hit", "prefill-batch", "prefill-state"],
+                [p["id"] for p in spec["panels"]], ["engine-tps", "client-qps", "latency", "cache-hit", "prefill-batch", "prefill-state"]
             )
             for panel in spec["panels"]:
                 self.assertTrue(panel["timeX"])
                 for series in panel["series"]:
                     self.assertTrue(series["points"])
                     self.assertIn(series["axis"], panel["axes"])
-            self.assertEqual(
-                analyze(json.loads((Path(d) / "performance-gate-evidence.json").read_text())),
-                r,
-            )
+            self.assertEqual(analyze(json.loads((Path(d) / "performance-gate-evidence.json").read_text())), r)
 
     def test_multiview_ab_preserves_decode_monitoring_and_request_buckets(self):
         prepare = metric_curves
@@ -532,20 +503,12 @@ class PerformanceGateTest(unittest.TestCase):
                             ),
                             "mock/rtp_llm_context_tps_per_engine": dict(
                                 promql="sum without (priority) (rtp_llm_context_tps)",
-                                result=[
-                                    dict(
-                                        metric=dict(role="prefill", engine_name="p0"),
-                                        values=[[100, 60000], [101, 61000]],
-                                    )
-                                ],
+                                result=[dict(metric=dict(role="prefill", engine_name="p0"), values=[[100, 60000], [101, 61000]])],
                             ),
                             "mock/engine_count": dict(
                                 promql="sum by(role)(engines)",
                                 result=[
-                                    dict(
-                                        metric=dict(role=role),
-                                        values=[[100, count], [101, count]],
-                                    )
+                                    dict(metric=dict(role=role), values=[[100, count], [101, count]])
                                     for role, count in [("prefill", 2), ("decode", 4)]
                                 ],
                             ),
@@ -567,15 +530,10 @@ class PerformanceGateTest(unittest.TestCase):
 
             store = MetricStore.read(root)
             self.assertEqual(store.select("mock/engine_count", labels={"role": "decode"})[0]["points"][0], [100, 4])
-            self.assertEqual(
-                store.select("mock/rtp_llm_context_tps_per_engine", labels={"role": "prefill"})[0]["points"][0],
-                [100, 60000],
-            )
+            self.assertEqual(store.select("mock/rtp_llm_context_tps_per_engine", labels={"role": "prefill"})[0]["points"][0], [100, 60000])
             self.assertEqual(by_name["TTFT p99"]["points"][0]["y"], 50)
             self.assertNotIn("request/arrival_success_ratio", store.document["definitions"])
-            self.assertEqual(
-                set(k for k in store.document["metrics"] if k.startswith("request/")), {"request/ttft_p99_ms"}
-            )
+            self.assertEqual(set(k for k in store.document["metrics"] if k.startswith("request/")), {"request/ttft_p99_ms"})
 
     def test_tail_cohort_and_actual_tokens_not_requested_budget(self):
         e = evidence()
@@ -658,10 +616,7 @@ class PerformanceGateTest(unittest.TestCase):
         e["criteria"]["min_output_tps"] = 1
         r = analyze(e)
         self.assertEqual(r["verdict"], "PASS")
-        self.assertEqual(
-            next(x for x in r["checks"] if x["id"] == "tpot_p99_ms")["status"],
-            "SKIP",
-        )
+        self.assertEqual(next(x for x in r["checks"] if x["id"] == "tpot_p99_ms")["status"], "SKIP")
 
     def test_workload_checksum_preserves_everything_except_rid(self):
         with tempfile.TemporaryDirectory() as d:
@@ -682,10 +637,7 @@ class PerformanceGateTest(unittest.TestCase):
             mock.patch("scenario.compiler.VICTIM_OFFSETS", (300, 301, 302)),
             mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (300, 301, 302)),
         ):
-            plans = compile_scenarios(
-                load_scenarios(ROOT / "config/scenarios/master_performance.yaml"),
-                handlers=handlers(),
-            )
+            plans = compile_scenarios(load_scenarios(ROOT / "config/scenarios/master_performance.yaml"), handlers=handlers())
         self.assertEqual(len(plans), 2)
         for p in plans:
             self.assertIn("performance_finish", [s["action"] for s in p["stages"]])

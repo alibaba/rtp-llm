@@ -64,14 +64,7 @@ class JavaMockBackend:
             self.environments.append(env)
 
     def remember_processes(self, env):
-        for mp in [
-            env.mock,
-            env.master,
-            env.zk_helper,
-            *env.masters.values(),
-            *env.victims.values(),
-            *env.load_clients,
-        ]:
+        for mp in [env.mock, env.master, env.zk_helper, *env.masters.values(), *env.victims.values(), *env.load_clients]:
             if mp is not None:
                 self.owned_processes[mp.pid] = mp
 
@@ -96,16 +89,12 @@ class JavaMockBackend:
         spec.diagnostic_events = ctx.instance.get("collection_profile", "diagnostic") == "diagnostic"
         # Keep the first-epoch artifact layout compatible with existing runs.
         # Later environments never overwrite its config, logs or cleanup proof.
-        artifact_dir = (
-            ctx.artifact_dir if ctx.env_epoch == 1 else ctx.artifact_dir / f"environment-epoch-{ctx.env_epoch}"
-        )
+        artifact_dir = ctx.artifact_dir if ctx.env_epoch == 1 else ctx.artifact_dir / f"environment-epoch-{ctx.env_epoch}"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         self.current_artifact_dir = artifact_dir
         if raw_config is not None:
             spec.raw_config = raw_config
-        sync_log_path = (
-            configure_master_sync_log(spec, artifact_dir, ctx.env_epoch) if plan.get("master_sync_log", False) else None
-        )
+        sync_log_path = configure_master_sync_log(spec, artifact_dir, ctx.env_epoch) if plan.get("master_sync_log", False) else None
         private_log = sync_log_path.parent if sync_log_path else None
         if not spec.masters and private_log is None:
             private_log = (artifact_dir / "master-logs").resolve()
@@ -173,12 +162,7 @@ class JavaMockBackend:
             if path.exists():
                 with path.open("rb") as stream:
                     stream.seek(max(0, path.stat().st_size - 262144))
-                    logs.append(
-                        dict(
-                            path=str(path),
-                            tail=stream.read(262144).decode("utf-8", errors="replace"),
-                        )
-                    )
+                    logs.append(dict(path=str(path), tail=stream.read(262144).decode("utf-8", errors="replace")))
         return dict(
             startup_error=error,
             started=error is None,
@@ -193,12 +177,7 @@ class JavaMockBackend:
 
         batch = RequestBatch(ctx, params)
         handle = ctx.register_resource(
-            "requests",
-            batch,
-            batch.cleanup,
-            historical=True,
-            evidence=request_evidence,
-            request_stop=lambda: batch.cancel("cleanup"),
+            "requests", batch, batch.cleanup, historical=True, evidence=request_evidence, request_stop=lambda: batch.cancel("cleanup")
         )
         batch.submit(deadline)
         return handle
@@ -271,8 +250,6 @@ class JavaMockBackend:
         if errors:
             message = "; ".join(name + ": " + str(exc) for name, exc in errors)
             error_type = (
-                StageTimeout
-                if any(isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)) for _, exc in errors)
-                else RuntimeError
+                StageTimeout if any(isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)) for _, exc in errors) else RuntimeError
             )
             raise error_type(message) from errors[0][1]

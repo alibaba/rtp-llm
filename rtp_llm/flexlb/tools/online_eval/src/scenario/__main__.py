@@ -24,12 +24,7 @@ def main(argv=None):
         return 2
     print(
         json.dumps(
-            {
-                "instance_catalog_schema_version": 1,
-                "mode": "compile",
-                "counts": plan_counts(plans),
-                "instances": plans,
-            },
+            {"instance_catalog_schema_version": 1, "mode": "compile", "counts": plan_counts(plans), "instances": plans},
             indent=2,
             ensure_ascii=False,
         )

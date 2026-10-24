@@ -40,9 +40,7 @@ class ScenarioRunner:
             experiment_definition_schema_version=1,
             plan=plan.to_dict(),
             dependencies=dependency_files([plan]),
-            views={
-                name: view(name).to_dict() for name in dict.fromkeys([DEFAULT_VIEW, *ctx.instance.get("reports", [])])
-            }
+            views={name: view(name).to_dict() for name in dict.fromkeys([DEFAULT_VIEW, *ctx.instance.get("reports", [])])}
             if ctx.instance["metadata"]["kind"] == "workload"
             else {},
         )
@@ -67,8 +65,4 @@ def execute_instance(
     _policy=None,
 ):
     """Artifact-facing API; execution itself operates on CompiledInstance and RunResult."""
-    return (
-        ScenarioRunner()
-        .run(instance, backend, handlers, artifact_dir, clock, sleeper, cancelled, enforce_deadlines, _policy)
-        .to_dict()
-    )
+    return ScenarioRunner().run(instance, backend, handlers, artifact_dir, clock, sleeper, cancelled, enforce_deadlines, _policy).to_dict()

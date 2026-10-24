@@ -8,24 +8,13 @@ from dataclasses import dataclass
 
 from adapters.perf_presets import load_preset_bundle
 from document_io import DocumentError as ScenarioError
-from flexlb_cfg import (
-    PROFILE_CAPS,
-    PROFILES,
-    VICTIM_STAGES,
-    ProfileIdentityError,
-    render_env,
-    validate_profile_identity,
-)
+from flexlb_cfg import PROFILE_CAPS, PROFILES, VICTIM_STAGES, ProfileIdentityError, render_env, validate_profile_identity
 from scenario.environment_declaration import EnvironmentDeclaration, captured_fields
 from scenario.environment_snapshot import EnvironmentSnapshot
 from scenario.master_patch import MasterPatch
 from scenario.validation import fail, mapping
 
-CAPABILITIES = set().union(*PROFILE_CAPS.values()) | {
-    "priority",
-    "preemption",
-    "engine_cancellation",
-}
+CAPABILITIES = set().union(*PROFILE_CAPS.values()) | {"priority", "preemption", "engine_cancellation"}
 
 
 def effective_capabilities(config):
@@ -88,10 +77,7 @@ class EnvironmentResolver:
         performance, runtime = bundle.performance, bundle.runtime
         common = MasterPatch.read(value.get("config_overrides", {}), path + ".config_overrides")
         patches = mapping(value.get("profile_overrides", {}), path + ".profile_overrides", PROFILES)
-        profiles = {
-            profile: MasterPatch.read(patch, path + ".profile_overrides." + profile)
-            for profile, patch in patches.items()
-        }
+        profiles = {profile: MasterPatch.read(patch, path + ".profile_overrides." + profile) for profile, patch in patches.items()}
         paired = runtime.get("paired_master")
         # Check excluded profiles too; this never recursively renders an environment.
         for profile, patch in profiles.items():
@@ -158,9 +144,7 @@ class EnvironmentResolver:
         from scenario.environment_snapshot import EnvironmentSnapshot
 
         snapshot = EnvironmentSnapshot.freeze(
-            config,
-            self.effective_performance(declaration),
-            {key: value for key, value in self.runtime.items() if key != "paired_master"},
+            config, self.effective_performance(declaration), {key: value for key, value in self.runtime.items() if key != "paired_master"}
         )
         return ResolvedEnvironment(declaration, resolved, snapshot, axes, tuple(capabilities))
 

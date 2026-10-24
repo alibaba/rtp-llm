@@ -125,8 +125,7 @@ class LineageModel:
         header = LineageMetadata.read(metadata)
         if header.version == 2:
             typed = tuple(
-                LineageEvent(ts, blocks * header.block_size, parent, shared, reserve)
-                for ts, blocks, parent, shared, reserve in events
+                LineageEvent(ts, blocks * header.block_size, parent, shared, reserve) for ts, blocks, parent, shared, reserve in events
             )
         else:
             typed = tuple(LineageEvent(*event) for event in events)
@@ -145,10 +144,7 @@ class LineageModel:
                 for event in self.events
             ]
         else:
-            events = [
-                [event.timestamp_ms, event.input_tokens, event.parent_index, event.shared_full_blocks]
-                for event in self.events
-            ]
+            events = [[event.timestamp_ms, event.input_tokens, event.parent_index, event.shared_full_blocks] for event in self.events]
         return self.metadata.to_dict(), events
 
 
@@ -175,9 +171,7 @@ class LineageExpander:
         next_label = 1
         for index, event in enumerate(self.model.events):
             prefix = paths[event.parent_index][: event.shared_full_blocks] if event.parent_index >= 0 else ()
-            fresh = (
-                event.input_tokens + self.model.metadata.block_size - 1
-            ) // self.model.metadata.block_size - event.shared_full_blocks
+            fresh = (event.input_tokens + self.model.metadata.block_size - 1) // self.model.metadata.block_size - event.shared_full_blocks
             if next_label + fresh + event.reserved_labels > self.label_limit:
                 raise ValueError("lineage label budget exceeded")
             retained = fresh if self.retained_blocks is None else max(0, self.retained_blocks - len(prefix))

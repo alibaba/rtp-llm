@@ -16,19 +16,11 @@ def validate_structure(path, data, fail):
     ):
         fail(path, "invalid report view fields or version")
     report = data["report"]
-    if (
-        not isinstance(report, dict)
-        or not {"subtitle"} <= report.keys()
-        or report.keys() - {"subtitle", "id", "producer"}
-    ):
+    if not isinstance(report, dict) or not {"subtitle"} <= report.keys() or report.keys() - {"subtitle", "id", "producer"}:
         fail(str(path) + ".report", "invalid report fields")
     if "metrics" in data:
         metrics = data["metrics"]
-        if (
-            not isinstance(metrics, dict)
-            or "query_plan" not in metrics
-            or metrics.keys() - {"query_plan", "diagnostic_only"}
-        ):
+        if not isinstance(metrics, dict) or "query_plan" not in metrics or metrics.keys() - {"query_plan", "diagnostic_only"}:
             fail(str(path) + ".metrics", "invalid metric selection fields")
     if "charts" in data and not isinstance(data["charts"], dict):
         fail(str(path) + ".charts", "expected mapping")

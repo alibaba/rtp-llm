@@ -64,9 +64,7 @@ def _prefill_max_share(source):
 
 
 def _visible_terminal_count(source):
-    return sum(
-        row["status"] == "ok" or row["error_kind"] in {"deadline", "transport", "business"} for row in source.rows
-    )
+    return sum(row["status"] == "ok" or row["error_kind"] in {"deadline", "transport", "business"} for row in source.rows)
 
 
 _CLIENT_METRICS = {

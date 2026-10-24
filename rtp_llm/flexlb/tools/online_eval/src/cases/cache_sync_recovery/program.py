@@ -11,15 +11,7 @@ from scenario.registry import CaseDefinition
 INPUTS = InputSchema(
     {
         "procedure": dict.fromkeys(
-            (
-                "setup_timeout_s",
-                "warmup_timeout_s",
-                "cache_only_s",
-                "traffic_warmup_s",
-                "measurement_s",
-                "withdraw_s",
-                "post_s",
-            ),
+            ("setup_timeout_s", "warmup_timeout_s", "cache_only_s", "traffic_warmup_s", "measurement_s", "withdraw_s", "post_s"),
             NONNEGATIVE,
         )
         | dict.fromkeys(("unique_keys", "delta_keys", "churn_interval_ms", "expired_workers"), POSITIVE_COUNT)
@@ -31,8 +23,7 @@ INPUTS = InputSchema(
             "capture": {"max_samples": POSITIVE_COUNT, "max_bytes": POSITIVE_COUNT},
         },
         "checks": dict.fromkeys(
-            ("max_status_age_ms", "min_cache_responses_per_s", "min_added_keys_per_s", "max_added_keys_per_s"),
-            NONNEGATIVE,
+            ("max_status_age_ms", "min_cache_responses_per_s", "min_added_keys_per_s", "max_added_keys_per_s"), NONNEGATIVE
         ),
         "traffic": JavaFlowSpec.input_fields(),
     }
@@ -44,11 +35,7 @@ def build(case, intervention):
     p, o, c = data["procedure"], data["observation"], data["checks"]
     if any(v <= 0 for k, v in p.items() if k not in {"shared_keys"}):
         raise ValueError("pressure windows and key parameters must be positive")
-    if (
-        case.env.n_prefill < 2
-        or case.env.discovery != "discovery_file"
-        or not 0 < p["expired_workers"] < case.env.n_prefill
-    ):
+    if case.env.n_prefill < 2 or case.env.discovery != "discovery_file" or not 0 < p["expired_workers"] < case.env.n_prefill:
         raise ValueError("partial withdrawal requires owned discovery and a proper Prefill subset")
     if p["unique_keys"] + p["shared_keys"] > 1_000_000 or p["delta_keys"] > p["unique_keys"]:
         raise ValueError("invalid fixture key budget")
@@ -69,13 +56,7 @@ def build(case, intervention):
         "cycle",
         "cache_recovery_cycle",
         timeout_s=budget,
-        params={
-            "procedure": p,
-            "observation": o,
-            "checks": c,
-            "traffic": data["traffic"],
-            "intervention": intervention,
-        },
+        params={"procedure": p, "observation": o, "checks": c, "traffic": data["traffic"], "intervention": intervention},
     )
     case.step("cleanup", "teardown")
 

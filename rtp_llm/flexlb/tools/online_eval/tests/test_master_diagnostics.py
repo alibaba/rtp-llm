@@ -23,9 +23,7 @@ def payload():
                 status="ok",
                 capture_started_at_ms=1,
                 capture_finished_at_ms=2,
-                coverage=dict(
-                    scope="prefill_decode_endpoint_registry", complete=True, truncated=False, returned_count=1
-                ),
+                coverage=dict(scope="prefill_decode_endpoint_registry", complete=True, truncated=False, returned_count=1),
                 rows=[
                     dict(
                         worker_id="prefill:a",

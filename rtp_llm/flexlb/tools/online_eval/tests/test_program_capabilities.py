@@ -44,9 +44,7 @@ class ProgramCapabilitiesTest(unittest.TestCase):
             shared = registry.registry().cases["cache_scale_in"].definition
             definition = replace(module.CASE, metrics=shared.metrics, report_views=shared.report_views)
             with mock.patch.object(
-                registry,
-                "_snapshot",
-                snapshot(entry("second_cache", definition, "second_cache", module_path), include_existing=True),
+                registry, "_snapshot", snapshot(entry("second_cache", definition, "second_cache", module_path), include_existing=True)
             ):
                 with (
                     mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)),
@@ -77,8 +75,7 @@ class ProgramCapabilitiesTest(unittest.TestCase):
             )
             evidence = dict(clock_anchor=dict(epoch_s=0), phases=[])
             with mock.patch(
-                "monitoring.metric_store.MetricStore.read",
-                return_value=mock.Mock(series=mock.Mock(return_value=({}, {}, {}, []))),
+                "monitoring.metric_store.MetricStore.read", return_value=mock.Mock(series=mock.Mock(return_value=({}, {}, {}, [])))
             ):
                 payload = analyze_evidence(root, result, evidence, WorkloadResult()).analysis
             self.assertNotIn("gate_reports", payload)
@@ -98,16 +95,12 @@ class ProgramCapabilitiesTest(unittest.TestCase):
         )
         with (
             tempfile.TemporaryDirectory() as d,
-            mock.patch.dict(
-                REGISTERED_PROFILE_SPECS, {"second-profile": dict(decision="single", dispatcher="non_batch")}
-            ),
+            mock.patch.dict(REGISTERED_PROFILE_SPECS, {"second-profile": dict(decision="single", dispatcher="non_batch")}),
         ):
             path = Path(d) / "modes.yaml"
             path.write_text(yaml.safe_dump(tables))
             loaded = mode_profiles.load_mode_tables(path)
-            self.assertEqual(
-                mode_profiles.resolve_mode("second", "sn", tables=loaded)["master_profile"], "second-profile"
-            )
+            self.assertEqual(mode_profiles.resolve_mode("second", "sn", tables=loaded)["master_profile"], "second-profile")
             self.assertEqual(mode_profiles.master_mode_for_profile("second-profile"), "sn")
             for patch, message in (
                 ({"default_profile": "missing"}, "unknown default"),

@@ -70,9 +70,7 @@ def test_html_reinterpretation_is_self_contained_and_source_is_read_only(tmp_pat
     assert saved["reinterpretation"]["source_sha256"] == hashlib.sha256(input_path.read_bytes()).hexdigest()
     from cases.master_performance import analysis
 
-    assert (
-        saved["reinterpretation"]["analyzer_sha256"] == hashlib.sha256(Path(analysis.__file__).read_bytes()).hexdigest()
-    )
+    assert saved["reinterpretation"]["analyzer_sha256"] == hashlib.sha256(Path(analysis.__file__).read_bytes()).hexdigest()
     provenance = metrics["metrics"]["performance_gate/ttft_p99_ms"][0]["provenance"]
     assert provenance["evidence"]["path"] == str(destination / "performance-gate-evidence.json")
     shutil.rmtree(source)

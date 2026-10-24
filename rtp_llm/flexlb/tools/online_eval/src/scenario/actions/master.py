@@ -92,15 +92,11 @@ def _fault(ctx, params, deadline):
     if fault.mode == "kill":
         _invalidate_master_channel(ctx, fault.target)
     deadline.check()
-    return StageOutput(
-        {"fault": handle, "pid": process.pid, "started_s": fault.started_s, "epoch_s": fault.started_epoch_s}
-    )
+    return StageOutput({"fault": handle, "pid": process.pid, "started_s": fault.started_s, "epoch_s": fault.started_epoch_s})
 
 
 def _invalidate_master_channel(ctx, target):
-    address = (
-        ctx.ops.master_target() if target == "single" else ctx.backend.manager.master_instance_target(ctx.env, target)
-    )
+    address = ctx.ops.master_target() if target == "single" else ctx.backend.manager.master_instance_target(ctx.env, target)
     ctx.ops.invalidate_channel(address)
 
 
@@ -194,17 +190,8 @@ def _ready(ctx, params, deadline):
             inflight = _master_json(ctx, params["target"], "/rtp_llm/inflight_status", deadline)
             count = scheduler_inflight(inflight)
             counts = worker_counts(info, expected)
-            samples.append(
-                dict(
-                    time_s=ctx.clock(),
-                    topology=counts,
-                    scheduler_inflight=count,
-                    ready=info.get("ready"),
-                )
-            )
-            converged = info.get("ready") is True and all(
-                values == (expected[role], expected[role]) for role, values in counts.items()
-            )
+            samples.append(dict(time_s=ctx.clock(), topology=counts, scheduler_inflight=count, ready=info.get("ready")))
+            converged = info.get("ready") is True and all(values == (expected[role], expected[role]) for role, values in counts.items())
             endpoint_loads = {} if not params["inflight_zero"] else None
             if params["inflight_zero"] and converged:
                 endpoint_rows = [inflight[side + "_endpoints"] for side in ("prefill", "decode")]
@@ -225,12 +212,7 @@ def _ready(ctx, params, deadline):
         {"snapshot": handle},
         [
             CheckResult("topology", "PASS", actual=counts, expected=expected),
-            CheckResult(
-                "inflight",
-                "PASS",
-                actual=count,
-                expected=0 if params["inflight_zero"] else "observed",
-            ),
+            CheckResult("inflight", "PASS", actual=count, expected=0 if params["inflight_zero"] else "observed"),
         ],
         [str(artifact)],
     )
@@ -252,14 +234,7 @@ def _wrap_inflight(ctx, params, deadline):
             raw = _master_json(ctx, params["target"], "/rtp_llm/inflight_status", deadline)
             scheduler = scheduler_inflight(raw)
             loads = zero_owner_loads(raw)
-            samples.append(
-                dict(
-                    time_s=ctx.clock(),
-                    scheduler_inflight=scheduler,
-                    endpoint_loads=loads,
-                    raw=raw,
-                )
-            )
+            samples.append(dict(time_s=ctx.clock(), scheduler_inflight=scheduler, endpoint_loads=loads, raw=raw))
             if scheduler == 0 and not any(value for rows in loads.values() for value in rows):
                 break
             deadline.sleep(0.5)
@@ -298,24 +273,12 @@ def _leadership(ctx, params, deadline):
                 for name in params["targets"]
             }
             leaders = [name for name, state in states.items() if state.leader]
-            samples.append(
-                {
-                    "time_s": ctx.clock(),
-                    "leaders": leaders,
-                    "states": {name: state.to_dict() for name, state in states.items()},
-                }
-            )
+            samples.append({"time_s": ctx.clock(), "leaders": leaders, "states": {name: state.to_dict() for name, state in states.items()}})
             if len(leaders) > 1:
                 raise ValueError("multiple elected Masters observed")
             leader = leaders[0] if leaders else None
-            address = (
-                None
-                if leader is None
-                else states[leader].local_host + ":" + str(ctx.env.master_specs[leader].http_port)
-            )
-            converged = leader is not None and all(
-                state.enabled and state.master_host == address for state in states.values()
-            )
+            address = None if leader is None else states[leader].local_host + ":" + str(ctx.env.master_specs[leader].http_port)
+            converged = leader is not None and all(state.enabled and state.master_host == address for state in states.values())
             converged = converged and ("leader" not in params or params["leader"] == leader)
             samples[-1]["leader"] = leader
             if converged:
@@ -337,38 +300,13 @@ def _leadership(ctx, params, deadline):
 
 
 HANDLERS = [
+    StageHandler("master_leadership", _leadership_validate, _leadership, {"snapshot": "snapshot"}, checks=frozenset({"leadership"})),
     StageHandler(
-        "master_leadership",
-        _leadership_validate,
-        _leadership,
-        {"snapshot": "snapshot"},
-        checks=frozenset({"leadership"}),
+        "master_fault", _fault_validate, _fault, {"fault": "master_fault", "pid": "integer", "started_s": "number", "epoch_s": "number"}
     ),
     StageHandler(
-        "master_fault",
-        _fault_validate,
-        _fault,
-        {"fault": "master_fault", "pid": "integer", "started_s": "number", "epoch_s": "number"},
+        "master_restore", _restore_validate, _restore, {"pid": "integer", "restored_s": "number"}, checks=frozenset({"process_identity"})
     ),
-    StageHandler(
-        "master_restore",
-        _restore_validate,
-        _restore,
-        {"pid": "integer", "restored_s": "number"},
-        checks=frozenset({"process_identity"}),
-    ),
-    StageHandler(
-        "master_ready",
-        _ready_validate,
-        _ready,
-        {"snapshot": "snapshot"},
-        checks=frozenset({"topology", "inflight"}),
-    ),
-    StageHandler(
-        "master_inflight_clean",
-        _owner_gate_validate,
-        _wrap_inflight,
-        {"snapshot": "snapshot"},
-        checks=frozenset({"inflight"}),
-    ),
+    StageHandler("master_ready", _ready_validate, _ready, {"snapshot": "snapshot"}, checks=frozenset({"topology", "inflight"})),
+    StageHandler("master_inflight_clean", _owner_gate_validate, _wrap_inflight, {"snapshot": "snapshot"}, checks=frozenset({"inflight"})),
 ]

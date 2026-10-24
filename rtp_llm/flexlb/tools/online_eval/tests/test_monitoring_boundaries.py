@@ -55,9 +55,7 @@ def test_query_client_is_independent_and_sees_registered_sources():
     from monitoring.client import PrometheusClient
 
     kinds = {"first": "mock"}
-    client = PrometheusClient(
-        "http://owned-tsdb", query_plan=load_plan("default.yaml"), target_kinds=kinds, max_gap_s=5
-    )
+    client = PrometheusClient("http://owned-tsdb", query_plan=load_plan("default.yaml"), target_kinds=kinds, max_gap_s=5)
     kinds["later"] = "client"
     assert client.target_kind("later") == "client"
     assert client.selector("later") == '{job="later"}'
@@ -81,9 +79,7 @@ def test_recording_needs_only_a_window_and_query_client(tmp_path):
 
     plan = load_plan("default.yaml")
     client = PrometheusClient("http://owned-tsdb", query_plan=plan, target_kinds={"worker": "mock"}, max_gap_s=5)
-    window = ArchiveWindow(
-        tmp_path, "default.yaml", {}, 1, 1, {"worker": "http://exporter/metrics"}, {"worker": [1, 2]}
-    )
+    window = ArchiveWindow(tmp_path, "default.yaml", {}, 1, 1, {"worker": "http://exporter/metrics"}, {"worker": [1, 2]})
     with patch.object(client, "api", return_value={"result": []}):
         result = record_queries(window, client)
     assert result["errors"]
@@ -120,14 +116,7 @@ def test_probe_failed_export_retains_completed_chunks(tmp_path):
 
 
 def test_invalid_conversion_preserves_previous_frozen_artifact(tmp_path):
-    previous = dict(
-        metrics_schema_version=1,
-        definitions={},
-        metrics={},
-        collection_gaps={},
-        errors=[],
-        run={"identity": "previous"},
-    )
+    previous = dict(metrics_schema_version=1, definitions={}, metrics={}, collection_gaps={}, errors=[], run={"identity": "previous"})
     write_json(tmp_path / "metrics.json", previous)
     before = (tmp_path / "metrics.json").read_bytes()
     (tmp_path / "queries.json").write_text(
@@ -166,10 +155,7 @@ def test_archive_budget_keeps_partial_queries_and_still_reaps_process(tmp_path):
         now[0] += 0.6
         return {"result": []}
 
-    with (
-        patch("monitoring.session.time.monotonic", side_effect=lambda: now[0]),
-        patch.object(session.client, "api", side_effect=query),
-    ):
+    with patch("monitoring.session.time.monotonic", side_effect=lambda: now[0]), patch.object(session.client, "api", side_effect=query):
         with pytest.raises(TimeoutError):
             session.stop(timeout=1, materialize=False)
     assert len(calls) == 2  # Later chunks and queries do not get fresh budgets.
@@ -186,9 +172,7 @@ def test_query_http_timeout_is_bounded_by_remaining_budget(tmp_path):
     session = PrometheusSession(tmp_path, {}, metric_plan=load_plan("default.yaml"))
     session.client.url = "http://owned-tsdb"
     deadline = Deadline(0.2, clock=lambda: 0)
-    with patch(
-        "monitoring.client.urllib.request.urlopen", return_value=BytesIO(b'{"status":"success","data":{"result":[]}}')
-    ) as request:
+    with patch("monitoring.client.urllib.request.urlopen", return_value=BytesIO(b'{"status":"success","data":{"result":[]}}')) as request:
         assert session.client.api("query", timeout=5, deadline=deadline, query="up") == {"result": []}
     assert request.call_args.kwargs["timeout"] == 0.2
 
@@ -197,12 +181,7 @@ def test_calculator_identity_is_explicit_and_not_derived_from_method():
     from analysis.request_metrics import describe_calculation
 
     contract = describe_calculation(
-        dict(
-            calculator="request_rate",
-            window="measurement",
-            selection=dict(time_basis="arrival", status="all"),
-            bucket_s=1,
-        ),
+        dict(calculator="request_rate", window="measurement", selection=dict(time_basis="arrival", status="all"), bucket_s=1),
         windows={"measurement"},
     )
     assert contract["measurement"]["method"] == "request_rate"
@@ -214,10 +193,7 @@ def test_query_timestamp_defaults_only_when_absent(when, expected):
     from monitoring.client import PrometheusClient
 
     client = PrometheusClient("http://owned-tsdb", query_plan=load_plan("default.yaml"), target_kinds={}, max_gap_s=5)
-    with (
-        patch.object(client, "api", return_value={"result": []}) as api,
-        patch("monitoring.client.time.time", return_value=1234),
-    ):
+    with patch.object(client, "api", return_value={"result": []}) as api, patch("monitoring.client.time.time", return_value=1234):
         client.query("up", when=when)
     assert api.call_args.kwargs["time"] == expected
 
@@ -262,9 +238,7 @@ def test_raw_archive_keeps_inner_chunks_without_accepting_failed_metric(tmp_path
         return [[first], [second] if failure == "invalid_labels" else second]
 
     with (
-        patch.object(
-            client, "api", return_value={"result": [dict(metric={"__name__": "up"}, values=[[1, "1"], [121, "1"]])]}
-        ),
+        patch.object(client, "api", return_value={"result": [dict(metric={"__name__": "up"}, values=[[1, "1"], [121, "1"]])]}),
         patch.object(client, "query", side_effect=samples()),
     ):
         result = record_queries(window, client)
@@ -310,9 +284,7 @@ def test_invalid_published_identity_preserves_store_and_artifact(tmp_path, chang
     previous = (tmp_path / "metrics.json").read_bytes()
     valid = dict(epoch="1", source="ha", labels={"master": "A"}, points=[[1, 2]])
     with pytest.raises(MetricContractError):
-        publish(
-            store, "ha/scheduler_inflight", spec, [valid, dict(valid, **change)], producer="ha_evidence", evidence={}
-        )
+        publish(store, "ha/scheduler_inflight", spec, [valid, dict(valid, **change)], producer="ha_evidence", evidence={})
     assert store.document["metrics"] == {}
     assert (tmp_path / "metrics.json").read_bytes() == previous
     assert MetricStore.read(tmp_path).document["metrics"] == {}
@@ -375,9 +347,7 @@ def test_failed_client_registration_restores_config_and_allows_retry(tmp_path, p
     kinds = session.client.target_kinds
     config = json.loads((tmp_path / "prometheus.json").read_text())
     reload_results = (
-        [OSError("reload failed"), BytesIO(b""), BytesIO(b"")]
-        if phase == "reload"
-        else [BytesIO(b""), BytesIO(b""), BytesIO(b"")]
+        [OSError("reload failed"), BytesIO(b""), BytesIO(b"")] if phase == "reload" else [BytesIO(b""), BytesIO(b""), BytesIO(b"")]
     )
     ready_results = [None] if phase == "reload" else [TimeoutError("not ready"), None]
     with (
@@ -396,10 +366,7 @@ def test_failed_client_registration_restores_config_and_allows_retry(tmp_path, p
     assert reload.call_count == 3
     assert kinds["new"] == "client"
     assert set(session.target_bounds) == {"existing", "new"}
-    assert [job["job_name"] for job in json.loads((tmp_path / "prometheus.json").read_text())["scrape_configs"]] == [
-        "existing",
-        "new",
-    ]
+    assert [job["job_name"] for job in json.loads((tmp_path / "prometheus.json").read_text())["scrape_configs"]] == ["existing", "new"]
 
 
 def test_failed_registration_rollback_marks_session_unusable_and_still_cleans_up(tmp_path):
@@ -438,9 +405,7 @@ def test_registration_rollback_uses_the_original_deadline(tmp_path):
     assert request.call_count == 1  # An expired budget cannot authorize a fresh reload.
     assert isinstance(session.registration_error, TimeoutError)
     assert set(session.targets) == {"existing"}
-    assert [job["job_name"] for job in json.loads((tmp_path / "prometheus.json").read_text())["scrape_configs"]] == [
-        "existing"
-    ]
+    assert [job["job_name"] for job in json.loads((tmp_path / "prometheus.json").read_text())["scrape_configs"]] == ["existing"]
 
 
 def test_config_write_failure_restores_inventory_without_reload(tmp_path):
@@ -452,10 +417,7 @@ def test_config_write_failure_restores_inventory_without_reload(tmp_path):
             raise OSError("disk full")
         return write_json(path, data)
 
-    with (
-        patch("monitoring.session.write_json", side_effect=fail_once),
-        patch("monitoring.session.urllib.request.urlopen") as request,
-    ):
+    with patch("monitoring.session.write_json", side_effect=fail_once), patch("monitoring.session.urllib.request.urlopen") as request:
         with pytest.raises(OSError, match="disk full"):
             session.add_client_target("new", "http://client/metrics")
     request.assert_not_called()
@@ -510,10 +472,7 @@ def test_archive_expiry_preserves_error_and_fresh_shutdown_budget(tmp_path):
         now[0] = kwargs["deadline"].expires_at
         kwargs["deadline"].check()
 
-    with (
-        patch.object(session, "archive", side_effect=archive),
-        pytest.raises(TimeoutError, match="Prometheus archive") as exc,
-    ):
+    with patch.object(session, "archive", side_effect=archive), pytest.raises(TimeoutError, match="Prometheus archive") as exc:
         session.stop(10, archive_timeout=100, deadline=parent)
     assert "Prometheus process" not in str(exc.value)
     session.process.wait.assert_called_once_with(timeout=10)
@@ -536,9 +495,7 @@ def test_expired_outer_budget_does_not_refresh_shutdown_allowance(tmp_path):
 def test_snapshot_queries_only_requested_metrics_and_labels_at_one_scrape():
     from monitoring.client import PrometheusClient
 
-    client = PrometheusClient(
-        "http://owned-tsdb", query_plan=load_plan("cache_scale_in.yaml"), target_kinds={"mock": "mock"}, max_gap_s=5
-    )
+    client = PrometheusClient("http://owned-tsdb", query_plan=load_plan("cache_scale_in.yaml"), target_kinds={"mock": "mock"}, max_gap_s=5)
     labels = dict(
         __name__="mock_context_requests_total",
         role="prefill",
@@ -550,10 +507,7 @@ def test_snapshot_queries_only_requested_metrics_and_labels_at_one_scrape():
     # A removed engine's older series must not be resurrected through lookback.
     samples = [
         [dict(metric={"__name__": "up"}, values=[[10, "1"], [11, "1"]])],
-        [
-            dict(metric=labels, values=[[10, "3"], [11, "4"]]),
-            dict(metric=dict(labels, engine_name="removed"), values=[[10, "7"]]),
-        ],
+        [dict(metric=labels, values=[[10, "3"], [11, "4"]]), dict(metric=dict(labels, engine_name="removed"), values=[[10, "7"]])],
     ]
     with patch.object(client, "query", side_effect=samples) as query:
         result = client.metric_snapshot(["mock/context_requests_total"], source="mock", labels={"role": "prefill"})
@@ -568,9 +522,7 @@ def test_snapshot_queries_only_requested_metrics_and_labels_at_one_scrape():
 def test_snapshot_rejects_stale_or_failed_target_before_reading_metrics(health, message):
     from monitoring.client import PrometheusClient
 
-    client = PrometheusClient(
-        "http://owned-tsdb", query_plan=load_plan("cache_scale_in.yaml"), target_kinds={"mock": "mock"}, max_gap_s=5
-    )
+    client = PrometheusClient("http://owned-tsdb", query_plan=load_plan("cache_scale_in.yaml"), target_kinds={"mock": "mock"}, max_gap_s=5)
     with patch.object(client, "query", return_value=health) as query, pytest.raises(RuntimeError, match=message):
         client.metric_snapshot(["mock/context_requests_total"], source="mock")
     assert query.call_count == 1
@@ -579,15 +531,9 @@ def test_snapshot_rejects_stale_or_failed_target_before_reading_metrics(health, 
 def test_raw_chunks_apply_label_filter_and_keep_actual_scrape_times():
     from monitoring.client import PrometheusClient
 
-    client = PrometheusClient(
-        "http://owned-tsdb", query_plan=load_plan("cache_scale_in.yaml"), target_kinds={"mock": "mock"}, max_gap_s=5
-    )
+    client = PrometheusClient("http://owned-tsdb", query_plan=load_plan("cache_scale_in.yaml"), target_kinds={"mock": "mock"}, max_gap_s=5)
     labels = dict(role="prefill", engine_name="p", engine_incarnation="one", engine_ip="ip", grpc_port="7")
     with patch.object(client, "query", return_value=[dict(metric=labels, values=[[10.25, "4"]])]) as query:
-        chunks = list(
-            client.metric_chunks(
-                "mock/context_requests_total", source="mock", start=10, end=11, labels={"role": "prefill"}
-            )
-        )
+        chunks = list(client.metric_chunks("mock/context_requests_total", source="mock", start=10, end=11, labels={"role": "prefill"}))
     assert query.call_args.args == ('mock_context_requests_total{job="mock",role="prefill"}[1000ms]', 11)
     assert chunks[0][0]["values"] == [[10.25, "4"]]

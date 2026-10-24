@@ -65,10 +65,7 @@ def drain_flow(flow, deadline, sample, interval_s, event):
 def execute(ctx, params, deadline):
     from adapters.java_flow import JavaFlowGroup
     from adapters.resource_evidence import flow_evidence
-    from cases.cache_sync_recovery.telemetry import (
-        interval_rates,
-        worker_rows,
-    )
+    from cases.cache_sync_recovery.telemetry import interval_rates, worker_rows
     from traffic.traffic_source import materialize
 
     p, o, limits = (params[k] for k in ("procedure", "observation", "checks"))
@@ -104,9 +101,7 @@ def execute(ctx, params, deadline):
     baseline, flow, last_sample = None, None, None
     affected, absent, rebuilt = set(), set(), set()
     maximum_gap = 0
-    diagnostics = MasterDiagnosticsClient(
-        f"http://127.0.0.1:{ctx.ops.master_http_port}", timeout_s=min(5, deadline.remaining())
-    )
+    diagnostics = MasterDiagnosticsClient(f"http://127.0.0.1:{ctx.ops.master_http_port}", timeout_s=min(5, deadline.remaining()))
     # Check capabilities before cache construction or traffic launch.
     preflight = diagnostics.snapshot(include=("workers",))
     worker_rows(preflight)
@@ -115,9 +110,7 @@ def execute(ctx, params, deadline):
     sample_budget = SampleBudget(o["capture"])
 
     def fixture(e, operation, **options):
-        result = control_json(
-            ctx.ops, "cache_fixture", deadline, dict(engine=e["name"], operation=operation, **options)
-        )
+        result = control_json(ctx.ops, "cache_fixture", deadline, dict(engine=e["name"], operation=operation, **options))
         if result.get("engine") != e["name"] or result.get("status") != "ok":
             raise ValueError("fixture identity mismatch")
         return result["fixture"]
@@ -188,23 +181,11 @@ def execute(ctx, params, deadline):
             workers=rows
             if phase == "cache_settle"
             else {
-                a: {
-                    k: w[k]
-                    for k in (
-                        "role",
-                        "generation",
-                        "reported_alive",
-                        "lifecycle_state",
-                        "status_age_ms",
-                        "applied_status_age_ms",
-                    )
-                }
+                a: {k: w[k] for k in ("role", "generation", "reported_alive", "lifecycle_state", "status_age_ms", "applied_status_age_ms")}
                 for a, w in rows.items()
             },
             missing_workers=len((baseline or {}).keys() - rows.keys() - victims),
-            healthy_max_status_age_ms=max(poll_age, applied_age)
-            if poll_age is not None and applied_age is not None
-            else None,
+            healthy_max_status_age_ms=max(poll_age, applied_age) if poll_age is not None and applied_age is not None else None,
             healthy_max_rpc_age_ms=poll_age,
             healthy_max_applied_age_ms=applied_age,
             affected_workers=len(affected),
@@ -220,9 +201,7 @@ def execute(ctx, params, deadline):
         before = stats()
         event(phase + "_started")
         until = start + seconds
-        for _ in poll_samples(
-            deadline, o["sample_s"], lambda: sample(phase), until=until, immediate=True, boundary_sample=False
-        ):
+        for _ in poll_samples(deadline, o["sample_s"], lambda: sample(phase), until=until, immediate=True, boundary_sample=False):
             pass
         after = stats()
         evidence["intensity"][phase] = interval_rates(before, after, ctx.clock() - start)
@@ -268,9 +247,7 @@ def execute(ctx, params, deadline):
         until = ctx.clock() + p["warmup_timeout_s"]
         while ctx.clock() < until:
             rows = sample("warmup")
-            good = converged(
-                rows, names, baseline_keys, {a: f["version"] for a, f in frozen.items()}, limits["max_status_age_ms"]
-            )
+            good = converged(rows, names, baseline_keys, {a: f["version"] for a, f in frozen.items()}, limits["max_status_age_ms"])
             ready = ready + 1 if good else 0
             if ready >= o["converged_samples"]:
                 baseline = rows
@@ -306,15 +283,11 @@ def execute(ctx, params, deadline):
                 flow.stop_sending(d)
                 flow.drain(d)
 
-        ctx.register_resource(
-            "java_flow", flow, cleanup=close_flow, evidence=flow_evidence, request_stop=flow.request_stop
-        )
+        ctx.register_resource("java_flow", flow, cleanup=close_flow, evidence=flow_evidence, request_stop=flow.request_stop)
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(max_workers=1) as startup:
-            pending = startup.submit(
-                flow.start, trace, t["client"], deadline, target=f"127.0.0.1:{ctx.env.master_http_port + 2}"
-            )
+            pending = startup.submit(flow.start, trace, t["client"], deadline, target=f"127.0.0.1:{ctx.env.master_http_port + 2}")
             while not pending.done():
                 sample("traffic_startup")
                 deadline.sleep(o["sample_s"])
@@ -358,10 +331,7 @@ def execute(ctx, params, deadline):
         )
         event("cache_progress_finished")
         evidence.update(
-            affected_workers=sorted(affected),
-            expired_workers=sorted(absent),
-            rebuilt_workers=sorted(rebuilt),
-            max_sample_gap_s=maximum_gap,
+            affected_workers=sorted(affected), expired_workers=sorted(absent), rebuilt_workers=sorted(rebuilt), max_sample_gap_s=maximum_gap
         )
         event("observation_finished")
     except Exception as error:

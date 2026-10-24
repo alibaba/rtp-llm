@@ -11,11 +11,7 @@ def test_cpu_export_inputs_and_per_master_queries():
     plan = load_plan("cache_scale_in.yaml")
     assert {"process_cpu_usage", "system_cpu_usage", "system_cpu_count"} <= set(physical_metrics(plan, "master"))
     queries, required = queries_for_targets(
-        plan,
-        ["master-A", "master-B"],
-        lambda name: '{job="' + name + '"}',
-        1,
-        {"master-A": "master", "master-B": "master"},
+        plan, ["master-A", "master-B"], lambda name: '{job="' + name + '"}', 1, {"master-A": "master", "master-B": "master"}
     )
     for name in ("master-A", "master-B"):
         key = name + "/cpu_usage_percent"
@@ -27,13 +23,7 @@ def test_cpu_export_inputs_and_per_master_queries():
 def test_cpu_panel_preserves_percent_capacity_and_missing_samples():
     presentation = view("cache_scale_in.yaml")
     curves = [
-        dict(
-            curve_id=identity,
-            metric_id=identity,
-            name=style.name,
-            axis=style.axis,
-            points=[dict(x=0, y=None), dict(x=1, y=value)],
-        )
+        dict(curve_id=identity, metric_id=identity, name=style.name, axis=style.axis, points=[dict(x=0, y=None), dict(x=1, y=value)])
         for identity, value in [
             ("master/cpu_usage_percent", 12.5),
             ("master/system_cpu_usage_percent", 40),

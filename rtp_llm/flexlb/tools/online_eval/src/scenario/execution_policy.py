@@ -9,12 +9,7 @@ from typing import Optional, cast
 from document_io import DocumentError as ScenarioError
 
 KINDS = ("functional", "workload")
-DEFAULT_MONITORING = {
-    "capture_metrics": True,
-    "sample_interval_s": 1.0,
-    "max_sample_gap_s": 5.0,
-    "collector_shutdown_s": 10.0,
-}
+DEFAULT_MONITORING = {"capture_metrics": True, "sample_interval_s": 1.0, "max_sample_gap_s": 5.0, "collector_shutdown_s": 10.0}
 
 
 def normalize_metadata(value: object) -> dict:
@@ -23,15 +18,7 @@ def normalize_metadata(value: object) -> dict:
     data = mapping(
         value,
         "metadata",
-        {
-            "kind",
-            "description",
-            "category",
-            "tags",
-            "requires",
-            "findings",
-            "estimated_duration_s",
-        },
+        {"kind", "description", "category", "tags", "requires", "findings", "estimated_duration_s"},
         {"kind", "description"},
     )
     if data["kind"] not in KINDS:
@@ -42,12 +29,7 @@ def normalize_metadata(value: object) -> dict:
 
 
 DEFAULT_BUDGETS = dict(
-    timeout_s=600,
-    stage_timeout_s=60,
-    cleanup_timeout_s=120,
-    finalize_timeout_s=120,
-    report_timeout_s=60,
-    archive_timeout_s=120,
+    timeout_s=600, stage_timeout_s=60, cleanup_timeout_s=120, finalize_timeout_s=120, report_timeout_s=60, archive_timeout_s=120
 )
 EXECUTION_BUDGETS = frozenset(DEFAULT_BUDGETS)
 EXECUTION_FIELDS = EXECUTION_BUDGETS | {"collection", "monitoring"}

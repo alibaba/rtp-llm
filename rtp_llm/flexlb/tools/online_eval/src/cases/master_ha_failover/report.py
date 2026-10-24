@@ -50,7 +50,7 @@ def build_spec(payload, presentation):
                 telemetry_errors=payload["workload"].get("telemetry_integrity_errors", []),
                 telemetry_warnings=payload["workload"].get("telemetry_warnings", []),
             ),
-        ),
+        )
     ]
     maximum = max([point["x"] for panel in panels for curve in panel["series"] for point in curve["points"]] + [1])
     spec = dict(

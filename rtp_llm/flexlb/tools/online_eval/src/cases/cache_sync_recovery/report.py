@@ -14,9 +14,7 @@ from reporting.core import write_bundle
 def compact_report_spec(data, original, *, presentation=None, store=None):
     """同一冻结数据按变体选择两张主图；完整指标保留在汇总和证据中。"""
     spec = copy.deepcopy(original)
-    variant = (
-        "recovery" if data.get("intervention", data.get("parameters", {}).get("intervention", False)) else "steady"
-    )
+    variant = "recovery" if data.get("intervention", data.get("parameters", {}).get("intervention", False)) else "steady"
     zero = spec["timeOriginEpochS"]
     end = zero + spec["timeAxis"]["max"]
     rows = [r for r in data["frames"] if zero <= r["epoch_s"] <= end]
@@ -50,8 +48,7 @@ def compact_report_spec(data, original, *, presentation=None, store=None):
                         axis="y",
                         points=points,
                         provenance=dict(
-                            source=(spec.get("run_meta", {}).get("evidence") or {}).get("source", "frozen analysis"),
-                            measurement=key,
+                            source=(spec.get("run_meta", {}).get("evidence") or {}).get("source", "frozen analysis"), measurement=key
                         ),
                     )
                 ],
@@ -72,10 +69,7 @@ def compact_report_spec(data, original, *, presentation=None, store=None):
         env = data.get("environment", {})
         total = env.get("n_prefill", 0) + env.get("n_decode", 0) - len(data.get("victims", []))
         visible = [
-            dict(
-                epoch_s=r["epoch_s"],
-                value=total - r["missing_workers"] if total and r.get("missing_workers") is not None else None,
-            )
+            dict(epoch_s=r["epoch_s"], value=total - r["missing_workers"] if total and r.get("missing_workers") is not None else None)
             for r in rows
         ]
         add(
@@ -97,9 +91,7 @@ def compact_report_spec(data, original, *, presentation=None, store=None):
         for panel in panels:
             panel["events"] = events
     anchor = [
-        dict(id="cache_only_started", name="观察起点", t=e["epoch_s"] - zero)
-        for e in data["events"]
-        if e["id"] == "cache_only_started"
+        dict(id="cache_only_started", name="观察起点", t=e["epoch_s"] - zero) for e in data["events"] if e["id"] == "cache_only_started"
     ]
     spec.update(panels=panels, events=anchor + events, title=variant + " · 缓存同步实验 · " + spec["run_id"])
     ages = []
@@ -137,17 +129,11 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
 
         store = MetricStore.read(directory)
         frames = archived_metrics(
-            store,
-            frames,
-            epoch=raw["provenance"]["env_epoch"],
-            maximum_gap_s=raw["parameters"]["observation"]["max_gap_s"],
+            store, frames, epoch=raw["provenance"]["env_epoch"], maximum_gap_s=raw["parameters"]["observation"]["max_gap_s"]
         )
-    zero = next(
-        (e["epoch_s"] for e in raw["events"] if e.get("name", e["id"]) == "cache_only_started"), frames[0]["epoch_s"]
-    )
+    zero = next((e["epoch_s"] for e in raw["events"] if e.get("name", e["id"]) == "cache_only_started"), frames[0]["epoch_s"])
     performance_end = next(
-        (e["epoch_s"] for e in raw["events"] if e.get("name", e["id"]) == "performance_observation_finished"),
-        frames[-1]["epoch_s"],
+        (e["epoch_s"] for e in raw["events"] if e.get("name", e["id"]) == "performance_observation_finished"), frames[-1]["epoch_s"]
     )
     rows = [r for r in frames if zero <= r["epoch_s"] <= performance_end]
     gc = [g for g in raw.get("gc", []) if zero <= g["epoch_s"] <= performance_end]
@@ -202,8 +188,7 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
             cache_success_s=rate("cache_sync_commits"),
             worker_status_success_s=rate("worker_status_commits"),
             max_healthy_age_ms=max(
-                (r["healthy_max_status_age_ms"] for r in group if r.get("healthy_max_status_age_ms") is not None),
-                default=None,
+                (r["healthy_max_status_age_ms"] for r in group if r.get("healthy_max_status_age_ms") is not None), default=None
             ),
             affected_workers=max((r.get("affected_workers", 0) for r in group), default=0),
         )
@@ -234,10 +219,7 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
             dict(label="功能判定", value=data["outcome"]["gate"]),
             dict(label="实验有效性（含同步强度）", value=data["outcome"]["validity"]),
             dict(label="Full GC次数", value=sum(g["full"] for g in gc) if raw.get("gc_available", True) else None),
-            dict(
-                label="未参与撤出的 Worker 受影响数",
-                value=len(set(raw.get("affected_workers", [])) - set(raw.get("victims", []))),
-            ),
+            dict(label="未参与撤出的 Worker 受影响数", value=len(set(raw.get("affected_workers", [])) - set(raw.get("victims", [])))),
         ],
         sections=[
             table(
@@ -281,12 +263,7 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
         data["outcome"]["validity"] = data["runtime_validity"] = "INVALID"
     spec = compact_report_spec(data, spec, presentation=presentation, store=store)
     spec["sections"].insert(
-        0,
-        table(
-            "实验有效性",
-            ["检查", "状态", "实际值"],
-            [[c["id"], c["status"], str(c["actual"])] for c in validity_checks],
-        ),
+        0, table("实验有效性", ["检查", "状态", "实际值"], [[c["id"], c["status"], str(c["actual"])] for c in validity_checks])
     )
     # Keep execution/telemetry provenance from the common runner; preserve the case's own origin.
     if run is not None:

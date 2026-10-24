@@ -190,18 +190,9 @@ def test_registered_http_projection_is_scraped_and_only_selected_fields_are_requ
     probe = None
     try:
         session.start()
-        env = NS(
-            master_specs={
-                name: NS(bind_ip="127.0.0.1", http_port=server.server_port) for name, server in zip(("A", "B"), servers)
-            }
-        )
+        env = NS(master_specs={name: NS(bind_ip="127.0.0.1", http_port=server.server_port) for name, server in zip(("A", "B"), servers)})
         probe = evidence_collector(
-            plan,
-            "master_inflight",
-            env,
-            tmp_path / "states.jsonl",
-            session=session,
-            limits=dict(max_samples=100, max_bytes=10000),
+            plan, "master_inflight", env, tmp_path / "states.jsonl", session=session, limits=dict(max_samples=100, max_bytes=10000)
         )
         probe.start()
         wait_for(lambda: probe.budget.count >= 6)

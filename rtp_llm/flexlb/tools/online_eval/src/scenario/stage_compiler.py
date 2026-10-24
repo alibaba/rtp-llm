@@ -26,26 +26,11 @@ def _request_reference(params, loc, outputs):
 
 
 def _check_params(params, loc, outputs):
-    mapping(
-        params,
-        loc + ".params",
-        {"actual", "op", "expected"},
-        {"actual", "op", "expected"},
-    )
+    mapping(params, loc + ".params", {"actual", "op", "expected"}, {"actual", "op", "expected"})
     kind = reference(params["actual"], loc + ".params.actual", outputs)
-    expected_types = {
-        "boolean": (bool,),
-        "integer": (int,),
-        "number": (int, float),
-        "string": (str,),
-    }.get(kind, ())
-    if type(params["expected"]) not in expected_types or (
-        type(params["expected"]) is float and not math.isfinite(params["expected"])
-    ):
-        fail(
-            loc,
-            "checks compare scalar values with matching types, not live handles",
-        )
+    expected_types = {"boolean": (bool,), "integer": (int,), "number": (int, float), "string": (str,)}.get(kind, ())
+    if type(params["expected"]) not in expected_types or (type(params["expected"]) is float and not math.isfinite(params["expected"])):
+        fail(loc, "checks compare scalar values with matching types, not live handles")
     try:
         validate_comparison(params["op"], params["expected"])
     except ValueError:
@@ -61,8 +46,7 @@ class _CoreAction:
 _CORE_ACTIONS = {
     "setup": _CoreAction({"environment": "environment"}, _empty_params),
     "request": _CoreAction(
-        {"requests": "requests", "count": "integer"},
-        lambda params, loc, outputs: normalize_request_parameters(params, loc),
+        {"requests": "requests", "count": "integer"}, lambda params, loc, outputs: normalize_request_parameters(params, loc)
     ),
     "wait": _CoreAction({"completed": "boolean", "error_count": "integer"}, _request_reference),
     "cancel": _CoreAction({"issued": "integer"}, _request_reference),
@@ -95,14 +79,7 @@ class _StageCompiler:
             fail(loc + ".action", f"action {action!r} belongs to cases {sorted(descriptor.owners)!r}")
         try:
             params = descriptor.validate(
-                params,
-                PlanContext(
-                    loc + ".params",
-                    dict(self.outputs),
-                    copy.deepcopy(self.environment),
-                    self.profiles,
-                    self.case,
-                ),
+                params, PlanContext(loc + ".params", dict(self.outputs), copy.deepcopy(self.environment), self.profiles, self.case)
             )
         except ScenarioError:
             raise
@@ -126,9 +103,7 @@ class _StageCompiler:
         if not isinstance(action, str) or action not in (set(OUTPUTS) | set(self.handlers)):
             fail(loc + ".action", f"unsupported action {action!r}")
         self.setup_seen = enter_stage(action, index, self.setup_seen, self.torn_down, loc)
-        timeout = number(
-            value.timeout_s if value.timeout_s is not None else self.default_timeout, loc + ".timeout_s", minimum=0.001
-        )
+        timeout = number(value.timeout_s if value.timeout_s is not None else self.default_timeout, loc + ".timeout_s", minimum=0.001)
         params = copy.deepcopy(value.params)
         descriptor = self.handlers.get(action)
         if descriptor is not None:

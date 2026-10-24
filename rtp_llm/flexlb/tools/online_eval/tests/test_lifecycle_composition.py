@@ -28,13 +28,7 @@ def completion_parameters():
 
 @pytest.mark.parametrize(
     "failure,expected",
-    [
-        (None, "PASS"),
-        ("fail_submit", "ERROR"),
-        ("timeout_wait", "TIMEOUT"),
-        ("completed", "FAIL"),
-        ("fail_cleanup", "ERROR"),
-    ],
+    [(None, "PASS"), ("fail_submit", "ERROR"), ("timeout_wait", "TIMEOUT"), ("completed", "FAIL"), ("fail_cleanup", "ERROR")],
 )
 def test_completion_runs_real_executor_and_always_reclaims_owned_requests(tmp_path, failure, expected):
     config = load_document(ROOT / "config/scenarios/request_completion.yaml")
@@ -78,9 +72,7 @@ def test_issue_and_wait_keep_independent_operation_budgets(tmp_path):
         execute(ctx, completion_parameters(), Deadline(5, clock, clock.sleep))
 
 
-@pytest.mark.parametrize(
-    "change", [dict(output="unknown"), dict(unit="seconds"), dict(expected=1), dict(op="ge"), dict(windows=["other"])]
-)
+@pytest.mark.parametrize("change", [dict(output="unknown"), dict(unit="seconds"), dict(expected=1), dict(op="ge"), dict(windows=["other"])])
 def test_completion_reuses_strict_criterion_contract(change):
     params = completion_parameters()
     params["checks"]["completed"].update(change)
@@ -92,10 +84,7 @@ def test_ha_batch_keeps_issue_time_windows_sample_errors_and_all_named_checks(tm
     ctx = RuntimeContext(dict(profile="batch-window"), None, tmp_path, lambda: 0, lambda _: None)
     rows = ctx.register_resource(
         "ha_rows",
-        [
-            dict(status=status, send_start_epoch_ms=stamp)
-            for stamp, status in [(1000, "ok"), (2000, "schedule_error"), (3000, "ok")]
-        ],
+        [dict(status=status, send_start_epoch_ms=stamp) for stamp, status in [(1000, "ok"), (2000, "schedule_error"), (3000, "ok")]],
     )
     criterion = dict(metric="ha_gate/success_rate", op="eq", expected=1, min_samples=1)
     params = dict(
@@ -127,14 +116,10 @@ def test_ha_period_cannot_spend_one_operations_budget_on_another(tmp_path):
     clock = Clock()
     ctx = RuntimeContext({}, None, tmp_path, clock, clock.sleep, wall_clock=clock)
     with pytest.raises(StageTimeout):
-        ha._period(
-            ctx, dict(name="b", settle_s=4, duration_s=1, operation_timeout_s=3), Deadline(6, clock, clock.sleep)
-        )
+        ha._period(ctx, dict(name="b", settle_s=4, duration_s=1, operation_timeout_s=3), Deadline(6, clock, clock.sleep))
     assert not ctx.report_events
     clock.now = 0
-    result = ha._period(
-        ctx, dict(name="baseline", settle_s=0, duration_s=2, operation_timeout_s=3), Deadline(6, clock, clock.sleep)
-    )
+    result = ha._period(ctx, dict(name="baseline", settle_s=0, duration_s=2, operation_timeout_s=3), Deadline(6, clock, clock.sleep))
     assert [e["id"] for e in ctx.report_events] == ["baseline_end"]
     assert result.output["end"] == pytest.approx(2)
 
@@ -157,8 +142,6 @@ def test_operation_rejects_a_backend_that_returns_after_its_own_budget(tmp_path)
         clock.sleep(5)  # backend ignores its supplied deadline
         return ctx.register_resource("requests", [])
 
-    ctx.backend = SimpleNamespace(
-        start_requests=issue, wait_requests=lambda *_: pytest.fail("expired issue must not reach wait")
-    )
+    ctx.backend = SimpleNamespace(start_requests=issue, wait_requests=lambda *_: pytest.fail("expired issue must not reach wait"))
     with pytest.raises(StageTimeout):
         execute(ctx, completion_parameters(), Deadline(8, clock, clock.sleep))

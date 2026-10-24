@@ -35,10 +35,7 @@ def _ha_validate(params, plan):
     environment = getattr(plan, "environment", {})
     if environment.get("master_layout", "single") != "dual_zookeeper":
         raise ValueError("HA traffic requires a dual-master environment with ZK (dual_zookeeper)")
-    for key, default, lower, upper in (
-        ("duration_s", 60, 1, 3600),
-        ("timeout_ms", 30000, 100, 120000),
-    ):
+    for key, default, lower, upper in (("duration_s", 60, 1, 3600), ("timeout_ms", 30000, 100, 120000)):
         p.setdefault(key, default)
         if type(p[key]) is not int or not lower <= p[key] <= upper:
             raise ValueError(f"{key} is outside the bounded HA range")
@@ -56,9 +53,7 @@ def _ha_validate(params, plan):
 
         if not SourceSpecification.read(p["source"]).is_lineage:
             raise ValueError("HA source must be a pinned real prefix lineage trace")
-    if "max_requests" in p and (
-        "source" not in p or type(p["max_requests"]) is not int or not 1 <= p["max_requests"] <= 20000
-    ):
+    if "max_requests" in p and ("source" not in p or type(p["max_requests"]) is not int or not 1 <= p["max_requests"] <= 20000):
         raise ValueError("HA max_requests requires a bounded real trace")
     p.setdefault("loop", False)
     if type(p["loop"]) is not bool:
@@ -139,17 +134,13 @@ def _ha_finish(ctx, params, deadline):
     sampler = getattr(client, "state_sampler", None)
     return StageOutput(
         {"rows": ctx.register_resource("ha_rows", rows, historical=True)},
-        artifacts=[str(path)]
-        + ([str(sampler.path), str(sampler.path.with_suffix(".prometheus.json"))] if sampler is not None else []),
+        artifacts=[str(path)] + ([str(sampler.path), str(sampler.path.with_suffix(".prometheus.json"))] if sampler is not None else []),
     )
 
 
 def _period_validate(params, plan):
     p = validate_fields(
-        params,
-        plan,
-        {"name", "settle_s", "duration_s", "operation_timeout_s"},
-        {"name", "settle_s", "duration_s", "operation_timeout_s"},
+        params, plan, {"name", "settle_s", "duration_s", "operation_timeout_s"}, {"name", "settle_s", "duration_s", "operation_timeout_s"}
     )
     if p["name"] not in {"baseline", "a", "b", "both", "outage"}:
         raise ValueError("unknown HA period")
@@ -185,17 +176,9 @@ def _select_rows(ctx, rows, params, deadline):
         lower, upper, lower_offset_s=params.get("from_offset_s", 0), upper_offset_s=params.get("until_offset_s", 0)
     )
     selected = select_window(
-        rows,
-        -math.inf if lower is None else lower,
-        math.inf if upper is None else upper,
-        time=lambda row: row_ts_ms(row) / 1000,
+        rows, -math.inf if lower is None else lower, math.inf if upper is None else upper, time=lambda row: row_ts_ms(row) / 1000
     )
-    for param, field in (
-        ("route", "route_path"),
-        ("status", "status"),
-        ("error_kind", "error_kind"),
-        ("failover", "failover"),
-    ):
+    for param, field in (("route", "route_path"), ("status", "status"), ("error_kind", "error_kind"), ("failover", "failover")):
         if param in params:
             selected = [r for r in selected if r[field] == params[param]]
     return selected
@@ -266,18 +249,12 @@ def _client_check(ctx, params, deadline, rows=None):
         from dataclasses import replace
 
         result = replace(result, detail="Known issue: advisory criterion")
-    return StageOutput(
-        {"actual": actual},
-        [result],
-    )
+    return StageOutput({"actual": actual}, [result])
 
 
 def _analyze_validate(params, plan):
     p = validate_fields(
-        params,
-        plan,
-        {"rows", "windows", "checks", "operation_timeout_s"},
-        {"rows", "windows", "checks", "operation_timeout_s"},
+        params, plan, {"rows", "windows", "checks", "operation_timeout_s"}, {"rows", "windows", "checks", "operation_timeout_s"}
     )
     plan.reference(p["rows"], "ha_rows")
     from scenario.validation import number

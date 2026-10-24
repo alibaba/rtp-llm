@@ -23,11 +23,7 @@ def record_queries(window, client, *, deadline=None):
     end = time.time()
 
     queries, required_queries = queries_for_targets(
-        client.query_plan,
-        window.targets,
-        client.selector,
-        window.interval,
-        client.target_kinds,
+        client.query_plan, window.targets, client.selector, window.interval, client.target_kinds
     )
     result = dict(
         missing_queries=[],
@@ -62,11 +58,7 @@ def record_queries(window, client, *, deadline=None):
                     if right <= cursor:
                         break
                     for chunk in client.metric_chunks(
-                        client.target_kind(source) + "/" + metric,
-                        source=source,
-                        start=cursor,
-                        end=right,
-                        deadline=deadline,
+                        client.target_kind(source) + "/" + metric, source=source, start=cursor, end=right, deadline=deadline
                     ):
                         rows.extend(chunk)
                 else:

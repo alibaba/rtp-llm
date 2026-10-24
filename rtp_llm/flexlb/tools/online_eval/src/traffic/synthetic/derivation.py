@@ -72,10 +72,7 @@ def derive_parameters(model: LineageModel, report, report_sha, *, model_sha256):
             family_statistic="lineage_tree_request_count",
             structure_statistics=dict(lineage_tree_count=len(family_counts)),
             targets=dict(
-                mean_input_tokens=sum(sizes) / len(sizes),
-                p99_input_tokens=values[990],
-                lineage_tree_top5_share=top5,
-                cold_fraction=cold,
+                mean_input_tokens=sum(sizes) / len(sizes), p99_input_tokens=values[990], lineage_tree_top5_share=top5, cold_fraction=cold
             ),
             limitations=[
                 "session turns not identifiable; disabled until explicitly configured",

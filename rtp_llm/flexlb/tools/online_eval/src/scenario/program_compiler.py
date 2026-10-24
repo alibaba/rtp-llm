@@ -49,17 +49,7 @@ def configure_program(config, source) -> ProgramPlan:
         seen.add(identity)
         if archive is not None:
             axes[identity] = dict(data_archive=archive, variant=behavior)
-        variants.append(
-            _build_variant(
-                config,
-                row,
-                identity,
-                module,
-                config.profiles,
-                source,
-                numeric_contracts,
-            )
-        )
+        variants.append(_build_variant(config, row, identity, module, config.profiles, source, numeric_contracts))
     implementation = _implementation(config, module, name)
     implementation["numeric_parameters"] = numeric_contracts
     if axes:
@@ -134,11 +124,7 @@ def _build_variant(config, row, identity, module, selected_profiles, source, num
     if "reports" in variant:
         variant["reports"] = tuple(variant["reports"])
     return VariantPlan(
-        id=identity,
-        profiles=tuple(profiles),
-        stages=builder.finish(),
-        environment_overrides=copy.deepcopy(patch),
-        **variant,
+        id=identity, profiles=tuple(profiles), stages=builder.finish(), environment_overrides=copy.deepcopy(patch), **variant
     )
 
 
@@ -175,9 +161,7 @@ def _variant_contract(config, builder, source):
         from scenario.registry import view as view
 
         name = execution["monitoring"].get("query_plan", DEFAULT_PLAN)
-        selected = select_plan(
-            load_plan(name), builder.metric_dependencies, [view(report) for report in variant.get("reports", [])]
-        )
+        selected = select_plan(load_plan(name), builder.metric_dependencies, [view(report) for report in variant.get("reports", [])])
         from monitoring.query_plan import definitions
         from scenario.registry import registry
 
@@ -247,9 +231,7 @@ def _implementation(config, module, name):
     }
     implementation = {
         "case_sources": case_sources,
-        "case_sources_sha256": hashlib.sha256(
-            json.dumps(case_sources, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest(),
+        "case_sources_sha256": hashlib.sha256(json.dumps(case_sources, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
         "configuration": copy.deepcopy(config.declaration),
         "language": "python",
         "program": name,

@@ -13,20 +13,13 @@ def series(evidence):
     total -= len(evidence.get("victims", []))
     result = {
         "full_gc_pause_ms": [
-            [g["epoch_s"], g["duration_ms"]]
-            for g in evidence.get("gc", [])
-            if g["full"] and start <= g["epoch_s"] <= end
+            [g["epoch_s"], g["duration_ms"]] for g in evidence.get("gc", []) if g["full"] and start <= g["epoch_s"] <= end
         ],
         "healthy_age_s": [
-            [
-                r["epoch_s"],
-                r["healthy_max_status_age_ms"] / 1000 if r.get("healthy_max_status_age_ms") is not None else None,
-            ]
-            for r in rows
+            [r["epoch_s"], r["healthy_max_status_age_ms"] / 1000 if r.get("healthy_max_status_age_ms") is not None else None] for r in rows
         ],
         "visible_workers": [
-            [r["epoch_s"], total - r["missing_workers"] if total and r.get("missing_workers") is not None else None]
-            for r in rows
+            [r["epoch_s"], total - r["missing_workers"] if total and r.get("missing_workers") is not None else None] for r in rows
         ],
     }
     return result
@@ -36,8 +29,7 @@ def metric_contract(producer, identity, calculation):
     if (
         producer != "cache_stability"
         or calculation is not None
-        or identity
-        not in {"cache_stability/" + key for key in ("full_gc_pause_ms", "healthy_age_s", "visible_workers")}
+        or identity not in {"cache_stability/" + key for key in ("full_gc_pause_ms", "healthy_age_s", "visible_workers")}
     ):
         raise ValueError("unknown cache stability measurement: " + identity)
     return dict(

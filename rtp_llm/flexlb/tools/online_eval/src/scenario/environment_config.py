@@ -4,27 +4,15 @@ import re
 
 from adapters.perf_presets import preset_names
 from adapters.zookeeper_config import ZooKeeperConfig
-from scenario.environment_declaration import (
-    EnvironmentDeclaration,
-    captured_fields,
-    environment_fields,
-    optional_scalars,
-)
+from scenario.environment_declaration import EnvironmentDeclaration, captured_fields, environment_fields, optional_scalars
 from scenario.environment_resolver import EnvironmentResolver
 from scenario.validation import fail, mapping, number
 
 
 def read_environment(value, path):
-    value = mapping(
-        value,
-        path,
-        environment_fields(),
-    )
+    value = mapping(value, path, environment_fields())
     if value.get("backend", "java_mock") != "java_mock":
-        fail(
-            path + ".backend",
-            "only java_mock is implemented; GPU/multi-host/TP/DP layouts need separate capabilities",
-        )
+        fail(path + ".backend", "only java_mock is implemented; GPU/multi-host/TP/DP layouts need separate capabilities")
     result = {"backend": "java_mock", "n_prefill": 2, "n_decode": 4}
     for key, default, allowed in (
         ("discovery", "file", ("file", "discovery_file")),
@@ -48,34 +36,20 @@ def read_environment(value, path):
         if field not in value and capture_field in captured:
             result[field] = captured[capture_field]
     if "model_override" in value:
-        override = mapping(
-            value["model_override"], path + ".model_override", {"baseline", "reason"}, {"baseline", "reason"}
-        )
-        if (
-            override["baseline"] != result["perf_preset"]
-            or not isinstance(override["reason"], str)
-            or not override["reason"].strip()
-        ):
+        override = mapping(value["model_override"], path + ".model_override", {"baseline", "reason"}, {"baseline", "reason"})
+        if override["baseline"] != result["perf_preset"] or not isinstance(override["reason"], str) or not override["reason"].strip():
             fail(path + ".model_override", "baseline must name perf_preset and reason must be nonempty")
         result["model_override"] = dict(override)
     optional_scalars(value, path, result)
     if "metric_whitelist" in value:
         whitelist = value["metric_whitelist"]
-        if not isinstance(whitelist, str) or not re.fullmatch(
-            r"[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*){0,15}", whitelist
-        ):
-            fail(
-                path + ".metric_whitelist",
-                "expected 1..16 comma-separated metric identifiers",
-            )
+        if not isinstance(whitelist, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*){0,15}", whitelist):
+            fail(path + ".metric_whitelist", "expected 1..16 comma-separated metric identifiers")
         if len(whitelist) > 1024:
             fail(path + ".metric_whitelist", "metric whitelist exceeds byte budget")
         result["metric_whitelist"] = whitelist
     if result["master_sync_log"] and result["master_layout"] != "single":
-        fail(
-            path + ".master_sync_log",
-            "isolated sync log currently requires single master",
-        )
+        fail(path + ".master_sync_log", "isolated sync log currently requires single master")
     result["master_stable_window_s"] = number(value.get("master_stable_window_s", 3), path + ".master_stable_window_s")
     if "prefill_cache_policy" in value:
         field = path + ".prefill_cache_policy"
@@ -91,9 +65,7 @@ def read_environment(value, path):
         field = path + ".prefill_perf"
         required = {"fixed_ms", "scale", "max_batch_tokens", "max_batch_requests"}
         perf = mapping(value["prefill_perf"], field, required, required)
-        result["prefill_perf"] = {
-            key: number(val, field + "." + key, integer=key.startswith("max_batch_")) for key, val in perf.items()
-        }
+        result["prefill_perf"] = {key: number(val, field + "." + key, integer=key.startswith("max_batch_")) for key, val in perf.items()}
     for key in ("n_prefill", "n_decode"):
         if key in value:
             result[key] = number(value[key], path + "." + key, minimum=1, integer=True)

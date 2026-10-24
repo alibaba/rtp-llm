@@ -26,10 +26,7 @@ def read_token_plan(path):
                 physical = row["input_token_blocks"][: row["il"] // block]
                 blocks = (v if isinstance(v, list) else [v] * block for v in physical)
             else:
-                blocks = (
-                    row["input_ids"][offset : offset + block]
-                    for offset in range(0, len(row["input_ids"]) - block + 1, block)
-                )
+                blocks = (row["input_ids"][offset : offset + block] for offset in range(0, len(row["input_ids"]) - block + 1, block))
             key, keys = b"", []
             for values in blocks:
                 key = hashlib.sha256(key + struct.pack("<" + "i" * block, *values)).digest()

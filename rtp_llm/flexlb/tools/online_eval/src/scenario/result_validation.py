@@ -7,14 +7,7 @@ from schema_contract import matches_schema
 
 
 def error_result(instance, message):
-    return {
-        **instance.metadata,
-        "status": "ERROR",
-        "duration_ms": 0,
-        "stages": [],
-        "cleanup": [],
-        "error": message,
-    }
+    return {**instance.metadata, "status": "ERROR", "duration_ms": 0, "stages": [], "cleanup": [], "error": message}
 
 
 def execution_issues(row):
@@ -44,11 +37,7 @@ def execution_issues(row):
             continue
         failures = []
         for check in checks:
-            if (
-                not isinstance(check, dict)
-                or check.get("status") not in {"PASS", "FAIL", "SKIP", "WARNING"}
-                or check.get("error")
-            ):
+            if not isinstance(check, dict) or check.get("status") not in {"PASS", "FAIL", "SKIP", "WARNING"} or check.get("error"):
                 issues.append("check has an execution error or unknown status")
                 continue
             if check["status"] == "FAIL":
@@ -88,9 +77,7 @@ def read_results(path, group):
     expected = {instance.id: instance for instance in group}
     try:
         data = read_json(path)
-        if not matches_schema(data, "scenario_results_schema_version", 1) or (
-            not isinstance(data.get("instances"), list)
-        ):
+        if not matches_schema(data, "scenario_results_schema_version", 1) or (not isinstance(data.get("instances"), list)):
             raise ValueError("unsupported scenario result schema")
         rows = data["instances"]
         if not isinstance(rows, list):
@@ -111,15 +98,10 @@ def read_results(path, group):
                     raise ValueError(f"result grade mismatch: {identity}")
             row = dict(row)
             failures = execution_issues(row)
-            if (row.get("error") or failures) and row["status"] not in {
-                "ERROR",
-                "TIMEOUT",
-            }:
+            if (row.get("error") or failures) and row["status"] not in {"ERROR", "TIMEOUT"}:
                 row["original_status"] = row["status"]
                 row["status"] = "ERROR"
-                row["error"] = (
-                    row.get("error") or "; ".join(failures) or "stage/cleanup error cannot be classified as a finding"
-                )
+                row["error"] = row.get("error") or "; ".join(failures) or "stage/cleanup error cannot be classified as a finding"
             if row["status"] in {"PASS", "FINDING-CONFIRMED", "FINDING-RESOLVED"}:
                 stages = row.get("stages", [])
                 executed_checks = [
@@ -134,9 +116,6 @@ def read_results(path, group):
                     row["status"] = "ERROR"
                     row["error"] = "successful instance has no executed checks"
             by_id[identity] = {**row, **expected[identity].metadata, "id": identity}
-        return [
-            by_id.get(identity) or error_result(instance, "missing instance result")
-            for (identity, instance) in expected.items()
-        ]
+        return [by_id.get(identity) or error_result(instance, "missing instance result") for (identity, instance) in expected.items()]
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         return [error_result(instance, f"invalid child result {path}: {exc}") for instance in group]

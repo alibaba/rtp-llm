@@ -26,11 +26,7 @@ class JavaFlowSpec:
 
     @classmethod
     def input_fields(cls, *, max_requests=False):
-        return {
-            item.name: item.metadata.get("number")
-            for item in fields(cls)
-            if item.name != "max_requests" or max_requests
-        }
+        return {item.name: item.metadata.get("number") for item in fields(cls) if item.name != "max_requests" or max_requests}
 
     @classmethod
     def read(cls, value):
@@ -46,9 +42,7 @@ class JavaFlowSpec:
             value = getattr(spec, item.name)
             if rule is not None and (item.name in supplied or value is not None):
                 rule.validate(value, "java_flow." + item.name)
-        if not all(
-            isinstance(value, str) and value for value in (spec.group_id, spec.phase_id, spec.jvm_xms, spec.jvm_xmx)
-        ):
+        if not all(isinstance(value, str) and value for value in (spec.group_id, spec.phase_id, spec.jvm_xms, spec.jvm_xmx)):
             raise ValueError("flow identity and JVM sizing must be explicit")
         if re.fullmatch(r"[A-Za-z0-9_-]+", spec.group_id) is None:
             raise ValueError("group_id must be a safe directory component")

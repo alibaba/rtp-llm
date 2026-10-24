@@ -5,21 +5,11 @@ import re
 from pathlib import Path
 
 from artifacts.archive import _secret_like
-from artifacts.experiment_store import (
-    ArtifactEntry as ArtifactEntry,
-)
-from artifacts.experiment_store import (
-    ArtifactRole as ArtifactRole,
-)
-from artifacts.experiment_store import (
-    ExperimentReader as ContainerReader,
-)
-from artifacts.experiment_store import (
-    ExperimentWriter as ContainerWriter,
-)
-from artifacts.experiment_store import (
-    ViewDescriptor as ViewDescriptor,
-)
+from artifacts.experiment_store import ArtifactEntry as ArtifactEntry
+from artifacts.experiment_store import ArtifactRole as ArtifactRole
+from artifacts.experiment_store import ExperimentReader as ContainerReader
+from artifacts.experiment_store import ExperimentWriter as ContainerWriter
+from artifacts.experiment_store import ViewDescriptor as ViewDescriptor
 from schema_contract import matches_schema
 
 
@@ -256,8 +246,7 @@ def publish_run(directory, definition, execution, *, analysis=None, deadline=Non
             missing.extend(
                 name.replace("-result.json", "-manifest.json")
                 for name in primary.entries
-                if name.endswith("-gate-result.json")
-                and name.replace("-result.json", "-manifest.json") not in primary.entries
+                if name.endswith("-gate-result.json") and name.replace("-result.json", "-manifest.json") not in primary.entries
             )
             primary.add_json(
                 "completeness.json",
@@ -312,8 +301,7 @@ def main(argv=None):
             reader.render(args.view or reader.preferred_view, args.out)
         print(
             json.dumps(
-                dict(kind=reader.kind, views=reader.available_views, files=len(reader.entries), omitted=reader.omitted),
-                ensure_ascii=False,
+                dict(kind=reader.kind, views=reader.available_views, files=len(reader.entries), omitted=reader.omitted), ensure_ascii=False
             )
         )
 

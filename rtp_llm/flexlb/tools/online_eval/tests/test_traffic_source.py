@@ -30,10 +30,7 @@ class TrafficSourceTest(unittest.TestCase):
             model = root / "model.xz"
             model.write_bytes(raw)
             spec = dict(
-                kind="trace",
-                model="prefix_lineage",
-                version="2",
-                parameters=dict(path=str(model), count=4, output_tokens=8, priority=50),
+                kind="trace", model="prefix_lineage", version="2", parameters=dict(path=str(model), count=4, output_tokens=8, priority=50)
             )
             target = materialize(root / "trace.jsonl", spec, "r", root)
             rows = [json.loads(l) for l in target.read_text().splitlines()]
@@ -59,15 +56,7 @@ class TrafficSourceTest(unittest.TestCase):
     def test_compact_pinned_and_partial_tail_validation(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "trace.jsonl"
-            row = dict(
-                rid="r:1",
-                ts=0,
-                il=1031,
-                ol=8,
-                priority=50,
-                cache_key_block_size=512,
-                input_token_blocks=[[1, 2] * 256, 8, 9],
-            )
+            row = dict(rid="r:1", ts=0, il=1031, ol=8, priority=50, cache_key_block_size=512, input_token_blocks=[[1, 2] * 256, 8, 9])
             path.write_text(json.dumps(row) + "\n")
             self.assertEqual(validate_plan(path, "r"), 1)
             for invalid in (
@@ -107,9 +96,7 @@ class TrafficSourceTest(unittest.TestCase):
             self.assertEqual([r["input_token_blocks"] for r in rows], [r["input_token_blocks"] for r in second])
 
     def test_playback_explicit_laps_and_no_duplicate_controls(self):
-        env, p = client_environment(
-            dict(playback=dict(mode="uniform", duration_s=60, qps=20, ramp_up_seconds=2, max_laps=0))
-        )
+        env, p = client_environment(dict(playback=dict(mode="uniform", duration_s=60, qps=20, ramp_up_seconds=2, max_laps=0)))
         self.assertEqual(env["LOOP"], "true")
         self.assertEqual(p["identity"], "structural-relabel")
         with self.assertRaises(ValueError):

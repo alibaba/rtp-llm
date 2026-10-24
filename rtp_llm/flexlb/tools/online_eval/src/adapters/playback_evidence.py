@@ -18,11 +18,7 @@ class PlaybackEvidence:
             raise ValueError("Java playback trace SHA256 differs from materialized plan")
         if value.get("offline_plan_supported") is not True:
             raise ValueError("Java playback cannot reproduce controlled trace")
-        if (
-            value.get("planner_version") != "PLAYBACK_V1"
-            or type(value.get("token_stride")) is not int
-            or value["token_stride"] < 1
-        ):
+        if value.get("planner_version") != "PLAYBACK_V1" or type(value.get("token_stride")) is not int or value["token_stride"] < 1:
             raise ValueError("Java playback identity evidence missing")
         expected = dict(
             mode=environment.get("SEND_MODE", "replay"),

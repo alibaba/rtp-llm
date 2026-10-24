@@ -47,11 +47,7 @@ def test_handler_replacement_environment_reaches_only_later_stages():
 
     replace = StageHandler("replace", validate, lambda *_: None, {}, next_environment=lambda _: replacement)
     observe = StageHandler("observe", validate, lambda *_: None, {})
-    sequence = [
-        dict(id="setup", action="setup"),
-        dict(id="replace", action="replace"),
-        dict(id="observe", action="observe"),
-    ]
+    sequence = [dict(id="setup", action="setup"), dict(id="replace", action="replace"), dict(id="observe", action="observe")]
     for _ in range(2):
         stages(sequence, "plan.stages", 5, {"replace": replace, "observe": observe}, env=original)
     assert seen == [original, replacement, original, replacement]

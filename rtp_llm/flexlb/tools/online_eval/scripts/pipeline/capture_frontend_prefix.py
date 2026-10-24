@@ -192,11 +192,7 @@ def capture(a, *, clock=time.monotonic):
         "truncated": truncated,
         "errors": errors,
         "parameters": dict(
-            log_dir=str(a.log_dir),
-            log_glob=a.log_glob,
-            time_budget_s=a.time_budget_s,
-            block_size=block_size,
-            on_budget=a.on_budget,
+            log_dir=str(a.log_dir), log_glob=a.log_glob, time_budget_s=a.time_budget_s, block_size=block_size, on_budget=a.on_budget
         ),
         "hostname": socket.gethostname(),
         "start": a.start,

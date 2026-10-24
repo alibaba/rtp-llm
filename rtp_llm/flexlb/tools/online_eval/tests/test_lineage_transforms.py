@@ -40,9 +40,7 @@ class LineageTransformsTest(unittest.TestCase):
                     self.assertEqual(len(rows), 1)
                     self.assertEqual(rows[0]["input_token_blocks"], [1])
                     self.assertEqual(rows[0]["il"], 512)
-                    self.assertEqual(
-                        manifest["length_filter"], dict(max_input_tokens=512, selected=1, excluded_before_limit=1)
-                    )
+                    self.assertEqual(manifest["length_filter"], dict(max_input_tokens=512, selected=1, excluded_before_limit=1))
                     self.assertEqual(manifest["transformations"]["applied"][0]["kind"], "input_length_filter")
 
     def test_bundled_v2_accepts_32k_filter_through_public_materialize(self):
@@ -65,9 +63,7 @@ class LineageTransformsTest(unittest.TestCase):
                 kind="trace",
                 model="prefix_lineage",
                 version="2",
-                parameters=dict(
-                    path=str(model), count=manifest["count"], output_tokens=8, priority=50, max_input_tokens=32768
-                ),
+                parameters=dict(path=str(model), count=manifest["count"], output_tokens=8, priority=50, max_input_tokens=32768),
             )
             output = root / "filtered.jsonl"
             materialize(output, spec, "bundled", root, max_requests=5)

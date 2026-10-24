@@ -112,9 +112,7 @@ class RunPresentation:
             raise ValueError("run.implementation must be an object")
         checks = analysis.get("checks")
         if checks is None:
-            checks = [
-                dict(stage=stage["id"], **check) for stage in analysis.get("stages", []) for check in stage["checks"]
-            ]
+            checks = [dict(stage=stage["id"], **check) for stage in analysis.get("stages", []) for check in stage["checks"]]
         analysis = dict(
             analysis,
             checks=checks,

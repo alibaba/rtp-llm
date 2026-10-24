@@ -7,11 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from adapters.java_mock_resources import (
-    JavaMockBudget,
-    ResourcePlanError,
-    plan_lane_leases,
-)
+from adapters.java_mock_resources import JavaMockBudget, ResourcePlanError, plan_lane_leases
 from program_fixtures import compile_scenarios
 from scenario.backend import BoundedOps, JavaMockBackend
 from scenario.catalog import handlers
@@ -24,22 +20,13 @@ from test_scenario_runtime import source
 def program():
     doc = source()
     doc["profiles"] = ["single-nonbatch"]
-    doc["environment"] = {
-        "n_prefill": 2,
-        "n_decode": 2,
-        "config_overrides": {"ordering": "priority"},
-    }
+    doc["environment"] = {"n_prefill": 2, "n_decode": 2, "config_overrides": {"ordering": "priority"}}
     doc["stages"].insert(
         1,
         {
             "id": "larger",
             "action": "environment_reconfigure",
-            "params": {
-                "config_overrides": {"ordering": "priority"},
-                "n_prefill": 1,
-                "n_decode": 4,
-                "metric_whitelist": "flexlb_auto_tpm",
-            },
+            "params": {"config_overrides": {"ordering": "priority"}, "n_prefill": 1, "n_decode": 4, "metric_whitelist": "flexlb_auto_tpm"},
         },
     )
     return doc
@@ -71,14 +58,7 @@ class EnvironmentBudgetTest(unittest.TestCase):
 
     def test_later_stage_inherits_current_topology_and_metric_environment(self):
         doc = program()
-        doc["stages"].insert(
-            2,
-            {
-                "id": "again",
-                "action": "environment_reconfigure",
-                "params": {"config_overrides": {"ordering": "fifo"}},
-            },
-        )
+        doc["stages"].insert(2, {"id": "again", "action": "environment_reconfigure", "params": {"config_overrides": {"ordering": "fifo"}}})
         instance = compile_one(doc)
         later = instance["stages"][2]["params"]["environments"]["single-nonbatch"]
         self.assertEqual((later["n_prefill"], later["n_decode"]), (1, 4))
@@ -92,11 +72,7 @@ class EnvironmentBudgetTest(unittest.TestCase):
         doc["stages"].insert(2, {"id": "priority_only", "action": "needs_priority"})
         registry = handlers()
         registry["needs_priority"] = StageHandler(
-            "needs_priority",
-            lambda params, plan: params,
-            lambda *args: None,
-            {},
-            requires=frozenset({"priority"}),
+            "needs_priority", lambda params, plan: params, lambda *args: None, {}, requires=frozenset({"priority"})
         )
         with self.assertRaisesRegex(ValueError, "priority_only.*lacks capabilities"):
             compile_scenarios([("test", doc)], handlers=registry)
@@ -116,11 +92,9 @@ class EnvironmentBudgetTest(unittest.TestCase):
     def test_backend_rejects_unplanned_or_unleased_topology_before_process_setup(self):
         instance = compile_one(program())
         target = instance["stages"][1]["params"]["environments"]["single-nonbatch"]
-        lease = plan_lane_leases(
-            [[JavaMockBudget.from_metadata(instance["resource_budget"])]],
-            master_base=28000,
-            mock_base=55000,
-        )[0].to_manifest()
+        lease = plan_lane_leases([[JavaMockBudget.from_metadata(instance["resource_budget"])]], master_base=28000, mock_base=55000)[
+            0
+        ].to_manifest()
         with tempfile.TemporaryDirectory() as tmp, patch("adapters.environment.EnvManager.ensure") as ensure:
             ctx = RuntimeContext(instance, None, tmp, time.monotonic, time.sleep)
             ctx.env_epoch = 1

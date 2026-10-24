@@ -64,17 +64,13 @@ def test_report_schema_does_not_import_execution():
     root = Path(__file__).parents[1] / "src"
     for name in ("reporting/view_config.py", "reporting/events.py", "reporting/view_schema.py"):
         imports = [
-            node.module
-            for node in ast.walk(ast.parse((root / name).read_text()))
-            if isinstance(node, ast.ImportFrom) and node.module
+            node.module for node in ast.walk(ast.parse((root / name).read_text())) if isinstance(node, ast.ImportFrom) and node.module
         ]
         assert not any(module.startswith("scenario") for module in imports)
         if name.endswith("view_schema.py"):
             assert not any(module.startswith("monitoring") for module in imports)
     for name in ("reporting/components.py", "reporting/report_model.py"):
-        imports = [
-            node.module for node in ast.walk(ast.parse((root / name).read_text())) if isinstance(node, ast.ImportFrom)
-        ]
+        imports = [node.module for node in ast.walk(ast.parse((root / name).read_text())) if isinstance(node, ast.ImportFrom)]
         assert "reporting.core" not in imports and "reporting.renderer" not in imports
 
 
@@ -97,6 +93,4 @@ def test_subtitle_extension_names_require_a_collection():
     with pytest.raises(ValueError, match="collection"):
         SubtitleTemplate("{verdict}", fields="trial")
     with pytest.raises(ValueError, match="collection"):
-        ViewDefinition.read(
-            {"kind": "default", "report": {"subtitle": "{verdict}"}, "charts": {}}, subtitle_fields="trial"
-        )
+        ViewDefinition.read({"kind": "default", "report": {"subtitle": "{verdict}"}, "charts": {}}, subtitle_fields="trial")

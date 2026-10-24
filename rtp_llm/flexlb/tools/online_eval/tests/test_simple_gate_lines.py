@@ -37,9 +37,7 @@ def test_optional_reference_is_omitted_but_unknown_reference_is_an_error():
         apply_gate_lines(panels, presentation, {})
 
 
-@pytest.mark.parametrize(
-    "value,start,end", [(float("nan"), 0, 1), (1, 2, 2), (1, 3, 2), (1, 0, float("inf")), (True, 0, 1)]
-)
+@pytest.mark.parametrize("value,start,end", [(float("nan"), 0, 1), (1, 2, 2), (1, 3, 2), (1, 0, float("inf")), (True, 0, 1)])
 def test_invalid_window_or_value_is_rejected(value, start, end):
     with pytest.raises(ValueError):
         Threshold(value, start, end)

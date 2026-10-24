@@ -11,11 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_redundant_priority_override_preserves_existing_policy():
-    ordering = {
-        "type": "PRIORITY",
-        "defaultPriority": 75,
-        "preemption": {"allowedVictimStages": ["DECODE_ENGINE_OWNED"], "timeoutMs": 900},
-    }
+    ordering = {"type": "PRIORITY", "defaultPriority": 75, "preemption": {"allowedVictimStages": ["DECODE_ENGINE_OWNED"], "timeoutMs": 900}}
     doc = {"scheduler": {"ordering": ordering.copy()}}
     _retype_ordering(doc, ConfigOverride(ordering="priority"))
     assert doc["scheduler"]["ordering"] == ordering
@@ -30,8 +26,7 @@ def test_invalid_decision_lifetime_rejected_before_rendering(value):
 
 
 @pytest.mark.parametrize(
-    "values,p,expected",
-    [([10, 20], 0.5, 10), ([10, 20, 30, 40], 0.2, 10), (list(range(1, 101)), 0.95, 95), ([], 0.99, None)],
+    "values,p,expected", [([10, 20], 0.5, 10), ([10, 20, 30, 40], 0.2, 10), (list(range(1, 101)), 0.95, 95), ([], 0.99, None)]
 )
 def test_percentile_uses_nearest_rank(values, p, expected):
     assert report_percentile(values, p) == expected
@@ -42,9 +37,7 @@ def test_metric_timestamp_is_validated_before_window_filter(timestamp):
     from monitoring.contracts import MetricUnavailable
     from monitoring.metric_store import MetricStore
 
-    row = dict(
-        metric_id="x", source="P", epoch="1", status="PASS", labels={}, provenance={}, points=[[10, 2], [timestamp, 3]]
-    )
+    row = dict(metric_id="x", source="P", epoch="1", status="PASS", labels={}, provenance={}, points=[[10, 2], [timestamp, 3]])
     store = MetricStore(dict(metrics_schema_version=1, definitions={"x": dict(unit="count")}, metrics={"x": [row]}))
     with pytest.raises(MetricUnavailable, match="timestamp"):
         store.select("x", start=9, end=11)
@@ -67,9 +60,7 @@ def test_metric_artifact_rejects_null_metadata(field):
         MetricStore(document)
 
 
-@pytest.mark.parametrize(
-    "data", [{}, {"id": "a", "checks": [{}]}, {"id": "a", "checks": [{"stage": "gate", "status": "PASS"}]}]
-)
+@pytest.mark.parametrize("data", [{}, {"id": "a", "checks": [{}]}, {"id": "a", "checks": [{"stage": "gate", "status": "PASS"}]}])
 def test_presentation_missing_identity_or_stage_is_a_contract_error(data):
     from reporting.run_model import RunPresentation
 
@@ -81,12 +72,7 @@ def test_report_rejects_nonfinite_axis_metadata():
     from reporting import render
 
     with pytest.raises(ValueError):
-        render(
-            dict(
-                timeAxis=dict(min=0, max=1),
-                panels=[dict(id="a", timeX=True, axes={"y": dict(min=float("nan"))}, series=[])],
-            )
-        )
+        render(dict(timeAxis=dict(min=0, max=1), panels=[dict(id="a", timeX=True, axes={"y": dict(min=float("nan"))}, series=[])]))
 
 
 def test_long_report_identity_is_bounded_and_collision_resistant(tmp_path):
@@ -185,22 +171,7 @@ def test_producer_source_without_file_has_clear_error(tmp_path, monkeypatch, spe
 
 @pytest.mark.parametrize(
     "metrics",
-    [
-        {},
-        {
-            "x": [
-                dict(
-                    metric_id="x",
-                    epoch="1",
-                    source="P",
-                    labels={},
-                    points=[[10, 2], [11, None]],
-                    status="PRESENT",
-                    provenance={},
-                )
-            ]
-        },
-    ],
+    [{}, {"x": [dict(metric_id="x", epoch="1", source="P", labels={}, points=[[10, 2], [11, None]], status="PRESENT", provenance={})]}],
 )
 def test_minimal_metric_store_exports_without_optional_diagnostics(metrics, tmp_path):
     from monitoring.archive import export_metrics
@@ -221,19 +192,7 @@ def metric_document():
     return dict(
         metrics_schema_version=1,
         definitions={"x": dict(unit="count")},
-        metrics={
-            "x": [
-                dict(
-                    metric_id="x",
-                    epoch="1",
-                    source="P",
-                    status="PRESENT",
-                    labels={},
-                    points=[[10, 2], [11, 3]],
-                    provenance={},
-                )
-            ]
-        },
+        metrics={"x": [dict(metric_id="x", epoch="1", source="P", status="PRESENT", labels={}, points=[[10, 2], [11, 3]], provenance={})]},
     )
 
 
@@ -282,11 +241,7 @@ def test_metric_store_preserves_and_copies_recorded_diagnostics():
     from monitoring.metric_store import MetricStore
 
     document = dict(
-        metrics_schema_version=1,
-        definitions={},
-        metrics={},
-        collection_gaps={"P": [10, 12]},
-        errors=[dict(reason="scrape failed")],
+        metrics_schema_version=1, definitions={}, metrics={}, collection_gaps={"P": [10, 12]}, errors=[dict(reason="scrape failed")]
     )
     _, _, gaps, errors = MetricStore(document).series(10)
     assert gaps == {"P": [0, 2]} and errors == document["errors"]

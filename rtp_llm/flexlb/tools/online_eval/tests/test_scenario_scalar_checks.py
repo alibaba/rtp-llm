@@ -16,32 +16,15 @@ class ScalarCheckTest(unittest.TestCase):
         doc["stages"] = [
             doc["stages"][0],
             dict(id="metric", action="metric"),
-            dict(
-                id="assertion",
-                action="check",
-                params=dict(
-                    actual={"$ref": "stages.metric.output.value"},
-                    expected=expected,
-                    op=op,
-                ),
-            ),
+            dict(id="assertion", action="check", params=dict(actual={"$ref": "stages.metric.output.value"}, expected=expected, op=op)),
         ]
         registry = {
-            "metric": StageHandler(
-                "metric",
-                lambda params, plan: params,
-                lambda *args: StageOutput({"value": actual}),
-                {"value": kind},
-            )
+            "metric": StageHandler("metric", lambda params, plan: params, lambda *args: StageOutput({"value": actual}), {"value": kind})
         }
         return doc, registry
 
     def test_numeric_rate_and_string_equality_execute(self):
-        for kind, actual, expected, op in [
-            ("number", 0.95, 0.9, "ge"),
-            ("number", 1, 0.9, "ge"),
-            ("string", "ready", "ready", "eq"),
-        ]:
+        for kind, actual, expected, op in [("number", 0.95, 0.9, "ge"), ("number", 1, 0.9, "ge"), ("string", "ready", "ready", "eq")]:
             doc, handlers = self.fixture(kind, actual, expected, op)
             plan = compile_scenarios([("scalar.yaml", doc)], handlers=handlers)[0]
             clock = Clock()

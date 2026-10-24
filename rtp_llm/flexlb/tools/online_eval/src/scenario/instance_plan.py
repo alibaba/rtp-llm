@@ -47,15 +47,7 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
     for row in rows:
         if not isinstance(row, dict):
             raise InstancePlanError("instance metadata must be an object")
-        for key in [
-            "id",
-            "scenario_id",
-            "variant_id",
-            "profile",
-            "category",
-            "source_path",
-            "source",
-        ]:
+        for key in ["id", "scenario_id", "variant_id", "profile", "category", "source_path", "source"]:
             if not isinstance(row.get(key), str) or not row[key].strip():
                 raise InstancePlanError(f"instance requires nonempty {key}")
         identity = row["id"]
@@ -70,20 +62,12 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
             if not isinstance(row.get(key), list) or any(not isinstance(item, str) for item in row[key]):
                 raise InstancePlanError(f"instance {identity} requires a string list for {key}")
         duration = row.get("estimated_duration_s")
-        if (
-            not isinstance(duration, (int, float))
-            or type(duration) not in (int, float)
-            or not math.isfinite(duration)
-            or duration <= 0
-        ):
+        if not isinstance(duration, (int, float)) or type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
             raise InstancePlanError(f"instance {identity} has invalid estimated_duration_s")
         if source == "yaml":
             budget = JavaMockBudget.from_metadata(row.get("resource_budget"))
             from document_io import DocumentError as ScenarioError
-            from scenario.execution_policy import (
-                normalize_execution,
-                normalize_metadata,
-            )
+            from scenario.execution_policy import normalize_execution, normalize_metadata
 
             try:
                 metadata = normalize_metadata(row.get("metadata"))
@@ -136,12 +120,7 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
     return instances
 
 
-def select_instances(
-    instances: Sequence[Instance],
-    *,
-    exact_ids: str | None = None,
-    categories: str | None = None,
-) -> list[Instance]:
+def select_instances(instances: Sequence[Instance], *, exact_ids: str | None = None, categories: str | None = None) -> list[Instance]:
     ids = _names(exact_ids, "--instances")
     cats = _names(categories, "--categories")
     if len({row.id for row in instances}) != len(instances):
@@ -161,11 +140,7 @@ def select_instances(
     return selected
 
 
-def plan_instances(
-    instances: Sequence[Instance],
-    parallel: int,
-    timings: Mapping[str, float] | None = None,
-) -> list[list[Instance]]:
+def plan_instances(instances: Sequence[Instance], parallel: int, timings: Mapping[str, float] | None = None) -> list[list[Instance]]:
     if type(parallel) is not int or parallel < 1:
         raise InstancePlanError("parallel must be a positive integer")
     if not instances:

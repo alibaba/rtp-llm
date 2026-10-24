@@ -13,17 +13,7 @@ def links(title, items):
     return dict(type="links", title=title, items=list(items))
 
 
-def run_meta(
-    identity,
-    *,
-    implementation=None,
-    workload=None,
-    configuration=None,
-    environment=None,
-    clock=None,
-    evidence=None,
-    runs=None,
-):
+def run_meta(identity, *, implementation=None, workload=None, configuration=None, environment=None, clock=None, evidence=None, runs=None):
     """None means unknown, never proof of matching experiment conditions."""
     metadata = dict(
         run_meta_schema_version=1,

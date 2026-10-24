@@ -85,11 +85,7 @@ class ReportComparisonTest(unittest.TestCase):
         return json.loads((self.output(name) / "reports/comparison/runs/report-spec.json").read_text())
 
     def test_three_frozen_runs_are_shown_without_reanalysis_or_verdict(self):
-        paths = [
-            self.bundle("a"),
-            self.bundle("b", verdict="FAIL", value=30),
-            self.bundle("c", verdict="INVALID", value=None),
-        ]
+        paths = [self.bundle("a"), self.bundle("b", verdict="FAIL", value=30), self.bundle("c", verdict="INVALID", value=None)]
         before = [{p.name: p.read_bytes() for p in d.iterdir()} for d in paths]
         with (
             mock.patch("cases.master_performance.analysis.analyze", side_effect=AssertionError("reanalysis")),
@@ -160,9 +156,7 @@ class ReportComparisonTest(unittest.TestCase):
         a = self.bundle("a", second_panel=True)
         b = self.bundle("b", verdict="INVALID", event=None, configuration=dict(scheduler="different"))
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(
-                main([str(a), str(b), "--output", str(self.output()), "--alignment-event", "checkpoint"]), 0
-            )
+            self.assertEqual(main([str(a), str(b), "--output", str(self.output()), "--alignment-event", "checkpoint"]), 0)
         result = load_analysis(self.output() / "reports/comparison/runs")
         self.assertEqual(result["controls"]["comparisons"]["B"]["status"], "UNKNOWN")
         self.assertEqual(result["time_alignment"]["status"], "UNAVAILABLE")
@@ -204,25 +198,12 @@ class ReportComparisonTest(unittest.TestCase):
                         title="metric",
                         timeX=True,
                         axes={"y": dict(title="count")},
-                        series=[
-                            dict(
-                                name="metric",
-                                metric_id="metric",
-                                points=[dict(x=t, y=v) for t, v in zip(times, [3, None, 4])],
-                            )
-                        ],
+                        series=[dict(name="metric", metric_id="metric", points=[dict(x=t, y=v) for t, v in zip(times, [3, None, 4])])],
                     )
                 ],
             )
             paths.append(
-                write_bundle(
-                    self.root / name,
-                    "run",
-                    name,
-                    {},
-                    spec,
-                    meta=run_meta({"id": name}, clock={"origin_kind": "run_start"}),
-                )
+                write_bundle(self.root / name, "run", name, {}, spec, meta=run_meta({"id": name}, clock={"origin_kind": "run_start"}))
             )
         compare(paths, self.output())
         series = self.spec()["panels"][0]["series"]

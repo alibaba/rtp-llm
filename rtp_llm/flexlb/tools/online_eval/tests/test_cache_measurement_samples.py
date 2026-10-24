@@ -26,11 +26,7 @@ def prepare(hit=0.8):
         e = CacheGateTest().evidence(hit=hit)
     e["clock"] = dict(origin_epoch_s=1000, origin_monotonic_s=50)
     dense = copy.deepcopy(e["samples"])
-    fields = {
-        key: dict(metric="mock/" + key, labels={"role": "prefill"})
-        for key in dense[0]["engines"]["p0"]
-        if key != "grpc_addr"
-    }
+    fields = {key: dict(metric="mock/" + key, labels={"role": "prefill"}) for key in dense[0]["engines"]["p0"] if key != "grpc_addr"}
     e["gate_input"] = dict(fields=fields)
     # The control loop stalls for six seconds; the TSDB retains each real scrape.
     e["samples"] = [r for r in e["samples"] if not 40 <= r["t"] <= 45]
@@ -61,9 +57,7 @@ def prepare(hit=0.8):
     monitor = SimpleNamespace(
         client=SimpleNamespace(
             metric_chunks=Mock(side_effect=chunks),
-            metric_definition=lambda identity: dict(
-                unit="number", labels=["engine_name", "engine_incarnation", "engine_ip", "grpc_port"]
-            ),
+            metric_definition=lambda identity: dict(unit="number", labels=["engine_name", "engine_incarnation", "engine_ip", "grpc_port"]),
         )
     )
     return e, dense, monitor
@@ -92,9 +86,7 @@ def test_raw_window_uses_frozen_provenance_epoch_without_defaulting(tmp_path):
     e, _, monitor = prepare()
     e["provenance"]["env_epoch"] = 7
     directory = tmp_path / "capture"
-    measurement_samples(
-        monitor, e, Deadline(float("inf")), dict(max_samples=1000, max_bytes=1_000_000), directory=directory
-    )
+    measurement_samples(monitor, e, Deadline(float("inf")), dict(max_samples=1000, max_bytes=1_000_000), directory=directory)
     raw = json.loads((directory / "metrics.json").read_text())
     assert raw["capture"]["epoch"] == "7"
     assert {row["epoch"] for rows in raw["metrics"].values() for row in rows} == {"7"}

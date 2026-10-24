@@ -74,11 +74,8 @@ def stages(values, *args, **kwargs):
 def mutable_program(value):
     """Editable input for tests that deliberately corrupt a built program."""
     result = {
-        key: copy.deepcopy(getattr(value, key))
-        for key in ("id", "description", "category", "environment", "implementation", "execution")
+        key: copy.deepcopy(getattr(value, key)) for key in ("id", "description", "category", "environment", "implementation", "execution")
     }
     result["profiles"] = list(value.profiles)
-    result["stages"] = [
-        {key: child for key, child in asdict(step).items() if child is not None} for step in value.variants[0].stages
-    ]
+    result["stages"] = [{key: child for key, child in asdict(step).items() if child is not None} for step in value.variants[0].stages]
     return result

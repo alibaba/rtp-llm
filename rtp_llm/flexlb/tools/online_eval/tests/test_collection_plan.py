@@ -89,9 +89,7 @@ def test_raw_dependency_cannot_disagree_with_query(tmp_path, dependency):
     spec = dict(promql="running${selector}", mode="scrape", unit="requests", value_kind="gauge", labels=[])
     if dependency is not None:
         spec["exported_metrics"] = dependency
-    (tmp_path / "case.yaml").write_text(
-        json.dumps(dict(metric_plan_schema_version=5, sources=dict(mock=dict(running=spec))))
-    )
+    (tmp_path / "case.yaml").write_text(json.dumps(dict(metric_plan_schema_version=5, sources=dict(mock=dict(running=spec)))))
     with patch("monitoring.query_plan.CATALOG", tmp_path), pytest.raises(ScenarioError):
         load_plan("case.yaml")
 
@@ -138,9 +136,7 @@ def test_registered_projection_reads_only_selected_fields(tmp_path):
     )
     with patch("urllib.request.urlopen", return_value=BytesIO(b"{}")):
         assert collector.adapters["A"](timeout=0.1) == {"master": "A", "http_up": 1}
-    plan["produced"]["ha/scheduler_inflight"] = load_plan("master_ha_failover.yaml")["produced"][
-        "ha/scheduler_inflight"
-    ]
+    plan["produced"]["ha/scheduler_inflight"] = load_plan("master_ha_failover.yaml")["produced"]["ha/scheduler_inflight"]
     collector = evidence_collector(
         plan,
         "master_inflight",

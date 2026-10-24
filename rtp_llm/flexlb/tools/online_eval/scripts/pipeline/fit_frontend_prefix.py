@@ -51,9 +51,7 @@ def fit(a):
     metadata = None
     for path in sorted(list(a.source.glob("*.jsonl.gz")) + list(a.source.glob("*.jsonl.xz"))):
         summary = json.loads(
-            path.with_name(
-                path.name.replace(".jsonl.gz", ".summary.json").replace(".jsonl.xz", ".summary.json")
-            ).read_text()
+            path.with_name(path.name.replace(".jsonl.gz", ".summary.json").replace(".jsonl.xz", ".summary.json")).read_text()
         )
         if hashlib.sha256(path.read_bytes()).hexdigest() != summary["sha256"]:
             raise ValueError("capture checksum mismatch: " + str(path))
@@ -160,10 +158,7 @@ def fit(a):
     source = json.loads(a.source_info.read_text()) if a.source_info else None
     model_path.with_suffix(".manifest.json").write_text(json.dumps(build_manifest(model_path, source), indent=2) + "\n")
     write_trace(
-        plan,
-        dict(path=str(model_path.resolve()), count=len(model), output_tokens=a.output_tokens, priority=50),
-        a.namespace,
-        a.out,
+        plan, dict(path=str(model_path.resolve()), count=len(model), output_tokens=a.output_tokens, priority=50), a.namespace, a.out
     )
     digest = hashlib.sha256()
     with plan.open("rb") as f:
@@ -185,9 +180,7 @@ def fit(a):
         distinct_prefix_blocks=len(seen),
         family_4k_count=len(families),
         family_4k_top5_share=sum(v for _, v in families.most_common(5)) / len(rows),
-        nearest_prefix_repeat_gap_ms={
-            str(q): gaps[int(q * (len(gaps) - 1))] if gaps else None for q in [0.5, 0.9, 0.99]
-        },
+        nearest_prefix_repeat_gap_ms={str(q): gaps[int(q * (len(gaps) - 1))] if gaps else None for q in [0.5, 0.9, 0.99]},
         source_minute_windows=windows,
         duplicate_identity_count=sum(v - 1 for v in duplicate_counts.values() if v > 1),
         plan_sha256=digest.hexdigest(),
@@ -204,13 +197,7 @@ def fit(a):
         ],
     )
     (a.out / "fit-report.json").write_text(json.dumps(report, indent=2))
-    print(
-        json.dumps(
-            {k: v for k, v in report.items() if k not in ["sources", "source_minute_windows"]},
-            indent=2,
-        ),
-        flush=True,
-    )
+    print(json.dumps({k: v for k, v in report.items() if k not in ["sources", "source_minute_windows"]}, indent=2), flush=True)
 
 
 if __name__ == "__main__":

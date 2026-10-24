@@ -74,9 +74,7 @@ class PrometheusClient:
         window = f"[{round(self.max_gap * 1000)}ms]"
         # Health and values must come from the same actual scrape. An instant
         # vector can look back across a gap and turn stale data into a sample.
-        health = self.query(
-            "up" + selector + window, now, timeout, **({"deadline": deadline} if deadline is not None else {})
-        )
+        health = self.query("up" + selector + window, now, timeout, **({"deadline": deadline} if deadline is not None else {}))
         if len(health) != 1 or not health[0].get("values"):
             raise RuntimeError("Prometheus target stale: " + name)
         latest_scrape, up = health[0]["values"][-1]
@@ -88,15 +86,11 @@ class PrometheusClient:
         selected = self.selector(name, metric_names=metric_names, labels=labels)
         latest_scrape = self.scrape_time(name, timeout, deadline=deadline)
         window = f"[{round(self.max_gap * 1000)}ms]"
-        rows = self.query(
-            selected + window, latest_scrape, timeout, **({"deadline": deadline} if deadline is not None else {})
-        )
+        rows = self.query(selected + window, latest_scrape, timeout, **({"deadline": deadline} if deadline is not None else {}))
         return [
             dict(metric=r["metric"], value=r["values"][-1])
             for r in rows
-            if r.get("values")
-            and r["values"][-1][0] == latest_scrape
-            and not r["metric"]["__name__"].startswith(("up", "scrape_"))
+            if r.get("values") and r["values"][-1][0] == latest_scrape and not r["metric"]["__name__"].startswith(("up", "scrape_"))
         ]
 
     def metric_definition(self, metric_id):
@@ -107,11 +101,7 @@ class PrometheusClient:
 
     def metric_rows(self, metric_id, *, source, start, end, deadline=None):
         """Read a declared raw metric with actual scrape times, never lookback filling."""
-        return [
-            row
-            for chunk in self.metric_chunks(metric_id, source=source, start=start, end=end, deadline=deadline)
-            for row in chunk
-        ]
+        return [row for chunk in self.metric_chunks(metric_id, source=source, start=start, end=end, deadline=deadline) for row in chunk]
 
     def metric_chunks(self, metric_id, *, source, start, end, deadline=None, labels=None):
         """Yield validated chunks so archives retain evidence if a later query fails."""
@@ -129,9 +119,7 @@ class PrometheusClient:
                 deadline.check()
             right = min(end, cursor + 60)
             rows = self.query(
-                expression + f"[{math.ceil((right - cursor) * 1000)}ms]",
-                right,
-                **({"deadline": deadline} if deadline is not None else {}),
+                expression + f"[{math.ceil((right - cursor) * 1000)}ms]", right, **({"deadline": deadline} if deadline is not None else {})
             )
             for row in rows:
                 if set(definition["labels"]) - set(row["metric"]):

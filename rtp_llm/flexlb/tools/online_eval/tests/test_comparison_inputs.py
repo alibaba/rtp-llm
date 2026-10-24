@@ -249,12 +249,7 @@ def test_event_aligned_comparison_does_not_clip_a_later_recovery(tmp_path, basel
     spec["panels"][0]["series"][0]["points"] = [{"x": 39, "y": 9}]
     long = write_bundle(tmp_path / "long", "run", "long", {}, spec, meta=spec["run_meta"])
     compare(
-        [short, long],
-        tmp_path / "out",
-        labels=["short", "long"],
-        baseline=baseline,
-        alignment_event="scale",
-        include_original_panels=True,
+        [short, long], tmp_path / "out", labels=["short", "long"], baseline=baseline, alignment_event="scale", include_original_panels=True
     )
     result = report(tmp_path / "out")
     assert result["timeAxis"] == {"min": -10, "max": 30}
@@ -271,13 +266,9 @@ def test_original_gate_is_not_inferred_from_execution_status():
 
     from reporting.comparison import _original_result
 
-    snapshot = SimpleNamespace(
-        analysis={"status": "PASS", "outcome": {"gate": "FAIL", "validity": "VALID"}}, execution={}
-    )
+    snapshot = SimpleNamespace(analysis={"status": "PASS", "outcome": {"gate": "FAIL", "validity": "VALID"}}, execution={})
     assert _original_result(snapshot) == {"verdict": "FAIL", "validity": "VALID", "status": "PASS"}
-    snapshot = SimpleNamespace(
-        analysis={}, execution={"status": "PASS", "outcome": {"gate": "PASS", "validity": "VALID"}}
-    )
+    snapshot = SimpleNamespace(analysis={}, execution={"status": "PASS", "outcome": {"gate": "PASS", "validity": "VALID"}})
     assert _original_result(snapshot) == {"verdict": "PASS", "validity": "VALID", "status": "PASS"}
     snapshot = SimpleNamespace(analysis={}, execution={"status": "PASS"})
     assert _original_result(snapshot)["verdict"] is None

@@ -65,9 +65,7 @@ class PrometheusSession:
         self.binary = binary or os.environ.get("PROMETHEUS_BIN") or shutil.which("prometheus")
         self.process = None
         self.started = self.monotonic = None
-        self.client = PrometheusClient(
-            None, query_plan=self.query_plan, target_kinds=self.target_kinds, max_gap_s=self.max_gap
-        )
+        self.client = PrometheusClient(None, query_plan=self.query_plan, target_kinds=self.target_kinds, max_gap_s=self.max_gap)
         self.log = None
         self.target_bounds = {}
         self.closed = False
@@ -145,15 +143,12 @@ class PrometheusSession:
                 sample_limit=100000,
                 body_size_limit="32MB",
                 static_configs=[dict(targets=[parsed.netloc])],
-                metric_relabel_configs=[
-                    dict(source_labels=["__name__"], action="keep", regex="(" + "|".join(probe.names.values()) + ")")
-                ],
+                metric_relabel_configs=[dict(source_labels=["__name__"], action="keep", regex="(" + "|".join(probe.names.values()) + ")")],
             )
         )
         write_json(path, config)
         with urllib.request.urlopen(
-            urllib.request.Request(self.client.url + "/-/reload", data=b"", method="POST"),
-            timeout=min(5, deadline.remaining()),
+            urllib.request.Request(self.client.url + "/-/reload", data=b"", method="POST"), timeout=min(5, deadline.remaining())
         ):
             pass
         self._write_session()
@@ -199,14 +194,9 @@ class PrometheusSession:
         self.directory.mkdir(parents=True, exist_ok=True)
         if (self.directory / "data").exists():
             raise ValueError("Prometheus directory must be fresh")
-        jobs = [
-            scrape_job(self.query_plan, name, url, self.client.target_kind(name)) for name, url in self.targets.items()
-        ]
+        jobs = [scrape_job(self.query_plan, name, url, self.client.target_kind(name)) for name, url in self.targets.items()]
         config = {
-            "global": {
-                "scrape_interval": f"{round(self.interval * 1000)}ms",
-                "scrape_timeout": f"{round(min(self.interval, 2) * 1000)}ms",
-            },
+            "global": {"scrape_interval": f"{round(self.interval * 1000)}ms", "scrape_timeout": f"{round(min(self.interval, 2) * 1000)}ms"},
             "scrape_configs": jobs,
         }
         write_json(self.directory / "prometheus.json", config, indent=2)
@@ -310,9 +300,7 @@ class PrometheusSession:
         )
         result = record_queries(window, self.client, deadline=deadline)
         if self.registration_error is not None:
-            result["errors"].append(
-                dict(error="monitor target registration rollback failed: " + str(self.registration_error))
-            )
+            result["errors"].append(dict(error="monitor target registration rollback failed: " + str(self.registration_error)))
             write_json(self.directory / "queries.json", result)
         if materialize:
             if deadline is not None:
@@ -339,9 +327,7 @@ class PrometheusSession:
             return Deadline(expires, clock=clock, cancelled=deadline.cancelled if deadline is not None else None)
 
         probe_deadline = bounded(timeout)
-        operations = [
-            (name, lambda probe=probe: probe.stop(deadline=probe_deadline)) for name, probe in self.probes.items()
-        ]
+        operations = [(name, lambda probe=probe: probe.stop(deadline=probe_deadline)) for name, probe in self.probes.items()]
         if (
             not self.closed
             and export
@@ -353,10 +339,7 @@ class PrometheusSession:
             )
         ):
             operations.append(
-                (
-                    "Prometheus archive",
-                    lambda: self.archive(materialize=materialize, deadline=bounded(archive_timeout, reserve=timeout)),
-                )
+                ("Prometheus archive", lambda: self.archive(materialize=materialize, deadline=bounded(archive_timeout, reserve=timeout)))
             )
         # Construct this deadline when shutdown starts, after archive succeeds
         # or fails, so query time never consumes the process shutdown allowance.

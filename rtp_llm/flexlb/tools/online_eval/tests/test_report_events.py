@@ -46,12 +46,7 @@ def presentation():
                         axes={"y": {"title": "count", "position": "left"}},
                         event_ids=[],
                     ),
-                    dict(
-                        id="inherited",
-                        title="inherited",
-                        curve_ids=["observed"],
-                        axes={"y": {"title": "count", "position": "left"}},
-                    ),
+                    dict(id="inherited", title="inherited", curve_ids=["observed"], axes={"y": {"title": "count", "position": "left"}}),
                 ],
             ),
         )
@@ -60,10 +55,7 @@ def presentation():
 
 def test_stage_boundary_and_custom_event_use_recorded_times_and_explicit_panel_selection():
     spec = dict(panels=[dict(id=identity) for identity in ("selected", "hidden", "inherited")])
-    phases = [
-        dict(stage="stop", event="start", epoch_s=100),
-        dict(stage="stop", event="end", epoch_s=108, status="PASS"),
-    ]
+    phases = [dict(stage="stop", event="start", epoch_s=100), dict(stage="stop", event="end", epoch_s=108, status="PASS")]
     events = [dict(id="withdraw_start", epoch_s=104), dict(id="unselected", epoch_s=109)]
     attach_events(spec, presentation(), origin=100, phases=phases, events=events)
     assert [(event["id"], event["t"]) for event in spec["events"]] == [("withdraw", 4), ("shutdown", 8)]
@@ -138,12 +130,7 @@ def test_default_empty_and_all_metrics_share_one_view(tmp_path):
     assert list(empty) == ["default.yaml"]
     spec = json.loads((empty["default.yaml"].parent / "report-spec.json").read_text())
     assert spec["panels"] == []
-    with_metrics = payload(
-        {
-            "1/mock/qps/{}": [[0, 1]],
-            "1/case/derived/hit/{}": [[0, 0.8]],
-        }
-    )
+    with_metrics = payload({"1/mock/qps/{}": [[0, 1]], "1/case/derived/hit/{}": [[0, 0.8]]})
     paths = write_views(tmp_path / "metrics", with_metrics)
     spec = json.loads((paths["default.yaml"].parent / "report-spec.json").read_text())
     assert len(spec["panels"]) == 2
@@ -154,9 +141,7 @@ def test_frozen_inventory_includes_python_producer_metrics():
     store = MetricStore(
         dict(
             metrics_schema_version=1,
-            definitions={
-                "derived/hit": dict(unit="ratio"),
-            },
+            definitions={"derived/hit": dict(unit="ratio")},
             metrics={
                 "derived/hit": [
                     dict(
@@ -204,8 +189,6 @@ def test_compilation_rejects_event_stage_typo_before_execution():
 
 
 def test_failed_stage_marker_retains_failure_in_display_and_evidence():
-    events = project_events(
-        presentation(), origin=100, phases=[dict(stage="stop", event="end", epoch_s=108, status="ERROR")]
-    )
+    events = project_events(presentation(), origin=100, phases=[dict(stage="stop", event="end", epoch_s=108, status="ERROR")])
     assert events[0]["name"] == "服务停止 · ERROR"
     assert events[0]["source"]["record"]["status"] == "ERROR"

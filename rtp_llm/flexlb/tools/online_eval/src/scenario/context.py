@@ -17,16 +17,7 @@ class RuntimeContext(ResourceScope):
     experiment_definition: dict
     instance_deadline_s: float
 
-    def __init__(
-        self,
-        instance,
-        backend,
-        artifact_dir,
-        clock,
-        sleeper,
-        enforce_deadlines=False,
-        wall_clock=None,
-    ):
+    def __init__(self, instance, backend, artifact_dir, clock, sleeper, enforce_deadlines=False, wall_clock=None):
         from scenario.registry import registry
 
         self.case_sources = registry().sources

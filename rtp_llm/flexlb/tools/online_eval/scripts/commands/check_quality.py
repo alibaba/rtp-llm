@@ -31,13 +31,7 @@ def main():
         [sys.executable, "-m", "ruff", "check", "."],
         [sys.executable, "-m", "ruff", "format", "--check", "."],
         [sys.executable, "-m", "mypy"],
-        [
-            sys.executable,
-            "-c",
-            "from importlinter.cli import lint_imports_command; lint_imports_command()",
-            "--config",
-            ".importlinter",
-        ],
+        [sys.executable, "-c", "from importlinter.cli import lint_imports_command; lint_imports_command()", "--config", ".importlinter"],
     )
     for command in commands:
         result = subprocess.run(command, cwd=root, env=environment)

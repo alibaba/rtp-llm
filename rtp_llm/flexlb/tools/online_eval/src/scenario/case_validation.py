@@ -38,20 +38,13 @@ def validate_cases(source, *, profile=None):
                 parameters=parameters,
                 numeric_parameters=implementation["numeric_parameters"][plan["variant_id"]],
                 stages=[
-                    dict(
-                        id=stage["id"],
-                        action=stage["action"],
-                        timeout_s=stage["timeout_s"],
-                        check_ids=stage["check_ids"],
-                    )
+                    dict(id=stage["id"], action=stage["action"], timeout_s=stage["timeout_s"], check_ids=stage["check_ids"])
                     for stage in plan["stages"]
                 ],
                 windows=parameters.get("observation", {}).get("windows", {}),
                 metrics=dict(
                     definitions=definitions(metric_plan),
-                    consumers=dict(
-                        metric_plan.get("demand", {}), collector_health=sorted(kind + "/up" for kind in SOURCE_KINDS)
-                    ),
+                    consumers=dict(metric_plan.get("demand", {}), collector_health=sorted(kind + "/up" for kind in SOURCE_KINDS)),
                 )
                 if metric_plan
                 else dict(definitions={}, consumers={}),
@@ -68,9 +61,5 @@ def validate_cases(source, *, profile=None):
             )
         )
     return dict(
-        case_validation_schema_version=1,
-        status="PASS",
-        scope="static_compilation",
-        runtime_validation="NOT_RUN",
-        instances=instances,
+        case_validation_schema_version=1, status="PASS", scope="static_compilation", runtime_validation="NOT_RUN", instances=instances
     )
