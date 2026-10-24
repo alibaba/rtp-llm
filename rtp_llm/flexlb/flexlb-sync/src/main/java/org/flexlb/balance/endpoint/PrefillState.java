@@ -1477,10 +1477,8 @@ public final class PrefillState {
             long nowMs = clock.getAsLong();
             IdentityHashMap<BatchWork, BatchReduction> reductions =
                     batchReductionsUnderLock();
-            Map<Long, TerminalObservation> terminals = terminalObservationsUnderLock(
-                    finishedTasks);
-            Map<String, WorkerStatus.TaskObservation> activeTasks =
-                    engine.runningTaskList();
+            Map<String, WorkerStatus.TaskObservation> activeTasks = engine.runningTaskList();
+            Map<Long, TerminalObservation> terminals = terminalObservationsUnderLock(finishedTasks, activeTasks);
             IdentityHashMap<RequestEntry, TerminalObservation> settlements =
                     new IdentityHashMap<>(terminals.size());
             Set<BatchReduction> changedBatches = java.util.Collections.newSetFromMap(
@@ -2036,12 +2034,25 @@ public final class PrefillState {
     }
 
     private Map<Long, TerminalObservation> terminalObservationsUnderLock(
-            Map<String, WorkerStatus.TaskObservation> finishedTasks) {
+            Map<String, WorkerStatus.TaskObservation> finishedTasks,
+            Map<String, WorkerStatus.TaskObservation> activeTasks) {
         requireLock();
+        Map<Long, Long> cancelingBatches = new HashMap<>();
+        for (WorkerStatus.TaskObservation active : activeTasks.values()) {
+            if (active.priorityPreemptionProgress() == PriorityPreemptionProgress.CANCELING) {
+                cancelingBatches.put(active.requestId(), active.batchId());
+            }
+        }
         Map<Long, TerminalObservation> terminals = new HashMap<>();
         for (WorkerStatus.TaskObservation task : finishedTasks.values()) {
             RequestEntry entry = requests.get(task.requestId());
             if (entry == null || !matchesObservedBatch(entry, task.batchId())) {
+                continue;
+            }
+            // RpcServerRuntimeMeta retains execution history beside a live control
+            // overlay. Only its exact owner may await the authoritative CANCELED fact.
+            if (task.errorCode() == 0L
+                    && Objects.equals(cancelingBatches.get(task.requestId()), task.batchId())) {
                 continue;
             }
             TerminalObservation terminal = TerminalObservation.from(
