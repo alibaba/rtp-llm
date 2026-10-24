@@ -49,6 +49,12 @@ def program(value, source="fixture"):
 
 
 class ScenarioCompiler(Compiler):
+    def __init__(self, handlers=None):
+        if handlers is None:
+            from scenario.catalog import handlers as catalog
+            handlers = catalog()
+        super().__init__(handlers)
+
     def compile(self, documents, profile=None, grade="normal"):
         return super().compile([(source, program(value, source)) for source, value in documents], profile, grade)
 

@@ -2,9 +2,6 @@
 
 from dataclasses import replace
 
-from scenario.builder import output
-from scenario.inputs import fields
-from scenario.windows import check_windows
 from traffic.contracts import driver
 from scenario.numeric_parameters import COUNT
 from scenario.numeric_parameters import NONNEGATIVE
@@ -27,33 +24,19 @@ def default(case):
     """Submitted requests must reach a business terminal without stream errors."""
     data = case.config
     request = {name: data["traffic"][name] for name in driver(data['traffic'], "request_batch")}
-    for name, criterion in data['checks'].items():
-        fields(criterion, {"windows", "output", "unit", "op", "expected"}, f"parameters.checks.{name}")
-        check_windows(criterion["windows"], available={"terminal"},
-                      path=f"parameters.checks.{name}.windows", single=True)
-        field = criterion["output"]
-        unit = {"completed": "boolean", "error_count": "errors"}.get(field) if type(field) is str else None
-        if unit is None or criterion["unit"] != unit:
-            raise ValueError("completion checks require declared terminal outputs and their units")
-        if (unit == "boolean" and type(criterion["expected"]) is not bool
-                or unit == "errors" and type(criterion["expected"]) is not int):
-            raise ValueError("completion threshold type does not match the output")
+    validate_checks(data['checks'])
     case.step("setup", "setup", timeout_s=data['procedure']["setup_timeout_s"])
-    case.step("submit", "request", params=request)
-    case.step("terminal", "wait", params={"requests": output("submit", "requests")})
-    for name, criterion in data['checks'].items():
-        case.step(
-            name,
-            "check",
-            params=dict(op=criterion["op"], expected=criterion["expected"],
-                        actual=output(criterion["windows"][0], criterion["output"])),
-        )
+    case.step("terminal", "request_complete", params=dict(
+        request, checks=data['checks'], operation_timeout_s=case.stage_timeout_s,
+    ), timeout_s=2 * case.stage_timeout_s)
     case.step("cleanup", "teardown")
 
 
+from cases.request_completion.actions import COMPLETE, validate_checks
 from scenario.registry import CaseDefinition
 
 CASE = CaseDefinition(
     builders={"default": default},
     input_schema=INPUTS,
+    actions=(COMPLETE,),
 )

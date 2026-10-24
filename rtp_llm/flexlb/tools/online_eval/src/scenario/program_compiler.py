@@ -107,6 +107,7 @@ def _build_variant(config, row, identity, module, selected_profiles, source, num
         merge_data(parameters, variant_parameters),
         number_rules=narrow_parameters(base_rules, row.parameter_schema),
         profiles=profiles,
+        stage_timeout_s=config.execution.stage_timeout_s or 60,
         optional_numbers=(schema.optional_numbers
                           if schema is not None else ()),
     )

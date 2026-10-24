@@ -24,6 +24,10 @@ YAML 声明环境、输入、阈值和视图；Python 定义步骤与业务算�
 
 `CaseBuilder.step()` 和 `observe()` 生成 `StageDefinition`。action 名称是冻结计划中的稳定身份；执行器通过所属 case 的 `StageHandler` 找到普通执行函数。handler 保留输出类型、检查 ID、资源预算、所需能力和执行前提。只做字段与资源引用检查的参数校验复用 `scenario.parameters.reference_parameters`；有业务含义的验证保持在 case 内。
 
+外层阶段用于独立超时、前置条件、故障操作和资源生命周期。普通请求批次可以在一个动作内完成提交、等待和多项断言；持续负载保留启动与停发排空的边界。观察时段内部记录起止事件，窗口切片与独立断言集中分析，不为每个中间列表登记资源。合并动作使用子 deadline 保留各操作预算，并受所属阶段和整轮超时约束。
+
+批量动作可以通过 `StageHandler.checks(params)` 从已校验参数派生检查 ID；编译器将其冻结到计划，执行器仍核对返回的完整 ID 集合。每个业务检查保留独立结果、阈值、样本有效性和证据；报告中的完整身份为所属阶段 ID 与检查 ID 的组合。ERROR/INVALID 不得折算成业务通过。
+
 阶段执行消费原生参数对象，`AdapterParameters` 仅持有独立的字典快照；JSON 用于文件边界及可序列化性检查，不用作内部参数状态。输出句柄绑定环境代次，部分启动失败也登记并回收资源。
 
 `CaseDefinition.execution_requirements` 与 `StageHandler.execution_requirements` 声明逐请求证据和监控依赖。编译与冻结计划加载拒绝冲突的 `collection: aggregate`、`capture_metrics: false`，不隐式调整门槛或窗口。

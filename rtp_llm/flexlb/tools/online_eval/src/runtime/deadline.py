@@ -49,6 +49,19 @@ class Deadline:
         self.sleeper = sleeper
         self.cancelled = cancelled or threading.Event()
 
+    def child(self, timeout_s):
+        """Bound a sequential operation without extending the owning deadline."""
+        return Deadline(min(self.expires_at, self.clock() + timeout_s),
+                        self.clock, self.sleeper, self.cancelled)
+
+    @contextmanager
+    def operation(self, timeout_s, enforce=False):
+        child = self.child(timeout_s)
+        child.check()
+        with interruptible(child, enforce):
+            yield child
+        child.check()
+
     def remaining(self):
         remaining = self.expires_at - self.clock()
         if self.cancelled.is_set() or remaining <= 0:

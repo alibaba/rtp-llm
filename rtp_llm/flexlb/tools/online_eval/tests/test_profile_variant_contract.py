@@ -161,13 +161,13 @@ def test_variant_identity_is_independent_of_program_and_restart_mode_is_program_
     document = configure_program(data, 'ha.yaml')
     assert [v.id for v in document.variants] == ['default', 'non_rolling']
     for variant in document.variants:
-        ids = [s.id for s in variant.stages]
-        assert ('outage_failures' in ids) == (variant.id == 'non_rolling')
+        checks = next(s.params["checks"] for s in variant.stages if s.id == "analysis")
+        assert ('outage_failures' in checks) == (variant.id == 'non_rolling')
     wrong = copy.deepcopy(data)
     wrong['variants'][0]['id'] = 'full_restart'
     renamed = configure_program(wrong, 'ha.yaml')
     assert renamed.variants[1].id == 'full_restart'
-    assert 'outage_failures' in [step.id for step in renamed.variants[1].stages]
+    assert 'outage_failures' in next(step.params['checks'] for step in renamed.variants[1].stages if step.id == 'analysis')
     for mode in ('rolling', 'non_rolling'):
         wrong = copy.deepcopy(data)
         wrong['parameters']['procedure']['restart_mode'] = mode

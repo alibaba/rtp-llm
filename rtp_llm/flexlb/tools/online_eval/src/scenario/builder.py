@@ -15,7 +15,7 @@ def output(stage, field):
 class CaseBuilder:
     """Python owns ordering, branches and checks; YAML supplies declared parameters."""
 
-    def __init__(self, environment, parameters, *, number_rules, profiles=(), optional_numbers=()):
+    def __init__(self, environment, parameters, *, number_rules, profiles=(), optional_numbers=(), stage_timeout_s=60):
         self.parameters = copy.deepcopy(parameters)
         self.number_rules = dict(number_rules)
         self.profiles = tuple(profiles)
@@ -26,6 +26,7 @@ class CaseBuilder:
         self.read_parameters = set()
         self.metric_dependencies = {}
         self.config = None
+        self.stage_timeout_s = stage_timeout_s
 
     def value(self, path):
         """Read required YAML data; programs provide no hidden fallback values."""

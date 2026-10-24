@@ -120,6 +120,16 @@ class MetricArtifactTest(unittest.TestCase):
             self.assertEqual([row["provenance"]["evidence"]["observed_request_bounds"] for row in rows],
                              [[1, 1], [2, 2]])
             self.assertTrue(all(len(row["provenance"]["producer_sha256"]) == 64 for row in rows))
+            # The same archived evidence also projects from one batch analysis stage.
+            batch = dict(id="analysis", action="master_client_analyze", checks=[
+                dict(stage["checks"][0], id=stage["id"]) for stage in checks])
+            (Path(d)/"result.json").write_text(json.dumps(dict(stages=[batch])))
+            produce_gates(d)
+            rows = MetricStore.read(d).document["metrics"]["ha_gate/success_rate"]
+            self.assertEqual(len(rows), 2)
+            self.assertEqual([row["provenance"]["evidence"]["check"] for row in rows],
+                             ["analysis.before", "analysis.after"])
+
 
     def plan(self):
         return dict(metric_plan_schema_version=5, sources=dict(mock=dict(temperature=definition()),client={},master={}), produced={})

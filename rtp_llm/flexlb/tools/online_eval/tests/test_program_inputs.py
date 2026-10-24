@@ -80,8 +80,8 @@ def test_ha_windows_and_check_binding_are_yaml_data_and_compile_to_typed_outputs
     data["parameters"]["checks"]["b_success"]["windows"] = ["both"]
     document = configure_program(data, "ha.yaml")
     stages = {s.id: s for s in document.variants[0].stages}
-    assert stages["baseline"].params["until_offset_s"] == -3
-    assert stages["b_success"].params["rows"] == {"$ref": "stages.both.output.rows"}
+    assert stages["analysis"].params["windows"]["baseline"]["until_offset_s"] == -3
+    assert stages["analysis"].params["checks"]["b_success"]["window"] == "both"
     with patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
          patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
         assert len(compile_scenarios([("ha.yaml", document)], handlers=handlers())) == 4
@@ -120,10 +120,8 @@ def test_ha_flow_waits_and_evidence_offsets_have_separate_effects():
     for before, after in zip(baseline.variants, compiled.variants):
         expected = [asdict(s) for s in before.stages]
         for stage in expected:
-            if stage["action"] == "master_mark" and stage["id"] in {
-                "b_start", "a_start", "both_start", "outage_start",
-            }:
-                stage["params"] = {**stage["params"], "wait_s": 7}
+            if stage["action"] == "master_period" and stage["id"] != "baseline_period":
+                stage["params"]["settle_s"] = 7
         assert expected == [asdict(s) for s in after.stages]
     changed = config("master_ha_failover")
     changed["parameters"]["observation"]["windows"]["baseline"]["until"]["offset_s"] = -3
@@ -131,8 +129,8 @@ def test_ha_flow_waits_and_evidence_offsets_have_separate_effects():
     for before, after in zip(baseline.variants, compiled.variants):
         expected = [asdict(s) for s in before.stages]
         for stage in expected:
-            if stage["id"] == "baseline":
-                stage["params"] = {**stage["params"], "until_offset_s": -3}
+            if stage["id"] == "analysis":
+                stage["params"]["windows"]["baseline"]["until_offset_s"] = -3
         assert expected == [asdict(s) for s in after.stages]
 
 

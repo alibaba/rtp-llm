@@ -174,7 +174,7 @@ def produce_gates(directory):
     directory = Path(directory)
     store = MetricStore.read(directory)
     for stage in json.loads((directory / "result.json").read_text())["stages"]:
-        if stage["action"] == "master_client_check":
+        if stage["action"] in {"master_client_check", "master_client_analyze"}:
             for check in stage["checks"]:
                 if check["status"] in {"PASS", "FAIL", "WARNING"}:
                     _project_gate(store, stage, check)

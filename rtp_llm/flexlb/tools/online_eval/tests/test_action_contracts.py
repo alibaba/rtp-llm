@@ -5,7 +5,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from scenario.program_compiler import configure_program
 from cases.master_ha_failover import actions as master_ha
@@ -28,7 +28,7 @@ class ActionContractsTest(unittest.TestCase):
         self.assertEqual(foundation | {"performance_observe", "performance_finish"}, set(catalog))
         self.assertTrue(all(not catalog[name].owners for name in foundation))
         self.assertEqual(frozenset({"master_performance"}), catalog["performance_finish"].owners)
-        self.assertEqual(foundation, set(handlers("request_completion")))
+        self.assertEqual(foundation | {"request_complete"}, set(handlers("request_completion")))
         with self.assertRaisesRegex(ValueError, "unknown registered Python case"):
             handlers("unknown")
 
@@ -76,14 +76,20 @@ class ActionContractsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate action"):
                 handlers("master_performance")
 
-    def test_ha_time_marker_uses_bounded_wait_and_epoch_clock(self):
-        deadline = SimpleNamespace(sleep=Mock())
+    def test_ha_period_records_the_same_bounded_event_boundaries(self):
+        from runtime.deadline import Deadline
         from scenario.runtime import RuntimeContext
-        ctx = RuntimeContext({}, None, ".", lambda: 10, lambda _: None, wall_clock=lambda: 1234)
-        result = master_ha._mark(ctx, {"wait_s": 2, "event": "baseline_end"}, deadline)
-        self.assertEqual("baseline_end", ctx.report_events[0]["id"])
-        deadline.sleep.assert_called_once_with(2)
-        self.assertEqual({"epoch_s": 1234}, result.output)
+        now = [10.0]
+        def sleep(seconds):
+            now[0] += seconds
+        ctx = RuntimeContext({}, None, ".", lambda: now[0], sleep,
+                             wall_clock=lambda: 1234 + now[0] - 10)
+        deadline = Deadline(30, ctx.clock, sleep)
+        result = master_ha._period(ctx, dict(name="b", settle_s=2, duration_s=3,
+                                            operation_timeout_s=6), deadline)
+        self.assertEqual(["b_start", "b_end"], [e["id"] for e in ctx.report_events])
+        self.assertAlmostEqual(1236, result.output["start"])
+        self.assertAlmostEqual(1239, result.output["end"])
 
     def test_actions_share_runtime_helpers_without_importing_other_actions(self):
         for directory in (ROOT / "src/scenario/actions", ROOT / "src/cases"):

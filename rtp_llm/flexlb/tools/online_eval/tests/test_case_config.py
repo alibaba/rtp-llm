@@ -110,7 +110,7 @@ class CaseConfigTest(unittest.TestCase):
         self.assertEqual(plan["environment"]["n_decode"], 8)
         self.assertEqual(plan["stages"][1]["params"]["input_len"], 8192)
         self.assertEqual(plan["stages"][1]["params"]["count"], 3)
-        self.assertEqual(plan["stages"][4]["params"]["expected"], 0)
+        self.assertEqual(plan["stages"][1]["params"]["checks"]["no_errors"]["expected"], 0)
 
     def test_parameters_are_scoped_to_their_configuration(self):
         config = self.config()
@@ -229,7 +229,7 @@ class CaseConfigTest(unittest.TestCase):
         for plan in self.compile(config):
             self.assertEqual(plan["description"], "Configured in YAML")
             self.assertEqual(plan["stages"][0]["timeout_s"], 211)
-            self.assertEqual(plan["stages"][4]["params"]["expected"], 7)
+            self.assertEqual(plan["stages"][1]["params"]["checks"]["no_errors"]["expected"], 7)
 
     def test_classification_and_collection_have_one_explicit_owner(self):
         config = self.config()
@@ -289,8 +289,8 @@ class CaseConfigTest(unittest.TestCase):
         }
         for plan in self.compile(config):
             expected = 3 if plan["variant_id"] == "immediate" else 0
-            self.assertEqual(plan["stages"][4]["params"]["expected"], expected)
-            self.assertTrue(plan["stages"][3]["params"]["expected"])
+            self.assertEqual(plan["stages"][1]["params"]["checks"]["no_errors"]["expected"], expected)
+            self.assertTrue(plan["stages"][1]["params"]["checks"]["completed"]["expected"])
 
     def test_programs_do_not_declare_configuration_tables_or_defaults(self):
         for path in (ROOT / "src/cases").glob("*/program.py"):

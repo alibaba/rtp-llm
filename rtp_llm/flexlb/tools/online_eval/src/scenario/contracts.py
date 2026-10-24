@@ -66,7 +66,7 @@ class StageHandler:
     execute: StageExecutor
     outputs: dict[str, str]
     requires: frozenset[str] = frozenset()
-    checks: frozenset[str] = frozenset()
+    checks: frozenset[str] | Callable[[dict], frozenset[str]] = frozenset()
     max_dynamic_additions: object = 0  # nonnegative int or normalized-params -> int
     # Maximum fresh worker population requested by this stage (not additions).
     # Callable receives normalized params and the selected profile.

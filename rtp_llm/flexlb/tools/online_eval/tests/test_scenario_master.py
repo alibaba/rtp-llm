@@ -417,11 +417,10 @@ class MasterActionsTest(unittest.TestCase):
         rows = [{"send_start_epoch_ms": t * 1000, "rid": t} for t in (1, 2, 3)]
         for row in rows:
             row["wall_clock_ts"] = 1000
-        handle = self.ctx.register_resource("ha_rows", rows)
-        out = ha._window(
-            self.ctx, {"rows": handle, "from": 2, "until": 3}, self.deadline
+        out = ha._select_rows(
+            self.ctx, rows, {"from": 2, "until": 3}, self.deadline
         )
-        self.assertEqual([rows[1]], self.ctx.resource(out.output["rows"], "ha_rows"))
+        self.assertEqual([rows[1]], out)
 
 
     def test_negative_windows_filter_actual_error_rows_and_reject_empty_success(self):
@@ -433,13 +432,12 @@ class MasterActionsTest(unittest.TestCase):
         for row in rows:
             row["wall_clock_ts"] = 1000
             row.setdefault("send_start_epoch_ms", 1000000)
-        handle = self.ctx.register_resource("ha_rows", rows)
-        out = ha._window(
-            self.ctx,
-            {"rows": handle, "status": "schedule_error", "error_kind": "business"},
+        out = ha._select_rows(
+            self.ctx, rows,
+            {"status": "schedule_error", "error_kind": "business"},
             self.deadline,
         )
-        self.assertEqual([rows[1]], self.ctx.resource(out.output["rows"], "ha_rows"))
+        self.assertEqual([rows[1]], out)
         empty = self.ctx.register_resource("ha_rows", [])
         verdict = ha._client_check(
             self.ctx,
@@ -478,11 +476,10 @@ class MasterActionsTest(unittest.TestCase):
             {"send_start_epoch_ms": 1000000, "failover": False, "master_target": "B"},
             {"send_start_epoch_ms": 1000000, "failover": True, "master_target": "A"},
         ]
-        handle = self.ctx.register_resource("ha_rows", rows)
-        out = ha._window(
-            self.ctx, {"rows": handle, "failover": False}, self.deadline
+        out = ha._select_rows(
+            self.ctx, rows, {"failover": False}, self.deadline
         )
-        self.assertEqual([rows[0]], self.ctx.resource(out.output["rows"], "ha_rows"))
+        self.assertEqual([rows[0]], out)
 
     def test_master_programs_compile_with_explicit_registered_actions(self):
         from scenario import load_scenarios
@@ -513,21 +510,22 @@ class MasterActionsTest(unittest.TestCase):
                     "dual_zookeeper", plan["environment"]["master_layout"]
                 )
                 ids = [stage["id"] for stage in plan["stages"]]
+                checks = next(stage["check_ids"] for stage in plan["stages"] if stage["id"] == "analysis")
                 self.assertLess(ids.index("kill_a"), ids.index("kill_b"))
                 self.assertLess(ids.index("restart_a"), ids.index("a_ready"))
                 if plan["variant_id"] == "non_rolling":
                     self.assertLess(ids.index("kill_b"), ids.index("restart_a"))
-                    self.assertIn("outage_failures", ids)
+                    self.assertIn("outage_failures", checks)
                     continue
                 self.assertLess(ids.index("a_ready"), ids.index("kill_b"))
                 self.assertLess(ids.index("restart_a"), ids.index("restart_b"))
-                self.assertNotIn("outage_failures", ids)
-                self.assertIn("both_balance", ids)
-                self.assertIn("handover_errors", ids)
-                self.assertIn("late_errors", ids)
-                self.assertIn("rolling_errors", ids)
-                self.assertNotIn("to_b_balance", ids)
-                self.assertNotIn("to_a_balance", ids)
+                self.assertNotIn("outage_failures", checks)
+                self.assertIn("both_balance", checks)
+                self.assertIn("handover_errors", checks)
+                self.assertIn("late_errors", checks)
+                self.assertIn("rolling_errors", checks)
+                self.assertNotIn("to_b_balance", checks)
+                self.assertNotIn("to_a_balance", checks)
                 finish = next(s for s in plan["stages"] if s["id"] == "finish")
                 self.assertTrue(finish["params"]["stop_sending"])
                 flow = next(stage for stage in plan["stages"] if stage["id"] == "flow")
@@ -548,11 +546,13 @@ class MasterActionsTest(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / "config/scenarios/master_ha_failover.yaml"
         config = load_document(path)
         document = configure_program(config, str(path))
-        ids = [stage.id for stage in next(v for v in document.variants if v.id == "non_rolling").stages]
-        self.assertLess(ids.index("kill_b"), ids.index("outage_start"))
-        self.assertLess(ids.index("outage_end"), ids.index("restart_a"))
-        self.assertIn("outage_failures", ids)
-        self.assertNotIn("rolling_errors", ids)
+        stages = next(v for v in document.variants if v.id == "non_rolling").stages
+        ids = [stage.id for stage in stages]
+        checks = next(stage.params["checks"] for stage in stages if stage.id == "analysis")
+        self.assertLess(ids.index("kill_b"), ids.index("outage_period"))
+        self.assertLess(ids.index("outage_period"), ids.index("restart_a"))
+        self.assertIn("outage_failures", checks)
+        self.assertNotIn("rolling_errors", checks)
         config["parameters"]["procedure"]["restart_mode"] = "typo"
         with self.assertRaisesRegex(ScenarioError, "restart_mode"):
             configure_program(config, str(path))

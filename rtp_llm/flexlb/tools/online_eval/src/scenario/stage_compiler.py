@@ -155,6 +155,8 @@ class _StageCompiler:
         if descriptor is not None and descriptor.next_environment is not None:
             self.environment = copy.deepcopy(descriptor.next_environment(params))
         checks = descriptor.checks if descriptor else ({"comparison"} if action == "check" else set())
+        if callable(checks):
+            checks = checks(params)
         return StagePlan(sid, action, timeout, decode_parameters(action, params), tuple(sorted(checks)), value.purpose)
 
 

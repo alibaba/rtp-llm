@@ -148,72 +148,34 @@ def _ha_finish(ctx, params, deadline):
     )
 
 
-def _mark_validate(params, plan):
-    p = validate_fields(params, plan, {"wait_s", "event"}, {"wait_s", "event"})
-    validate_wait({"wait_s": p["wait_s"]}, path=plan.path)
-    from monitoring.identity import NAME
-    if type(p["event"]) is not str or not NAME.fullmatch(p["event"]):
-        raise ValueError("invalid mark event identity")
+def _period_validate(params, plan):
+    p = validate_fields(params, plan, {"name", "settle_s", "duration_s", "operation_timeout_s"},
+                        {"name", "settle_s", "duration_s", "operation_timeout_s"})
+    if p["name"] not in {"baseline", "a", "b", "both", "outage"}:
+        raise ValueError("unknown HA period")
+    for key in ("settle_s", "duration_s"):
+        validate_wait({"wait_s": p[key]}, path=plan.path + "." + key)
+    from scenario.validation import number
+    number(p["operation_timeout_s"], plan.path, minimum=0.001)
     return p
 
 
-def _mark(ctx, params, deadline):
-    deadline.sleep(params["wait_s"])
-    return StageOutput({"epoch_s": ctx.record_event(params["event"])["epoch_s"]})
+def _period(ctx, params, deadline):
+    def wait(seconds):
+        deadline.child(params["operation_timeout_s"]).sleep(seconds)
+    wait(params["settle_s"])
+    name = params["name"]
+    start = (ctx.record_event(name + "_start")["epoch_s"] if name != "baseline"
+             else ctx.wall_clock())
+    wait(params["duration_s"])
+    end = ctx.record_event(name + "_end")["epoch_s"]
+    return StageOutput({"start": start, "end": end})
 
 
-def _window_validate(params, plan):
-    p = validate_fields(
-        params,
-        plan,
-        {
-            "rows",
-            "from",
-            "until",
-            "route",
-            "status",
-            "error_kind",
-            "failover",
-            "from_offset_s",
-            "until_offset_s",
-        },
-        {"rows"},
-    )
-    plan.reference(p["rows"], "ha_rows")
-    for key in ("from", "until"):
-        if key in p:
-            plan.reference(p[key], "number")
-    if "route" in p and p["route"] not in {"master", "fallback", "failed"}:
-        raise ValueError("invalid window route filter")
-    if "failover" in p and type(p["failover"]) is not bool:
-        raise ValueError("window failover filter must be boolean")
-    if "status" in p and p["status"] not in {"ok", "schedule_error"}:
-        raise ValueError("unsupported window status filter")
-    if "error_kind" in p and p["error_kind"] not in {
-        "none",
-        "transport",
-        "business",
-        "deadline",
-    }:
-        raise ValueError("invalid window error filter")
-    for field in ("from_offset_s", "until_offset_s"):
-        if field in p:
-            if (
-                field.split("_")[0] not in p
-                or type(p[field]) not in (int, float)
-                or not math.isfinite(p[field])
-            ):
-                raise ValueError(
-                    "window offset requires finite offset and boundary reference"
-                )
-    return p
-
-
-def _window(ctx, params, deadline):
+def _select_rows(ctx, rows, params, deadline):
     from analysis.statistics import select_window
 
     deadline.check()
-    rows = ctx.resource(params["rows"], "ha_rows")
     lower = ctx.resolve(params["from"]) if "from" in params else None
     upper = ctx.resolve(params["until"]) if "until" in params else None
     from scenario.windows import resolve_window
@@ -229,35 +191,13 @@ def _window(ctx, params, deadline):
     ):
         if param in params:
             selected = [r for r in selected if r[field] == params[param]]
-    return StageOutput(
-        {"rows": ctx.register_resource("ha_rows", selected, historical=True)}
-    )
+    return selected
 
 
-def _client_check_validate(params, plan):
-    p = validate_fields(
-        params,
-        plan,
-        {
-            "rows",
-            "metric",
-            "op",
-            "expected",
-            "target",
-            "route",
-            "min_samples",
-            "warning_profiles",
-        },
-        {"rows", "metric", "op", "expected"},
-    )
-    plan.reference(p["rows"], "ha_rows")
-    criterion = validate_client_criterion({key: value for key, value in p.items() if key != "rows"})
-    return dict(criterion, rows=p["rows"])
-
-
-def _client_check(ctx, params, deadline):
+def _client_check(ctx, params, deadline, rows=None):
     deadline.check()
-    rows = ctx.resource(params["rows"], "ha_rows")
+    if rows is None:
+        rows = ctx.resource(params["rows"], "ha_rows")
     n = len(rows)
     metric = params["metric"].split("/", 1)[1]
     if n < params["min_samples"]:
@@ -298,22 +238,62 @@ def _client_check(ctx, params, deadline):
     )
 
 
+def _analyze_validate(params, plan):
+    p = validate_fields(params, plan, {"rows", "windows", "checks", "operation_timeout_s"}, {"rows", "windows", "checks", "operation_timeout_s"})
+    plan.reference(p["rows"], "ha_rows")
+    from scenario.validation import number
+    number(p["operation_timeout_s"], plan.path, minimum=0.001)
+    if not isinstance(p["windows"], dict) or not isinstance(p["checks"], dict) or not p["checks"]:
+        raise ValueError("HA analysis requires windows and checks")
+    from monitoring.identity import NAME
+    for name, window in p["windows"].items():
+        if not isinstance(name, str) or not NAME.fullmatch(name):
+            raise ValueError("invalid window name")
+        from scenario.inputs import fields
+        fields(window, (), plan.path, optional={"from", "until", "from_offset_s", "until_offset_s"})
+        for side in ("from", "until"):
+            if side in window:
+                plan.reference(window[side], "number")
+            if side + "_offset_s" in window:
+                offset = window[side + "_offset_s"]
+                if side not in window or type(offset) not in (int, float) or not math.isfinite(offset):
+                    raise ValueError("window offset requires finite offset and boundary reference")
+    for name, criterion in p["checks"].items():
+        if not isinstance(name, str) or not NAME.fullmatch(name):
+            raise ValueError("invalid check name")
+        criterion = dict(criterion)
+        window = criterion.pop("window")
+        if window not in {*p["windows"], "full_run"}:
+            raise ValueError("unknown analysis window")
+        p["checks"][name] = dict(validate_client_criterion(criterion, path=plan.path), rows=p["rows"], window=window)
+    return p
+
+
+def _analyze(ctx, params, deadline):
+    from dataclasses import replace
+    rows = ctx.resource(params["rows"], "ha_rows")
+    windows = {"full_run": rows}
+    for name, window in params["windows"].items():
+        with deadline.operation(params["operation_timeout_s"], ctx.enforce_deadlines) as operation:
+            windows[name] = _select_rows(ctx, rows, window, operation)
+    checks = []
+    for name, criterion in params["checks"].items():
+        p = {k: v for k, v in criterion.items() if k != "window"}
+        # A named cohort replaces the old intermediate resource identity.
+        cohort = criterion["window"]
+        with deadline.operation(params["operation_timeout_s"], ctx.enforce_deadlines) as operation:
+            result = _client_check(ctx, p, operation, windows[cohort]).checks[0]
+        evidence = dict(result.evidence or {})
+        if "labels" in evidence:
+            evidence["labels"] = dict(evidence["labels"], window=cohort)
+        checks.append(replace(result, id=name, evidence=evidence))
+    return StageOutput(checks=checks)
+
+
 HANDLERS = [
-    StageHandler(
-                "master_client_start", _ha_validate, _ha_start, {"client": "ha_client"}
-            ),
-    StageHandler(
-                "master_client_finish", _ha_finish_validate, _ha_finish, {"rows": "ha_rows"}
-            ),
-    StageHandler("master_mark", _mark_validate, _mark, {"epoch_s": "number"}),
-    StageHandler(
-                "master_client_window", _window_validate, _window, {"rows": "ha_rows"}
-            ),
-    StageHandler(
-                "master_client_check",
-                _client_check_validate,
-                _client_check,
-                {"actual": "nullable_number"},
-                checks=frozenset({"criterion"}),
-            ),
+    StageHandler("master_client_start", _ha_validate, _ha_start, {"client": "ha_client"}),
+    StageHandler("master_client_finish", _ha_finish_validate, _ha_finish, {"rows": "ha_rows"}),
+    StageHandler("master_period", _period_validate, _period, {"start": "number", "end": "number"}),
+    StageHandler("master_client_analyze", _analyze_validate, _analyze, {},
+                 checks=lambda p: frozenset(p["checks"])),
 ]
