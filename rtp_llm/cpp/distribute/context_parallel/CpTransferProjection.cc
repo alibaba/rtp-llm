@@ -74,26 +74,20 @@ std::vector<size_t> selectProducerTransferPages(const CacheGroupPolicy& policy,
     return pages;
 }
 
-std::vector<int32_t> windowedSwaHandoffBlocks(const CacheGroupPolicy&     policy,
-                                               const std::vector<int32_t>& blocks,
-                                               size_t                      tokens_per_block,
-                                               size_t                      input_token_count) {
+size_t firstRequiredSwaHandoffPage(const CacheGroupPolicy& policy,
+                                   size_t                  tokens_per_block,
+                                   size_t                  input_token_count) {
     if (policy.group_type != CacheGroupType::SWA || !policy.validate_tail_blocks || policy.active_tail_blocks < 2
         || policy.sliding_window_size <= 0 || policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN
         || tokens_per_block == 0 || input_token_count == 0) {
-        return blocks;
+        return 0;
     }
     // At the first decode step, only the last window-1 prompt tokens can be
     // read. Keep the current prompt page even for a one-token window.
     const size_t history_tokens =
         std::min(input_token_count, static_cast<size_t>(policy.sliding_window_size - 1));
     const size_t first_token = std::min(input_token_count - 1, input_token_count - history_tokens);
-    const size_t first_page  = first_token / tokens_per_block;
-    auto         selected    = blocks;
-    for (size_t page = 0; page < std::min(first_page, selected.size()); ++page) {
-        selected[page] = -1;
-    }
-    return selected;
+    return first_token / tokens_per_block;
 }
 
 LoadTransferPlan selectLoadTransferPages(const CacheGroupPolicy& policy,

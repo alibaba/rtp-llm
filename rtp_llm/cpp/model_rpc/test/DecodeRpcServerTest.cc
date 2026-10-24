@@ -24,7 +24,8 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(std::string              req
                                                     CacheKeysType            cache_keys,
                                                     GroupBlockIds            group_block_ids,
                                                     int32_t                  prefill_cp_size,
-                                                    int64_t                  reuse_block_size = 0) {
+                                                    int64_t                  reuse_block_size = 0,
+                                                    size_t                   input_token_count = 0) {
     return {/*request_id=*/42,
             request_key,
             peer_addrs,
@@ -35,7 +36,8 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(std::string              req
             /*partition_count=*/1,
             /*partition_id=*/0,
             /*server_context=*/nullptr,
-            prefill_cp_size};
+            prefill_cp_size,
+            input_token_count};
 }
 
 class TestDecodeRpcService final: public RpcService::Service {
@@ -442,7 +444,8 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
                                               cache_keys,
                                               std::move(group_block_ids),
                                               /*cp_size=*/2,
-                                              /*reuse=*/3);
+                                              /*reuse=*/3,
+                                              /*input_token_count=*/19);
 
     const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
 
@@ -450,6 +453,7 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     EXPECT_EQ(request.partition_count(), 1);
     EXPECT_EQ(request.partition_id(), 0);
     EXPECT_EQ(request.reuse_block_size(), 3);
+    EXPECT_EQ(request.input_token_count(), 19u);
     ASSERT_EQ(request.peer_addrs_size(), 2);
     EXPECT_EQ(request.peer_addrs(0), "prefill-0");
     EXPECT_EQ(request.peer_addrs(1), "prefill-1");
@@ -471,7 +475,8 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
                                               cache_keys,
                                               std::move(group_block_ids),
                                               /*cp_size=*/2,
-                                              /*reuse=*/3);
+                                              /*reuse=*/3,
+                                              /*input_token_count=*/19);
 
     const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/1, peer_addrs);
 
@@ -479,6 +484,7 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     EXPECT_EQ(request.partition_count(), 1);
     EXPECT_EQ(request.partition_id(), 0);
     EXPECT_EQ(request.reuse_block_size(), 3);
+    EXPECT_EQ(request.input_token_count(), 19u);
     ASSERT_EQ(request.peer_addrs_size(), 2);
     EXPECT_EQ(request.peer_addrs(0), "prefill-0");
     EXPECT_EQ(request.peer_addrs(1), "prefill-1");
@@ -1336,6 +1342,70 @@ TEST_F(HybridHandoffLoadTest, LoadCacheMainAndDraftUsePhysicalRowsAndPeerObligat
     EXPECT_EQ(null_result.loaded_cache_block_count, 1u);
     const auto missing_full = "kv_" + makeCacheKey(/*model_id=*/7, "222", /*layer_id=*/0, "full");
     EXPECT_EQ(capture->loaded_blocks.at("peer1").count(missing_full), 0u);
+}
+
+TEST_F(HybridHandoffLoadTest, WindowPrunedSwaPageDoesNotTruncateCompletedHandoff) {
+    CacheConfig config;
+    config.dtype                     = DataType::TYPE_UINT8;
+    config.layer_num                 = 1;
+    config.seq_size_per_block        = 4;
+    config.use_opaque_kv_cache_store = true;
+    auto full_spec = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, 4, "full");
+    auto swa_spec  = test::makeResolvedOpaqueSpec(true, "swa", DataType::TYPE_UINT8, 33, 8);
+    config.fromGroupedSpecs({full_spec, swa_spec},
+                            {{0}, {0}},
+                            {CacheGroupType::FULL, CacheGroupType::SWA},
+                            {"full", "swa"});
+    auto groups = config.topology().groups();
+    for (auto& group : groups) {
+        group.block_num = 8;
+        if (group.tag == "swa") {
+            group.policy.cp_mapping         = CpBlockMappingMode::COMPACT_LAST_RANK;
+            group.policy.sliding_window_size = 4;
+        }
+    }
+    config.setTopology(std::move(groups), config.topology().layers());
+
+    auto cache_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
+    ASSERT_TRUE(cache_manager->init());
+    EngineInitParams params;
+    params.model_config_.num_layers            = 1;
+    params.model_id                            = 7;
+    params.parallelism_config.local_world_size = 1;
+    params.parallelism_config.world_size       = 1;
+    params.parallelism_config.role_type        = RoleType::DECODE;
+    DecodeRpcServer server;
+    server.engine_           = std::make_shared<HandoffTestEngine>(params, cache_manager);
+    server.maga_init_params_ = params;
+    auto capture                 = std::make_shared<CapturingHandoffLoadStore>();
+    server.resource_.cache_store = capture;
+
+    auto full_blocks = std::make_shared<BlockIds>();
+    full_blocks->assign({0, 1, 2, 3, 4});
+    auto swa_blocks = std::make_shared<BlockIds>();
+    // A 19-token prompt with a 4-token SWA window needs only page 2.
+    // The old window mask marks page 1 null although it is selected as a tail page.
+    swa_blocks->assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, 2});
+    grpc::ServerContext rpc_context;
+    auto load_context = makeLoadContext("window-pruned-swa",
+                                        {"peer0:1:1", "peer1:1:1"},
+                                        {111, 222, 333, 444, 555},
+                                        {{{"full", 0}, {"swa", 1}}, {full_blocks, swa_blocks}},
+                                        /*prefill_cp_size=*/2,
+                                        /*reuse_block_size=*/0,
+                                        /*input_token_count=*/19);
+    load_context.server_context = &rpc_context;
+
+    const auto result = server.loadCache(load_context);
+    ASSERT_TRUE(result.ok()) << result.error_info.ToString();
+    EXPECT_EQ(result.loaded_cache_block_count, 5u);
+
+    // Null inside the required window is different from an intentionally
+    // skipped old page: key 555 must still block the completed prefix.
+    swa_blocks->assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    const auto missing_swa = server.loadCache(load_context);
+    ASSERT_TRUE(missing_swa.ok()) << missing_swa.error_info.ToString();
+    EXPECT_EQ(missing_swa.loaded_cache_block_count, 4u);
 }
 
 TEST(DecodeRpcServerTest, CompactStateGroupWithSingleLogicalBlockLoadsKeyZero) {
