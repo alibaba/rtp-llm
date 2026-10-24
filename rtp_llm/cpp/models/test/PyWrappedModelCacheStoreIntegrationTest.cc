@@ -1328,7 +1328,9 @@ py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
 
 py::dict runGenerationPrefillCaptureScenario(py::object                                py_model,
                                              const std::string&                        expected_error_substring,
-                                             const std::vector<std::pair<bool, bool>>& forward_flags) {
+                                             const std::vector<std::pair<bool, bool>>& forward_flags,
+                                             bool                                      release_gil_during_construction,
+                                             bool                                      enable_eplb) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
         initRuntime(/*device_id=*/0,
@@ -1361,6 +1363,10 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
     description.attention_conf.kv_head_num   = 1;
     description.attention_conf.size_per_head = 4;
 
+    if (enable_eplb) {
+        description.ffn_conf.moe_configs = MoeConfigs{2, 0, 1};
+    }
+
     HWKernelConfig hw_kernel_config;
     hw_kernel_config.enable_cuda_graph                          = true;
     hw_kernel_config.generation_prefill_cuda_graph_max_requests = 1;
@@ -1384,6 +1390,9 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
                               manager,
                               /*mtp_cache_config_index=*/std::nullopt};
     params.kernel_block_table_width = 1;
+    if (enable_eplb) {
+        params.eplb_config.eplb_mode = EplbMode::STATS;
+    }
 
     if (!forward_flags.empty()) {
         params.hidden_state_capture_layer_ids = {0, 1};
@@ -1395,7 +1404,14 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
     std::string capture_error_message;
     py::list    forwards;
     try {
-        PyWrappedModel model(params, py_model);
+        auto model_owner = [&]() {
+            if (release_gil_during_construction) {
+                py::gil_scoped_release release;
+                return std::make_unique<PyWrappedModel>(params, py_model);
+            }
+            return std::make_unique<PyWrappedModel>(params, py_model);
+        }();
+        auto& model      = *model_owner;
         available_during = manager->availableBlocksNum();
         graph_enabled    = PyWrappedModelTestPeer::generationPrefillCudaGraphReady(model);
         for (size_t i = 0; i < forward_flags.size(); ++i) {
@@ -1575,6 +1591,8 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     m.def("run_generation_prefill_capture_scenario",
           &rtp_llm::test::runGenerationPrefillCaptureScenario,
           py::arg("py_model"),
-          py::arg("expected_error_substring") = "",
-          py::arg("forward_flags")            = std::vector<std::pair<bool, bool>>{});
+          py::arg("expected_error_substring")        = "",
+          py::arg("forward_flags")                   = std::vector<std::pair<bool, bool>>{},
+          py::arg("release_gil_during_construction") = false,
+          py::arg("enable_eplb")                     = false);
 }

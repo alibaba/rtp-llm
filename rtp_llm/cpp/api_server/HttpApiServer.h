@@ -37,13 +37,13 @@ public:
         engine_(engine),
         mm_processor_(mm_processor),
         addr_(address),
-        params_(params),
+        model_config_(params.model_config_),
         token_processor_(new TokenProcessor(token_processor)),
         metrics_reporter_(params.metrics_reporter) {
         is_embedding_ = false;
         active_request_count_.reset(new autil::AtomicCounter());
         request_counter_.reset(new autil::AtomicCounter());
-        init_controller(params_.concurrency_config, params_.parallelism_config);
+        init_controller(params.concurrency_config, params.parallelism_config);
     }
 
     // embedding engine
@@ -51,12 +51,12 @@ public:
                   std::shared_ptr<MultimodalProcessor> mm_processor,
                   const EngineInitParams&              params,
                   py::object                           custom_module):
-        params_(params), metrics_reporter_(params.metrics_reporter) {
+        model_config_(params.model_config_), metrics_reporter_(params.metrics_reporter) {
         is_embedding_       = true;
         embedding_endpoint_ = std::make_shared<EmbeddingEndpoint>(embedding_engine, mm_processor, custom_module);
         active_request_count_.reset(new autil::AtomicCounter());
         request_counter_.reset(new autil::AtomicCounter());
-        init_controller(params_.concurrency_config, params_.parallelism_config);
+        init_controller(params.concurrency_config, params.parallelism_config);
     }
 
     ~HttpApiServer() = default;
@@ -95,7 +95,7 @@ private:
     std::shared_ptr<MultimodalProcessor> mm_processor_;
     std::string                          addr_;
 
-    const EngineInitParams&                params_;
+    ModelConfig                            model_config_;
     std::shared_ptr<ConcurrencyController> controller_;
     std::shared_ptr<TokenProcessor>        token_processor_;
 

@@ -77,7 +77,7 @@ class PyWrappedModel: public ModelBase {
 public:
     // py_instance is `py_model` indeedly.
     PyWrappedModel(const GptModelInitParams& params,
-                   py::object                py_instance,
+                   const py::object&         py_instance,
                    bool                      is_prefill_cuda_graph_mode   = false,
                    bool                      use_spec_decoding            = false,
                    DSparkModelRole           dspark_model_role            = DSparkModelRole::NONE,
@@ -203,7 +203,7 @@ private:
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
 inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
-                                      py::object                py_instance,
+                                      const py::object&         py_instance,
                                       bool                      is_prefill_cuda_graph_mode,
                                       bool                      use_spec_decoding,
                                       DSparkModelRole           dspark_model_role,
