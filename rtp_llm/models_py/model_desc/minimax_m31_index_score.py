@@ -189,8 +189,17 @@ def q8kv4_index_score(
         or not out.is_contiguous()
     ):
         raise ValueError(f"score output must be contiguous float32 {expected}")
-    pad_tile = triton.next_power_of_2(triton.cdiv(block_table.shape[1], 256))
-    _q8kv4_index_score_kernel[(q.shape[0], 256)](
+    chunks = 256
+    if q.shape[0] >= 64 and torch.cuda.get_device_capability(q.device) == (10, 3):
+        # Preserve parallelism while limiting each CTA to 32 history pages.
+        target_chunks = max(
+            16,
+            triton.cdiv(4096, q.shape[0]),
+            triton.cdiv(block_table.shape[1], 32),
+        )
+        chunks = min(256, triton.next_power_of_2(target_chunks))
+    pad_tile = triton.next_power_of_2(triton.cdiv(block_table.shape[1], chunks))
+    _q8kv4_index_score_kernel[(q.shape[0], chunks)](
         q,
         packed,
         scales.view(torch.uint8),
