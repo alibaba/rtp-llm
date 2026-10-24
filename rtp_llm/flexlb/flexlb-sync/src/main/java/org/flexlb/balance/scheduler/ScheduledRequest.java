@@ -118,11 +118,11 @@ public final class ScheduledRequest implements Prioritized {
     }
     public long enqueuedAtMs() { return enqueuedAtMs; }
 
-    void markSubQueueEntry() {
+    public void markSubQueueEntry() {
         subQueueEnteredAtNanos = System.nanoTime();
     }
 
-    long subQueueEnteredAtNanos() {
+    public long subQueueEnteredAtNanos() {
         return subQueueEnteredAtNanos;
     }
 
@@ -149,14 +149,14 @@ public final class ScheduledRequest implements Prioritized {
     }
 
     /** Bind the sole publish-time route reservation before ACTIVE becomes visible. */
-    boolean bindPublishedRouteReservation(
+    public boolean bindPublishedRouteReservation(
             PrefillState.RouteReservation reservation) {
         return publishedRouteReservation.compareAndSet(
                 null, Objects.requireNonNull(reservation, "reservation"));
     }
 
     /** Transfer the sole uncommitted route reservation to delivery or cleanup. */
-    PrefillState.RouteReservation takePublishedRouteReservation() {
+    public PrefillState.RouteReservation takePublishedRouteReservation() {
         return publishedRouteReservation.getAndSet(null);
     }
 
@@ -173,7 +173,7 @@ public final class ScheduledRequest implements Prioritized {
     }
 
     /** Restore ownership after a pre-commit operation made no state change. */
-    boolean restorePublishedRouteReservation(
+    public boolean restorePublishedRouteReservation(
             PrefillState.RouteReservation reservation) {
         return publishedRouteReservation.compareAndSet(
                 null, Objects.requireNonNull(reservation, "reservation"));
