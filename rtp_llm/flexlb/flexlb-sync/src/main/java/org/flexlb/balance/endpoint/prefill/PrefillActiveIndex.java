@@ -4,13 +4,10 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.util.PriorityNormalizer;
 
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
-import java.util.List;
 import java.util.TreeSet;
 
 /**
@@ -44,55 +41,11 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest> pe
     void clear();
 
     /** Caller holds the owning PrefillState lock. Reused until membership changes. */
-    Capture capture();
-
-    /** Immutable membership; prediction objects are materialized outside the owner lock. */
-    final class Capture {
-        private static final Capture EMPTY = new Capture(List.of());
-        private final List<Entry> entries;
-        private volatile List<ScheduledRequest> items;
-        private volatile List<GroupPlanner.Item> plannerItems;
-
-        private Capture(Collection<Entry> entries) {
-            this.entries = List.copyOf(entries);
-        }
-
-        public List<ScheduledRequest> items() {
-            List<ScheduledRequest> result = items;
-            if (result != null) { return result; }
-            synchronized (this) {
-                if (items == null) {
-                    List<ScheduledRequest> requests = new ArrayList<>(entries.size());
-                    for (Entry entry : entries) {
-                        requests.add(entry.request);
-                    }
-                    items = List.copyOf(requests);
-                }
-                return items;
-            }
-        }
-
-        public List<GroupPlanner.Item> plannerItems() {
-            List<GroupPlanner.Item> result = plannerItems;
-            if (result != null) {
-                return result;
-            }
-            synchronized (this) {
-                if (plannerItems == null) {
-                    List<GroupPlanner.Item> resultItems = new ArrayList<>(entries.size());
-                    for (Entry entry : entries) {
-                        resultItems.add(entry.plannerItem());
-                    }
-                    plannerItems = List.copyOf(resultItems);
-                }
-                return plannerItems;
-            }
-        }
-    }
+    WaitingQueueView capture();
 
     /** One identity in the active index; survives membership snapshot rebuilds. */
     final class Entry {
-        private final ScheduledRequest request;
+        public final ScheduledRequest request;
         private final long sequence;
         private volatile GroupPlanner.Item plannerItem;
 
@@ -101,7 +54,7 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest> pe
             this.sequence = sequence;
         }
 
-        private GroupPlanner.Item plannerItem() {
+        public GroupPlanner.Item plannerItem() {
             GroupPlanner.Item result = plannerItem;
             if (result != null) {
                 return result;
@@ -124,7 +77,7 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest> pe
         private final IdentityHashMap<ScheduledRequest, Entry> identities;
         private final int[] priorityCounts = new int[PriorityNormalizer.MAX_PRIORITY + 1];
         private long nextSequence;
-        private Capture capture;
+        private WaitingQueueView capture;
 
         private Ordered(int initialCapacity, Comparator<ScheduledRequest> ordering) {
             identities = new IdentityHashMap<>(initialCapacity);
@@ -193,9 +146,9 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest> pe
         }
 
         @Override
-        public Capture capture() {
+        public WaitingQueueView capture() {
             if (capture == null) {
-                capture = queue.isEmpty() ? Capture.EMPTY : new Capture(queue);
+                capture = queue.isEmpty() ? WaitingQueueView.EMPTY : new WaitingQueueView(queue);
             }
             return capture;
         }
