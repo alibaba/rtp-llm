@@ -129,7 +129,7 @@ public final class PrefillQueueEnqueuer {
                 }
                 reservations.add(reservation);
             }
-            replacement = prefillState.replaceQueuedRoutesUnderLock(victims, reservations, incoming);
+            replacement = prefillState.replaceQueuedRequests(victims, reservations, incoming);
             if (replacement == null) {
                 return new EnqueueAttempt(false, null, null);
             }

@@ -356,10 +356,10 @@ public final class PrefillState {
         return queuedPreemption.oneQueuedPreemptionVictimUnderLock(priority);
     }
 
-    public SingleReservation replaceQueuedRoutesUnderLock(List<ScheduledRequest> victims,
+    public SingleReservation replaceQueuedRequests(List<ScheduledRequest> victims,
                                                          List<SingleReservation> reservations,
                                                          ScheduledRequest incoming) {
-        return queuedPreemption.replaceQueuedRoutesUnderLock(victims, reservations, incoming);
+        return queuedPreemption.replaceQueuedRequests(victims, reservations, incoming);
     }
 
     public boolean removeQueuedSingleRequest(ScheduledRequest item, SingleReservation exactReservation) {

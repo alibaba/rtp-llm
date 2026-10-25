@@ -92,9 +92,9 @@ public final class QueuedPreemption {
     }
 
     /**
-     * Replace the selected waiting requests and their route reservations in one transaction.
+     * Replace the selected waiting requests and their single reservations in one transaction.
      */
-    public SingleReservation replaceQueuedRoutesUnderLock(List<ScheduledRequest> victims,
+    public SingleReservation replaceQueuedRequests(List<ScheduledRequest> victims,
                                                          List<SingleReservation> reservations,
                                                          ScheduledRequest incoming) {
         prefillState.requireLock();
