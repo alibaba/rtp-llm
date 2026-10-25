@@ -82,6 +82,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     new NonBatchDeliveryStrategy(
                             lifecycle,
                             new DeliveryMetrics(batchReporter));
+            case NON_BATCH_V2 -> throw new IllegalArgumentException("该测试环境仅用于 BATCH 和 NON_BATCH");
         };
         this.registry = new EndpointRegistry(
                 configService,
