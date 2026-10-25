@@ -551,6 +551,160 @@ class DecodeFusionsTest(unittest.TestCase):
             )
 
     @torch.inference_mode()
+    def test_c4_decode_queries_ring_and_cache(self):
+        from rtp_llm.platforms.ppu.kernels.cuda.ppu_fp4_indexer import (
+            compress4_decode_store,
+            project_compress4_decode_queries_store,
+        )
+        from rtp_llm.platforms.ppu.kernels.ppu_fp4_indexer_cache import (
+            build_decode_plan,
+        )
+
+        for batch, width, entries in (
+            (1, 2, 8),
+            (3, 3, 12),
+            (8, 4, 12),
+            (17, 2, 12),
+            (32, 4, 8),
+        ):
+            for dtype_mask in (0, 31, 26):
+                dtypes = [
+                    torch.int64 if dtype_mask & (1 << i) else torch.int32
+                    for i in range(5)
+                ]
+                # Permuted physical pages and a padded block-table stride.
+                pages = torch.randperm(batch * 3, device="cuda").reshape(batch, 3)
+                table = torch.zeros((batch, 5), device="cuda", dtype=dtypes[4])
+                table[:, :3] = pages
+                table = table[:, :3]
+                state = torch.randn((batch * 3 * entries, 512), device="cuda")
+                ref_state = state.clone()
+                cache = torch.zeros((batch, 4352), device="cuda", dtype=torch.uint8)
+                ref_cache = cache.clone()
+                x = torch.randn(
+                    (batch, width, 4096), device="cuda", dtype=torch.bfloat16
+                )
+                projection = (
+                    torch.randn((512, 4096), device="cuda", dtype=torch.bfloat16) / 64
+                )
+                ape = torch.randn((8, 128), device="cuda")
+                weight = torch.rand(128, device="cuda")
+                angle = torch.randn((128, 32), device="cuda")
+                freqs = torch.view_as_real(
+                    torch.polar(torch.ones_like(angle), angle)
+                ).flatten(-2)
+                values = [
+                    torch.zeros(batch * width, device="cuda", dtype=d)
+                    for d in dtypes[:4]
+                ]
+                values[2].fill_(-1)
+                values[3].fill_(-1)
+                meta = QueryMetadata(*values, token_to_req=values[1])
+                starts = torch.zeros(batch, device="cuda", dtype=torch.int32)
+
+                def old():
+                    for index in range(width):
+                        prepared = prepare_indexer_query(x, None, starts, meta, index)
+                        if prepared is None:
+                            step_x = x[:, index : index + 1].contiguous()
+                            step = slice_compressor_query(meta, batch, width, index)
+                        else:
+                            step_x, _, _, step = prepared
+                        projected = torch.mm(
+                            step_x.reshape(batch, 4096),
+                            projection.t(),
+                            out_dtype=torch.float32,
+                        )
+                        plan, slots = build_decode_plan(step, table, entries, 16)
+                        self.assertTrue(
+                            compress4_decode_store(
+                                ref_state,
+                                projected,
+                                ape,
+                                plan,
+                                weight,
+                                1e-6,
+                                freqs,
+                                slots,
+                                ref_cache,
+                                64,
+                            )
+                        )
+
+                def new():
+                    self.assertTrue(
+                        project_compress4_decode_queries_store(
+                            state,
+                            x,
+                            projection,
+                            ape,
+                            weight,
+                            1e-6,
+                            freqs,
+                            meta,
+                            table,
+                            entries,
+                            16,
+                            cache,
+                            64,
+                        )
+                    )
+
+                old()
+                new()
+                old_graph, new_graph = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
+                with torch.cuda.graph(old_graph):
+                    old()
+                with torch.cuda.graph(new_graph):
+                    new()
+                requests = (
+                    torch.arange(batch, device="cuda")
+                    .flip(0)[:, None]
+                    .expand(-1, width)
+                )
+                for start in (0, 1, 3, 7, 11, 15, 23, 31, 47, 63):
+                    pos = (
+                        start
+                        + torch.arange(width, device="cuda")[None, :]
+                        + torch.arange(batch, device="cuda")[:, None] % 4
+                    )
+                    physical = table[requests, (pos // 16) % 3].long()
+                    writes = physical * entries + pos % entries
+                    slots = requests * 64 + pos // 4
+                    if batch > 1:
+                        # Independent inactive state, position, and cache slots.
+                        writes[-1, 0] = -1
+                        pos[0, -1] = -1
+                        slots[0, 0] = -1
+                    for target, source in zip(values, (pos, requests, writes, slots)):
+                        target.copy_(source.flatten())
+                    x.normal_()
+                    old_graph.replay()
+                    new_graph.replay()
+                    self.same(state, ref_state)
+                    self.same(cache, ref_cache)
+                before = state.clone(), cache.clone()
+                self.assertFalse(
+                    project_compress4_decode_queries_store(
+                        state,
+                        x,
+                        projection,
+                        ape,
+                        weight,
+                        1e-6,
+                        freqs,
+                        meta,
+                        table,
+                        entries,
+                        16,
+                        cache,
+                        128,
+                    )
+                )
+                self.same(state, before[0])
+                self.same(cache, before[1])
+
+    @torch.inference_mode()
     def test_hc_head_preserves_reference_projection(self):
         from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import FallbackHCHead
         from rtp_llm.platforms.ppu.models.dsv4.ppu_hc_head import PpuDecodeHCHead

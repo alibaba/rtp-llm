@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn.functional as F
+
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
@@ -26,6 +27,32 @@ from .ppu_rope_attention import PpuRopeAttention
 
 
 class PpuFP4Compressor(CompressorFP8):
+    def try_forward_decode_queries(self, x, meta):
+        """Use one warp per request for chronological MTP C4 state updates."""
+        if not getattr(self, "_fuse_decode_queries", False):
+            return False
+        if self._state_pool_3d is None or self._kv_pool_view is None:
+            return False
+        from ...kernels.cuda.ppu_fp4_indexer import (
+            project_compress4_decode_queries_store,
+        )
+
+        return project_compress4_decode_queries_store(
+            self._state_pool_3d,
+            x,
+            self._wkv_wgate_fused,
+            self.ape,
+            self.norm.weight,
+            self.norm_eps,
+            torch.view_as_real(self.freqs_cis).flatten(-2),
+            meta,
+            self._state_block_table,
+            self._state_eb,
+            self._state_tokens_per_block,
+            self._kv_pool_view,
+            self._kv_eb,
+        )
+
     def __init__(self, *args, compressor_weights, **kwargs):
         super().__init__(*args, compressor_weights=compressor_weights, **kwargs)
         if (self.head_dim, self.rope_head_dim, self.compress_ratio) != (128, 64, 4):
@@ -362,7 +389,8 @@ class PpuFP4Indexer(IndexerFP8):
                 torch.view_as_real(self.freqs_cis).flatten(-2),
                 meta.positions,
             )
-            for index in range(width):
+            fused_compressor = self.compressor.try_forward_decode_queries(x, meta)
+            for index in range(0 if fused_compressor else width):
                 prepared = None
                 if batch > 1 and getattr(self, "_fuse_query_slices", False):
                     from ...kernels.ppu_query_slice import prepare_indexer_query

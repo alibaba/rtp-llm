@@ -148,6 +148,7 @@ class PpuDecodeProvider(PpuModuleProvider):
             if type(linear) in (PpuFp8Linear, PpuWoAFp8Linear):
                 linear._decode_attention_gemm = self._decode_fusions
         if attention.indexer is not None:
+            attention.indexer.compressor._fuse_decode_queries = self._decode_fusions
             attention.indexer._fuse_query_slices = self._decode_fusions
             attention.indexer._fuse_topk_order = self._decode_fusions
             attention.indexer.compressor._fuse_decode_store = self._decode_fusions
