@@ -38,6 +38,15 @@ class V41MXFP8Linear(torch.nn.Module):
             from rtp_llm.models_py.modules.dsv41.sm90_dense import Sm90MXFP8Linear
 
             self._sm90_linear = Sm90MXFP8Linear(weight, scales)
+            # Humming owns the executable packed layout. Keep that same
+            # allocation for generic device discovery instead of retaining
+            # a second, unused checkpoint-layout GPU weight. Logical shape
+            # remains available through N/K; SM10x-only consumers gate on
+            # device capability before inspecting the weight layout.
+            self.weight = self._sm90_linear.weight
+            self._sm90_checkpoint_weight_ref = (
+                weakref.ref(weight) if isinstance(weight, torch.Tensor) else None
+            )
             return
         self.weight_scales = self.pack_scales(scales)
 
@@ -125,6 +134,29 @@ class V41MXFP8Linear(torch.nn.Module):
         ):
             return adapter.forward_bf16(x, out=out)
         return self.forward_quantized(*self._quantize_input(x), out=out)
+
+
+def release_prepared_sm90_checkpoint_weights(root, weights) -> int:
+    """Release only prepared dense inputs after all model consumers bind.
+
+    The loader/weight manager also owns ModelWeights, so dropping the model's
+    reference alone does not release checkpoint tensors. Match exact tensor
+    identities recorded by the SM90 adapter; unrelated and SM10x weights stay
+    in their original dictionaries. Live consumers retain their own references.
+    """
+    sources = {}
+    for module in root.modules():
+        ref = getattr(module, "_sm90_checkpoint_weight_ref", None)
+        source = ref() if ref is not None else None
+        if source is not None:
+            sources[id(source)] = source
+    released = 0
+    for entries in (*weights.weights, weights.global_weights):
+        for key, value in list(entries.items()):
+            if id(value) in sources and sources[id(value)] is value:
+                released += value.numel() * value.element_size()
+                del entries[key]
+    return released
 
 
 def _is_v41_fp8_scale(w: torch.Tensor, s: torch.Tensor) -> bool:

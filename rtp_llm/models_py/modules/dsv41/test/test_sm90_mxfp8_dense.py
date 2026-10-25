@@ -1,7 +1,9 @@
 """SM90 native-g32 dense contracts; executed by the CUDA13 Bazel target."""
 
+import gc
 import json
 import unittest
+import weakref
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -11,7 +13,10 @@ from rtp_llm.models_py.modules.dsv41.sm90_dense import (
     expand_block32_scales,
     unpack_ue8m0_input_scales,
 )
-from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+from rtp_llm.models_py.modules.dsv41.utils import (
+    V41MXFP8Linear,
+    release_prepared_sm90_checkpoint_weights,
+)
 
 # Checkpoint config: hidden=5120, heads=64, head_dim=512, q_rank=1280,
 # o_rank=1024, o_groups=8, expert_intermediate=2304. AttentionFP8 slices
@@ -96,6 +101,7 @@ class DenseScaleAndDispatchTest(unittest.TestCase):
         ):
             linear = V41MXFP8Linear(weight, scales)
             adapter.assert_called_once_with(weight, scales)
+            self.assertIs(linear.weight, adapter.return_value.weight)
             pack.assert_not_called()
             q, s, out = object(), object(), object()
             self.assertIs(
@@ -118,6 +124,7 @@ class DenseScaleAndDispatchTest(unittest.TestCase):
             linear = V41MXFP8Linear(weight, scales)
             pack.assert_called_once_with(scales)
             self.assertIsNone(linear._sm90_linear)
+            self.assertIs(linear.weight, weight)
             self.assertIs(linear.weight_scales, pack.return_value)
 
     def test_sm100_shared_executor_ignores_sm90_overlap_setting(self):
@@ -233,6 +240,48 @@ class Sm90MXFP8DenseTest(unittest.TestCase):
             scales, weight.shape[0], k
         ).float().repeat_interleave(32, dim=1)
         return (activation.reshape(rows, k) @ w.T).to(torch.bfloat16)
+
+    def test_checkpoint_weight_is_released_after_sm90_preparation(self):
+        linear, weight, scales = self._linear(n=4096, k=5120)
+        raw_ref = weakref.ref(weight)
+        raw_bytes = weight.numel() * weight.element_size()
+        self.assertIs(linear.weight, linear._sm90_linear.weight)
+        cases = []
+        for rows in (1, 16, 129):
+            x = torch.randn(rows, 5120, device="cuda", dtype=torch.bfloat16)
+            cases.append((x, linear(x).clone()))
+        torch.cuda.synchronize()
+        before = torch.cuda.memory_allocated()
+        del weight, scales
+        gc.collect()
+        torch.cuda.synchronize()
+        self.assertIsNone(raw_ref())
+        self.assertLessEqual(torch.cuda.memory_allocated(), before - raw_bytes)
+        for x, expected in cases:
+            torch.testing.assert_close(linear(x), expected, rtol=0, atol=0)
+
+    def test_loader_owner_releases_only_prepared_checkpoint_tensor(self):
+        linear, weight, scales = self._linear(n=4096, k=5120)
+        raw_ref = weakref.ref(weight)
+        raw_bytes = weight.numel() * weight.element_size()
+        other = torch.ones(7, device="cuda")
+        loader = SimpleNamespace(
+            weights=[{"prepared": weight, "unrelated": other}],
+            global_weights={"scale": scales},
+        )
+        x = torch.randn(17, 5120, device="cuda", dtype=torch.bfloat16)
+        expected = linear(x).clone()
+        del weight
+        self.assertIsNotNone(raw_ref())
+        self.assertEqual(
+            release_prepared_sm90_checkpoint_weights(linear, loader), raw_bytes
+        )
+        self.assertIsNone(raw_ref())
+        self.assertEqual(set(loader.weights[0]), {"unrelated"})
+        self.assertIs(loader.weights[0]["unrelated"], other)
+        self.assertIs(loader.global_weights["scale"], scales)
+        torch.testing.assert_close(linear(x), expected, rtol=0, atol=0)
+        self.assertEqual(release_prepared_sm90_checkpoint_weights(linear, loader), 0)
 
     def test_prequantized_group32_and_out_match_independent_reference(self):
         for n, k, shape in (

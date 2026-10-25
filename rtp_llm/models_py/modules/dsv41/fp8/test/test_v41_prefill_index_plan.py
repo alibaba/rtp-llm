@@ -64,6 +64,36 @@ def make_inputs(rows, k=512, *, device="cpu", strided=False, dtype=torch.int32):
 
 
 class IndexPlanCPU(unittest.TestCase):
+    def test_chunked_eager_matches_oracle_across_chunk_boundaries(self):
+        for rows in (0, 1, 2047, 2048, 2049, 4113):
+            for dtype in (torch.int32, torch.int64):
+                with self.subTest(rows=rows, dtype=dtype):
+                    selected, positions = make_inputs(
+                        rows, 17, strided=True, dtype=dtype
+                    )
+                    before = selected.clone(), positions.clone()
+                    expected = reference_plan(selected, positions, 7, 4096, 29, 7)
+                    actual = fused.build_index_plan_eager(
+                        selected, positions, 7, 4096, 29, 7
+                    )
+                    for got, ref in zip(actual, expected):
+                        torch.testing.assert_close(got, ref, rtol=0, atol=0)
+                    for got, ref in zip((selected, positions), before):
+                        torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
+    def test_chunked_eager_preserves_per_row_metadata_and_int32_wrap(self):
+        rows = 2051
+        selected, positions = make_inputs(rows, 17, dtype=torch.int64)
+        selected[2048, 0] = 2**31 - 1
+        positions[2048] = 2**31
+        offset = (torch.arange(rows, dtype=torch.int64) % 3 + 1)[:, None]
+        count = (torch.arange(rows, dtype=torch.int64) + 7)[:, None]
+        start = (torch.arange(rows, dtype=torch.int64) % 11)[:, None]
+        expected = reference_plan(selected, positions, offset, count, start, 7)
+        actual = fused.build_index_plan_eager(selected, positions, offset, count, start, 7)
+        for got, ref in zip(actual, expected):
+            torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
     def test_blackwell_family_gate_is_cached_per_device(self):
         fused._device_supported.cache_clear()
         self.addCleanup(fused._device_supported.cache_clear)

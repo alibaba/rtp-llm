@@ -23,6 +23,54 @@ _MAX_WIDTH = 2048
 _INT32_MAX = 2**31 - 1
 
 
+def build_index_plan_eager(
+    selected, positions, offset, global_count, swa_start, window_size=128
+):
+    """Bound fallback sort/partition scratch independently of prompt length.
+
+    SM90 uses this path. Only the final int32 plan spans all query rows;
+    eager intermediates are confined to a chunk and released before the
+    caller allocates the combined KV workspace. Preserve the original cast
+    before stable validity partition, including int32 overflow semantics.
+    """
+    rows, k = selected.shape
+    width = k + window_size
+    padded = ((width + 63) // 64) * 64
+    output = torch.empty((rows, padded), dtype=torch.int32, device=selected.device)
+    lengths = torch.empty((rows,), dtype=torch.int32, device=selected.device)
+    if padded > width:
+        output[:, width:].fill_(-1)
+    window = torch.arange(window_size, device=selected.device)[None]
+
+    def metadata_slice(value, start, stop):
+        if isinstance(value, torch.Tensor) and value.ndim and value.shape[0] == rows:
+            return value[start:stop]
+        return value
+
+    def build_chunk(start, stop):
+        chunk_offset = metadata_slice(offset, start, stop)
+        chunk_count = metadata_slice(global_count, start, stop)
+        chunk_start = metadata_slice(swa_start, start, stop)
+        swpos = positions[start:stop, None] - window_size + 1 + window
+        swidx = torch.where(
+            swpos >= chunk_start,
+            chunk_offset + chunk_count + swpos - chunk_start,
+            -1,
+        )
+        ordered = selected[start:stop].sort(dim=-1).values
+        global_idx = torch.where(ordered >= 0, chunk_offset + ordered, -1)
+        indices = torch.cat((global_idx, swidx), -1).int()
+        indices = indices.gather(
+            1, torch.argsort(indices < 0, dim=-1, stable=True)
+        )
+        output[start:stop, :width].copy_(indices)
+        lengths[start:stop].copy_((indices >= 0).sum(-1).int())
+
+    for start in range(0, rows, 2048):
+        build_chunk(start, min(start + 2048, rows))
+    return output, lengths
+
+
 @lru_cache(maxsize=16)
 def _device_supported(device):
     return torch.cuda.get_device_capability(device)[0] == 10

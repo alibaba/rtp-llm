@@ -2784,25 +2784,9 @@ class AttentionV41FP8(AttentionFP8):
             if fused_plan is not None:
                 indices, lens = fused_plan
             else:
-                swpos = (
-                    positions[:, None]
-                    - self.window_size
-                    + 1
-                    + torch.arange(self.window_size, device=x.device)[None]
+                indices, lens = prefill_index_plan.build_index_plan_eager(
+                    selected, positions, offsets, ns, swstart, self.window_size
                 )
-                swidx = torch.where(
-                    swpos >= swstart, offsets + ns + swpos - swstart, -1
-                )
-                ordered = selected.sort(dim=-1).values
-                global_idx = torch.where(ordered >= 0, offsets + ordered, -1)
-                indices = torch.cat((global_idx, swidx), -1).int()
-                # FlashMLA's length bounds count a compact valid prefix.
-                indices = indices.gather(
-                    1, torch.argsort(indices < 0, dim=-1, stable=True)
-                )
-                lens = (indices >= 0).sum(-1).int()
-                if indices.shape[1] % 64:
-                    indices = F.pad(indices, (0, 64 - indices.shape[1] % 64), value=-1)
             self._shared_attention["prefill_index_plan"] = (selected, indices, lens)
         return self._prefill_sparse_attention(
             qkv,

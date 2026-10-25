@@ -991,6 +991,16 @@ class DeepSeekV4Model(GptModelBase):
 
     def _load_scoped_extra_weights(self, weights: ModelWeights) -> None:
         self._load_extra_weights(weights)
+        from rtp_llm.models_py.modules.dsv41.utils import (
+            release_prepared_sm90_checkpoint_weights,
+        )
+
+        released = release_prepared_sm90_checkpoint_weights(self, weights)
+        if released:
+            logging.info(
+                "[DeepSeekV4Model] released prepared SM90 checkpoint weights: %.3f GiB",
+                released / 1024**3,
+            )
 
     def _load_extra_weights(self, weights: ModelWeights) -> None:
         """Subclass hook for loading model-level (non-Block) tensors off
