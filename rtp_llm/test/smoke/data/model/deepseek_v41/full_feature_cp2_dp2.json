@@ -120,17 +120,12 @@
         515,
         3530,
         294,
-        6394,
-        14,
-        17942,
-        14,
-        305,
-        9263,
+        8331,
         16,
         1
       ]
     ],
-    "response": " long and the archive was full of books, maps, and letters.",
+    "response": " long and the archive was full of stories.",
     "input_len": 783,
     "prefill_reuse_len": 0
   },
@@ -159,17 +154,12 @@
         515,
         3530,
         294,
-        6394,
-        14,
-        17942,
-        14,
-        305,
-        9263,
+        8331,
         16,
         1
       ]
     ],
-    "response": " long and the archive was full of books, maps, and letters.",
+    "response": " long and the archive was full of stories.",
     "input_len": 783,
     "prefill_reuse_len": 0
   },
@@ -192,16 +182,11 @@
     "output_ids": [
       [
         1606,
-        305,
-        270,
-        41273,
-        515,
-        3530,
         16,
         1
       ]
     ],
-    "response": " long and the archive was full.",
+    "response": " long.",
     "input_len": 783,
     "prefill_reuse_len": 512
   },
@@ -224,16 +209,11 @@
     "output_ids": [
       [
         1606,
-        305,
-        270,
-        41273,
-        515,
-        3530,
         16,
         1
       ]
     ],
-    "response": " long and the archive was full.",
+    "response": " long.",
     "input_len": 783,
     "prefill_reuse_len": 512
   },
@@ -262,17 +242,12 @@
         515,
         3530,
         294,
-        6394,
-        14,
-        17942,
-        14,
-        305,
-        9263,
+        8331,
         16,
         1
       ]
     ],
-    "response": " long and the archive was full of books, maps, and letters.",
+    "response": " long and the archive was full of stories.",
     "input_len": 783,
     "prefill_reuse_len": 0
   }
