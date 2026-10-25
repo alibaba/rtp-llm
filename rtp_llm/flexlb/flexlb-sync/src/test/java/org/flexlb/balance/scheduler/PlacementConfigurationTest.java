@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
+import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.DispatcherConfig;
@@ -59,8 +59,7 @@ class PlacementConfigurationTest {
                     org.flexlb.service.VitCacheSelector.class,
                     () -> mock(org.flexlb.service.VitCacheSelector.class));
             spring.registerBean(EndpointRegistry.class, () -> mock(EndpointRegistry.class));
-            spring.registerBean(
-                    DecodeCapacityAcquirer.class, () -> mock(DecodeCapacityAcquirer.class));
+            spring.registerBean(DecodeAdmission.class, () -> mock(DecodeAdmission.class));
             spring.registerBean(
                     DeliveryMetricsReporter.class, () -> mock(DeliveryMetricsReporter.class));
             spring.registerBean(

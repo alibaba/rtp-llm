@@ -350,7 +350,7 @@ class QueuedBatchDeliveryTest {
                 .thenAnswer(
                         call -> {
                             assertFalse(Thread.holdsLock(context));
-                            assertFalse(ledger.prefill.lock.isHeldByCurrentThread());
+                            assertFalse(ledger.prefill.queueGuard().isHeldByCurrentThread());
                             rpcEntered.countDown();
                             await(releaseRpc);
                             return reply;
@@ -368,11 +368,11 @@ class QueuedBatchDeliveryTest {
                                                 DeliveryClaimKind.BATCH_ENQUEUE,
                                                 context.snapshot().delivery().identity().kind());
                                     }
-                                    ledger.prefill.lock.lock();
+                                    ledger.prefill.queueGuard().lock();
                                     try {
                                         assertEquals(0, ledger.prefill.progress().queueDepth());
                                     } finally {
-                                        ledger.prefill.lock.unlock();
+                                        ledger.prefill.queueGuard().unlock();
                                     }
                                     registry.cancel(
                                             item.requestId(), 0L, CancelReason.CLIENT_CANCELLED);
@@ -406,7 +406,8 @@ class QueuedBatchDeliveryTest {
                                     .thenAnswer(
                                             ignored -> {
                                                 assertFalse(
-                                                        ledger.prefill.lock
+                                                        ledger.prefill
+                                                                .queueGuard()
                                                                 .isHeldByCurrentThread());
                                                 throw failure;
                                             });

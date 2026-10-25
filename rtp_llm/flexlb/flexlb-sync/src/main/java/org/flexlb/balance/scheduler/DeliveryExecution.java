@@ -152,13 +152,22 @@ final class DeliveryExecution {
 
     /** One infrastructure permit. No business state or callbacks run under an infrastructure lock. */
     final class DeliveryPermit implements AutoCloseable {
-        // 0 reserved, 1 submitted, 2 running, 3 released, 4 awaiting RPC response.
-        private final AtomicInteger state = new AtomicInteger();
+        private static final int RESERVED = 0;
+        private static final int SUBMITTED = 1;
+        private static final int RUNNING = 2;
+        private static final int RELEASED = 3;
+        private static final int AWAITING_RESPONSE = 4;
+        // RESERVED -> SUBMITTED -> RUNNING -> AWAITING_RESPONSE -> RELEASED.
+        // close releases RESERVED; rejection releases SUBMITTED; sender exit without a response
+        // releases RUNNING.
+        // Only the CAS winner entering RELEASED returns the charged bytes and infrastructure
+        // permit.
+        private final AtomicInteger state = new AtomicInteger(RESERVED);
         private final AtomicLong chargedBytes = new AtomicLong();
 
         boolean tryChargeBytes(long bytes) {
             checkState(
-                    state.get() == 2 && chargedBytes.get() == 0L,
+                    state.get() == RUNNING && chargedBytes.get() == 0L,
                     "delivery is not ready for payload admission");
             long current;
             do {
@@ -177,7 +186,7 @@ final class DeliveryExecution {
         }
 
         void releaseIfNoResponse() {
-            if (state.compareAndSet(2, 3)) {
+            if (state.compareAndSet(RUNNING, RELEASED)) {
                 release();
             }
         }
@@ -185,11 +194,12 @@ final class DeliveryExecution {
         void submit(Runnable work, Consumer<Throwable> rejected) {
             Objects.requireNonNull(work, "work");
             Objects.requireNonNull(rejected, "rejected");
-            checkState(state.compareAndSet(0, 1), "delivery permit already resolved");
+            checkState(
+                    state.compareAndSet(RESERVED, SUBMITTED), "delivery permit already resolved");
             try {
                 dispatchExecutor.execute(
                         () -> {
-                            if (!state.compareAndSet(1, 2)) {
+                            if (!state.compareAndSet(SUBMITTED, RUNNING)) {
                                 return;
                             }
                             try {
@@ -201,7 +211,7 @@ final class DeliveryExecution {
                             }
                         });
             } catch (RuntimeException | Error failure) {
-                if (!state.compareAndSet(1, 3)) {
+                if (!state.compareAndSet(SUBMITTED, RELEASED)) {
                     failures.accept(failure);
                     return;
                 }
@@ -216,12 +226,14 @@ final class DeliveryExecution {
         }
 
         <T> void observeResponse(CompletableFuture<T> response, BiConsumer<T, Throwable> handler) {
-            checkState(state.compareAndSet(2, 4), "delivery response already observed");
+            checkState(
+                    state.compareAndSet(RUNNING, AWAITING_RESPONSE),
+                    "delivery response already observed");
             DeliveryExecution.this.observeDeliveryResponse(
                     response,
                     (reply, failure) -> {
                         // Return capacity before request callbacks can submit another batch.
-                        if (state.compareAndSet(4, 3)) {
+                        if (state.compareAndSet(AWAITING_RESPONSE, RELEASED)) {
                             release();
                         }
                         handler.accept(reply, failure);
@@ -230,7 +242,7 @@ final class DeliveryExecution {
 
         @Override
         public void close() {
-            if (state.compareAndSet(0, 3)) {
+            if (state.compareAndSet(RESERVED, RELEASED)) {
                 release();
             }
         }

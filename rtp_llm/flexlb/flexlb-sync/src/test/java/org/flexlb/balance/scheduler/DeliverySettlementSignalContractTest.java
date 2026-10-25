@@ -69,7 +69,7 @@ class DeliverySettlementSignalContractTest {
                     fixture.prefill.ownership.progress().outstandingRequests());
             assertFalse(fixture.settled.isDone(), "a release still owns real resources");
             assertEquals(
-                    DeliveryCleanup.Result.REMOTE_CLEANED,
+                    DeliveryDispatcher.StopResult.REMOTE_CLEANED,
                     fixture.session.get(2, TimeUnit.SECONDS),
                     "remote stop completes independently of local settlement");
             assertSame(
@@ -99,7 +99,7 @@ class DeliverySettlementSignalContractTest {
             assertTrue(fixture.scheduler.requests.isCurrent(fixture.context));
             assertFalse(fixture.settled.isDone(), "failed release is still an obligation");
             assertEquals(
-                    DeliveryCleanup.Result.REMOTE_CLEANED,
+                    DeliveryDispatcher.StopResult.REMOTE_CLEANED,
                     fixture.session.get(2, TimeUnit.SECONDS));
             assertSame(fixture.session, fixture.cleanupSession());
             assertEquals(1, fixture.cleanupRegistry().size());
@@ -139,7 +139,7 @@ class DeliverySettlementSignalContractTest {
         final IllegalStateException releaseFailure =
                 new IllegalStateException("real Decode release paused by failure");
         final boolean expectsFailure;
-        CompletableFuture<DeliveryCleanup.Result> session;
+        CompletableFuture<DeliveryDispatcher.StopResult> session;
 
         Fixture(Side side, boolean persistentFailure) {
             expectsFailure = persistentFailure;
@@ -237,7 +237,7 @@ class DeliverySettlementSignalContractTest {
             }
             var prepared = prefill.reserveBatch(route, BATCH, 2);
             assertEquals(PrefillState.CapacityStatus.ACQUIRED, prepared.status());
-            state.lock.lock();
+            state.queueGuard().lock();
             PrefillState.CommittedHandoff committed;
             try {
                 committed =
@@ -251,7 +251,7 @@ class DeliverySettlementSignalContractTest {
                                         null,
                                         System.currentTimeMillis()));
             } finally {
-                state.lock.unlock();
+                state.queueGuard().unlock();
             }
             assertNotNull(committed);
             var dispatch =
@@ -288,7 +288,7 @@ class DeliverySettlementSignalContractTest {
 
         private void awaitRelease() throws InterruptedException {
             assertFalse(Thread.holdsLock(context));
-            assertFalse(prefill.ownership.lock.isHeldByCurrentThread());
+            assertFalse(prefill.ownership.queueGuard().isHeldByCurrentThread());
             releaseAttempts.incrementAndGet();
             releaseEntered.countDown();
             if (failRelease.get()) {
@@ -311,14 +311,12 @@ class DeliverySettlementSignalContractTest {
             proof.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
         }
 
-        CompletableFuture<DeliveryCleanup.Result> cleanupSession() {
+        CompletableFuture<DeliveryDispatcher.StopResult> cleanupSession() {
             return dispatcher.stop(claim);
         }
 
         Map<?, ?> cleanupRegistry() {
-            return (Map<?, ?>)
-                    ReflectionTestUtils.getField(
-                            ReflectionTestUtils.getField(dispatcher, "cleanup"), "sessions");
+            return (Map<?, ?>) ReflectionTestUtils.getField(dispatcher, "sessions");
         }
 
         long pendingWork() {

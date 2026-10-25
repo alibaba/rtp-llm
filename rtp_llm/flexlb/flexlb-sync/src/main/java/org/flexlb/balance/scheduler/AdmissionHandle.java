@@ -44,8 +44,20 @@ public final class AdmissionHandle implements AutoCloseable {
     }
 
     public void finish() {
+        complete(
+                token.withdrawing() == null
+                        ? ContextResult.PublicationResult.PUBLISHED
+                        : ContextResult.PublicationResult.RESTORED);
+    }
+
+    public void complete(ContextResult.PublicationResult result) {
+        checkArgument(
+                result == ContextResult.PublicationResult.PUBLISHED
+                        || result == ContextResult.PublicationResult.RESTORED
+                        || result == ContextResult.PublicationResult.WITHDRAWN,
+                "invalid placement completion");
         if (resolved.compareAndSet(false, true)) {
-            scheduler.completePlacement(this, null);
+            scheduler.completePlacement(this, result, null);
         }
     }
 
@@ -53,7 +65,7 @@ public final class AdmissionHandle implements AutoCloseable {
         Objects.requireNonNull(failure);
         checkArgument(!failure.isSuccess(), "admission termination requires a failure");
         if (resolved.compareAndSet(false, true)) {
-            scheduler.completePlacement(this, failure);
+            scheduler.completePlacement(this, ContextResult.PublicationResult.FAILED, failure);
         }
     }
 

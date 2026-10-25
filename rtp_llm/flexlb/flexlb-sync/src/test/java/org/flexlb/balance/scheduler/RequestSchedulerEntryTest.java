@@ -53,23 +53,16 @@ class RequestSchedulerEntryTest {
         if (!mode.equals("BATCH")) {
             SchedulingTestConfig.useNonBatchDispatcher(config);
         }
-        var owner = owner(config, mock(RecentCacheKeyTraceReporter.class));
+        var router = mock(RequestWorkerSelector.class);
+        var owner = owner(config, mock(RecentCacheKeyTraceReporter.class), router);
         var context = RequestProtocolTestSupport.context(config, 700L);
         Span span = mock(Span.class);
         when(span.storeInContext(any(Context.class))).thenCallRealMethod();
         context.data().setTraceContext(Context.root().with(span));
-        var router = mock(RequestWorkerSelector.class);
         when(router.select(context, null))
                 .thenReturn(
                         PlacementResult.rejected(
                                 Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
-        SchedulerTestSupport.configure(
-                owner,
-                config,
-                router,
-                mock(DeliveryMetricsReporter.class),
-                mock(org.flexlb.balance.eviction.DecodeCapacityAcquirer.class),
-                new PlacementAvailability());
         try {
             var result = owner.submit(context);
             assertSame(context.data().getFuture(), result);
@@ -191,6 +184,20 @@ class RequestSchedulerEntryTest {
         } finally {
             owner.runtime.shutdown();
         }
+    }
+
+    private static AbstractRequestScheduler owner(
+            FlexlbConfig config, RecentCacheKeyTraceReporter trace, RequestWorkerSelector router) {
+        var service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        return SchedulerTestSupport.create(
+                service,
+                mock(DeliveryMetricsReporter.class),
+                mock(RequestSchedulerReporter.class),
+                trace,
+                router,
+                mock(org.flexlb.balance.eviction.DecodeAdmission.class),
+                new PlacementAvailability());
     }
 
     private static AbstractRequestScheduler owner(

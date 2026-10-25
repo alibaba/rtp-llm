@@ -4,7 +4,7 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
+import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
@@ -32,7 +32,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static org.flexlb.balance.scheduler.ContextResult.CancelEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.CancelEvidenceKind;
@@ -69,7 +68,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
 
     private final RequestWorkerSelector router;
     private final DeliveryMetricsReporter reporter;
-    private final DecodeCapacityAcquirer decodeCapacity;
+    private final DecodeAdmission decodeCapacity;
     private final PlacementAvailability availability;
     private final QueueExecutionSettings queueSettings;
     private final int plannerCount;
@@ -110,7 +109,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             FlexlbConfig config,
             RequestWorkerSelector router,
             DeliveryMetricsReporter reporter,
-            DecodeCapacityAcquirer decodeCapacity,
+            DecodeAdmission decodeCapacity,
             SchedulerRuntime runtime,
             PlacementAvailability availability,
             DecodeResources.AdmissionCapacity capacity,
@@ -153,68 +152,12 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     }
 
     @Override
-    protected void queueControl(RequestContext exact) {
-        postEvent(new QueueEvent(EventKind.CONTROL, null, exact, null));
-    }
-
-    public void completeWithdrawal(AdmissionHandle withdrawal, boolean committed) {
-        checkArgument(withdrawal.owner().data().getScheduler() == this, "foreign withdrawal");
-        Throwable failure = null;
-        RequestContext context = withdrawal.owner();
-        // Retain the exact queued route while the placement token owns withdrawal.
-        RequestRoute item = withdrawal.withdrawingRoute();
-        try {
-            if (committed) {
-                // Decode replacement has committed. Never take the Prefill lock under the context
-                // monitor.
-                if (!item.prefillEp().control(item, WorkerBatcher.Control.REMOVE)) {
-                    throw new IllegalStateException(
-                            "withdrawn route is no longer queued: "
-                                    + context.data().getRequestId());
-                }
-                synchronized (context) {
-                    context.bindPlacement(withdrawal.token, item, PublicationResult.WITHDRAWN);
-                }
-            }
-        } catch (Throwable detachFailure) {
-            failure = Failures.append(failure, detachFailure);
-            try {
-                withdrawal.terminate(
-                        buildErrorResponse(
-                                StrategyErrorType.DISPATCH_FAILED,
-                                "queued route withdrawal failed"));
-            } catch (Throwable terminalFailure) {
-                failure = Failures.append(failure, terminalFailure);
-            }
-        } finally {
-            try {
-                withdrawal.finish();
-                var state = context.snapshot();
-                if (committed
-                        && state.phase() == Phase.OPEN
-                        && state.cancellation() == null
-                        && !context.data().getFuture().isDone()
-                        && !requeue(item)) {
-                    item.future()
-                            .complete(
-                                    buildErrorResponse(
-                                            StrategyErrorType.DISPATCH_FAILED,
-                                            "scheduler closed during route withdrawal"));
-                }
-            } catch (Throwable closeFailure) {
-                failure = Failures.append(failure, closeFailure);
-                try {
-                    item.future()
-                            .complete(
-                                    buildErrorResponse(
-                                            StrategyErrorType.DISPATCH_FAILED,
-                                            "queued route requeue failed"));
-                } catch (Throwable terminalFailure) {
-                    failure = Failures.append(failure, terminalFailure);
-                }
-            }
+    protected boolean queueControl(RequestContext exact, RequestRoute withdrawn) {
+        if (withdrawn != null) {
+            return requeue(withdrawn);
         }
-        Failures.rethrow(failure, "queued route withdrawal failed");
+        postEvent(new QueueEvent(EventKind.CONTROL, null, exact, null));
+        return true;
     }
 
     public AdmissionHandle claimQueuedRoute(
@@ -344,19 +287,10 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     @Override
     public CompletableFuture<Response> submit(RequestContext context, Runnable onRegistered) {
         Objects.requireNonNull(onRegistered, "onRegistered");
-        if (context != null && context.data().getRequest() != null) {
-            var request = context.data().getRequest();
-            if (request.isVitRouteOnly()) {
-                var result = CompletableFuture.completedFuture(router.routeVit(context));
-                context.data().setFuture(result);
-                return result;
-            }
-            if (request.getSelectedVit() != null
-                    && requests.getRequestState(context.data().getRequestId(), 0L) == null
-                    && !router.selectedVitIsValid(context)) {
-                return CompletableFuture.completedFuture(
-                        Response.error(StrategyErrorType.VIT_ROUTE_STALE));
-            }
+        CompletableFuture<Response> vitResult =
+                RequestSchedulerEntry.tryCompleteVitRequest(context, requests, router);
+        if (vitResult != null) {
+            return vitResult;
         }
         if (context != null && context.data().getConfig().isDirect()) {
             return CompletableFuture.completedFuture(
@@ -415,7 +349,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             if (!postEvent(new QueueEvent(EventKind.SUBMIT, entry, null, null))) {
                 return false;
             }
-            future.whenComplete((ignored, failure) -> queueControl(context));
+            future.whenComplete((ignored, failure) -> queueControl(context, null));
             return true;
         } catch (RuntimeException failure) {
             // Once registration has been handed here, this mode owns execution failures.
@@ -630,7 +564,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         try {
             planners.execute(
                     () -> {
-                        Plan plan = new Plan(entry, availability.sequence());
+                        Plan plan = new Plan(entry, availability.sequence(), closed);
                         try {
                             if (!entry.removed && !entry.context.data().getFuture().isDone()) {
                                 if (entry.context
@@ -667,7 +601,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                         }
                     });
         } catch (Throwable failure) {
-            publishPlan(Plan.failure(entry, failure, availability.sequence()));
+            publishPlan(Plan.failure(entry, failure, availability.sequence(), closed));
         }
     }
 
@@ -694,9 +628,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             Outcome outcome = Outcome.DONE;
             Throwable commitFailure = null;
             try {
-                if (abandoned) {
-                    settlePreemptionResult(plan, false);
-                } else {
+                if (!abandoned) {
                     Failures.rethrow(plan.planningFailure, "placement planning failed");
                     outcome = commit(plan);
                 }
@@ -783,8 +715,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                     rejection = "Decode eviction control failed before commit";
                 } else if (!plan.preemptionResult.committed()) {
                     rejection = plan.preemptionResult.detail();
-                } else if (!settlePreemptionResult(plan, true)) {
-                    rejection = "Decode generation retired before canonical placement";
                 }
             }
             if (rejection == null
@@ -846,7 +776,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             preemptionQuotaWaiters.add(entry);
             return false;
         }
-        var execution = decodeCapacity.tryReclaim(entry.context, blockedEndpoint);
+        var execution = decodeCapacity.admit(plan, blockedEndpoint);
         if (execution == null) {
             return false;
         }
@@ -855,66 +785,17 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                 (result, failure) -> {
                     plan.preemptionResult = result;
                     plan.preemptionFailure = failure;
+                    if (failure != null) {
+                        runtime.recordFailure(
+                                failure instanceof java.util.concurrent.CompletionException
+                                                && failure.getCause() != null
+                                        ? failure.getCause()
+                                        : failure);
+                    }
                     plan.preemptionCompleted = true;
                     publishPlan(plan);
                 });
         return true;
-    }
-
-    private boolean settlePreemptionResult(Plan plan, boolean adopt) {
-        var result = plan.preemptionResult;
-        if (result == null || !result.committed()) {
-            return false;
-        }
-        plan.preemptionResult = null;
-        RequestRoute route = plan.result.value();
-        if (adopt) {
-            boolean adopted = false;
-            Throwable failure = null;
-            try {
-                if (route.decodeEp() == null
-                        || result.reservation().requestId() != route.requestId()
-                        || plan.pendingDecodeRollback != null) {
-                    return false;
-                }
-                if (!route.decodeEp()
-                        .markQueued(route.decodePin(), result.reservation())
-                        .status()
-                        .applied()) {
-                    return false;
-                }
-                plan.pendingDecodeRollback = result.reservation();
-                adopted = true;
-                return true;
-            } catch (RuntimeException | Error cause) {
-                failure = cause;
-                throw cause;
-            } finally {
-                if (!adopted && route.decodeEp() != null) {
-                    try {
-                        route.decodeEp()
-                                .release(
-                                        result.reservation(),
-                                        DecodeResources.ReleaseReason.LOCAL_ROLLBACK)
-                                .status();
-                    } catch (RuntimeException | Error cleanupFailure) {
-                        if (failure == null) {
-                            throw cleanupFailure;
-                        }
-                        Failures.append(failure, cleanupFailure);
-                    }
-                }
-            }
-        }
-        try {
-            route.decodeEp()
-                    .release(result.reservation(), DecodeResources.ReleaseReason.LOCAL_ROLLBACK)
-                    .status();
-        } catch (RuntimeException | Error failure) {
-            runtime.recordFailure(failure);
-            throw failure;
-        }
-        return false;
     }
 
     PlacementResult<RequestRoute, PlacementKey> enqueueRoute(Plan plan) {
@@ -1158,7 +1039,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     private record QueueEvent(
             EventKind kind, GlobalQueueEntry entry, RequestContext context, PlacementKey key) {}
 
-    static final class Plan implements AutoCloseable {
+    public static final class Plan implements AutoCloseable {
+        private boolean closed;
+        private final AtomicBoolean schedulerClosed;
         private final GlobalQueueEntry entry;
         private AdmissionHandle handle;
         private DecodeResources.ReservationHandle pendingDecodeRollback;
@@ -1168,8 +1051,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         private Throwable rollbackFailure;
         private Throwable planningFailure;
         private volatile boolean preemptionCompleted;
-        private org.flexlb.balance.eviction.DecodeCapacityAcquirer.PreemptionResult
-                preemptionResult;
+        private org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult preemptionResult;
         private Throwable preemptionFailure;
         // The plan owns selection pins and uncommitted Decode capacity.
         private PlacementResult<RequestRoute, PlacementKey> result;
@@ -1177,16 +1059,56 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         // Retained after selection pins close so the request can be parked.
         private PlacementKey waitKey;
 
-        private Plan(GlobalQueueEntry entry, long availabilitySequence) {
+        private Plan(
+                GlobalQueueEntry entry, long availabilitySequence, AtomicBoolean schedulerClosed) {
             this.entry = entry;
+            this.schedulerClosed = schedulerClosed;
             this.availabilitySequence = availabilitySequence;
             this.result = PlacementResult.closed();
         }
 
-        static Plan failure(GlobalQueueEntry entry, Throwable failure, long availabilitySequence) {
-            Plan plan = new Plan(entry, availabilitySequence);
+        static Plan failure(
+                GlobalQueueEntry entry,
+                Throwable failure,
+                long availabilitySequence,
+                AtomicBoolean schedulerClosed) {
+            Plan plan = new Plan(entry, availabilitySequence, schedulerClosed);
             plan.planningFailure = failure;
             return plan;
+        }
+
+        public RequestContext context() {
+            return entry.context;
+        }
+
+        /** A false result leaves ownership with DecodeAdmission. */
+        public synchronized boolean accept(
+                DecodeEndpoint endpoint, DecodeResources.ReservationHandle reservation) {
+            var route = result == null ? null : result.value();
+            var ctx = context();
+            synchronized (ctx) {
+                var state = ctx.snapshot();
+                if (closed
+                        || schedulerClosed.get()
+                        || route == null
+                        || route.decodeEp() != endpoint
+                        || pendingDecodeRollback != null
+                        || reservation.requestId() != route.requestId()
+                        || ctx.data().getFuture().isDone()
+                        || state.phase() != Phase.OPEN
+                        || state.cancellation() != null
+                        || handle == null
+                        || state.placement() == null
+                        || state.placement().operation() != handle.token) {
+                    return false;
+                }
+            }
+            // markQueued publishes capacity notifications; never invoke them under Context.
+            if (!endpoint.markQueued(route.decodePin(), reservation).status().applied()) {
+                return false;
+            }
+            pendingDecodeRollback = reservation;
+            return true;
         }
 
         void finishAdmission() {
@@ -1205,7 +1127,11 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         }
 
         @Override
-        public void close() {
+        public synchronized void close() {
+            if (closed) {
+                return;
+            }
+            closed = true;
             RequestRoute routing = result == null ? null : result.value();
             result = null;
             DecodeResources.ReservationHandle rollback = pendingDecodeRollback;

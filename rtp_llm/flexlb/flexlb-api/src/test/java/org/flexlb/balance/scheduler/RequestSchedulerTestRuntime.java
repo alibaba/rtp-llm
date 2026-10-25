@@ -5,7 +5,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
+import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -132,7 +132,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     .tryReserveDelivery();
         }
         var eviction =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         deliveryStrategy,
                         requests,
                         runtime,

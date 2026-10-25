@@ -575,7 +575,8 @@ class DeliveryClaimTest {
                     new ContextResult.TransportResult(
                             f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
 
-            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
 
             assertAll(
@@ -775,7 +776,8 @@ class DeliveryClaimTest {
                             f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
             Response selected = f.context.data().getFuture().get(2, TimeUnit.SECONDS);
 
-            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             f.assertArchivedAfterCleanup();
             assertSame(
@@ -829,7 +831,8 @@ class DeliveryClaimTest {
                     new ContextResult.TransportResult(
                             f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
 
-            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             f.retirePrefill();
             f.retireDecode();
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
@@ -852,7 +855,8 @@ class DeliveryClaimTest {
                     new ContextResult.TransportResult(
                             f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
 
-            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
             f.owner.onEngineEvidence(
                     f.context,
@@ -928,7 +932,8 @@ class DeliveryClaimTest {
             assertTrue(f.owner.tryStartSend(f.claim));
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
 
-            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
             assertFalse(f.settlement().isDone(), "remote cleanup cannot settle an active sender");
@@ -1256,7 +1261,7 @@ class DeliveryClaimTest {
                     .when(held)
                     .execute(any());
             ReflectionTestUtils.setField(f.owner.runtime, "stopWorkers", held);
-            CompletableFuture<DeliveryCleanup.Result> driver;
+            CompletableFuture<DeliveryDispatcher.StopResult> driver;
             try {
                 driver = f.driver();
                 f.cancel.complete(ack);
@@ -1350,7 +1355,7 @@ class DeliveryClaimTest {
                             DeliveryResult.uncertain(new IllegalStateException("reply lost")),
                             System.currentTimeMillis()));
             var driver = f.driver();
-            assertEquals(DeliveryCleanup.Result.UNRESOLVED, driver.get(6, TimeUnit.SECONDS));
+            assertEquals(DeliveryDispatcher.StopResult.UNRESOLVED, driver.get(6, TimeUnit.SECONDS));
             int count = mockingDetails(f.channel).getInvocations().size();
             assertSame(
                     driver,
@@ -1382,7 +1387,8 @@ class DeliveryClaimTest {
                             f.claim,
                             DeliveryResult.uncertain(new IllegalStateException("reply lost")),
                             System.currentTimeMillis()));
-            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             assertEquals(8, calls.get());
             assertFalse(f.settlement().isDone());
             first.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
@@ -1408,7 +1414,8 @@ class DeliveryClaimTest {
                             f.claim,
                             DeliveryResult.uncertain(new IllegalStateException("reply lost")),
                             System.currentTimeMillis()));
-            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             verify(f.channel, times(8))
                     .cancelAsync(
                             any(),
@@ -1443,7 +1450,8 @@ class DeliveryClaimTest {
                             anyInt(),
                             argThat(request -> request.getRequestId() == 41L),
                             anyLong());
-            assertEquals(DeliveryCleanup.Result.UNSUPPORTED, driver.get(2, TimeUnit.SECONDS));
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNSUPPORTED, driver.get(2, TimeUnit.SECONDS));
             assertNull(SchedulerTestSupport.failure(f.owner));
             assertFalse(f.settlement().isDone());
             assertTrue(f.prefillOwned.get());
@@ -1567,7 +1575,8 @@ class DeliveryClaimTest {
     void unsentStopTimeoutRetainsResponsibilityUntilSenderExits() throws Exception {
         try (var f = new Fixture()) {
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
-            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             SchedulerTestSupport.dispatcher(f.owner.runtime).awaitStops(f.owner.runtime);
             assertFalse(f.settlement().isDone());
             verifyNoInteractions(f.channel);
@@ -1621,7 +1630,8 @@ class DeliveryClaimTest {
             assertTrue(f.owner.tryStartSend(f.claim));
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             var record = f.stopRecord();
-            assertEquals(DeliveryCleanup.Result.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
+            assertEquals(
+                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             assertSame(record, f.stopRecord());
             assertFalse(f.settlement().isDone());
             var dispatcher = SchedulerTestSupport.dispatcher(f.owner.runtime);
@@ -1657,8 +1667,7 @@ class DeliveryClaimTest {
                             f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
             f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             assertEquals(
-                    EngineGrpcClient.CancelReply.REQUEST_CLEANED,
-                    preemptionReply.get(2, TimeUnit.SECONDS));
+                    PreemptionRegistration.Reply.UNKNOWN, preemptionReply.get(2, TimeUnit.SECONDS));
             f.assertArchivedAfterCleanup();
             verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
         }
@@ -1739,8 +1748,7 @@ class DeliveryClaimTest {
                             .thenCompose(reply -> dispatcher.preempt(next, 500L));
             var record = f.stopRecord();
             f.cancel.complete(EngineGrpcClient.CancelReply.NOT_FOUND);
-            assertEquals(
-                    EngineGrpcClient.CancelReply.REQUEST_CLEANED, result.get(2, TimeUnit.SECONDS));
+            assertEquals(PreemptionRegistration.Reply.UNKNOWN, result.get(2, TimeUnit.SECONDS));
             assertSame(
                     record,
                     f.stopRecord(),
@@ -2148,14 +2156,12 @@ class DeliveryClaimTest {
                     .release(reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
         }
 
-        CompletableFuture<DeliveryCleanup.Result> driver() {
+        CompletableFuture<DeliveryDispatcher.StopResult> driver() {
             return SchedulerTestSupport.dispatcher(owner.runtime).stop(claim);
         }
 
         Object stopRecord() {
-            var cleanup =
-                    ReflectionTestUtils.getField(
-                            SchedulerTestSupport.dispatcher(owner.runtime), "cleanup");
+            var cleanup = SchedulerTestSupport.dispatcher(owner.runtime);
             var records = (java.util.Map<?, ?>) ReflectionTestUtils.getField(cleanup, "sessions");
             return java.util.Objects.requireNonNull(records.get(claim));
         }

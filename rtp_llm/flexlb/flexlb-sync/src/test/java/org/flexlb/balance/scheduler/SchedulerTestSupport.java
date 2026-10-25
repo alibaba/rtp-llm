@@ -1,9 +1,8 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
+import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
@@ -16,7 +15,6 @@ import java.util.WeakHashMap;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
@@ -300,11 +298,44 @@ public final class SchedulerTestSupport {
                 : new RequestRepository.TerminalRecord(state, owner);
     }
 
+    /** State/protocol fixtures have no running placement loop. */
     public static AbstractRequestScheduler create(
             ConfigService config,
             DeliveryMetricsReporter batches,
             RequestSchedulerReporter requests,
             RecentCacheKeyTraceReporter trace) {
+        return create(
+                config,
+                batches,
+                requests,
+                trace,
+                mock(RequestWorkerSelector.class),
+                mock(DecodeAdmission.class),
+                new PlacementAvailability(),
+                false);
+    }
+
+    /** Construct all placement dependencies together and let the runtime own their shutdown. */
+    public static AbstractRequestScheduler create(
+            ConfigService config,
+            DeliveryMetricsReporter batches,
+            RequestSchedulerReporter requests,
+            RecentCacheKeyTraceReporter trace,
+            RequestWorkerSelector router,
+            DecodeAdmission eviction,
+            PlacementAvailability availability) {
+        return create(config, batches, requests, trace, router, eviction, availability, true);
+    }
+
+    private static AbstractRequestScheduler create(
+            ConfigService config,
+            DeliveryMetricsReporter batches,
+            RequestSchedulerReporter requests,
+            RecentCacheKeyTraceReporter trace,
+            RequestWorkerSelector router,
+            DecodeAdmission eviction,
+            PlacementAvailability availability,
+            boolean startPlacement) {
         var runtime =
                 spy(
                         new SchedulerRuntime(
@@ -315,7 +346,32 @@ public final class SchedulerTestSupport {
                                 SchedulerTestSupport.dispatcher(),
                                 config,
                                 mock(EngineGrpcClient.class)));
+        return create(
+                runtime, config, batches, trace, router, eviction, availability, startPlacement);
+    }
+
+    public static AbstractRequestScheduler create(
+            SchedulerRuntime runtime,
+            ConfigService config,
+            DeliveryMetricsReporter batches,
+            RecentCacheKeyTraceReporter trace,
+            RequestWorkerSelector router,
+            DecodeAdmission eviction,
+            PlacementAvailability availability) {
+        return create(runtime, config, batches, trace, router, eviction, availability, true);
+    }
+
+    private static AbstractRequestScheduler create(
+            SchedulerRuntime runtime,
+            ConfigService config,
+            DeliveryMetricsReporter batches,
+            RecentCacheKeyTraceReporter trace,
+            RequestWorkerSelector router,
+            DecodeAdmission eviction,
+            PlacementAvailability availability,
+            boolean startPlacement) {
         var snapshot = config.loadBalanceConfig();
+        var capacity = new PlacementConfiguration().decodeAdmissionCapacity(config);
         AbstractRequestScheduler owner =
                 snapshot.isQueue()
                         ? mock(
@@ -323,78 +379,33 @@ public final class SchedulerTestSupport {
                                 withSettings()
                                         .useConstructor(
                                                 snapshot,
-                                                mock(RequestWorkerSelector.class),
+                                                router,
                                                 batches,
-                                                mock(DecodeCapacityAcquirer.class),
+                                                eviction,
                                                 runtime,
-                                                new PlacementAvailability(),
-                                                new PlacementConfiguration()
-                                                        .decodeAdmissionCapacity(config),
+                                                availability,
+                                                capacity,
                                                 trace)
                                         .defaultAnswer(CALLS_REAL_METHODS))
                         : mock(
                                 DirectRequestScheduler.class,
                                 withSettings()
-                                        .useConstructor(
-                                                mock(RequestWorkerSelector.class),
-                                                runtime,
-                                                snapshot,
-                                                new PlacementConfiguration()
-                                                        .decodeAdmissionCapacity(config),
-                                                trace)
+                                        .useConstructor(router, runtime, snapshot, capacity, trace)
                                         .defaultAnswer(CALLS_REAL_METHODS));
-        if (owner instanceof QueuedRequestScheduler queue) {
+        if (owner instanceof QueuedRequestScheduler queue && !startPlacement) {
             doAnswer(
                             call -> {
                                 queue.resolveControl(call.getArgument(0), false);
                                 return null;
                             })
                     .when(queue)
-                    .queueControl(org.mockito.ArgumentMatchers.any());
+                    .queueControl(
+                            org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.isNull());
         }
         runtime.registerScheduler(owner);
-        return owner;
-    }
-
-    public static RequestScheduler configure(
-            AbstractRequestScheduler owner,
-            FlexlbConfig config,
-            RequestWorkerSelector router,
-            DeliveryMetricsReporter reporter,
-            DecodeCapacityAcquirer eviction,
-            PlacementAvailability availability) {
-        ReflectionTestUtils.setField(owner, "router", router);
-        if (owner instanceof QueuedRequestScheduler queue) {
-            ReflectionTestUtils.setField(queue, "decodeCapacity", eviction);
-            ReflectionTestUtils.setField(queue, "reporter", reporter);
-            ReflectionTestUtils.setField(
-                    queue,
-                    "plannerCount",
-                    Math.max(2, config.getInternalRuntime().getQueuePlannerThreads()));
-            ReflectionTestUtils.setField(
-                    queue, "queueSettings", QueueExecutionSettings.capture(config));
-            ReflectionTestUtils.setField(
-                    queue, "orderedQueue", new OrderedRequestQueue(config.isPriorityOrdering()));
-            ReflectionTestUtils.setField(
-                    queue,
-                    "scanBudgetMultiplier",
-                    config.queueScheduler().getScanBudgetMultiplier());
-            var oldAvailability =
-                    (PlacementAvailability) ReflectionTestUtils.getField(queue, "availability");
-            var listener =
-                    (PlacementAvailability.Listener)
-                            ReflectionTestUtils.getField(queue, "availabilityListener");
-            oldAvailability.removeListener(listener);
-            ReflectionTestUtils.setField(queue, "availability", availability);
-            ReflectionTestUtils.setField(
-                    queue,
-                    "waitingRequests",
-                    new PlacementCapacityWaitQueue(config.isPriorityOrdering(), availability));
-            availability.addListener(listener);
-            doCallRealMethod().when(queue).queueControl(org.mockito.ArgumentMatchers.any());
-            if (!((Thread) ReflectionTestUtils.getField(queue, "decisionThread")).isAlive()) {
-                queue.start();
-            }
+        if (owner instanceof QueuedRequestScheduler queue && startPlacement) {
+            queue.start();
         }
         return owner;
     }

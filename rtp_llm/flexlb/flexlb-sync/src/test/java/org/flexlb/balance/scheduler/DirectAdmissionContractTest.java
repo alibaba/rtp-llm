@@ -7,7 +7,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
+import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -32,7 +32,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Duration;
 import java.util.List;
@@ -525,7 +524,7 @@ class DirectAdmissionContractTest {
                             config,
                             fixture.router,
                             mock(DeliveryMetricsReporter.class),
-                            mock(DecodeCapacityAcquirer.class),
+                            mock(DecodeAdmission.class),
                             fixture.runtime,
                             new PlacementAvailability(),
                             SchedulingTestConfig.capacity(config),
@@ -616,7 +615,7 @@ class DirectAdmissionContractTest {
                                     config,
                                     fixture.router,
                                     mock(DeliveryMetricsReporter.class),
-                                    mock(DecodeCapacityAcquirer.class),
+                                    mock(DecodeAdmission.class),
                                     new PlacementAvailability(),
                                     SchedulingTestConfig.capacity(config),
                                     org.mockito.Mockito.mock(
@@ -692,22 +691,38 @@ class DirectAdmissionContractTest {
             when(service.loadBalanceConfig()).thenReturn(config);
             var reporter = mock(DeliveryMetricsReporter.class);
             var requestReporter = mock(RequestSchedulerReporter.class);
-            requests =
-                    SchedulerTestSupport.create(
-                            service,
-                            reporter,
-                            requestReporter,
-                            mock(RecentCacheKeyTraceReporter.class));
-            var projector = requests;
             var placement = new PlacementAvailability();
             queuedDelivery = spy(DeliveryTestSupport.route(reporter));
+            var repository = new RequestRepository();
             endpoints =
-                    new EndpointRegistry(
+                    new EndpointRegistry(service, repository, reporter, queuedDelivery, placement);
+            runtime =
+                    spy(
+                            new SchedulerRuntime(
+                                    repository,
+                                    endpoints,
+                                    reporter,
+                                    requestReporter,
+                                    queuedDelivery,
+                                    service,
+                                    mock(org.flexlb.engine.grpc.EngineGrpcClient.class)));
+            prefillSelector = mock(CostBasedPrefillStrategy.class);
+            var decodeSelector = mock(DecodeSelector.class);
+            var model = mock(ModelMetaConfig.class);
+            when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
+            router =
+                    new RequestWorkerSelector(
+                            prefillSelector, decodeSelector, mock(VitWorkerSelector.class), model);
+            requests =
+                    SchedulerTestSupport.create(
+                            runtime,
                             service,
-                            SchedulerTestSupport.repository(projector),
                             reporter,
-                            queuedDelivery,
+                            mock(RecentCacheKeyTraceReporter.class),
+                            router,
+                            mock(DecodeAdmission.class),
                             placement);
+            scheduler = (DirectRequestScheduler) requests;
             WorkerStatus worker = worker(RoleType.PREFILL, "127.0.0.1");
             worker.lock.lock();
             try {
@@ -726,11 +741,8 @@ class DirectAdmissionContractTest {
             decode =
                     spy(
                             EndpointTestSupport.decode(
-                                    worker(RoleType.DECODE, "127.0.0.2"),
-                                    SchedulerTestSupport.repository(projector)));
+                                    worker(RoleType.DECODE, "127.0.0.2"), repository));
             applyWorkerStatus(decode, Map.of(), Map.of());
-            prefillSelector = mock(CostBasedPrefillStrategy.class);
-            var decodeSelector = mock(DecodeSelector.class);
             when(prefillSelector.select(
                             any(),
                             any(),
@@ -774,22 +786,6 @@ class DirectAdmissionContractTest {
                                                         -1L,
                                                         decode.placementVersion()));
                             });
-            var model = mock(ModelMetaConfig.class);
-            when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
-            router =
-                    new RequestWorkerSelector(
-                            prefillSelector, decodeSelector, mock(VitWorkerSelector.class), model);
-            scheduler =
-                    (DirectRequestScheduler)
-                            SchedulerTestSupport.configure(
-                                    requests,
-                                    service.loadBalanceConfig(),
-                                    router,
-                                    reporter,
-                                    mock(DecodeCapacityAcquirer.class),
-                                    placement);
-            runtime = requests.runtime;
-            ReflectionTestUtils.setField(runtime, "endpoints", endpoints);
         }
 
         private RequestContext context(long requestId) {

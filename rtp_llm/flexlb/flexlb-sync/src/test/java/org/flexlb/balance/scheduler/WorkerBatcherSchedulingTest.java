@@ -68,7 +68,7 @@ class WorkerBatcherSchedulingTest {
                         mock(PrefillEndpoint.class),
                         SchedulerTestSupport.dispatcher());
         assertThrows(IllegalStateException.class, runtime::planningViewLocked);
-        var lock = WorkerBatcherTestSupport.state(runtime).lock;
+        var lock = WorkerBatcherTestSupport.state(runtime).queueGuard();
         lock.lock();
         try {
             assertEquals(1, runtime.planningViewLocked().constraints().maxRequests());
@@ -213,14 +213,14 @@ class WorkerBatcherSchedulingTest {
                 .snapshot();
         org.mockito.Mockito.doReturn(observation).when(route).ctx();
         var queue = WorkerBatcherTestSupport.state(worker);
-        queue.lock.lock();
+        queue.queueGuard().lock();
         try {
             assertSame(
                     route,
                     queue.updateQueue(
                             PrefillState.QueueChange.ENQUEUE, route, System.currentTimeMillis()));
         } finally {
-            queue.lock.unlock();
+            queue.queueGuard().unlock();
         }
         try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
             var completion =
@@ -254,7 +254,7 @@ class WorkerBatcherSchedulingTest {
             assertSame(route, context.snapshot().route());
         } finally {
             committed.countDown();
-            queue.lock.lock();
+            queue.queueGuard().lock();
             try {
                 assertSame(
                         route,
@@ -263,7 +263,7 @@ class WorkerBatcherSchedulingTest {
                                 route,
                                 System.currentTimeMillis()));
             } finally {
-                queue.lock.unlock();
+                queue.queueGuard().unlock();
             }
         }
     }
@@ -404,14 +404,14 @@ class WorkerBatcherSchedulingTest {
         RequestRoute request = item(config, endpoint, 915L, 50, System.currentTimeMillis());
         SchedulerTestSupport.bindOwner(request.ctx(), events);
         var state = WorkerBatcherTestSupport.state(runtime);
-        state.lock.lock();
+        state.queueGuard().lock();
         try {
             assertSame(
                     request,
                     state.updateQueue(
                             PrefillState.QueueChange.ENQUEUE, request, System.currentTimeMillis()));
         } finally {
-            state.lock.unlock();
+            state.queueGuard().unlock();
         }
         var failure = new IllegalStateException("capacity notification failed");
         doThrow(failure).when(endpoint).signal(PrefillEndpoint.Signal.PLACEMENT);
@@ -439,14 +439,14 @@ class WorkerBatcherSchedulingTest {
         RequestRoute request = item(config, endpoint, 914L, 50, System.currentTimeMillis());
         SchedulerTestSupport.bindOwner(request.ctx(), events);
         var state = WorkerBatcherTestSupport.state(runtime);
-        state.lock.lock();
+        state.queueGuard().lock();
         try {
             assertSame(
                     request,
                     state.updateQueue(
                             PrefillState.QueueChange.ENQUEUE, request, System.currentTimeMillis()));
         } finally {
-            state.lock.unlock();
+            state.queueGuard().unlock();
         }
         RuntimeException signalFailure = new IllegalStateException("capacity signal failed");
         RuntimeException admissionFailure = new IllegalStateException("admission failed");
@@ -513,14 +513,14 @@ class WorkerBatcherSchedulingTest {
         RequestRoute request = item(config, endpoint, 916L, 50, System.currentTimeMillis());
         SchedulerTestSupport.bindOwner(request.ctx(), events);
         var state = WorkerBatcherTestSupport.state(runtime);
-        state.lock.lock();
+        state.queueGuard().lock();
         try {
             assertSame(
                     request,
                     state.updateQueue(
                             PrefillState.QueueChange.ENQUEUE, request, System.currentTimeMillis()));
         } finally {
-            state.lock.unlock();
+            state.queueGuard().unlock();
         }
         try {
             org.springframework.test.util.ReflectionTestUtils.invokeMethod(runtime, "processQueue");

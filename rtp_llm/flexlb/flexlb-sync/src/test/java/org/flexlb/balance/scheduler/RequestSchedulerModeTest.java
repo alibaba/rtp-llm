@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
+import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -267,19 +267,15 @@ class RequestSchedulerModeTest {
             when(service.loadBalanceConfig()).thenReturn(config);
             var reporter = mock(DeliveryMetricsReporter.class);
             requests =
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.create(
+                    SchedulerTestSupport.create(
                             service,
                             reporter,
                             mock(RequestSchedulerReporter.class),
-                            mock(RecentCacheKeyTraceReporter.class));
-            scheduler =
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.configure(
-                            requests,
-                            config,
+                            mock(RecentCacheKeyTraceReporter.class),
                             router,
-                            reporter,
-                            mock(DecodeCapacityAcquirer.class),
+                            mock(DecodeAdmission.class),
                             new PlacementAvailability());
+            scheduler = requests;
             queue =
                     scheduler instanceof QueuedRequestScheduler queuedScheduler
                             ? queuedScheduler

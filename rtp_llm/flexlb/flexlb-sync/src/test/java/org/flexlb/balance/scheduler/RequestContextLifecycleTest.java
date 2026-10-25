@@ -383,9 +383,10 @@ class RequestContextLifecycleTest {
     @Test
     void rejectedDuplicateSubmitCannotConsumeTheCanonicalControlTicket() {
         var queue = (QueuedRequestScheduler) lifecycle;
-        org.mockito.Mockito.doNothing()
+        org.mockito.Mockito.doReturn(true)
                 .when(queue)
-                .queueControl(org.mockito.ArgumentMatchers.any());
+                .queueControl(
+                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.isNull());
         RequestContext context = context(804L);
         CompletableFuture<Response> canonical =
                 RequestProtocolTestSupport.register(lifecycle, context);
@@ -477,9 +478,10 @@ class RequestContextLifecycleTest {
     void futureCancelDuringAdmissionIsSynchronousAndTheAdmissionOwnerSettlesIt(
             boolean mayInterruptIfRunning) {
         QueuedRequestScheduler queue = (QueuedRequestScheduler) lifecycle;
-        org.mockito.Mockito.doNothing()
+        org.mockito.Mockito.doReturn(true)
                 .when(queue)
-                .queueControl(org.mockito.ArgumentMatchers.any());
+                .queueControl(
+                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.isNull());
         CompletableFuture<Response> future =
                 RequestProtocolTestSupport.register(lifecycle, context(10003L));
         RequestContext requestContext = lifecycle.requests.findActive(10003L);
@@ -498,7 +500,7 @@ class RequestContextLifecycleTest {
                 0,
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
                         .liveRequestCount());
-        verify(queue).queueControl(requestContext);
+        verify(queue).queueControl(requestContext, null);
     }
 
     @ParameterizedTest
@@ -786,9 +788,10 @@ class RequestContextLifecycleTest {
     @Test
     void globalWaitingCancellationWaitsForDecisionOwnerTicket() throws Exception {
         QueuedRequestScheduler queue = (QueuedRequestScheduler) lifecycle;
-        org.mockito.Mockito.doNothing()
+        org.mockito.Mockito.doReturn(true)
                 .when(queue)
-                .queueControl(org.mockito.ArgumentMatchers.any());
+                .queueControl(
+                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.isNull());
         CompletableFuture<Response> future =
                 RequestProtocolTestSupport.register(lifecycle, context(1002L));
 
@@ -797,7 +800,7 @@ class RequestContextLifecycleTest {
                 lifecycle.cancel(1002L, 0L, CancelReason.CLIENT_CANCELLED).state());
         assertFalse(future.isDone());
         RequestContext context = lifecycle.requests.findActive(1002L);
-        verify(queue).queueControl(context);
+        verify(queue).queueControl(context, null);
 
         ((QueuedRequestScheduler) lifecycle).resolveControl(context, false);
         assertEquals(
@@ -1731,7 +1734,8 @@ class RequestContextLifecycleTest {
         SchedulerTestSupport.awaitRequestWork(lifecycle.runtime);
         assertTrue(
                 registered.future().get(5, TimeUnit.SECONDS).isSuccess(),
-                "this case starts after ACK publication; deferred ACK reconciliation is a separate contract");
+                "this case starts after ACK publication; deferred ACK reconciliation is a separate"
+                        + " contract");
         var claim =
                 lifecycle
                         .tryClaim(
@@ -1977,7 +1981,8 @@ class RequestContextLifecycleTest {
                         call -> {
                             assertFalse(
                                     Thread.holdsLock(context),
-                                    "capacity notification must follow the resource CAS outside the request lock");
+                                    "capacity notification must follow the resource CAS outside the"
+                                            + " request lock");
                             return null;
                         })
                 .when(source)

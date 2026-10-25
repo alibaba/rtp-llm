@@ -5,7 +5,7 @@ import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
+import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -51,9 +51,9 @@ class QueuedDecodeWithdrawalTest {
     private FlexlbConfig config;
     private AbstractRequestScheduler registry;
     private QueuedRequestScheduler queue;
-    private DecodeCapacityAcquirer eviction;
+    private DecodeAdmission eviction;
     private DecodeEndpoint decode;
-    private final DecodeResources.AdmissionCapacity capacity =
+    private DecodeResources.AdmissionCapacity capacity =
             new DecodeResources.AdmissionCapacity(1, 95);
 
     @BeforeEach
@@ -79,7 +79,7 @@ class QueuedDecodeWithdrawalTest {
                         mock(RecentCacheKeyTraceReporter.class));
         queue = (QueuedRequestScheduler) registry;
         eviction =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         SchedulerTestSupport.dispatcher(SchedulerTestSupport.runtime(registry)),
                         SchedulerTestSupport.repository(registry),
                         SchedulerTestSupport.runtime(registry),
@@ -219,7 +219,7 @@ class QueuedDecodeWithdrawalTest {
         when(prefill.offerPinned(eq(pin), any(), org.mockito.ArgumentMatchers.any()))
                 .thenReturn(accepted);
         var manager =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         SchedulerTestSupport.dispatcher(SchedulerTestSupport.runtime(registry)),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry),
@@ -245,12 +245,12 @@ class QueuedDecodeWithdrawalTest {
                                                 })
                                         .value())) {
             assertNotNull(handle);
-            var reservation = manager.tryReclaim(context, decode);
+            var reservation = manager.admit(plan, decode);
             assertNotNull(reservation);
             var result = reservation.join();
             assertEquals(replacement.get(), result.reservation());
             var scheduler = (QueuedRequestScheduler) context.data().getScheduler();
-            assertTrue(RequestProtocolTestSupport.adopt(scheduler, plan, result));
+            assertTrue(result.committed());
             var placement = scheduler.enqueueRoute(plan);
             var offered = org.mockito.ArgumentCaptor.forClass(RequestRoute.class);
             verify(prefill)
@@ -292,7 +292,8 @@ class QueuedDecodeWithdrawalTest {
         assertEquals(
                 accepted ? 0 : 1,
                 successfulProducerRollbacks.get(),
-                "closing the already resolved plan cannot release the replacement reservation twice");
+                "closing the already resolved plan cannot release the replacement reservation"
+                        + " twice");
         assertEquals(accepted ? 1 : 0, decode.routingView().totalLoad());
         if (!accepted) {
             assertNull(EndpointTestSupport.decodeReservation(decode, 100));
@@ -415,7 +416,8 @@ class QueuedDecodeWithdrawalTest {
                         call -> {
                             assertFalse(
                                     RequestProtocolTestSupport.prepareMember(registry, item),
-                                    "withdrawal must fence batch preparation before releasing the old route");
+                                    "withdrawal must fence batch preparation before releasing the"
+                                            + " old route");
                             registry.cancel(4, 0, reason);
                             return true;
                         })
@@ -530,6 +532,27 @@ class QueuedDecodeWithdrawalTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
                         .liveRequestCount());
         assertEquals(0, decode.routingView().totalLoad());
+    }
+
+    @Test
+    void prefillRemovalFailureStillFinishesOtherVictimsAndReleasesIncoming() throws Exception {
+        capacity = new DecodeResources.AdmissionCapacity(2, 95);
+        var first = queued(81);
+        var second = queued(82);
+        when(first.prefillEp().control(first, WorkerBatcher.Control.REMOVE))
+                .thenThrow(new IllegalStateException("injected Prefill removal failure"));
+        assertThrows(
+                IllegalStateException.class,
+                () -> replace(List.of(first.decodeReservation(), second.decodeReservation()), 80));
+        assertFalse(first.future().get(2, TimeUnit.SECONDS).isSuccess());
+        assertNull(EndpointTestSupport.decodeReservation(decode, 100));
+        assertNull(EndpointTestSupport.decodeReservation(decode, 81));
+        assertNull(EndpointTestSupport.decodeReservation(decode, 82));
+        assertNull(second.ctx().snapshot().placement());
+        assertNull(second.ctx().snapshot().route());
+        verify(queue).requeue(second);
+        verify(queue, never()).requeue(first);
+        assertFalse(RequestProtocolTestSupport.prepareMember(registry, first));
     }
 
     @Test
@@ -656,7 +679,7 @@ class QueuedDecodeWithdrawalTest {
             assertNotNull(
                     valid,
                     "rejected attempts must leave the valid withdrawal qualification available");
-            ((QueuedRequestScheduler) registry).completeWithdrawal(valid, false);
+            valid.complete(ContextResult.PublicationResult.RESTORED);
         }
         assertEquals(ContextResult.Phase.OPEN, item.ctx().snapshot().phase());
         assertNotNull(item.ctx().snapshot().route());

@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 
@@ -33,9 +34,10 @@ import static com.google.common.math.LongMath.saturatedAdd;
  * an immediate admission owns the same resource record without a queue entry.
  * Callback and Engine progress mutate the same entry instead of moving ownership
  * between containers. Methods ending in {@code Locked} require the caller to
- * hold {@link #lock}, shared with the worker queue. Other mutation
+ * hold {@link #queueGuard()}, shared with the worker queue. Other mutation
  * methods acquire that lock internally. Methods return resource facts; Endpoint
- * executes notifications and request continuations after unlocking.
+ * executes notifications and request continuations after unlocking. Locked
+ * methods must not perform RPC, prediction, or request notification work.
  */
 public final class PrefillState {
 
@@ -314,7 +316,68 @@ public final class PrefillState {
             long errorCode,
             PriorityPreemptionProgress preemptionProgress) {}
 
-    public final ReentrantLock lock;
+    /** Package-local only for observation reduction; queue consumers use the guard. */
+    final ReentrantLock lock;
+
+    private final QueueGuard queueGuard;
+
+    /**
+     * Coordinates queue predicates and their wakeups on the ownership lock.
+     * Waiting atomically releases this same lock, so a queue/input change cannot
+     * be lost between checking a predicate and sleeping. No raw lock or Condition
+     * escapes to the worker runtime.
+     */
+    public final class QueueGuard {
+        private final Condition stateChanged;
+
+        private QueueGuard() {
+            stateChanged = lock.newCondition();
+        }
+
+        public void lock() {
+            lock.lock();
+        }
+
+        public void lockInterruptibly() throws InterruptedException {
+            lock.lockInterruptibly();
+        }
+
+        public void unlock() {
+            lock.unlock();
+        }
+
+        public boolean isHeldByCurrentThread() {
+            return lock.isHeldByCurrentThread();
+        }
+
+        public void requireHeld() {
+            checkState(lock.isHeldByCurrentThread(), "Prefill ownership requires queue lock");
+        }
+
+        public void signal() {
+            requireHeld();
+            stateChanged.signal();
+        }
+
+        public void signalAll() {
+            requireHeld();
+            stateChanged.signalAll();
+        }
+
+        public void await() throws InterruptedException {
+            requireHeld();
+            stateChanged.await();
+        }
+
+        public void awaitNanos(long timeoutNanos) throws InterruptedException {
+            requireHeld();
+            stateChanged.awaitNanos(timeoutNanos);
+        }
+    }
+
+    public QueueGuard queueGuard() {
+        return queueGuard;
+    }
 
     /** Non-owning index containing only ACTIVE RequestRoute identities. */
     private PrefillActiveIndex activeIndex;
@@ -346,6 +409,7 @@ public final class PrefillState {
 
     /** Publish the capacity summary before readers observe a new ownership revision. */
     private void recordMutationLocked() {
+        queueGuard.requireHeld();
         outstandingRequestCount = saturatedAdd(requests.size(), unknownEngineRequestCount);
         mutationVersion++;
         progress =
@@ -360,6 +424,7 @@ public final class PrefillState {
 
     public PrefillState(ReentrantLock lock, PrefillActiveIndex activeIndex, LongSupplier clock) {
         this.lock = Objects.requireNonNull(lock, "lock");
+        this.queueGuard = new QueueGuard();
         this.activeIndex = Objects.requireNonNull(activeIndex, "activeIndex");
         this.clock = Objects.requireNonNull(clock, "clock");
     }
@@ -378,7 +443,7 @@ public final class PrefillState {
 
     /** Enable waiting work without replacing the ledger of existing DIRECT reservations. */
     void enableQueueLocked(Comparator<RequestRoute> ordering) {
-        checkState(lock.isHeldByCurrentThread(), "Prefill ownership requires queueLock");
+        queueGuard.requireHeld();
         if (activeIndex == PrefillActiveIndex.disabled()) {
             activeIndex = PrefillActiveIndex.ordered(16, ordering);
             schedulingInputsChangedLocked();
@@ -434,7 +499,7 @@ public final class PrefillState {
     }
 
     public void schedulingInputsChangedLocked() {
-        checkState(lock.isHeldByCurrentThread(), "Prefill ownership requires queueLock");
+        queueGuard.requireHeld();
         schedulingInputVersion++;
         progress =
                 new Progress(
@@ -538,6 +603,7 @@ public final class PrefillState {
     }
 
     public boolean ownsSelectionLocked(List<RequestRoute> items, long nowMs) {
+        queueGuard.requireHeld();
         for (RequestRoute item : items) {
             if (!activeIndex.contains(item) || item.requestExpired(nowMs)) {
                 return false;
@@ -553,6 +619,7 @@ public final class PrefillState {
             long inputVersion,
             boolean capacityWait,
             long nowMs) {
+        queueGuard.requireHeld();
         if (head == null) {
             return activeIndex.isEmpty();
         }
@@ -683,7 +750,7 @@ public final class PrefillState {
     /** Validate the complete plan before changing a seat, preparation, or generation capability. */
     public CommittedHandoff commitLocked(
             CommitPlan plan, EndpointGenerationLifecycle.HandoffPermit handoff) {
-        checkState(lock.isHeldByCurrentThread(), "Prefill ownership requires queueLock");
+        queueGuard.requireHeld();
         var items = plan.items();
         var leases = plan.routeReservations();
         var batchLease = plan.batchReservation();
@@ -1027,7 +1094,7 @@ public final class PrefillState {
     /** Null means the out-of-lock prediction was invalidated; no fact has changed. */
     public StatusReconciliation commitStatusLocked(
             StatusReduction reduction, Map<Long, Long> predictions) {
-        checkState(lock.isHeldByCurrentThread(), "Prefill ownership requires queueLock");
+        queueGuard.requireHeld();
         checkArgument(reduction.owner == this, "Status reduction belongs to another State");
         if (reduction.version != mutationVersion) {
             return null;
@@ -1278,7 +1345,7 @@ public final class PrefillState {
     }
 
     Snapshot snapshotLocked() {
-        checkState(lock.isHeldByCurrentThread(), "Prefill ownership requires queueLock");
+        queueGuard.requireHeld();
         long nowMs = clock.getAsLong();
         return new Snapshot(progress, nowMs, activeIndex.capture(), captureWorkLocked(nowMs, null));
     }
@@ -1308,6 +1375,7 @@ public final class PrefillState {
     }
 
     private WorkCapture captureWorkLocked(long nowMs, Set<RequestEntry> excluded) {
+        queueGuard.requireHeld();
         boolean cached = excluded == null;
         if (cached && committedWorkCapture != null && committedWorkCapture.capturedAtMs <= nowMs) {
             return committedWorkCapture;
