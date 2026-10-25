@@ -615,7 +615,7 @@ public final class PrefillState {
 
     private RawWorkView cachedCommittedWork(long nowMs) {
         requireLock();
-        if (cachedCommittedWork == null || cachedCommittedWork.capturedAtMs > nowMs) {
+        if (cachedCommittedWork == null || cachedCommittedWork.createdAtMs > nowMs) {
             cachedCommittedWork = copyCommittedWork(nowMs);
         }
         return cachedCommittedWork;

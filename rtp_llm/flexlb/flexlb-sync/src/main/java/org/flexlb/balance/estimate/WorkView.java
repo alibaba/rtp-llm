@@ -19,7 +19,7 @@ public final class WorkView {
     private static final long[] EMPTY_LONGS = new long[0];
     private static final String[] EMPTY_STRINGS = new String[0];
 
-    private final long capturedAtMs;
+    private final long createdAtMs;
     private final List<RequestWork> requests;
     private final List<BatchWork> batches;
     private final long unknownRequestCount;
@@ -28,12 +28,8 @@ public final class WorkView {
     private final String[] requestIds;
     private final boolean unknownWork;
 
-    public WorkView(
-            long capturedAtMs,
-            List<RequestWork> requests,
-            List<BatchWork> batches,
-            long unknownRequestCount) {
-        this.capturedAtMs = capturedAtMs;
+    public WorkView(long createdAtMs, List<RequestWork> requests, List<BatchWork> batches, long unknownRequestCount) {
+        this.createdAtMs = createdAtMs;
         this.requests = List.copyOf(requests);
         this.batches = List.copyOf(batches);
         if (unknownRequestCount < 0L) {
@@ -94,8 +90,8 @@ public final class WorkView {
         Arrays.sort(requestIds);
     }
 
-    public long capturedAtMs() {
-        return capturedAtMs;
+    public long createdAtMs() {
+        return createdAtMs;
     }
 
     public List<RequestWork> requests() {
@@ -192,8 +188,7 @@ public final class WorkView {
 
     /** Known work rebased to a later planning clock without copying the snapshot. */
     public long knownRemainingWorkMsAt(long planningAtMs) {
-        long elapsedMs = planningAtMs <= capturedAtMs
-                ? 0L : planningAtMs - capturedAtMs;
+        long elapsedMs = planningAtMs <= createdAtMs ? 0L : planningAtMs - createdAtMs;
         long total = knownNonRunningWorkMs;
         for (long runningMs : runningWorkMs) {
             long remaining = elapsedMs >= runningMs
@@ -211,23 +206,18 @@ public final class WorkView {
         if (!(other instanceof WorkView that)) {
             return false;
         }
-        return capturedAtMs == that.capturedAtMs
-                && unknownRequestCount == that.unknownRequestCount
-                && requests.equals(that.requests)
-                && batches.equals(that.batches);
+        return createdAtMs == that.createdAtMs && unknownRequestCount == that.unknownRequestCount
+                && requests.equals(that.requests) && batches.equals(that.batches);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(
-                capturedAtMs, requests, batches, unknownRequestCount);
+        return Objects.hash(createdAtMs, requests, batches, unknownRequestCount);
     }
 
     @Override
     public String toString() {
-        return "WorkView[capturedAtMs=" + capturedAtMs
-                + ", requests=" + requests
-                + ", batches=" + batches
+        return "WorkView[createdAtMs=" + createdAtMs + ", requests=" + requests + ", batches=" + batches
                 + ", unknownRequestCount=" + unknownRequestCount + ']';
     }
 

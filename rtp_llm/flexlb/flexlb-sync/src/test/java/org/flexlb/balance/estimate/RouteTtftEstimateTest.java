@@ -106,24 +106,17 @@ class RouteTtftEstimateTest {
                 state.name(), null, 0L, 0L);
     }
 
-    private static PrefillTtftEstimate.LoadView inputs(long capturedAtMs) {
-        return new PrefillTtftEstimate.LoadView(
-                emptyQueue(capturedAtMs), emptyWork(capturedAtMs));
+    private static PrefillTtftEstimate.LoadView inputs(long createdAtMs) {
+        return new PrefillTtftEstimate.LoadView(emptyQueue(createdAtMs), emptyWork(createdAtMs));
     }
 
-    private static QueueView emptyQueue(long capturedAtMs) {
-        return new QueueView(
-                capturedAtMs,
-                Comparator.comparing(GroupPlanner.Item::requestId),
-                new GroupPlanner.Constraints(
-                        1, 1_000_000L, 1_000_000L, 0L, 30L),
-                List.of(),
-                null);
+    private static QueueView emptyQueue(long createdAtMs) {
+        return new QueueView(createdAtMs, Comparator.comparing(GroupPlanner.Item::requestId),
+                new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 0L, 30L), List.of(), null);
     }
 
-    private static WorkView emptyWork(long capturedAtMs) {
-        return new WorkView(
-                capturedAtMs, List.of(), List.of(), 0L);
+    private static WorkView emptyWork(long createdAtMs) {
+        return new WorkView(createdAtMs, List.of(), List.of(), 0L);
     }
 
     private static PrefillTtftEstimate.Probe probe() {

@@ -13,12 +13,11 @@ import java.util.Objects;
  * materialized from the canonical ownership registry at one linearization
  * point together with committed work and pending count.
  */
-public record QueueView(
-        long capturedAtMs,
-        Comparator<GroupPlanner.Item> ordering,
-        GroupPlanner.Constraints constraints,
-        List<GroupPlanner.Item> activeItems,
-        AdmissionBlock admissionBlock) {
+public record QueueView(long createdAtMs,
+                        Comparator<GroupPlanner.Item> ordering,
+                        GroupPlanner.Constraints constraints,
+                        List<GroupPlanner.Item> activeItems,
+                        AdmissionBlock admissionBlock) {
 
     public QueueView {
         activeItems = List.copyOf(activeItems);

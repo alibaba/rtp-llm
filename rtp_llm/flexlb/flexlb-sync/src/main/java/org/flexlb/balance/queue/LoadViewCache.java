@@ -126,7 +126,7 @@ public final class LoadViewCache {
             }
             synchronized (this) {
                 if (materialized == null) {
-                    var queueSnapshot = new QueueView(prefillView.takenAtMs(), estimateOrder, constraints,
+                    var queueSnapshot = new QueueView(prefillView.createdAtMs(), estimateOrder, constraints,
                             prefillView.waiting().plannerItems(), admissionBlock);
                     materialized = new PrefillTtftEstimate.LoadView(queueSnapshot, prefillView.work().toWorkView(),
                             version.ownership());

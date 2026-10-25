@@ -56,11 +56,11 @@ final class QueueTimelineEstimator {
      * frozen TTFT estimation rule defines each group's completion shape.
      */
     PrefillTtftEstimate.CandidateView estimate(QueueView queue,
-                                          WorkView committed,
-                                          PrefillTimePredictor.Evaluator evaluator,
-                                          PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule,
-                                          long planningAtMs) {
-        long estimateAtMs = Math.max(queue.capturedAtMs(), planningAtMs);
+                                               WorkView committed,
+                                               PrefillTimePredictor.Evaluator evaluator,
+                                               PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule,
+                                               long planningAtMs) {
+        long estimateAtMs = Math.max(queue.createdAtMs(), planningAtMs);
         if (expiresAtMs <= 0L || estimateAtMs >= expiresAtMs) {
             return unavailable("INCOMING_EXPIRED");
         }

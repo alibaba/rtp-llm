@@ -118,9 +118,9 @@ class PrefillStateSnapshotTest {
         clock.set(90);
         var rebased = capture();
         assertNotSame(original.work(), rebased.work());
-        assertEquals(100, original.work().toWorkView().capturedAtMs());
-        assertEquals(90, rebased.work().toWorkView().capturedAtMs());
-        assertEquals(rebased.takenAtMs(), rebased.work().toWorkView().capturedAtMs());
+        assertEquals(100, original.work().toWorkView().createdAtMs());
+        assertEquals(90, rebased.work().toWorkView().createdAtMs());
+        assertEquals(rebased.createdAtMs(), rebased.work().toWorkView().createdAtMs());
         assertEquals(original.work().toWorkView().requests(), rebased.work().toWorkView().requests());
     }
 

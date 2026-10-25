@@ -265,7 +265,7 @@ public final class PrefillTtftEstimate {
         public LoadView {
             // Committed work may reuse an older clock base while its ownership
             // is unchanged. The timelineEstimator rebases running duration to queue time.
-            if (queue.capturedAtMs() < work.capturedAtMs()) {
+            if (queue.createdAtMs() < work.createdAtMs()) {
                 throw new IllegalArgumentException(
                         "work snapshot cannot be newer than its queue capture");
             }
@@ -276,13 +276,11 @@ public final class PrefillTtftEstimate {
         }
     }
 
-    public static Candidate estimate(
-            LoadView inputs,
-            Probe probe,
-            PrefillTimePredictor.Evaluator evaluator,
-            TtftEstimationRule ttftEstimationRule) {
-        return estimate(inputs, probe, evaluator, ttftEstimationRule,
-                inputs.queue().capturedAtMs());
+    public static Candidate estimate(LoadView inputs,
+                                     Probe probe,
+                                     PrefillTimePredictor.Evaluator evaluator,
+                                     TtftEstimationRule ttftEstimationRule) {
+        return estimate(inputs, probe, evaluator, ttftEstimationRule, inputs.queue().createdAtMs());
     }
 
     public static Candidate estimate(

@@ -11,17 +11,17 @@ import java.util.List;
  * <p>锁外第一次调用 {@link #toWorkView()} 时才排序并生成 WorkView，结果保存下来，之后直接复用。</p>
  */
 public final class RawWorkView {
-    public final long capturedAtMs;
+    public final long createdAtMs;
     private final List<WorkView.RequestWork> requests;
     private final List<WorkView.BatchWork> batches;
     private final long unknownRequestCount;
     private volatile WorkView workView;
 
-    public RawWorkView(long capturedAtMs,
+    public RawWorkView(long createdAtMs,
                        List<WorkView.RequestWork> requests,
                        List<WorkView.BatchWork> batches,
                        long unknownRequestCount) {
-        this.capturedAtMs = capturedAtMs;
+        this.createdAtMs = createdAtMs;
         this.requests = List.copyOf(requests);
         this.batches = List.copyOf(batches);
         this.unknownRequestCount = unknownRequestCount;
@@ -44,7 +44,7 @@ public final class RawWorkView {
                         .map(batch -> new WorkView.BatchWork(batch.batchId(),
                                 batch.requestIds().stream().sorted().toList(), batch.phase(), batch.remainingWorkMs()))
                         .toList();
-                workView = new WorkView(capturedAtMs, orderedRequests, orderedBatches, unknownRequestCount);
+                workView = new WorkView(createdAtMs, orderedRequests, orderedBatches, unknownRequestCount);
             }
             return workView;
         }

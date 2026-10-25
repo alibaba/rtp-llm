@@ -492,12 +492,12 @@ class RequestLifetimeTest {
         assertNotNull(slot.commitTerminalRecord(terminal).terminal());
     }
 
-    private static WorkView emptyWork(long capturedAtMs) {
-        return new WorkView(capturedAtMs, List.of(), List.of(), 0L);
+    private static WorkView emptyWork(long createdAtMs) {
+        return new WorkView(createdAtMs, List.of(), List.of(), 0L);
     }
 
-    private static WorkView unknownWork(long capturedAtMs) {
-        return new WorkView(capturedAtMs, List.of(), List.of(), 1L);
+    private static WorkView unknownWork(long createdAtMs) {
+        return new WorkView(createdAtMs, List.of(), List.of(), 1L);
     }
 
     private static OptionalLong visibilityDeadline(WorkView preceding, long unstartedWorkMs,
