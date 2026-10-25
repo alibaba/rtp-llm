@@ -35,7 +35,9 @@ Encoder 请求；队列超时和取消按 Encoder 阶段独立清理。Generatio
 
 ```text
 MainQueue -> 每台机器一个 PrefillQueue -> 共用 DecodeQueue -> publish(Prefill 地址, Decode 地址)
-  主线程           Prefill 线程              Decode 线程          调用方再向引擎发请求
+  调度线程         每台机器独立线程          调度线程             调用方再向引擎发请求
+     |                                        |
+     +-> 并行查缓存、预测自身耗时              +-> 并行准备请求需求
 ```
 
 - 三段都按 `RequestOrder` 排序：PRIORITY 先按优先级降序，同优先级按进入主队列的顺序号升序；
@@ -53,8 +55,35 @@ MainQueue -> 每台机器一个 PrefillQueue -> 共用 DecodeQueue -> publish(Pr
   Prefill 只有 KV 不够时允许较小请求先走，在途数量满时整台机器等待；
   Decode 放不下队头时允许同 group 后面的请求先走。队头等待达到阈值后恢复严格顺序，0 表示始终严格顺序。
   Prefill 等待从进入这台机器的队列起算，Decode 等待从 Prefill dispatch 起算。
-- 每个循环最外层捕获 `Throwable`，记录异常后继续下一轮。主队列和 Decode waiting 每轮最多尝试 256 次选点；
-  已结束或因 group 被阻塞而直接跳过的请求不占尝试次数。Decode 的 published 和 reserved 每轮遍历全部记录。
+- 主队列和 Decode 各有一个调度线程，以及独立的 `ProcessWorkers` 线程池。
+  两个池各自的线程数默认是 JVM 可见 CPU 数，沿用启动参数 `-Dflexlb.queue.planner.threads=N`。
+  调度线程按队列顺序提交准备任务，处理已完成材料，不等前面尚未准备完成的请求。
+  Decode 队头已经等到饥饿阈值时，同 group 后面的结果即使先完成，也不能先 reserve。
+- Prefill worker 对完整候选集合查缓存、预测请求自身耗时，返回 `PrefillInputs`，不选定节点。
+  主调度线程累加最新队列中排在请求之前的预测耗时及在途耗时，再按 TTFT、缓存亲和、同分轮询规则选择节点。
+  选定后紧接着分配子队列名额、必要时抢占并入队，再处理下一份材料。最终决策不调用缓存 IO 或预测器。
+  队列线程把请求从 waiting 转入 dispatched 的过渡期间，TTFT 只计算一次这条请求。
+- Decode worker 只准备容量需求和评分公式，返回 `DecodeInputs`。Decode 调度线程读取最新节点负载，
+  计算评分、选择节点并立即 reserve，再处理下一个请求；空机器放行、RETURN 抢占、permit、发布和归还也在该线程执行。
+- 正在准备及刚完成、尚未被调度线程接收的任务合计不超过池的线程数。若高优先级队头没有 worker 名额，
+  可以丢掉一个较低顺序请求的已完成材料腾出名额；请求本身仍排队，稍后重新准备。
+  准备材料不持有 endpoint hold；请求取消或服务关闭后，迟到的材料直接丢弃。
+- 缓存匹配结果按 `dispatcher.cacheMatchResultTtlMs` 复用，默认 30000ms，必须为正数；关联的 Prefill 耗时一起缓存。
+  容量不足时复用材料，只重试最终决策；每轮读取最新 TTL，使用前检查 Prefill 候选集合。
+  TTL 到期、节点增删或开始下线时重新准备；请求离开本阶段、失败或取消时清理缓存。
+  Decode 材料不含缓存匹配结果，不使用该 TTL，只随请求阶段清理。
+- 发布前重新获取所选 Prefill 的 hold，并确认节点未开始下线、注册表仍指向同一对象。
+  等待 Decode 或已有 Decode 预占时发现 Prefill 不可用，由 Decode 线程归还预占，再退回主队列。
+  退回时清掉旧 Prefill 记录和材料，归还子队列名额，但保留总排队名额、原顺序号和请求截止时间。
+- `DecodeReservations` 登记 V2 尚在管理的 Decode 预占，从创建前一直保护到归还或引擎确认。
+  旧孤儿清理同时检查老请求表和这个并发表，避免按旧 TTL 清掉 V2 的正常预占。
+- Decode 空机预占到发布之间的短窗口允许尾部请求交给刚摘除、仍处于优雅下线阶段的节点，依赖引擎继续服务。
+  请求超时以定时取消实际执行为准，不在 publish 时追加严格的绝对截止时间校验。
+- 每台 Prefill 队列有自己的线程和 `LoopSignal`。新请求、记录移除时唤醒自己的线程，
+  空闲时阻塞等待。机器下线或同地址换成新的 endpoint 时，旧线程退回等待请求并停止；新队列启动新线程。
+- 每个循环最外层捕获 `Throwable`，记录异常后继续下一轮，worker 的异常作为结果交回调度线程。
+  主队列和 Decode waiting 每轮最多处理 256 个候选；因 group 阻塞而直接跳过的请求不占次数。
+  Decode 的 published 和 reserved 每轮遍历全部记录。
 
 以下描述为原有 BATCH / NON_BATCH 链路。
 
