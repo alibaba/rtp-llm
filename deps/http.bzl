@@ -5,6 +5,15 @@ def clean_dep(dep):
 
 def http_deps():
     http_archive(
+        name = "torch_2.11_py312_ppu",
+        sha256 = "34ec402766652465f13482025b8ebc35fe7a0921a5325c6b7d308fe31976d7ff",
+        urls = [
+            "https://pkg.flytiger-eco.com/artifactory/pypi_generic/torch/2.11.0+v0.2.0.ppu2.2.0/torch-2.11.0+cu130alios7u2oe-cp312-cp312-linux_x86_64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+    http_archive(
         name = "nvcomp_cuda13_x86",
         urls = [
             "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/nvcomp/5.0.0.6/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_x86_64.whl",
@@ -93,7 +102,7 @@ def http_deps():
         name = "torch_2.11_py310_cuda-aarch64",
         sha256 = "4af01fad0822353e766770ff2c7d6bdc2cbcc2ac7fcd6da93a9e3c6f3f932b21",
         urls = [
-            "https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),

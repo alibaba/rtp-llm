@@ -36,13 +36,18 @@ py_binary(
     name = "gpu_lock",
     deps = [":jit_sys_path_setup", ":filelock", ":torch"],
     main = "device_resource.py",
-    srcs = ["device_resource.py"],
+    srcs = ["device_resource.py", "jit_sys_path_setup.py"],
 )
 
 py_library(
     name = "device_resource",
-    deps = [":filelock"],
+    deps = [":filelock", ":jit_sys_path_setup"],
     srcs = ["device_resource.py"],
+)
+
+py_library(
+    name = "hang_watchdog",
+    srcs = ["hang_watchdog.py"],
 )
 
 py_library(
@@ -84,4 +89,14 @@ py_test(
     srcs = ["device_resource_test.py"],
     env = {"GPU_COUNT": "0"},
     deps = [":device_resource"],
+)
+
+py_test(
+    name = "gpu_health_probe",
+    srcs = ["gpu_health_probe.py"],
+    main = "gpu_health_probe.py",
+    deps = [":torch"],
+    tags = ["SM100_ARM_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
 )

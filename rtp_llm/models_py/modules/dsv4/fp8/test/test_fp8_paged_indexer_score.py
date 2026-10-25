@@ -1,5 +1,13 @@
 """UT for DeepGEMM FP8-paged indexer score path.
 
+Path coverage: every case executes on any CUDA device — the shared
+``supports_paged_mqa_logits`` predicate decides which kernel serves it:
+DeepGEMM ``fp8_paged_mqa_logits`` on SM90/SM100 with a wheel that accepts the
+group-128 legacy call, the Triton fallback otherwise (e.g. pre-SM90 L20).
+Each case pins the path with a call counter (DeepGEMM == 1 when the predicate
+is true; fallback == 1 when it is false), so the numeric assertions below stay
+honest about which kernel produced the numbers.
+
 End-to-end equivalence check:
     bf16 reference (v4_indexer_score on dequant K) ≈ DeepGEMM
         fp8_paged_mqa_logits on packed FP8 cache + FP8 Q + folded weights.
@@ -17,9 +25,13 @@ Run:
 
 from __future__ import annotations
 
+import contextlib
+import logging
+
 import torch
 
 from rtp_llm.models_py.modules.dsv4._indexer_score_triton import v4_indexer_score
+from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score as _indexer_score_mod
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
 )
@@ -31,8 +43,74 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     fp8_paged_indexer_score,
-    has_fp8_paged_mqa_logits,
+    supports_paged_mqa_logits,
 )
+from rtp_llm.models_py.triton_kernels import (
+    legacy_fp8_indexer_score as _legacy_fallback_mod,
+)
+
+
+class _CountingDeepGemm:
+    """Delegate to DeepGEMM while counting the paged entry point."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.paged = 0
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def fp8_paged_mqa_logits(self, *args, **kwargs):
+        self.paged += 1
+        return self._inner.fp8_paged_mqa_logits(*args, **kwargs)
+
+
+@contextlib.contextmanager
+def _count_paged_dispatch():
+    """Count DeepGEMM vs Triton-fallback calls around one wrapper invocation.
+
+    ``fp8_paged_indexer_score`` resolves ``_deep_gemm`` and the fallback symbol
+    at call time, so swapping both handles proves which path the shared
+    predicate selected and that the case really executed on a kernel.
+    """
+    inner = _indexer_score_mod._deep_gemm
+    counted = _CountingDeepGemm(inner)
+    fallback = {"calls": 0}
+    original_fallback = _legacy_fallback_mod.legacy_fp8_paged_mqa_logits
+
+    def _counted_fallback(*args, **kwargs):
+        fallback["calls"] += 1
+        return original_fallback(*args, **kwargs)
+
+    _indexer_score_mod._deep_gemm = counted
+    _legacy_fallback_mod.legacy_fp8_paged_mqa_logits = _counted_fallback
+    try:
+        yield counted, fallback
+    finally:
+        _indexer_score_mod._deep_gemm = inner
+        _legacy_fallback_mod.legacy_fp8_paged_mqa_logits = original_fallback
+
+
+def _assert_paged_path(counted, fallback, block_size: int) -> None:
+    """DeepGEMM-path assertion: the dispatch must match the shared predicate.
+
+    Predicate true → the numeric assertions ran on DeepGEMM and the entry
+    point was called exactly once; predicate false → they ran on the Triton
+    fallback and DeepGEMM was not called at all.
+    """
+    expects_deepgemm = supports_paged_mqa_logits(torch.device("cuda"), block_size)
+    expected_deepgemm = 1 if expects_deepgemm else 0
+    expected_fallback = 0 if expects_deepgemm else 1
+    assert counted.paged == expected_deepgemm, (
+        f"expected {expected_deepgemm} deep_gemm.fp8_paged_mqa_logits call(s) "
+        f"(predicate says DeepGEMM={expects_deepgemm} for block_kv={block_size}), "
+        f"got {counted.paged} — the capability predicate and the dispatch drifted"
+    )
+    assert fallback["calls"] == expected_fallback, (
+        f"expected {expected_fallback} Triton fallback call(s) "
+        f"(predicate says DeepGEMM={expects_deepgemm} for block_kv={block_size}), "
+        f"got {fallback['calls']} — the case did not run on either kernel path"
+    )
 
 
 def _make_packed_cache_with_block_table(k_bf16: torch.Tensor, block_size: int):
@@ -63,9 +141,14 @@ def _make_packed_cache_with_block_table(k_bf16: torch.Tensor, block_size: int):
 
 def test_decode_equiv():
     """B=1, S=1, T=256, H=64, D=128 — typical decode shape."""
-    assert (
-        has_fp8_paged_mqa_logits()
-    ), "required DeepGEMM indexer interface is unavailable"
+    # The wrapper picks DeepGEMM or the Triton fallback for this device/block;
+    # both must agree with the reference below, so the case runs either way
+    # (asserting the DeepGEMM entry point unconditionally would turn the ARM
+    # SM100 lane red, where the wheel rejects the group-128 legacy call).
+    if not supports_paged_mqa_logits(torch.device("cuda"), 64):
+        logging.info(
+            "block_kv=64 not served by DeepGEMM here; exercising the Triton fallback"
+        )
     torch.manual_seed(0)
     B, S, H, D = 1, 1, 64, INDEXER_HEAD_DIM
     T, block_size = 256, 64
@@ -90,18 +173,19 @@ def test_decode_equiv():
         compress_ratio=4,
     )  # [B, S, T] fp32
 
-    # FP8 paged path
+    # FP8 paged path — count which kernel the shared predicate selected.
     q_fp8, w_fold = indexer_q_fp8_quant_fold(q_bf16.contiguous(), weights)
     ctx_lens = torch.full((B, S), T, dtype=torch.int32, device="cuda")
-    score_fp8 = fp8_paged_indexer_score(
-        q_fp8,
-        w_fold.view(B * S, H),
-        pool_uint8,
-        block_table,
-        ctx_lens,
-        block_size,
-        max_ctx_len=T,
-    )  # [B*S, T] fp32
+    with _count_paged_dispatch() as (counted, fallback):
+        score_fp8 = fp8_paged_indexer_score(
+            q_fp8,
+            w_fold.view(B * S, H),
+            pool_uint8,
+            block_table,
+            ctx_lens,
+            block_size,
+            max_ctx_len=T,
+        )  # [B*S, T] fp32
     score_fp8 = score_fp8.view(B, S, T)
 
     diff = (score_ref - score_fp8).abs()
@@ -120,14 +204,20 @@ def test_decode_equiv():
     overlap = len(top_ref & top_fp8)
     print(f"  [decode top-{K} overlap] {overlap}/{K}")
     assert overlap >= K - 2, f"top-{K} overlap only {overlap}/{K}"
+    _assert_paged_path(counted, fallback, block_size)
 
 
 def test_decode_partial_context():
     """Cache holds T_max=512 slots but only 100 are live (context_lens=100).
     DeepGEMM should mask past context_lens."""
-    assert (
-        has_fp8_paged_mqa_logits()
-    ), "required DeepGEMM indexer interface is unavailable"
+    # The wrapper picks DeepGEMM or the Triton fallback for this device/block;
+    # both must agree with the reference below, so the case runs either way
+    # (asserting the DeepGEMM entry point unconditionally would turn the ARM
+    # SM100 lane red, where the wheel rejects the group-128 legacy call).
+    if not supports_paged_mqa_logits(torch.device("cuda"), 64):
+        logging.info(
+            "block_kv=64 not served by DeepGEMM here; exercising the Triton fallback"
+        )
     torch.manual_seed(1)
     B, S, H, D = 1, 1, 64, INDEXER_HEAD_DIM
     T_cache, T_live, block_size = 512, 100, 64
@@ -156,15 +246,17 @@ def test_decode_partial_context():
 
     q_fp8, w_fold = indexer_q_fp8_quant_fold(q_bf16.contiguous(), weights)
     ctx_lens = torch.tensor([[T_live]], dtype=torch.int32, device="cuda")
-    score_fp8 = fp8_paged_indexer_score(
-        q_fp8,
-        w_fold.view(B * S, H),
-        pool_uint8,
-        block_table,
-        ctx_lens,
-        block_size,
-        max_ctx_len=T_cache,
-    )[..., :T_live].view(B, S, T_live)
+    with _count_paged_dispatch() as (counted, fallback):
+        score_fp8 = fp8_paged_indexer_score(
+            q_fp8,
+            w_fold.view(B * S, H),
+            pool_uint8,
+            block_table,
+            ctx_lens,
+            block_size,
+            max_ctx_len=T_cache,
+        )
+    score_fp8 = score_fp8[..., :T_live].view(B, S, T_live)
 
     diff = (score_ref_live - score_fp8).abs()
     score_max = score_ref_live.abs().amax().item()
@@ -179,13 +271,19 @@ def test_decode_partial_context():
     overlap = len(top_ref & top_fp8)
     print(f"  [partial ctx top-{K} overlap] {overlap}/{K}")
     assert overlap >= K - 2
+    _assert_paged_path(counted, fallback, block_size)
 
 
 def test_decode_batched():
     """B=4 with varying context_lens."""
-    assert (
-        has_fp8_paged_mqa_logits()
-    ), "required DeepGEMM indexer interface is unavailable"
+    # The wrapper picks DeepGEMM or the Triton fallback for this device/block;
+    # both must agree with the reference below, so the case runs either way
+    # (asserting the DeepGEMM entry point unconditionally would turn the ARM
+    # SM100 lane red, where the wheel rejects the group-128 legacy call).
+    if not supports_paged_mqa_logits(torch.device("cuda"), 64):
+        logging.info(
+            "block_kv=64 not served by DeepGEMM here; exercising the Triton fallback"
+        )
     torch.manual_seed(2)
     B, S, H, D = 4, 1, 64, INDEXER_HEAD_DIM
     T_cache, block_size = 256, 64
@@ -233,15 +331,17 @@ def test_decode_batched():
     ctx_lens = torch.tensor(
         [[c] for c in ctx_lens_list], dtype=torch.int32, device="cuda"
     )
-    score_fp8 = fp8_paged_indexer_score(
-        q_fp8,
-        w_fold.view(B * S, H),
-        pool_uint8,
-        block_table,
-        ctx_lens,
-        block_size,
-        max_ctx_len=T_cache,
-    ).view(B, S, T_cache)
+    with _count_paged_dispatch() as (counted, fallback):
+        score_fp8 = fp8_paged_indexer_score(
+            q_fp8,
+            w_fold.view(B * S, H),
+            pool_uint8,
+            block_table,
+            ctx_lens,
+            block_size,
+            max_ctx_len=T_cache,
+        )
+    score_fp8 = score_fp8.view(B, S, T_cache)
 
     # Compare only the live prefix per row.
     bad = 0
@@ -264,13 +364,19 @@ def test_decode_batched():
         if not ok:
             bad += 1
     assert bad == 0, f"{bad} batched rows failed"
+    _assert_paged_path(counted, fallback, block_size)
 
 
 def test_decode_batched_mtp_next_n_gt_1():
     """B=2, S=3: DeepGEMM rows must map to block_table[b] with row b*S+s."""
-    assert (
-        has_fp8_paged_mqa_logits()
-    ), "required DeepGEMM indexer interface is unavailable"
+    # The wrapper picks DeepGEMM or the Triton fallback for this device/block;
+    # both must agree with the reference below, so the case runs either way
+    # (asserting the DeepGEMM entry point unconditionally would turn the ARM
+    # SM100 lane red, where the wheel rejects the group-128 legacy call).
+    if not supports_paged_mqa_logits(torch.device("cuda"), 64):
+        logging.info(
+            "block_kv=64 not served by DeepGEMM here; exercising the Triton fallback"
+        )
     torch.manual_seed(3)
     B, S, H, D = 2, 3, 64, INDEXER_HEAD_DIM
     T_cache, block_size = 256, 64
@@ -315,15 +421,17 @@ def test_decode_batched_mtp_next_n_gt_1():
     )
 
     q_fp8, w_fold = indexer_q_fp8_quant_fold(q_bf16.contiguous(), weights)
-    score_fp8 = fp8_paged_indexer_score(
-        q_fp8,
-        w_fold.view(B * S, H),
-        pool_uint8,
-        block_table,
-        ctx_lens,
-        block_size,
-        max_ctx_len=T_cache,
-    ).view(B, S, T_cache)
+    with _count_paged_dispatch() as (counted, fallback):
+        score_fp8 = fp8_paged_indexer_score(
+            q_fp8,
+            w_fold.view(B * S, H),
+            pool_uint8,
+            block_table,
+            ctx_lens,
+            block_size,
+            max_ctx_len=T_cache,
+        )
+    score_fp8 = score_fp8.view(B, S, T_cache)
 
     bad = 0
     for b in range(B):
@@ -346,11 +454,13 @@ def test_decode_batched_mtp_next_n_gt_1():
             if not ok:
                 bad += 1
     assert bad == 0, f"{bad} B,S rows failed"
+    _assert_paged_path(counted, fallback, block_size)
 
 
 def bench_decode():
     """Compare DeepGEMM FP8 paged vs bf16 dequant + Triton score."""
-    if not has_fp8_paged_mqa_logits():
+    block_size = 64
+    if not supports_paged_mqa_logits(torch.device("cuda"), block_size):
         return
     print("\n  decode: B=1 S=1 H=64 D=128 — T sweep")
     print("    {:>5}  {:>10}  {:>10}  {:>8}".format("T", "bf16", "fp8_dg", "speedup"))

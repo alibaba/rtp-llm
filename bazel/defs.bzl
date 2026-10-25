@@ -145,15 +145,33 @@ def pyc_wheel(name, package_name, src):
         visibility = ["//visibility:public"],
     )
 
+def _rename_wheel_impl(ctx):
+    src = ctx.file.src
+    out = ctx.actions.declare_file(ctx.attr.out_name)
+    ctx.actions.run_shell(
+        inputs = [src],
+        outputs = [out],
+        command = "set -xe && cp -f '%s' '%s' && chmod a+w '%s'" % (src.path, out.path, out.path),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+# genrule outs cannot be configurable, so the ABI-tagged output name is an attr.
+_rename_wheel = rule(
+    implementation = _rename_wheel_impl,
+    attrs = {
+        "src": attr.label(allow_single_file = True, mandatory = True),
+        "out_name": attr.string(mandatory = True),
+    },
+)
+
 def rename_wheel(name, package_name, src):
-    native.genrule(
+    _rename_wheel(
         name = name,
-        srcs = [src],
-        outs = [package_name + "-cp310-cp310-manylinux1_x86_64.whl"],
-        cmd = "bash -c 'set -xe;" +
-            "cp $(locations %s) $(OUTS);" % (src) +
-            "chmod a+w $(OUTS);" +
-            "'",
+        src = src,
+        out_name = select({
+            "@rtp_llm//:using_ppu": package_name + "-cp312-cp312-manylinux1_x86_64.whl",
+            "//conditions:default": package_name + "-cp310-cp310-manylinux1_x86_64.whl",
+        }),
         tags = [
             "local",
             "manual",

@@ -91,6 +91,9 @@ struct MallocInfo {
     // the legacy aggregate fields above for positional initialization safety.
     bool pd_decode_linear_tail_only = false;
 
+    // Initial chunk admission reserves fixed sparse banks for this maximum grant.
+    int max_chunk_tokens = 0;
+
     int incrSeqLen() const;
 };
 

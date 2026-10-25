@@ -132,7 +132,9 @@ py_test(
         "H20_CU13",
         "open_skip",
     ],
-    timeout = "moderate",
+    # Cold flashinfer trtllm_comm JIT compilation pushes this test to ~220s;
+    # keep headroom above the 480s per-rank join budget for genuine hangs.
+    timeout = "long",
 )
 
 py_test(
