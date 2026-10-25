@@ -109,8 +109,8 @@ class DeliverySettlementTest {
         var decode = spy(new DecodeEndpoint(WorkerStatus.createDiscovered(
                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), new EndpointEventHandler(registry)));
         DecodeEndpoint.ReservationHandle reservation;
-        try (var pin = decode.tryPinGeneration()) {
-            reservation = decode.reserveUnqueued(pin, "2", 1L, 1L, 50);
+        try (var hold = decode.tryHold()) {
+            reservation = decode.reserveUnqueued(hold, "2", 1L, 1L, 50);
         }
         assertNotNull(reservation);
         Member member = member(2L, 12L, decode, reservation);

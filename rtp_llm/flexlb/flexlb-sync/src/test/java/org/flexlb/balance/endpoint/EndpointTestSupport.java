@@ -229,11 +229,11 @@ public final class EndpointTestSupport {
                             RoleType.PREFILL));
 
     public static boolean offer(PrefillEndpoint endpoint, ScheduledRequest item) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            if (pin == null) {
+        try (WorkerEndpoint.EndpointHold hold = endpoint.tryHold()) {
+            if (hold == null) {
                 return false;
             }
-            return endpoint.offerPinnedResult(pin, item) == PrefillQueueEnqueueResult.ACCEPTED;
+            return endpoint.offerHeldResult(hold, item) == PrefillQueueEnqueueResult.ACCEPTED;
         }
     }
 

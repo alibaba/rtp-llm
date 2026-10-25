@@ -105,16 +105,15 @@ public class DecodeSelector {
                     i -> decodeWorkerViews.get(i).address());
             if (selectedIndex < 0) { throw new IllegalStateException("Decode snapshot candidate disappeared"); }
             DecodeRoutingView selected = decodeWorkerViews.get(selectedIndex);
-            WorkerEndpoint.GenerationPin pin = workerDirectory.pinDecodeEndpoint(selected);
-            if (pin != null) {
+            WorkerEndpoint.EndpointHold hold = workerDirectory.holdDecodeEndpoint(selected);
+            if (hold != null) {
                 if (context != null) {
                     context.recordSelectionReason(RoleType.DECODE,
                             minimumCostCandidateCount > 1
                                     ? "DECODE_MIN_COST_ROUND_ROBIN_TIEBREAK"
                                     : "DECODE_MIN_COST");
                 }
-                return PlacementResult.success(buildSelectedRole(
-                        selected, pin, request.requestId()));
+                return PlacementResult.success(buildSelectedRole(selected, hold, request.requestId()));
             }
         }
         return PlacementResult.blocked(RoleType.DECODE);
@@ -127,11 +126,11 @@ public class DecodeSelector {
         List<Map<String, Object>> evidence = new ArrayList<>();
         for (DecodeRoutingView view : views) {
             Response workerFailure;
-            try (WorkerEndpoint.GenerationPin pin = workerDirectory.pinDecodeEndpoint(view)) {
-                if (pin == null) {
+            try (WorkerEndpoint.EndpointHold hold = workerDirectory.holdDecodeEndpoint(view)) {
+                if (hold == null) {
                     workerFailure = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
                 } else {
-                    var snapshot = ((DecodeEndpoint) pin.endpoint()).admissionSummary();
+                    var snapshot = ((DecodeEndpoint) hold.endpoint()).admissionSummary();
                     evidence.add(Map.of("endpoint", view.address(), "version", snapshot.routing().admissionVersion(),
                             "engineLoad", snapshot.routing().engineLoad(), "totalLoad", snapshot.routing().totalLoad(),
                             "kvTotal", snapshot.routing().totalKv(), "kvAvailable", snapshot.routing().placementUsage().availableKvAfterReservations()));
@@ -215,15 +214,13 @@ public class DecodeSelector {
                         + maximum);
     }
 
-    private SelectedRole buildSelectedRole(
-            DecodeRoutingView selected,
-            WorkerEndpoint.GenerationPin selectedPin,
-            String requestId) {
+    private SelectedRole buildSelectedRole(DecodeRoutingView selected,
+                                           WorkerEndpoint.EndpointHold selectedHold,
+                                           String requestId) {
         try {
-            if (selectedPin.generationId() != selected.generationId()
-                    || !(selectedPin.endpoint() instanceof DecodeEndpoint)) {
-                throw new IllegalStateException(
-                        "Decode snapshot pin changed before selection handoff");
+            if (selectedHold.generationId() != selected.generationId()
+                    || !(selectedHold.endpoint() instanceof DecodeEndpoint)) {
+                throw new IllegalStateException("Decode snapshot hold changed before selection handoff");
             }
             WorkerStatus.TopologySnapshot topology = selected.topology();
             WorkerStatus.EngineObservation status =
@@ -240,14 +237,13 @@ public class DecodeSelector {
             result.setSelectedEngineIndex(
                     topology.engineIndex(), topology.multiEngineNum());
 
-            // SelectedRole consumes the pin even if its validation rejects.
-            WorkerEndpoint.GenerationPin factoryPin = selectedPin;
-            selectedPin = null;
-            return SelectedRole.decode(
-                    factoryPin, result, selected.admissionVersion());
+            // SelectedRole consumes the hold even if its validation rejects.
+            WorkerEndpoint.EndpointHold factoryHold = selectedHold;
+            selectedHold = null;
+            return SelectedRole.decode(factoryHold, result, selected.admissionVersion());
         } finally {
-            if (selectedPin != null) {
-                selectedPin.close();
+            if (selectedHold != null) {
+                selectedHold.close();
             }
         }
     }

@@ -82,8 +82,8 @@ public final class DeliverySettlementTestSupport {
         response.setAvailableKvCacheTokens(10_000L);
         response.setTotalKvCacheTokens(10_000L);
         EndpointTestSupport.applyStatus(endpoint, response).run();
-        try (var pin = endpoint.tryPinGeneration()) {
-            assertTrue(endpoint.markQueued(pin, reservation));
+        try (var hold = endpoint.tryHold()) {
+            assertTrue(endpoint.markQueued(hold, reservation));
         }
     }
 

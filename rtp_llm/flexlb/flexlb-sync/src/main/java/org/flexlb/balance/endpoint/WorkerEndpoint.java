@@ -122,38 +122,33 @@ public class WorkerEndpoint {
     }
 
     /**
-     * Pin this exact endpoint generation for one admission handoff.
+     * Hold this exact endpoint generation for one admission handoff.
      *
      * <p>The returned capability remains valid after retirement starts. That is
-     * the point of the pin: a capture which linearized before registry detach
-     * may finish its already accepted handoff. The owner must close the pin on
+     * the point of the hold: a capture which linearized before registry detach
+     * may finish its already accepted handoff. The owner must close the hold on
      * every selected, rejected, and exceptional path.</p>
      */
-    public final GenerationPin tryPinGeneration() {
+    public final EndpointHold tryHold() {
         EndpointGenerationLifecycle.HandoffPermit permit =
                 generationLifecycle.tryAcquireHandoff();
-        return permit == null
-                ? null
-                : new GenerationPin(
-                        this,
-                        status.getGenerationId(),
-                        permit);
+        return permit == null ? null : new EndpointHold(this, status.getGenerationId(), permit);
     }
 
-    /** Validate an exact, still-open pin before consuming its admission right. */
-    public final void requirePinnedGeneration(GenerationPin pin) {
-        if (pin == null || pin.endpoint != this
-                || pin.generationId != status.getGenerationId()
-                || !pin.permit.isOpen()) {
-            throw new IllegalArgumentException(
-                    "Generation pin does not own this endpoint generation");
+    /**
+     * Validate an exact, still-open hold before consuming its admission right.
+     */
+    public final void checkHold(EndpointHold hold) {
+        if (hold == null || hold.endpoint != this || hold.generationId != status.getGenerationId()
+                || !hold.permit.isOpen()) {
+            throw new IllegalArgumentException("Endpoint hold does not own this endpoint generation");
         }
     }
 
     /**
      * Internal generation handoff used by existing batch/route leases whose
      * terminal callback may run on a different thread. It shares the one gate
-     * with public route pins but deliberately is not exposed as a route API.
+     * with public route holds but deliberately is not exposed as a route API.
      */
     final EndpointGenerationLifecycle.HandoffPermit
             tryAcquireGenerationHandoff() {
@@ -276,16 +271,15 @@ public class WorkerEndpoint {
      * The permit is transferable: asynchronous ownership may close it from a
      * completion thread without adding a second lifecycle state.
      */
-    public static final class GenerationPin implements AutoCloseable {
+    public static final class EndpointHold implements AutoCloseable {
 
         private final WorkerEndpoint endpoint;
         private final long generationId;
         private final EndpointGenerationLifecycle.HandoffPermit permit;
 
-        private GenerationPin(
-                WorkerEndpoint endpoint,
-                long generationId,
-                EndpointGenerationLifecycle.HandoffPermit permit) {
+        private EndpointHold(WorkerEndpoint endpoint,
+                             long generationId,
+                             EndpointGenerationLifecycle.HandoffPermit permit) {
             this.endpoint = endpoint;
             this.generationId = generationId;
             this.permit = permit;

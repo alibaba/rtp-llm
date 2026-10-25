@@ -85,7 +85,7 @@ public class DefaultRouter {
         Response validationFailure = validateRequest(context);
         if (validationFailure != null) { return PlacementResult.rejected(validationFailure); }
         DecodeDecideInfo decodeDecideInfo = DecodeDecideInfo.capture(context);
-        try (PinnedRouting routing = selectAll(context, requestedRoles(context), policyGroup, decodeDecideInfo)) {
+        try (HeldRouting routing = selectAll(context, requestedRoles(context), policyGroup, decodeDecideInfo)) {
             if (routing.blocker() != null) {
                 return PlacementResult.blocked(routing.blocker(), routing.failure(), routing.diagnostics);
             }
@@ -137,10 +137,10 @@ public class DefaultRouter {
                         .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
-    private PinnedRouting selectAll(BalanceContext context,
-                                    Set<RoleType> roles,
-                                    String policyGroup,
-                                    DecodeDecideInfo decodeDecideInfo) {
+    private HeldRouting selectAll(BalanceContext context,
+                                  Set<RoleType> roles,
+                                  String policyGroup,
+                                  DecodeDecideInfo decodeDecideInfo) {
         List<SelectedRole> selected = new ArrayList<>(roles.size());
         String group = policyGroup;
         if (StringUtils.isNotBlank(policyGroup)) {
@@ -154,11 +154,11 @@ public class DefaultRouter {
         try {
             if (context.getRequest().getSelectedVit() != null) {
                 if (vitCacheSelector == null) {
-                    return new PinnedRouting(selected, null, Response.error(StrategyErrorType.VIT_ROUTE_STALE), null);
+                    return new HeldRouting(selected, null, Response.error(StrategyErrorType.VIT_ROUTE_STALE), null);
                 }
-                SelectedRole vit = vitCacheSelector.selectPinned(context, policyGroup);
+                SelectedRole vit = vitCacheSelector.selectHeld(context, policyGroup);
                 if (vit == null) {
-                    return new PinnedRouting(selected, null, Response.error(StrategyErrorType.VIT_ROUTE_STALE), null);
+                    return new HeldRouting(selected, null, Response.error(StrategyErrorType.VIT_ROUTE_STALE), null);
                 }
                 selected.add(vit);
                 group = vit.serverStatus().getGroup();
@@ -172,14 +172,11 @@ public class DefaultRouter {
                             "Failed to select {} worker for request {}",
                             role.getCode(), context.getRequestId());
                     if (result.status() == PlacementResult.Status.REJECTED) {
-                        return new PinnedRouting(
-                                selected, null, result.failure(), result.diagnostics());
+                        return new HeldRouting(selected, null, result.failure(), result.diagnostics());
                     }
                     if (result.status() == PlacementResult.Status.BLOCKED) {
-                        return new PinnedRouting(
-                                selected,
-                                new PlacementKey(result.blocker(), group),
-                                result.failure(), result.diagnostics());
+                        return new HeldRouting(selected, new PlacementKey(result.blocker(), group), result.failure(),
+                                result.diagnostics());
                     }
                     throw new IllegalStateException("unexpected selector result: "
                             + result.status());
@@ -195,7 +192,7 @@ public class DefaultRouter {
                     group = selection.serverStatus().getGroup();
                 }
             }
-            return new PinnedRouting(selected, null, null, null);
+            return new HeldRouting(selected, null, null, null);
         } catch (RuntimeException | Error failure) {
             closeSelections(selected, failure);
             throw failure;
@@ -285,10 +282,12 @@ public class DefaultRouter {
         return response;
     }
 
-    private record PinnedRouting(List<SelectedRole> selections,
-                                 PlacementKey blocker,
-                                 Response failure,
-                                 Map<String, Object> diagnostics) implements AutoCloseable {
+    private record HeldRouting(List<SelectedRole> selections,
+                               PlacementKey blocker,
+                               Response failure,
+                               Map<String, Object> diagnostics)
+            implements
+                AutoCloseable {
 
         private List<ServerStatus> serverStatuses() {
                 return DefaultRouter.serverStatuses(selections);

@@ -20,7 +20,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 
-/** Decode worker boundary: lifecycle pins, resource operations and lock-free notifications.
+/** Decode worker boundary: lifecycle holds, resource operations and lock-free notifications.
  * DecodeState owns the generation-local resource ledger and its single mutation lock.
  */
 public class DecodeEndpoint extends WorkerEndpoint {
@@ -45,27 +45,33 @@ public class DecodeEndpoint extends WorkerEndpoint {
         this.placementAvailability = placementAvailability;
     }
 
-    // Reservation and release. Lifecycle pins remain valid for the entire handoff.
+    // Reservation and release. Lifecycle holds remain valid for the entire handoff.
 
-    public ReservationHandle reserve(GenerationPin pin, String requestId, long inputKvTokens,
-                                     long inputAndMaxOutputKvTokens, int priority) {
-        return reserve(pin, requestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, null);
+    public ReservationHandle reserve(EndpointHold hold,
+                                     String requestId,
+                                     long inputKvTokens,
+                                     long inputAndMaxOutputKvTokens,
+                                     int priority) {
+        return reserve(hold, requestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, null);
     }
 
-    public ReservationHandle reserve(GenerationPin pin,
+    public ReservationHandle reserve(EndpointHold hold,
                                      String requestId,
                                      long inputKvTokens,
                                      long inputAndMaxOutputKvTokens,
                                      int priority,
                                      CapacityLimit capacity) {
-        requirePinnedGeneration(pin);
+        checkHold(hold);
         return state.reserve(requestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, true, capacity);
     }
 
     /** An engine-facing shadow for work already outside the local queue. */
-    public ReservationHandle reserveUnqueued(GenerationPin pin, String requestId, long inputKvTokens,
-                                             long inputAndMaxOutputKvTokens, int priority) {
-        requirePinnedGeneration(pin);
+    public ReservationHandle reserveUnqueued(EndpointHold hold,
+                                             String requestId,
+                                             long inputKvTokens,
+                                             long inputAndMaxOutputKvTokens,
+                                             int priority) {
+        checkHold(hold);
         ReservationHandle reservation = state.reserve(requestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, false, null);
         if (reservation == null) {
             throw new IllegalStateException("Decode request id is already owned: " + requestId);
@@ -125,8 +131,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     // Dispatch: acquire capacity, hand over ownership, or return the permit.
 
-    public boolean markQueued(GenerationPin pin, ReservationHandle reservation) {
-        requirePinnedGeneration(pin);
+    public boolean markQueued(EndpointHold hold, ReservationHandle reservation) {
+        checkHold(hold);
         boolean changed = state.markQueued(reservation);
         if (changed) { publishCapacityRelease(); }
         return changed;
@@ -134,11 +140,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public EngineDispatchPermitAcquisition acquireDispatchPermit(ReservationHandle reservation,
                                                                  CapacityLimit capacity) {
-        GenerationPin pin = tryPinGeneration();
-        if (pin == null) {
+        EndpointHold hold = tryHold();
+        if (hold == null) {
             return new EngineDispatchPermitAcquisition(EngineDispatchPermitAcquireStatus.ENDPOINT_RETIRED, null);
         }
-        try (pin) {
+        try (hold) {
             DecodeState.DispatchAcquisition acquired = state.acquireDispatchPermit(reservation, capacity);
             return new EngineDispatchPermitAcquisition(acquired.status(), acquired.permit() == null ? null
                     : new EngineDispatchPermit(this, reservation.requestId(), acquired.permit()));
@@ -152,11 +158,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     private EngineDispatchPermitTransferStatus applyDispatch(EngineDispatchPermit permit, DispatchOutcome outcome) {
-        GenerationPin pin = outcome == DispatchOutcome.ENGINE_OWNED ? tryPinGeneration() : null;
-        if (outcome == DispatchOutcome.ENGINE_OWNED && pin == null) {
+        EndpointHold hold = outcome == DispatchOutcome.ENGINE_OWNED ? tryHold() : null;
+        if (outcome == DispatchOutcome.ENGINE_OWNED && hold == null) {
             return EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED;
         }
-        try (pin) {
+        try (hold) {
             DecodeState.DispatchResult result = state.dispatch(permit.lease, outcome);
             if (result.capacityReleased()) {
                 if (outcome == DispatchOutcome.ABANDONED) { publishCapacityRelease(); } else { notifyEngineDispatchCapacityListeners(); }
@@ -297,9 +303,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
                                          long inputAndMaxOutputKvTokens,
                                          int priority,
                                          CapacityLimit capacity) {
-        GenerationPin pin = tryPinGeneration();
-        if (pin == null) { return false; }
-        try (pin) {
+        EndpointHold hold = tryHold();
+        if (hold == null) {
+            return false;
+        }
+        try (hold) {
             boolean replaced = state.replaceQueuedRequests(victims, incomingRequestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, capacity);
             if (replaced) { publishCapacityRelease(); }
             return replaced;
@@ -316,9 +324,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (attemptToken <= 0 || victims == null || victims.isEmpty()) {
             throw new IllegalArgumentException("attempt token and victims are required");
         }
-        GenerationPin pin = tryPinGeneration();
-        if (pin == null) { return PreemptionBeginResult.ENDPOINT_RETIRED; }
-        try (pin) {
+        EndpointHold hold = tryHold();
+        if (hold == null) {
+            return PreemptionBeginResult.ENDPOINT_RETIRED;
+        }
+        try (hold) {
             return state.beginPreemption(attemptToken, victims, incomingRequestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, capacity);
         }
     }
@@ -334,11 +344,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (attemptToken <= 0 || victims == null || victims.isEmpty()) {
             throw new IllegalArgumentException("attempt token and victims are required");
         }
-        GenerationPin pin = tryPinGeneration();
-        if (pin == null) {
+        EndpointHold hold = tryHold();
+        if (hold == null) {
             return PreemptionBeginResult.ENDPOINT_RETIRED;
         }
-        try (pin) {
+        try (hold) {
             return state.beginReturnedPreemption(
                     attemptToken, victims, incomingRequestId,
                     inputKvTokens, inputAndMaxOutputKvTokens, priority, capacity);

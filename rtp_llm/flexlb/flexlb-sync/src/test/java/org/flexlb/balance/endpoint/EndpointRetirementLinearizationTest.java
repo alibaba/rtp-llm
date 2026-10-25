@@ -25,8 +25,7 @@ import static org.mockito.Mockito.when;
 class EndpointRetirementLinearizationTest {
 
     @Test
-    void detachClosesEveryStatefulAdmissionGateBeforeFinalDrain()
-            throws Exception {
+    void detachClosesEveryStatefulAdmissionGateBeforeFinalDrain() throws Exception {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointTestSupport.TestRequestRuntime requestRuntime =
@@ -65,20 +64,15 @@ class EndpointRetirementLinearizationTest {
 
                 boolean queueOfferAccepted = EndpointTestSupport.offer(
                         prefill, mock(ScheduledRequest.class));
-                boolean directPinAvailable;
-                try (WorkerEndpoint.GenerationPin pin =
-                             prefill.tryPinGeneration()) {
-                    directPinAvailable = pin != null;
+                boolean directHoldAvailable;
+                try (WorkerEndpoint.EndpointHold hold = prefill.tryHold()) {
+                    directHoldAvailable = hold != null;
                 }
-                boolean decodePinAvailable;
-                try (WorkerEndpoint.GenerationPin pin =
-                             decode.tryPinGeneration()) {
-                    decodePinAvailable = pin != null;
+                boolean decodeHoldAvailable;
+                try (WorkerEndpoint.EndpointHold hold = decode.tryHold()) {
+                    decodeHoldAvailable = hold != null;
                 }
-                return new AdmissionAttempt(
-                        queueOfferAccepted,
-                        directPinAvailable,
-                        decodePinAvailable);
+                return new AdmissionAttempt(queueOfferAccepted, directHoldAvailable, decodeHoldAvailable);
             });
 
             assertTrue(referencesCaptured.await(2, TimeUnit.SECONDS));
@@ -101,8 +95,8 @@ class EndpointRetirementLinearizationTest {
             resumeAdmission.countDown();
             AdmissionAttempt attempt = delayedAdmission.get(2, TimeUnit.SECONDS);
             assertFalse(attempt.queueOfferAccepted());
-            assertFalse(attempt.directPinAvailable());
-            assertFalse(attempt.decodePinAvailable());
+            assertFalse(attempt.directHoldAvailable());
+            assertFalse(attempt.decodeHoldAvailable());
             assertTrue(capturedDecode.resourceSnapshot()
                     .reserved().isEmpty());
         } finally {
@@ -138,9 +132,8 @@ class EndpointRetirementLinearizationTest {
         }
     }
 
-    private record AdmissionAttempt(
-            boolean queueOfferAccepted,
-            boolean directPinAvailable,
-            boolean decodePinAvailable) {
+    private record AdmissionAttempt(boolean queueOfferAccepted,
+                                    boolean directHoldAvailable,
+                                    boolean decodeHoldAvailable) {
     }
 }

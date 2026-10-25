@@ -58,16 +58,17 @@ class EndpointCleanupOwnershipTest {
         }
     }
 
-    @Test void currentDirectoryProtectsReservationButEarlierSnapshotCanEvictIt() {
+    @Test
+    void currentDirectoryProtectsReservationButEarlierSnapshotCanEvictIt() {
         Set<String> beforeRegistration = registry.snapshotSlots().stream()
                 .map(RequestSlot::requestId).collect(java.util.stream.Collectors.toSet());
         String id = "7001";
         registry.register(RequestLifecycleTestSupport.context(config, id));
         var endpoint = new DecodeEndpoint(WorkerStatus.createDiscovered(
                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), mock(EndpointEventHandler.class));
-        try (var pin = endpoint.tryPinGeneration()) {
-            assertNotNull(pin);
-            assertNotNull(endpoint.reserveUnqueued(pin, id, 1L, 1L, 50));
+        try (var hold = endpoint.tryHold()) {
+            assertNotNull(hold);
+            assertNotNull(endpoint.reserveUnqueued(hold, id, 1L, 1L, 50));
         }
         assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
         assertEquals(1, endpoint.getInflightCount());
@@ -239,11 +240,13 @@ class EndpointCleanupOwnershipTest {
         assertDecodeLedger(endpoint, 0, 0, 0L, 0L);
     }
 
-    private static DecodeEndpoint.ReservationHandle reserve(
-            DecodeEndpoint endpoint, String id, long requiredKv, long kvBudget) {
-        try (var pin = endpoint.tryPinGeneration()) {
-            assertNotNull(pin);
-            var reservation = endpoint.reserveUnqueued(pin, id, requiredKv, kvBudget, 50);
+    private static DecodeEndpoint.ReservationHandle reserve(DecodeEndpoint endpoint,
+                                                            String id,
+                                                            long requiredKv,
+                                                            long kvBudget) {
+        try (var hold = endpoint.tryHold()) {
+            assertNotNull(hold);
+            var reservation = endpoint.reserveUnqueued(hold, id, requiredKv, kvBudget, 50);
             assertNotNull(reservation);
             return reservation;
         }

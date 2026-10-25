@@ -293,7 +293,7 @@ public abstract class FlexLBMockTestBase {
         return fixedRouter;
     }
 
-    /** Build the exact pinned queue admission for a fixture response. */
+    /** Build the exact held queue admission for a fixture response. */
     protected final PlacementResult<RouteAdmission, PlacementKey> admittedRoute(
             BalanceContext context, Response response) {
         return schedulerRuntime.admittedRoute(context, response);

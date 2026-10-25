@@ -95,13 +95,13 @@ public class CostBasedPrefillStrategy {
         PrefillEndpoint best = survivors.endpoint(selectedIndex);
         long bestCacheHit = survivors.cacheHit(selectedIndex);
         long selectedPrefillMs = survivors.prefillMs(selectedIndex);
-        WorkerEndpoint.GenerationPin selectedPin =
-                workerDirectory.pinEndpoint(roleType, survivors.endpointAddress(selectedIndex));
-        if (selectedPin == null || selectedPin.endpoint() != best) {
+        WorkerEndpoint.EndpointHold selectedHold =
+                workerDirectory.holdEndpoint(roleType, survivors.endpointAddress(selectedIndex));
+        if (selectedHold == null || selectedHold.endpoint() != best) {
             recordDecision(balanceContext, roleType, group, discovery.registeredCount(), survivors,
                     -1, "ENDPOINT_GENERATION_CHANGED", cacheMatchResult);
-            if (selectedPin != null) {
-                selectedPin.close();
+            if (selectedHold != null) {
+                selectedHold.close();
             }
             // The planning endpoint retired or was replaced after the
             // full-fleet snapshot. Re-enter the queue rather than
@@ -109,15 +109,8 @@ public class CostBasedPrefillStrategy {
             return PlacementResult.blocked(roleType);
         }
         long selectedTtft = survivors.estimatedTtftMs(selectedIndex);
-        SelectedRole selectedRole = buildSelectedRole(
-                best,
-                roleType,
-                requestId,
-                selectedTtft,
-                selectedPrefillMs,
-                bestCacheHit,
-                survivors.ownershipVersion(selectedIndex),
-                selectedPin);
+        SelectedRole selectedRole = buildSelectedRole(best, roleType, requestId, selectedTtft, selectedPrefillMs,
+                bestCacheHit, survivors.ownershipVersion(selectedIndex), selectedHold);
         if (balanceContext.selectionReason(roleType) == null) {
             balanceContext.recordSelectionReason(roleType, "COST_BASED");
         }
@@ -647,22 +640,21 @@ public class CostBasedPrefillStrategy {
                 roleType, candidateMaxHitTokens);
     }
 
-    private SelectedRole buildSelectedRole(
-            PrefillEndpoint ep,
-            RoleType roleType,
-            String requestId,
-            long estimatedTtftMs,
-            long selectedPrefillMs,
-            long bestCacheHit,
-            long placementVersion,
-            WorkerEndpoint.GenerationPin selectedPin) {
+    private SelectedRole buildSelectedRole(PrefillEndpoint ep,
+                                           RoleType roleType,
+                                           String requestId,
+                                           long estimatedTtftMs,
+                                           long selectedPrefillMs,
+                                           long bestCacheHit,
+                                           long placementVersion,
+                                           WorkerEndpoint.EndpointHold selectedHold) {
         try {
             // Populate DebugInfo so ScheduledRequest.hitCache() can read
             // hitCacheLen for batch metrics.
             DebugInfo debugInfo = new DebugInfo();
             debugInfo.setHitCacheLen(bestCacheHit);
 
-            if (selectedPin == null || selectedPin.endpoint() != ep) {
+            if (selectedHold == null || selectedHold.endpoint() != ep) {
                 throw new IllegalStateException(
                         "selected Prefill endpoint generation changed before handoff");
             }
@@ -682,13 +674,12 @@ public class CostBasedPrefillStrategy {
             result.setSuccess(true);
             result.setSelectedEngineIndex(
                     topology.engineIndex(), topology.multiEngineNum());
-            WorkerEndpoint.GenerationPin ownedPin = selectedPin;
-            selectedPin = null;
-            return SelectedRole.prefill(
-                    ownedPin, result, selectedPrefillMs, placementVersion);
+            WorkerEndpoint.EndpointHold ownedHold = selectedHold;
+            selectedHold = null;
+            return SelectedRole.prefill(ownedHold, result, selectedPrefillMs, placementVersion);
         } finally {
-            if (selectedPin != null) {
-                selectedPin.close();
+            if (selectedHold != null) {
+                selectedHold.close();
             }
         }
     }

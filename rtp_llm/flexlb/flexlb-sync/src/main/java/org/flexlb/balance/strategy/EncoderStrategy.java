@@ -19,7 +19,7 @@ public final class EncoderStrategy {
     private final WorkerDirectory workerDirectory;
 
     /**
-     * Select from the current worker directory and its pinned endpoint generations.
+     * Select from the current worker directory and its held endpoint generations.
      */
     public EncoderStrategy(WorkerDirectory workerDirectory) {
         this.workerDirectory = workerDirectory;
@@ -33,7 +33,7 @@ public final class EncoderStrategy {
     public SelectedRole select(BalanceContext context, String group) {
         context.beginRoutingAttempt(RoleType.ENCODER);
         int maxInflightPerWorker = context.getConfig().getDispatcher().getMaxInflightPerEncoderWorker();
-        WorkerEndpoint.GenerationPin winner = null;
+        WorkerEndpoint.EndpointHold winner = null;
         WorkerStatus.TopologySnapshot winnerTopology = null;
         WorkerStatus.EngineObservation winnerEngine = null;
         boolean weighted = context.getRequest().getEncoderCacheHitLen() != null;
@@ -41,7 +41,7 @@ public final class EncoderStrategy {
         long fewestRequests = Long.MAX_VALUE;
         try {
             for (String address : workerDirectory.endpointAddressSnapshot(RoleType.ENCODER)) {
-                WorkerEndpoint.GenerationPin candidate = workerDirectory.pinEndpoint(RoleType.ENCODER, address);
+                WorkerEndpoint.EndpointHold candidate = workerDirectory.holdEndpoint(RoleType.ENCODER, address);
                 if (candidate == null) {
                     continue;
                 }

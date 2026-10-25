@@ -159,11 +159,11 @@ final class EncoderQueueCoordinator implements AutoCloseable {
     }
 
     private void publishRoute(GlobalQueueEntry entry, SelectedRole selected) {
-        try (selected; var pin = selected.takeGenerationPin()) {
+        try (selected; var hold = selected.takeEndpointHold()) {
             Response response = new Response();
             response.setSuccess(true);
             response.setServerStatus(List.of(selected.serverStatus()));
-            if (!requests.claimEncoderRoute(entry.context.getRequestId(), entry.future, pin)
+            if (!requests.claimEncoderRoute(entry.context.getRequestId(), entry.future, hold)
                     || !requests.publishEncoderRoute(entry.context.getRequestId(), entry.future, response)) {
                 fail(entry, Response.error(StrategyErrorType.REQUEST_CANCELLED));
             }

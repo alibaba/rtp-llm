@@ -362,9 +362,9 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
             String[] parts = physicalAddress.split(":");
             String ip = parts[0];
             int httpPort = Integer.parseInt(parts[1]);
-            // admittedRoute() converts this response into the exact pinned
+            // admittedRoute() converts this response into the exact held
             // queue admission the scheduler consumes — including the Decode KV
-            // reservation (RouteAdmission.reserveQueuedPinned) the batcher
+            // reservation (RouteAdmission.reserveQueuedHeld) the batcher
             // later marks queued; without it admission would hit NOT_QUEUED ->
             // OwnershipLost and the request would never complete.
             return admittedRoute(ctx,

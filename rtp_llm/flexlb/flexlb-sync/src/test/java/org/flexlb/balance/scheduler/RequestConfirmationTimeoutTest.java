@@ -78,8 +78,8 @@ class RequestConfirmationTimeoutTest {
             applyStatus(decode, status(RoleType.DECODE));
             var capacity = new DecodeEndpoint.CapacityLimit(1L, 90L);
             DecodeEndpoint.ReservationHandle reservation;
-            try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.reserve(pin, Long.toString(REQUEST_ID), 16L, 32L, 50, capacity);
+            try (var hold = decode.tryHold()) {
+                reservation = decode.reserve(hold, Long.toString(REQUEST_ID), 16L, 32L, 50, capacity);
                 assertNotNull(reservation);
                 var acquired = decode.acquireDispatchPermit(reservation, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquired.status());
@@ -144,8 +144,8 @@ class RequestConfirmationTimeoutTest {
             assertEquals(0, decode.routingView().engineCapacityUsed());
 
             // Local expiration restores admission capacity without an Engine Cancel channel.
-            try (var pin = decode.tryPinGeneration()) {
-                var next = decode.reserve(pin, "102", 16L, 32L, 50, capacity);
+            try (var hold = decode.tryHold()) {
+                var next = decode.reserve(hold, "102", 16L, 32L, 50, capacity);
                 assertNotNull(next);
                 var acquired = decode.acquireDispatchPermit(next, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquired.status());

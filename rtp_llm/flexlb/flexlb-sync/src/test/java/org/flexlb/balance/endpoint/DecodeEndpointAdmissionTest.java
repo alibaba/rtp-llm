@@ -102,20 +102,18 @@ class DecodeEndpointAdmissionTest {
                 status, mock(EndpointEventHandler.class), availability);
 
         DecodeEndpoint.ReservationHandle speculative;
-        try (WorkerEndpoint.GenerationPin pin =
-                     exactEndpoint.tryPinGeneration()) {
-            assertNotNull(pin);
-            speculative = exactEndpoint.reserve(pin, "11", 100L, 110L, 10);
+        try (WorkerEndpoint.EndpointHold hold = exactEndpoint.tryHold()) {
+            assertNotNull(hold);
+            speculative = exactEndpoint.reserve(hold, "11", 100L, 110L, 10);
         }
         exactEndpoint.release(speculative, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         verify(availability).capacityChanged(
                 RoleType.DECODE, null, "10.0.0.1:8080@0");
 
         DecodeEndpoint.ReservationHandle published;
-        try (WorkerEndpoint.GenerationPin pin =
-                     exactEndpoint.tryPinGeneration()) {
-            assertNotNull(pin);
-            published = exactEndpoint.reserve(pin, "12", 100L, 110L, 10);
+        try (WorkerEndpoint.EndpointHold hold = exactEndpoint.tryHold()) {
+            assertNotNull(hold);
+            published = exactEndpoint.reserve(hold, "12", 100L, 110L, 10);
         }
         exactEndpoint.release(published, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
         verify(availability, times(2)).capacityChanged(
@@ -431,7 +429,7 @@ class DecodeEndpointAdmissionTest {
         release(10L);
         endpoint.close();
 
-        assertNull(endpoint.tryPinGeneration());
+        assertNull(endpoint.tryHold());
         assertFalse(endpoint.replaceQueuedRequests(List.of(stale), "3", 100, 110, 50,
                 new DecodeEndpoint.CapacityLimit(1, 100)));
         assertEquals(DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED, endpoint.beginPreemption(101L,
@@ -825,10 +823,9 @@ class DecodeEndpointAdmissionTest {
                             blockingEndpoint, response));
 
             Future<?> reserve = executor.submit(() -> {
-                try (WorkerEndpoint.GenerationPin pin =
-                             blockingEndpoint.tryPinGeneration()) {
-                    assertNotNull(pin);
-                    blockingEndpoint.reserveUnqueued(pin, "71", 500L, 600L, 80);
+                try (WorkerEndpoint.EndpointHold hold = blockingEndpoint.tryHold()) {
+                    assertNotNull(hold);
+                    blockingEndpoint.reserveUnqueued(hold, "71", 500L, 600L, 80);
                 }
             });
             assertThrows(TimeoutException.class,
@@ -870,8 +867,8 @@ class DecodeEndpointAdmissionTest {
                 attempts.add(executor.submit(() -> {
                     start.await();
                     DecodeEndpoint.ReservationHandle reservation;
-                    try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-                        reservation = endpoint.reserve(pin, Long.toString(requestId), 100L, 3000L, 50);
+                    try (WorkerEndpoint.EndpointHold hold = endpoint.tryHold()) {
+                        reservation = endpoint.reserve(hold, Long.toString(requestId), 100L, 3000L, 50);
                     }
                     assertNotNull(reservation);
                     var acquired =
@@ -1027,44 +1024,39 @@ class DecodeEndpointAdmissionTest {
         return (ReentrantLock) field.get(owner.get(target));
     }
 
-    private DecodeEndpoint.ReservationHandle reserve(
-            long requestId,
-            long requiredKv,
-            long kvBudget,
-            int priority) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            if (pin == null) {
+    private DecodeEndpoint.ReservationHandle reserve(long requestId, long requiredKv, long kvBudget, int priority) {
+        try (WorkerEndpoint.EndpointHold hold = endpoint.tryHold()) {
+            if (hold == null) {
                 throw new IllegalStateException(
                         "Decode endpoint generation is retired");
             }
             DecodeEndpoint.ReservationHandle reservation =
-                    endpoint.reserveUnqueued(pin, Long.toString(requestId), requiredKv, kvBudget, priority);
+                    endpoint.reserveUnqueued(hold, Long.toString(requestId), requiredKv, kvBudget, priority);
             reservations.put(requestId, reservation);
             return reservation;
         }
     }
 
-    private DecodeEndpoint.ReservationHandle reserveQueued(
-            long requestId,
-            long requiredKv,
-            long kvBudget,
-            int priority) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            if (pin == null) {
+    private DecodeEndpoint.ReservationHandle reserveQueued(long requestId,
+                                                           long requiredKv,
+                                                           long kvBudget,
+                                                           int priority) {
+        try (WorkerEndpoint.EndpointHold hold = endpoint.tryHold()) {
+            if (hold == null) {
                 throw new IllegalStateException(
                         "Decode endpoint generation is retired");
             }
             DecodeEndpoint.ReservationHandle reservation =
-                    endpoint.reserve(pin, Long.toString(requestId), requiredKv, kvBudget, priority);
+                    endpoint.reserve(hold, Long.toString(requestId), requiredKv, kvBudget, priority);
             reservations.put(requestId, reservation);
             return reservation;
         }
     }
 
     private void markQueued(long requestId) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            assertNotNull(pin);
-            assertTrue(endpoint.markQueued(pin, reservations.get(requestId)));
+        try (WorkerEndpoint.EndpointHold hold = endpoint.tryHold()) {
+            assertNotNull(hold);
+            assertTrue(endpoint.markQueued(hold, reservations.get(requestId)));
         }
     }
 

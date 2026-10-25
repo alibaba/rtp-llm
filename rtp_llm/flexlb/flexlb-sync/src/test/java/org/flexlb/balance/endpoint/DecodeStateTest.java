@@ -105,8 +105,8 @@ class DecodeStateTest {
         DecodeEndpoint other = new DecodeEndpoint(status(), EndpointTestSupport.noopEventSink());
         try {
             DecodeEndpoint.ReservationHandle reservation;
-            try (var pin = owner.tryPinGeneration()) {
-                reservation = owner.reserve(pin, "3", 100, 200, 50);
+            try (var hold = owner.tryHold()) {
+                reservation = owner.reserve(hold, "3", 100, 200, 50);
             }
             var permit = owner.acquireDispatchPermit(reservation, CAPACITY).permit();
             assertThrows(IllegalArgumentException.class, () -> other.dispatch(permit, DispatchOutcome.ENGINE_OWNED));

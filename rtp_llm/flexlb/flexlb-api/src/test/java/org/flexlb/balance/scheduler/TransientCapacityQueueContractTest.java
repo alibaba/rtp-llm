@@ -159,14 +159,11 @@ class TransientCapacityQueueContractTest {
         verifyRetryWaitsForDecodeSettlementFence(config, 880_002L);
     }
 
-    private static void verifyRetryWaitsForDecodeSettlementFence(
-            FlexlbConfig config,
-            long requestId) throws Exception {
+    private static void verifyRetryWaitsForDecodeSettlementFence(FlexlbConfig config, long requestId) throws Exception {
         try (Fixture fixture = new Fixture(null, config)) {
             DecodeEndpoint.ReservationHandle settled;
-            try (WorkerEndpoint.GenerationPin pin =
-                         fixture.decodeEndpoint.tryPinGeneration()) {
-                settled = fixture.decodeEndpoint.reserve(pin, Long.toString(requestId), 128L, 136L, 50);
+            try (WorkerEndpoint.EndpointHold hold = fixture.decodeEndpoint.tryHold()) {
+                settled = fixture.decodeEndpoint.reserve(hold, Long.toString(requestId), 128L, 136L, 50);
             }
             assertTrue(fixture.decodeEndpoint.release(settled, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED).released());
             assertEquals(0, fixture.totalDecodeReservations());

@@ -43,8 +43,8 @@ public class EndpointRegistry {
     /**
      * One non-owning Prefill generation exposed to routing.
      *
-     * <p>The endpoint identity is advisory: a caller must pin the address
-     * and verify that the pinned endpoint is still this exact instance before
+     * <p>The endpoint identity is advisory: a caller must hold the address
+     * and verify that the held endpoint is still this exact instance before
      * transferring generation ownership to a request.</p>
      */
     public record PrefillRoutingEntry(
@@ -118,7 +118,7 @@ public class EndpointRegistry {
      * replacement after changing the endpoint map. A racing reader may finish
      * an older traversal, but it cannot acquire stale ownership because the
      * selected address and generation are always revalidated by
-     * {@link #pinDecodeEndpoint(DecodeEndpoint.DecodeRoutingView)}.
+     * {@link #holdDecodeEndpoint(DecodeEndpoint.DecodeRoutingView)}.
      */
     private volatile List<Map.Entry<String, DecodeEndpoint>> decodeDirectory =
             List.of();
@@ -177,45 +177,44 @@ public class EndpointRegistry {
     }
 
     /**
-     * Pin one exact currently published endpoint generation.
+     * Hold one exact currently published endpoint generation.
      *
-     * <p>The pin is acquired inside the address key's CHM remapping critical
-     * section. Pinning therefore linearizes either before exact detach (and
-     * retirement waits for the pin) or after detach (and returns {@code null}).
+     * <p>The hold is acquired inside the address key's CHM remapping critical
+     * section. Holding therefore linearizes either before exact detach (and
+     * retirement waits for the hold) or after detach (and returns {@code null}).
      * The returned route capability is thread-confined.</p>
      */
-    public WorkerEndpoint.GenerationPin pin(RoleType roleType, String ipPort) {
+    public WorkerEndpoint.EndpointHold hold(RoleType roleType, String ipPort) {
         ConcurrentHashMap<String, WorkerEndpoint> endpoints =
                 endpoints(roleType);
-        return endpoints == null ? null : pin(endpoints, ipPort);
+        return endpoints == null ? null : hold(endpoints, ipPort);
     }
 
     /**
-     * Pin the currently addressable generations without exposing a live
-     * registry map. Addresses are snapshotted first; every exact pin is then
-     * acquired through {@link #pin(RoleType, String)}.
+     * Hold the currently addressable generations without exposing a live
+     * registry map. Addresses are snapshotted first; every exact hold is then
+     * acquired through {@link #hold(RoleType, String)}.
      */
-    public List<WorkerEndpoint.GenerationPin> pin(RoleType roleType) {
+    public List<WorkerEndpoint.EndpointHold> hold(RoleType roleType) {
         List<String> addresses = endpointAddressSnapshot(roleType);
-        List<WorkerEndpoint.GenerationPin> pins =
-                new ArrayList<>(addresses.size());
+        List<WorkerEndpoint.EndpointHold> holds = new ArrayList<>(addresses.size());
         try {
             for (String address : addresses) {
-                WorkerEndpoint.GenerationPin pin = pin(roleType, address);
-                if (pin != null) {
-                    pins.add(pin);
+                WorkerEndpoint.EndpointHold hold = hold(roleType, address);
+                if (hold != null) {
+                    holds.add(hold);
                 }
             }
-            return pins;
-        } catch (RuntimeException | Error pinFailure) {
-            for (WorkerEndpoint.GenerationPin pin : pins) {
+            return holds;
+        } catch (RuntimeException | Error holdFailure) {
+            for (WorkerEndpoint.EndpointHold hold : holds) {
                 try {
-                    pin.close();
+                    hold.close();
                 } catch (Throwable closeFailure) {
-                    pinFailure.addSuppressed(closeFailure);
+                    holdFailure.addSuppressed(closeFailure);
                 }
             }
-            throw pinFailure;
+            throw holdFailure;
         }
     }
 
@@ -224,7 +223,7 @@ public class EndpointRegistry {
      *
      * <p>No endpoint object or live registry map escapes.  A caller which needs
      * generation ownership must still pass an address back through
-     * {@link #pin(RoleType, String)}; same-address replacement therefore
+     * {@link #hold(RoleType, String)}; same-address replacement therefore
      * remains linearized by the address key's remapping critical section.</p>
      */
     public List<String> endpointAddressSnapshot(RoleType roleType) {
@@ -251,8 +250,8 @@ public class EndpointRegistry {
      * Return the immutable Prefill routing directory observed at one instant.
      *
      * <p>This removes per-request registry lookups while deliberately avoiding
-     * fleet-wide generation pins. A selected entry remains advisory until its
-     * address is pinned and the endpoint identity is revalidated.</p>
+     * fleet-wide endpoint holds. A selected entry remains advisory until its
+     * address is held and the endpoint identity is revalidated.</p>
      */
     public List<PrefillRoutingEntry> prefillRoutingSnapshot(RoleType roleType) {
         return switch (roleType) {
@@ -268,8 +267,8 @@ public class EndpointRegistry {
      *
      * <p>The registry is intentionally not locked while an endpoint takes its
      * admission lock.  This avoids introducing a map-bin/admission-lock order;
-     * publication races are resolved when the selected generation is pinned
-     * by {@link #pinDecodeEndpoint(DecodeEndpoint.DecodeRoutingView)}.</p>
+     * publication races are resolved when the selected generation is held
+     * by {@link #holdDecodeEndpoint(DecodeEndpoint.DecodeRoutingView)}.</p>
      */
     public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot() {
         List<Map.Entry<String, DecodeEndpoint>> directory = decodeDirectory;
@@ -282,42 +281,41 @@ public class EndpointRegistry {
     }
 
     /**
-     * Pin the exact Decode generation represented by a routing snapshot.
+     * Hold the exact Decode generation represented by a routing snapshot.
      *
      * <p>The routing values are advisory and may change after selection. The
      * subsequent reservation/dispatch transaction revalidates capacity under
      * the endpoint admission lock. This method authorizes only an identical
-     * endpoint generation; every rejected or exceptional pin is closed
-     * here, while a successful caller owns the returned generation pin.</p>
+     * endpoint generation; every rejected or exceptional hold is closed
+     * here, while a successful caller owns the returned endpoint hold.</p>
      */
-    public WorkerEndpoint.GenerationPin pinDecodeEndpoint(DecodeEndpoint.DecodeRoutingView expected) {
-        WorkerEndpoint.GenerationPin pin = pin(RoleType.DECODE, expected.address());
-        if (pin == null) {
+    public WorkerEndpoint.EndpointHold holdDecodeEndpoint(DecodeEndpoint.DecodeRoutingView expected) {
+        WorkerEndpoint.EndpointHold hold = hold(RoleType.DECODE, expected.address());
+        if (hold == null) {
             return null;
         }
         boolean transferred = false;
         try {
-            if (pin.generationId() != expected.generationId()
-                    || !(pin.endpoint() instanceof DecodeEndpoint)) {
+            if (hold.generationId() != expected.generationId() || !(hold.endpoint() instanceof DecodeEndpoint)) {
                 return null;
             }
             transferred = true;
-            return pin;
+            return hold;
         } finally {
             if (!transferred) {
-                pin.close();
+                hold.close();
             }
         }
     }
 
-    private static WorkerEndpoint.GenerationPin pin(ConcurrentHashMap<String, WorkerEndpoint> endpoints,
+    private static WorkerEndpoint.EndpointHold hold(ConcurrentHashMap<String, WorkerEndpoint> endpoints,
                                                     String ipPort) {
-        AtomicReference<WorkerEndpoint.GenerationPin> pinned = new AtomicReference<>();
+        AtomicReference<WorkerEndpoint.EndpointHold> held = new AtomicReference<>();
         endpoints.computeIfPresent(ipPort, (ignored, current) -> {
-            pinned.set(current.tryPinGeneration());
+            held.set(current.tryHold());
             return current;
         });
-        return pinned.get();
+        return held.get();
     }
 
     /** Return the endpoint only when it belongs to the expected status generation. */

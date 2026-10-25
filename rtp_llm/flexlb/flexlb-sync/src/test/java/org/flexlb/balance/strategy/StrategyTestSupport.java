@@ -141,11 +141,9 @@ final class StrategyTestSupport {
         }
     }
 
-    static boolean offer(
-            PrefillEndpoint endpoint, ScheduledRequest exactItem) {
-        try (WorkerEndpoint.GenerationPin pin =
-                     endpoint.tryPinGeneration()) {
-            return pin != null && endpoint.offerPinnedResult(pin, exactItem) == PrefillQueueEnqueueResult.ACCEPTED;
+    static boolean offer(PrefillEndpoint endpoint, ScheduledRequest exactItem) {
+        try (WorkerEndpoint.EndpointHold hold = endpoint.tryHold()) {
+            return hold != null && endpoint.offerHeldResult(hold, exactItem) == PrefillQueueEnqueueResult.ACCEPTED;
         }
     }
 

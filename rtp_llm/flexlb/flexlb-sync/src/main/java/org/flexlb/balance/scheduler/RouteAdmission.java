@@ -47,13 +47,13 @@ public final class RouteAdmission implements AutoCloseable {
         String requestId = context.getRequestId();
 
         PrefillEndpoint prefillEndpoint = null;
-        WorkerEndpoint.GenerationPin prefillPin = null;
+        WorkerEndpoint.EndpointHold prefillHold = null;
         ServerStatus prefillStatus = null;
         long prefillPlacementVersion = 0L;
         long prefillWorkMs = 0L;
         Runnable commitTelemetry = null;
         DecodeEndpoint decodeEndpoint = null;
-        WorkerEndpoint.GenerationPin decodePin = null;
+        WorkerEndpoint.EndpointHold decodeHold = null;
         ServerStatus decodeStatus = null;
         long decodePlacementVersion = 0L;
 
@@ -66,18 +66,16 @@ public final class RouteAdmission implements AutoCloseable {
                 }
                 RoleType role = status.getRole();
                 long placementVersion = selected.placementVersion();
-                WorkerEndpoint.GenerationPin pin =
-                        selected.takeGenerationPin();
-                WorkerEndpoint endpoint = pin.endpoint();
+                WorkerEndpoint.EndpointHold hold = selected.takeEndpointHold();
+                WorkerEndpoint endpoint = hold.endpoint();
                 if (role != null && role.supportsPrefill()) {
-                    if (prefillPin != null
-                            || !(endpoint instanceof PrefillEndpoint prefill)) {
-                        pin.close();
+                    if (prefillHold != null || !(endpoint instanceof PrefillEndpoint prefill)) {
+                        hold.close();
                         throw new IllegalStateException(
                                 "route requires one exact Prefill selection");
                     }
                     prefillEndpoint = prefill;
-                    prefillPin = pin;
+                    prefillHold = hold;
                     prefillStatus = status;
                     prefillPlacementVersion = placementVersion;
                     prefillWorkMs = selected.prefillWorkMs();
@@ -85,35 +83,33 @@ public final class RouteAdmission implements AutoCloseable {
                     continue;
                 }
                 if (role == RoleType.DECODE) {
-                    if (decodePin != null
-                            || !(endpoint instanceof DecodeEndpoint decode)) {
-                        pin.close();
+                    if (decodeHold != null || !(endpoint instanceof DecodeEndpoint decode)) {
+                        hold.close();
                         throw new IllegalStateException(
                                 "route requires at most one exact Decode selection");
                     }
                     decodeEndpoint = decode;
-                    decodePin = pin;
+                    decodeHold = hold;
                     decodeStatus = status;
                     decodePlacementVersion = placementVersion;
                     continue;
                 }
                 // Stateless roles need no owner after their response metadata
                 // has been frozen.
-                pin.close();
+                hold.close();
             }
-            if (prefillPin == null || prefillEndpoint == null
-                    || prefillStatus == null) {
+            if (prefillHold == null || prefillEndpoint == null || prefillStatus == null) {
                 throw new IllegalStateException(
                         "route has no Prefill endpoint generation");
             }
             return new RouteAdmission(requestId, response,
-                    new Selection(prefillEndpoint, prefillPin, prefillStatus, prefillPlacementVersion, prefillWorkMs,
-                            decodePin, decodePlacementVersion, commitTelemetry),
+                    new Selection(prefillEndpoint, prefillHold, prefillStatus, prefillPlacementVersion, prefillWorkMs,
+                            decodeHold, decodePlacementVersion, commitTelemetry),
                     decodeRequest.withSelection(DecodeSelection.of(decodeStatus, decodeEndpoint, null)));
         } catch (RuntimeException | Error failure) {
-            WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
-            WorkerEndpoint.GenerationPin ownedDecodePin = decodePin;
-            try (ownedPrefillPin; ownedDecodePin) {
+            WorkerEndpoint.EndpointHold ownedPrefillHold = prefillHold;
+            WorkerEndpoint.EndpointHold ownedDecodeHold = decodeHold;
+            try (ownedPrefillHold; ownedDecodeHold) {
                 throw failure;
             }
         }
@@ -148,7 +144,7 @@ public final class RouteAdmission implements AutoCloseable {
         // commitRoute takes a boolean, but a blocked request also needs the reason from the Prefill queue.
         PrefillQueueEnqueueResult[] prefillQueueEnqueueResult = new PrefillQueueEnqueueResult[1];
         PlacementResult.Status routeCommitStatus = lifecycle.commitRoute(item, () -> {
-            PrefillQueueEnqueueResult queueResult = prefillEndpoint().offerPinnedResult(prefillPin(), item);
+            PrefillQueueEnqueueResult queueResult = prefillEndpoint().offerHeldResult(prefillHold(), item);
             prefillQueueEnqueueResult[0] = queueResult;
             return queueResult == PrefillQueueEnqueueResult.ACCEPTED;
         });
@@ -178,7 +174,7 @@ public final class RouteAdmission implements AutoCloseable {
     public boolean commitQueuedRequest(RequestRegistry lifecycle, ScheduledRequest item) {
         requireProvisional();
         PlacementResult.Status commitStatus = lifecycle.commitRoute(item,
-                () -> prefillEndpoint().offerPinnedResult(prefillPin(), item) == PrefillQueueEnqueueResult.ACCEPTED);
+                () -> prefillEndpoint().offerHeldResult(prefillHold(), item) == PrefillQueueEnqueueResult.ACCEPTED);
         if (commitStatus != PlacementResult.Status.SUCCESS) {
             return false;
         }
@@ -189,8 +185,8 @@ public final class RouteAdmission implements AutoCloseable {
     Response response() { return response; }
     public PrefillEndpoint prefillEndpoint() { return selection.prefillEndpoint(); }
     public DecodeEndpoint decodeEndpoint() { return decodeDecideInfo.endpoint(); }
-    private WorkerEndpoint.GenerationPin prefillPin() { return selection.prefillPin(); }
-    private WorkerEndpoint.GenerationPin decodePin() { return selection.decodePin(); }
+    private WorkerEndpoint.EndpointHold prefillHold() { return selection.prefillHold(); }
+    private WorkerEndpoint.EndpointHold decodeHold() { return selection.decodeHold(); }
     private ServerStatus prefillStatus() { return selection.prefillStatus(); }
     private ServerStatus decodeStatus() { return decodeDecideInfo.status(); }
     private long prefillPlacementVersion() { return selection.prefillPlacementVersion(); }
@@ -213,9 +209,9 @@ public final class RouteAdmission implements AutoCloseable {
         }
         DecodeRequirement requirement = decodeDecideInfo.requirement();
         DecodeEndpoint.ReservationHandle reservation = switch (requirement.mode()) {
-            case IMMEDIATE -> decodeEndpoint().reserve(decodePin(), requestId, requirement.inputKvTokens(),
+            case IMMEDIATE -> decodeEndpoint().reserve(decodeHold(), requestId, requirement.inputKvTokens(),
                     requirement.inputAndMaxOutputKvTokens(), requirement.priority());
-            case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> decodeEndpoint().reserve(decodePin(), requestId,
+            case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> decodeEndpoint().reserve(decodeHold(), requestId,
                     requirement.inputKvTokens(), requirement.inputAndMaxOutputKvTokens(), requirement.priority(), null);
         };
         if (reservation == null) {
@@ -239,8 +235,8 @@ public final class RouteAdmission implements AutoCloseable {
             return false;
         }
         try {
-            endpoint.requirePinnedGeneration(decodePin());
-            if (!endpoint.markQueued(decodePin(), reservation)) {
+            endpoint.checkHold(decodeHold());
+            if (!endpoint.markQueued(decodeHold(), reservation)) {
                 endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
                 return false;
             }
@@ -272,7 +268,7 @@ public final class RouteAdmission implements AutoCloseable {
     private void markCommitted() {
         requireProvisional();
         ownership = Ownership.COMMITTED;
-        closePins();
+        closeHolds();
         runCommitTelemetry();
     }
 
@@ -301,16 +297,20 @@ public final class RouteAdmission implements AutoCloseable {
                 decodeEndpoint().release(decodeDecideInfo.reservation(), DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }
         } finally {
-            closePins();
+            closeHolds();
         }
     }
 
-    private void closePins() {
-        try (var prefill = prefillPin(); var decode = decodePin()) { }
+    private void closeHolds() {
+        try (var prefill = prefillHold(); var decode = decodeHold()) {}
     }
 
-    private record Selection(PrefillEndpoint prefillEndpoint, WorkerEndpoint.GenerationPin prefillPin,
-                             ServerStatus prefillStatus, long prefillPlacementVersion, long prefillWorkMs,
-                             WorkerEndpoint.GenerationPin decodePin, long decodePlacementVersion,
-                             Runnable commitTelemetry) { }
+    private record Selection(PrefillEndpoint prefillEndpoint,
+                             WorkerEndpoint.EndpointHold prefillHold,
+                             ServerStatus prefillStatus,
+                             long prefillPlacementVersion,
+                             long prefillWorkMs,
+                             WorkerEndpoint.EndpointHold decodeHold,
+                             long decodePlacementVersion,
+                             Runnable commitTelemetry) {}
 }

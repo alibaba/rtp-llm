@@ -66,9 +66,9 @@ class VitCacheDirectoryTest {
         var workers = mock(WorkerDirectory.class);
         when(workers.statusSnapshot(RoleType.VIT)).thenAnswer(call -> Map.copyOf(live));
         when(workers.endpointAddressSnapshot(RoleType.VIT)).thenAnswer(call -> new java.util.ArrayList<>(live.keySet()));
-        when(workers.pinEndpoint(eq(RoleType.VIT), any())).thenAnswer(call -> {
+        when(workers.holdEndpoint(eq(RoleType.VIT), any())).thenAnswer(call -> {
             WorkerStatus status = live.get(call.getArgument(1));
-            return status == null ? null : new WorkerEndpoint(status).tryPinGeneration();
+            return status == null ? null : new WorkerEndpoint(status).tryHold();
         });
         grpc = mock(EngineGrpcClient.class);
         consistency = mock(LBStatusConsistencyService.class);
@@ -358,7 +358,7 @@ class VitCacheDirectoryTest {
         verify(grpc, times(4)).getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L));
     }
     @Test
-    void selectionKeepsGenerationThroughCopyAndPin() throws Exception {
+    void selectionKeepsGenerationThroughCopyAndHold() throws Exception {
         snapshot(a, "epoch-a", "image");
         var ctx = context("image");
         var selected = selector.select(ctx, "one");
@@ -373,13 +373,13 @@ class VitCacheDirectoryTest {
         copied.setWorkerGeneration(0);
         assertFalse(selector.validate(ctx, "one").isSuccess());
         copied.setWorkerGeneration(a.getGenerationId());
-        try (var pinned = selector.selectPinned(ctx, "one")) {
-            org.junit.jupiter.api.Assertions.assertNotNull(pinned);
-            assertEquals(a.getGenerationId(), pinned.serverStatus().getWorkerGeneration());
+        try (var held = selector.selectHeld(ctx, "one")) {
+            org.junit.jupiter.api.Assertions.assertNotNull(held);
+            assertEquals(a.getGenerationId(), held.serverStatus().getWorkerGeneration());
         }
         live.put(a.getIpPort(), worker(a.getIp(), "one"));
         assertFalse(selector.validate(ctx, "one").isSuccess());
-        org.junit.jupiter.api.Assertions.assertNull(selector.selectPinned(ctx, "one"));
+        org.junit.jupiter.api.Assertions.assertNull(selector.selectHeld(ctx, "one"));
     }
 
 }

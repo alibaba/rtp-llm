@@ -233,10 +233,11 @@ public class RequestRegistry {
     /**
      * Transfer a selected Encoder request to its endpoint before publishing the route.
      */
-    public boolean claimEncoderRoute(String requestId, CompletableFuture<Response> future,
-                                     WorkerEndpoint.GenerationPin selected) {
+    public boolean claimEncoderRoute(String requestId,
+                                     CompletableFuture<Response> future,
+                                     WorkerEndpoint.EndpointHold selected) {
         WorkerEndpoint endpoint = selected.endpoint();
-        endpoint.requirePinnedGeneration(selected);
+        endpoint.checkHold(selected);
         if (!(endpoint instanceof EncoderEndpoint encoder)) { return false; }
         RequestSlot slot = requestSlot(requestId, RequestPhase.ENCODER);
         return slot != null && slot.ownsFuture(future)

@@ -219,8 +219,8 @@ class SchedulingErrorCodeMatrixTest {
 
         void reserveDecode(int priority) {
             var endpoint = harness.decodeEndpoint(0);
-            try (var pin = endpoint.tryPinGeneration()) {
-                assertNotNull(endpoint.reserveUnqueued(pin, Long.toString(REQUEST_ID - 1), 0L, 0L, priority));
+            try (var hold = endpoint.tryHold()) {
+                assertNotNull(endpoint.reserveUnqueued(hold, Long.toString(REQUEST_ID - 1), 0L, 0L, priority));
             }
         }
 

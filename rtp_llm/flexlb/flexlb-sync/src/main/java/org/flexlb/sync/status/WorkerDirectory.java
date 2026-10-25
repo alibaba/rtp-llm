@@ -24,7 +24,7 @@ import java.util.function.Supplier;
  *
  * <p>A status entry describes the generation currently being polled. Routing
  * authority always comes from the matching endpoint generation in
- * {@link EndpointRegistry}; callers must take a pin before using it. Keeping
+ * {@link EndpointRegistry}; callers must take a hold before using it. Keeping
  * both views behind this directory makes disagreement visible instead of
  * hiding it behind a derived capacity value.</p>
  */
@@ -227,7 +227,7 @@ public final class WorkerDirectory implements WorkerStatusProvider {
 
     /**
      * Prefill candidates whose reported DP group has every rank available for routing.
-     * The winning address must still be pinned and identity-checked.
+     * The winning address must still be held and identity-checked.
      */
     public List<EndpointRegistry.PrefillRoutingEntry> prefillRoutingSnapshot(RoleType role) {
         List<EndpointRegistry.PrefillRoutingEntry> directory = endpointRegistry.prefillRoutingSnapshot(role);
@@ -257,9 +257,11 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         return List.copyOf(matching);
     }
 
-    /** Pin one exact currently published endpoint generation by address. */
-    public WorkerEndpoint.GenerationPin pinEndpoint(RoleType role, String ipPort) {
-        return endpointRegistry.pin(role, ipPort);
+    /**
+     * Hold one exact currently published endpoint generation by address.
+     */
+    public WorkerEndpoint.EndpointHold holdEndpoint(RoleType role, String ipPort) {
+        return endpointRegistry.hold(role, ipPort);
     }
 
     /**
@@ -294,54 +296,57 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         return List.copyOf(matching);
     }
 
-    /** Pin the exact generation represented by a Decode routing snapshot. */
-    public WorkerEndpoint.GenerationPin pinDecodeEndpoint(DecodeEndpoint.DecodeRoutingView expected) {
-        return endpointRegistry.pinDecodeEndpoint(expected);
+    /**
+     * Hold the exact generation represented by a Decode routing snapshot.
+     */
+    public WorkerEndpoint.EndpointHold holdDecodeEndpoint(DecodeEndpoint.DecodeRoutingView expected) {
+        return endpointRegistry.holdDecodeEndpoint(expected);
     }
 
-    /** Pin exact endpoint generations for one routing decision. */
-    public List<WorkerEndpoint.GenerationPin> pinEndpoints(RoleType role, String group) {
-        List<WorkerEndpoint.GenerationPin> pinned = endpointRegistry.pin(role);
-        List<WorkerEndpoint.GenerationPin> matching = new ArrayList<>(pinned.size());
+    /**
+     * Hold exact endpoint generations for one routing decision.
+     */
+    public List<WorkerEndpoint.EndpointHold> holdEndpoints(RoleType role, String group) {
+        List<WorkerEndpoint.EndpointHold> held = endpointRegistry.hold(role);
+        List<WorkerEndpoint.EndpointHold> matching = new ArrayList<>(held.size());
         try {
-            for (int index = 0; index < pinned.size(); index++) {
-                WorkerEndpoint.GenerationPin pin = pinned.get(index);
-                WorkerStatus.TopologySnapshot topology =
-                        pin.endpoint().getStatus().topologySnapshot();
+            for (int index = 0; index < held.size(); index++) {
+                WorkerEndpoint.EndpointHold hold = held.get(index);
+                WorkerStatus.TopologySnapshot topology = hold.endpoint().getStatus().topologySnapshot();
                 if (group != null && !group.equals(topology.group())) {
-                    pin.close();
-                    pinned.set(index, null);
+                    hold.close();
+                    held.set(index, null);
                     continue;
                 }
-                matching.add(pin);
-                pinned.set(index, null);
+                matching.add(hold);
+                held.set(index, null);
             }
             return matching;
         } catch (Throwable failure) {
-            closePins(pinned);
-            closePins(matching);
+            closeHolds(held);
+            closeHolds(matching);
             throw failure;
         }
     }
 
     /** Non-owning monitoring view; no live endpoint map escapes. */
     public List<String> endpointAddresses(RoleType role, String group) {
-        List<WorkerEndpoint.GenerationPin> pinned = pinEndpoints(role, group);
+        List<WorkerEndpoint.EndpointHold> held = holdEndpoints(role, group);
         try {
-            List<String> addresses = new ArrayList<>(pinned.size());
-            for (WorkerEndpoint.GenerationPin pin : pinned) {
-                addresses.add(pin.endpoint().ipPort());
+            List<String> addresses = new ArrayList<>(held.size());
+            for (WorkerEndpoint.EndpointHold hold : held) {
+                addresses.add(hold.endpoint().ipPort());
             }
             return addresses;
         } finally {
-            closePins(pinned);
+            closeHolds(held);
         }
     }
 
-    private static void closePins(List<WorkerEndpoint.GenerationPin> pins) {
-        for (WorkerEndpoint.GenerationPin pin : pins) {
-            if (pin != null) {
-                pin.close();
+    private static void closeHolds(List<WorkerEndpoint.EndpointHold> holds) {
+        for (WorkerEndpoint.EndpointHold hold : holds) {
+            if (hold != null) {
+                hold.close();
             }
         }
     }

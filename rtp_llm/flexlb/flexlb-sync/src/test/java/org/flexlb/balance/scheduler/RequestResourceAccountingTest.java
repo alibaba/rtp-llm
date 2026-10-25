@@ -217,8 +217,8 @@ class RequestResourceAccountingTest {
             RequestLifecycleTestSupport.awaitCondition(() -> {
                 if (replacementRef.get() != null) { return true; }
                 f.decode.evictExpiredRequests(0, ignored -> false);
-                try (var pin = f.decode.tryPinGeneration()) {
-                    replacementRef.set(f.decode.reserve(pin, ID, HARD_KV * 2, EXPECTED_KV * 2, 50));
+                try (var hold = f.decode.tryHold()) {
+                    replacementRef.set(f.decode.reserve(hold, ID, HARD_KV * 2, EXPECTED_KV * 2, 50));
                 }
                 return replacementRef.get() != null;
             });
@@ -276,8 +276,8 @@ class RequestResourceAccountingTest {
             } finally { worker.lock.unlock(); }
             decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"), eventHandler);
             decodeStatus(Map.of(), Map.of(), TOTAL_KV);
-            try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.reserve(pin, ID, HARD_KV, EXPECTED_KV, 50);
+            try (var hold = decode.tryHold()) {
+                reservation = decode.reserve(hold, ID, HARD_KV, EXPECTED_KV, 50);
             }
             assertNotNull(reservation);
             var context = RequestLifecycleTestSupport.context(config, ID);
@@ -344,8 +344,8 @@ class RequestResourceAccountingTest {
         }
 
         void assertCapacityReusable() {
-            try (var pin = decode.tryPinGeneration()) {
-                var next = decode.reserve(pin, "999", HARD_KV, EXPECTED_KV, 50);
+            try (var hold = decode.tryHold()) {
+                var next = decode.reserve(hold, "999", HARD_KV, EXPECTED_KV, 50);
                 assertNotNull(next);
                 var permit = decode.acquireDispatchPermit(next, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, permit.status());

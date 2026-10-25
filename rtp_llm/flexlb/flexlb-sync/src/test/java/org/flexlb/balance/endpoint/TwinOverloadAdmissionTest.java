@@ -150,9 +150,9 @@ class TwinOverloadAdmissionTest {
         endpoints.add(endpoint);
         applyStatus(endpoint, Map.of(), Map.of());
         for (long id = 1; id <= 9; id++) {
-            try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-                assertNotNull(pin);
-                assertNotNull(endpoint.reserve(pin, Long.toString(id), 128L, 256L, 50));
+            try (WorkerEndpoint.EndpointHold hold = endpoint.tryHold()) {
+                assertNotNull(hold);
+                assertNotNull(endpoint.reserve(hold, Long.toString(id), 128L, 256L, 50));
             }
         }
         for (long id = 1; id <= 8; id++) {
@@ -209,7 +209,7 @@ class TwinOverloadAdmissionTest {
         assertEquals(ReservationResult.Status.SUCCESS, acquisition.status());
         try (BatchReservation reservation = acquisition.reservation();
                 CommitResult ignored = reservation.commit(items, 300_000L)) {
-            // Releasing the handoff closes only the generation pin, not engine work.
+            // Releasing the handoff closes only the endpoint hold, not engine work.
         }
     }
 

@@ -199,24 +199,20 @@ class DecodeRequestExpirationTest {
         EndpointTestSupport.applyStatus(endpoint, response);
     }
 
-    private DecodeEndpoint.ReservationHandle reserve(
-            long requestId,
-            long requiredKv,
-            long kvBudget,
-            int priority) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            assertTrue(pin != null);
+    private DecodeEndpoint.ReservationHandle reserve(long requestId, long requiredKv, long kvBudget, int priority) {
+        try (WorkerEndpoint.EndpointHold hold = endpoint.tryHold()) {
+            assertTrue(hold != null);
             DecodeEndpoint.ReservationHandle reservation =
-                    endpoint.reserveUnqueued(pin, Long.toString(requestId), requiredKv, kvBudget, priority);
+                    endpoint.reserveUnqueued(hold, Long.toString(requestId), requiredKv, kvBudget, priority);
             reservations.put(requestId, reservation);
             return reservation;
         }
     }
 
     private void markQueued(long requestId) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            assertTrue(pin != null);
-            assertTrue(endpoint.markQueued(pin, reservations.get(requestId)));
+        try (WorkerEndpoint.EndpointHold hold = endpoint.tryHold()) {
+            assertTrue(hold != null);
+            assertTrue(endpoint.markQueued(hold, reservations.get(requestId)));
         }
     }
 

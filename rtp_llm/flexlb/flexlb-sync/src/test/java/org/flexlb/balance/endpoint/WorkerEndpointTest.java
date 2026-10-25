@@ -192,13 +192,12 @@ class WorkerEndpointTest {
     }
 
     @Test
-    void generationPinCanBeReleasedByCompletionThread() {
-        WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration();
+    void endpointHoldCanBeReleasedByCompletionThread() {
+        WorkerEndpoint.EndpointHold hold = endpoint.tryHold();
 
-        CompletableFuture.runAsync(pin::close).join();
+        CompletableFuture.runAsync(hold::close).join();
 
-        assertThrows(IllegalArgumentException.class,
-                () -> endpoint.requirePinnedGeneration(pin));
+        assertThrows(IllegalArgumentException.class, () -> endpoint.checkHold(hold));
     }
 
     // ==================== getStatus() returns live reference ====================

@@ -122,13 +122,13 @@ public class VitCacheSelector {
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
-        try (var pin = workers.pinEndpoint(RoleType.VIT, selected.getServerIp() + ":" + selected.getHttpPort())) {
-            WorkerStatus worker = pin == null ? null : pin.endpoint().getStatus();
+        try (var hold = workers.holdEndpoint(RoleType.VIT, selected.getServerIp() + ":" + selected.getHttpPort())) {
+            WorkerStatus worker = hold == null ? null : hold.endpoint().getStatus();
             if (selected.getRole() != RoleType.VIT || worker == null
                     || (group != null && !Objects.equals(group, worker.getGroup()))
                     || selected.getGrpcPort() != worker.getGrpcPort()
                     || !Objects.equals(selected.getGroup(), worker.getGroup())
-                    || selected.getWorkerGeneration() != pin.generationId()) {
+                    || selected.getWorkerGeneration() != hold.generationId()) {
                 return errorStatus(StrategyErrorType.NO_VIT_WORKER);
             }
             return status(worker, ctx.getRequestId());
@@ -136,21 +136,21 @@ public class VitCacheSelector {
     }
 
     /** Holds the selected endpoint generation through the admission handoff. */
-    public synchronized SelectedRole selectPinned(BalanceContext ctx, String group) {
+    public synchronized SelectedRole selectHeld(BalanceContext ctx, String group) {
         ServerStatus result = ctx.getRequest().getSelectedVit() == null ? select(ctx, group) : validate(ctx, group);
         if (!result.isSuccess()) {
             return null;
         }
-        WorkerEndpoint.GenerationPin pin =
-                workers.pinEndpoint(RoleType.VIT, result.getServerIp() + ":" + result.getHttpPort());
-        if (pin == null) {
+        WorkerEndpoint.EndpointHold hold =
+                workers.holdEndpoint(RoleType.VIT, result.getServerIp() + ":" + result.getHttpPort());
+        if (hold == null) {
             return null;
         }
-        if (pin.generationId() != result.getWorkerGeneration()) {
-            pin.close();
+        if (hold.generationId() != result.getWorkerGeneration()) {
+            hold.close();
             return null;
         }
-        return SelectedRole.stateless(pin, result);
+        return SelectedRole.stateless(hold, result);
     }
 
     private static ServerStatus errorStatus(StrategyErrorType error) {

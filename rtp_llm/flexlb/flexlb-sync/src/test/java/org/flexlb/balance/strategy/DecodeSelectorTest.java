@@ -166,8 +166,8 @@ class DecodeSelectorTest {
             DecodeEndpoint endpoint = decodeEndpoint(registry, "127.0.0.1:8080");
             DecodeEndpoint.AdmissionSummary empty = endpoint.admissionSummary();
             Assertions.assertSame(empty, endpoint.admissionSummary());
-            try (var pin = endpoint.tryPinGeneration()) {
-                var reservation = endpoint.reserve(pin, "42", 128L, 256L, 70);
+            try (var hold = endpoint.tryHold()) {
+                var reservation = endpoint.reserve(hold, "42", 128L, 256L, 70);
                 var queued = endpoint.admissionSummary();
                 Assertions.assertNotSame(empty, queued);
                 Assertions.assertSame(queued, endpoint.admissionSummary());
@@ -220,18 +220,15 @@ class DecodeSelectorTest {
         DecodeEndpoint.DecodeRoutingView stale = views.get("127.0.0.1:8080");
         DecodeEndpoint.DecodeRoutingView replacement =
                 views.get("127.0.0.2:8080");
-        WorkerEndpoint.GenerationPin replacementPin =
-                Mockito.mock(WorkerEndpoint.GenerationPin.class);
-        Mockito.when(replacementPin.endpoint()).thenReturn(
-                decodeEndpoint(registry, replacement.address()));
-        Mockito.when(replacementPin.generationId()).thenReturn(
-                replacement.generationId());
+        WorkerEndpoint.EndpointHold replacementHold = Mockito.mock(WorkerEndpoint.EndpointHold.class);
+        Mockito.when(replacementHold.endpoint()).thenReturn(decodeEndpoint(registry, replacement.address()));
+        Mockito.when(replacementHold.generationId()).thenReturn(replacement.generationId());
         WorkerDirectory racing = Mockito.mock(WorkerDirectory.class);
         Mockito.when(racing.decodeRoutingSnapshot(null))
                 .thenReturn(List.of(stale))
                 .thenReturn(List.of(replacement));
-        Mockito.when(racing.pinDecodeEndpoint(stale)).thenReturn(null);
-        Mockito.when(racing.pinDecodeEndpoint(replacement)).thenReturn(replacementPin);
+        Mockito.when(racing.holdDecodeEndpoint(stale)).thenReturn(null);
+        Mockito.when(racing.holdDecodeEndpoint(replacement)).thenReturn(replacementHold);
 
         PlacementResult<SelectedRole, RoleType> result =
                 new DecodeSelector(racing).select(DecodeRequirement.capture(context(1_000, 1_001L)), null);
@@ -240,12 +237,12 @@ class DecodeSelectorTest {
         SelectedRole selected = result.value();
         Assertions.assertEquals(
                 "127.0.0.2", selected.serverStatus().getServerIp());
-        Mockito.verify(replacementPin, Mockito.never()).close();
+        Mockito.verify(replacementHold, Mockito.never()).close();
         selected.close();
-        Mockito.verify(replacementPin).close();
+        Mockito.verify(replacementHold).close();
         Mockito.verify(racing, Mockito.times(2)).decodeRoutingSnapshot(null);
-        Mockito.verify(racing).pinDecodeEndpoint(stale);
-        Mockito.verify(racing).pinDecodeEndpoint(replacement);
+        Mockito.verify(racing).holdDecodeEndpoint(stale);
+        Mockito.verify(racing).holdDecodeEndpoint(replacement);
     }
 
     @ParameterizedTest
@@ -472,7 +469,7 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.2", 10_000L, 9_000L);
         EndpointRegistry registry = decodeRegistry();
         DecodeEndpoint local = decodeEndpoint(registry, "127.0.0.2:8080");
-        reservePinned(local, 91L, 0L, 0L, 50);
+        reserveHeld(local, 91L, 0L, 0L, 50);
         Assertions.assertEquals(2, decodeEndpoint(registry, "127.0.0.1:8080").routingView().totalLoad());
         DecodeSelector strategy = availableStrategy(registry);
         for (int i = 0; i < 4; i++) {
@@ -499,7 +496,7 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.1", 10_000L, 10_000L);
         registerWorker("127.0.0.2", 10_000L, 10_000L);
         EndpointRegistry registry = decodeRegistry();
-        reservePinned(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
+        reserveHeld(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 92L, 0L, 0L, 50);
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 93L, 0L, 0L, 50);
 
@@ -735,7 +732,7 @@ class DecodeSelectorTest {
         EndpointRegistry registry = createDecodeRegistry(decodeStatuses);
         DecodeEndpoint endpoint = decodeEndpoint(registry, "127.0.0.1:8080");
         for (int i = 0; i < 6; i++) {
-            reservePinned(endpoint, 400L + i, 0, 0, 50);
+            reserveHeld(endpoint, 400L + i, 0, 0, 50);
         }
 
         DecodeSelector strategy = availableStrategy(registry);
@@ -789,14 +786,13 @@ class DecodeSelectorTest {
                 Math.max(1L, worker.appliedStatusCursor().statusVersion() + 1L)));
     }
 
-    private static void reserveQueued(
-            DecodeEndpoint endpoint,
-            long requestId,
-            long kvTokens,
-            long kvBudgetTokens,
-            int priority) {
-        try (var pin = endpoint.tryPinGeneration()) {
-            endpoint.reserve(pin, Long.toString(requestId), kvTokens, kvBudgetTokens, priority);
+    private static void reserveQueued(DecodeEndpoint endpoint,
+                                      long requestId,
+                                      long kvTokens,
+                                      long kvBudgetTokens,
+                                      int priority) {
+        try (var hold = endpoint.tryHold()) {
+            endpoint.reserve(hold, Long.toString(requestId), kvTokens, kvBudgetTokens, priority);
         }
     }
 
@@ -807,14 +803,13 @@ class DecodeSelectorTest {
     }
 
     /** Non-queued inflight reservation: each call raises engineLoad by one. */
-    private static void reservePinned(
-            DecodeEndpoint endpoint,
-            long requestId,
-            long kvTokens,
-            long kvBudgetTokens,
-            int priority) {
-        try (var pin = endpoint.tryPinGeneration()) {
-            endpoint.reserveUnqueued(pin, Long.toString(requestId), kvTokens, kvBudgetTokens, priority);
+    private static void reserveHeld(DecodeEndpoint endpoint,
+                                    long requestId,
+                                    long kvTokens,
+                                    long kvBudgetTokens,
+                                    int priority) {
+        try (var hold = endpoint.tryHold()) {
+            endpoint.reserveUnqueued(hold, Long.toString(requestId), kvTokens, kvBudgetTokens, priority);
         }
     }
 

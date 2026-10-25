@@ -69,8 +69,8 @@ class PrefillCompletionEventTest {
             applyStatus(decode, decodeStatus(1L, Map.of()));
             DecodeEndpoint.ReservationHandle reservation;
             var capacity = new DecodeEndpoint.CapacityLimit(10L, 90L);
-            try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.reserve(pin, "101", 16L, 32L, 50, capacity);
+            try (var hold = decode.tryHold()) {
+                reservation = decode.reserve(hold, "101", 16L, 32L, 50, capacity);
                 assertNotNull(reservation);
                 var acquisition = decode.acquireDispatchPermit(reservation, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquisition.status());
@@ -125,8 +125,8 @@ class PrefillCompletionEventTest {
                     "missing Decode acceptance must retain this request's reservation");
             assertTrue(capacity.evaluate(decode.routingView().dispatchUsage(), 16L, 32L).fits(),
                     "a suspected lost request must not isolate a worker with available capacity");
-            try (var pin = decode.tryPinGeneration()) {
-                var waiting = decode.reserve(pin, "102", 16L, 32L, 50, capacity);
+            try (var hold = decode.tryHold()) {
+                var waiting = decode.reserve(hold, "102", 16L, 32L, 50, capacity);
                 assertNotNull(waiting);
                 var acquisition = decode.acquireDispatchPermit(waiting, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquisition.status());

@@ -202,8 +202,8 @@ class RequestRegistryTest {
         Response route = new Response();
         route.setSuccess(true);
 
-        try (var pin = endpoint.tryPinGeneration()) {
-            assertTrue(lifecycle.claimEncoderRoute("107", future, pin));
+        try (var hold = endpoint.tryHold()) {
+            assertTrue(lifecycle.claimEncoderRoute("107", future, hold));
         }
         assertEquals(1, endpoint.pendingEncoderRequestCount());
         assertFalse(future.isDone());
@@ -252,8 +252,8 @@ class RequestRegistryTest {
         when(engine.runningTaskList()).thenReturn(Map.of());
         EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventHandler(lifecycle));
 
-        try (var pin = endpoint.tryPinGeneration()) {
-            assertTrue(lifecycle.claimEncoderRoute("109", future, pin));
+        try (var hold = endpoint.tryHold()) {
+            assertTrue(lifecycle.claimEncoderRoute("109", future, hold));
         }
         assertEquals(800L, endpoint.inflightUncachedTokenEstimate());
 
@@ -293,8 +293,8 @@ class RequestRegistryTest {
         when(engine.runningTaskList()).thenReturn(Map.of());
         EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventHandler(lifecycle));
 
-        try (var pin = endpoint.tryPinGeneration()) {
-            assertTrue(lifecycle.claimEncoderRoute("110", future, pin));
+        try (var hold = endpoint.tryHold()) {
+            assertTrue(lifecycle.claimEncoderRoute("110", future, hold));
         }
         assertEquals(1000L, endpoint.inflightUncachedTokenEstimate());
 
@@ -384,8 +384,8 @@ class RequestRegistryTest {
         EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventHandler(lifecycle));
         Response route = new Response();
         route.setSuccess(true);
-        try (var pin = endpoint.tryPinGeneration()) {
-            assertTrue(lifecycle.claimEncoderRoute("108", encoderFuture, pin));
+        try (var hold = endpoint.tryHold()) {
+            assertTrue(lifecycle.claimEncoderRoute("108", encoderFuture, hold));
         }
         assertTrue(lifecycle.publishEncoderRoute("108", encoderFuture, route));
         assertTrue(encoderFuture.get(5, TimeUnit.SECONDS).isSuccess());
@@ -409,8 +409,8 @@ class RequestRegistryTest {
         EncoderEndpoint failedEndpoint = new EncoderEndpoint(failedWorker, new EndpointEventHandler(lifecycle));
         Response route = new Response();
         route.setSuccess(true);
-        try (var pin = failedEndpoint.tryPinGeneration()) {
-            assertTrue(lifecycle.claimEncoderRoute("109", failedFuture, pin));
+        try (var hold = failedEndpoint.tryHold()) {
+            assertTrue(lifecycle.claimEncoderRoute("109", failedFuture, hold));
         }
         assertTrue(lifecycle.publishEncoderRoute("109", failedFuture, route));
         failedFuture.get(5, TimeUnit.SECONDS);
@@ -433,8 +433,8 @@ class RequestRegistryTest {
         CompletableFuture<Response> inactiveFuture = lifecycle.register(inactiveContext);
         WorkerStatus inactiveWorker = mock(WorkerStatus.class);
         EncoderEndpoint inactiveEndpoint = new EncoderEndpoint(inactiveWorker, new EndpointEventHandler(lifecycle));
-        try (var pin = inactiveEndpoint.tryPinGeneration()) {
-            assertTrue(lifecycle.claimEncoderRoute("110", inactiveFuture, pin));
+        try (var hold = inactiveEndpoint.tryHold()) {
+            assertTrue(lifecycle.claimEncoderRoute("110", inactiveFuture, hold));
         }
         assertTrue(lifecycle.publishEncoderRoute("110", inactiveFuture, route));
         inactiveFuture.get(5, TimeUnit.SECONDS);
@@ -453,8 +453,8 @@ class RequestRegistryTest {
         EncoderEndpoint endpoint = new EncoderEndpoint(worker, new EndpointEventHandler(lifecycle));
         Response route = new Response();
         route.setSuccess(true);
-        try (var pin = endpoint.tryPinGeneration()) {
-            assertTrue(lifecycle.claimEncoderRoute("112", future, pin));
+        try (var hold = endpoint.tryHold()) {
+            assertTrue(lifecycle.claimEncoderRoute("112", future, hold));
         }
         assertTrue(lifecycle.publishEncoderRoute("112", future, route));
         future.get(5, TimeUnit.SECONDS);
@@ -474,8 +474,8 @@ class RequestRegistryTest {
         CompletableFuture<Response> future = lifecycle.register(context);
         EncoderEndpoint endpoint = new EncoderEndpoint(mock(WorkerStatus.class),
                 new EndpointEventHandler(lifecycle));
-        try (var pin = endpoint.tryPinGeneration()) {
-            assertTrue(lifecycle.claimEncoderRoute("113", future, pin));
+        try (var hold = endpoint.tryHold()) {
+            assertTrue(lifecycle.claimEncoderRoute("113", future, hold));
         }
         assertEquals(RequestState.Phase.DISPATCHING,
                 lifecycle.getRequestState("113", 0L, RequestPhase.ENCODER).state());

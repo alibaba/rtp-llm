@@ -135,9 +135,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillQueue.ttftEstimationRule();
     }
 
-    /** Publish one exact route after validating its generation pin. */
-    public PrefillQueueEnqueueResult offerPinnedResult(GenerationPin exactPin, ScheduledRequest exactItem) {
-        requirePinnedGeneration(exactPin);
+    /**
+     * Publish one exact route after validating its endpoint hold.
+     */
+    public PrefillQueueEnqueueResult offerHeldResult(EndpointHold exactHold, ScheduledRequest exactItem) {
+        checkHold(exactHold);
         return prefillQueue.offerWithResult(exactItem);
     }
 
@@ -170,7 +172,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillQueue.queueSize();
     }
 
-    /** Runs once, after every accepted generation handoff has released its pin. */
+    /**
+     * Runs once, after every accepted generation handoff has released its hold.
+     */
     @Override
     protected void closeEndpoint() {
         // A self-await invariant escapes here before ledger mutation/event
@@ -267,7 +271,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Bind exact NON_BATCH ownership inside the caller's pinned placement
+     * Bind exact NON_BATCH ownership inside the caller's held placement
      * transaction.
      */
     public ReservationResult<SingleReservation> reserveSingle(ScheduledRequest exactItem,

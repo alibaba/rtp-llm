@@ -318,23 +318,23 @@ class DecodeEndpointTest {
         EndpointTestSupport.applyStatus(endpoint, response);
     }
 
-    private DecodeEndpoint.ReservationHandle reserve(
-            long requestId, long requiredKv, long kvBudget) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            assertNotNull(pin);
+    private DecodeEndpoint.ReservationHandle reserve(long requestId, long requiredKv, long kvBudget) {
+        try (WorkerEndpoint.EndpointHold hold = endpoint.tryHold()) {
+            assertNotNull(hold);
             DecodeEndpoint.ReservationHandle reservation =
-                    endpoint.reserveUnqueued(pin, Long.toString(requestId), requiredKv, kvBudget, 0);
+                    endpoint.reserveUnqueued(hold, Long.toString(requestId), requiredKv, kvBudget, 0);
             reservations.put(requestId, reservation);
             return reservation;
         }
     }
 
-    private static DecodeEndpoint.ReservationHandle reserve(
-            DecodeEndpoint target, long requestId, long requiredKv, long kvBudget) {
-        try (WorkerEndpoint.GenerationPin pin = target.tryPinGeneration()) {
-            assertNotNull(pin);
-            return target.reserveUnqueued(
-                    pin, Long.toString(requestId), requiredKv, kvBudget, 0);
+    private static DecodeEndpoint.ReservationHandle reserve(DecodeEndpoint target,
+                                                            long requestId,
+                                                            long requiredKv,
+                                                            long kvBudget) {
+        try (WorkerEndpoint.EndpointHold hold = target.tryHold()) {
+            assertNotNull(hold);
+            return target.reserveUnqueued(hold, Long.toString(requestId), requiredKv, kvBudget, 0);
         }
     }
 
@@ -347,9 +347,9 @@ class DecodeEndpointTest {
     }
 
     private void markQueued(long requestId) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            assertNotNull(pin);
-            assertTrue(endpoint.markQueued(pin, reservations.get(requestId)));
+        try (WorkerEndpoint.EndpointHold hold = endpoint.tryHold()) {
+            assertNotNull(hold);
+            assertTrue(endpoint.markQueued(hold, reservations.get(requestId)));
         }
     }
 

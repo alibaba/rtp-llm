@@ -172,9 +172,9 @@ class EndpointCleanupDeadlockTest {
                         RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
                         mock(EndpointEventHandler.class)));
                 DecodeEndpoint.ReservationHandle reservation;
-                try (var pin = endpoint.tryPinGeneration()) {
-                    assertNotNull(pin);
-                    reservation = endpoint.reserveUnqueued(pin, Long.toString(id), 1L, 1L, 50);
+                try (var hold = endpoint.tryHold()) {
+                    assertNotNull(hold);
+                    reservation = endpoint.reserveUnqueued(hold, Long.toString(id), 1L, 1L, 50);
                 }
                 assertNotNull(reservation);
                 var item = new ScheduledRequest(context, future,

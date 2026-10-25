@@ -285,8 +285,8 @@ class QueuedBatchDeliveryTest {
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()).build().toByteString());
         var future = registry.register(context);
         DecodeEndpoint.ReservationHandle reservation;
-        try (var pin = decode.tryPinGeneration()) {
-            reservation = decode.reserveUnqueued(pin, Long.toString(id), 1L, 2L, 50);
+        try (var hold = decode.tryHold()) {
+            reservation = decode.reserveUnqueued(hold, Long.toString(id), 1L, 2L, 50);
         }
         assertNotNull(reservation);
         DeliverySettlementTestSupport.queueDecode(decode, reservation);

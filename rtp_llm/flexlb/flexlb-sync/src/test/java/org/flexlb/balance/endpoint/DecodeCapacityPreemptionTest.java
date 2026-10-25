@@ -34,9 +34,9 @@ class DecodeCapacityPreemptionTest {
         long requiredKvTokens = 100L;
         long kvBudgetTokens = 250L;
         DecodeEndpoint.ReservationHandle victim;
-        try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.reserveUnqueued(pin, "1", 100L, 200L, 30);
-            var reservation = endpoint.reserve(pin, "9", requiredKvTokens, kvBudgetTokens, 70);
+        try (var hold = endpoint.tryHold()) {
+            victim = endpoint.reserveUnqueued(hold, "1", 100L, 200L, 30);
+            var reservation = endpoint.reserve(hold, "9", requiredKvTokens, kvBudgetTokens, 70);
             assertNotNull(reservation);
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
                     endpoint.acquireDispatchPermit(reservation, policy).status());
@@ -63,9 +63,9 @@ class DecodeCapacityPreemptionTest {
         long requiredKvTokens = 100L;
         long kvBudgetTokens = 100L;
         DecodeEndpoint.ReservationHandle victim;
-        try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.reserve(pin, "1", 100L, 200L, 30);
-            assertNull(endpoint.reserve(pin, "9", requiredKvTokens, kvBudgetTokens, 70, policy));
+        try (var hold = endpoint.tryHold()) {
+            victim = endpoint.reserve(hold, "1", 100L, 200L, 30);
+            assertNull(endpoint.reserve(hold, "9", requiredKvTokens, kvBudgetTokens, 70, policy));
         }
         // The same queued reservation remains soft for ordinary Engine dispatch.
         assertTrue(policy.evaluate(endpoint.routingView().dispatchUsage(), requiredKvTokens, kvBudgetTokens).fits());
@@ -83,8 +83,8 @@ class DecodeCapacityPreemptionTest {
         long requiredKvTokens = 100L;
         long kvBudgetTokens = 200L;
         DecodeEndpoint.ReservationHandle victim;
-        try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.reserve(pin, "1", 0L, 900L, 30);
+        try (var hold = endpoint.tryHold()) {
+            victim = endpoint.reserve(hold, "1", 0L, 900L, 30);
         }
         DecodeEvictionProposal proposal = plan(endpoint, requiredKvTokens, kvBudgetTokens, policy, VictimStage.DECODE_RESERVED);
         assertEquals(List.of("1"), proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());

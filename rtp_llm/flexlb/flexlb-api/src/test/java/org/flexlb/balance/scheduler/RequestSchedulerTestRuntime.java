@@ -209,11 +209,10 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     }
 
     /**
-     * Convert a fixture's successful route metadata into the exact pinned
+     * Convert a fixture's successful route metadata into the exact held
      * queue-admission capability consumed by {@link RequestScheduler}.
      */
-    public PlacementResult<RouteAdmission, PlacementKey> admittedRoute(
-            BalanceContext context, Response response) {
+    public PlacementResult<RouteAdmission, PlacementKey> admittedRoute(BalanceContext context, Response response) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(response, "response");
         if (!response.isSuccess() || response.getServerStatus() == null) {
@@ -228,13 +227,13 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     continue;
                 }
                 String address = status.getLogicalIpPort();
-                WorkerEndpoint.GenerationPin pin = registry.pin(status.getRole(), address);
-                if (pin == null) {
+                WorkerEndpoint.EndpointHold hold = registry.hold(status.getRole(), address);
+                if (hold == null) {
                     throw new IllegalStateException(
                             "fixture route references an unpublished endpoint: "
                                     + status.getRole() + " " + address);
                 }
-                SelectedRole selected = select(pin, status);
+                SelectedRole selected = select(hold, status);
                 selections.add(selected);
             }
             return PlacementResult.success(
@@ -246,19 +245,17 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
     }
 
-    private static SelectedRole select(
-            WorkerEndpoint.GenerationPin pin, ServerStatus status) {
+    private static SelectedRole select(WorkerEndpoint.EndpointHold hold, ServerStatus status) {
         try {
             return switch (status.getRole()) {
-                case PREFILL, PDFUSION -> SelectedRole.prefill(
-                        pin, status, Math.max(0L, status.getPrefillTime()));
-                case DECODE -> SelectedRole.decode(pin, status);
-                case VIT, ENCODER -> SelectedRole.stateless(pin, status);
+                case PREFILL, PDFUSION -> SelectedRole.prefill(hold, status, Math.max(0L, status.getPrefillTime()));
+                case DECODE -> SelectedRole.decode(hold, status);
+                case VIT, ENCODER -> SelectedRole.stateless(hold, status);
                 case FRONTEND -> throw new IllegalArgumentException(
                         "FRONTEND cannot be a worker route");
             };
         } catch (RuntimeException | Error failure) {
-            pin.close();
+            hold.close();
             throw failure;
         }
     }

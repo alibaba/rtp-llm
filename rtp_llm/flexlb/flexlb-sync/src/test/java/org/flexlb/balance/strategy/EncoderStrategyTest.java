@@ -119,13 +119,13 @@ class EncoderStrategyTest {
                                      long running,
                                      long waiting,
                                      int pending) {
-        WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
+        WorkerEndpoint.EndpointHold hold = mock(WorkerEndpoint.EndpointHold.class);
         EncoderEndpoint endpoint = mock(EncoderEndpoint.class);
         WorkerStatus status = mock(WorkerStatus.class);
         WorkerStatus.EngineObservation engine = mock(WorkerStatus.EngineObservation.class);
-        when(directory.pinEndpoint(RoleType.ENCODER, address)).thenReturn(pin);
-        when(pin.endpoint()).thenReturn(endpoint);
-        when(pin.generationId()).thenReturn(1L);
+        when(directory.holdEndpoint(RoleType.ENCODER, address)).thenReturn(hold);
+        when(hold.endpoint()).thenReturn(endpoint);
+        when(hold.generationId()).thenReturn(1L);
         when(endpoint.getStatus()).thenReturn(status);
         when(endpoint.getIp()).thenReturn(address);
         when(endpoint.getHttpPort()).thenReturn(port);

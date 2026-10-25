@@ -118,8 +118,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     }
 
     /** Translate fixture response metadata into an exact queue admission. */
-    public PlacementResult<RouteAdmission, PlacementKey> routeResult(
-            BalanceContext context, Response response) {
+    public PlacementResult<RouteAdmission, PlacementKey> routeResult(BalanceContext context, Response response) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(response, "response");
         if (!response.isSuccess()) {
@@ -137,13 +136,13 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     continue;
                 }
                 String address = status.getServerIp() + ":" + status.getHttpPort();
-                WorkerEndpoint.GenerationPin pin = registry.pin(status.getRole(), address);
-                if (pin == null) {
+                WorkerEndpoint.EndpointHold hold = registry.hold(status.getRole(), address);
+                if (hold == null) {
                     throw new IllegalStateException(
                             "fixture route references an unpublished endpoint: "
                                     + status.getRole() + " " + address);
                 }
-                SelectedRole selected = select(pin, status);
+                SelectedRole selected = select(hold, status);
                 selections.add(selected);
             }
             return PlacementResult.success(
@@ -195,19 +194,17 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         statusNotifier.run();
     }
 
-    private static SelectedRole select(
-            WorkerEndpoint.GenerationPin pin, ServerStatus status) {
+    private static SelectedRole select(WorkerEndpoint.EndpointHold hold, ServerStatus status) {
         try {
             return switch (status.getRole()) {
-                case PREFILL, PDFUSION -> SelectedRole.prefill(
-                        pin, status, Math.max(0L, status.getPrefillTime()));
-                case DECODE -> SelectedRole.decode(pin, status);
-                case VIT, ENCODER -> SelectedRole.stateless(pin, status);
+                case PREFILL, PDFUSION -> SelectedRole.prefill(hold, status, Math.max(0L, status.getPrefillTime()));
+                case DECODE -> SelectedRole.decode(hold, status);
+                case VIT, ENCODER -> SelectedRole.stateless(hold, status);
                 case FRONTEND -> throw new IllegalArgumentException(
                         "FRONTEND cannot be a worker route");
             };
         } catch (RuntimeException | Error failure) {
-            pin.close();
+            hold.close();
             throw failure;
         }
     }

@@ -61,7 +61,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** Final selector/pin ownership contracts for {@link DefaultRouter}. */
+/**
+ * Final selector/hold ownership contracts for {@link DefaultRouter}.
+ */
 class DefaultRouterTest {
     private DeliveryClaim lastDelivery;
 
@@ -152,8 +154,7 @@ class DefaultRouterTest {
         context.setRequestedRoles(Set.of(RoleType.ENCODER));
         SelectionFixture encoder = selection(RoleType.ENCODER, 703L, "encoder", 8003, "g1");
         when(encoderSelector.select(context, null)).thenReturn(encoder.selection);
-        when(requests.claimEncoderRoute(eq("703"), any(), eq(encoder.pin)))
-                .thenReturn(true);
+        when(requests.claimEncoderRoute(eq("703"), any(), eq(encoder.hold))).thenReturn(true);
         when(requests.publishEncoderRoute(eq("703"), any(), any()))
                 .thenAnswer(call -> {
                     call.getArgument(1, CompletableFuture.class)
@@ -172,7 +173,7 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess());
         assertEquals(RequestPhase.ENCODER, context.getRequestPhase());
         assertEquals(List.of(encoder.status), response.getServerStatus());
-        verify(encoder.pin).close();
+        verify(encoder.hold).close();
         verifyNoInteractions(prefillSelector, decodeSelector, vitSelector);
     }
 
@@ -396,7 +397,7 @@ class DefaultRouterTest {
     }
 
     @Test
-    void queueRouteTransfersTheExactPrefillPinIntoAdmissionOwnership() {
+    void queueRouteTransfersTheExactPrefillHoldIntoAdmissionOwnership() {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
         DefaultRouter router = router();
         BalanceContext context = context(21L);
@@ -412,11 +413,11 @@ class DefaultRouterTest {
         assertTrue(admitted.value().response().isSuccess());
         assertEquals(List.of(prefill.status),
                 admitted.value().response().getServerStatus());
-        verify(prefill.selection).takeGenerationPin();
-        verify(prefill.pin, never()).close();
+        verify(prefill.selection).takeEndpointHold();
+        verify(prefill.hold, never()).close();
 
         admitted.value().close();
-        verify(prefill.pin).close();
+        verify(prefill.hold).close();
     }
 
     @Test
@@ -443,8 +444,8 @@ class DefaultRouterTest {
                 context, RoleType.PREFILL, null);
         verify(vitSelector).select(
                 context, RoleType.VIT, "selected-group");
-        verify(vit.pin).close();
-        verify(prefill.pin).close();
+        verify(vit.hold).close();
+        verify(prefill.hold).close();
     }
 
     @Test
@@ -477,7 +478,7 @@ class DefaultRouterTest {
     }
 
     @Test
-    void laterSelectionFailureClosesEveryEarlierExactPinOwner() {
+    void laterSelectionFailureClosesEveryEarlierExactHoldOwner() {
         when(modelMeta.requiredRoles())
                 .thenReturn(List.of(RoleType.PREFILL, RoleType.VIT));
         DefaultRouter router = router();
@@ -518,11 +519,11 @@ class DefaultRouterTest {
         assertEquals(new PlacementKey(RoleType.DECODE, "g1"),
                 blocked.blocker());
         verify(prefill.selection).close();
-        verify(prefill.selection, never()).takeGenerationPin();
+        verify(prefill.selection, never()).takeEndpointHold();
     }
 
     @Test
-    void mismatchedSelectedRequestFailsClosedAndReleasesPins() {
+    void mismatchedSelectedRequestFailsClosedAndReleasesHolds() {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
         DefaultRouter router = router();
         BalanceContext context = context(61L);
@@ -535,7 +536,7 @@ class DefaultRouterTest {
         assertThrows(IllegalStateException.class, () -> select(router, context));
 
         verify(foreign.selection).close();
-        verify(foreign.selection, never()).takeGenerationPin();
+        verify(foreign.selection, never()).takeEndpointHold();
     }
 
     @Test
@@ -617,14 +618,9 @@ class DefaultRouterTest {
         return selection(role, Long.toString(requestId), ip, httpPort, group);
     }
 
-    private static SelectionFixture selection(
-            RoleType role,
-            String requestId,
-            String ip,
-            int httpPort,
-            String group) {
+    private static SelectionFixture selection(RoleType role, String requestId, String ip, int httpPort, String group) {
         SelectedRole selection = mock(SelectedRole.class);
-        WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
+        WorkerEndpoint.EndpointHold hold = mock(WorkerEndpoint.EndpointHold.class);
         WorkerEndpoint endpoint = switch (role) {
             case PREFILL, PDFUSION -> mock(PrefillEndpoint.class);
             case DECODE -> mock(DecodeEndpoint.class);
@@ -639,17 +635,16 @@ class DefaultRouterTest {
         status.setGroup(group);
         when(selection.serverStatus()).thenReturn(status);
         when(selection.prefillWorkMs()).thenReturn(1L);
-        when(selection.takeGenerationPin()).thenReturn(pin);
-        when(pin.endpoint()).thenReturn(endpoint);
+        when(selection.takeEndpointHold()).thenReturn(hold);
+        when(hold.endpoint()).thenReturn(endpoint);
         when(endpoint.ipPort()).thenReturn(status.getLogicalIpPort());
-        return new SelectionFixture(selection, pin, endpoint, status);
+        return new SelectionFixture(selection, hold, endpoint, status);
     }
 
-    private record SelectionFixture(
-            SelectedRole selection,
-            WorkerEndpoint.GenerationPin pin,
-            WorkerEndpoint endpoint,
-            ServerStatus status) {
+    private record SelectionFixture(SelectedRole selection,
+                                    WorkerEndpoint.EndpointHold hold,
+                                    WorkerEndpoint endpoint,
+                                    ServerStatus status) {
     }
 
     private static PlacementResult<RouteAdmission, PlacementKey> select(DefaultRouter router, BalanceContext context) {

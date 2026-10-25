@@ -53,14 +53,14 @@ class WorkerDirectoryTest {
         RunnerTestSupport.publishEndpoint(registry,
                 RoleType.DECODE, filtered.getLogicalIpPort(), filtered);
 
-        List<WorkerEndpoint.GenerationPin> result = workerDirectory.pinEndpoints(RoleType.DECODE, "group1");
+        List<WorkerEndpoint.EndpointHold> result = workerDirectory.holdEndpoints(RoleType.DECODE, "group1");
         try {
             assertEquals(1, result.size());
             assertSame(matching, result.getFirst().endpoint().getStatus());
             assertEquals(matching.getLogicalIpPort(),
                     result.getFirst().endpoint().ipPort());
         } finally {
-            closePins(result);
+            closeHolds(result);
         }
     }
 
@@ -73,21 +73,19 @@ class WorkerDirectoryTest {
         RunnerTestSupport.publishEndpoint(registry,
                 RoleType.PREFILL, second.getLogicalIpPort(), second);
 
-        List<WorkerEndpoint.GenerationPin> result = workerDirectory.pinEndpoints(RoleType.PREFILL, null);
+        List<WorkerEndpoint.EndpointHold> result = workerDirectory.holdEndpoints(RoleType.PREFILL, null);
         try {
             assertEquals(2, result.size());
-            assertTrue(result.stream().anyMatch(
-                    pin -> pin.endpoint().getStatus() == first));
-            assertTrue(result.stream().anyMatch(
-                    pin -> pin.endpoint().getStatus() == second));
+            assertTrue(result.stream().anyMatch(hold -> hold.endpoint().getStatus() == first));
+            assertTrue(result.stream().anyMatch(hold -> hold.endpoint().getStatus() == second));
         } finally {
-            closePins(result);
+            closeHolds(result);
         }
     }
 
     @Test
     void should_return_empty_capture_when_role_registry_is_empty() {
-        List<WorkerEndpoint.GenerationPin> result = workerDirectory.pinEndpoints(RoleType.PDFUSION, null);
+        List<WorkerEndpoint.EndpointHold> result = workerDirectory.holdEndpoints(RoleType.PDFUSION, null);
 
         assertNotNull(result);
         assertTrue(result.isEmpty());
@@ -99,7 +97,7 @@ class WorkerDirectoryTest {
         RunnerTestSupport.publishEndpoint(registry,
                 RoleType.VIT, status.getLogicalIpPort(), status);
 
-        List<WorkerEndpoint.GenerationPin> result = workerDirectory.pinEndpoints(RoleType.VIT, "nonExistentGroup");
+        List<WorkerEndpoint.EndpointHold> result = workerDirectory.holdEndpoints(RoleType.VIT, "nonExistentGroup");
 
         assertTrue(result.isEmpty());
         assertEquals(List.of(status.getLogicalIpPort()),
@@ -396,12 +394,12 @@ class WorkerDirectoryTest {
         WorkerEndpoint registered = RunnerTestSupport.publishEndpoint(registry,
                 role, status.getLogicalIpPort(), status);
 
-        List<WorkerEndpoint.GenerationPin> selected = workerDirectory.pinEndpoints(role, null);
+        List<WorkerEndpoint.EndpointHold> selected = workerDirectory.holdEndpoints(role, null);
         try {
             assertEquals(1, selected.size());
             assertSame(registered, selected.getFirst().endpoint());
         } finally {
-            closePins(selected);
+            closeHolds(selected);
         }
     }
 
@@ -411,10 +409,9 @@ class WorkerDirectoryTest {
                 role, group, "127.0.0.1", port, port + 1, "test-site");
     }
 
-    private static void closePins(
-            List<WorkerEndpoint.GenerationPin> pins) {
-        for (WorkerEndpoint.GenerationPin pin : pins) {
-            pin.close();
+    private static void closeHolds(List<WorkerEndpoint.EndpointHold> holds) {
+        for (WorkerEndpoint.EndpointHold hold : holds) {
+            hold.close();
         }
     }
 

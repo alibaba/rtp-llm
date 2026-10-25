@@ -53,15 +53,11 @@ class DecodeSelectionAdmissionContractTest {
                     assertEquals(FREE_IP, selected.serverStatus().getServerIp(),
                             "free placement capacity must win over a queued endpoint with only dispatch capacity");
                     fixture.assertSelectionHasNoReservation(requestId, queuedUsage, freeUsage);
-                    try (WorkerEndpoint.GenerationPin pin = selected.takeGenerationPin()) {
-                        DecodeEndpoint endpoint = (DecodeEndpoint) pin.endpoint();
-                        DecodeEndpoint.ReservationHandle reservation = endpoint.reserve(
-                                pin,
-                                request.requestId(),
-                                request.inputKvTokens(),
-                                request.inputAndMaxOutputKvTokens(),
-                                request.priority(),
-                                request.capacity());
+                    try (WorkerEndpoint.EndpointHold hold = selected.takeEndpointHold()) {
+                        DecodeEndpoint endpoint = (DecodeEndpoint) hold.endpoint();
+                        DecodeEndpoint.ReservationHandle reservation =
+                                endpoint.reserve(hold, request.requestId(), request.inputKvTokens(),
+                                        request.inputAndMaxOutputKvTokens(), request.priority(), request.capacity());
                         assertNotNull(reservation, "the selected endpoint must pass the same placement gate");
                         try {
                             String canonicalRequestId = Long.toString(requestId);
@@ -151,10 +147,10 @@ class DecodeSelectionAdmissionContractTest {
             strategy = new DecodeSelector(new WorkerDirectory(endpoints));
 
             long kvBudget = dimension == CapacityDimension.EXPECTED_KV ? 400L : 0L;
-            try (WorkerEndpoint.GenerationPin pin = queued.tryPinGeneration()) {
-                assertNotNull(pin);
-                assertNotNull(queued.reserve(pin, "1", 0L, kvBudget, 50));
-                assertNotNull(queued.reserve(pin, "2", 0L, kvBudget, 50));
+            try (WorkerEndpoint.EndpointHold hold = queued.tryHold()) {
+                assertNotNull(hold);
+                assertNotNull(queued.reserve(hold, "1", 0L, kvBudget, 50));
+                assertNotNull(queued.reserve(hold, "2", 0L, kvBudget, 50));
             }
         }
 

@@ -41,12 +41,12 @@ public final class RandomStrategy {
         int start = ThreadLocalRandom.current().nextInt(addresses.size());
         for (int offset = 0; offset < addresses.size(); offset++) {
             String address = addresses.get((start + offset) % addresses.size());
-            WorkerEndpoint.GenerationPin pin = workerDirectory.pinEndpoint(RoleType.VIT, address);
-            if (pin == null) {
+            WorkerEndpoint.EndpointHold hold = workerDirectory.holdEndpoint(RoleType.VIT, address);
+            if (hold == null) {
                 continue;
             }
             try {
-                WorkerStatus status = pin.endpoint().getStatus();
+                WorkerStatus status = hold.endpoint().getStatus();
                 WorkerStatus.TopologySnapshot topology =
                         status.topologySnapshot();
                 if (group != null && !group.equals(topology.group())) {
@@ -55,16 +55,12 @@ public final class RandomStrategy {
                 WorkerStatus.EngineObservation engine =
                         status.committedEngineObservation();
                 context.recordSelectionReason(role, "RANDOM");
-                WorkerEndpoint.GenerationPin selectedPin = pin;
-                pin = null;
-                return selected(
-                        selectedPin,
-                        topology,
-                        engine,
-                        context.getRequestId());
+                WorkerEndpoint.EndpointHold selectedHold = hold;
+                hold = null;
+                return selected(selectedHold, topology, engine, context.getRequestId());
             } finally {
-                if (pin != null) {
-                    pin.close();
+                if (hold != null) {
+                    hold.close();
                 }
             }
         }
@@ -74,11 +70,10 @@ public final class RandomStrategy {
         return null;
     }
 
-    private static SelectedRole selected(
-            WorkerEndpoint.GenerationPin pin,
-            WorkerStatus.TopologySnapshot topology,
-            WorkerStatus.EngineObservation engine,
-            String requestId) {
+    private static SelectedRole selected(WorkerEndpoint.EndpointHold hold,
+                                         WorkerStatus.TopologySnapshot topology,
+                                         WorkerStatus.EngineObservation engine,
+                                         String requestId) {
         try {
             ServerStatus result = new ServerStatus();
             result.setSuccess(true);
@@ -92,12 +87,12 @@ public final class RandomStrategy {
             result.setSelectedEngineIndex(
                     topology.engineIndex(), topology.multiEngineNum());
 
-            WorkerEndpoint.GenerationPin owned = pin;
-            pin = null;
+            WorkerEndpoint.EndpointHold owned = hold;
+            hold = null;
             return SelectedRole.stateless(owned, result);
         } finally {
-            if (pin != null) {
-                pin.close();
+            if (hold != null) {
+                hold.close();
             }
         }
     }
