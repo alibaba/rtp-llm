@@ -2,11 +2,14 @@ package org.flexlb.balance.schedulev2.decode;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
+import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
+import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.Request;
@@ -20,10 +23,12 @@ import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -35,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -66,7 +72,8 @@ class DecodeQueueLoopTest {
                 decodeLoopSignal);
         when(selector.select(any(), any(), any())).thenAnswer(invocation -> success());
         loop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, new PlacementAvailability(), selector,
-                mock(DefaultRouter.class));
+                mock(DefaultRouter.class), new DecodePreemptionCoordinator(mock(EngineCancelChannel.class),
+                        mock(RequestRegistry.class), mock(RequestSchedulerReporter.class)));
     }
 
     @AfterEach
@@ -124,15 +131,19 @@ class DecodeQueueLoopTest {
     }
 
     @Test
-    void cancelledRequestReturnsDecodeReservation() {
+    void cancelledRequestReturnsDecodeReservationInNextRound() {
         Request request = addWaiting("1");
         loop.runOnce();
 
         assertTrue(request.cancel(CancelReason.CLIENT_CANCELLED));
         cleanup.releaseEnded(request);
 
+        // 清理不动 reserve，请求留在 reserved，Decode 队列下一轮扫到后归还
+        assertEquals(1, decodeQueue.reservedCount());
+        assertEquals(1L, decode.routingView().placementUsage().occupiedRequests());
+        loop.runOnce();
         assertNull(request.decodeChoice());
-        assertEquals(0L, decode.routingView().inputKvReserved());
+        assertEquals(0L, decode.routingView().placementUsage().occupiedRequests());
         assertEquals(0, decodeQueue.reservedCount());
         assertEquals(0, decodeQueue.waitingCount());
         assertEquals(0, requestTable.size());
@@ -164,8 +175,67 @@ class DecodeQueueLoopTest {
         assertEquals(1, decodeQueue.waitingCount());
     }
 
+    @Test
+    void higherPriorityRequestPreemptsPublishedRequestWhenDecodeIsFull() {
+        config.queueScheduler().getOrdering().setType(QueueOrderingConfig.Type.PRIORITY);
+        Request low = addWaiting("1", 30);
+        loop.runOnce();
+        loop.runOnce();
+        assertEquals(Stage.PUBLISHED, low.stage());
+
+        ServerStatus highStatus = decodeStatus();
+        doAnswer(invocation -> PlacementResult.success(SelectedRole.decode(decode.tryHold(), highStatus)))
+                .when(selector)
+                .select(any(), any(), any());
+        Request high = addWaiting("2", 80);
+        assertTrue(loop.runOnce());
+        assertEquals(Stage.DECODE_RESERVED, high.stage());
+        assertTrue(loop.runOnce());
+
+        assertEquals(Stage.PUBLISHED, high.stage());
+        assertEquals(List.of("1"), high.future().join().getServerStatus().get(1).getPreemptRequestIds());
+    }
+
+    @Test
+    void samePriorityRequestDoesNotPreempt() {
+        config.queueScheduler().getOrdering().setType(QueueOrderingConfig.Type.PRIORITY);
+        addWaiting("1", 30);
+        loop.runOnce();
+        loop.runOnce();
+
+        Request second = addWaiting("2", 30);
+        assertFalse(loop.runOnce());
+
+        assertEquals(Stage.DECODE_WAITING, second.stage());
+    }
+
+    @Test
+    void cancelledPreemptingRequestRollsBackPreemption() {
+        config.queueScheduler().getOrdering().setType(QueueOrderingConfig.Type.PRIORITY);
+        addWaiting("1", 30);
+        loop.runOnce();
+        loop.runOnce();
+        Request high = addWaiting("2", 80);
+        loop.runOnce();
+        assertEquals(Stage.DECODE_RESERVED, high.stage());
+
+        high.cancel(CancelReason.CLIENT_CANCELLED);
+        cleanup.releaseEnded(high);
+        loop.runOnce();
+        assertNull(decode.reservationHandle("2"));
+
+        // 抢占撤销后，被抢占的请求可以再被别的请求抢占
+        Request next = addWaiting("3", 80);
+        assertTrue(loop.runOnce());
+        assertEquals(Stage.DECODE_RESERVED, next.stage());
+    }
+
     private Request addWaiting(String requestId) {
-        Request request = V2TestSupport.request(config, requestId, 30, 16L);
+        return addWaiting(requestId, 30);
+    }
+
+    private Request addWaiting(String requestId, int priority) {
+        Request request = V2TestSupport.request(config, requestId, priority, 16L);
         request.setQueueSeq(Long.parseLong(requestId));
         V2TestSupport.choose(request, V2TestSupport.prefillEndpoint("p1:8000"), 0L, 0L);
         request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
@@ -173,6 +243,15 @@ class DecodeQueueLoopTest {
         requestTable.add(request);
         decodeQueue.addWaiting(request);
         return request;
+    }
+
+    private ServerStatus decodeStatus() {
+        ServerStatus status = new ServerStatus();
+        status.setRole(RoleType.DECODE);
+        status.setSuccess(true);
+        status.setServerIp("127.0.0.2");
+        status.setHttpPort(8080);
+        return status;
     }
 
     private PlacementResult<SelectedRole, RoleType> success() {

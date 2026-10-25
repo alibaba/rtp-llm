@@ -1,6 +1,7 @@
 package org.flexlb.balance.schedulev2;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.PlacementAvailability;
@@ -154,7 +155,8 @@ class RequestSchedulerV2Test {
         when(modelMetaConfig.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
         return new RequestSchedulerV2(configService, queueCapacity, mock(EndpointRegistry.class),
                 new PlacementAvailability(), mock(DefaultRouter.class), mock(CostBasedPrefillStrategy.class),
-                mock(DecodeSelector.class), new PrefillQueueRegistry(configService), modelMetaConfig);
+                mock(DecodeSelector.class), new PrefillQueueRegistry(configService), modelMetaConfig,
+                mock(DecodePreemptionCoordinator.class));
     }
 
     private BalanceContext context(String requestId, int priority, long expiresInMs) {

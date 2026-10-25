@@ -34,7 +34,7 @@ import java.util.function.BooleanSupplier;
 @Component
 public final class DecodePreemptionCoordinator {
 
-    record PreemptionResult(
+    public record PreemptionResult(
             boolean committed, boolean controlFailure, String detail) {
         public PreemptionResult {
             if (committed && controlFailure) {
@@ -44,7 +44,7 @@ public final class DecodePreemptionCoordinator {
         }
     }
 
-    record PreemptionCommand(DecodeEndpoint endpoint,
+    public record PreemptionCommand(DecodeEndpoint endpoint,
                              String incomingRequestId,
                              long incomingKvTokens,
                              long incomingKvBudgetTokens,
@@ -103,7 +103,7 @@ public final class DecodePreemptionCoordinator {
         this.reporter = reporter;
     }
 
-    CompletableFuture<PreemptionResult> prepareReturnedPreemption(
+    public CompletableFuture<PreemptionResult> prepareReturnedPreemption(
             PreemptionCommand command) {
         long token = nextToken();
         long generation = command.endpoint().getStatus().getGenerationId();

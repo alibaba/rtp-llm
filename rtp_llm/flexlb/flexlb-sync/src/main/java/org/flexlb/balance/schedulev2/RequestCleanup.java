@@ -1,6 +1,5 @@
 package org.flexlb.balance.schedulev2;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.schedulev2.decode.DecodeQueue;
 import org.flexlb.balance.schedulev2.main.MainQueue;
@@ -41,8 +40,9 @@ public final class RequestCleanup {
     }
 
     /**
-     * 请求失败或取消后调用：取消超时任务，移出主队列、Prefill 队列和 Decode 队列，删掉 Prefill 的 dispatch 记录，
-     * 归还 Decode 的 reserve、主队列名额和排队总数，最后从请求表移除。
+     * 请求失败或取消后调用：取消超时任务，移出主队列、Prefill 队列和 Decode 队列的 waiting，删掉 Prefill 的 dispatch 记录，
+     * 归还主队列名额和排队总数，最后从请求表移除。
+     * 在 Decode 上 reserve 了的请求留在 Decode 队列的 reserved 里，由 Decode 队列线程归还 reserve，这里只唤醒它。
      */
     public void releaseEnded(Request request) {
         request.cancelDeadlineTask();
@@ -54,8 +54,10 @@ public final class RequestCleanup {
                 prefillLoopSignal.wake();
             }
         }
-        decodeQueue.remove(request);
-        releaseDecodeReservation(request);
+        decodeQueue.removeWaiting(request);
+        if (request.decodeChoice() != null) {
+            decodeLoopSignal.wake();
+        }
         releaseQueueSlot(request);
         queueCapacity.decreaseTotalQueueCount(request.future());
         requestTable.remove(request);
@@ -76,19 +78,6 @@ public final class RequestCleanup {
     public void releaseAtPrefillDispatch(Request request) {
         releaseQueueSlot(request);
         queueCapacity.decreaseTotalQueueCount(request.future());
-    }
-
-    /**
-     * 归还请求在 Decode 上的 reserve，并唤醒 Decode 队列循环。没有 reserve 时什么也不做。
-     * 只用于还没发布的请求，结果没发给调用方，所以按 NOT_SENT 归还。
-     */
-    public void releaseDecodeReservation(Request request) {
-        DecodeChoice choice = request.takeDecodeChoice();
-        if (choice == null) {
-            return;
-        }
-        choice.endpoint().release(choice.reservation(), DecodeEndpoint.ReleaseReason.NOT_SENT);
-        decodeLoopSignal.wake();
     }
 
     /**

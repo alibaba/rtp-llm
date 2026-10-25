@@ -1,6 +1,7 @@
 package org.flexlb.balance.schedulev2;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.PlacementAvailability;
@@ -74,7 +75,8 @@ public class RequestSchedulerV2 {
                               CostBasedPrefillStrategy prefillStrategy,
                               DecodeSelector decodeSelector,
                               PrefillQueueRegistry prefillQueues,
-                              ModelMetaConfig modelMetaConfig) {
+                              ModelMetaConfig modelMetaConfig,
+                              DecodePreemptionCoordinator preemptionCoordinator) {
         this.configService = configService;
         this.deployedRoles = Set.copyOf(modelMetaConfig.requiredRoles());
         this.prefillRole = deployedRoles.contains(RoleType.PREFILL)
@@ -92,7 +94,7 @@ public class RequestSchedulerV2 {
         this.prefillQueueLoop = new PrefillQueueLoop(prefillQueues, prefillLoopSignal, cleanup, mainQueue,
                 endpointRegistry, configService, this::sendToDecodeQueue);
         this.decodeQueueLoop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, placementAvailability,
-                decodeSelector, router);
+                decodeSelector, router, preemptionCoordinator);
         this.deadlineTimer = new ScheduledThreadPoolExecutor(1, task -> {
             Thread thread = new Thread(task, "flexlb-v2-deadline");
             thread.setDaemon(true);
@@ -239,12 +241,13 @@ public class RequestSchedulerV2 {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
-        mainQueueLoop.close();
-        prefillQueueLoop.close();
-        decodeQueueLoop.close();
+        // 先让请求失败再停循环：Decode 队列线程退出前要归还这些请求在 Decode 上的 reserve
         for (Request request : requestTable.list()) {
             request.fail(StrategyErrorType.DISPATCH_FAILED, SHUTTING_DOWN_MESSAGE);
         }
+        mainQueueLoop.close();
+        prefillQueueLoop.close();
+        decodeQueueLoop.close();
         deadlineTimer.shutdownNow();
     }
 }

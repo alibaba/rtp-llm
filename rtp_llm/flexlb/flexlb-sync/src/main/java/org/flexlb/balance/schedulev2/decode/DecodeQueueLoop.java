@@ -4,8 +4,13 @@ import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.eviction.DecodeEndpointSnapshot;
+import org.flexlb.balance.eviction.DecodeEvictionProposal;
+import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
+import org.flexlb.balance.eviction.EvictionPlanner;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.decode.DecodeMode;
 import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.balance.schedulev2.DecodeChoice;
 import org.flexlb.balance.schedulev2.LoopSignal;
@@ -14,11 +19,18 @@ import org.flexlb.balance.schedulev2.RequestCleanup;
 import org.flexlb.balance.schedulev2.Stage;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.config.EngineCancellationConfig;
+import org.flexlb.config.PreemptionConfig;
+import org.flexlb.config.VictimStage;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
+import org.flexlb.util.PriorityNormalizer;
 
 import java.util.Collections;
+import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
@@ -31,11 +43,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Decode 队列线程，每一轮做两件事：
  * <ol>
  * <li>reserved 的请求按顺序向 reserve 的那台 Decode 要 permit，拿到后发布结果（PUBLISHED）。
+ * 扫到已经结束的请求就归还它的 reserve 并移出 reserved。
  * 某台 Decode 给不出 permit 时，这一轮跳过 reserve 在它上面的其他请求，等它有空位时被唤醒；</li>
  * <li>waiting 的请求按顺序选 Decode 并 reserve，成功后进入 DECODE_RESERVED。reserve 带容量上限，放不下就不 reserve。
  * 某个 group 没有放得下的 Decode 时，请求留在 waiting，这一轮跳过同 group 的请求，等 Decode 归还容量时被唤醒。</li>
  * </ol>
  * reserve 的 Decode 下线或 reserve 丢失时，请求退回 waiting 重新选。
+ * <p>
+ * 抢占模式下，选中的 Decode 放不下时，尝试抢占这台 Decode 上优先级更低、已经发给引擎的请求。
+ * V2 只支持 RETURN 方式：被抢占请求的 id 放进响应的 preemptRequestIds，由调用方去取消，flexlb 不发 cancel。
  */
 public final class DecodeQueueLoop {
 
@@ -54,6 +70,7 @@ public final class DecodeQueueLoop {
     private final PlacementAvailability placementAvailability;
     private final DecodeSelector decodeSelector;
     private final DefaultRouter router;
+    private final DecodePreemptionCoordinator preemptionCoordinator;
     /**
      * Decode 上下线或 reserve 容量变化时唤醒循环，让 waiting 的请求马上重试。
      */
@@ -74,13 +91,15 @@ public final class DecodeQueueLoop {
                            RequestCleanup cleanup,
                            PlacementAvailability placementAvailability,
                            DecodeSelector decodeSelector,
-                           DefaultRouter router) {
+                           DefaultRouter router,
+                           DecodePreemptionCoordinator preemptionCoordinator) {
         this.decodeQueue = decodeQueue;
         this.loopSignal = loopSignal;
         this.cleanup = cleanup;
         this.placementAvailability = placementAvailability;
         this.decodeSelector = decodeSelector;
         this.router = router;
+        this.preemptionCoordinator = preemptionCoordinator;
         this.capacityListener = loopSignal::wake;
         this.thread = new Thread(this::run, "flexlb-v2-decode-queue");
         this.thread.setDaemon(true);
@@ -119,6 +138,7 @@ public final class DecodeQueueLoop {
                 loopSignal.await(IDLE_WAIT_MS);
             }
         }
+        releaseEndedReserved();
         for (DecodeEndpoint endpoint : listenedEndpoints) {
             endpoint.removeEngineDispatchCapacityListener(capacityListener);
         }
@@ -134,12 +154,47 @@ public final class DecodeQueueLoop {
         return moved;
     }
 
+    /**
+     * 拿走请求在 Decode 上的 reserve 并归还。没有 reserve 时什么也不做。
+     */
+    private void releaseNow(Request request) {
+        DecodeChoice choice = request.takeDecodeChoice();
+        if (choice != null) {
+            release(choice);
+        }
+    }
+
+    /**
+     * 归还还没发布的请求在 Decode 上的 reserve。结果没发给调用方，所以按 NOT_SENT 归还。
+     * 抢占来的 reserve 还挂着抢占记录，NOT_SENT 不归还（返回 CONFLICT），要按 LOCAL_ROLLBACK 撤销抢占。
+     * 归还和 dispatch 都在这个线程里做，归还时 reserve 一定还没 dispatch；
+     * 已经 dispatch 的请求不会走到这里（发布成功的不归还，发布失败的抢占记录在 dispatch 时已经清掉）。
+     */
+    private void release(DecodeChoice choice) {
+        try {
+            DecodeEndpoint.ReservationReleaseResult result =
+                    choice.endpoint().release(choice.reservation(), DecodeEndpoint.ReleaseReason.NOT_SENT);
+            if (result == DecodeEndpoint.ReservationReleaseResult.CONFLICT) {
+                choice.endpoint().release(choice.reservation(), DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            }
+        } catch (RuntimeException failure) {
+            Logger.error("V2 decode reservation release failed: request_id={}", choice.reservation().requestId(),
+                    failure);
+        }
+    }
+
     private boolean dispatchReserved() {
         Set<DecodeEndpoint> fullEndpoints = Collections.newSetFromMap(new IdentityHashMap<>());
         boolean moved = false;
         Iterator<Request> iterator = decodeQueue.reservedIterator();
         while (iterator.hasNext()) {
             Request request = iterator.next();
+            if (request.stage().isEnded()) {
+                releaseNow(request);
+                decodeQueue.removeReserved(request);
+                moved = true;
+                continue;
+            }
             DecodeChoice choice = request.decodeChoice();
             if (request.stage() != Stage.DECODE_RESERVED || choice == null) {
                 decodeQueue.removeReserved(request);
@@ -203,23 +258,39 @@ public final class DecodeQueueLoop {
             return;
         }
         decodeQueue.removeReserved(request);
-        // 发布失败说明请求已经结束，结束时的清理会归还 reserve
         if (request.publish(Stage.DECODE_RESERVED,
                 List.of(request.prefillChoice().serverStatus(), choice.serverStatus()))) {
             cleanup.releasePublished(request);
+        } else {
+            // 请求已经结束，结果没发给调用方，归还 reserve
+            releaseNow(request);
         }
     }
 
     /**
      * reserve 的 Decode 下线或 reserve 丢失：归还 reserve，请求退回 waiting 重新选 Decode。
+     * 请求已经结束时只归还 reserve。
      */
     private void sendBackToWaiting(Request request) {
         decodeQueue.removeReserved(request);
-        if (!request.moveTo(Stage.DECODE_RESERVED, Stage.DECODE_WAITING)) {
-            return;
+        releaseNow(request);
+        if (request.moveTo(Stage.DECODE_RESERVED, Stage.DECODE_WAITING)) {
+            decodeQueue.addWaiting(request);
         }
-        cleanup.releaseDecodeReservation(request);
-        decodeQueue.addWaiting(request);
+    }
+
+    /**
+     * 线程退出前归还 reserved 里已经结束的请求的 reserve。
+     */
+    private void releaseEndedReserved() {
+        Iterator<Request> iterator = decodeQueue.reservedIterator();
+        while (iterator.hasNext()) {
+            Request request = iterator.next();
+            if (request.stage().isEnded()) {
+                releaseNow(request);
+                decodeQueue.removeReserved(request);
+            }
+        }
     }
 
     private void listenCapacity(DecodeEndpoint endpoint) {
@@ -307,12 +378,15 @@ public final class DecodeQueueLoop {
                     endpoint.reserve(hold, request.requestId(), requirement.inputKvTokens(),
                             requirement.inputAndMaxOutputKvTokens(), requirement.priority(), requirement.capacity());
             if (reservation == null) {
-                if (endpoint.reservationHandle(request.requestId()) == null) {
+                if (endpoint.reservationHandle(request.requestId()) != null) {
+                    request.fail(StrategyErrorType.DISPATCH_FAILED,
+                            "request id is already reserved on decode " + endpoint.ipPort());
+                    return true;
+                }
+                reservation = preempt(request, hold, requirement, selected.serverStatus());
+                if (reservation == null) {
                     return false;
                 }
-                request.fail(StrategyErrorType.DISPATCH_FAILED,
-                        "request id is already reserved on decode " + endpoint.ipPort());
-                return true;
             }
             choice = new DecodeChoice(endpoint, reservation, selected.serverStatus(), requirement);
         } catch (RuntimeException failure) {
@@ -324,10 +398,78 @@ public final class DecodeQueueLoop {
         decodeQueue.removeWaiting(request);
         if (!request.moveTo(Stage.DECODE_WAITING, Stage.DECODE_RESERVED)) {
             // 选的过程中请求已经结束
-            cleanup.releaseDecodeReservation(request);
+            releaseNow(request);
             return true;
         }
         decodeQueue.addReserved(request);
         return true;
+    }
+
+    /**
+     * 选中的 Decode 放不下时，尝试抢占这台 Decode 上优先级更低、已经发给引擎的请求。
+     * 成功时返回新请求在这台 Decode 上的 reserve，并把被抢占请求的 id 写进返回给调用方的 Decode 信息；
+     * 不能抢占或没有可抢占的请求时返回 null。
+     */
+    private DecodeEndpoint.ReservationHandle preempt(Request request,
+                                                     WorkerEndpoint.EndpointHold hold,
+                                                     DecodeRequirement requirement,
+                                                     ServerStatus serverStatus) {
+        PreemptionConfig policy = returnPreemptionPolicy(request, requirement);
+        if (policy == null) {
+            return null;
+        }
+        DecodeEndpoint endpoint = (DecodeEndpoint) hold.endpoint();
+        DecodeEndpointSnapshot snapshot = DecodeEndpointSnapshot.capture(endpoint, requirement.capacity());
+        DecodeEvictionProposal proposal =
+                EvictionPlanner.planDecode(requirement.priority(), requirement.inputKvTokens(),
+                        requirement.inputAndMaxOutputKvTokens(), List.of(snapshot), policy, null, new HashMap<>());
+        if (proposal == null || !proposal.requiresEngineCancel()) {
+            return null;
+        }
+        DecodePreemptionCoordinator.PreemptionCommand command = new DecodePreemptionCoordinator.PreemptionCommand(
+                endpoint, request.requestId(), requirement.inputKvTokens(), requirement.inputAndMaxOutputKvTokens(),
+                requirement.priority(), requirement.capacity(), proposal.victims(), 0L, policy.getTimeoutMs(),
+                () -> !request.stage().isEnded(), "v2_decode_queue");
+        // RETURN 方式不发 cancel，结果同步就有
+        DecodePreemptionCoordinator.PreemptionResult result =
+                preemptionCoordinator.prepareReturnedPreemption(command).join();
+        if (!result.committed()) {
+            Logger.debug("V2 decode preemption not committed: request_id={} detail={}", request.requestId(),
+                    result.detail());
+            return null;
+        }
+        DecodeEndpoint.ReservationHandle reservation = endpoint.reservationHandle(request.requestId());
+        if (reservation == null) {
+            return null;
+        }
+        // 抢占装上的 reserve 还没进排队，要先标记才能拿 permit
+        if (!endpoint.markQueued(hold, reservation)) {
+            endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            return null;
+        }
+        serverStatus.setPreemptRequestIds(
+                proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());
+        return reservation;
+    }
+
+    /**
+     * V2 用的抢占策略：只抢已经发给引擎的请求，并且固定用 RETURN 方式。
+     * 不是抢占模式、请求没有优先级或配置不允许抢引擎上的请求时返回 null。
+     */
+    private static PreemptionConfig returnPreemptionPolicy(Request request, DecodeRequirement requirement) {
+        if (requirement.mode() != DecodeMode.PREEMPT_AT_PLACEMENT
+                || !PriorityNormalizer.hasPriority(requirement.priority())) {
+            return null;
+        }
+        PreemptionConfig configured =
+                request.ctx().getConfig().queueScheduler().getOrdering().preemptionPolicy().orElse(null);
+        if (configured == null || !configured.allows(VictimStage.DECODE_ENGINE_OWNED)) {
+            return null;
+        }
+        PreemptionConfig policy = new PreemptionConfig();
+        policy.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_ENGINE_OWNED));
+        policy.setTimeoutMs(configured.getTimeoutMs());
+        policy.getEngineCancellation().setMode(EngineCancellationConfig.Mode.RETURN);
+        return policy;
     }
 }

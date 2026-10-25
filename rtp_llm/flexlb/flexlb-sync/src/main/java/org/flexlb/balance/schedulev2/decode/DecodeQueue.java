@@ -12,7 +12,10 @@ import java.util.concurrent.ConcurrentSkipListSet;
  * <li>waiting：还没选 Decode 的请求（DECODE_WAITING）；</li>
  * <li>reserved：已经在某台 Decode 上 reserve、等这台 Decode 给 permit 的请求（DECODE_RESERVED）。</li>
  * </ul>
- * 两部分都按 {@link RequestOrder} 排序。只有 Decode 队列线程会出队，其他线程只会加入或移除。
+ * 两部分都按 {@link RequestOrder} 排序。只有 Decode 队列线程会出队，其他线程只会加入或移除 waiting。
+ * <p>
+ * reserved 里的请求结束时，别的线程不把它移出 reserved，由 Decode 队列线程扫到后归还 reserve 再移除。
+ * 这样 V2 对 Decode reserve 的操作（reserve、拿 permit、dispatch、归还）都在 Decode 队列线程里，互相不会撞上。
  */
 public final class DecodeQueue {
 
@@ -54,13 +57,5 @@ public final class DecodeQueue {
 
     public int reservedCount() {
         return reserved.size();
-    }
-
-    /**
-     * 从两部分里都移除，请求结束时调用。
-     */
-    public void remove(Request request) {
-        waiting.remove(request);
-        reserved.remove(request);
     }
 }
