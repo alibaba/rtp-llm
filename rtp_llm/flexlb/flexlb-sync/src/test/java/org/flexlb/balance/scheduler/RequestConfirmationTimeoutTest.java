@@ -1,14 +1,12 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.delivery.NonBatchDeliveryStrategy;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
-import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
@@ -59,10 +57,8 @@ class RequestConfirmationTimeoutTest {
         var requests = new RequestRegistry(service, reporter, requestReporter);
         var eventHandler = new EndpointEventHandler(requests);
         var queueCapacity = new QueueCapacity();
-        var endpoints = new EndpointRegistry(service, eventHandler, reporter,
-                new NonBatchDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
-                new NonBatchTtftEstimator(),
-                new PlacementAvailability(), queueCapacity);
+        var endpoints = new EndpointRegistry(service, eventHandler, reporter, EndpointTestSupport.parkedDelivery(),
+                new NonBatchTtftEstimator(), new PlacementAvailability(), queueCapacity);
         var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter,
                 service, queueCapacity, new ModelMetaConfig());
         DecodeEndpoint decode = null;
@@ -99,14 +95,10 @@ class RequestConfirmationTimeoutTest {
             ScheduledRequest item = new ScheduledRequest(context, future, new Response(), prefillMetadata,
                     null, prefill, decode, reservation, slot.createdAtMs());
             AtomicReference<PrefillState.RouteReservation> routeReservation = new AtomicReference<>();
-            try (var mutation = requests.claimAdmissionHandle(Long.toString(REQUEST_ID), future);
-                 var pin = prefill.tryPinGeneration()) {
+            try (var mutation = requests.claimAdmissionHandle(Long.toString(REQUEST_ID), future)) {
                 assertNotNull(mutation);
-                assertNotNull(pin);
                 assertTrue(requests.commitItemForPublication(item, () -> {
-                    var reserved = prefill.reserveUnqueuedRoute(pin, item, 30_000L);
-                    assertEquals(ReservationResult.Status.SUCCESS, reserved.status());
-                    routeReservation.set(reserved.reservation());
+                    routeReservation.set(EndpointTestSupport.offerAndTakeRoute(prefill, item, 30_000L));
                     return true;
                 }));
             }

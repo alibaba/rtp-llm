@@ -1,13 +1,11 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryMetrics;
-import org.flexlb.balance.delivery.NonBatchDeliveryStrategy;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
-import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.config.ConfigService;
@@ -49,10 +47,8 @@ class PrefillCompletionEventTest {
         var requests = new RequestRegistry(service, reporter, requestReporter);
         var eventHandler = new EndpointEventHandler(requests);
         var queueCapacity = new QueueCapacity();
-        var endpoints = new EndpointRegistry(service, eventHandler, reporter,
-                new NonBatchDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
-                new NonBatchTtftEstimator(),
-                new PlacementAvailability(), queueCapacity);
+        var endpoints = new EndpointRegistry(service, eventHandler, reporter, EndpointTestSupport.parkedDelivery(),
+                new NonBatchTtftEstimator(), new PlacementAvailability(), queueCapacity);
         var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter,
                 service, queueCapacity, new ModelMetaConfig());
         try {
@@ -86,14 +82,10 @@ class PrefillCompletionEventTest {
             ScheduledRequest item = new ScheduledRequest(context, future, new Response(), null, null,
                     prefill, decode, reservation, System.currentTimeMillis());
             AtomicReference<PrefillState.RouteReservation> routeReservation = new AtomicReference<>();
-            try (var mutation = requests.claimAdmissionHandle("101", future);
-                 var pin = prefill.tryPinGeneration()) {
+            try (var mutation = requests.claimAdmissionHandle("101", future)) {
                 assertNotNull(mutation);
-                assertNotNull(pin);
                 assertTrue(requests.commitItemForPublication(item, () -> {
-                    var registered = prefill.reserveUnqueuedRoute(pin, item, 30_000L);
-                    assertEquals(ReservationResult.Status.SUCCESS, registered.status());
-                    routeReservation.set(registered.reservation());
+                    routeReservation.set(EndpointTestSupport.offerAndTakeRoute(prefill, item, 30_000L));
                     return true;
                 }));
             }

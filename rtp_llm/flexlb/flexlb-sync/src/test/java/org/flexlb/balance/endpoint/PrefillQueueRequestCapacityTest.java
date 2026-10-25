@@ -107,9 +107,7 @@ class PrefillQueueRequestCapacityTest {
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
         try (Fixture fixture = fixture(config)) {
             ScheduledRequest committed = item(config, fixture.endpoint, 1L);
-            try (var reservation = EndpointTestSupport.reserveUnqueued(fixture.endpoint, committed, 100L);
-                 var commit = fixture.endpoint.tryBeginRouteCommitAdmission();
-                 var handoff = commit.commit(List.of(committed), List.of(reservation))) {
+            try (var handoff = commitQueuedRoute(fixture, committed)) {
                 assertFalse(fixture.endpoint.canPreemptQueuedRequest(90, 1L));
                 assertTrue(EndpointTestSupport.offer(fixture.endpoint, item(config, fixture.endpoint, 2L, 90)));
                 assertEquals(2L, fixture.endpoint.observedRequestCount());
@@ -279,9 +277,7 @@ class PrefillQueueRequestCapacityTest {
         config.getScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
         try (Fixture fixture = fixture(config)) {
             ScheduledRequest delivered = item(config, fixture.endpoint, 1L);
-            try (var reservation = EndpointTestSupport.reserveUnqueued(fixture.endpoint, delivered, 100L);
-                    var commit = fixture.endpoint.tryBeginRouteCommitAdmission();
-                    var handoff = commit.commit(List.of(delivered), List.of(reservation))) {
+            try (var handoff = commitQueuedRoute(fixture, delivered)) {
                 assertFalse(fixture.endpoint.canDeliver(1L, 1));
                 for (long id = 2L; id <= 4L; id++) {
                     assertTrue(EndpointTestSupport.offer(fixture.endpoint,
@@ -576,6 +572,18 @@ class PrefillQueueRequestCapacityTest {
         context.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         return new ScheduledRequest(context, new CompletableFuture<Response>(), null, null, null,
                 endpoint, null, null, System.currentTimeMillis());
+    }
+
+    /**
+     * 把请求放进队列再提交，和真实交付一样，提交后归还它占用的共享排队名额。
+     */
+    private static PrefillState.CommittedHandoff commitQueuedRoute(Fixture fixture, ScheduledRequest item) {
+        var reservation = EndpointTestSupport.offerAndTakeRoute(fixture.endpoint, item, 100L);
+        try (var commit = fixture.endpoint.tryBeginRouteCommitAdmission()) {
+            var handoff = commit.commit(List.of(item), List.of(reservation));
+            fixture.queueCapacity.releaseEngineSubQueueSlot(RoleType.PREFILL);
+            return handoff;
+        }
     }
 
     private static Fixture fixture(FlexlbConfig config) {

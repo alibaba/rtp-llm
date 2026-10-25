@@ -198,9 +198,6 @@ public final class PrefillState {
                                     + requestId);
                 }
                 predictedWorkMs = boundedPrediction(predictedMs);
-                if (entry.queueMembership == QueueMembership.UNINDEXED) {
-                    committedWorkCapture = null;
-                }
                 recordMutationUnderLock();
             } finally {
                 lock.unlock();
@@ -403,12 +400,8 @@ public final class PrefillState {
         private ScheduledRequest committedItem;
         private Reservation reservation;
         private RequestEntry(ScheduledRequest item) {
-            this(item, QueueMembership.WAITING);
-        }
-
-        private RequestEntry(ScheduledRequest item, QueueMembership queueMembership) {
             this.requestId = item.requestId();
-            this.queueMembership = queueMembership;
+            this.queueMembership = QueueMembership.WAITING;
             this.activeItem = item;
         }
 
@@ -1167,38 +1160,6 @@ public final class PrefillState {
                         + item.requestId());
     }
 
-    /**
-     * Reserve immediate route work against current ownership in one transaction.
-     * Selection revisions are advisory; only exact identity and current capacity
-     * decide admission. A zero request limit leaves count admission disabled.
-     */
-    public ReservationResult<RouteReservation> reserveUnqueuedRoute(ScheduledRequest item,
-                                                                    long predictedMs,
-                                                                    long maxOutstandingRequests) {
-        if (maxOutstandingRequests < 0L) {
-            throw new IllegalArgumentException("request limit must be non-negative");
-        }
-        lock.lock();
-        try {
-            if (requests.containsKey(item.requestId())) {
-                return ReservationResult.fail(ReservationResult.Status.REQUEST_ALREADY_RESERVED);
-            }
-            if (maxOutstandingRequests > 0L && !canAcceptRequestUnderLock(maxOutstandingRequests)) {
-                return ReservationResult.fail(ReservationResult.Status.CAPACITY_FULL);
-            }
-            RequestEntry entry = new RequestEntry(item, QueueMembership.UNINDEXED);
-            RouteReservation reservation = new RouteReservation(entry, item.requestId(), predictedMs);
-            ReservationResult<RouteReservation> result = ReservationResult.success(reservation);
-            entry.reservation = reservation;
-            putRequestUnderLock(item.requestId(), entry);
-            committedWorkCapture = null;
-            recordMutationUnderLock();
-            return result;
-        } finally {
-            lock.unlock();
-        }
-    }
-
     private List<ScheduledRequest> validateRouteGroup(List<ScheduledRequest> items) {
         requireState(!items.isEmpty(), "committed group requires members");
         for (ScheduledRequest item : items) {
@@ -1944,13 +1905,6 @@ public final class PrefillState {
                 continue;
             }
             if (entry.isActive()) {
-                if (entry.queueMembership == QueueMembership.UNINDEXED
-                        && entry.reservation instanceof RouteReservation route) {
-                    // Capacity has been reserved for immediate handoff. Later admissions
-                    // must include this work even before its route is published.
-                    individual.add(new WorkView.RequestWork(
-                            entry.requestId, Phase.COMMITTED, route.predictedWorkMs));
-                }
                 continue;
             }
             if (entry.batchWork == null) {
@@ -2236,10 +2190,6 @@ public final class PrefillState {
         releaseBatchSlotUnderLock(lease);
         if (owner != null) {
             owner.reservation = null;
-            if (owner.queueMembership == QueueMembership.UNINDEXED) {
-                removeRequestUnderLock(owner.requestId, owner);
-                committedWorkCapture = null;
-            }
         }
         recordMutationUnderLock();
         return generationHandoff;

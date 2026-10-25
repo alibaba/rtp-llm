@@ -72,8 +72,15 @@ public final class EndpointCleanupTestSupport {
                     return new Owner(item, reservation);
                 }
             }
-            try (var reservation = state.reserveUnqueuedRoute(item, predictedMs, 1).reservation()) {
-                assertNotNull(reservation, "the expired individual must release its sole capacity slot");
+            lock.lock();
+            try {
+                assertTrue(state.enqueueActiveUnderLock(item, 1L),
+                        "the expired individual must release its sole capacity slot");
+            } finally {
+                lock.unlock();
+            }
+            try (var reservation = state.reserveRoute(item, predictedMs).reservation()) {
+                assertNotNull(reservation);
                 try (var handoff = state.commitRouteGroup(List.of(item), List.of(reservation),
                         generation.tryAcquireHandoff())) {
                     assertNotNull(handoff);

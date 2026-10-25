@@ -34,20 +34,20 @@ class PrefillRequestCapacityTest {
 
     @Test
     void waitingPreparedAndCommittedRequestsShareOneCount() {
-        ScheduledRequest queued = item(1), immediate = item(2);
+        ScheduledRequest queued = item(1), prepared = item(2);
         assertTrue(enqueue(queued, 2L));
-        var registration = reserve(immediate, 2L).reservation();
+        var registration = reserve(prepared, 2L).reservation();
         assertNotNull(registration);
         assertEquals(2L, state.observedRequestCount());
         assertFalse(enqueue(item(3), 2L));
         assertEquals(ReservationResult.Status.CAPACITY_FULL, reserve(item(3), 2L).status());
-        try (var handoff = commit(immediate, registration)) {
+        try (var handoff = commit(prepared, registration)) {
             assertEquals(2L, state.observedRequestCount());
         }
         registration.close();
         assertEquals(2L, state.observedRequestCount(), "ACK and capability closure cannot release Engine ownership");
-        assertTrue(state.terminalizeCommittedItem(immediate));
-        assertFalse(state.terminalizeCommittedItem(immediate));
+        assertTrue(state.terminalizeCommittedItem(prepared));
+        assertFalse(state.terminalizeCommittedItem(prepared));
         assertTrue(enqueue(item(3), 2L));
         assertEquals(2L, state.observedRequestCount());
     }
@@ -72,25 +72,27 @@ class PrefillRequestCapacityTest {
 
     @Test
     void scalarEngineWorkIsCountedWithoutInventingIdentity() {
-        var registration = reserve(item(1), 4L).reservation();
+        ScheduledRequest local = item(1);
+        var registration = reserve(local, 4L).reservation();
         heartbeat(Map.of(), 2L);
         assertEquals(3L, state.observedRequestCount(), "unseen local shadow cannot explain unidentified Engine work");
         assertEquals(ReservationResult.Status.CAPACITY_FULL, reserve(item(2), 3L).status());
-        registration.close();
+        cancel(local, registration);
         assertEquals(2L, state.observedRequestCount());
     }
 
     @Test
     void changingLimitCannotReleaseExistingOwners() {
-        var first = reserve(item(1), 2L).reservation();
-        var second = reserve(item(2), 2L).reservation();
+        ScheduledRequest firstItem = item(1), secondItem = item(2);
+        var first = reserve(firstItem, 2L).reservation();
+        var second = reserve(secondItem, 2L).reservation();
         assertEquals(ReservationResult.Status.CAPACITY_FULL, reserve(item(3), 1L).status());
         assertEquals(2L, state.observedRequestCount());
         assertFalse(state.canAcceptRequest(1L));
         assertTrue(state.canAcceptRequest(5L));
-        first.close();
+        cancel(firstItem, first);
         assertEquals(ReservationResult.Status.CAPACITY_FULL, reserve(item(3), 1L).status());
-        second.close();
+        cancel(secondItem, second);
         assertTrue(state.canAcceptRequest(1L));
         assertNotNull(reserve(item(3), 1L).reservation());
     }
@@ -117,17 +119,18 @@ class PrefillRequestCapacityTest {
     void staleOwnerCannotReleaseAReusedRequestId() {
         ScheduledRequest previous = item(1);
         var old = reserve(previous, 1L).reservation();
-        old.close();
-        var current = reserve(item(1), 1L).reservation();
+        cancel(previous, old);
+        ScheduledRequest reused = item(1);
+        var current = reserve(reused, 1L).reservation();
         old.close();
         assertFalse(state.terminalizeCommittedItem(previous));
         assertEquals(1L, state.observedRequestCount());
-        current.close();
+        cancel(reused, current);
         assertEquals(0L, state.observedRequestCount());
     }
 
     @Test
-    void immediateAdmissionChecksCurrentCapacityAfterOtherOwnershipChanges() {
+    void queuedAdmissionChecksCurrentCapacityAfterOtherOwnershipChanges() {
         assertTrue(state.canAcceptRequest(2L));
         assertTrue(enqueue(item(1), 2L));
         assertNotNull(reserve(item(2), 2L).reservation(),
@@ -160,9 +163,11 @@ class PrefillRequestCapacityTest {
         CountDownLatch selected = new CountDownLatch(contenders);
         CountDownLatch admit = new CountDownLatch(1);
         try (var executor = Executors.newFixedThreadPool(contenders)) {
+            List<ScheduledRequest> requests = new ArrayList<>();
             List<Future<ReservationResult<PrefillState.RouteReservation>>> attempts = new ArrayList<>();
             for (int i = 0; i < contenders; i++) {
                 ScheduledRequest request = item(i + 1);
+                requests.add(request);
                 attempts.add(executor.submit(() -> {
                     assertTrue(state.canAcceptRequest(1L));
                     selected.countDown();
@@ -176,27 +181,30 @@ class PrefillRequestCapacityTest {
                 admit.countDown();
             }
             List<PrefillState.RouteReservation> acquired = new ArrayList<>();
-            for (var attempt : attempts) {
-                var result = attempt.get(5, TimeUnit.SECONDS);
+            ScheduledRequest acquiredRequest = null;
+            for (int i = 0; i < contenders; i++) {
+                var result = attempts.get(i).get(5, TimeUnit.SECONDS);
                 if (result.reservation() != null) {
                     acquired.add(result.reservation());
+                    acquiredRequest = requests.get(i);
                 } else {
                     assertEquals(ReservationResult.Status.CAPACITY_FULL, result.status());
                 }
             }
             assertEquals(1, acquired.size());
             assertFalse(state.canAcceptRequest(1L));
-            acquired.getFirst().close();
+            cancel(acquiredRequest, acquired.getFirst());
             assertTrue(state.canAcceptRequest(1L));
         }
     }
 
     @Test
     void summaryCountsUnknownWorkWithoutOverflowAndClearsOnRetirement() {
-        var reservation = reserve(item(1), 2L).reservation();
+        ScheduledRequest queued = item(1);
+        var reservation = reserve(queued, 2L).reservation();
         heartbeat(Map.of(), Long.MAX_VALUE);
         assertFalse(state.canAcceptRequest(Long.MAX_VALUE));
-        reservation.close();
+        cancel(queued, reservation);
         assertFalse(state.canAcceptRequest(Long.MAX_VALUE));
         heartbeat(Map.of(), 0L);
         assertTrue(enqueue(item(2), 1L));
@@ -225,7 +233,20 @@ class PrefillRequestCapacityTest {
     }
 
     private ReservationResult<PrefillState.RouteReservation> reserve(ScheduledRequest item, long limit) {
-        return state.reserveUnqueuedRoute(item, 0L, limit);
+        if (!enqueue(item, limit)) {
+            return ReservationResult.fail(ReservationResult.Status.CAPACITY_FULL);
+        }
+        return state.reserveRoute(item, 0L);
+    }
+
+    private void cancel(ScheduledRequest item, PrefillState.RouteReservation reservation) {
+        lock.lock();
+        try {
+            assertTrue(state.terminalizeActiveRouteUnderLock(item, reservation));
+        } finally {
+            lock.unlock();
+        }
+        reservation.close();
     }
 
     private PrefillState.CommittedHandoff commit(ScheduledRequest item, PrefillState.RouteReservation registration) {

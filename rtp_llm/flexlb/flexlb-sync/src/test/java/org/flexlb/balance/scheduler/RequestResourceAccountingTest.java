@@ -1,14 +1,12 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.delivery.NonBatchDeliveryStrategy;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
-import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
@@ -265,10 +263,8 @@ class RequestResourceAccountingTest {
             requests = new RequestRegistry(service, reporter, requestReporter);
             var eventHandler = new EndpointEventHandler(requests);
             var queueCapacity = new QueueCapacity();
-            var endpoints = new EndpointRegistry(service, eventHandler, reporter,
-                    new NonBatchDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
-                    new NonBatchTtftEstimator(),
-                    new PlacementAvailability(), queueCapacity);
+            var endpoints = new EndpointRegistry(service, eventHandler, reporter, EndpointTestSupport.parkedDelivery(),
+                    new NonBatchTtftEstimator(), new PlacementAvailability(), queueCapacity);
             runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter,
                     service, queueCapacity, new ModelMetaConfig());
             var worker = WorkerStatus.createDiscovered(RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test");
@@ -289,14 +285,10 @@ class RequestResourceAccountingTest {
             var held = new AtomicReference<PrefillState.RouteReservation>();
             admission = requests.claimAdmissionHandle(ID, future);
             assertNotNull(admission);
-            try (var pin = prefill.tryPinGeneration()) {
-                assertTrue(requests.commitItemForPublication(item, () -> {
-                    var result = prefill.reserveUnqueuedRoute(pin, item, 30_000);
-                    assertEquals(ReservationResult.Status.SUCCESS, result.status());
-                    held.set(result.reservation());
-                    return true;
-                }));
-            }
+            assertTrue(requests.commitItemForPublication(item, () -> {
+                held.set(EndpointTestSupport.offerAndTakeRoute(prefill, item, 30_000));
+                return true;
+            }));
             routeReservation = held.get();
             try (var commit = prefill.tryBeginRouteCommitAdmission()) {
                 assertNotNull(commit);
@@ -363,11 +355,8 @@ class RequestResourceAccountingTest {
             var nextContext = RequestLifecycleTestSupport.context(item.ctx().getConfig(), 999L);
             var next = new ScheduledRequest(nextContext, new CompletableFuture<>(),
                     new Response(), null, null, prefill, null, null, System.currentTimeMillis());
-            try (var pin = prefill.tryPinGeneration()) {
-                var result = prefill.reserveUnqueuedRoute(pin, next, 1);
-                assertEquals(ReservationResult.Status.SUCCESS, result.status());
-                result.reservation().close();
-            }
+            assertTrue(EndpointTestSupport.offer(prefill, next));
+            assertTrue(prefill.removeQueued(next, "test capacity probe"));
             assertEmpty();
         }
 

@@ -335,19 +335,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.mutationVersion();
     }
 
-    /**
-     * Admit on the selected generation using its current canonical occupancy
-     * and the request's dispatcher policy. The pin preserves generation identity while
-     * PrefillState checks and occupies capacity under its ownership lock.
-     */
-    public ReservationResult<PrefillState.RouteReservation> reserveUnqueuedRoute(GenerationPin pin,
-                                                                                 ScheduledRequest item,
-                                                                                 long predictedMs) {
-        requirePinnedGeneration(pin);
-        long inflightRequestLimit = item.ctx().getConfig().getDispatcher().getMaxInflightPerPrefillWorker();
-        return prefillState.reserveUnqueuedRoute(item, predictedMs, inflightRequestLimit);
-    }
-
     /** Exact counterpart cleanup; stale item generations are a no-op. */
     public boolean releaseCommittedItem(ScheduledRequest exactItem) {
         return prefillState.terminalizeCommittedItem(exactItem);

@@ -22,7 +22,6 @@ import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
@@ -178,8 +177,13 @@ public final class EndpointTestSupport {
     }
 
     static DeliveryStrategy routeStrategy(TestRequestRuntime runtime) {
-        NonBatchDeliveryStrategy route = new NonBatchDeliveryStrategy(
-                runtime.requests(), NOOP_TELEMETRY);
+        return parkedDelivery();
+    }
+
+    /**
+     * 一个永远不交付的 Prefill 交付策略：请求一直留在等待队列里，由测试自己提交。
+     */
+    public static DeliveryStrategy parkedDelivery() {
         DeliveryStrategy delivery = org.mockito.Mockito.mock(
                 DeliveryStrategy.class);
         org.mockito.Mockito.when(delivery.prepare(
@@ -222,7 +226,7 @@ public final class EndpointTestSupport {
                             "test delivery parked",
                             RoleType.PREFILL));
 
-    static boolean offer(PrefillEndpoint endpoint, ScheduledRequest item) {
+    public static boolean offer(PrefillEndpoint endpoint, ScheduledRequest item) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             if (pin == null) {
                 return false;
@@ -231,25 +235,19 @@ public final class EndpointTestSupport {
         }
     }
 
-    static PrefillState.RouteReservation reserveUnqueued(
-            PrefillEndpoint endpoint, ScheduledRequest item, long predictedMs) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            if (pin == null) {
-                throw new IllegalStateException("endpoint is retired");
-            }
-            return endpoint.reserveUnqueuedRoute(pin, item, predictedMs).reservation();
+    /**
+     * 把 NON_BATCH 请求放进 Prefill 等待队列，取出入队时预留的 Prefill 资源，并换上给定的耗时预测。
+     * 调用方随后自己提交这份预留。
+     */
+    public static PrefillState.RouteReservation offerAndTakeRoute(PrefillEndpoint endpoint,
+                                                                  ScheduledRequest item,
+                                                                  long predictedMs) {
+        if (!offer(endpoint, item)) {
+            throw new IllegalStateException("Prefill queue rejected request_id=" + item.requestId());
         }
-    }
-
-    static void commitUnqueued(PrefillEndpoint endpoint, long requestId, long predictedMs) {
-        ScheduledRequest item = org.mockito.Mockito.mock(ScheduledRequest.class);
-        org.mockito.Mockito.when(item.requestId()).thenReturn(Long.toString(requestId));
-        org.mockito.Mockito.when(item.ctx()).thenReturn(new BalanceContext(new FlexlbConfig()));
-        try (var reservation = reserveUnqueued(endpoint, item, predictedMs);
-             var commit = endpoint.tryBeginRouteCommitAdmission();
-             var handoff = commit.commit(List.of(item), List.of(reservation))) {
-            // The endpoint ledger owns this request until authoritative termination.
-        }
+        PrefillState.RouteReservation reservation = item.takePublishedRouteReservation();
+        reservation.updatePrediction(item, predictedMs);
+        return reservation;
     }
 
     static PrefillState.CommittedHandoff commitBatch(PrefillEndpoint endpoint,

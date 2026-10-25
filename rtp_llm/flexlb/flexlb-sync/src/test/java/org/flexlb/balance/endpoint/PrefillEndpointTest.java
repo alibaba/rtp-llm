@@ -579,7 +579,7 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateMissingBatchIdRemovesDirectRequestLedgerEntry() {
-        registerDirect(endpoint, 101L, 100L);
+        commitQueuedRoute(endpoint, 101L, 100L);
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.getIndividuallyTrackedRequestCount());
 
@@ -590,23 +590,6 @@ class PrefillEndpointTest {
         calibrate(Map.of("101", finished), Map.of());
 
         assertEquals(0, endpoint.getIndividuallyTrackedRequestCount());
-        assertEquals(0, endpoint.observedRequestCount());
-    }
-
-    @Test
-    void directRegistrationCanRollbackFromAsyncCompletionThread()
-            throws Exception {
-        PrefillState.RouteReservation registration =
-                EndpointTestSupport.reserveUnqueued(endpoint, createScheduledRequest(102L, 100, 0), 100L);
-        assertEquals(1, endpoint.observedRequestCount());
-
-        ExecutorService executor = Executors.newSingleThreadExecutor();
-        try {
-            executor.submit(registration::close).get(5, TimeUnit.SECONDS);
-        } finally {
-            executor.shutdownNow();
-        }
-
         assertEquals(0, endpoint.observedRequestCount());
     }
 
@@ -641,7 +624,7 @@ class PrefillEndpointTest {
         // DIRECT request 101 and QUEUE batch 101 live in different ledgers.
         // Completing the DIRECT request must not erase QUEUE member 201.
         registerBatch(endpoint, 101L, 100, List.of(createScheduledRequest(201L, 500, 200)));
-        registerDirect(endpoint, 101L, 100L);
+        commitQueuedRoute(endpoint, 101L, 100L);
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1,
                 endpoint.captureLoadView().work().batches().size());
@@ -1106,8 +1089,7 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void observedRequestCountCannotMissActiveToCommittedHandoff()
-            throws Exception {
+    void observedRequestCountCannotMissActiveToCommittedHandoff() throws Exception {
         PrefillEndpoint handoffEndpoint = newFixedWindowEndpoint(60_000);
         long requestId = 222L;
         try {
@@ -1116,7 +1098,7 @@ class PrefillEndpointTest {
             assertTrue(EndpointTestSupport.offer(handoffEndpoint, active));
             assertTrue(handoffEndpoint.removeQueued(
                     active, "test exact ownership handoff"));
-            registerDirect(handoffEndpoint, requestId, 100L);
+            commitQueuedRoute(handoffEndpoint, requestId, 100L);
 
             assertEquals(1L, handoffEndpoint.observedRequestCount());
             assertEquals(0, handoffEndpoint.queuedRequestCount());
@@ -1145,9 +1127,9 @@ class PrefillEndpointTest {
             Map<String, TaskInfo> running = new HashMap<>();
             for (long requestId = 1; requestId <= 4; requestId++) {
                 ScheduledRequest item = createScheduledRequest(metricsEndpoint, requestConfig, requestId, 500, 0);
-                try (var reservation = EndpointTestSupport.reserveUnqueued(metricsEndpoint, item, 100L);
-                     var admission = metricsEndpoint.tryBeginRouteCommitAdmission();
-                     var handoff = admission.commit(List.of(item), List.of(reservation))) {
+                try (var reservation = EndpointTestSupport.offerAndTakeRoute(metricsEndpoint, item, 100L);
+                        var admission = metricsEndpoint.tryBeginRouteCommitAdmission();
+                        var handoff = admission.commit(List.of(item), List.of(reservation))) {
                     running.put(item.requestId(), taskInfo(requestId, 0L, TaskPhase.RUNNING, 0, 0));
                 }
             }
@@ -1162,11 +1144,7 @@ class PrefillEndpointTest {
 
             assertEquals(4.0, registry.get("flexlb.app.flexlb.inflight.request.count")
                     .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
-            ScheduledRequest fifth = createScheduledRequest(metricsEndpoint, requestConfig, 5L, 500, 0);
-            try (var pin = metricsEndpoint.tryPinGeneration()) {
-                assertEquals(ReservationResult.Status.CAPACITY_FULL,
-                        metricsEndpoint.reserveUnqueuedRoute(pin, fifth, 100L).status());
-            }
+            assertFalse(metricsEndpoint.canDeliver(4L, 1));
         } finally {
             registry.close();
             metricsEndpoint.close();
@@ -1184,9 +1162,9 @@ class PrefillEndpointTest {
             BatchSchedulerReporter reporter = new BatchSchedulerReporter(new MicrometerFlexMonitor(registry));
             reporter.init();
             ScheduledRequest item = createScheduledRequest(metricsEndpoint, requestConfig, 1L, 500, 0);
-            try (var reservation = EndpointTestSupport.reserveUnqueued(metricsEndpoint, item, 100L);
-                 var admission = metricsEndpoint.tryBeginRouteCommitAdmission();
-                 var handoff = admission.commit(List.of(item), List.of(reservation))) {
+            try (var reservation = EndpointTestSupport.offerAndTakeRoute(metricsEndpoint, item, 100L);
+                    var admission = metricsEndpoint.tryBeginRouteCommitAdmission();
+                    var handoff = admission.commit(List.of(item), List.of(reservation))) {
                 metricsEndpoint.reportBatchMetrics(reporter);
             }
             assertEquals(1.0, registry.get("flexlb.app.flexlb.worker.status.unconfirmed.request.count")
@@ -1286,14 +1264,16 @@ class PrefillEndpointTest {
                 EndpointTestSupport.routeStrategy(requestRuntime), requestRuntime.events(), endpointReporter);
         PrefillEndpoint sibling = EndpointTestSupport.standalonePrefillEndpoint(siblingStatus, requestConfig,
                 EndpointTestSupport.routeStrategy(requestRuntime), requestRuntime.events(), endpointReporter);
+        first.startGeneration();
+        sibling.startGeneration();
         try {
             BatchSchedulerReporter reporter = new BatchSchedulerReporter(new MicrometerFlexMonitor(registry));
             reporter.init();
             for (PrefillEndpoint target : List.of(first, sibling)) {
                 ScheduledRequest item = createScheduledRequest(target, requestConfig, 1L, 500, 0);
-                try (var reservation = EndpointTestSupport.reserveUnqueued(target, item, 100L);
-                     var admission = target.tryBeginRouteCommitAdmission();
-                     var handoff = admission.commit(List.of(item), List.of(reservation))) {
+                try (var reservation = EndpointTestSupport.offerAndTakeRoute(target, item, 100L);
+                        var admission = target.tryBeginRouteCommitAdmission();
+                        var handoff = admission.commit(List.of(item), List.of(reservation))) {
                     target.reportBatchMetrics(reporter);
                 }
             }
@@ -1645,7 +1625,7 @@ class PrefillEndpointTest {
 
     @Test
     void closeHandlesEveryCommittedRouteAcrossSchedulingModes() {
-        registerDirect(endpoint, 100L, 100L);
+        commitQueuedRoute(endpoint, 100L, 100L);
         ScheduledRequest route = createScheduledRequest(200L, 200L, 0L);
         // A queue route can only be reserved after its canonical item has been
         // offered into the ACTIVE queue; reserveRoute rejects a non-active
@@ -1921,11 +1901,15 @@ class PrefillEndpointTest {
         }
     }
 
-    private static void registerDirect(
-            PrefillEndpoint target,
-            long requestId,
-            long predictedMs) {
-        EndpointTestSupport.commitUnqueued(target, requestId, predictedMs);
+    private static void commitQueuedRoute(PrefillEndpoint target, long requestId, long predictedMs) {
+        FlexlbConfig routeConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        routeConfig.setDispatcher(DispatcherConfig.nonBatch());
+        ScheduledRequest item = createScheduledRequest(target, routeConfig, requestId, 500, 0);
+        try (var reservation = EndpointTestSupport.offerAndTakeRoute(target, item, predictedMs);
+                var admission = target.tryBeginRouteCommitAdmission();
+                var handoff = admission.commit(List.of(item), List.of(reservation))) {
+            // 提交后 Prefill 一直记着这个请求，直到引擎上报它结束。
+        }
     }
 
 }
