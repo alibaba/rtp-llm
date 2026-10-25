@@ -79,6 +79,19 @@ MainQueue -> 每台机器一个 PrefillQueue -> 共用 DecodeQueue -> publish(Pr
   旧孤儿清理同时检查老请求表和这个并发表，避免按旧 TTL 清掉 V2 的正常预占。
 - Decode 空机预占到发布之间的短窗口允许尾部请求交给刚摘除、仍处于优雅下线阶段的节点，依赖引擎继续服务。
   请求超时以定时取消实际执行为准，不在 publish 时追加严格的绝对截止时间校验。
+- V2 队列可观测性由 `V2QueueReporter` 独立上报，每秒按请求阶段统计 `schedule_v2.queue.depth`：
+  `main`、逐 endpoint 的 `prefill`、`decode_waiting`、`decode_reserved`，已发布请求不计入等待。
+  共享子队列名额保留到发布，所以名额占用不等于 Prefill 排队长度。空队列持续报零，移除节点后补零。
+- `schedule_v2.queue.blocked.qps` 按阶段、endpoint、优先级、固定原因统计进入阻塞的请求；
+  同一次排队连续相同原因去重，原因或 endpoint 变化、退回重排后可再计一次。
+  `blocked_attempt.qps` 记录所有实际失败检查，包括重复重试；未执行检查的顺序跳过不计数。
+  两者都不是最终失败率。`rejected.qps` 在请求完成回调中按失败前阶段和错误码名称计一次。
+  截止时间触发的取消单独标为 `REQUEST_TIMEOUT`，不与复用同一错误码的其他失败混淆。
+- Prefill 阻塞区分在途满、KV 不足；Decode 区分请求数满、KV 不足和同时不足，
+  并区分等待预占与等待许可。Decode 原因使用失败后的即时容量视图，若容量已恢复则记状态变化。
+- `QueueProgress` 把阶段和累计时间放在同一次 CAS 中更新，退回重排时累加，失败与取消也记录最后一段。
+  完成响应前写入 PV：`globalQueueMs` 是主队列累计时间，`prefillQueueMs` 和 `decodeQueueMs` 是分项，
+  `subQueueMs` 是 Prefill 与 Decode 的总等待时间；`schedule_v2.queue.wait_ms` 提供相同口径的监控。
 - 每台 Prefill 队列有自己的线程和 `LoopSignal`。新请求、记录移除时唤醒自己的线程，
   空闲时阻塞等待。机器下线或同地址换成新的 endpoint 时，旧线程退回等待请求并停止；新队列启动新线程。
 - 每个循环最外层捕获 `Throwable`，记录异常后继续下一轮，worker 的异常作为结果交回调度线程。

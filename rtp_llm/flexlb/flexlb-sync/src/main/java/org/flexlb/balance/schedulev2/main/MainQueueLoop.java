@@ -6,6 +6,7 @@ import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.ProcessWorkers;
+import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.RequestCleanup;
 import org.flexlb.balance.schedulev2.SelectionResult;
 import org.flexlb.balance.schedulev2.prefill.PrefillPicker;
@@ -20,6 +21,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.V2QueueReporter;
 import org.flexlb.util.Logger;
 
 import java.util.HashSet;
@@ -58,6 +60,7 @@ public final class MainQueueLoop {
     private final PrefillPicker prefillPicker;
     private final PrefillQueueRegistry prefillQueues;
     private final ProcessWorkers<PrefillInputs> processWorkers;
+    private final V2QueueReporter queueReporter;
     /**
      * 这个部署里 Prefill 用的角色：PD 分离时是 PREFILL，PD 合一时是 PDFUSION。
      */
@@ -84,7 +87,9 @@ public final class MainQueueLoop {
                          PrefillQueueRegistry prefillQueues,
                          RoleType prefillRole,
                          Consumer<Request> sendToPrefillQueue,
-                         ProcessWorkers<PrefillInputs> processWorkers) {
+                         ProcessWorkers<PrefillInputs> processWorkers,
+                         V2QueueReporter queueReporter) {
+        this.queueReporter = queueReporter;
         this.mainQueue = mainQueue;
         this.loopSignal = loopSignal;
         this.cleanup = cleanup;
@@ -144,9 +149,7 @@ public final class MainQueueLoop {
         FlexlbConfig config = configService.loadBalanceConfig();
         long cacheTtlMs = config.getDispatcher().getCacheMatchResultTtlMs();
         processWorkers.removeExpired(cacheTtlMs);
-        if (endpointRegistry.getEndpointCount(prefillRole) == 0) {
-            return false;
-        }
+        boolean noPrefill = endpointRegistry.getEndpointCount(prefillRole) == 0;
         Set<String> blockedGroups = new HashSet<>();
         boolean moved = false;
         int scanned = 0;
@@ -162,12 +165,18 @@ public final class MainQueueLoop {
                 continue;
             }
             scanned++;
+            if (noPrefill) {
+                queueReporter.blocked(request, Stage.MAIN_WAITING, QueueBlockReason.NO_AVAILABLE_PREFILL, "all");
+                blockedGroups.add(group);
+                continue;
+            }
             SelectionResult<PrefillInputs> completed = processWorkers.get(request, cacheTtlMs);
             if (completed == null) {
                 processWorkers.submit(request, () -> prefillPicker.prepare(request.ctx(), prefillRole, group));
                 completed = processWorkers.get(request, cacheTtlMs);
             }
             if (completed == null) {
+                queueReporter.blocked(request, Stage.MAIN_WAITING, QueueBlockReason.PREPARING, "all");
                 continue;
             }
             SelectionResult<PrefillInputs> result = completed;
@@ -180,6 +189,7 @@ public final class MainQueueLoop {
                             "prefill selection failed: " + result.failure().getMessage());
                     moved = true;
                 } else if (!prefillPicker.inputsAreCurrent(result.value(), prefillRole, group)) {
+                    queueReporter.blocked(request, Stage.MAIN_WAITING, QueueBlockReason.CANDIDATES_CHANGED, "all");
                     processWorkers.discard(request);
                 } else if (pickPrefill(request, group, result.value(), config)) {
                     moved = true;
@@ -211,6 +221,7 @@ public final class MainQueueLoop {
                 }
             }
             case BLOCKED -> {
+                queueReporter.blocked(request, Stage.MAIN_WAITING, QueueBlockReason.NO_AVAILABLE_PREFILL, "all");
                 return false;
             }
             default -> {
@@ -236,6 +247,8 @@ public final class MainQueueLoop {
             return true;
         }
         if (!reserveQueueSlot(request, choice, config)) {
+            queueReporter.blocked(request, Stage.MAIN_WAITING, QueueBlockReason.SHARED_QUEUE_FULL,
+                    choice.endpoint().ipPort());
             return false;
         }
         request.setPrefillChoice(choice);

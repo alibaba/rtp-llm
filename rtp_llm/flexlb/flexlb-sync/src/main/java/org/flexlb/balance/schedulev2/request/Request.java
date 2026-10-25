@@ -29,7 +29,9 @@ public final class Request {
      * 规范化后的优先级（1-100，越大越优先），主队列按它排序。
      */
     private final int priority;
-    private final AtomicReference<Stage> stage = new AtomicReference<>(Stage.MAIN_WAITING);
+    private final AtomicReference<QueueProgress> progress = new AtomicReference<>(
+            new QueueProgress(Stage.MAIN_WAITING, System.nanoTime(), 0L, 0L, 0L, Stage.MAIN_WAITING));
+    private final AtomicReference<QueueBlock> lastBlock = new AtomicReference<>();
     /**
      * 子队列名额占用的角色（PREFILL 或 PDFUSION）。主队列出队时设置，
      * 请求发布、失败、取消或退回主队列时取走并归还名额；为 null 表示没占名额。
@@ -90,7 +92,24 @@ public final class Request {
     }
 
     public Stage stage() {
-        return stage.get();
+        return progress.get().stage();
+    }
+
+    public QueueProgress queueProgress() {
+        return progress.get();
+    }
+
+    /**
+     * 同一次排队中连续遇到相同节点和原因只计一次阻塞请求；每次尝试仍单独统计。
+     */
+    public boolean recordBlock(Stage expected, String reason, String endpoint) {
+        QueueProgress current = progress.get();
+        if (current.stage() != expected) {
+            return false;
+        }
+        QueueBlock next = new QueueBlock(current, reason, endpoint);
+        QueueBlock previous = lastBlock.getAndSet(next);
+        return !next.equals(previous);
     }
 
     public long createdAtMs() {
@@ -194,11 +213,16 @@ public final class Request {
         if (!from.canMoveTo(to)) {
             throw new IllegalArgumentException("cannot move from " + from + " to " + to);
         }
-        if (!stage.compareAndSet(from, to)) {
-            return false;
+        while (true) {
+            QueueProgress current = progress.get();
+            if (current.stage() != from) {
+                return false;
+            }
+            if (progress.compareAndSet(current, current.next(to, System.nanoTime()))) {
+                updatedAtMs = System.currentTimeMillis();
+                return true;
+            }
         }
-        updatedAtMs = System.currentTimeMillis();
-        return true;
     }
 
     /**
@@ -212,6 +236,7 @@ public final class Request {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(serverStatuses);
+        writeQueueTimes();
         future.complete(response);
         return true;
     }
@@ -231,6 +256,7 @@ public final class Request {
             return false;
         }
         detail = failureDetail;
+        writeQueueTimes();
         future.complete(Response.buildErrorResponse(errorType, failureDetail));
         return true;
     }
@@ -242,6 +268,7 @@ public final class Request {
         if (!end(Stage.FAILED, errorResponse.getErrorMessage())) {
             return false;
         }
+        writeQueueTimes();
         future.complete(errorResponse);
         return true;
     }
@@ -257,17 +284,18 @@ public final class Request {
         StrategyErrorType errorType = reason == CancelReason.DEADLINE_EXCEEDED
                 ? StrategyErrorType.BATCH_SLO_EXPIRED
                 : StrategyErrorType.REQUEST_CANCELLED;
+        writeQueueTimes();
         future.complete(Response.buildErrorResponse(errorType, reason.getMessage()));
         return true;
     }
 
     private boolean end(Stage target, String endDetail) {
         while (true) {
-            Stage current = stage.get();
+            Stage current = stage();
             if (!current.canMoveTo(target)) {
                 return false;
             }
-            if (stage.compareAndSet(current, target)) {
+            if (moveTo(current, target)) {
                 detail = endDetail;
                 updatedAtMs = System.currentTimeMillis();
                 return true;
@@ -276,10 +304,22 @@ public final class Request {
     }
 
     /**
+     * 完成 future 前写入 PV；subQueueMs 包含 Prefill 和 Decode 等待，并额外提供两者的分项。
+     */
+    private void writeQueueTimes() {
+        QueueProgress times = progress.get();
+        ctx.setGlobalQueueMs(times.mainMs());
+        ctx.setSubQueueMs(
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(times.prefillNanos() + times.decodeNanos()));
+        ctx.setPrefillQueueMs(times.prefillMs());
+        ctx.setDecodeQueueMs(times.decodeMs());
+    }
+
+    /**
      * 转成对外的 RequestState，供查询和取消接口返回。
      */
     public RequestState toRequestState() {
-        Stage current = stage.get();
+        Stage current = stage();
         RequestState.Phase phase = switch (current) {
             case MAIN_WAITING, PREFILL_WAITING, DECODE_WAITING, DECODE_RESERVED -> RequestState.Phase.QUEUED;
             case PUBLISHED -> RequestState.Phase.ACKNOWLEDGED;

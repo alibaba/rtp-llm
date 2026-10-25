@@ -6,6 +6,7 @@ import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.balance.schedulev2.LoopSignal;
+import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.RequestCleanup;
 import org.flexlb.balance.schedulev2.V2TestSupport;
 import org.flexlb.balance.schedulev2.decode.DecodeQueue;
@@ -19,6 +20,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.V2QueueReporter;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -52,6 +54,7 @@ class PrefillQueueLoopTest {
     private final PrefillEndpoint endpoint = V2TestSupport.prefillEndpoint("p1:8000");
     private final List<Request> sentToDecode = new ArrayList<>();
     private final RequestSchedulerReporter reporter = mock(RequestSchedulerReporter.class);
+    private final V2QueueReporter queueReporter = mock(V2QueueReporter.class);
     private PrefillQueueLoop loop;
 
     PrefillQueueLoopTest() {
@@ -113,6 +116,7 @@ class PrefillQueueLoopTest {
 
         assertEquals(List.of(first), sentToDecode);
         assertEquals(Stage.PREFILL_WAITING, second.stage());
+        verify(queueReporter).blocked(second, Stage.PREFILL_WAITING, QueueBlockReason.PREFILL_INFLIGHT_FULL, "p1:8000");
         assertEquals(2, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
 
         V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of("1", TaskPhase.RUNNING));
@@ -205,7 +209,7 @@ class PrefillQueueLoopTest {
         queues.addWaiting(request);
         if (loop == null) {
             loop = new PrefillQueueLoop(queues.find(endpoint), queues, cleanup, mainQueue, endpointRegistry,
-                    configService, reporter, sentToDecode::add);
+                    configService, reporter, sentToDecode::add, queueReporter);
         }
         return request;
     }
@@ -315,7 +319,7 @@ class PrefillQueueLoopTest {
                     if (request.prefillChoice().endpoint() == other) {
                         secondSent.complete(request);
                     }
-                }));
+                }, mock(V2QueueReporter.class)));
         Request first = addWaiting("1");
         try {
             assertTrue(firstReadingStatus.await(5, TimeUnit.SECONDS));

@@ -47,6 +47,8 @@ public class PvLogData {
     private long latencyMs;
     private long globalQueueMs;
     private long subQueueMs;
+    private long prefillQueueMs;
+    private long decodeQueueMs;
     private int parkCount;
     private int wakeCount;
     private long batchId;
@@ -153,6 +155,8 @@ public class PvLogData {
         this.startTime = ctx.getStartTime();
         this.globalQueueMs = ctx.getGlobalQueueMs();
         this.subQueueMs = ctx.getSubQueueMs();
+        this.prefillQueueMs = ctx.getPrefillQueueMs();
+        this.decodeQueueMs = ctx.getDecodeQueueMs();
         this.parkCount = ctx.getParkCount();
         this.wakeCount = ctx.getWakeCount();
         this.totalUs = ctx.getTotalTimeUs();

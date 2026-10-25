@@ -29,8 +29,10 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.V2QueueReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -76,6 +78,8 @@ public class RequestSchedulerV2 {
     private final DecodeQueueLoop decodeQueueLoop;
     private final ScheduledThreadPoolExecutor deadlineTimer;
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final V2QueueReporter queueReporter;
+    private final EndpointRegistry endpointRegistry;
 
     public RequestSchedulerV2(ConfigService configService,
                               QueueCapacity queueCapacity,
@@ -89,7 +93,10 @@ public class RequestSchedulerV2 {
                               DecodePreemptionCoordinator preemptionCoordinator,
                               RequestSchedulerReporter reporter,
                               WorkerDirectory workerDirectory,
-                              DecodeReservations reservations) {
+                              DecodeReservations reservations,
+                              V2QueueReporter queueReporter) {
+        this.queueReporter = queueReporter;
+        this.endpointRegistry = endpointRegistry;
         this.configService = configService;
         this.prefillCheck = new PrefillPublishCheck(endpointRegistry);
         this.deployedRoles = Set.copyOf(modelMetaConfig.requiredRoles());
@@ -104,10 +111,11 @@ public class RequestSchedulerV2 {
                 decodeQueue, decodeLoopSignal);
         this.mainQueueLoop = new MainQueueLoop(mainQueue, mainLoopSignal, cleanup, queueCapacity, endpointRegistry,
                 placementAvailability, configService, new PrefillPicker(router, prefillStrategy, prefillQueues),
-                prefillQueues, prefillRole, this::sendToPrefillQueue, processWorkers("main", mainLoopSignal));
+                prefillQueues, prefillRole, this::sendToPrefillQueue, processWorkers("main", mainLoopSignal),
+                queueReporter);
         this.decodeQueueLoop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, placementAvailability,
                 decodeSelector, router, preemptionCoordinator, new EmptyDecodeFinder(workerDirectory), configService,
-                reporter, processWorkers("decode", decodeLoopSignal), prefillCheck, reservations);
+                reporter, processWorkers("decode", decodeLoopSignal), prefillCheck, reservations, queueReporter);
         this.deadlineTimer = new ScheduledThreadPoolExecutor(1, task -> {
             Thread thread = new Thread(task, "flexlb-v2-deadline");
             thread.setDaemon(true);
@@ -115,7 +123,7 @@ public class RequestSchedulerV2 {
         });
         this.deadlineTimer.setRemoveOnCancelPolicy(true);
         prefillQueues.start(queue -> new PrefillQueueLoop(queue, prefillQueues, cleanup, mainQueue, endpointRegistry,
-                configService, reporter, this::sendToDecodeQueue));
+                configService, reporter, this::sendToDecodeQueue, queueReporter));
         mainQueueLoop.start();
         decodeQueueLoop.start();
     }
@@ -142,7 +150,10 @@ public class RequestSchedulerV2 {
         }
         context.setEnqueueTime(nowMs);
         context.setFuture(future);
-        future.whenComplete((response, failure) -> handleFutureDone(request, failure));
+        future.whenComplete((response, failure) -> {
+            handleFutureDone(request, failure);
+            queueReporter.completed(request, response);
+        });
         long delayMs = Math.max(0L, context.getRequestExpiresAtMs() - nowMs);
         try {
             request.setDeadlineTask(deadlineTimer.schedule(() -> request.cancel(CancelReason.DEADLINE_EXCEEDED),
@@ -246,6 +257,17 @@ public class RequestSchedulerV2 {
 
     public int trackedRequestCount() {
         return requestTable.size();
+    }
+
+    @Scheduled(fixedDelay = 1000L)
+    public void reportQueues() {
+        List<String> endpoints = prefillRole == null
+                ? List.of()
+                : endpointRegistry.prefillRoutingSnapshot(prefillRole)
+                        .stream()
+                        .map(entry -> entry.endpoint().ipPort())
+                        .toList();
+        queueReporter.sample(requestTable, endpoints);
     }
 
     public int queuedRequestCount() {

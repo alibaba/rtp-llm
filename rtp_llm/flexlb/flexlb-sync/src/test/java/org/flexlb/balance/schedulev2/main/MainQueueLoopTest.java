@@ -28,6 +28,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.V2QueueReporter;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -82,7 +83,7 @@ class MainQueueLoopTest {
                 new PlacementAvailability(), configService, picker, prefillQueues, RoleType.PREFILL, request -> {
                     prefillQueues.addWaiting(request);
                     sent.add(request);
-                }, new ProcessWorkers<>(new DirectExecutorService(), 2, loopSignal, true));
+                }, new ProcessWorkers<>(new DirectExecutorService(), 2, loopSignal, true), mock(V2QueueReporter.class));
     }
 
     @Test
@@ -294,7 +295,7 @@ class MainQueueLoopTest {
                 new PlacementAvailability(), configService, picker, prefillQueues, RoleType.PREFILL, request -> {
                     prefillQueues.addWaiting(request);
                     (request == first ? firstSent : secondSent).complete(request);
-                }, new ProcessWorkers<>(executor, 2, loopSignal, true));
+                }, new ProcessWorkers<>(executor, 2, loopSignal, true), mock(V2QueueReporter.class));
         parallelLoop.start();
         try {
             assertTrue(bothStarted.await(5, TimeUnit.SECONDS));

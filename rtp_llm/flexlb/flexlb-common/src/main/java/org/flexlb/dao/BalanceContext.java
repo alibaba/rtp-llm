@@ -100,6 +100,8 @@ public class BalanceContext {
     /** Queue diagnostics for pv.log; written by scheduler threads, read after completion. */
     private volatile long globalQueueMs;
     private volatile long subQueueMs;
+    private volatile long prefillQueueMs;
+    private volatile long decodeQueueMs;
     private volatile int parkCount;
     private volatile int wakeCount;
 

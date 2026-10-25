@@ -16,6 +16,7 @@ import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
 import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.PrefillPublishCheck;
 import org.flexlb.balance.schedulev2.ProcessWorkers;
+import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.RequestCleanup;
 import org.flexlb.balance.schedulev2.SelectionResult;
 import org.flexlb.balance.schedulev2.request.DecodeChoice;
@@ -31,6 +32,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.V2QueueReporter;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
 
@@ -90,6 +92,7 @@ public final class DecodeQueueLoop {
     private final ProcessWorkers<DecodeInputs> processWorkers;
     private final PrefillPublishCheck prefillCheck;
     private final DecodeReservations reservations;
+    private final V2QueueReporter queueReporter;
     /**
      * Decode 上下线或 reserve 容量变化时唤醒循环，让 waiting 的请求马上重试。
      */
@@ -117,7 +120,9 @@ public final class DecodeQueueLoop {
                            RequestSchedulerReporter reporter,
                            ProcessWorkers<DecodeInputs> processWorkers,
                            PrefillPublishCheck prefillCheck,
-                           DecodeReservations reservations) {
+                           DecodeReservations reservations,
+                           V2QueueReporter queueReporter) {
+        this.queueReporter = queueReporter;
         this.decodeQueue = decodeQueue;
         this.loopSignal = loopSignal;
         this.cleanup = cleanup;
@@ -318,6 +323,7 @@ public final class DecodeQueueLoop {
                 return true;
             }
             case CAPACITY_FULL -> {
+                reportCapacityBlock(request, endpoint, choice.requirement(), true);
                 listenCapacity(endpoint);
                 return false;
             }
@@ -460,6 +466,7 @@ public final class DecodeQueueLoop {
             }
             if (completed == null) {
                 // 已等太久的队头还在准备材料时，也不能让后面的请求先占走容量。
+                queueReporter.blocked(request, Stage.DECODE_WAITING, QueueBlockReason.PREPARING, "all");
                 if (groupsWithHead.add(group) && isStarved(request, starvationThresholdMs, now)) {
                     blockedGroups.add(group);
                 }
@@ -533,7 +540,15 @@ public final class DecodeQueueLoop {
             }
             case BLOCKED, REJECTED -> {
                 // REJECTED 是请求超过了所有 Decode 的额度，等到有空的 Decode 时放过去
-                return placeOnEmptyDecode(request, requirement, group);
+                if (placeOnEmptyDecode(request, requirement, group)) {
+                    return true;
+                }
+                queueReporter.blocked(request, Stage.DECODE_WAITING,
+                        result.status() == PlacementResult.Status.REJECTED
+                                ? QueueBlockReason.REQUEST_EXCEEDS_KV_BUDGET
+                                : QueueBlockReason.NO_AVAILABLE_DECODE,
+                        "all");
+                return false;
             }
             default -> {
                 if (result.failure() == null) {
@@ -555,6 +570,8 @@ public final class DecodeQueueLoop {
         try (selected; WorkerEndpoint.EndpointHold hold = selected.takeEndpointHold()) {
             DecodeEndpoint endpoint = (DecodeEndpoint) hold.endpoint();
             if (endpoint.isRetired()) {
+                queueReporter.blocked(request, Stage.DECODE_WAITING, QueueBlockReason.ENDPOINT_RETIRED,
+                        endpoint.ipPort());
                 return false;
             }
             DecodeEndpoint.ReservationHandle reservation =
@@ -566,6 +583,7 @@ public final class DecodeQueueLoop {
                 }
                 reservation = preempt(request, hold, requirement, selected.serverStatus());
                 if (reservation == null) {
+                    reportCapacityBlock(request, endpoint, requirement, false);
                     return false;
                 }
             }
@@ -674,6 +692,21 @@ public final class DecodeQueueLoop {
         serverStatus.setPreemptRequestIds(
                 proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());
         return reservation;
+    }
+
+    /**
+     * 失败后读容量视图，复用 reserve/permit 的容量公式。此时已恢复容量则记为状态变化，不误报 KV 不足。
+     */
+    private void reportCapacityBlock(Request request,
+                                     DecodeEndpoint endpoint,
+                                     DecodeRequirement requirement,
+                                     boolean dispatch) {
+        var view = endpoint.routingView();
+        var deficit = requirement.capacity()
+                .evaluate(dispatch ? view.dispatchUsage() : view.placementUsage(), requirement.inputKvTokens(),
+                        requirement.inputAndMaxOutputKvTokens());
+        queueReporter.blocked(request, dispatch ? Stage.DECODE_RESERVED : Stage.DECODE_WAITING,
+                QueueBlockReason.decodeCapacity(deficit), endpoint.ipPort());
     }
 
     /**

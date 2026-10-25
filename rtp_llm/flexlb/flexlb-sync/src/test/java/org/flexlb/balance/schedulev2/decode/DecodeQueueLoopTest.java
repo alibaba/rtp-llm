@@ -17,6 +17,7 @@ import org.flexlb.balance.schedulev2.DirectExecutorService;
 import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.PrefillPublishCheck;
 import org.flexlb.balance.schedulev2.ProcessWorkers;
+import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.RequestCleanup;
 import org.flexlb.balance.schedulev2.V2TestSupport;
 import org.flexlb.balance.schedulev2.main.MainQueue;
@@ -36,6 +37,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.V2QueueReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -69,6 +71,7 @@ class DecodeQueueLoopTest {
     private final RequestTable requestTable = new RequestTable();
     private final PrefillPublishCheck prefillCheck = mock(PrefillPublishCheck.class);
     private final DecodeReservations reservations = new DecodeReservations();
+    private final V2QueueReporter queueReporter = mock(V2QueueReporter.class);
     private final LoopSignal decodeLoopSignal = new LoopSignal();
     private final DecodeQueue decodeQueue = new DecodeQueue(false);
     private final RequestCleanup cleanup;
@@ -106,7 +109,7 @@ class DecodeQueueLoopTest {
                         mock(RequestSchedulerReporter.class)),
                 emptyDecodeFinder, configService(), reporter,
                 new ProcessWorkers<>(new DirectExecutorService(), 2, decodeLoopSignal, false), prefillCheck,
-                reservations);
+                reservations, queueReporter);
     }
 
     @AfterEach
@@ -148,6 +151,8 @@ class DecodeQueueLoopTest {
         assertTrue(loop.runOnce());
         assertEquals(Stage.DECODE_RESERVED, first.stage());
         assertEquals(Stage.DECODE_WAITING, second.stage());
+        verify(queueReporter).blocked(second, Stage.DECODE_WAITING, QueueBlockReason.DECODE_REQUESTS_FULL,
+                decode.ipPort());
         assertEquals(1L, decode.routingView().placementUsage().occupiedRequests());
 
         first.cancel(CancelReason.CLIENT_CANCELLED);
@@ -512,9 +517,10 @@ class DecodeQueueLoopTest {
         workers.submit(second, () -> new DecodeInputs(DecodeRequirement.capture(second.ctx())));
         executor.shutdown();
         assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
-        DecodeQueueLoop parallelLoop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup,
-                new PlacementAvailability(), realSelector, router, mock(DecodePreemptionCoordinator.class),
-                emptyDecodeFinder, configService, reporter, workers, prefillCheck, reservations);
+        DecodeQueueLoop parallelLoop =
+                new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, new PlacementAvailability(), realSelector,
+                        router, mock(DecodePreemptionCoordinator.class), emptyDecodeFinder, configService, reporter,
+                        workers, prefillCheck, reservations, mock(V2QueueReporter.class));
         parallelLoop.start();
         try {
             assertTrue(first.future().get(5, TimeUnit.SECONDS).isSuccess());
@@ -545,9 +551,10 @@ class DecodeQueueLoopTest {
         workers.submit(later, () -> new DecodeInputs(DecodeRequirement.capture(later.ctx())));
         executor.shutdown();
         assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
-        DecodeQueueLoop parallelLoop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup,
-                new PlacementAvailability(), selector, router, mock(DecodePreemptionCoordinator.class),
-                emptyDecodeFinder, configService, reporter, workers, prefillCheck, reservations);
+        DecodeQueueLoop parallelLoop =
+                new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, new PlacementAvailability(), selector,
+                        router, mock(DecodePreemptionCoordinator.class), emptyDecodeFinder, configService, reporter,
+                        workers, prefillCheck, reservations, mock(V2QueueReporter.class));
         try {
             head.setPrefillDecidedAtMs(System.currentTimeMillis() - 120_000L);
 

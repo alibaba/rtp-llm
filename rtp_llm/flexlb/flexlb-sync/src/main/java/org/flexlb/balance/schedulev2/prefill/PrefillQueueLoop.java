@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
 import org.flexlb.balance.schedulev2.LoopSignal;
+import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.RequestCleanup;
 import org.flexlb.balance.schedulev2.main.MainQueue;
 import org.flexlb.balance.schedulev2.request.PrefillChoice;
@@ -11,6 +12,7 @@ import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.schedulev2.request.Stage;
 import org.flexlb.config.ConfigService;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.V2QueueReporter;
 import org.flexlb.util.Logger;
 
 import java.util.Iterator;
@@ -48,6 +50,7 @@ public final class PrefillQueueLoop {
     private final EndpointRegistry endpointRegistry;
     private final ConfigService configService;
     private final RequestSchedulerReporter reporter;
+    private final V2QueueReporter queueReporter;
     /**
      * dispatch 出去的请求交给 Decode 队列。
      */
@@ -62,7 +65,9 @@ public final class PrefillQueueLoop {
                             EndpointRegistry endpointRegistry,
                             ConfigService configService,
                             RequestSchedulerReporter reporter,
-                            Consumer<Request> sendToDecodeQueue) {
+                            Consumer<Request> sendToDecodeQueue,
+                            V2QueueReporter queueReporter) {
+        this.queueReporter = queueReporter;
         this.queues = queues;
         this.queue = queue;
         this.loopSignal = queue.signal();
@@ -149,9 +154,13 @@ public final class PrefillQueueLoop {
             }
             long kvTokens = request.prefillChoice().kvTokens(request.seqLen());
             if (!queue.hasDispatchSlot(maxInflight)) {
+                queueReporter.blocked(request, Stage.PREFILL_WAITING, QueueBlockReason.PREFILL_INFLIGHT_FULL,
+                        queue.endpoint().ipPort());
                 return;
             }
             if (!queue.canDispatch(kvTokens, maxInflight)) {
+                queueReporter.blocked(request, Stage.PREFILL_WAITING, QueueBlockReason.PREFILL_KV_FULL,
+                        queue.endpoint().ipPort());
                 if (head == null) {
                     head = request;
                 }
