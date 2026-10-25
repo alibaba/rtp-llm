@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
+import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -74,7 +74,7 @@ class RequestSchedulerContractTest {
                 // Direct registration does not create a global queue entry; consume its control
                 // ticket explicitly.
                 if (queued) {
-                    ((QueuedRequestScheduler) f.requests).queueControl(ownContext);
+                    ((QueuedRequestScheduler) f.requests).queueControl(ownContext, null);
                 }
                 ownFuture.get(3, TimeUnit.SECONDS);
                 assertNull(other.cancel(942L, 0L, CancelReason.CLIENT_CANCELLED));
@@ -308,7 +308,7 @@ class RequestSchedulerContractTest {
                             f.config,
                             f.router,
                             reporter,
-                            mock(DecodeCapacityAcquirer.class),
+                            mock(DecodeAdmission.class),
                             new PlacementAvailability(),
                             SchedulingTestConfig.capacity(f.config),
                             org.mockito.Mockito.mock(
@@ -603,15 +603,11 @@ class RequestSchedulerContractTest {
                             service,
                             reporter,
                             mock(RequestSchedulerReporter.class),
-                            mock(RecentCacheKeyTraceReporter.class));
-            scheduler =
-                    SchedulerTestSupport.configure(
-                            requests,
-                            service.loadBalanceConfig(),
+                            mock(RecentCacheKeyTraceReporter.class),
                             router,
-                            reporter,
-                            mock(DecodeCapacityAcquirer.class),
+                            mock(DecodeAdmission.class),
                             new PlacementAvailability());
+            scheduler = requests;
         }
 
         RequestContext context(long id) {

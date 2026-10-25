@@ -1,11 +1,10 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
@@ -22,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
-/** Measures real endpoint aggregation; delivery and event sinks are not invoked in the measured loop. */
+/** Measures selected-worker capacity classification without delivery or event sinks in the loop. */
 @Tag("performance-regression")
 class PrefillAdmissionFailurePerformanceTest {
     @Test
@@ -32,13 +31,10 @@ class PrefillAdmissionFailurePerformanceTest {
                                 CostBasedPrefillStrategy.class, MethodHandles.lookup())
                         .findStatic(
                                 CostBasedPrefillStrategy.class,
-                                "classifyAdmissionFailure",
+                                "classifyWorkerCapacity",
                                 MethodType.methodType(
-                                        PlacementResult.class,
-                                        List.class,
-                                        int.class,
-                                        RoleType.class,
-                                        String.class));
+                                        AdmissionRejectReason.class,
+                                        PrefillState.AdmissionSummary.class));
         var bean = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
         assertTrue(bean.isThreadAllocatedMemorySupported());
         bean.setThreadAllocatedMemoryEnabled(true);
@@ -51,7 +47,7 @@ class PrefillAdmissionFailurePerformanceTest {
         var reporter = mock(DeliveryMetricsReporter.class);
         long singleWorkerAllocation = 0L;
         for (int workerCount : new int[] {1, 64, 512, 1024}) {
-            List<EndpointRegistry.PrefillRoutingEntry> directory = new ArrayList<>();
+            List<PrefillEndpoint> directory = new ArrayList<>();
             for (int i = 0; i < workerCount; i++) {
                 var status =
                         EndpointTestSupport.workerStatus(
@@ -68,30 +64,35 @@ class PrefillAdmissionFailurePerformanceTest {
                 observation.setAlive(true);
                 observation.setRunningQueryLen(1L);
                 EndpointTestSupport.applyStatus(endpoint, observation).run();
-                directory.add(
-                        new EndpointRegistry.PrefillRoutingEntry(status.getIpPort(), endpoint));
+                var summary = endpoint.ownership.admissionSummary(50, endpoint.requestLimit);
+                assertEquals(1L, summary.occupiedRequests());
+                assertEquals(1L, summary.unknownPriorityRequests());
+                directory.add(endpoint);
             }
             directory = List.copyOf(directory);
-            PlacementResult<ServerStatus, RoleType> result = null;
+            AdmissionRejectReason result = null;
             for (int i = 0; i < 10_000; i++) {
+                var selected = directory.get(i % workerCount);
                 result =
-                        (PlacementResult<ServerStatus, RoleType>)
+                        (AdmissionRejectReason)
                                 classify.invokeExact(
-                                        directory, 50, RoleType.PREFILL, (String) null);
+                                        selected.ownership.admissionSummary(
+                                                50, selected.requestLimit));
             }
             long before = bean.getThreadAllocatedBytes(threadId);
             long started = System.nanoTime();
             for (int i = 0; i < 10_000; i++) {
+                var selected = directory.get(i % workerCount);
                 result =
-                        (PlacementResult<ServerStatus, RoleType>)
+                        (AdmissionRejectReason)
                                 classify.invokeExact(
-                                        directory, 50, RoleType.PREFILL, (String) null);
+                                        selected.ownership.admissionSummary(
+                                                50, selected.requestLimit));
             }
             long nsPerFailure = (System.nanoTime() - started) / 10_000;
             long bytesPerFailure = (bean.getThreadAllocatedBytes(threadId) - before) / 10_000;
-            // Unidentified Engine occupancy: 8432, never invented priority provenance.
-            assertEquals(8432, result.failure().getCode());
-            assertEquals(workerCount, result.diagnostics().get("workers"));
+            // Unknown Engine occupancy must not be attributed to a priority.
+            assertEquals(AdmissionRejectReason.UNSPECIFIED, result);
             System.out.printf(
                     "Prefill failure: workers=%d ns_per_failure=%d bytes_per_failure=%d%n",
                     workerCount, nsPerFailure, bytesPerFailure);

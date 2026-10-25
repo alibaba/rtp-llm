@@ -41,6 +41,7 @@ import static com.google.common.math.LongMath.saturatedMultiply;
 @Component
 public class CostBasedPrefillStrategy {
 
+    private static final int MAX_CACHED_WORKERS = 4096;
     private static final ThreadLocal<PrefillCandidateSet> CANDIDATES =
             ThreadLocal.withInitial(PrefillCandidateSet::new);
 
@@ -89,8 +90,11 @@ public class CostBasedPrefillStrategy {
         try {
             return selectCandidate(request, metadata, roleType, group, route, candidates);
         } finally {
-            candidates.reset(0);
+            candidates.clear();
             candidates.inUse = false;
+            if (candidates == cached && candidates.capacity() > MAX_CACHED_WORKERS) {
+                CANDIDATES.remove();
+            }
         }
     }
 
@@ -493,20 +497,20 @@ public class CostBasedPrefillStrategy {
             Request request, SchedulingMetadata metadata, RoleType roleType, String group) {
         List<EndpointRegistry.PrefillRoutingEntry> directory =
                 endpointRegistry.prefillRoutingSnapshot(roleType);
-        var matching = new ArrayList<EndpointRegistry.PrefillRoutingEntry>();
-        int registered = 0;
+        if (group == null) {
+            return new EndpointDiscovery(directory, directory, directory.size());
+        }
+        List<EndpointRegistry.PrefillRoutingEntry> matching = List.of();
         for (EndpointRegistry.PrefillRoutingEntry entry : directory) {
-            PrefillEndpoint endpoint = entry.endpoint();
-            if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) {
+            if (!group.equals(entry.endpoint().getStatus().topologySnapshot().group())) {
                 continue;
             }
-            registered++;
-            if (group == null && matching.isEmpty()) {
-                matching.ensureCapacity(directory.size());
+            if (matching.isEmpty()) {
+                matching = new ArrayList<>();
             }
             matching.add(entry);
         }
-        return new EndpointDiscovery(directory, matching, registered);
+        return new EndpointDiscovery(directory, matching, matching.size());
     }
 
     private record CacheTokenMatch(long effectiveHitTokens, long routingHitTokens) {

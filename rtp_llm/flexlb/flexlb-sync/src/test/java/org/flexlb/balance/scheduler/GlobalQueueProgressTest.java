@@ -5,8 +5,8 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer.PreemptionResult;
+import org.flexlb.balance.eviction.DecodeAdmission;
+import org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -222,7 +222,7 @@ class GlobalQueueProgressTest {
             awaitCondition(() -> f.selected.contains(991L));
             QueuedRequestScheduler queue = (QueuedRequestScheduler) f.scheduler;
             RequestContext context = f.contexts.get(991L);
-            queue.queueControl(context);
+            queue.queueControl(context, null);
             verify((QueuedRequestScheduler) f.lifecycle, timeout(5_000))
                     .resolveControl(context, false);
 
@@ -485,7 +485,7 @@ class GlobalQueueProgressTest {
                     new ConcurrentHashMap<
                             Long,
                             CompletableFuture<
-                                    org.flexlb.balance.eviction.DecodeCapacityAcquirer
+                                    org.flexlb.balance.eviction.DecodeAdmission
                                             .PreemptionResult>>();
             var attempts = new ConcurrentHashMap<Long, AtomicInteger>();
             var decode = org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
@@ -510,13 +510,14 @@ class GlobalQueueProgressTest {
                             f.admissionBlocked.remove(id);
                         }
                     };
-            when(f.eviction.tryReclaim(any(), eq(decode)))
+            when(org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
+                            f.eviction, any(), eq(decode)))
                     .thenAnswer(
                             call -> {
                                 RequestContext context = call.getArgument(0);
                                 var operation =
                                         new CompletableFuture<
-                                                org.flexlb.balance.eviction.DecodeCapacityAcquirer
+                                                org.flexlb.balance.eviction.DecodeAdmission
                                                         .PreemptionResult>();
                                 pending.put(context.data().getRequestId(), operation);
                                 return operation;
@@ -532,8 +533,8 @@ class GlobalQueueProgressTest {
                         pending.containsKey(1003L), "preemption operations must remain bounded");
                 pending.get(1001L)
                         .complete(
-                                new org.flexlb.balance.eviction.DecodeCapacityAcquirer
-                                        .PreemptionResult(null, false, "no victim"));
+                                new org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult(
+                                        null, false, "no victim"));
                 awaitCondition(() -> f.admitted.contains(1003L));
                 assertEquals(
                         2,
@@ -544,8 +545,8 @@ class GlobalQueueProgressTest {
                         .forEach(
                                 operation ->
                                         operation.complete(
-                                                new org.flexlb.balance.eviction
-                                                        .DecodeCapacityAcquirer.PreemptionResult(
+                                                new org.flexlb.balance.eviction.DecodeAdmission
+                                                        .PreemptionResult(
                                                         null, false, "test finished")));
             }
         }
@@ -576,7 +577,8 @@ class GlobalQueueProgressTest {
                         commit.set(Thread.currentThread());
                         admission.accept(requestId);
                     };
-            when(f.eviction.tryReclaim(any(), eq(decode)))
+            when(org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
+                            f.eviction, any(), eq(decode)))
                     .thenAnswer(
                             call -> {
                                 invoked.countDown();
@@ -619,7 +621,8 @@ class GlobalQueueProgressTest {
             DecodeEndpoint decode = f.blockDecodeAdmission(id);
             var reply = new CompletableFuture<PreemptionResult>();
             CountDownLatch invoked = new CountDownLatch(1);
-            when(f.eviction.tryReclaim(any(), eq(decode)))
+            when(org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
+                            f.eviction, any(), eq(decode)))
                     .thenAnswer(
                             call -> {
                                 invoked.countDown();
@@ -665,7 +668,8 @@ class GlobalQueueProgressTest {
             var reservation = new DecodeResources.ReservationHandle(3L, id, 17L);
             var reply = new CompletableFuture<PreemptionResult>();
             CountDownLatch invoked = new CountDownLatch(1);
-            when(f.eviction.tryReclaim(any(), eq(decode)))
+            when(org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
+                            f.eviction, any(), eq(decode)))
                     .thenAnswer(
                             call -> {
                                 invoked.countDown();
@@ -719,7 +723,8 @@ class GlobalQueueProgressTest {
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(f.scheduler, 1);
             f.submit(1107L, "b");
             awaitCondition(() -> f.admitted.contains(1107L));
-            verify(f.eviction, never()).tryReclaim(any(), any());
+            org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
+                    verify(f.eviction, never()), any(), any());
             assertFalse(f.admitted.contains(1106L));
             f.decodeBlocked.remove(1106L);
             f.release("a");
@@ -748,7 +753,8 @@ class GlobalQueueProgressTest {
             assertEquals(2, attempts.get());
             org.junit.jupiter.api.Assertions.assertNotSame(old.get(), f.routes.get(1201L));
             verify(old.get(), times(1)).close();
-            verify(f.eviction, never()).tryReclaim(any(), any());
+            org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
+                    verify(f.eviction, never()), any(), any());
         }
     }
 
@@ -822,7 +828,8 @@ class GlobalQueueProgressTest {
 
         private final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
 
-        private final DecodeCapacityAcquirer eviction = mock(DecodeCapacityAcquirer.class);
+        private final DecodeAdmission eviction =
+                org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock();
 
         private static FlexlbConfig twoPlannerConfig() {
             FlexlbConfig config = spy(SchedulingTestConfig.batchConfig());
@@ -872,7 +879,9 @@ class GlobalQueueProgressTest {
             when(lifecycle.claimAdmissionHandle(anyLong(), any()))
                     .thenAnswer(
                             i -> {
-                                AdmissionHandle mutation = mock(AdmissionHandle.class);
+                                AdmissionHandle mutation =
+                                        RequestProtocolTestSupport.admissionHandle(
+                                                contexts.get(i.<Long>getArgument(0)));
                                 mutations.put(i.getArgument(0), mutation);
                                 return mutation;
                             });
@@ -919,7 +928,7 @@ class GlobalQueueProgressTest {
                                 return PlacementResult.success(route);
                             });
             scheduler =
-                    RequestProtocolTestSupport.configure(
+                    RequestProtocolTestSupport.injectPlacementDependencies(
                             lifecycle,
                             service,
                             router,

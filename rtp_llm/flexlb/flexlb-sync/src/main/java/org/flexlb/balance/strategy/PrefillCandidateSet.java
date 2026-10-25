@@ -27,10 +27,14 @@ final class PrefillCandidateSet {
     long maximumRoutingCacheMatchTokens;
 
     void reset(int expectedCapacity) {
+        clear();
+        ensureCapacity(expectedCapacity);
+    }
+
+    void clear() {
         Arrays.fill(endpointAddresses, 0, size, null);
         Arrays.fill(endpoints, 0, size, null);
         Arrays.fill(admissionBlocks, 0, size, null);
-        ensureCapacity(expectedCapacity);
         size = 0;
         minimumTtftRank = Long.MAX_VALUE;
         hasKnownTtft = false;
@@ -104,6 +108,10 @@ final class PrefillCandidateSet {
 
     int size() {
         return size;
+    }
+
+    int capacity() {
+        return endpoints.length;
     }
 
     private void ensureCapacity(int expectedCapacity) {

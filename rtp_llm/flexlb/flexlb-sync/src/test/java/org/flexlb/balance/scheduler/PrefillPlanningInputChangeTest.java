@@ -177,18 +177,24 @@ class PrefillPlanningInputChangeTest {
     }
 
     private static void awaitKvWait(WorkerBatcher worker, PrefillEndpoint endpoint) {
-        Condition condition = (Condition) ReflectionTestUtils.getField(worker, "stateChanged");
+        Condition condition =
+                (Condition)
+                        ReflectionTestUtils.getField(
+                                endpoint.ownership.queueGuard(), "stateChanged");
+        var lock =
+                (java.util.concurrent.locks.ReentrantLock)
+                        ReflectionTestUtils.getField(endpoint.ownership, "lock");
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
         while (System.nanoTime() < deadline) {
-            endpoint.ownership.lock.lock();
+            lock.lock();
             try {
                 if ("Prefill KV capacity exhausted"
                                 .equals(worker.getLatestQueueWaitSnapshot().get("cause"))
-                        && endpoint.ownership.lock.hasWaiters(condition)) {
+                        && lock.hasWaiters(condition)) {
                     return;
                 }
             } finally {
-                endpoint.ownership.lock.unlock();
+                lock.unlock();
             }
             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
         }

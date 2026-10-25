@@ -34,14 +34,20 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
@@ -103,7 +109,176 @@ class CostBasedPrefillSelectionMetricTest {
 
     @AfterEach
     void tearDown() {
-        registry.close();
+        try {
+            registry.close();
+        } finally {
+            candidateWorkspace().remove();
+        }
+    }
+
+    @Test
+    void selectionReleasesWorkspaceWithoutChangingItsOwnedResult() {
+        PrefillCandidateSet workspace = candidateWorkspace().get();
+
+        try (RequestRoute selected = select()) {
+            assertReleased(workspace);
+            assertSame(workspace, candidateWorkspace().get());
+            assertTrue(selected.prefill().isSuccess());
+            assertEquals("10.0.0.1", selected.prefill().getServerIp());
+            assertTrue(selected.prefillWorkMs() > 0L);
+        }
+    }
+
+    @Test
+    void lostGenerationCaptureReleasesWorkspace() {
+        PrefillCandidateSet workspace = candidateWorkspace().get();
+        EndpointRegistry directory = Mockito.spy(registry);
+        Mockito.doReturn(null).when(directory).capture(RoleType.PREFILL, "10.0.0.1:8080");
+        strategy =
+                new CostBasedPrefillStrategy(
+                        directory,
+                        cache,
+                        reporter,
+                        cacheReporter,
+                        SchedulingTestConfig.configService(config));
+
+        var result =
+                StrategyTestSupport.select(
+                        strategy,
+                        context.data().getRequest(),
+                        context.data().getSchedulingMetadata(),
+                        RoleType.PREFILL,
+                        null);
+
+        assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        assertReleased(workspace);
+    }
+
+    @Test
+    void projectionFailureReleasesCandidatesAlreadyEvaluated() {
+        PrefillCandidateSet workspace = candidateWorkspace().get();
+        publish("10.0.0.2", 8080);
+        PrefillEndpoint failing =
+                Mockito.spy((PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080"));
+        IllegalStateException failure = new IllegalStateException("projection unavailable");
+        Mockito.doAnswer(
+                        invocation -> {
+                            assertEquals(
+                                    1,
+                                    workspace.size(),
+                                    "the first endpoint must already be captured");
+                            throw failure;
+                        })
+                .when(failing)
+                .captureRouteProjectionInputs();
+        EndpointRegistry directory = Mockito.spy(registry);
+        Mockito.doReturn(
+                        List.of(
+                                registry.prefillRoutingSnapshot(RoleType.PREFILL).getFirst(),
+                                new EndpointRegistry.PrefillRoutingEntry("10.0.0.2:8080", failing)))
+                .when(directory)
+                .prefillRoutingSnapshot(RoleType.PREFILL);
+        strategy =
+                new CostBasedPrefillStrategy(
+                        directory,
+                        cache,
+                        reporter,
+                        cacheReporter,
+                        SchedulingTestConfig.configService(config));
+
+        assertSame(failure, assertThrows(IllegalStateException.class, this::select));
+
+        assertReleased(workspace);
+        assertSame(workspace, candidateWorkspace().get());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"4096,true", "4097,false"})
+    void workspaceRetentionIsBoundedByItsColumnCapacity(int workers, boolean retained) {
+        PrefillCandidateSet workspace = candidateWorkspace().get();
+        var originalDirectory = registry.prefillRoutingSnapshot(RoleType.PREFILL);
+        EndpointRegistry directory = Mockito.spy(registry);
+        Mockito.doReturn(Collections.nCopies(workers, originalDirectory.getFirst()))
+                .when(directory)
+                .prefillRoutingSnapshot(RoleType.PREFILL);
+        strategy =
+                new CostBasedPrefillStrategy(
+                        directory,
+                        cache,
+                        reporter,
+                        cacheReporter,
+                        SchedulingTestConfig.configService(config));
+
+        try (RequestRoute selected = select()) {
+            assertEquals("10.0.0.1", selected.prefill().getServerIp());
+        }
+
+        assertTrue(workspace.capacity() >= workers);
+        assertReleased(workspace);
+        PrefillCandidateSet nextWorkspace = candidateWorkspace().get();
+        if (retained) {
+            assertSame(workspace, nextWorkspace);
+        } else {
+            assertNotSame(workspace, nextWorkspace);
+            assertEquals(0, nextWorkspace.capacity());
+        }
+        Mockito.doReturn(originalDirectory)
+                .when(directory)
+                .prefillRoutingSnapshot(RoleType.PREFILL);
+        try (RequestRoute selected = select()) {
+            assertEquals("10.0.0.1", selected.prefill().getServerIp());
+        }
+        assertReleased(nextWorkspace);
+    }
+
+    @Test
+    void reentrantSelectionPreservesTheOuterWorkspaceUntilItsHandoffCompletes() {
+        PrefillCandidateSet workspace = candidateWorkspace().get();
+        AtomicBoolean reentered = new AtomicBoolean();
+        Mockito.doAnswer(
+                        invocation -> {
+                            if (reentered.compareAndSet(false, true)) {
+                                assertEquals(1, workspace.size());
+                                try (RequestRoute selected = select()) {
+                                    assertEquals("10.0.0.1", selected.prefill().getServerIp());
+                                }
+                                assertEquals(1, workspace.size());
+                                assertTrue(workspace.inUse);
+                            }
+                            return null;
+                        })
+                .when(reporter)
+                .reportPrefillSelectedEstimates(
+                        any(), any(), any(), Mockito.anyLong(), Mockito.anyLong());
+
+        try (RequestRoute selected = select()) {
+            assertEquals("10.0.0.1", selected.prefill().getServerIp());
+        }
+
+        assertTrue(reentered.get());
+        assertReleased(workspace);
+        assertSame(workspace, candidateWorkspace().get());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ThreadLocal<PrefillCandidateSet> candidateWorkspace() {
+        return (ThreadLocal<PrefillCandidateSet>)
+                org.springframework.test.util.ReflectionTestUtils.getField(
+                        CostBasedPrefillStrategy.class, "CANDIDATES");
+    }
+
+    private static void assertReleased(PrefillCandidateSet workspace) {
+        assertEquals(0, workspace.size());
+        assertFalse(workspace.inUse);
+        assertEquals(Long.MAX_VALUE, workspace.minimumTtftRank);
+        assertFalse(workspace.hasKnownTtft);
+        assertEquals(0L, workspace.maximumCacheHit);
+        assertEquals(0L, workspace.maximumRoutingCacheMatchTokens);
+        for (int index = 0; index < workspace.capacity(); index++) {
+            assertNull(workspace.endpoint(index));
+            assertNull(workspace.endpointAddress(index));
+            assertNull(workspace.admissionBlock(index));
+        }
     }
 
     @Test

@@ -36,7 +36,6 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
         try (Node oldMaster = new Node("10.0.0.1", remoteRoutes);
                 Node follower = new Node("10.0.0.2", scheduler);
                 var deadAddress = java.nio.channels.SocketChannel.open()) {
-            int oldMasterPort = oldMaster.server.getPort();
             when(follower.leadership.getMasterHostIpPort()).thenReturn(oldMaster.httpAddress());
             if (failure.equals("SHUTDOWN")) {
                 oldMaster.server.shutdown().awaitTermination(3, TimeUnit.SECONDS);
@@ -48,10 +47,16 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
                         .thenReturn("flexlb-unresolvable.invalid.:7001");
             }
             if (failure.equals("SHUTDOWN") || failure.equals("DEAD_BEFORE_CONNECT")) {
-                // Reserve the dead listener's address without listening, so another
-                // local service cannot turn a connect-failure test into an HTTP response.
-                deadAddress.bind(new java.net.InetSocketAddress("127.0.0.1", oldMasterPort));
-                follower.useBoundedConnectFailure(oldMasterPort);
+                // Reserve a fresh non-listening address exclusively. A closed listener's
+                // port can still be occupied by connections from an earlier parameter case.
+                deadAddress.bind(new java.net.InetSocketAddress("127.0.0.1", 0));
+                int deadPort =
+                        ((java.net.InetSocketAddress) deadAddress.getLocalAddress()).getPort();
+                when(follower.leadership.getMasterHostIpPort())
+                        .thenReturn(
+                                "127.0.0.1:"
+                                        + (deadPort - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET));
+                follower.useBoundedConnectFailure(deadPort);
             }
             long requestId = 91_001L;
             var originalInput =

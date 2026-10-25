@@ -6,7 +6,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
+import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -33,7 +33,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final PlacementAvailability placementAvailability = new PlacementAvailability();
     private final BindingRouter router;
     private final EndpointRegistry registry;
-    private final DecodeCapacityAcquirer decodeCapacity;
+    private final DecodeAdmission decodeCapacity;
     private final AbstractRequestScheduler scheduler;
     private final SchedulerRuntime runtime;
     private volatile boolean deliveryPaused;
@@ -104,7 +104,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 .when(facilities)
                 .watchDeliveryCapacity(org.mockito.ArgumentMatchers.any());
         this.decodeCapacity =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         delivery, requests, runtime, requestReporter, configService, capacity);
         this.scheduler =
                 PlacementConfiguration.create(

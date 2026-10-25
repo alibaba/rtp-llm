@@ -45,12 +45,24 @@ class DirectRequestLifetimeRaceTest {
         SchedulingTestConfig.useNonBatchDispatcher(config);
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
+        var prefillSelector = mock(CostBasedPrefillStrategy.class);
+        var model = mock(ModelMetaConfig.class);
+        when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
+        var router =
+                new RequestWorkerSelector(
+                        prefillSelector,
+                        mock(DecodeSelector.class),
+                        mock(VitWorkerSelector.class),
+                        model);
         var requests =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(RecentCacheKeyTraceReporter.class),
+                        router,
+                        mock(org.flexlb.balance.eviction.DecodeAdmission.class),
+                        new PlacementAvailability());
         try {
             var context = RequestProtocolTestSupport.context(config, 101L);
             var prefill = mock(PrefillEndpoint.class);
@@ -82,7 +94,6 @@ class DirectRequestLifetimeRaceTest {
                                     0L));
             when(handoff.precedingWork()).thenReturn(capture);
             when(prefill.commit(any(PrefillState.CommitPlan.class))).thenReturn(handoff);
-            var prefillSelector = mock(CostBasedPrefillStrategy.class);
             when(prefillSelector.select(
                             org.mockito.ArgumentMatchers.eq(context.data().getRequest()),
                             org.mockito.ArgumentMatchers.eq(context.data().getSchedulingMetadata()),
@@ -94,14 +105,6 @@ class DirectRequestLifetimeRaceTest {
                                     PlacementResult.success(
                                             call.getArgument(4, RequestRoute.class)
                                                     .add(pin, metadata, 30_000L, 0L)));
-            var model = mock(ModelMetaConfig.class);
-            when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
-            var router =
-                    new RequestWorkerSelector(
-                            prefillSelector,
-                            mock(DecodeSelector.class),
-                            mock(VitWorkerSelector.class),
-                            model);
 
             AtomicBoolean lateConfirmation = new AtomicBoolean();
             doAnswer(
@@ -129,15 +132,7 @@ class DirectRequestLifetimeRaceTest {
                             any(),
                             org.mockito.ArgumentMatchers.isA(ContextResult.RouteDelivered.class));
 
-            var scheduler =
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.configure(
-                            requests,
-                            service.loadBalanceConfig(),
-                            router,
-                            mock(DeliveryMetricsReporter.class),
-                            mock(org.flexlb.balance.eviction.DecodeCapacityAcquirer.class),
-                            new PlacementAvailability());
-            var returned = scheduler.submit(context);
+            var returned = requests.submit(context);
             assertSame(context.data().getFuture(), returned);
             var response = returned.get(2L, TimeUnit.SECONDS);
             assertFalse(returned.isCompletedExceptionally());

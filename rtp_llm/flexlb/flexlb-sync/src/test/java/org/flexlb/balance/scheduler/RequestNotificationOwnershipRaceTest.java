@@ -92,7 +92,7 @@ class RequestNotificationOwnershipRaceTest {
                             return null;
                         })
                 .when(owner)
-                .queueControl(eq(context));
+                .queueControl(eq(context), org.mockito.ArgumentMatchers.isNull());
         owner.start();
         try {
             assertNull(context.snapshot().route());
@@ -134,7 +134,9 @@ class RequestNotificationOwnershipRaceTest {
             assertNull(SchedulerTestSupport.failure(owner));
         } finally {
             finishNotification.countDown();
-            doCallRealMethod().when(owner).queueControl(eq(context));
+            doCallRealMethod()
+                    .when(owner)
+                    .queueControl(eq(context), org.mockito.ArgumentMatchers.isNull());
             ReflectionTestUtils.setField(runtime, "timer", originalTimer);
             runtime.shutdown();
         }

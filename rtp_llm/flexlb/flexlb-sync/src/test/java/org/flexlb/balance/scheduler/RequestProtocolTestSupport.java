@@ -50,14 +50,47 @@ final class RequestProtocolTestSupport {
         try {
             var constructor =
                     QueuedRequestScheduler.Plan.class.getDeclaredConstructor(
-                            GlobalQueueEntry.class, long.class);
+                            GlobalQueueEntry.class,
+                            long.class,
+                            java.util.concurrent.atomic.AtomicBoolean.class);
             constructor.setAccessible(true);
-            plan = constructor.newInstance(new GlobalQueueEntry(context, null), 0L);
+            plan =
+                    constructor.newInstance(
+                            new GlobalQueueEntry(context, null),
+                            0L,
+                            new java.util.concurrent.atomic.AtomicBoolean());
         } catch (ReflectiveOperationException failure) {
             throw new AssertionError(failure);
         }
         ReflectionTestUtils.setField(plan, "result", PlacementResult.success(routing));
+        ReflectionTestUtils.setField(plan, "handle", admissionHandle(context));
         return plan;
+    }
+
+    static AdmissionHandle admissionHandle(RequestContext context) {
+        if (context.data().getFuture() == null) {
+            context.data().setFuture(new CompletableFuture<>());
+        }
+        context.register(
+                context.data().getRequestId(), System.currentTimeMillis(), Long.MAX_VALUE, 60_000L);
+        if (context.snapshot().placement() == null) {
+            context.beginPlacement(null);
+        }
+        var handle = org.mockito.Mockito.mock(AdmissionHandle.class);
+        var token = context.snapshot().placement().operation();
+        ReflectionTestUtils.setField(handle, "token", token);
+        org.mockito.Mockito.when(handle.owner()).thenReturn(context);
+        org.mockito.Mockito.doAnswer(
+                        call -> {
+                            context.completePlacement(
+                                    token,
+                                    ContextResult.PublicationResult.PUBLISHED,
+                                    System.currentTimeMillis());
+                            return null;
+                        })
+                .when(handle)
+                .finish();
+        return handle;
     }
 
     static RequestContext planContext(QueuedRequestScheduler.Plan plan) {
@@ -91,10 +124,31 @@ final class RequestProtocolTestSupport {
     static boolean adopt(
             QueuedRequestScheduler scheduler,
             QueuedRequestScheduler.Plan plan,
-            org.flexlb.balance.eviction.DecodeCapacityAcquirer.PreemptionResult result) {
-        ReflectionTestUtils.setField(plan, "preemptionResult", result);
-        return Boolean.TRUE.equals(
-                ReflectionTestUtils.invokeMethod(scheduler, "settlePreemptionResult", plan, true));
+            org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult result) {
+        var endpoint = planRouting(plan).decodeEp();
+        boolean accepted = false;
+        Throwable failure = null;
+        try {
+            accepted = plan.accept(endpoint, result.reservation());
+            return accepted;
+        } catch (RuntimeException | Error failed) {
+            failure = failed;
+            throw failed;
+        } finally {
+            if (!accepted && endpoint != null) {
+                try {
+                    endpoint.release(
+                                    result.reservation(),
+                                    DecodeResources.ReleaseReason.LOCAL_ROLLBACK)
+                            .status();
+                } catch (RuntimeException | Error failed) {
+                    if (failure == null) {
+                        throw failed;
+                    }
+                    failure.addSuppressed(failed);
+                }
+            }
+        }
     }
 
     static DecodeEndpoint decodeEndpoint() {
@@ -270,32 +324,53 @@ final class RequestProtocolTestSupport {
         return (QueuedRequestScheduler) requests;
     }
 
-    static QueuedRequestScheduler queue(
-            org.flexlb.config.ConfigService config,
+    /** Rewire an already-bound owner only for protocol/fault-injection fixtures. */
+    static RequestScheduler injectPlacementDependencies(
+            AbstractRequestScheduler owner,
+            org.flexlb.config.ConfigService service,
             RequestWorkerSelector router,
             org.flexlb.service.monitor.DeliveryMetricsReporter reporter,
-            org.flexlb.balance.eviction.DecodeCapacityAcquirer eviction,
-            AbstractRequestScheduler owner,
+            org.flexlb.balance.eviction.DecodeAdmission eviction,
             PlacementAvailability availability) {
-        return (QueuedRequestScheduler)
-                SchedulerTestSupport.configure(
-                        owner,
-                        config.loadBalanceConfig(),
-                        router,
-                        reporter,
-                        eviction,
-                        availability);
-    }
-
-    static RequestScheduler configure(
-            AbstractRequestScheduler owner,
-            org.flexlb.config.ConfigService config,
-            RequestWorkerSelector router,
-            org.flexlb.service.monitor.DeliveryMetricsReporter reporter,
-            org.flexlb.balance.eviction.DecodeCapacityAcquirer eviction,
-            PlacementAvailability availability) {
-        return SchedulerTestSupport.configure(
-                owner, config.loadBalanceConfig(), router, reporter, eviction, availability);
+        var config = service.loadBalanceConfig();
+        ReflectionTestUtils.setField(owner, "router", router);
+        if (owner instanceof QueuedRequestScheduler queue) {
+            ReflectionTestUtils.setField(queue, "decodeCapacity", eviction);
+            ReflectionTestUtils.setField(queue, "reporter", reporter);
+            ReflectionTestUtils.setField(
+                    queue,
+                    "plannerCount",
+                    Math.max(2, config.getInternalRuntime().getQueuePlannerThreads()));
+            ReflectionTestUtils.setField(
+                    queue, "queueSettings", QueueExecutionSettings.capture(config));
+            ReflectionTestUtils.setField(
+                    queue, "orderedQueue", new OrderedRequestQueue(config.isPriorityOrdering()));
+            ReflectionTestUtils.setField(
+                    queue,
+                    "scanBudgetMultiplier",
+                    config.queueScheduler().getScanBudgetMultiplier());
+            var oldAvailability =
+                    (PlacementAvailability) ReflectionTestUtils.getField(queue, "availability");
+            var listener =
+                    (PlacementAvailability.Listener)
+                            ReflectionTestUtils.getField(queue, "availabilityListener");
+            oldAvailability.removeListener(listener);
+            ReflectionTestUtils.setField(queue, "availability", availability);
+            ReflectionTestUtils.setField(
+                    queue,
+                    "waitingRequests",
+                    new PlacementCapacityWaitQueue(config.isPriorityOrdering(), availability));
+            availability.addListener(listener);
+            org.mockito.Mockito.doCallRealMethod()
+                    .when(queue)
+                    .queueControl(
+                            org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.isNull());
+            if (!((Thread) ReflectionTestUtils.getField(queue, "decisionThread")).isAlive()) {
+                queue.start();
+            }
+        }
+        return owner;
     }
 
     static void close(RequestScheduler scheduler) {

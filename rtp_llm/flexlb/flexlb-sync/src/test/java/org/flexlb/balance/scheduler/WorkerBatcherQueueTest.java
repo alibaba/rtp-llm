@@ -29,7 +29,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.ReentrantLock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -328,10 +327,7 @@ class WorkerBatcherQueueTest {
         doAnswer(
                         invocation -> {
                             callbackThread.set(Thread.currentThread());
-                            ReentrantLock lock =
-                                    (ReentrantLock)
-                                            org.springframework.test.util.ReflectionTestUtils
-                                                    .getField(runtime, "queueLock");
+                            var lock = prefillEndpoint.ownership.queueGuard();
                             callbackHeldLock.set(lock.isHeldByCurrentThread());
                             delivered.countDown();
                             return null;
@@ -397,7 +393,7 @@ class WorkerBatcherQueueTest {
                                         Thread.holdsLock(context),
                                         "request cleanup must run outside Context's monitor");
                                 assertFalse(
-                                        state.lock.isHeldByCurrentThread(),
+                                        state.queueGuard().isHeldByCurrentThread(),
                                         "request cleanup must enter the resource ledger outside the queue lock");
                                 cleanupThread.set(Thread.currentThread());
                                 boolean released =
@@ -406,7 +402,7 @@ class WorkerBatcherQueueTest {
                                 if (released) {
                                     releases.incrementAndGet();
                                     assertFalse(
-                                            state.lock.isHeldByCurrentThread(),
+                                            state.queueGuard().isHeldByCurrentThread(),
                                             "capacity and queue notifications must run after resource release unlocks");
                                     runtime.signal(false);
                                     runtime.capacityAvailableSignal.run();
@@ -436,10 +432,7 @@ class WorkerBatcherQueueTest {
             assertEquals(List.of(queued), WorkerBatcherTestSupport.capture(runtime).items());
             RequestProtocolTestSupport.awaitCondition(
                     () -> {
-                        ReentrantLock lock =
-                                (ReentrantLock)
-                                        org.springframework.test.util.ReflectionTestUtils.getField(
-                                                runtime, "queueLock");
+                        var lock = prefillEndpoint.ownership.queueGuard();
                         lock.lock();
                         try {
                             return org.springframework.test.util.ReflectionTestUtils.getField(

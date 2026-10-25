@@ -12,6 +12,13 @@ public record PreemptionRegistration(
         DecodeResources.ReservationHandle reservation,
         CancelTarget cancelTarget)
         implements ContextResult.GrantValue {
+    /** Business progress after Scheduler has applied a cancel reply; never a capacity grant. */
+    public enum Reply {
+        WAITING,
+        NOT_FOUND,
+        UNKNOWN
+    }
+
     public PreemptionRegistration {
         Objects.requireNonNull(owner);
         Objects.requireNonNull(reservation);

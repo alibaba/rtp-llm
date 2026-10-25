@@ -617,7 +617,7 @@ class RequestWorkerSelectorTest {
                                     RequestProtocolTestSupport.adopt(
                                             queueScheduler(context),
                                             RequestProtocolTestSupport.plan(context, route),
-                                            new org.flexlb.balance.eviction.DecodeCapacityAcquirer
+                                            new org.flexlb.balance.eviction.DecodeAdmission
                                                     .PreemptionResult(reservation, false, "test")));
             assertSame(adoptionThrows ? adoptionFailure : cleanupFailure, actual);
             assertEquals(
@@ -649,7 +649,7 @@ class RequestWorkerSelectorTest {
                 RequestProtocolTestSupport.adopt(
                         scheduler,
                         plan,
-                        new org.flexlb.balance.eviction.DecodeCapacityAcquirer.PreemptionResult(
+                        new org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult(
                                 reservation, false, "test")));
         when(route.prefillEp().offerPinned(eq(prefill.pin()), any(), any())).thenReturn(true);
         doThrow(cleanupFailure).when(prefill.pin()).close();
@@ -774,22 +774,19 @@ class RequestWorkerSelectorTest {
                     RequestProtocolTestSupport.adopt(
                             scheduler,
                             plan,
-                            new org.flexlb.balance.eviction.DecodeCapacityAcquirer.PreemptionResult(
+                            new org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult(
                                     existing, false, "first")));
             assertFalse(
                     RequestProtocolTestSupport.adopt(
                             scheduler,
                             plan,
-                            new org.flexlb.balance.eviction.DecodeCapacityAcquirer.PreemptionResult(
+                            new org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult(
                                     incoming, false, "conflict")));
             assertEquals(
                     existing,
                     org.springframework.test.util.ReflectionTestUtils.getField(
                             plan, "pendingDecodeRollback"));
-            assertEquals(
-                    false,
-                    org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                            scheduler, "settlePreemptionResult", plan, true));
+            assertFalse(plan.accept(endpoint, incoming));
             verify(endpoint, never())
                     .release(existing, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         }
@@ -814,9 +811,7 @@ class RequestWorkerSelectorTest {
                                         mock(
                                                 org.flexlb.service.monitor.DeliveryMetricsReporter
                                                         .class),
-                                        mock(
-                                                org.flexlb.balance.eviction.DecodeCapacityAcquirer
-                                                        .class),
+                                        mock(org.flexlb.balance.eviction.DecodeAdmission.class),
                                         SchedulerTestSupport.runtime(requests),
                                         new PlacementAvailability(),
                                         SchedulingTestConfig.capacity(config),
@@ -1248,12 +1243,12 @@ class RequestWorkerSelectorTest {
     private RequestScheduler scheduler(RequestWorkerSelector router, RequestContext context) {
 
         when(configService.loadBalanceConfig()).thenReturn(context.data().getConfig());
-        return SchedulerTestSupport.configure(
+        return RequestProtocolTestSupport.injectPlacementDependencies(
                 requests,
-                configService.loadBalanceConfig(),
+                configService,
                 router,
                 mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
-                mock(org.flexlb.balance.eviction.DecodeCapacityAcquirer.class),
+                mock(org.flexlb.balance.eviction.DecodeAdmission.class),
                 new PlacementAvailability());
     }
 

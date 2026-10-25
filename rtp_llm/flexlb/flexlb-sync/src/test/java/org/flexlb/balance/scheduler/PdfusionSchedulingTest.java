@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
+import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -77,12 +77,7 @@ class PdfusionSchedulingTest {
         when(service.loadBalanceConfig()).thenReturn(config);
         DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
         RequestSchedulerReporter requestReporter = mock(RequestSchedulerReporter.class);
-        AbstractRequestScheduler lifecycle =
-                SchedulerTestSupport.create(
-                        service,
-                        reporter,
-                        requestReporter,
-                        mock(RecentCacheKeyTraceReporter.class));
+        var repository = new RequestRepository();
         PlacementAvailability availability = new PlacementAvailability();
         var grpc = mock(EngineGrpcClient.class);
         when(grpc.batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
@@ -92,12 +87,7 @@ class PdfusionSchedulingTest {
                                         LinearDeliveryFixture.ack(call.getArgument(2))));
         DeliveryDispatcher delivery = new DeliveryDispatcher(grpc, service, reporter);
         EndpointRegistry endpoints =
-                new EndpointRegistry(
-                        service,
-                        SchedulerTestSupport.repository(lifecycle),
-                        reporter,
-                        delivery,
-                        availability);
+                new EndpointRegistry(service, repository, reporter, delivery, availability);
         WorkerStatus worker =
                 WorkerStatus.createDiscovered(
                         RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test");
@@ -144,23 +134,26 @@ class PdfusionSchedulingTest {
                                                 .loadBalanceConfig())),
                         new VitWorkerSelector(directory),
                         model);
-        RequestScheduler scheduler =
-                SchedulerTestSupport.configure(
-                        lifecycle,
-                        service.loadBalanceConfig(),
-                        router,
-                        reporter,
-                        mock(DecodeCapacityAcquirer.class),
-                        availability);
         SchedulerRuntime runtime =
-                new SchedulerRuntime(
-                        SchedulerTestSupport.repository(lifecycle),
-                        endpoints,
-                        reporter,
-                        requestReporter,
-                        org.mockito.Mockito.mock(DeliveryDispatcher.class),
+                org.mockito.Mockito.spy(
+                        new SchedulerRuntime(
+                                repository,
+                                endpoints,
+                                reporter,
+                                requestReporter,
+                                delivery,
+                                service,
+                                grpc));
+        AbstractRequestScheduler lifecycle =
+                SchedulerTestSupport.create(
+                        runtime,
                         service,
-                        org.mockito.Mockito.mock(EngineGrpcClient.class));
+                        reporter,
+                        mock(RecentCacheKeyTraceReporter.class),
+                        router,
+                        mock(DecodeAdmission.class),
+                        availability);
+        RequestScheduler scheduler = lifecycle;
         try {
             long requestId = 920001L;
             var context = RequestProtocolTestSupport.context(config, requestId);

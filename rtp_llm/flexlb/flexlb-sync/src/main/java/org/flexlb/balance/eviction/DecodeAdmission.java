@@ -20,7 +20,6 @@ import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter.CancelEvent;
@@ -50,13 +49,16 @@ import static com.google.common.base.Preconditions.checkState;
 /**
  * Obtains capacity at one selected Decode generation through local withdrawal or Engine cancellation.
  *
- * <p>The scheduler supplies the blocked endpoint and consumes one result.  This class
- * owns the two-phase protocol, token fencing and exactly-once child settlement.
+ * <p>The scheduler supplies the blocked endpoint and a Plan. This class owns the
+ * two-phase protocol, token fencing and reservation transfer or release.
  * Engine acknowledgement is only control evidence; the canonical victim
  * resolution transaction may complete before or after that acknowledgement.</p>
  */
 @Component
-public class DecodeCapacityAcquirer {
+public class DecodeAdmission {
+    private static final AbstractRequestScheduler.PreemptionEvent START_CANCEL =
+            new AbstractRequestScheduler.PreemptionEvent(
+                    PreemptionCancelPhase.CANCEL_IN_FLIGHT, false, null, null, null);
 
     public record PreemptionResult(
             DecodeResources.ReservationHandle reservation, boolean controlFailure, String detail) {
@@ -117,7 +119,7 @@ public class DecodeCapacityAcquirer {
     private final PreemptionConfig preemption;
 
     @Autowired
-    public DecodeCapacityAcquirer(
+    public DecodeAdmission(
             DeliveryDispatcher dispatcher,
             RequestRepository requests,
             RequestTaskScheduler runtime,
@@ -201,19 +203,10 @@ public class DecodeCapacityAcquirer {
                                 "begin_" + begin.name().toLowerCase()));
             }
             capability.endpointBegun = true;
+            capability.observe();
             for (ClaimedVictim owned : capability.claims) {
-                if (!owned.claim
-                        .owner()
-                        .data()
-                        .getScheduler()
-                        .onPreemption(
-                                owned.claim,
-                                new AbstractRequestScheduler.PreemptionEvent(
-                                        PreemptionCancelPhase.CANCEL_IN_FLIGHT,
-                                        false,
-                                        null,
-                                        null,
-                                        null))) {
+                var scheduler = owned.claim.owner().data().getScheduler();
+                if (!scheduler.onPreemption(owned.claim, START_CANCEL)) {
                     return CompletableFuture.completedFuture(
                             capability.abort(
                                     true,
@@ -223,9 +216,9 @@ public class DecodeCapacityAcquirer {
             for (ClaimedVictim owned : capability.claims) {
                 owned.acknowledgement =
                         capability.outboundStarted(owned)
-                                ? cancel(owned, command.cancelAckTimeoutMs())
+                                ? cancel(owned, command, capability.expiresAt)
                                 : CompletableFuture.completedFuture(
-                                        EngineGrpcClient.CancelReply.FAILED);
+                                        PreemptionRegistration.Reply.UNKNOWN);
             }
 
             CompletableFuture<PreemptionResult> protocol =
@@ -253,25 +246,7 @@ public class DecodeCapacityAcquirer {
     /** Freeze completion versus timeout at the ACK boundary, before coordination can queue. */
     private CompletableFuture<PreemptionResult> coordinateAcknowledgements(
             RequestContext context, AttemptCapability capability) {
-        var resolutions =
-                capability.claims.stream()
-                        .map(
-                                owned ->
-                                        runtime.signals()
-                                                .preemption(owned.claim)
-                                                .toCompletableFuture())
-                        .toArray(CompletableFuture<?>[]::new);
-        var completed = CompletableFuture.allOf(resolutions);
-        var settlement = completed.handle((ignored, failure) -> capability.allVictimsResolved());
-        // Detach the attempt's observer when this wait ends; victim signals remain authoritative.
-        settlement.whenComplete((ignored, failure) -> completed.cancel(false));
-        if (!settlement.isDone()) {
-            var deadline =
-                    runtime.scheduleTimeout(
-                            () -> settlement.complete(false),
-                            Math.max(1L, capability.command.preemptionTimeoutMs()));
-            settlement.whenComplete((ignored, failure) -> deadline.cancel());
-        }
+        var settlement = capability.settlement;
         // Only signal observation and timer registration run on the ACK thread.
         return CompletableFuture.completedFuture(null)
                 .thenComposeAsync(
@@ -284,7 +259,6 @@ public class DecodeCapacityAcquirer {
             RequestContext context,
             AttemptCapability capability,
             CompletableFuture<Boolean> settlement) {
-        PreemptionCommand command = capability.command;
         // A transport-unknown ACK is not a negative acknowledgement: the
         // Prefill may have installed the intent before the reply was lost.
         // Such a child therefore waits for the canonical victim resolution
@@ -296,70 +270,16 @@ public class DecodeCapacityAcquirer {
             if (owned.requestResolved()) {
                 continue;
             }
-            EngineGrpcClient.CancelReply outcome = owned.acknowledgement.join();
-            switch (outcome) {
-                case ACCEPTED, REQUEST_FENCED -> {
-                    boolean transitioned =
-                            owned.claim
-                                    .owner()
-                                    .data()
-                                    .getScheduler()
-                                    .onPreemption(
-                                            owned.claim,
-                                            new AbstractRequestScheduler.PreemptionEvent(
-                                                    PreemptionCancelPhase.CANCEL_REQUESTED,
-                                                    false,
-                                                    null,
-                                                    null,
-                                                    null));
-                    if (transitioned) {
-                        capability.transferred(owned);
-                    } else {
-                        capability.transferUnknown(owned);
-                    }
-                    pendingResolutions.add(owned);
-                }
-                case NOT_FOUND -> {
-                    owned.claim
-                            .owner()
-                            .data()
-                            .getScheduler()
-                            .onPreemption(
-                                    owned.claim,
-                                    new AbstractRequestScheduler.PreemptionEvent(
-                                            PreemptionCancelPhase.NOT_FOUND_STALE,
-                                            false,
-                                            null,
-                                            null,
-                                            null));
-                    capability.transferred(owned);
-                    if (!owned.requestResolved()) {
-                        hasNotFound = true;
-                    }
-                }
-                case REQUEST_CLEANED -> {
-                    // Only downstream cleanup proof can release Decode capacity without a
-                    // WorkerStatus terminal.
-                    if (owned.claim
-                            .owner()
-                            .data()
-                            .getScheduler()
-                            .onPreemption(
-                                    owned.claim,
-                                    new AbstractRequestScheduler.PreemptionEvent(
-                                            null,
-                                            false,
-                                            command.endpoint(),
-                                            owned.reservation,
-                                            command.detail()))) {
-                        capability.transferred(owned);
-                        pendingResolutions.add(owned);
-                    }
-                }
-                case FAILED, UNSUPPORTED -> {
-                    capability.transferUnknown(owned);
-                    pendingResolutions.add(owned);
-                }
+            var progress = owned.acknowledgement.join();
+            if (progress == PreemptionRegistration.Reply.UNKNOWN) {
+                capability.transferUnknown(owned);
+            } else {
+                capability.transferred(owned);
+            }
+            if (progress == PreemptionRegistration.Reply.NOT_FOUND) {
+                hasNotFound |= !owned.requestResolved();
+            } else {
+                pendingResolutions.add(owned);
             }
         }
 
@@ -390,23 +310,33 @@ public class DecodeCapacityAcquirer {
                 work -> runtime.executeRequestWork(context, work));
     }
 
-    private CompletableFuture<EngineGrpcClient.CancelReply> cancel(
-            ClaimedVictim victim, long timeoutMs) {
+    private CompletableFuture<PreemptionRegistration.Reply> cancel(
+            ClaimedVictim victim, PreemptionCommand command, long expiresAt) {
         try {
-            CompletableFuture<EngineGrpcClient.CancelReply> stage =
-                    dispatcher.preempt(victim.claim, timeoutMs);
+            long remaining =
+                    java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                            expiresAt - System.nanoTime());
+            if (remaining <= 0) {
+                return CompletableFuture.completedFuture(PreemptionRegistration.Reply.UNKNOWN);
+            }
+            var stage =
+                    dispatcher.preempt(
+                            victim.claim,
+                            command.endpoint(),
+                            command.detail(),
+                            Math.min(command.cancelAckTimeoutMs(), remaining));
             if (stage == null) {
-                return CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.FAILED);
+                return CompletableFuture.completedFuture(PreemptionRegistration.Reply.UNKNOWN);
             }
             return stage.handle(
                     (outcome, failure) ->
                             failure == null && outcome != null
                                     ? outcome
-                                    : EngineGrpcClient.CancelReply.FAILED);
+                                    : PreemptionRegistration.Reply.UNKNOWN);
         } catch (RuntimeException | Error failure) {
             // The capability marked this victim OUTBOUND before invocation,
             // so close conservatively transfers its exact claims to UNKNOWN.
-            return CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.FAILED);
+            return CompletableFuture.completedFuture(PreemptionRegistration.Reply.UNKNOWN);
         }
     }
 
@@ -430,7 +360,7 @@ public class DecodeCapacityAcquirer {
     private final class ClaimedVictim {
         private final DecodeResources.ReservationHandle reservation;
         private final PreemptionRegistration claim;
-        private CompletableFuture<EngineGrpcClient.CancelReply> acknowledgement;
+        private CompletableFuture<PreemptionRegistration.Reply> acknowledgement;
         private volatile ClaimDisposition disposition = ClaimDisposition.RELEASABLE;
 
         private ClaimedVictim(
@@ -459,6 +389,8 @@ public class DecodeCapacityAcquirer {
         private final PreemptionCommand command;
         private final long token;
         private final List<ClaimedVictim> claims = new ArrayList<>();
+        private final long expiresAt;
+        private final CompletableFuture<Boolean> settlement = new CompletableFuture<>();
         private boolean endpointBegun;
         private boolean closed;
         private String cleanupFailure;
@@ -466,10 +398,39 @@ public class DecodeCapacityAcquirer {
         private AttemptCapability(PreemptionCommand command, long token) {
             this.command = command;
             this.token = token;
+            this.expiresAt =
+                    System.nanoTime()
+                            + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(
+                                    command.preemptionTimeoutMs());
+        }
+
+        private void observe() {
+            var signals =
+                    claims.stream()
+                            .map(v -> runtime.signals().preemption(v.claim).toCompletableFuture())
+                            .toArray(CompletableFuture[]::new);
+            var all = CompletableFuture.allOf(signals);
+            all.whenComplete((ignored, failure) -> settlement.complete(allVictimsResolved()));
+            settlement.whenComplete((ignored, failure) -> all.cancel(false));
+            if (!settlement.isDone()) {
+                long remaining = expiresAt - System.nanoTime();
+                if (remaining <= 0) {
+                    settlement.complete(false);
+                } else {
+                    var deadline =
+                            runtime.scheduleTimeout(
+                                    () -> settlement.complete(allVictimsResolved()),
+                                    Math.max(
+                                            1L,
+                                            java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                                                    remaining)));
+                    settlement.whenComplete((ignored, failure) -> deadline.cancel());
+                }
+            }
         }
 
         private synchronized boolean outboundStarted(ClaimedVictim owned) {
-            if (owned.requestResolved()) {
+            if (owned.requestResolved() || settlement.isDone() && !settlement.getNow(false)) {
                 return false;
             }
             if (owned.disposition != ClaimDisposition.RELEASABLE) {
@@ -517,7 +478,7 @@ public class DecodeCapacityAcquirer {
 
         private PreemptionResult finish(boolean hasNotFound, boolean victimsResolved) {
             DecodeResources.ReservationHandle incoming =
-                    victimsResolved && command.admissionOpen().getAsBoolean()
+                    victimsResolved && !closed && command.admissionOpen().getAsBoolean()
                             ? command.endpoint().commitPreemption(token)
                             : null;
             if (incoming != null) {
@@ -543,6 +504,7 @@ public class DecodeCapacityAcquirer {
             if (!beginClose()) {
                 return;
             }
+            settlement.complete(false);
 
             // OUTBOUND means the call may have reached Prefill even if its
             // Java invocation or continuation failed. Transfer before endpoint
@@ -603,11 +565,65 @@ public class DecodeCapacityAcquirer {
     }
 
     /**
-     * The caller retains its admission handle throughout this operation and consumes
-     * any returned reservation. Null means no takeover occurred, including a local
-     * victim conflict; an Engine attempt always returns its eventual terminal result.
+     * Completes only after the Plan accepts acquired capacity or that capacity is released.
+     * Null means no takeover occurred, including a local victim conflict. The returned
+     * future observes the operation; cancelling it cannot interrupt ownership transfer.
      */
-    public CompletableFuture<PreemptionResult> tryReclaim(
+    public CompletableFuture<PreemptionResult> admit(
+            QueuedRequestScheduler.Plan plan, WorkerEndpoint endpoint) {
+        var attempt = tryReclaim(plan.context(), endpoint);
+        if (attempt == null) {
+            return null;
+        }
+        return attempt.thenApply(
+                        result -> {
+                            if (result == null || !result.committed()) {
+                                return result;
+                            }
+                            var decode = (DecodeEndpoint) endpoint;
+                            boolean accepted = false;
+                            Throwable failure = null;
+                            try {
+                                accepted = plan.accept(decode, result.reservation());
+                                return accepted
+                                        ? result
+                                        : new PreemptionResult(
+                                                null, false, "plan_no_longer_current");
+                            } catch (RuntimeException | Error failed) {
+                                failure = failed;
+                                throw failed;
+                            } finally {
+                                if (!accepted) {
+                                    try {
+                                        var released =
+                                                decode.release(
+                                                                result.reservation(),
+                                                                DecodeResources.ReleaseReason
+                                                                        .LOCAL_ROLLBACK)
+                                                        .status();
+                                        checkState(
+                                                released
+                                                                == DecodeResources
+                                                                        .ReservationReleaseResult
+                                                                        .RELEASED
+                                                        || released
+                                                                == DecodeResources
+                                                                        .ReservationReleaseResult
+                                                                        .STALE,
+                                                "unaccepted admission retained Decode resources");
+                                    } catch (RuntimeException | Error failed) {
+                                        if (failure == null) {
+                                            throw failed;
+                                        }
+                                        failure.addSuppressed(failed);
+                                    }
+                                }
+                            }
+                        })
+                .copy();
+    }
+
+    CompletableFuture<PreemptionResult> tryReclaim(
             RequestContext ctx, WorkerEndpoint blockedEndpoint) {
         Request request = ctx.data().getRequest();
         SchedulingMetadata metadata = ctx.data().getSchedulingMetadata();
@@ -922,9 +938,12 @@ public class DecodeCapacityAcquirer {
                         Failures.run(
                                 failure,
                                 () ->
-                                        ((QueuedRequestScheduler)
-                                                        withdrawal.owner().data().getScheduler())
-                                                .completeWithdrawal(withdrawal, committed));
+                                        withdrawal.complete(
+                                                committed
+                                                        ? org.flexlb.balance.scheduler.ContextResult
+                                                                .PublicationResult.WITHDRAWN
+                                                        : org.flexlb.balance.scheduler.ContextResult
+                                                                .PublicationResult.RESTORED));
             }
             if (failure != null) {
                 if (incoming != null) {
