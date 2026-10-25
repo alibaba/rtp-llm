@@ -268,12 +268,22 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
-    @Test
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+        "PREFILL_REQUEST,Prefill request capacity exhausted",
+        "PREFILL_BATCH,Prefill batch capacity exhausted",
+        "DISPATCH_EXECUTOR,DELIVERY_CAPACITY_BATCH_ADMISSION",
+        "DECODE_ENGINE,DELIVERY_CAPACITY_DECODE_ENGINE"
+    })
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
-    void blockedExactHeadWaitsForItsCapacityEventWithoutPolling() throws Exception {
+    void blockedExactHeadWaitsForItsCapacityEventWithoutPolling(
+            CapacityBoundary.Resource resource, String cause) throws Exception {
         FlexlbConfig config = singleConfig();
+        if (resource == CapacityBoundary.Resource.PREFILL_REQUEST) {
+            SchedulingTestConfig.useNonBatchDispatcher(config);
+        }
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
-        EventDrivenBlock delivery = new EventDrivenBlock();
+        EventDrivenBlock delivery = new EventDrivenBlock(resource);
         WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         RequestRoute head = item(config, endpoint, 1L, 50, System.currentTimeMillis());
 
@@ -282,6 +292,7 @@ class WorkerBatcherSchedulingTest {
         await(delivery.firstCapacity.subscribed);
 
         var firstWait = runtime.getLatestQueueWaitSnapshot();
+        assertEquals(cause, firstWait.get("cause"));
         assertEquals(1, firstWait.get("queueDepth"));
         assertEquals(Map.of(50, 1), firstWait.get("priorityCounts"));
         assertThrows(UnsupportedOperationException.class, () -> firstWait.put("cause", "modified"));
@@ -622,7 +633,7 @@ class WorkerBatcherSchedulingTest {
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
     void deliveryOnlyWaitKeepsBacklogSelectable() throws Exception {
         FlexlbConfig config = singleConfig();
-        EventDrivenBlock delivery = new EventDrivenBlock(true);
+        EventDrivenBlock delivery = new EventDrivenBlock(CapacityBoundary.Resource.PREFILL_BATCH);
         PrefillEndpoint endpoint =
                 org.flexlb.balance.endpoint.EndpointTestSupport.unstartedPrefill(
                         config,
@@ -1063,16 +1074,17 @@ class WorkerBatcherSchedulingTest {
                 new java.util.IdentityHashMap<>();
 
         CapacityBoundary unavailable(TestAvailability availability) {
-            return boundary(availability, false);
+            return boundary(availability, CapacityBoundary.Resource.DISPATCH_EXECUTOR);
         }
 
-        CapacityBoundary boundary(TestAvailability availability, boolean deliveryOnly) {
+        CapacityBoundary boundary(
+                TestAvailability availability, CapacityBoundary.Resource resource) {
             var boundary =
-                    deliveryOnly
-                            ? CapacityBoundary.deliveryUnavailable(
-                                    CapacityBoundary.Resource.PREFILL_BATCH)
+                    resource == CapacityBoundary.Resource.PREFILL_REQUEST
+                                    || resource == CapacityBoundary.Resource.PREFILL_BATCH
+                            ? CapacityBoundary.deliveryUnavailable(resource)
                             : CapacityBoundary.unavailable(
-                                    CapacityBoundary.Resource.DISPATCH_EXECUTOR,
+                                    resource,
                                     new RouteProjection.AdmissionBlockSemantics(
                                             "TEST_CAPACITY",
                                             RouteProjection.AfterProbeAdmission.BLOCKED,
@@ -1093,9 +1105,10 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
+    @lombok.RequiredArgsConstructor
     private static final class EventDrivenBlock extends BoundaryDelivery {
 
-        private final boolean deliveryOnly;
+        private final CapacityBoundary.Resource resource;
 
         private final TestAvailability firstCapacity = new TestAvailability();
 
@@ -1108,15 +1121,7 @@ class WorkerBatcherSchedulingTest {
         private final CountDownLatch secondAttempt = new CountDownLatch(1);
 
         private EventDrivenBlock() {
-            this(false);
-        }
-
-        private EventDrivenBlock(boolean deliveryOnly) {
-            this.deliveryOnly = deliveryOnly;
-        }
-
-        private CapacityBoundary boundary(TestAvailability availability) {
-            return boundary(availability, deliveryOnly);
+            this(CapacityBoundary.Resource.DISPATCH_EXECUTOR);
         }
 
         @Override
@@ -1127,10 +1132,10 @@ class WorkerBatcherSchedulingTest {
             int attempt = attempts.incrementAndGet();
             if (attempt == 1) {
                 firstAttempt.countDown();
-                return boundary(firstCapacity);
+                return boundary(firstCapacity, resource);
             }
             secondAttempt.countDown();
-            return boundary(parkedCapacity);
+            return boundary(parkedCapacity, resource);
         }
     }
 

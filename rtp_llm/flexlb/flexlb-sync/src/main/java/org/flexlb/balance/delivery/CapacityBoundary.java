@@ -61,12 +61,16 @@ public record CapacityBoundary(
         FAILED
     }
 
-    /** Identifies the exhausted resource; waiting belongs to WorkerBatcher and notification to the capacity owner. */
+    /** Shared capacity failure descriptions for direct admission and queued delivery. */
+    @lombok.Getter
+    @lombok.RequiredArgsConstructor
     public enum Resource {
-        DISPATCH_EXECUTOR,
-        PREFILL_BATCH,
-        PREFILL_REQUEST,
-        DECODE_ENGINE
+        DISPATCH_EXECUTOR("DELIVERY_CAPACITY_BATCH_ADMISSION"),
+        PREFILL_BATCH("Prefill batch capacity exhausted"),
+        PREFILL_REQUEST("Prefill request capacity exhausted"),
+        DECODE_ENGINE("DELIVERY_CAPACITY_DECODE_ENGINE");
+
+        private final String description;
     }
 
     /** Either an accepted capability/value or one fully materialized boundary. */
