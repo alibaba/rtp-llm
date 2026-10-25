@@ -45,5 +45,7 @@ public record QueueSnapshot(
      * Null semantics mean the wait only limits delivery, not queue publication.
      */
     public record AdmissionBlock(
-            long requestId, long enqueueSeq, RouteProjection.AdmissionBlockSemantics semantics) {}
+            long requestId,
+            long enqueueSeq,
+            RequestTimeEstimation.AdmissionBlockSemantics semantics) {}
 }

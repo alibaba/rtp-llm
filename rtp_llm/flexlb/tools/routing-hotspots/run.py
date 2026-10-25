@@ -50,6 +50,14 @@ for variant, directory in [("before", baseline), ("after", root)]:
             "GroupPlanner.evaluateReadiness(selection, limits, 1000).reason()",
         )
     benchmark_source = source.read_text()
+    if not (
+        directory
+        / "flexlb-sync/src/main/java/org/flexlb/balance/projection/RequestTimeEstimation.java"
+    ).exists():
+        benchmark_source, verification_source = (
+            body.replace("RequestTimeEstimation", "RouteProjection")
+            for body in (benchmark_source, verification_source)
+        )
     delivery_source = (
         directory
         / "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BatchDeliveryStrategy.java"

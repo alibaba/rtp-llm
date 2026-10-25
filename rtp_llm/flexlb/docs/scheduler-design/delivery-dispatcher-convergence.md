@@ -4,14 +4,14 @@
 
 ## 类与职责变化
 
-| 收敛后的类           | 职责                                                                     | 原实现的去向                                                                                                |
-| -------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
-| `WorkerBatcher`      | 每个 Prefill generation 的队列、成组、等待、唤醒、停止与排空             | 调用一次 `dispatcher.dispatch(...)`，不再驱动 prepare / commit / deliver 事务                               |
-| `DeliveryDispatcher` | 资源准备、原子提交、路由发布、批量 RPC、结果回传、容量监听绑定、异步取消 | 合并 `DefaultBatchDispatcher`、两个 DeliveryStrategy 实现和 DeliveryTransaction；删除 DeliveryStrategy 接口 |
-| `CapacityBoundary`   | 不可变的准入结果：容量不足、所有权丢失或失败                             | 删除 Availability；保留资源类型、预测阻塞语义和失败原因                                                     |
-| `DeliveryResult`     | 不可变的单次投递结果                                                     | 原有结果与证据含义保持一致                                                                                  |
-| `RouteProjection`    | BATCH / NON_BATCH 的纯预测策略与增量预测                                 | 从两个 Strategy 迁入，Endpoint 直接获取预测策略                                                             |
-| `SchedulerRuntime`   | 共享执行设施及关闭顺序                                                   | 增加共享虚拟线程 executor；调用 Dispatcher 的清理函数                                                       |
+| 收敛后的类              | 职责                                                                     | 原实现的去向                                                                                                |
+| ----------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `WorkerBatcher`         | 每个 Prefill generation 的队列、成组、等待、唤醒、停止与排空             | 调用一次 `dispatcher.dispatch(...)`，不再驱动 prepare / commit / deliver 事务                               |
+| `DeliveryDispatcher`    | 资源准备、原子提交、路由发布、批量 RPC、结果回传、容量监听绑定、异步取消 | 合并 `DefaultBatchDispatcher`、两个 DeliveryStrategy 实现和 DeliveryTransaction；删除 DeliveryStrategy 接口 |
+| `CapacityBoundary`      | 不可变的准入结果：容量不足、所有权丢失或失败                             | 删除 Availability；保留资源类型、预测阻塞语义和失败原因                                                     |
+| `DeliveryResult`        | 不可变的单次投递结果                                                     | 原有结果与证据含义保持一致                                                                                  |
+| `RequestTimeEstimation` | BATCH / NON_BATCH 的纯预测策略与增量预测                                 | 从两个 Strategy 迁入，Endpoint 直接获取预测策略                                                             |
+| `SchedulerRuntime`      | 共享执行设施及关闭顺序                                                   | 增加共享虚拟线程 executor；调用 Dispatcher 的清理函数                                                       |
 
 `DeliveryCleanupTask` 已删除。取消流程全部写在 `DeliveryDispatcher.cleanupDelivery(...)` 中：局部截止时间、循环尝试、等待 ACK、退避、结束。迟到 ACK 的处理通过同一函数中注册的回调保留。
 
@@ -80,8 +80,8 @@ classDiagram
     DeliveryDispatcher ..> EngineCancelChannel
     DeliveryDispatcher ..> AbstractRequestScheduler : exact claim and proof
     SchedulerRuntime --> DeliveryDispatcher
-    PrefillEndpoint ..> RouteProjection
-    WorkerBatcher ..> RouteProjection
+    PrefillEndpoint ..> RequestTimeEstimation
+    WorkerBatcher ..> RequestTimeEstimation
 ```
 
 ## 投递 API

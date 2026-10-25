@@ -7,7 +7,7 @@ import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.balance.delivery.BatchIdGenerator;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.config.ConfigService;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.route.RoleType;
@@ -49,10 +49,10 @@ final class DeliveryExecution {
     final AdmissionCapacity decodeDeliveryCapacity;
     final int maxInflightBatches;
     private BatchIdGenerator batchIds;
-    private static final RouteProjection.AdmissionBlockSemantics DELIVERY_CAPACITY_BLOCK =
-            new RouteProjection.AdmissionBlockSemantics(
+    private static final RequestTimeEstimation.AdmissionBlockSemantics DELIVERY_CAPACITY_BLOCK =
+            new RequestTimeEstimation.AdmissionBlockSemantics(
                     "DELIVERY_CAPACITY_BATCH_ADMISSION",
-                    RouteProjection.AfterProbeAdmission.BLOCKED,
+                    RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
                     "DELIVERY_CAPACITY_BATCH_ADMISSION",
                     RoleType.PREFILL);
 

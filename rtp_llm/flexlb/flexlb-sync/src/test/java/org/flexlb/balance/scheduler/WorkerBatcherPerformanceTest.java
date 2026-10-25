@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -212,7 +212,8 @@ class WorkerBatcherPerformanceTest {
                                     : 0L;
                     long started = System.nanoTime();
                     for (int operation = 0; operation < operations; operation++) {
-                        RouteProjection.Inputs inputs = endpoint.captureRouteProjectionInputs();
+                        RequestTimeEstimation.Inputs inputs =
+                                endpoint.captureRouteProjectionInputs();
                         checksum += inputs.queue().activeItems().size();
                         checksum += inputs.ownershipVersion();
                     }
@@ -278,9 +279,9 @@ class WorkerBatcherPerformanceTest {
         var boundary =
                 CapacityBoundary.unavailable(
                         CapacityBoundary.Resource.DISPATCH_EXECUTOR,
-                        new RouteProjection.AdmissionBlockSemantics(
+                        new RequestTimeEstimation.AdmissionBlockSemantics(
                                 "PERF_BLOCK",
-                                RouteProjection.AfterProbeAdmission.BLOCKED,
+                                RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
                                 "PERF_BLOCK",
                                 RoleType.PREFILL));
         var execution = mock(DeliveryExecution.class);
@@ -357,9 +358,9 @@ class WorkerBatcherPerformanceTest {
                 OptionalLong plannedPrediction) {
             return CapacityBoundary.unavailable(
                     CapacityBoundary.Resource.PREFILL_BATCH,
-                    new RouteProjection.AdmissionBlockSemantics(
+                    new RequestTimeEstimation.AdmissionBlockSemantics(
                             "PERF_BLOCK",
-                            RouteProjection.AfterProbeAdmission.BLOCKED,
+                            RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
                             "PERF_BLOCK",
                             RoleType.PREFILL));
         }

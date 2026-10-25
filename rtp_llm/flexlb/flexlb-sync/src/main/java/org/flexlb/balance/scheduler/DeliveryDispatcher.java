@@ -9,7 +9,7 @@ import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
@@ -60,10 +60,10 @@ public class DeliveryDispatcher {
 
     record Member(RequestRoute route, DecodeEndpoint.EngineDispatchPermit decode)
             implements AutoCloseable {
-        private static final RouteProjection.AdmissionBlockSemantics DECODE_BLOCK =
-                new RouteProjection.AdmissionBlockSemantics(
+        private static final RequestTimeEstimation.AdmissionBlockSemantics DECODE_BLOCK =
+                new RequestTimeEstimation.AdmissionBlockSemantics(
                         "DELIVERY_CAPACITY_DECODE_ENGINE",
-                        RouteProjection.AfterProbeAdmission.UNAVAILABLE,
+                        RequestTimeEstimation.AfterProbeAdmission.UNAVAILABLE,
                         "DECODE_CAPACITY_SCOPE_UNKNOWN",
                         RoleType.DECODE);
 

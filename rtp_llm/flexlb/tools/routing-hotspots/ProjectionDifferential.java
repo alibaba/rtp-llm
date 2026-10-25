@@ -1,8 +1,6 @@
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.RouteProjectionTestSupport;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -24,9 +22,10 @@ public class ProjectionDifferential {
     public static void main(String[] args) throws Exception {
         SnapshotBench.initialize(Path.of(args[0]));
         var model = SnapshotBench.model;
-        var batchPolicy = RouteProjection.forDelivery(SnapshotBench.strategy.mode());
+        var batchPolicy = RequestTimeEstimation.forDelivery(SnapshotBench.strategy.mode());
         var routePolicy =
-                RouteProjection.forDelivery(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+                RequestTimeEstimation.forDelivery(
+                        org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
         var random = new Random(1729);
         var digest = MessageDigest.getInstance("SHA-256");
         var states = new TreeMap<String, Integer>();
@@ -94,7 +93,7 @@ public class ProjectionDifferential {
                             List.of(),
                             0);
             var inputs =
-                    new RouteProjection.Inputs(
+                    new RequestTimeEstimation.Inputs(
                             new QueueSnapshot(
                                     1000,
                                     true,
@@ -106,7 +105,7 @@ public class ProjectionDifferential {
                             committed,
                             0L);
             var probe =
-                    new RouteProjectionTestSupport.Probe(
+                    new RequestTimeEstimationTestSupport.Probe(
                             trial % 50 == 0 ? 1 : 999999,
                             random.nextInt(10),
                             1000,
@@ -116,7 +115,7 @@ public class ProjectionDifferential {
                             256);
             for (var policy : List.of(batchPolicy, routePolicy)) {
                 var candidate =
-                        RouteProjectionTestSupport.project(
+                        RequestTimeEstimationTestSupport.project(
                                 inputs,
                                 probe,
                                 model,

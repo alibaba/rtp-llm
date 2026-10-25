@@ -1545,7 +1545,7 @@ class PrefillEndpointTest {
             RequestRoute active = createRequestRoute(handoffEndpoint, 111L, 500L, 0L);
             assertTrue(EndpointTestSupport.offer(handoffEndpoint, active));
 
-            org.flexlb.balance.projection.RouteProjection.Inputs snapshot =
+            org.flexlb.balance.projection.RequestTimeEstimation.Inputs snapshot =
                     handoffEndpoint.captureRouteProjectionInputs();
             assertEquals(1, snapshot.queue().activeItems().size());
             assertEquals(111L, snapshot.queue().activeItems().getFirst().requestId());
