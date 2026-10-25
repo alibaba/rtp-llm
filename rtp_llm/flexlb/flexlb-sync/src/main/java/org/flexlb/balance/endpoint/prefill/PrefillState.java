@@ -249,7 +249,7 @@ public final class PrefillState {
         private Phase servicePhase = Phase.COMMITTED;
         /** A later queued observation cannot make started batch work repackable. */
         private boolean executionStarted;
-        private long phaseBaseMs;
+        private long remainingWorkSinceMs;
         private long lastObservedAtMs;
         private long maxExecutionTimeMs;
         private boolean successfulCompletion;
@@ -271,15 +271,15 @@ public final class PrefillState {
             this.originalPredictionMs = predictedWorkMs;
             this.originalFeatures = originalFeatures;
             this.remainingWorkMs = predictedWorkMs;
-            this.phaseBaseMs = nowMs;
+            this.remainingWorkSinceMs = nowMs;
             this.lastObservedAtMs = nowMs;
         }
 
-        private long remainingAt(long nowMs) {
+        private long remainingWorkMsAt(long nowMs) {
             if (servicePhase != Phase.ENGINE_RUNNING) {
                 return remainingWorkMs;
             }
-            return Math.max(0L, remainingWorkMs - Math.max(0L, nowMs - phaseBaseMs));
+            return Math.max(0L, remainingWorkMs - Math.max(0L, nowMs - remainingWorkSinceMs));
         }
 
         private void observeTerminal(TerminalObservation terminal, long nowMs) {
@@ -300,9 +300,9 @@ public final class PrefillState {
             lastObservedAtMs = Math.max(lastObservedAtMs, nowMs);
         }
 
-        private void observePhase(Phase phase, long nowMs) {
-            remainingWorkMs = remainingAt(nowMs);
-            phaseBaseMs = Math.max(phaseBaseMs, nowMs);
+        private void updateProgressFromWorkerStatus(Phase phase, long nowMs) {
+            remainingWorkMs = remainingWorkMsAt(nowMs);
+            remainingWorkSinceMs = Math.max(remainingWorkSinceMs, nowMs);
             touch(nowMs);
             executionStarted |= phase == Phase.ENGINE_RUNNING;
             servicePhase = phase;
@@ -391,10 +391,7 @@ public final class PrefillState {
         private final String requestId;
         private QueueMembership queueMembership;
         private ScheduledRequest activeItem;
-        private Phase individualPhase;
-        private long remainingWorkMs;
-        private long phaseBaseMs;
-        private long lastObservedAtMs;
+        private SingleRequestProgress singleRequestProgress;
         private BatchWork batchWork;
         /** Canonical callback identity after admission commits. */
         private ScheduledRequest committedItem;
@@ -420,13 +417,10 @@ public final class PrefillState {
                 throw new IllegalStateException(
                         "request is not an ACTIVE route request_id=" + requestId);
             }
-            remainingWorkMs = lease.predictedWorkMs;
-            phaseBaseMs = nowMs;
-            lastObservedAtMs = nowMs;
+            singleRequestProgress = new SingleRequestProgress(lease.predictedWorkMs, nowMs);
             committedItem = activeItem;
             activeItem = null;
             queueMembership = QueueMembership.UNINDEXED;
-            individualPhase = Phase.COMMITTED;
         }
 
         private void commitBatch(BatchWork work) {
@@ -439,23 +433,6 @@ public final class PrefillState {
             reservation = null;
             activeItem = null;
             queueMembership = QueueMembership.UNINDEXED;
-        }
-
-        private void observeIndividualPhase(Phase next, long nowMs) {
-            if (next != Phase.ENGINE_QUEUED && next != Phase.ENGINE_RUNNING) {
-                throw new IllegalArgumentException("invalid Engine phase " + next);
-            }
-            if (batchWork != null || individualPhase == null) {
-                throw new IllegalStateException(
-                        "request is not individual request_id=" + requestId);
-            }
-            if (individualPhase == Phase.ENGINE_RUNNING) {
-                remainingWorkMs = Math.max(
-                        0L, remainingWorkMs - Math.max(0L, nowMs - phaseBaseMs));
-            }
-            phaseBaseMs = Math.max(phaseBaseMs, nowMs);
-            lastObservedAtMs = Math.max(lastObservedAtMs, nowMs);
-            individualPhase = next;
         }
     }
 
@@ -1238,8 +1215,7 @@ public final class PrefillState {
         }
     }
 
-    public HeartbeatReconciliation reconcileHeartbeat(
-            WorkerStatus.StatusObservation observation) {
+    public HeartbeatReconciliation reconcileHeartbeat(WorkerStatus.StatusObservation observation) {
         List<WorkerStatusFact> facts = new ArrayList<>(
                 observation.activeTasks().size());
         boolean capacityReleased = false;
@@ -1264,12 +1240,12 @@ public final class PrefillState {
                             facts);
             schedulingInputsChanged = nextUnknown != unknownEngineRequestCount;
             for (var observed : individualPhases.entrySet()) {
-                schedulingInputsChanged |= observed.getKey().individualPhase != observed.getValue();
-                observed.getKey().observeIndividualPhase(observed.getValue(), nowMs);
+                schedulingInputsChanged |= observed.getKey().singleRequestProgress.phase() != observed.getValue();
+                observed.getKey().singleRequestProgress.updateProgressFromWorkerStatus(observed.getValue(), nowMs);
             }
             for (var observed : batchPhases.entrySet()) {
                 schedulingInputsChanged |= observed.getKey().servicePhase != observed.getValue();
-                observed.getKey().observePhase(observed.getValue(), nowMs);
+                observed.getKey().updateProgressFromWorkerStatus(observed.getValue(), nowMs);
             }
             capacityReleased = nextUnknown < unknownEngineRequestCount;
             unknownEngineRequestCount = nextUnknown;
@@ -1421,12 +1397,11 @@ public final class PrefillState {
         return Math.max(unknownDetailed.size(), scalarUnknown);
     }
 
-    private StatusReconciliation reconcileEngineStatus(
-            WorkerStatus.EngineObservation engine,
-            Map<String, WorkerStatus.TaskObservation> finishedTasks,
-            ToLongFunction<List<ScheduledRequest>> repredictor,
-            Runnable committedPublication,
-            Runnable failedReduction) {
+    private StatusReconciliation reconcileEngineStatus(WorkerStatus.EngineObservation engine,
+                                                       Map<String, WorkerStatus.TaskObservation> finishedTasks,
+                                                       ToLongFunction<List<ScheduledRequest>> repredictor,
+                                                       Runnable committedPublication,
+                                                       Runnable failedReduction) {
         boolean capacityReleased = false;
         boolean canonicalMutationStarted = false;
         StatusReconciliation outcome = null;
@@ -1491,13 +1466,11 @@ public final class PrefillState {
                         nowMs);
             }
             individualPhases.forEach(
-                    (entry, phase) -> entry.observeIndividualPhase(
-                            phase, nowMs));
-            batchPhases.forEach(
-                    (batch, phase) -> batch.observePhase(phase, nowMs));
+                    (entry, phase) -> entry.singleRequestProgress.updateProgressFromWorkerStatus(phase, nowMs));
+            batchPhases.forEach((batch, phase) -> batch.updateProgressFromWorkerStatus(phase, nowMs));
             predictions.forEach((batch, prediction) -> {
                 batch.remainingWorkMs = prediction;
-                batch.phaseBaseMs = nowMs;
+                batch.remainingWorkSinceMs = nowMs;
                 batch.touch(nowMs);
             });
             capacityReleased |= nextUnknown < unknownEngineRequestCount;
@@ -1677,7 +1650,7 @@ public final class PrefillState {
                 entry.committedItem = null;
                 entry.reservation = null;
                 entry.batchWork = null;
-                entry.individualPhase = null;
+                entry.singleRequestProgress = null;
                 entry.queueMembership = QueueMembership.UNINDEXED;
             }
             for (Reservation lease : leases) {
@@ -1721,8 +1694,7 @@ public final class PrefillState {
         return first;
     }
 
-    public int evictExpiredIndividuals(
-            long ttlMs, java.util.function.Predicate<String> retainForSchedulerCleanup) {
+    public int evictExpiredIndividuals(long ttlMs, java.util.function.Predicate<String> retainForSchedulerCleanup) {
         int evicted = 0;
         boolean capacityReleased = false;
         lock.lock();
@@ -1730,9 +1702,8 @@ public final class PrefillState {
             long nowMs = clock.getAsLong();
             List<RequestEntry> candidates = new ArrayList<>();
             for (RequestEntry entry : requests.values()) {
-                if (entry.batchWork == null
-                        && !entry.isActive()
-                        && nowMs - entry.lastObservedAtMs >= Math.max(0L, ttlMs)
+                if (entry.batchWork == null && !entry.isActive()
+                        && nowMs - entry.singleRequestProgress.lastObservedAtMs() >= Math.max(0L, ttlMs)
                         && !retainForSchedulerCleanup.test(entry.requestId)) {
                     candidates.add(entry);
                 }
@@ -1800,17 +1771,15 @@ public final class PrefillState {
                     continue;
                 }
                 locallyOwned++;
-                Phase phase = entry.batchWork == null
-                        ? entry.individualPhase : entry.batchWork.servicePhase;
+                Phase phase =
+                        entry.batchWork == null ? entry.singleRequestProgress.phase() : entry.batchWork.servicePhase;
                 if (phase == Phase.COMMITTED && (entry.batchWork != null
                         || entry.reservation != null && entry.reservation.state == LeaseState.OWNED)) {
                     workerStatusUnconfirmed++;
                 }
                 if (entry.batchWork == null) {
                     individual++;
-                    maxAgeMs = Math.max(
-                            maxAgeMs,
-                            Math.max(0L, nowMs - entry.lastObservedAtMs));
+                    maxAgeMs = Math.max(maxAgeMs, Math.max(0L, nowMs - entry.singleRequestProgress.lastObservedAtMs()));
                 } else {
                     batches.add(entry.batchWork);
                 }
@@ -1908,10 +1877,8 @@ public final class PrefillState {
                 continue;
             }
             if (entry.batchWork == null) {
-                individual.add(new WorkView.RequestWork(
-                        entry.requestId,
-                        entry.individualPhase,
-                        individualRemaining(entry, nowMs)));
+                individual.add(new WorkView.RequestWork(entry.requestId, entry.singleRequestProgress.phase(),
+                        entry.singleRequestProgress.remainingWorkMsAt(nowMs)));
             } else {
                 batchMembers.computeIfAbsent(
                                 entry.batchWork, ignored -> new ArrayList<>())
@@ -1922,11 +1889,8 @@ public final class PrefillState {
                 new ArrayList<>(batchMembers.size());
         for (Map.Entry<BatchWork, List<String>> observed : batchMembers.entrySet()) {
             BatchWork batch = observed.getKey();
-            batches.add(new WorkView.BatchWork(
-                    batch.lease.batchId,
-                    observed.getValue(),
-                    batch.servicePhase,
-                    OptionalLong.of(batch.remainingAt(nowMs))));
+            batches.add(new WorkView.BatchWork(batch.lease.batchId, observed.getValue(), batch.servicePhase,
+                    OptionalLong.of(batch.remainingWorkMsAt(nowMs))));
         }
         return new WorkCapture(
                 nowMs,
@@ -2273,14 +2237,6 @@ public final class PrefillState {
         if (!condition) {
             throw new IllegalStateException(message);
         }
-    }
-
-    private static long individualRemaining(RequestEntry entry, long nowMs) {
-        if (entry.individualPhase != Phase.ENGINE_RUNNING) {
-            return entry.remainingWorkMs;
-        }
-        return Math.max(0L, entry.remainingWorkMs
-                - Math.max(0L, nowMs - entry.phaseBaseMs));
     }
 
     private static long boundedPrediction(long predictedMs) {
