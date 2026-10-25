@@ -7,9 +7,9 @@ from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
 
 setup_cutlass_import_path()
 from cula.kda import chunk_kda
-
 from rtp_llm.models_py.modules.factory.attention.cuda_kda_impl import (
     cula_kda_paged_prefill,
+    prepare_cula_kda_prefill_metadata,
 )
 
 
@@ -67,6 +67,176 @@ def native_checkpoint_reference(q, k, v, gate, beta, initial, alog, bias, prefix
 
 
 class NativeKdaCheckpointTest(unittest.TestCase):
+    def test_packed_batch_strided_cache_and_layer_workspace_reuse(self):
+        # Empty requests must not add a cuLA sequence; virtual padding keeps its
+        # token range, publishes no state, and has exactly zero output.
+        cu = [0, 129, 129, 194, 201]
+        prefixes = [64, 0, 128, 0]
+        tables = [[3, 5, -1, 7], [], [8, 9, 10, -1], [0]]
+        heads, blocks = 12, 16
+        row_size = heads * 128 * 128
+        for dtype in (torch.float32, torch.bfloat16, torch.float16):
+            with self.subTest(dtype=dtype):
+
+                def new_pool():
+                    storage = torch.full(
+                        (blocks, row_size + 19),
+                        -77.0,
+                        device="cuda",
+                        dtype=dtype,
+                    )
+                    pool = storage.as_strided(
+                        (blocks, heads, 128, 128),
+                        (row_size + 19, 128 * 128, 128, 1),
+                    )
+                    return storage, pool
+
+                storage, pool = new_pool()
+                metadata = prepare_cula_kda_prefill_metadata(
+                    cu,
+                    prefixes,
+                    tables,
+                    64,
+                    pool,
+                )
+                self.assertIsNotNone(metadata.packed)
+                packed = metadata.packed
+                pointers = (
+                    packed.initial_states.data_ptr(),
+                    packed.checkpoints.data_ptr(),
+                )
+                self.assertEqual(packed.cu_seqlens_cpu.tolist(), [0, 129, 194, 201])
+                self.assertEqual(packed.checkpoint_offsets.tolist(), [0, 3, 5, 6])
+                self.assertEqual(
+                    packed.checkpoint_blocks.tolist(), [5, -1, 7, 10, -1, -1]
+                )
+
+                # Each layer has a different pool and different prefix state.
+                # Reusing the workspace must not reuse the previous layer's H0.
+                for layer in range(2):
+                    with self.subTest(layer=layer):
+                        if layer:
+                            storage, pool = new_pool()
+                        torch.manual_seed(8320 + layer)
+                        for block in (3, 9):
+                            pool[block].copy_(torch.randn_like(pool[block]) * 0.02)
+                        before = storage.clone()
+                        shape = (cu[-1], heads, 128)
+                        q, k, v, gate = [
+                            torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+                            for _ in range(4)
+                        ]
+                        beta = torch.randn(
+                            cu[-1],
+                            heads,
+                            device="cuda",
+                            dtype=torch.bfloat16,
+                        )
+                        alog = torch.randn(heads, device="cuda") * 0.1
+                        bias = torch.randn(heads * 128, device="cuda") * 0.01
+                        expected = torch.zeros_like(v, dtype=torch.float32)
+                        states = []
+                        for request in (0, 2):
+                            start, end = cu[request : request + 2]
+                            initial = pool[
+                                tables[request][prefixes[request] // 64 - 1]
+                            ].float()
+                            reference = recurrent_reference(
+                                q[start:end],
+                                k[start:end],
+                                v[start:end],
+                                gate[start:end],
+                                beta[start:end],
+                                initial,
+                                alog,
+                                bias,
+                            )
+                            expected[start:end].copy_(reference)
+                            states.append(
+                                (
+                                    request,
+                                    native_checkpoint_reference(
+                                        q[start:end],
+                                        k[start:end],
+                                        v[start:end],
+                                        gate[start:end],
+                                        beta[start:end],
+                                        initial,
+                                        alog,
+                                        bias,
+                                        prefixes[request],
+                                        reference,
+                                    ),
+                                )
+                            )
+
+                        packed.initial_states.fill_(float("nan"))
+                        packed.checkpoints.fill_(float("nan"))
+                        with patch("cula.kda.chunk_kda", wraps=chunk_kda) as call:
+                            actual = cula_kda_paged_prefill(
+                                q,
+                                k,
+                                v,
+                                gate,
+                                beta,
+                                alog,
+                                bias,
+                                -5.0,
+                                pool,
+                                cu,
+                                prefixes,
+                                tables,
+                                64,
+                                metadata=metadata,
+                            )
+                        call.assert_called_once()
+                        self.assertIs(
+                            call.call_args.kwargs["cu_seqlens_cpu"],
+                            packed.cu_seqlens_cpu,
+                        )
+                        self.assertIs(
+                            call.call_args.kwargs["checkpoint_offsets"],
+                            packed.checkpoint_offsets,
+                        )
+                        self.assertEqual(call.call_args.args[0].shape[1], cu[-1])
+                        torch.testing.assert_close(
+                            actual.float(),
+                            expected,
+                            rtol=0.03,
+                            atol=0.003,
+                        )
+                        self.assertEqual(torch.count_nonzero(actual[194:]).item(), 0)
+                        written = set()
+                        for request, checkpoints in states:
+                            for endpoint, state in checkpoints.items():
+                                block = tables[request][
+                                    (prefixes[request] + endpoint) // 64
+                                ]
+                                if block > 0:
+                                    torch.testing.assert_close(
+                                        pool[block].float(),
+                                        state,
+                                        rtol=0.03,
+                                        atol=0.003,
+                                    )
+                                    written.add(block)
+                        untouched = [
+                            block for block in range(blocks) if block not in written
+                        ]
+                        torch.testing.assert_close(
+                            storage[untouched], before[untouched], rtol=0, atol=0
+                        )
+                        torch.testing.assert_close(
+                            storage[:, row_size:], before[:, row_size:], rtol=0, atol=0
+                        )
+                        self.assertEqual(
+                            pointers,
+                            (
+                                packed.initial_states.data_ptr(),
+                                packed.checkpoints.data_ptr(),
+                            ),
+                        )
+
     def test_bounded_gate_and_every_checkpoint(self):
         original_empty = torch.empty
         poisoned = []

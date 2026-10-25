@@ -326,19 +326,30 @@ class BoundedProjectionWarmupTest(unittest.TestCase):
             self.assertEqual(projection.rows, [1, 24, 65536])
 
     def test_fla_buckets_and_fixed_scratch_launch_metadata(self):
-        kda = NS(_MAX_PACKED_CULA_CHECKPOINT_BYTES=32 << 20)
-        for heads, page, expected in (
-            ((12,), 4096, tuple(range(1, 13))),
-            ((96,), 128, (1,)),
-            ((12, 16), 4096, tuple(range(1, 17))),
+        for heads, page, rows, maximum in (
+            ((12,), 4096, 65536, 12),
+            ((96,), 128, 65536, 96),
+            ((12, 16), 4096, 65536, 16),
+            ((12,), None, 65536, 12),
+            ((12,), 128, 65537, 13),
+            ((12,), 128, 5461, 2),
         ):
             model = Model(page=page)
+            if page is None:
+                model.kv_cache = None
+            model.config.moe_prefill_max_tokens_per_rank = rows
             model.layers = [
                 NS(index=i, attention=KimiK3KDA(count)) for i, count in enumerate(heads)
             ]
-            with self.subTest(heads=heads, page=page), dependencies(kda=kda):
-                specs = list(self.warmup._fla_l2norm_specs(model, 65536))
-                self.assertEqual([buckets for _, buckets in specs], [expected])
+            # Planning must not import the old backend checkpoint constant.
+            with self.subTest(heads=heads, page=page, rows=rows), dependencies(
+                kda=None
+            ):
+                max_rows = self.warmup._projection_rows(model, NS(is_decode_role=False))
+                specs = list(self.warmup._fla_l2norm_specs(model, max_rows))
+                self.assertEqual(
+                    [buckets for _, buckets in specs], [tuple(range(1, maximum + 1))]
+                )
         kernel = mock.MagicMock()
         with dependencies(torch=metadata_torch(), fla=NS(l2norm_fwd_kernel=kernel)):
             self.warmup._warmup_fla("cuda:0", (1, 12, 64))
@@ -352,6 +363,30 @@ class BoundedProjectionWarmupTest(unittest.TestCase):
             self.assertEqual(
                 tuple(args[key] for key in keys), (8, 128, 128, 8, 1, 3, 1)
             )
+
+    def test_fla_device_bounds_and_ineligible_layers(self):
+        model = Model()
+        first, second, other = KimiK3KDA(12), KimiK3KDA(16), KimiK3KDA(8)
+        other.prefill.conv_weights = Tensor((128, 4), device="cuda:1")
+        wrong_dim, cpu = KimiK3KDA(96), KimiK3KDA(96)
+        wrong_dim.prefill.head_k_dim = 64
+        cpu.prefill.conv_weights = Tensor((128, 4), device="cpu")
+        model.layers = [
+            NS(index=i, attention=attention)
+            for i, attention in enumerate(
+                (first, second, other, wrong_dim, cpu, KimiK3KDA(0), NS())
+            )
+        ]
+        with dependencies(kda=None):
+            specs = list(self.warmup._fla_l2norm_specs(model, 65536))
+            self.assertEqual(
+                [(device.name, buckets) for device, buckets in specs],
+                [
+                    ("cuda:0", tuple(range(1, 17))),
+                    ("cuda:1", tuple(range(1, 9))),
+                ],
+            )
+            self.assertEqual(list(self.warmup._fla_l2norm_specs(model, 0)), [])
 
     def test_disabled_or_no_cuda_does_no_dependency_work(self):
         torch = NS(cuda=NS(is_available=lambda: False))
