@@ -41,7 +41,7 @@ def engine_input(env, default=None):
     return value
 
 
-def calibration_input(env):
+def calibration_input(env, default=None):
     import sys
 
     root = Path(__file__).resolve().parent
@@ -50,8 +50,9 @@ def calibration_input(env):
             sys.path.insert(0, str(directory))
     from adapters.perf_presets import resolve_performance_calibration
 
-    path = root / "performance.json"
-    value = json.loads(env.get("MOCK_CALIBRATION_CONFIG_JSON", path.read_text()))
+    path = Path(default) if default is not None else root / "performance.json"
+    encoded = env.get("MOCK_CALIBRATION_CONFIG_JSON")
+    value = json.loads(path.read_text() if encoded is None else encoded)
     if not isinstance(value, dict):
         raise ValueError("MOCK_CALIBRATION_CONFIG_JSON must be an object")
     return resolve_performance_calibration(value, path)

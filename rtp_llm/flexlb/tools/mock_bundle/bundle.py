@@ -20,7 +20,6 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent / "online_eval"))
 sys.path.insert(0, str(ROOT.parent / "online_eval" / "src"))
 from adapters.mock_launch import MockLaunchSpec
-from adapters.perf_presets import resolve_performance_calibration
 from flexlb_cfg import render_env, render_process_config
 from mode_profiles import load_mode_tables, resolve_address_plan, resolve_mode
 
@@ -116,21 +115,17 @@ def run():
     dispatcher = json.loads(raw).get("dispatcher", {}).get("type", "BATCH")
     (runtime / "master-config.json").write_text(render_process_config(profile, jvm_heap=cfg["master_heap"], raw_config=mock_raw))
     performance_path = (cfg_path.parent / cfg["performance"]).resolve()
-    from runtime_configs import engine_input
+    from runtime_configs import calibration_input, engine_input
 
     engine = engine_input(os.environ, cfg_path.parent / cfg["engine_config"])
     (runtime / "engine-config.json").write_text(json.dumps(engine))
-    performance_json = os.environ.get("MOCK_CALIBRATION_CONFIG_JSON")
     eos_json = os.environ.get("MOCK_EOS_CONFIG_JSON")
-    performance = json.loads(performance_json if performance_json is not None else performance_path.read_text())
-    if not isinstance(performance, dict):
-        raise ValueError("MOCK_CALIBRATION_CONFIG_JSON must be a JSON object")
+    performance = calibration_input(os.environ, performance_path)
     if eos_json is not None:
         eos = json.loads(eos_json)
         if not isinstance(eos, dict):
             raise ValueError("MOCK_EOS_CONFIG_JSON must be a JSON object")
         performance.setdefault("decode", {})["eos"] = eos
-    resolve_performance_calibration(performance, performance_path)
     performance_path = runtime / "performance.json"
     performance_path.write_text(json.dumps(performance))
     children, logs = [], []

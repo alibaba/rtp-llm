@@ -46,7 +46,18 @@
           "enable_memory_cache": true,
           "enable_disk_cache": false,
           "reserve_block_ratio": 1,
-          "enable_remote_cache": false
+          "enable_remote_cache": false,
+          "device_eviction_policy": "lru",
+          "memory_eviction_policy": "lru",
+          "block_tree_transfer_worker_count": 4,
+          "block_tree_business_queue_max_size": 10000,
+          "block_tree_transfer_queue_max_size": 10000,
+          "memory_cache_max_descriptors_per_transfer_batch": 8,
+          "memory_cache_sync_timeout_ms": 10000,
+          "block_tree_device_evict_low_watermark_ratio": 0.82,
+          "block_tree_device_evict_high_watermark_ratio": 0.9,
+          "block_tree_memory_evict_low_watermark_ratio": 0.9,
+          "block_tree_memory_evict_high_watermark_ratio": 0.94
         },
         "capacity": {
           "kind": "synthetic",
@@ -60,6 +71,18 @@
           "enable_memory_prefix_tree": true,
           "reserve_blocks": 215,
           "seq_size_per_block": 512
+        },
+        "pd_sep": {
+          "prefill_retry_times": 0,
+          "prefill_retry_timeout_ms": 20,
+          "prefill_max_wait_timeout_ms": 600000,
+          "decode_retry_interval_ms": 1,
+          "load_cache_timeout_ms": 5000,
+          "max_rpc_timeout_ms": 7200000,
+          "prefill_prepare_resource_pool_size": 128,
+          "prefill_stop_stream_wait_timeout_ms": 2000,
+          "decode_retry_times": 100,
+          "decode_retry_timeout_ms": 100
         }
       },
       "decode": {
@@ -85,7 +108,18 @@
           "enable_memory_cache": false,
           "enable_disk_cache": false,
           "reserve_block_ratio": 8,
-          "enable_remote_cache": false
+          "enable_remote_cache": false,
+          "device_eviction_policy": "lru",
+          "memory_eviction_policy": "lru",
+          "block_tree_transfer_worker_count": 4,
+          "block_tree_business_queue_max_size": 10000,
+          "block_tree_transfer_queue_max_size": 10000,
+          "memory_cache_max_descriptors_per_transfer_batch": 8,
+          "memory_cache_sync_timeout_ms": 10000,
+          "block_tree_device_evict_low_watermark_ratio": 0.82,
+          "block_tree_device_evict_high_watermark_ratio": 0.9,
+          "block_tree_memory_evict_low_watermark_ratio": 0.9,
+          "block_tree_memory_evict_high_watermark_ratio": 0.94
         },
         "capacity": {
           "kind": "synthetic",
@@ -99,20 +133,52 @@
           "enable_memory_prefix_tree": true,
           "reserve_blocks": 17718,
           "seq_size_per_block": 128
+        },
+        "pd_sep": {
+          "prefill_retry_times": 0,
+          "prefill_retry_timeout_ms": 20,
+          "prefill_max_wait_timeout_ms": 600000,
+          "decode_retry_interval_ms": 1,
+          "load_cache_timeout_ms": 5000,
+          "max_rpc_timeout_ms": 7200000,
+          "prefill_prepare_resource_pool_size": 128,
+          "prefill_stop_stream_wait_timeout_ms": 2000,
+          "decode_retry_times": 100,
+          "decode_retry_timeout_ms": 100
         }
       },
       "vit": {
         "vit_concurrency": 4,
         "vit_max_queue_size": 64,
         "gpu_max_batch_size": 1,
-        "gpu_max_batch_images": 200,
+        "gpu_max_batch_images": 9223372036854775807,
         "gpu_batch_wait_ms": 0,
         "mm_max_queue_size": 1024,
         "mm_cache_gpu_max_bytes": 0,
         "mm_cache_cpu_max_bytes": 67108864,
         "mm_hash_key_cache_max_bytes": 8388608,
         "mm_remote_cache_enable": false,
-        "mm_transport_mode": "grpc"
+        "mm_transport_mode": "grpc",
+        "greennet_enabled": false,
+        "work_budget": null,
+        "mm_timeout_ms": 120000,
+        "mm_image_max_file_size_kb": 16384,
+        "use_local_preprocess": false,
+        "mm_preprocess_max_workers": 4,
+        "download_headers": "",
+        "hash_cache_accounting": {
+          "entry_overhead": 96,
+          "ascii_base": 49,
+          "latin1_base": 73,
+          "bmp_base": 74,
+          "ucs4_base": 76,
+          "hash_list_bytes": 88,
+          "tensor_object_bytes": 80,
+          "record_bytes": 80,
+          "integer_bytes": 24
+        },
+        "mm_cache_item_num": 10,
+        "url_cache_item_num": 100
       }
     }
   },
@@ -124,7 +190,7 @@
       "deployment": null
     },
     "capture_window": null,
-    "record_sha256": "3959f2baf0314bebc5edecb9f8314d68ffdcaa2ef01e20a63041d1bb797a7784",
+    "record_sha256": "5bfa8075c09f0a96bd6c1e2b2b9c292a1d66c5d2a7bdc2d1e23c328ed5a561a2",
     "n_prefill": 48,
     "n_decode": 192,
     "prefill_kv_pool_blocks": 21553,

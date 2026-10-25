@@ -10,6 +10,7 @@ import tempfile
 import types
 import typing
 import unittest
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -147,22 +148,38 @@ class EffectiveConfigTest(unittest.TestCase):
             output_transport=NS(mode="grpc"),
         )
         vit.embedding_scheduler_args = types.MethodType(namespace["embedding_scheduler_args"], vit)
-        result = vit_snapshot(vit, revision="fixture")["roles"]["vit"]
+        export = partial(
+            vit_snapshot,
+            vit,
+            revision="fixture",
+            work_budget=None,
+            hash_cache_accounting={"tensor_object_bytes": 80},
+            greennet_enabled=False,
+        )
+        result = export()["roles"]["vit"]
         self.assertEqual(result["gpu_batch_wait_ms"], 0)
         self.assertEqual(result["gpu_max_batch_images"], sys.maxsize)
         self.assertEqual(result["vit_concurrency"], 1)
         self.assertEqual(result["vit_max_queue_size"], 0)
         self.assertIsNone(result["work_budget"])
-        self.assertIsNone(result["hash_cache_accounting"])
+        self.assertEqual(result["hash_cache_accounting"], {"tensor_object_bytes": 80})
         self.assertFalse(result["greennet_enabled"])
-        self.assertTrue(vit_snapshot(vit, revision="fixture", greennet_enabled=True)["roles"]["vit"]["greennet_enabled"])
+        self.assertTrue(export(greennet_enabled=True)["roles"]["vit"]["greennet_enabled"])
         accounting = {"tensor_object_bytes": 80}
-        self.assertEqual(
-            vit_snapshot(vit, revision="fixture", hash_cache_accounting=accounting)["roles"]["vit"]["hash_cache_accounting"], accounting
-        )
+        self.assertEqual(export(hash_cache_accounting=accounting)["roles"]["vit"]["hash_cache_accounting"], accounting)
         budget = NS(input_patches=8, output_tokens=16, estimated_workspace_bytes=32, max_attention_segment=4, attention_work=64)
-        actual = vit_snapshot(vit, revision="fixture", work_budget=budget)["roles"]["vit"]
+        actual = export(work_budget=budget)["roles"]["vit"]
         self.assertEqual(actual["work_budget"], vars(budget))
+        for field in ("work_budget", "hash_cache_accounting", "greennet_enabled"):
+            arguments = dict(revision="fixture", work_budget=None, hash_cache_accounting=accounting, greennet_enabled=False)
+            arguments.pop(field)
+            with self.subTest(missing=field), self.assertRaises(TypeError):
+                vit_snapshot(vit, **arguments)
+        for value in (None, 0, "false"):
+            with self.subTest(greennet=value), self.assertRaises(ValueError):
+                export(greennet_enabled=value)
+        with self.assertRaises(ValueError):
+            export(hash_cache_accounting=None)
 
     def test_merge_rejects_revision_drift_and_duplicate_roles(self):
         one = {"schema_version": 1, "source": {"kind": "real", "revision": "a"}, "roles": {"prefill": {}}}

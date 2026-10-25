@@ -95,7 +95,11 @@ def snapshot(engine, model, *, revision, capacity=None):
     return {"schema_version": SCHEMA_VERSION, "source": {"kind": "real", "revision": revision}, "roles": {role: values}}
 
 
-def vit_snapshot(vit, *, revision, work_budget=None, hash_cache_accounting=None, greennet_enabled=False):
+def vit_snapshot(vit, *, revision, work_budget, hash_cache_accounting, greennet_enabled):
+    if type(greennet_enabled) is not bool:
+        raise ValueError("greennet_enabled requires an observed boolean")
+    if not isinstance(hash_cache_accounting, dict) or not hash_cache_accounting:
+        raise ValueError("hash_cache_accounting requires runtime measurement")
     scheduler = vit.embedding_scheduler_args()
     names = (
         "vit_concurrency",
@@ -131,7 +135,7 @@ def vit_snapshot(vit, *, revision, work_budget=None, hash_cache_accounting=None,
                 },
                 "mm_transport_mode": vit.output_transport.mode,
                 "hash_cache_accounting": hash_cache_accounting,
-                "greennet_enabled": bool(greennet_enabled),
+                "greennet_enabled": greennet_enabled,
                 "vit_concurrency": max(1, int(vit.vit_concurrency)),
                 "vit_max_queue_size": max(0, int(vit.vit_max_queue_size)),
                 "gpu_max_batch_size": scheduler["max_batch_size"],

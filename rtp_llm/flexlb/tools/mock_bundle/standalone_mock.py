@@ -72,13 +72,10 @@ def command(env):
         ("--completion-threads", "MOCK_COMPLETION_THREADS", 4),
     ):
         numeric[flag.removeprefix("--").replace("-", "_")] = integer(env, key, default)
-    if "MOCK_ENGINE_CONFIG_JSON" not in env:
-        raise ValueError("MOCK_ENGINE_CONFIG_JSON is required; import the real effective configuration and capacity")
-    engine = json_object(env["MOCK_ENGINE_CONFIG_JSON"], "MOCK_ENGINE_CONFIG_JSON")
-    from runtime_configs import calibration_input, reject_removed_environment
+    from runtime_configs import calibration_input, engine_input
 
+    engine = engine_input(env)
     performance = calibration_input(env)
-    reject_removed_environment(env)
     master = json_object(env.get("FLEXLB_CONFIG", "{}"), "FLEXLB_CONFIG")
     fetch = boolean(env, "FETCH_OUTPUT_STREAM", "1")
     kmonitor = boolean(env, "MOCK_KMONITOR_ENABLED", "true")

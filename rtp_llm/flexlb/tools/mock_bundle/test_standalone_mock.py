@@ -57,6 +57,12 @@ class StandaloneMockTest(unittest.TestCase):
         self.assertEqual(args[args.index("--kmonitor") + 1], "false")
         self.assertEqual(json.loads((Path(self.directory.name) / "calibration.json").read_text())["sleep_scale"], 2)
 
+    def test_explicit_calibration_does_not_read_a_missing_default_file(self):
+        from runtime_configs import calibration_input
+
+        explicit = {"MOCK_CALIBRATION_CONFIG_JSON": '{"sleep_scale":2}'}
+        self.assertEqual(calibration_input(explicit, Path(self.directory.name) / "missing.json"), {"sleep_scale": 2})
+
     def test_compact_cache_status_is_explicitly_opt_in(self):
         self.env["MOCK_CACHE_STATUS_COMPACT_ENCODING"] = "1"
         args = standalone_mock.command(self.env)
