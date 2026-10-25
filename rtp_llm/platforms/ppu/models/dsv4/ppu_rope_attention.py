@@ -26,7 +26,11 @@ class PpuRopeAttention(AttentionFP8):
                 )
             ):
                 payload, scale = inverse_rope_fp8_permute(
-                    output, freqs_cis, self.rope_head_dim, self.n_groups
+                    output,
+                    freqs_cis,
+                    self.rope_head_dim,
+                    self.n_groups,
+                    column_major_scales=True,
                 )
                 projected = self.wo_a.forward_permuted(payload, scale)
                 return projected.view(B, S, self.n_groups, self.wo_a.rank)

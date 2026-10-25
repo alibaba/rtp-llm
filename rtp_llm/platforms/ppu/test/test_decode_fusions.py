@@ -5,6 +5,7 @@ import importlib
 import unittest
 
 import torch
+
 from rtp_llm.platforms.ppu.kernels.cuda.ppu_fp4_indexer import topk_decode
 from rtp_llm.platforms.ppu.kernels.cuda.ppu_sglang_permute import fused_permute
 from rtp_llm.platforms.ppu.kernels.ppu_decode_fused_quant import (
@@ -209,11 +210,79 @@ class DecodeFusionsTest(unittest.TestCase):
                         payload.view(b * q, 8, 4096), scale.view(b * q, 8, 32)
                     )
 
-                self.replay(
-                    old_inverse,
-                    lambda: inverse_rope_fp8_permute(o, freq, 64, 8),
-                    o.normal_,
+                for column_major in (False, True):
+                    self.replay(
+                        old_inverse,
+                        lambda: inverse_rope_fp8_permute(
+                            o, freq, 64, 8, column_major_scales=column_major
+                        ),
+                        o.normal_,
+                    )
+
+    @torch.inference_mode()
+    def test_inverse_rope_consumer_scale_layout(self):
+        from deep_gemm.jit_kernels.utils import get_col_major_tma_aligned_tensor
+
+        for m in (1, 3, 8, 17, 32, 127):
+            for groups in (1, 2, 4, 8):
+                x = torch.randn(
+                    (m, 1, groups * 8, 512), device="cuda", dtype=torch.bfloat16
                 )
+                angle = torch.randn((m, 32), device="cuda")
+                freq = torch.polar(torch.ones_like(angle), angle)
+
+                def old():
+                    return inverse_rope_fp8_permute(x, freq, 64, groups)
+
+                def new():
+                    return inverse_rope_fp8_permute(
+                        x, freq, 64, groups, column_major_scales=True
+                    )
+
+                self.replay(old, new, x.normal_)
+                _, scales = new()
+                self.assertEqual(scales.stride(), (m * 32, 1, m))
+                self.assertIs(get_col_major_tma_aligned_tensor(scales), scales)
+
+    @torch.inference_mode()
+    def test_attention_projection_tiles(self):
+        from rtp_llm.platforms.ppu.models.dsv4.ppu_wo_a import PpuWoAFp8Linear
+        from rtp_llm.platforms.ppu.modules.linear.fp8_linear import PpuFp8Linear
+
+        for n, k, groups in ((32768, 1024, 1), (4096, 8192, 1), (8192, 4096, 8)):
+            weight = torch.randn((n, k), device="cuda", dtype=torch.bfloat16).to(
+                torch.float8_e4m3fn
+            )
+            scale = torch.ones((n // 128, k // 128), device="cuda")
+            if groups == 1:
+                linear = PpuFp8Linear(
+                    weight, scale, scale_is_prepared=True, quantization="v2_column"
+                )
+            else:
+                linear = PpuWoAFp8Linear(
+                    weight,
+                    scale.to(torch.float8_e8m0fnu),
+                    groups=groups,
+                    k_local=k,
+                    sglang_layout=True,
+                    quantization="v2_row",
+                )
+            # Include unqualified M values to exercise the normal fallback.
+            for m in (1, 8, 16, 17, 24, 32, 33):
+                shape = (m, k) if groups == 1 else (m, groups, k)
+                x = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+
+                def old():
+                    linear._decode_attention_gemm = False
+                    return linear(x)
+
+                def new():
+                    linear._decode_attention_gemm = True
+                    return linear(x)
+
+                for magnitude in (1e-30, 1.0, 1e8):
+                    x.normal_().mul_(magnitude)
+                    self.replay(old, new, x.normal_)
 
     @torch.inference_mode()
     def test_qkv_norm_quant(self):

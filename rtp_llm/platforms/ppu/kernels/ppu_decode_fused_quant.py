@@ -105,6 +105,7 @@ def _inverse_rope_fp8_permute(
     G: tl.constexpr,
     PER_BATCH: tl.constexpr,
     GROUPS: tl.constexpr,
+    COLUMN_MAJOR_SCALES: tl.constexpr,
 ):
     token = tl.program_id(0)
     head_group = tl.program_id(1)
@@ -127,11 +128,11 @@ def _inverse_rope_fp8_permute(
     value = tl.where(is_rope, rotated, value)
     quant, scale = _quant_block(value, 1)
     tl.store(payload + (head_group * M + token) * K + col, quant, col < K)
-    tl.store(
-        scales + (head_group * M + token) * (K // 128) + quant_group,
-        scale,
-        quant_group < K // 128,
-    )
+    if COLUMN_MAJOR_SCALES:
+        scale_offset = (head_group * (K // 128) + quant_group) * M + token
+    else:
+        scale_offset = (head_group * M + token) * (K // 128) + quant_group
+    tl.store(scales + scale_offset, scale, quant_group < K // 128)
 
 
 def supports_inverse_rope_fp8_permute(x, freqs, rope_dim, groups):
@@ -145,8 +146,8 @@ def supports_inverse_rope_fp8_permute(x, freqs, rope_dim, groups):
     )
 
 
-def inverse_rope_fp8_permute(x, freqs, rope_dim, groups):
-    """Produce contiguous [G,M,K] payload/scales for PPU fp8_bmm.
+def inverse_rope_fp8_permute(x, freqs, rope_dim, groups, *, column_major_scales=False):
+    """Produce group-major payload and consumer-selected FP32 scale layout.
 
     The input is read-only. The old inverse RoPE mutation is not observable
     outside the output-projection producer/consumer boundary.
@@ -157,7 +158,14 @@ def inverse_rope_fp8_permute(x, freqs, rope_dim, groups):
     m = batch * seq
     k = heads // groups * dim
     payload = torch.empty((groups, m, k), device=x.device, dtype=torch.float8_e4m3fn)
-    scale = torch.empty((groups, m, k // 128), device=x.device, dtype=torch.float32)
+    if column_major_scales:
+        # fp8_bmm consumes [G,M,K/128] with a unit-stride M axis. Writing it
+        # here removes its scale transpose without changing quantization.
+        scale = torch.empty(
+            (groups, k // 128, m), device=x.device, dtype=torch.float32
+        ).transpose(1, 2)
+    else:
+        scale = torch.empty((groups, m, k // 128), device=x.device, dtype=torch.float32)
     if m:
         groups_per_cta = 4
         _inverse_rope_fp8_permute[(m, groups, triton.cdiv(k // 128, groups_per_cta))](
@@ -173,6 +181,7 @@ def inverse_rope_fp8_permute(x, freqs, rope_dim, groups):
             groups,
             freqs.ndim == 2 and freqs.shape[0] == batch,
             groups_per_cta,
+            column_major_scales,
             num_warps=2,
             enable_fp_fusion=True,
         )

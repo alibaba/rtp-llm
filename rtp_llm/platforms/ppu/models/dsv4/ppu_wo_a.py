@@ -4,6 +4,8 @@ import os
 from typing import Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.platforms.ppu.modules.linear.fp8_linear import (
     FP8_BLOCK_SIZE,
     _require_dtype,
@@ -14,7 +16,6 @@ from rtp_llm.platforms.ppu.modules.linear.fp8_linear import (
     checkpoint_ue8m0_scale_to_fp32,
     quantize_ppu_fp8_activation,
 )
-from torch import nn
 
 
 class PpuWoAFp8Linear(nn.Module):
@@ -100,6 +101,16 @@ class PpuWoAFp8Linear(nn.Module):
             persistent=False,
         )
         self._einsum = _resolve_deep_gemm_symbol("fp8_einsum")
+        self._decode_attention_gemm = False
+
+    def _decode_config(self, m):
+        if not self._decode_attention_gemm:
+            return None
+        from ...kernels.ppu_attention_gemm import decode_attention_gemm_config
+
+        return decode_attention_gemm_config(
+            m, self.rank, self.k_local, groups=self.groups
+        )
 
     def forward_permuted(self, payload, scales):
         """Consume the fused producer's group-major FP8/FP32 pair."""
@@ -115,7 +126,15 @@ class PpuWoAFp8Linear(nn.Module):
             or scales.shape != (self.groups, payload.shape[1], self.k_local // 128)
             or scales.dtype != torch.float32
             or scales.device != payload.device
-            or not scales.is_contiguous()
+            or not (
+                scales.is_contiguous()
+                or scales.stride()
+                == (
+                    payload.shape[1] * (self.k_local // 128),
+                    1,
+                    payload.shape[1],
+                )
+            )
         ):
             raise ValueError("Invalid PPU group-major FP8 projection inputs")
         out = torch.empty(
@@ -126,7 +145,14 @@ class PpuWoAFp8Linear(nn.Module):
         if payload.shape[1]:
             from deep_gemm.jit_kernels.einsum import fp8_bmm
 
-            fp8_bmm(payload, scales, self.weight, self.weight_scale, out)
+            fp8_bmm(
+                payload,
+                scales,
+                self.weight,
+                self.weight_scale,
+                out,
+                configs=self._decode_config(payload.shape[1]),
+            )
         return out
 
     def forward(
@@ -169,12 +195,20 @@ class PpuWoAFp8Linear(nn.Module):
         output_3d = output.view(m, self.groups, self.rank)
         if self.sglang_layout:
             from deep_gemm.jit_kernels.einsum import fp8_bmm
+
             from rtp_llm.platforms.ppu.kernels.cuda.ppu_sglang_permute import (
                 fused_permute,
             )
 
             perm_a, perm_scale = fused_permute(x_fp8, x_scale)
-            fp8_bmm(perm_a, perm_scale, self.weight, self.weight_scale, output_3d)
+            fp8_bmm(
+                perm_a,
+                perm_scale,
+                self.weight,
+                self.weight_scale,
+                output_3d,
+                configs=self._decode_config(m),
+            )
             return output
         try:
             self._einsum(

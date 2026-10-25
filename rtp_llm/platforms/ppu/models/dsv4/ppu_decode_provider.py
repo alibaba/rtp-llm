@@ -140,6 +140,13 @@ class PpuDecodeProvider(PpuModuleProvider):
         # metadata, without a provider <-> attention ownership cycle.
         self._decode_attention_refs.append(weakref.ref(attention))
         attention._fuse_qkv_quant = self._decode_fusions
+        from rtp_llm.platforms.ppu.modules.linear.fp8_linear import PpuFp8Linear
+
+        from .ppu_wo_a import PpuWoAFp8Linear
+
+        for linear in (attention.wq_b, attention.wo_a, attention.wo_b):
+            if type(linear) in (PpuFp8Linear, PpuWoAFp8Linear):
+                linear._decode_attention_gemm = self._decode_fusions
         if attention.indexer is not None:
             attention.indexer._fuse_query_slices = self._decode_fusions
             attention.indexer._fuse_topk_order = self._decode_fusions
