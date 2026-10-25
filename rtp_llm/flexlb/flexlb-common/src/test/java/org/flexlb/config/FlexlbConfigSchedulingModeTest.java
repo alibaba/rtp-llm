@@ -312,6 +312,17 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
+    void cache_match_result_ttl_defaults_to_30s_and_requires_positive_value() {
+        assertEquals(30_000L, parse("QUEUE", "NON_BATCH_V2", "").getDispatcher().getCacheMatchResultTtlMs());
+        assertEquals(500L, parse("QUEUE", "NON_BATCH_V2", ",\"cacheMatchResultTtlMs\":500").getDispatcher()
+                .getCacheMatchResultTtlMs());
+        for (String value : new String[]{"0", "-1"}) {
+            assertThrows(ConfigValidationException.class,
+                    () -> parse("QUEUE", "NON_BATCH_V2", ",\"cacheMatchResultTtlMs\":" + value));
+        }
+    }
+
+    @Test
     void fetch_attach_timeout_requires_a_positive_integer_without_json_coercion() {
         for (String value : new String[]{"0", "-1", "1.5", "\"3000\"", "true", "null", "[]", "{}", "2147483648"}) {
             assertThrows(ConfigValidationException.class,

@@ -37,6 +37,11 @@ public final class DispatcherConfig {
      * 0 表示一直严格按顺序。支持热更新，Prefill 和 Decode 队列每一轮都读最新值。
      */
     private long dispatchStarvationThresholdMs = DEFAULT_DISPATCH_STARVATION_THRESHOLD_MS;
+    /**
+     * NON_BATCH_V2：缓存匹配查询结果的复用有效期，随匹配结果计算的 Prefill 耗时一起缓存。
+     * 默认 30 秒，支持热更新；候选节点变化时立即失效。
+     */
+    private long cacheMatchResultTtlMs = 30_000L;
 
     public static DispatcherConfig nonBatch() {
         DispatcherConfig config = new DispatcherConfig();
@@ -74,6 +79,9 @@ public final class DispatcherConfig {
         }
         if (dispatchStarvationThresholdMs < 0L) {
             throw new ConfigValidationException("dispatcher.dispatchStarvationThresholdMs", "must not be negative");
+        }
+        if (cacheMatchResultTtlMs <= 0L) {
+            throw new ConfigValidationException("dispatcher.cacheMatchResultTtlMs", "must be greater than zero");
         }
     }
 }
