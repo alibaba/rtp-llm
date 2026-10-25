@@ -137,11 +137,7 @@ def _kv_up_rows(model, init_resource, layer, projection, splits, current_rows):
 
 
 def _fla_l2norm_specs(model, max_rows):
-    """Bound per-cuLA-call rows using its real checkpoint grouping policy."""
-    from rtp_llm.models_py.modules.factory.attention.cuda_kda_impl import (
-        _MAX_PACKED_CULA_CHECKPOINT_BYTES,
-    )
-
+    """Cover FLA's NB specializations for the full packed cuLA input."""
     devices = {}
     for layer in model.layers:
         if type(layer.attention).__name__ != "KimiK3KDA":
@@ -150,22 +146,13 @@ def _fla_l2norm_specs(model, max_rows):
         heads, dim = int(prefill.local_num_k_heads), int(prefill.head_k_dim)
         if heads <= 0 or dim != 128 or prefill.conv_weights.device.type != "cuda":
             continue
-        spans = (
-            [
-                int(cache.seq_size_per_block)
-                for cache in model.kv_cache.get_layer_cache_groups(layer.index)
-            ]
-            if model.kv_cache is not None
-            else [max_rows]
-        )
-        for span in spans:
-            packed_pages = _MAX_PACKED_CULA_CHECKPOINT_BYTES // (heads * dim * dim * 4)
-            call_rows = min(max_rows, max(4, packed_pages) * span)
-            nb = (call_rows * heads + 65535) // 65536
-            key = str(prefill.conv_weights.device)
-            if nb > 0:
-                previous = devices.get(key, (prefill.conv_weights.device, 0))
-                devices[key] = previous[0], max(previous[1], nb)
+        # cuLA normalizes the whole packed Q/K; cache pages no longer bound a
+        # call. FLA flattens rows and heads before selecting constexpr NB.
+        nb = (max_rows * heads + 65535) // 65536
+        key = str(prefill.conv_weights.device)
+        if nb > 0:
+            previous = devices.get(key, (prefill.conv_weights.device, 0))
+            devices[key] = previous[0], max(previous[1], nb)
     for device, nb in devices.values():
         yield device, tuple(range(1, nb + 1))
 
