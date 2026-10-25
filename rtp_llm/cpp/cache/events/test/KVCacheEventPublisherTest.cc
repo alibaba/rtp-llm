@@ -101,6 +101,11 @@ public:
         reply_body_count_ = count;
     }
 
+    bool waitForReplyConsumed(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mu_);
+        return cv_.wait_for(lock, timeout, [this] { return reply_body_count_ == 0; });
+    }
+
     bool waitForBody(const std::string& text, std::chrono::milliseconds timeout) {
         std::unique_lock<std::mutex> lock(mu_);
         return cv_.wait_for(lock, timeout, [&] {
@@ -612,36 +617,41 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherReusesSnapshotPayloadAndExponential
     config.report_batch_size     = 8;
     config.flush_interval_ms     = 1;
     config.heartbeat_interval_ms = 60000;
-    config.snapshot_interval_ms  = 60000;
+    config.snapshot_interval_ms  = 500;
     config.retry_interval_ms     = 40;
 
     auto reporter = std::make_shared<RecordingReporter>();
-    // Rate limiting keeps registration valid, so retries reuse the pending snapshot.
+    // Retries cross the periodic deadline without making the pending snapshot dirty.
     reporter->replyNextBodiesContaining("EVENT_BLOCK_SNAPSHOT",
-        R"({"header":{"status":{"code":"SNAPSHOT_RATE_LIMITED"}},"retry_after_ms":1})", true, 2);
+        R"({"header":{"status":{"code":"SNAPSHOT_RATE_LIMITED"}},"retry_after_ms":1})", true, 5);
+    std::atomic<size_t> captures{0};
     KVCMPublisher publisher(
         config,
         makeContext(),
-        [] {
+        [&captures] {
+            ++captures;
             return KVCacheSnapshot{1, {{10, {0}}, {20, {0}}}};
         },
         reporter);
 
     ASSERT_TRUE(publisher.start());
-    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 3, kAsyncTestTimeout));
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 6, kAsyncTestTimeout));
+    EXPECT_TRUE(waitForState(publisher, PublisherState::READY, kAsyncTestTimeout));
     publisher.stop();
 
+    EXPECT_EQ(captures.load(), 1u);
     std::vector<RecordingReporter::Request> snapshot_requests;
     for (const auto& request : reporter->requests()) {
         if (request.body.find("EVENT_BLOCK_SNAPSHOT") != std::string::npos) {
             snapshot_requests.push_back(request);
         }
     }
-    ASSERT_GE(snapshot_requests.size(), 3u);
+    ASSERT_EQ(snapshot_requests.size(), 6u);
     // Retrying an upload must reuse the already captured and serialized
     // snapshot (including its trace id) instead of recopying the cache.
-    EXPECT_EQ(snapshot_requests[0].body, snapshot_requests[1].body);
-    EXPECT_EQ(snapshot_requests[1].body, snapshot_requests[2].body);
+    for (const auto& request : snapshot_requests) {
+        EXPECT_EQ(snapshot_requests[0].body, request.body);
+    }
 
     const auto first_retry_delay = std::chrono::duration_cast<std::chrono::milliseconds>(
         snapshot_requests[1].recorded_at - snapshot_requests[0].recorded_at);
@@ -902,6 +912,92 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromQueueOverflowWithSnapsh
         }
     }
     EXPECT_EQ(snapshots, 2u);
+}
+
+TEST(KVCacheEventPublisherTest, AckSilenceEscalatesOnceAndOnlyNormalAcksRearmIt) {
+    for (const bool recover_with_mutation : {false, true}) {
+        SCOPED_TRACE(recover_with_mutation);
+        KVCacheEventPublisherConfig config;
+        config.flush_interval_ms      = 1;
+        config.heartbeat_interval_ms  = 5;
+        config.snapshot_interval_ms   = 60000;
+        config.retry_interval_ms      = 1;
+        config.ack_recovery_timeout_ms = 40;
+        auto reporter = std::make_shared<RecordingReporter>();
+        KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{1, {}}; }, reporter);
+
+        ASSERT_TRUE(publisher.start());
+        ASSERT_TRUE(waitForState(publisher, PublisherState::READY, kAsyncTestTimeout));
+        reporter->replyNextBodiesContaining("EVENT_HEARTBEAT", "", true, 100000);
+        ASSERT_TRUE(reporter->waitForBodyCount("EVENT_NODE_REGISTER", 2, kAsyncTestTimeout));
+        ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 2, kAsyncTestTimeout));
+        ASSERT_TRUE(waitForState(publisher, PublisherState::READY, kAsyncTestTimeout));
+        ASSERT_TRUE(reporter->waitForBodyCount("EVENT_HEARTBEAT", 40, kAsyncTestTimeout));
+
+        // Empty queue polls and successful recovery requests must not rearm.
+        size_t registrations = 0;
+        size_t heartbeats = 0;
+        for (const auto& request : reporter->requests()) {
+            registrations += request.route == "/api/registerInstance";
+            heartbeats += request.body.find("EVENT_HEARTBEAT") != std::string::npos;
+        }
+        EXPECT_EQ(registrations, 2u);
+
+        if (recover_with_mutation) {
+            ASSERT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 30, 0}));
+            ASSERT_TRUE(reporter->waitForBody("EVENT_BLOCK_ADD", kAsyncTestTimeout));
+        } else {
+            reporter->replyNextBodyContaining("EVENT_HEARTBEAT", R"({"header":{"status":{"code":"OK"}}})", false);
+            ASSERT_TRUE(reporter->waitForReplyConsumed(kAsyncTestTimeout));
+            reporter->replyNextBodiesContaining("EVENT_HEARTBEAT", "", true, 100000);
+        }
+
+        ASSERT_TRUE(reporter->waitForBodyCount("EVENT_NODE_REGISTER", 3, kAsyncTestTimeout));
+        ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 3, kAsyncTestTimeout));
+        ASSERT_TRUE(reporter->waitForBodyCount("EVENT_HEARTBEAT", heartbeats + 40, kAsyncTestTimeout));
+        publisher.stop();
+
+        registrations = 0;
+        size_t snapshots = 0;
+        for (const auto& request : reporter->requests()) {
+            registrations += request.route == "/api/registerInstance";
+            snapshots += request.body.find("EVENT_BLOCK_SNAPSHOT") != std::string::npos;
+        }
+        EXPECT_EQ(registrations, 3u);
+        EXPECT_EQ(snapshots, 3u);
+    }
+}
+
+TEST(KVCacheEventPublisherTest, MutationAcksPreventEscalationWhileHeartbeatsFail) {
+    KVCacheEventPublisherConfig config;
+    config.report_batch_size      = 1;
+    config.flush_interval_ms      = 1;
+    config.heartbeat_interval_ms  = 5;
+    config.snapshot_interval_ms   = 60000;
+    config.retry_interval_ms      = 1;
+    config.ack_recovery_timeout_ms = 500;
+    auto reporter = std::make_shared<RecordingReporter>();
+    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{1, {}}; }, reporter);
+
+    ASSERT_TRUE(publisher.start());
+    ASSERT_TRUE(waitForState(publisher, PublisherState::READY, kAsyncTestTimeout));
+    reporter->replyNextBodiesContaining("EVENT_HEARTBEAT", "", true, 100000);
+    for (size_t i = 0; i < 24; ++i) {
+        ASSERT_EQ(PublishResult::ACCEPTED,
+                  publisher.tryPublish({KVCacheEventType::BLOCK_ADD, static_cast<int64_t>(i), 0}));
+        ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_ADD", i + 1, kAsyncTestTimeout));
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    publisher.stop();
+
+    size_t registrations = 0;
+    size_t snapshots = 0;
+    for (const auto& request : reporter->requests()) {
+        registrations += request.route == "/api/registerInstance";
+        snapshots += request.body.find("EVENT_BLOCK_SNAPSHOT") != std::string::npos;
+    }
+    EXPECT_EQ(registrations, 1u);
+    EXPECT_EQ(snapshots, 1u);
 }
 
 }  // namespace
