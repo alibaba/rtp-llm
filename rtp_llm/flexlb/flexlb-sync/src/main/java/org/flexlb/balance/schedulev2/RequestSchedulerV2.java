@@ -139,7 +139,9 @@ public class RequestSchedulerV2 {
         }
         long nowMs = System.currentTimeMillis();
         if (context.requestExpired(nowMs)) {
-            return CompletableFuture.completedFuture(Response.buildErrorResponse(StrategyErrorType.RESOURCE_EXHAUSTED,
+            return CompletableFuture.completedFuture(Response.buildErrorResponse(
+                    StrategyErrorType.queueRejectionFor(context.getPriority(),
+                            context.getConfig().queueScheduler().getOrdering().getHighPriorityThreshold()),
                     "request scheduling deadline has expired before placement"));
         }
         CompletableFuture<Response> future = new CompletableFuture<>();

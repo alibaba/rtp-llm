@@ -79,6 +79,8 @@ MainQueue -> 每台机器一个 PrefillQueue -> 共用 DecodeQueue -> publish(Pr
   旧孤儿清理同时检查老请求表和这个并发表，避免按旧 TTL 清掉 V2 的正常预占。
 - Decode 空机预占到发布之间的短窗口允许尾部请求交给刚摘除、仍处于优雅下线阶段的节点，依赖引擎继续服务。
   请求超时以定时取消实际执行为准，不在 publish 时追加严格的绝对截止时间校验。
+  提交时已过期及发布前定时超时均按请求优先级返回：低于高优阈值为 8433，达到阈值为 8434；
+  保留超时原因，定时超时的内部状态仍为 TIMED_OUT。
 - V2 队列可观测性由 `V2QueueReporter` 独立上报，每秒按请求阶段统计 `schedule_v2.queue.depth`：
   `main`、逐 endpoint 的 `prefill`、`decode_waiting`、`decode_reserved`，已发布请求不计入等待。
   共享子队列名额保留到发布，所以名额占用不等于 Prefill 排队长度。空队列持续报零，移除节点后补零。

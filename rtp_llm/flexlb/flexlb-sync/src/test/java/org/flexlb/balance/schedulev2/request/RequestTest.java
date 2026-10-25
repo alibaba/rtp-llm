@@ -44,13 +44,28 @@ class RequestTest {
     }
 
     @Test
-    void deadlineCancelIsReportedAsTimedOut() {
-        Request request = request("3");
-
-        assertTrue(request.cancel(CancelReason.DEADLINE_EXCEEDED));
-
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), request.future().join().getCode());
-        assertEquals(RequestState.Phase.TIMED_OUT, request.toRequestState().state());
+    void deadlineCancelUsesRequestPriorityInEveryWaitingStage() {
+        for (Stage stage : new Stage[]{Stage.MAIN_WAITING, Stage.PREFILL_WAITING, Stage.DECODE_WAITING,
+                Stage.DECODE_RESERVED}) {
+            for (int priority : new int[]{59, 60, 61}) {
+                Request request = request("timeout-" + stage + "-" + priority, priority, 60);
+                if (stage != Stage.MAIN_WAITING) {
+                    request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
+                }
+                if (stage == Stage.DECODE_WAITING || stage == Stage.DECODE_RESERVED) {
+                    request.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING);
+                }
+                if (stage == Stage.DECODE_RESERVED) {
+                    request.moveTo(Stage.DECODE_WAITING, Stage.DECODE_RESERVED);
+                }
+                assertTrue(request.cancel(CancelReason.DEADLINE_EXCEEDED));
+                Response response = request.future().join();
+                assertEquals(priority < 60 ? 8433 : 8434, response.getCode());
+                assertEquals("request deadline exceeded", response.getErrorMessage());
+                assertEquals(RequestState.Phase.TIMED_OUT, request.toRequestState().state());
+                assertFalse(request.cancel(CancelReason.CLIENT_CANCELLED));
+            }
+        }
     }
 
     @Test
@@ -71,10 +86,17 @@ class RequestTest {
     }
 
     static Request request(String requestId) {
+        return request(requestId, 50, 50);
+    }
+
+    static Request request(String requestId, int priority, int threshold) {
         org.flexlb.dao.loadbalance.Request body = new org.flexlb.dao.loadbalance.Request();
         body.setRequestId(requestId);
         body.setSeqLen(16L);
-        BalanceContext context = new BalanceContext(new FlexlbConfig());
+        body.setPriority(priority);
+        FlexlbConfig config = new FlexlbConfig();
+        config.queueScheduler().getOrdering().setHighPriorityThreshold(threshold);
+        BalanceContext context = new BalanceContext(config);
         context.setRequest(body);
         return new Request(context, new CompletableFuture<>(), System.currentTimeMillis());
     }

@@ -282,7 +282,8 @@ public final class Request {
         }
         cancelReason = reason;
         StrategyErrorType errorType = reason == CancelReason.DEADLINE_EXCEEDED
-                ? StrategyErrorType.BATCH_SLO_EXPIRED
+                ? StrategyErrorType.queueRejectionFor(priority,
+                        ctx.getConfig().queueScheduler().getOrdering().getHighPriorityThreshold())
                 : StrategyErrorType.REQUEST_CANCELLED;
         writeQueueTimes();
         future.complete(Response.buildErrorResponse(errorType, reason.getMessage()));

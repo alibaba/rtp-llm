@@ -107,11 +107,27 @@ class RequestSchedulerV2Test {
 
         Response response = scheduler.submit(context("1", 50, 50L)).get(5, TimeUnit.SECONDS);
 
-        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED.getErrorCode(), response.getCode());
         // 超时由计时线程完成 future，清理在它的回调里，get 返回时清理可能还没结束
         awaitNoTrackedRequest();
         assertEquals(0, scheduler.trackedRequestCount());
         assertEquals(0L, queueCapacity.globalQueueAndEngineSubQueueCount());
+    }
+
+    @Test
+    void lowPriorityTimeoutUsesConfiguredThreshold() throws Exception {
+        config.queueScheduler().getOrdering().setHighPriorityThreshold(60);
+        scheduler = scheduler();
+
+        Response queued = scheduler.submit(context("low-queued", 59, 50L)).get(5, TimeUnit.SECONDS);
+        assertEquals(8433, queued.getCode());
+        assertEquals("request deadline exceeded", queued.getErrorMessage());
+        awaitNoTrackedRequest();
+        assertEquals(0L, queueCapacity.globalQueueAndEngineSubQueueCount());
+
+        Response expired = scheduler.submit(context("low-expired", 59, -1L)).join();
+        assertEquals(8433, expired.getCode());
+        assertEquals(0, scheduler.trackedRequestCount());
     }
 
     @Test
@@ -120,7 +136,7 @@ class RequestSchedulerV2Test {
 
         Response response = scheduler.submit(context("1", 50, -1L)).join();
 
-        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED.getErrorCode(), response.getCode());
         assertEquals(0, scheduler.trackedRequestCount());
     }
 
