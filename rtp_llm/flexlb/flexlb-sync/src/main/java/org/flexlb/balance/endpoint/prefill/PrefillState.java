@@ -405,16 +405,16 @@ public final class PrefillState {
      * <p>正常情况下 {@link PrefillQueue#stopAndAwait()} 已经处理完所有 ACTIVE 请求。
      * 这里还是把剩下的 ACTIVE 请求一起清掉，万一前面的检查失败了，关闭 worker 也能清干净。</p>
      */
-    public Retirement retireGenerationOwnership() {
-        List<ScheduledRequest> ownedItems = new ArrayList<>();
+    public ShutdownResult shutdown() {
+        List<ScheduledRequest> removedItems = new ArrayList<>();
         List<FinishedBatch> finishedBatches = new ArrayList<>();
         List<EndpointGenerationLifecycle.HandoffPermit> orphanedHandoffs =
                 new ArrayList<>();
         Set<Reservation> leases = java.util.Collections.newSetFromMap(
                 new IdentityHashMap<>());
         Set<BatchProgress> batches = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
-        Throwable invariantFailure = null;
-        Retirement plannedRetirement;
+        Throwable checkFailure = null;
+        ShutdownResult result;
         lock.lock();
         try {
             Set<ScheduledRequest> canonicalActive = java.util.Collections.newSetFromMap(
@@ -422,20 +422,19 @@ public final class PrefillState {
             for (Map.Entry<String, RequestEntry> canonical : requests.entrySet()) {
                 RequestEntry entry = canonical.getValue();
                 if (!Objects.equals(canonical.getKey(), entry.requestId)) {
-                    invariantFailure = appendRetirementInvariant(
-                            invariantFailure,
-                            "request table key does not match request entry");
+                    checkFailure =
+                            appendRetirementInvariant(checkFailure, "request table key does not match request entry");
                 }
                 ScheduledRequest item = entry.isActive() ? entry.activeItem : entry.committedItem;
                 if (item == null) {
-                    invariantFailure = appendRetirementInvariant(invariantFailure,
+                    checkFailure = appendRetirementInvariant(checkFailure,
                             "retirement owner has no ScheduledRequest request_id=" + entry.requestId);
                 } else {
-                    ownedItems.add(item);
+                    removedItems.add(item);
                     if (entry.isActive() && entry.queueMembership == QueueMembership.WAITING) {
                         canonicalActive.add(item);
                     } else if (activeIndex.contains(item)) {
-                        invariantFailure = appendRetirementInvariant(invariantFailure,
+                        checkFailure = appendRetirementInvariant(checkFailure,
                                 "unindexed owner remains in waiting index request_id=" + entry.requestId);
                     }
                 }
@@ -450,16 +449,13 @@ public final class PrefillState {
             }
 
             if (activeIndex.size() != canonicalActive.size()) {
-                invariantFailure = appendRetirementInvariant(
-                        invariantFailure,
+                checkFailure = appendRetirementInvariant(checkFailure,
                         "ACTIVE index size does not match canonical ACTIVE owners");
             }
             for (ScheduledRequest indexed : activeIndex) {
                 if (!canonicalActive.contains(indexed)) {
-                    invariantFailure = appendRetirementInvariant(
-                            invariantFailure,
-                            "ACTIVE index contains a non-canonical item request_id="
-                                    + indexed.requestId());
+                    checkFailure = appendRetirementInvariant(checkFailure,
+                            "ACTIVE index contains a non-canonical item request_id=" + indexed.requestId());
                 }
             }
 
@@ -467,31 +463,29 @@ public final class PrefillState {
             for (Reservation lease : leases) {
                 if (lease instanceof SingleReservation) {
                     if (lease.state != LeaseState.OPEN && lease.state != LeaseState.OWNED) {
-                        invariantFailure = appendRetirementInvariant(invariantFailure,
+                        checkFailure = appendRetirementInvariant(checkFailure,
                                 "canonical retirement owner has an invalid single-reservation state");
                     }
                 } else if (lease instanceof BatchReservation batch) {
                     observedBatchLeases++;
-                    invariantFailure = BatchPrefill.checkRetiringBatchLease(batch, orphanedHandoffs, invariantFailure);
+                    checkFailure = BatchPrefill.checkRetiringBatchLease(batch, orphanedHandoffs, checkFailure);
                 } else {
-                    invariantFailure = appendRetirementInvariant(
-                            invariantFailure,
-                            "retirement found an unknown Prefill lease type");
+                    checkFailure =
+                            appendRetirementInvariant(checkFailure, "retirement found an unknown Prefill lease type");
                 }
             }
             if (batchPrefill.batchLeasesInUse() != observedBatchLeases) {
-                invariantFailure = appendRetirementInvariant(
-                        invariantFailure,
+                checkFailure = appendRetirementInvariant(checkFailure,
                         "batch capacity does not match canonical retirement leases");
             }
 
             for (BatchProgress batch : batches) {
                 finishedBatches.add(batch.finishedBatchOnRetirement());
             }
-            ownedItems.sort(Comparator.comparingLong(ScheduledRequest::enqueueSeq)
-                    .thenComparing(ScheduledRequest::requestId));
+            removedItems.sort(
+                    Comparator.comparingLong(ScheduledRequest::enqueueSeq).thenComparing(ScheduledRequest::requestId));
             finishedBatches.sort(Comparator.comparingLong(FinishedBatch::batchId));
-            plannedRetirement = new Retirement(ownedItems, finishedBatches, invariantFailure);
+            result = new ShutdownResult(removedItems, finishedBatches, checkFailure);
 
             // 从这里开始真正清空。会分配内存或做检查的步骤都已经在上面做完了。
             for (RequestEntry entry : requests.values()) {
@@ -528,7 +522,7 @@ public final class PrefillState {
             }
         }
         notifyCapacityAvailable(!leases.isEmpty());
-        return plannedRetirement;
+        return result;
     }
 
     public static Throwable appendRetirementInvariant(Throwable first, String message) {

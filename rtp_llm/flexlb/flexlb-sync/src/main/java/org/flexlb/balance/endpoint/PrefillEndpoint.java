@@ -7,7 +7,7 @@ import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
 import org.flexlb.balance.endpoint.prefill.HeartbeatResult;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
-import org.flexlb.balance.endpoint.prefill.Retirement;
+import org.flexlb.balance.endpoint.prefill.ShutdownResult;
 import org.flexlb.balance.endpoint.prefill.Stats;
 import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
 import org.flexlb.balance.endpoint.prefill.WorkerStatusResult;
@@ -179,19 +179,17 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // the exact worker has exited, and are aggregated below.
         Throwable retirementFailure = prefillQueue.stopAndAwait();
         try {
-            Retirement retirement = prefillState.retireGenerationOwnership();
-            if (!retirement.ownedItems().isEmpty()) {
+            ShutdownResult shutdownResult = prefillState.shutdown();
+            if (!shutdownResult.removedItems().isEmpty()) {
                 try {
-                    endpointEvents.onPrefillGenerationRetired(
-                            this, retirement.ownedItems());
+                    endpointEvents.onPrefillGenerationRetired(this, shutdownResult.removedItems());
                 } catch (Throwable callbackFailure) {
                     retirementFailure = appendRetirementFailure(
                             retirementFailure, callbackFailure);
                 }
             }
-            retirementFailure = appendRetirementFailure(
-                    retirementFailure, retirement.invariantFailure());
-            List<FinishedBatch> finishedBatches = retirement.finishedBatches();
+            retirementFailure = appendRetirementFailure(retirementFailure, shutdownResult.checkFailure());
+            List<FinishedBatch> finishedBatches = shutdownResult.finishedBatches();
             for (int index = 0; index < finishedBatches.size(); index++) {
                 FinishedBatch finishedBatch = finishedBatches.get(index);
                 try {

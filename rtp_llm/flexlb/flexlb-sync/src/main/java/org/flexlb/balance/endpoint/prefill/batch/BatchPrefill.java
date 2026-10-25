@@ -292,21 +292,21 @@ public final class BatchPrefill {
      */
     public static Throwable checkRetiringBatchLease(BatchReservation batch,
                                                     List<EndpointGenerationLifecycle.HandoffPermit> orphanedHandoffs,
-                                                    Throwable invariantFailure) {
+                                                    Throwable checkFailure) {
         if (batch.state == LeaseState.OPEN) {
             if (batch.generationHandoff == null) {
-                return PrefillState.appendRetirementInvariant(invariantFailure,
+                return PrefillState.appendRetirementInvariant(checkFailure,
                         "OPEN Prefill batch lease lost its generation handoff");
             }
             orphanedHandoffs.add(batch.generationHandoff);
-            return PrefillState.appendRetirementInvariant(invariantFailure,
+            return PrefillState.appendRetirementInvariant(checkFailure,
                     "retirement reached an OPEN Prefill batch lease");
         }
         if (batch.state != LeaseState.OWNED || batch.generationHandoff != null) {
-            return PrefillState.appendRetirementInvariant(invariantFailure,
+            return PrefillState.appendRetirementInvariant(checkFailure,
                     "canonical retirement owner has an invalid batch lease state");
         }
-        return invariantFailure;
+        return checkFailure;
     }
 
     /**

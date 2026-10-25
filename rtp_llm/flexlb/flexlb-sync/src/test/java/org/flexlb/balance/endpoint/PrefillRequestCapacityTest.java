@@ -211,7 +211,7 @@ class PrefillRequestCapacityTest {
         heartbeat(Map.of(), 0L);
         assertTrue(enqueue(item(2), 1L));
         assertFalse(state.canAcceptRequest(1L));
-        state.retireGenerationOwnership();
+        state.shutdown();
         assertTrue(state.canAcceptRequest(1L));
         assertFalse(state.canAcceptRequest(0L));
         assertFalse(state.canAcceptRequest(-1L));

@@ -197,10 +197,10 @@ class PrefillStateSnapshotTest {
                 generation.tryAcquireHandoff())) {
             assertEquals(1, state.committedSnapshot().requests().size());
         }
-        var retired = state.retireGenerationOwnership();
-        assertNull(retired.invariantFailure());
-        assertEquals(3, retired.ownedItems().size());
-        assertTrue(retired.ownedItems().containsAll(List.of(queued, prepared, committed)));
+        var retired = state.shutdown();
+        assertNull(retired.checkFailure());
+        assertEquals(3, retired.removedItems().size());
+        assertTrue(retired.removedItems().containsAll(List.of(queued, prepared, committed)));
         preparedReservation.close();
         committedReservation.close();
         assertTrue(state.committedSnapshot().requests().isEmpty());
