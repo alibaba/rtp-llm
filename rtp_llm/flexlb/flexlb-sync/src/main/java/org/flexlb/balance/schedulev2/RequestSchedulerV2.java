@@ -9,6 +9,7 @@ import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.balance.schedulev2.decode.DecodeQueue;
 import org.flexlb.balance.schedulev2.decode.DecodeQueueLoop;
+import org.flexlb.balance.schedulev2.decode.EmptyDecodeFinder;
 import org.flexlb.balance.schedulev2.main.MainQueue;
 import org.flexlb.balance.schedulev2.main.MainQueueLoop;
 import org.flexlb.balance.schedulev2.prefill.PrefillPicker;
@@ -26,6 +27,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
@@ -81,7 +83,8 @@ public class RequestSchedulerV2 {
                               PrefillQueueRegistry prefillQueues,
                               ModelMetaConfig modelMetaConfig,
                               DecodePreemptionCoordinator preemptionCoordinator,
-                              RequestSchedulerReporter reporter) {
+                              RequestSchedulerReporter reporter,
+                              WorkerDirectory workerDirectory) {
         this.configService = configService;
         this.deployedRoles = Set.copyOf(modelMetaConfig.requiredRoles());
         this.prefillRole = deployedRoles.contains(RoleType.PREFILL)
@@ -98,8 +101,9 @@ public class RequestSchedulerV2 {
                 this::sendToPrefillQueue);
         this.prefillQueueLoop = new PrefillQueueLoop(prefillQueues, prefillLoopSignal, cleanup, mainQueue,
                 endpointRegistry, configService, reporter, this::sendToDecodeQueue);
-        this.decodeQueueLoop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, placementAvailability,
-                decodeSelector, router, preemptionCoordinator, configService, reporter);
+        this.decodeQueueLoop =
+                new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, placementAvailability, decodeSelector,
+                        router, preemptionCoordinator, new EmptyDecodeFinder(workerDirectory), configService, reporter);
         this.deadlineTimer = new ScheduledThreadPoolExecutor(1, task -> {
             Thread thread = new Thread(task, "flexlb-v2-deadline");
             thread.setDaemon(true);

@@ -55,6 +55,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * </ol>
  * reserve 的 Decode 下线或 reserve 丢失时，请求退回 waiting 重新选。
  * <p>
+ * 请求放不下时（选中的 Decode reserve 不上，或者选择器说都放不下、请求超过所有 Decode 的额度），
+ * 先在同 group 里找空的 Decode（{@link EmptyDecodeFinder}），有就不看容量直接放过去并发布。
+ * 没有空的 Decode 时，选中的 Decode reserve 不上才尝试抢占，其余情况请求留在 waiting。
+ * <p>
  * 抢占模式下，选中的 Decode 放不下时，尝试抢占这台 Decode 上优先级更低、已经发给引擎的请求。
  * V2 只支持 RETURN 方式：被抢占请求的 id 放进响应的 preemptRequestIds，由调用方去取消，flexlb 不发 cancel。
  */
@@ -76,6 +80,7 @@ public final class DecodeQueueLoop {
     private final DecodeSelector decodeSelector;
     private final DefaultRouter router;
     private final DecodePreemptionCoordinator preemptionCoordinator;
+    private final EmptyDecodeFinder emptyDecodeFinder;
     private final ConfigService configService;
     private final RequestSchedulerReporter reporter;
     /**
@@ -100,6 +105,7 @@ public final class DecodeQueueLoop {
                            DecodeSelector decodeSelector,
                            DefaultRouter router,
                            DecodePreemptionCoordinator preemptionCoordinator,
+                           EmptyDecodeFinder emptyDecodeFinder,
                            ConfigService configService,
                            RequestSchedulerReporter reporter) {
         this.decodeQueue = decodeQueue;
@@ -109,6 +115,7 @@ public final class DecodeQueueLoop {
         this.decodeSelector = decodeSelector;
         this.router = router;
         this.preemptionCoordinator = preemptionCoordinator;
+        this.emptyDecodeFinder = emptyDecodeFinder;
         this.configService = configService;
         this.reporter = reporter;
         this.capacityListener = loopSignal::wake;
@@ -403,10 +410,11 @@ public final class DecodeQueueLoop {
         }
         switch (result.status()) {
             case SUCCESS -> {
-                return reserve(request, result.value(), requirement);
+                return reserve(request, result.value(), requirement, group);
             }
-            case BLOCKED -> {
-                return false;
+            case BLOCKED, REJECTED -> {
+                // REJECTED 是请求超过了所有 Decode 的额度，等到有空的 Decode 时放过去
+                return placeOnEmptyDecode(request, requirement, group);
             }
             default -> {
                 if (result.failure() == null) {
@@ -420,10 +428,10 @@ public final class DecodeQueueLoop {
     }
 
     /**
-     * 在选中的 Decode 上 reserve。返回 false 表示这台 Decode 放不下，请求留在 waiting。
+     * 在选中的 Decode 上 reserve。返回 false 表示这台 Decode 放不下、没有空的 Decode、也抢占不到，请求留在 waiting。
      * 选择器在没有放得下的 Decode 时也会选一台忙的，所以放不下由 reserve 带容量上限在锁里判断，不会超额。
      */
-    private boolean reserve(Request request, SelectedRole selected, DecodeRequirement requirement) {
+    private boolean reserve(Request request, SelectedRole selected, DecodeRequirement requirement, String group) {
         DecodeChoice choice;
         try (selected; WorkerEndpoint.EndpointHold hold = selected.takeEndpointHold()) {
             DecodeEndpoint endpoint = (DecodeEndpoint) hold.endpoint();
@@ -431,6 +439,9 @@ public final class DecodeQueueLoop {
                     endpoint.reserve(hold, request.requestId(), requirement.inputKvTokens(),
                             requirement.inputAndMaxOutputKvTokens(), requirement.priority(), requirement.capacity());
             if (reservation == null) {
+                if (placeOnEmptyDecode(request, requirement, group)) {
+                    return true;
+                }
                 reservation = preempt(request, hold, requirement, selected.serverStatus());
                 if (reservation == null) {
                     return false;
@@ -450,6 +461,43 @@ public final class DecodeQueueLoop {
             return true;
         }
         decodeQueue.addReserved(request);
+        return true;
+    }
+
+    /**
+     * 找一台空的 Decode，不看容量直接放过去并发布。返回 false 表示没有空的 Decode，请求留在 waiting。
+     * <p>
+     * reserve 按已经发给引擎记（不进排队，也不再要 permit），请求的 KV 照样记到这台 Decode 上，
+     * 后面的请求看到的就不是空机器了。发布后和普通请求一样进 published，等引擎上报或超时归还。
+     */
+    private boolean placeOnEmptyDecode(Request request, DecodeRequirement requirement, String group) {
+        DecodeChoice choice;
+        try {
+            SelectedRole selected = emptyDecodeFinder.find(group, request.requestId());
+            if (selected == null) {
+                return false;
+            }
+            try (selected; WorkerEndpoint.EndpointHold hold = selected.takeEndpointHold()) {
+                DecodeEndpoint endpoint = (DecodeEndpoint) hold.endpoint();
+                DecodeEndpoint.ReservationHandle reservation = endpoint.reserveUnqueued(hold, request.requestId(),
+                        requirement.inputKvTokens(), requirement.inputAndMaxOutputKvTokens(), requirement.priority());
+                choice = new DecodeChoice(endpoint, reservation, selected.serverStatus(), requirement);
+            }
+        } catch (RuntimeException failure) {
+            request.fail(StrategyErrorType.DISPATCH_FAILED, "empty decode reserve failed: " + failure.getMessage());
+            return true;
+        }
+        // 先设置再发布：发布前请求随时可能结束，结束时的清理要能看到它有 reserve
+        request.setDecodeChoice(choice);
+        decodeQueue.removeWaiting(request);
+        if (request.publish(Stage.DECODE_WAITING,
+                List.of(request.prefillChoice().serverStatus(), choice.serverStatus()))) {
+            cleanup.releasePublished(request);
+            decodeQueue.addPublished(request);
+        } else {
+            // 请求已经结束，结果没发给调用方，归还 reserve
+            releaseNow(request);
+        }
         return true;
     }
 

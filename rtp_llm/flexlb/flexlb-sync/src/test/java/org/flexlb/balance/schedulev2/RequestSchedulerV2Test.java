@@ -21,6 +21,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -157,7 +158,8 @@ class RequestSchedulerV2Test {
         return new RequestSchedulerV2(configService, queueCapacity, mock(EndpointRegistry.class),
                 new PlacementAvailability(), mock(DefaultRouter.class), mock(CostBasedPrefillStrategy.class),
                 mock(DecodeSelector.class), new PrefillQueueRegistry(configService), modelMetaConfig,
-                mock(DecodePreemptionCoordinator.class), mock(RequestSchedulerReporter.class));
+                mock(DecodePreemptionCoordinator.class), mock(RequestSchedulerReporter.class),
+                mock(WorkerDirectory.class));
     }
 
     private BalanceContext context(String requestId, int priority, long expiresInMs) {

@@ -214,9 +214,9 @@ public class DecodeSelector {
                         + maximum);
     }
 
-    private SelectedRole buildSelectedRole(DecodeRoutingView selected,
-                                           WorkerEndpoint.EndpointHold selectedHold,
-                                           String requestId) {
+    public static SelectedRole buildSelectedRole(DecodeRoutingView selected,
+                                                 WorkerEndpoint.EndpointHold selectedHold,
+                                                 String requestId) {
         try {
             if (selectedHold.generationId() != selected.generationId()
                     || !(selectedHold.endpoint() instanceof DecodeEndpoint)) {

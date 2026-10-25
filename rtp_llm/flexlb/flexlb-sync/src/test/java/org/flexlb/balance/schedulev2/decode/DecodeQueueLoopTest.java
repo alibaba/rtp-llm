@@ -29,6 +29,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -65,6 +66,10 @@ class DecodeQueueLoopTest {
                     mock(EndpointEventHandler.class));
     private final ServerStatus decodeStatus = new ServerStatus();
     private final RequestSchedulerReporter reporter = mock(RequestSchedulerReporter.class);
+    private final EmptyDecodeFinder emptyDecodeFinder = mock(EmptyDecodeFinder.class);
+    private final DecodeEndpoint emptyDecode =
+            new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.3", 8080, 8081, "test"),
+                    mock(EndpointEventHandler.class));
     private final DecodeQueueLoop loop;
 
     DecodeQueueLoopTest() {
@@ -81,12 +86,13 @@ class DecodeQueueLoopTest {
         loop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, new PlacementAvailability(), selector,
                 mock(DefaultRouter.class), new DecodePreemptionCoordinator(mock(EngineCancelChannel.class),
                         mock(RequestRegistry.class), mock(RequestSchedulerReporter.class)),
-                configService(), reporter);
+                emptyDecodeFinder, configService(), reporter);
     }
 
     @AfterEach
     void closeEndpoint() {
         decode.close();
+        emptyDecode.close();
     }
 
     @Test
@@ -289,6 +295,55 @@ class DecodeQueueLoopTest {
 
         assertEquals(0, decodeQueue.publishedCount());
         verify(reporter, never()).reportDispatchConfirmTimeout();
+    }
+
+    @Test
+    void requestGoesToEmptyDecodeWhenSelectedDecodeIsFull() {
+        Request first = addWaiting("1");
+        loop.runOnce();
+        Request second = addWaiting("2");
+        ServerStatus emptyStatus = emptyDecodeStatus();
+        doAnswer(invocation -> SelectedRole.decode(emptyDecode.tryHold(), emptyStatus)).when(emptyDecodeFinder)
+                .find(any(), any());
+
+        // 这一轮 first 发布占满 decode，second 在 decode 上放不下，放到空的 Decode 上直接发布
+        assertTrue(loop.runOnce());
+
+        assertEquals(Stage.PUBLISHED, first.stage());
+        assertEquals(Stage.PUBLISHED, second.stage());
+        assertSame(emptyDecode, second.decodeChoice().endpoint());
+        assertEquals(List.of(second.prefillChoice().serverStatus(), emptyStatus),
+                second.future().join().getServerStatus());
+        assertNotNull(emptyDecode.reservationHandle("2"));
+        assertEquals(1L, emptyDecode.routingView().totalLoad());
+        assertEquals(2, decodeQueue.publishedCount());
+    }
+
+    @Test
+    void requestOverEveryDecodeBudgetWaitsForEmptyDecode() {
+        doReturn(PlacementResult.rejected(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED))).when(selector)
+                .select(any(), any(), any());
+        Request request = addWaiting("1");
+
+        assertFalse(loop.runOnce());
+        assertEquals(Stage.DECODE_WAITING, request.stage());
+
+        ServerStatus emptyStatus = emptyDecodeStatus();
+        doAnswer(invocation -> SelectedRole.decode(emptyDecode.tryHold(), emptyStatus)).when(emptyDecodeFinder)
+                .find(any(), any());
+        assertTrue(loop.runOnce());
+
+        assertEquals(Stage.PUBLISHED, request.stage());
+        assertNotNull(emptyDecode.reservationHandle("1"));
+    }
+
+    private ServerStatus emptyDecodeStatus() {
+        ServerStatus status = new ServerStatus();
+        status.setRole(RoleType.DECODE);
+        status.setSuccess(true);
+        status.setServerIp("127.0.0.3");
+        status.setHttpPort(8080);
+        return status;
     }
 
     private ConfigService configService() {
