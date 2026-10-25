@@ -628,6 +628,27 @@ public:
         }
     }
 
+    void reportQuarantineEvent(bool is_write, StorageQuarantineReason reason, size_t block_count) const noexcept {
+        RtpLLMRemoteCacheQuarantineEventMetricsCollector collector;
+        collector.op          = is_write ? "write" : "read";
+        collector.block_count = static_cast<int64_t>(block_count);
+        switch (reason) {
+            case StorageQuarantineReason::SDK_TIMEOUT:
+                collector.reason = "sdk_timeout";
+                break;
+            case StorageQuarantineReason::RPC_TIMEOUT:
+                collector.reason = "rpc_timeout";
+                break;
+            case StorageQuarantineReason::RPC_ERROR:
+                collector.reason = "rpc_error";
+                break;
+            case StorageQuarantineReason::INVALID_RESPONSE:
+                collector.reason = "invalid_response";
+                break;
+        }
+        reportRemoteMetrics<RtpLLMRemoteCacheQuarantineMetrics>(collector);
+    }
+
     void reportQuarantineState(uint64_t generation, size_t task_count, size_t block_count) noexcept {
         reportQuarantineMetrics(generation, task_count, block_count);
         if (parallelism_config_.tp_rank == 0 && quarantine_abort_ratio_ > 0.0 && total_device_block_count_ > 0) {
@@ -1140,32 +1161,39 @@ private:
             auto result =
                 broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, timeout_ms, rpc_call);
             if (result == nullptr) {
-                throw StorageOperationCompletionUnknown("KVCM broadcast dispatch failed");
+                throw StorageOperationCompletionUnknown("KVCM broadcast dispatch failed",
+                                                        StorageQuarantineReason::RPC_ERROR);
             }
             try {
                 result->waitDone();
             } catch (const std::exception& exception) {
                 if (result->deadlineExceeded()) {
-                    throw StorageOperationTimeout(std::string("KVCM broadcast timed out: ") + exception.what());
+                    throw StorageOperationTimeout(std::string("KVCM broadcast timed out: ") + exception.what(),
+                                                  StorageQuarantineReason::RPC_TIMEOUT);
                 }
                 throw StorageOperationCompletionUnknown(
-                    std::string("KVCM broadcast completion is unknown: ") + exception.what());
+                    std::string("KVCM broadcast completion is unknown: ") + exception.what(),
+                    StorageQuarantineReason::RPC_ERROR);
             } catch (...) {
-                throw StorageOperationCompletionUnknown("KVCM broadcast completion is unknown");
+                throw StorageOperationCompletionUnknown("KVCM broadcast completion is unknown",
+                                                        StorageQuarantineReason::RPC_ERROR);
             }
             if (!result->success()) {
-                throw StorageOperationCompletionUnknown("KVCM broadcast completion is unknown");
+                throw StorageOperationCompletionUnknown("KVCM broadcast completion is unknown",
+                                                        StorageQuarantineReason::RPC_ERROR);
             }
             responses = result->responses();
         }
 
         if (responses.size() != requests.size()) {
-            throw StorageOperationCompletionUnknown("KVCM worker response count mismatch");
+            throw StorageOperationCompletionUnknown("KVCM worker response count mismatch",
+                                                    StorageQuarantineReason::INVALID_RESPONSE);
         }
         bool failed = false;
         for (const auto& response : responses) {
             if (!response.has_remote_response()) {
-                throw StorageOperationCompletionUnknown("KVCM worker returned no transfer response");
+                throw StorageOperationCompletionUnknown("KVCM worker returned no transfer response",
+                                                        StorageQuarantineReason::INVALID_RESPONSE);
             }
             switch (response.remote_response().transfer_status()) {
                 case REMOTE_TRANSFER_STATUS_UNSPECIFIED:  // successful legacy worker
@@ -1175,9 +1203,10 @@ private:
                     failed = true;
                     break;
                 case REMOTE_TRANSFER_STATUS_TIMEOUT:
-                    throw StorageOperationTimeout("KVCM transfer timed out");
+                    throw StorageOperationTimeout("KVCM transfer timed out", StorageQuarantineReason::SDK_TIMEOUT);
                 default:
-                    throw StorageOperationCompletionUnknown("KVCM transfer completion is unknown");
+                    throw StorageOperationCompletionUnknown("KVCM transfer completion is unknown",
+                                                            StorageQuarantineReason::INVALID_RESPONSE);
             }
         }
         if (failed) {
@@ -1286,6 +1315,10 @@ void KVCMStorageBackend::writeImpl(const StorageRequest& request) {
 
 void KVCMStorageBackend::shutdownImpl() noexcept {
     impl_->shutdown();
+}
+
+void KVCMStorageBackend::onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept {
+    impl_->reportQuarantineEvent(is_write, reason, block_count);
 }
 
 void KVCMStorageBackend::onQuarantineChanged(uint64_t generation, size_t task_count, size_t block_count) noexcept {
