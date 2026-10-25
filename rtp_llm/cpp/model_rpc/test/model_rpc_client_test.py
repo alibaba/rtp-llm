@@ -1339,6 +1339,39 @@ class ModelRpcClientTest(TestCase):
                     expected_status,
                 )
 
+    def test_trans_output_xgrammar_update_timeout(self):
+        for timed_out in (None, False, True):
+            for aux_info_enabled in (False, True):
+                with self.subTest(
+                    timed_out=timed_out, aux_info_enabled=aux_info_enabled
+                ):
+                    input_py = GenerateInput(
+                        token_ids=torch.tensor([1, 2], dtype=torch.int32),
+                        generate_config=GenerateConfig(aux_info=aux_info_enabled),
+                        request_id=1,
+                        mm_inputs=[],
+                    )
+                    outputs_pb = GenerateOutputsPB()
+                    output_pb = outputs_pb.flatten_output
+                    output_pb.finished.append(True)
+                    aux_info = output_pb.aux_info.add()
+                    # Omitted fields from older workers retain the false default.
+                    if timed_out is not None:
+                        aux_info.xgrammar_update_timeout = timed_out
+                    wire_output = GenerateOutputsPB.FromString(
+                        outputs_pb.SerializeToString()
+                    )
+
+                    outputs = trans_output(input_py, wire_output, StreamState())
+
+                    actual = outputs.generate_outputs[0].aux_info
+                    if aux_info_enabled:
+                        self.assertEqual(
+                            actual.xgrammar_update_timeout, bool(timed_out)
+                        )
+                    else:
+                        self.assertIsNone(actual)
+
     @unittest.skip("need fix")
     def test_generate_stream(self):
         client = FakeModelRpcClient()

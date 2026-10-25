@@ -12,8 +12,10 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include <c10/cuda/CUDACachingAllocator.h>
 #endif
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <map>
 #include <numeric>
@@ -1155,7 +1157,15 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
     // to avoid cuda sync, we need to set propose token in extra loop
     updateProposeTokens(stream_groups, draft_prefill_output, spec_update_infos);
 
+    const auto update_start = std::chrono::steady_clock::now();
     stream_groups.updateStreams(spec_update_infos);
+    if (metrics_reporter_ && stream_groups.totalDecodeBatchSize() > 0) {
+        RtpLLMStreamUpdateMetricsCollector collector;
+        collector.latency_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - update_start)
+                .count();
+        metrics_reporter_->report<RtpLLMStreamUpdateMetrics, RtpLLMStreamUpdateMetricsCollector>(nullptr, &collector);
+    }
 
     RTP_LLM_LOG_DEBUG("dispatch decode done");
     return absl::OkStatus();
