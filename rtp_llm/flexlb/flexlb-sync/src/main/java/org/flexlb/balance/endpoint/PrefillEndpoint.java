@@ -303,8 +303,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Explain a failed admission using the current owner-priority summary. */
-    public AdmissionRejectReason admissionRejectReason(int priority, long inflightRequestLimit) {
-        return prefillState.admissionRejectReason(priority, inflightRequestLimit);
+    public AdmissionRejectReason rejectReason(int priority, long inflightRequestLimit) {
+        return prefillState.rejectReason(priority, inflightRequestLimit);
     }
 
     /** Advisory capacity; publication repeats the count check under the ownership lock. */

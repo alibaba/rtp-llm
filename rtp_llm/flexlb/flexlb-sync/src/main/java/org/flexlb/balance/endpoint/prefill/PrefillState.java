@@ -258,7 +258,7 @@ public final class PrefillState {
     }
 
     /** Only failed admission needs priority provenance; reuse one summary per revision. */
-    public AdmissionRejectReason admissionRejectReason(int priority, long requestLimit) {
+    public AdmissionRejectReason rejectReason(int priority, long requestLimit) {
         long[] counts;
         long occupiedRequests;
         lock.lock();

@@ -274,7 +274,7 @@ public class CostBasedPrefillStrategy {
             }
             workerCount++;
             observedRequestCount += endpoint.observedRequestCount();
-            AdmissionRejectReason workerReason = endpoint.admissionRejectReason(priority, inflightRequestLimit);
+            AdmissionRejectReason workerReason = endpoint.rejectReason(priority, inflightRequestLimit);
             if (reason == null) {
                 reason = workerReason;
             } else if (reason == AdmissionRejectReason.UNSPECIFIED
