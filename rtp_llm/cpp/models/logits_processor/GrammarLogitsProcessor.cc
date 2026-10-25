@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <limits>
 #include <new>
@@ -12,10 +13,12 @@
 #include <dlpack/dlpack.h>
 
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
@@ -296,9 +299,16 @@ private:
     int32_t         reusable_mask_words_ = 0;
 };
 
-GrammarLogitsProcessor::GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher, int64_t eos_token_id):
+GrammarLogitsProcessor::GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher,
+                                               int64_t                            eos_token_id,
+                                               int                                update_timeout_ms,
+                                               kmonitor::MetricsReporterPtr       metrics_reporter,
+                                               std::string                        stream_log_tag):
     matcher_(std::move(matcher)),
     eos_token_id_(eos_token_id),
+    update_timeout_ms_(update_timeout_ms),
+    metrics_reporter_(std::move(metrics_reporter)),
+    stream_log_tag_(std::move(stream_log_tag)),
     decode_mask_builder_(std::make_unique<DecodeMaskBuilder>()) {}
 
 GrammarLogitsProcessor::~GrammarLogitsProcessor() = default;
@@ -323,6 +333,9 @@ GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, s
     }
 
     std::lock_guard<std::mutex> lock(state_mutex_);
+    if (update_timed_out_) {
+        return std::nullopt;
+    }
     const auto                  logits_row = inputs.logits[start_idx];
     if (!logits_row.defined() || logits_row.dim() != 1 || logits_row.stride(0) != 1) {
         return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "grammar logits processor requires contiguous 1D logits rows");
@@ -357,8 +370,28 @@ std::optional<ErrorInfo> GrammarLogitsProcessor::updateStatus(const torch::Tenso
     }
     const auto* data = new_tokens.data_ptr<int32_t>();
 
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    auto                        error = acceptCommittedLocked(data, static_cast<size_t>(num_new_tokens));
+    std::unique_lock<std::mutex> lock(state_mutex_);
+    if (update_timed_out_) {
+        return std::nullopt;
+    }
+    // Measure only committed CPU state advancement, excluding lock wait and reporting.
+    // xgrammar calls are synchronous: the budget is checked after the call returns.
+    const auto start   = std::chrono::steady_clock::now();
+    auto       error   = acceptCommittedLocked(data, static_cast<size_t>(num_new_tokens));
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    update_timed_out_  = elapsed > std::chrono::milliseconds(update_timeout_ms_);
+    // A timeout disables this request's grammar even when the slow update rejected a token.
+    if (update_timed_out_) {
+        lock.unlock();
+        RTP_LLM_LOG_WARNING("xgrammar state update timed out; grammar disabled for stream, %s",
+                            stream_log_tag_.c_str());
+        if (metrics_reporter_) {
+            RtpLLMGrammarUpdateMetricsCollector collector;
+            collector.update_timeout_qps = true;
+            metrics_reporter_->report<RtpLLMGrammarMetrics, RtpLLMGrammarUpdateMetricsCollector>(nullptr, &collector);
+        }
+        return std::nullopt;
+    }
     if (error.hasError()) {
         return error;
     }
@@ -367,13 +400,27 @@ std::optional<ErrorInfo> GrammarLogitsProcessor::updateStatus(const torch::Tenso
 
 std::optional<int64_t> GrammarLogitsProcessor::committedOutputLen() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
+    if (update_timed_out_) {
+        return std::nullopt;
+    }
     return committed_output_len_;
+}
+
+bool GrammarLogitsProcessor::updateTimedOut() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return update_timed_out_;
 }
 
 ErrorResult<int> GrammarLogitsProcessor::prepareSpeculative(const SpecLogitsProcessorRequest& request) {
     int cap_out = 0;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
+        if (update_timed_out_) {
+            std::fill_n(request.bitmask_cpu_out,
+                        (static_cast<size_t>(request.propose_step) + 1) * request.bitmask_size_int32,
+                        SpecLogitsProcessorRequest::kBitmaskAllowAll);
+            return int(request.propose_step);
+        }
         auto                        cap_or = prepareSpecMask(*matcher_, eos_token_id_, request);
         if (!cap_or.ok()) {
             return cap_or.status();

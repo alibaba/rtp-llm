@@ -130,6 +130,7 @@ class AuxInfo:
     first_token_cost_time: float = 0
     wait_time: float = 0
     pd_sep: bool = False
+    xgrammar_update_timeout: bool = False
     cum_log_probs: List[float] = field(default_factory=list)
     beam_responses: List[str] = field(default_factory=list)
     softmax_probs: List[float] = field(default_factory=list)

@@ -95,6 +95,13 @@ public:
     GrammarBackendStats stats() const;
     void                clear();
 
+    int updateTimeoutMs() const {
+        return options_.update_timeout_ms;
+    }
+    kmonitor::MetricsReporterPtr metricsReporter() const {
+        return metrics_reporter_;
+    }
+
     // Test seams for deterministic timeout, queue, singleflight, failure classification, and metrics tests.
     using CompileFn       = std::function<GrammarCompileResult(const GrammarKeyCpp&)>;
     using MetricsReportFn = std::function<void(const RtpLLMGrammarMetricsCollector&)>;
@@ -112,6 +119,7 @@ private:
         int64_t compiler_cache_budget_bytes       = 1LL << 30;
         int64_t verdict_cache_budget_bytes        = 1LL << 30;
         int     compile_timeout_ms                = 2000;
+        int     update_timeout_ms                 = 10;
         int     compile_concurrency               = 1;
         int     compile_queue_size                = 2;
     };

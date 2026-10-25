@@ -439,6 +439,7 @@ std::string GrammarConfig::to_string() const {
         << "compile_concurrency: " << compile_concurrency << "\n"
         << "compile_queue_size: " << compile_queue_size << "\n"
         << "compiler_cache_bytes: " << compiler_cache_bytes << "\n"
+        << "update_timeout_ms: " << update_timeout_ms << "\n"
         << "tokenizer_info_json_size: " << tokenizer_info_json.size();
     return oss.str();
 }

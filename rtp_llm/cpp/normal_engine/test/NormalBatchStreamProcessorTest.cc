@@ -10,10 +10,12 @@
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <thread>
 #include <tuple>
 #include "torch/csrc/autograd/profiler_kineto.h"
 #include "torch/all.h"
 #include "gtest/gtest.h"
+#include "kmonitor/client/metric/GaugeMetric.h"
 
 #define private public
 #define protected public
@@ -23,6 +25,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -1083,6 +1086,70 @@ private:
     bool    async_device_state_;
     int64_t accepted_token_len_ = 0;
 };
+
+TEST_P(OutputDispatchTest, testStreamUpdateLatencyReportsOncePerDecodeBatch) {
+    class SlowUpdateProcessor: public TestStatefulLogitsProcessor {
+    public:
+        SlowUpdateProcessor(): TestStatefulLogitsProcessor(false) {}
+
+        std::optional<ErrorInfo> updateStatus(const torch::Tensor& tokens, int32_t count) override {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            return TestStatefulLogitsProcessor::updateStatus(tokens, count);
+        }
+    };
+
+    auto monitor = std::make_shared<kmonitor::KMonitor>("stream_update_test");
+    monitor->SetServiceName("");
+    auto  reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+    auto* metrics  = reporter->getMetricsGroup<RtpLLMStreamUpdateMetrics>();
+    auto* latency =
+        dynamic_cast<kmonitor::GaugeMetric*>(metrics->latency_us_metric->DeclareMetric(&reporter->getTags()));
+    ASSERT_NE(latency, nullptr);
+
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 8;
+    model_config.vocab_size  = 2;
+    model_config.num_layers  = 1;
+    RuntimeConfig                                     runtime_config;
+    std::list<GenerateStreamPtr>                      streams;
+    std::vector<std::shared_ptr<SlowUpdateProcessor>> processors;
+    for (int input_token : {0, 1}) {
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer({input_token});
+        query->generate_config = make_shared<GenerateConfig>();
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        auto processor                   = std::make_shared<SlowUpdateProcessor>();
+        stream->logits_processor_list_.push_back(processor);
+        processors.push_back(processor);
+        streams.push_back(stream);
+    }
+    NormalBatchStreamProcessor batch_processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, CacheConfig{}, false, GetParam(), reporter);
+    MergedOutput outputs;
+    outputs.sampler_output.token_ids = torch::tensor({1, 1}, torch::kInt32).reshape({2, 1});
+    outputs.sampler_output.success   = torch::tensor({true, true}, torch::kBool);
+
+    ASSERT_TRUE(batch_processor.dispatch(StreamGroups(streams), outputs).ok());
+    EXPECT_EQ(latency->calculator_.Count(), 0);  // Prefill does not contribute decode samples.
+    for (const auto& stream : streams) {
+        stream->setIsContextStream(false);
+    }
+    for (int step = 1; step <= 2; ++step) {
+        ASSERT_TRUE(batch_processor.dispatch(StreamGroups(streams), outputs).ok());
+        EXPECT_EQ(latency->calculator_.Count(), step);
+        // Include updateStatus itself, including the serial path with no futures.
+        EXPECT_GE(latency->calculator_.Min(), GetParam() == 0 ? 4000 : 2000);
+        for (const auto& processor : processors) {
+            EXPECT_EQ(processor->acceptedTokenLen(), step + 1);
+        }
+        for (const auto& stream : streams) {
+            EXPECT_FALSE(stream->hasError());
+        }
+    }
+    metrics->latency_us_metric->UndeclareMetric(latency);
+}
 
 class ChunkedPrefillBatchStreamProcessorTest: public NormalBatchStreamProcessorTest {
 protected:

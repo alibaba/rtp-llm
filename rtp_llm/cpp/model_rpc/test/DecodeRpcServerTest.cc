@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <limits>
 #include <thread>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -8,6 +9,9 @@
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
+#include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
+#include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -569,6 +573,103 @@ TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
 }
 
 class PrefillCompletionRpcTest: public DeviceTestBase {};
+
+TEST_F(PrefillCompletionRpcTest, HandoffCommitsFirstTokenToLocalXGrammar) {
+    class HandoffEngine final: public EngineBase {
+    public:
+        HandoffEngine(): EngineBase(EngineInitParams{}) {}
+        GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>&) override {
+            return nullptr;
+        }
+        void enqueue(GenerateStreamPtr& stream) override {
+            stream->generate_status_->status.store(StreamState::RUNNING);
+            stream->reportEvent(StreamEvents::GenerateDone);
+        }
+        absl::Status stop() override {
+            return absl::OkStatus();
+        }
+        absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+            return absl::UnimplementedError("unused in handoff test");
+        }
+        KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+            return {};
+        }
+    };
+    class HandoffService final: public RpcService::Service {
+    public:
+        grpc::Status RemoteGenerate(grpc::ServerContext* server_context, ServerStream* rpc_stream) override {
+            DecodeRpcContext             rpc_context{rpc_stream};
+            kmonitor::MetricsReporterPtr reporter;
+            DecodeGenerateContext        context(rpc_context, 0, server_context, reporter, handler.meta_);
+            context.request_id = 42;
+            context.setStream(stream);
+            handler.localGenerate(context);
+            context.markRpcHandlingCompleted();
+            return context.error_status;
+        }
+        DecodeRpcServer   handler;
+        GenerateStreamPtr stream;
+    };
+
+    std::vector<std::string> vocab;
+    for (int i = 0; i < 128; ++i) {
+        vocab.emplace_back(1, static_cast<char>(i));
+    }
+    xgrammar::TokenizerInfo tokenizer(vocab, xgrammar::VocabType::RAW, 128, std::vector<int32_t>{0});
+    GrammarConfig           grammar_config;
+    grammar_config.num_workers = 1;
+    auto backend               = XGrammarBackend::create(tokenizer.SerializeJSON(), grammar_config);
+    ASSERT_NE(backend, nullptr);
+
+    for (const char first_token : {'a', 'b'}) {
+        SCOPED_TRACE(first_token);
+        auto matcher = backend->createMatcherFromKey({"regex", "a+"});
+        ASSERT_TRUE(matcher.ok());
+        auto input             = std::make_shared<GenerateInput>();
+        input->request_id      = 42;
+        input->begin_time_us   = currentTimeUs();
+        input->generate_config = std::make_shared<GenerateConfig>();
+        input->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
+        ModelConfig config;
+        config.max_seq_len = 16;
+        config.vocab_size  = 128;
+        HandoffService service;
+        service.stream =
+            std::make_shared<NormalGenerateStream>(input, config, RuntimeConfig{}, ResourceContext{}, nullptr);
+        service.stream->logits_processor_list_.push_back(std::make_shared<GrammarLogitsProcessor>(
+            matcher.value(), /*eos_token_id=*/0, /*update_timeout_ms=*/std::numeric_limits<int>::max()));
+        service.handler.engine_  = std::make_shared<HandoffEngine>();
+        service.handler.meta_    = std::make_shared<RpcServerRuntimeMeta>();
+        int                 port = 0;
+        grpc::ServerBuilder builder;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(&service);
+        auto server = builder.BuildAndStart();
+        ASSERT_NE(server, nullptr);
+        auto stub = RpcService::NewStub(
+            grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        auto              rpc = stub->RemoteGenerate(&context);
+        GenerateRequestPB request;
+        request.set_stage(RemoteStage::GENERATE);
+        request.set_request_id(42);
+        request.set_first_generate_token_id(first_token);
+        EXPECT_TRUE(rpc->Write(request));
+        rpc->WritesDone();
+        GenerateOutputsPB response;
+        while (rpc->Read(&response)) {}
+        const auto status = rpc->Finish();
+        server->Shutdown();
+        server->Wait();
+
+        const bool accepted = first_token == 'a';
+        EXPECT_EQ(status.ok(), accepted) << status.error_message();
+        EXPECT_EQ(service.stream->hasError(), !accepted) << service.stream->statusInfo().ToString();
+        EXPECT_FALSE(service.stream->xgrammarUpdateTimedOut());
+        EXPECT_EQ(matcher.value()->numAcceptedTokens(), accepted ? 1 : 0);
+    }
+}
 
 TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailures) {
     class CompletionService final: public RpcService::Service {

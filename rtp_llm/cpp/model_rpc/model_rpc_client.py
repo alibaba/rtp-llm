@@ -984,6 +984,7 @@ def trans_output(
                 output_len=aux_info_pb.output_len,
                 step_output_len=aux_info_pb.step_output_len,
                 pd_sep=aux_info_pb.pd_sep,
+                xgrammar_update_timeout=aux_info_pb.xgrammar_update_timeout,
                 reuse_len=aux_info_pb.total_reuse_len,
                 local_reuse_len=aux_info_pb.local_reuse_len,
                 remote_reuse_len=aux_info_pb.remote_reuse_len,

@@ -487,6 +487,8 @@ struct GrammarConfig {
     std::string tokenizer_info_json;
     // Total byte cap split between xgrammar's cache and the engine verdict LRU; <=0 = unlimited.
     int64_t     compiler_cache_bytes = 2L * 1024L * 1024L * 1024L;
+    // Positive wall-clock budget in ms for a stream's CPU state update; exceeding it disables its grammar.
+    int         update_timeout_ms = 10;
     std::string to_string() const;
 };
 
