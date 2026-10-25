@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
@@ -94,7 +95,7 @@ class RequestConfirmationTimeoutTest {
             prefillMetadata.setGrpcPort(8081);
             ScheduledRequest item = new ScheduledRequest(context, future, new Response(), prefillMetadata,
                     null, prefill, decode, reservation, slot.createdAtMs());
-            AtomicReference<PrefillState.RouteReservation> routeReservation = new AtomicReference<>();
+            AtomicReference<RouteReservation> routeReservation = new AtomicReference<>();
             try (var mutation = requests.claimAdmissionHandle(Long.toString(REQUEST_ID), future)) {
                 assertNotNull(mutation);
                 assertTrue(requests.commitItemForPublication(item, () -> {

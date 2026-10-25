@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
@@ -244,7 +245,7 @@ class RequestResourceAccountingTest {
         final DecodeEndpoint decode;
         final ScheduledRequest item;
         final DecodeEndpoint.ReservationHandle reservation;
-        final PrefillState.RouteReservation routeReservation;
+        final RouteReservation routeReservation;
         final PrefillState.CommittedHandoff prefillHandoff;
         final RequestSlot.AdmissionHandle admission;
         final DecodeEndpoint.AdmissionCapacity capacity = new DecodeEndpoint.AdmissionCapacity(1, 90);
@@ -282,7 +283,7 @@ class RequestResourceAccountingTest {
             var context = RequestLifecycleTestSupport.context(config, ID);
             var future = requests.register(context);
             item = new ScheduledRequest(context, future, new Response(), null, null, prefill, decode, reservation, System.currentTimeMillis());
-            var held = new AtomicReference<PrefillState.RouteReservation>();
+            var held = new AtomicReference<RouteReservation>();
             admission = requests.claimAdmissionHandle(ID, future);
             assertNotNull(admission);
             assertTrue(requests.commitItemForPublication(item, () -> {

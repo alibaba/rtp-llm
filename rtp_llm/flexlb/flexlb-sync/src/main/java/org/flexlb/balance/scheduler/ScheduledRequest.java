@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
 import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
 import org.flexlb.balance.scheduler.decode.DecodeSelection;
 import org.flexlb.config.DispatcherConfig;
@@ -54,7 +54,7 @@ public final class ScheduledRequest implements Prioritized {
      * this ACTIVE item until NonBatchDeliveryStrategy takes it, then the route
      * transaction. ACTIVE terminal paths take and close the same capability.
      */
-    private final AtomicReference<PrefillState.RouteReservation>
+    private final AtomicReference<RouteReservation>
             publishedRouteReservation = new AtomicReference<>();
 
     public ScheduledRequest(BalanceContext ctx,
@@ -150,31 +150,31 @@ public final class ScheduledRequest implements Prioritized {
 
     /** Bind the sole publish-time route reservation before ACTIVE becomes visible. */
     public boolean bindPublishedRouteReservation(
-            PrefillState.RouteReservation reservation) {
+            RouteReservation reservation) {
         return publishedRouteReservation.compareAndSet(
                 null, Objects.requireNonNull(reservation, "reservation"));
     }
 
     /** Transfer the sole uncommitted route reservation to delivery or cleanup. */
-    public PrefillState.RouteReservation takePublishedRouteReservation() {
+    public RouteReservation takePublishedRouteReservation() {
         return publishedRouteReservation.getAndSet(null);
     }
 
     /** Observe without transferring; optimistic preparation does not transfer ownership. */
-    public PrefillState.RouteReservation publishedRouteReservation() {
+    public RouteReservation publishedRouteReservation() {
         return publishedRouteReservation.get();
     }
 
     /** Transfer only the reservation validated during optimistic preparation. */
     public boolean takePublishedRouteReservation(
-            PrefillState.RouteReservation expected) {
+            RouteReservation expected) {
         return publishedRouteReservation.compareAndSet(
                 Objects.requireNonNull(expected, "expected"), null);
     }
 
     /** Restore ownership after a pre-commit operation made no state change. */
     public boolean restorePublishedRouteReservation(
-            PrefillState.RouteReservation reservation) {
+            RouteReservation reservation) {
         return publishedRouteReservation.compareAndSet(
                 null, Objects.requireNonNull(reservation, "reservation"));
     }

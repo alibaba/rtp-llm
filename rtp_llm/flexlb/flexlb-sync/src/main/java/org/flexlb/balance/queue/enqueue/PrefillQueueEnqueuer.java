@@ -3,6 +3,7 @@ package org.flexlb.balance.queue.enqueue;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
+import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
 import org.flexlb.balance.queue.QueueFailures;
 import org.flexlb.balance.queue.QueueState;
 import org.flexlb.balance.queue.QueuedRequestRemover;
@@ -118,11 +119,11 @@ public final class PrefillQueueEnqueuer {
 
     private EnqueueAttempt replaceQueuedRequestsUnderLock(ScheduledRequest incoming,
                                                           List<ScheduledRequest> victims) {
-        List<PrefillState.RouteReservation> reservations = new ArrayList<>(victims.size());
-        PrefillState.RouteReservation replacement = null;
+        List<RouteReservation> reservations = new ArrayList<>(victims.size());
+        RouteReservation replacement = null;
         try {
             for (ScheduledRequest victim : victims) {
-                PrefillState.RouteReservation reservation = victim.takePublishedRouteReservation();
+                RouteReservation reservation = victim.takePublishedRouteReservation();
                 if (reservation == null) {
                     return new EnqueueAttempt(false, null, null);
                 }
@@ -165,7 +166,7 @@ public final class PrefillQueueEnqueuer {
             return new EnqueueAttempt(true, null, null);
         }
 
-        ReservationResult<PrefillState.RouteReservation> result;
+        ReservationResult<RouteReservation> result;
         try {
             // 队列锁可重入，同时也是 PrefillState 的锁，所以登记进排队索引和预留 Prefill 资源
             // 在同一把锁里完成，其他线程看不到只做了一半的状态。
@@ -181,7 +182,7 @@ public final class PrefillQueueEnqueuer {
             return new EnqueueAttempt(false, null, null);
         }
 
-        PrefillState.RouteReservation reservation = result.reservation();
+        RouteReservation reservation = result.reservation();
         if (!item.bindPublishedRouteReservation(reservation)) {
             rollbackFreshActiveUnderLock(item, reservation);
             return new EnqueueAttempt(
@@ -201,7 +202,7 @@ public final class PrefillQueueEnqueuer {
      */
     private void rollbackFreshActiveUnderLock(
             ScheduledRequest item,
-            PrefillState.RouteReservation reservation) {
+            RouteReservation reservation) {
         boolean removed = reservation == null
                 ? prefillState.terminalizeActiveUnderLock(item)
                 : prefillState.terminalizeActiveRouteUnderLock(

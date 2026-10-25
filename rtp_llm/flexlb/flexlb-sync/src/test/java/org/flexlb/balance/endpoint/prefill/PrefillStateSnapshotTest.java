@@ -2,6 +2,7 @@ package org.flexlb.balance.endpoint.prefill;
 
 import org.flexlb.balance.endpoint.EndpointGenerationLifecycle;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
+import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.TaskInfo;
@@ -362,7 +363,7 @@ class PrefillStateSnapshotTest {
         }
     }
 
-    private PrefillState.RouteReservation reserveQueued(ScheduledRequest item, long predictedMs) {
+    private RouteReservation reserveQueued(ScheduledRequest item, long predictedMs) {
         enqueue(item);
         return state.reserveRoute(item, predictedMs).reservation();
     }

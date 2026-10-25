@@ -2,6 +2,7 @@ package org.flexlb.balance.queue;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
@@ -36,7 +37,7 @@ public final class QueuedRequestRemover {
         if (!item.requiresRouteReservation()) {
             removed = prefillState.terminalizeActiveUnderLock(item);
         } else {
-            PrefillState.RouteReservation reservation =
+            RouteReservation reservation =
                     item.takePublishedRouteReservation();
             if (reservation == null) {
                 return false;
@@ -64,7 +65,7 @@ public final class QueuedRequestRemover {
      */
     public static void restoreRouteReservation(
             ScheduledRequest item,
-            PrefillState.RouteReservation reservation) {
+            RouteReservation reservation) {
         if (!item.restorePublishedRouteReservation(reservation)) {
             throw new IllegalStateException(
                     "ACTIVE route reservation could not be restored request_id="

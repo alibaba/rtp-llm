@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.prefill.batch.BatchProgress;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.batch.FinishedBatch;
 import org.flexlb.balance.endpoint.prefill.batch.LiveBatchMembers;
+import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.estimate.WorkView.Phase;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -135,45 +136,6 @@ public final class PrefillState {
             generationHandoff = null;
             exact.close();
         }
-    }
-
-    public final class RouteReservation extends Reservation {
-        private final String requestId;
-        /* guarded by PrefillState.lock until the reservation commits */
-        private long predictedWorkMs;
-
-        private RouteReservation(RequestEntry originalOwner, String requestId, long predictedWorkMs) {
-            super(PrefillState.this, originalOwner);
-            this.requestId = requestId;
-            this.predictedWorkMs = boundedPrediction(predictedWorkMs);
-        }
-
-        long predictedWorkMs() {
-            return predictedWorkMs;
-        }
-
-        /** Bind the fresh delivery prediction to this exact OPEN reservation. */
-        public void updatePrediction(
-                ScheduledRequest exactItem,
-                long predictedMs) {
-            lock.lock();
-            try {
-                RequestEntry entry = requests.get(requestId);
-                if (state != LeaseState.OPEN
-                        || entry == null
-                        || !entry.activeIdentity(exactItem)
-                        || entry.reservation != this) {
-                    throw new IllegalStateException(
-                            "route prediction no longer owns ACTIVE request_id="
-                                    + requestId);
-                }
-                predictedWorkMs = boundedPrediction(predictedMs);
-                recordMutationUnderLock();
-            } finally {
-                lock.unlock();
-            }
-        }
-
     }
 
     /** Queue and committed work captured at one ownership linearization point. */
@@ -465,7 +427,7 @@ public final class PrefillState {
             }
         }
         RequestEntry incomingEntry = new RequestEntry(incoming);
-        RouteReservation incomingReservation = new RouteReservation(incomingEntry, incoming.requestId(), 0L);
+        RouteReservation incomingReservation = new RouteReservation(this, incomingEntry, incoming.requestId(), 0L);
         incomingEntry.reservation = incomingReservation;
         activeIndex.add(incoming);
         try {
@@ -576,7 +538,7 @@ public final class PrefillState {
                 return ReservationResult.fail(ReservationResult.Status.REQUEST_ALREADY_RESERVED);
             }
             RouteReservation lease = new RouteReservation(
-                    entry, item.requestId(), predictedMs);
+                    this, entry, item.requestId(), predictedMs);
             entry.reservation = lease;
             recordMutationUnderLock();
             return ReservationResult.success(lease);
@@ -1589,10 +1551,6 @@ public final class PrefillState {
         if (!condition) {
             throw new IllegalStateException(message);
         }
-    }
-
-    private static long boundedPrediction(long predictedMs) {
-        return Math.min(Integer.MAX_VALUE, Math.max(0L, predictedMs));
     }
 
     private static long saturatedAdd(long left, long right) {

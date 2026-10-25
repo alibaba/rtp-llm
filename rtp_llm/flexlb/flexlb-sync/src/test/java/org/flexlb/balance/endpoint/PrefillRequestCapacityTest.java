@@ -3,6 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
+import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
@@ -164,7 +165,7 @@ class PrefillRequestCapacityTest {
         CountDownLatch admit = new CountDownLatch(1);
         try (var executor = Executors.newFixedThreadPool(contenders)) {
             List<ScheduledRequest> requests = new ArrayList<>();
-            List<Future<ReservationResult<PrefillState.RouteReservation>>> attempts = new ArrayList<>();
+            List<Future<ReservationResult<RouteReservation>>> attempts = new ArrayList<>();
             for (int i = 0; i < contenders; i++) {
                 ScheduledRequest request = item(i + 1);
                 requests.add(request);
@@ -180,7 +181,7 @@ class PrefillRequestCapacityTest {
             } finally {
                 admit.countDown();
             }
-            List<PrefillState.RouteReservation> acquired = new ArrayList<>();
+            List<RouteReservation> acquired = new ArrayList<>();
             ScheduledRequest acquiredRequest = null;
             for (int i = 0; i < contenders; i++) {
                 var result = attempts.get(i).get(5, TimeUnit.SECONDS);
@@ -232,14 +233,14 @@ class PrefillRequestCapacityTest {
         assertTrue(state.canAcceptRequest(2L));
     }
 
-    private ReservationResult<PrefillState.RouteReservation> reserve(ScheduledRequest item, long limit) {
+    private ReservationResult<RouteReservation> reserve(ScheduledRequest item, long limit) {
         if (!enqueue(item, limit)) {
             return ReservationResult.fail(ReservationResult.Status.CAPACITY_FULL);
         }
         return state.reserveRoute(item, 0L);
     }
 
-    private void cancel(ScheduledRequest item, PrefillState.RouteReservation reservation) {
+    private void cancel(ScheduledRequest item, RouteReservation reservation) {
         lock.lock();
         try {
             assertTrue(state.terminalizeActiveRouteUnderLock(item, reservation));
@@ -249,7 +250,7 @@ class PrefillRequestCapacityTest {
         reservation.close();
     }
 
-    private PrefillState.CommittedHandoff commit(ScheduledRequest item, PrefillState.RouteReservation registration) {
+    private PrefillState.CommittedHandoff commit(ScheduledRequest item, RouteReservation registration) {
         return state.commitRouteGroup(List.of(item), List.of(registration),
                 new EndpointGenerationLifecycle(() -> { }).tryAcquireHandoff());
     }

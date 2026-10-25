@@ -2,6 +2,7 @@ package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.scheduler.PrefillAdmissionResources;
@@ -29,7 +30,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
     private final PrefillEndpoint prefill;
     private List<ScheduledRequest> items = List.of();
     private BlockedRequest blocked;
-    private ArrayList<PrefillState.RouteReservation> reservations;
+    private ArrayList<RouteReservation> reservations;
     private ArrayList<Boolean> itemOwnedReservations;
     private final IdentityHashMap<ScheduledRequest, Long> predictions = new IdentityHashMap<>();
     private ArrayList<PrefillAdmissionResources.Member> members;
@@ -70,7 +71,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
             return failed(failure);
         }
 
-        PrefillState.RouteReservation published = exact.publishedRouteReservation();
+        RouteReservation published = exact.publishedRouteReservation();
         try {
             if (published == null) {
                 return failed(new IllegalStateException(
@@ -82,7 +83,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
             return failed(failure);
         }
         predictions.put(exact, predictedMs);
-        PrefillState.RouteReservation reservation = published;
+        RouteReservation reservation = published;
         final DeliveryBlockReason.Attempt<PrefillAdmissionResources.Member> memberAttempt;
         try {
             memberAttempt = prepareMember(exact);
@@ -214,7 +215,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
     }
 
     private Throwable rollbackPrepared(Throwable priorFailure) {
-        List<PrefillState.RouteReservation> exactReservations;
+        List<RouteReservation> exactReservations;
         List<Boolean> exactItemOwnedReservations;
         List<PrefillAdmissionResources.Member> exactMembers;
         synchronized (this) {

@@ -1,6 +1,6 @@
 package org.flexlb.balance.queue.enqueue;
 
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
 
 /**
  * 一次持队列锁入队的结果。
@@ -10,6 +10,6 @@ import org.flexlb.balance.endpoint.prefill.PrefillState;
  * @param failure  入队过程中遇到的异常，放锁后抛出；没有则为 null
  */
 record EnqueueAttempt(boolean accepted,
-                      PrefillState.RouteReservation rollback,
+                      RouteReservation rollback,
                       Throwable failure) {
 }

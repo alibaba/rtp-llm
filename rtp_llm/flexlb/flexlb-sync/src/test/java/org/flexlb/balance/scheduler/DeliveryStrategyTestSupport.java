@@ -13,6 +13,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
+import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.DecodeCostFormula;
@@ -164,7 +165,7 @@ public final class DeliveryStrategyTestSupport {
         private final PrefillEndpoint.RouteCommitAdmission routeCommit =
                 Mockito.mock(PrefillEndpoint.RouteCommitAdmission.class);
         private final DecodeEndpoint decode = Mockito.mock(DecodeEndpoint.class);
-        private final Map<ScheduledRequest, PrefillState.RouteReservation>
+        private final Map<ScheduledRequest, RouteReservation>
                 routeReservations = new IdentityHashMap<>();
         private final Map<ScheduledRequest, DecodeEndpoint.EngineDispatchPermit>
                 permits = new IdentityHashMap<>();
@@ -200,8 +201,8 @@ public final class DeliveryStrategyTestSupport {
                 DecodeEndpoint.ReservationHandle reservation = Mockito.mock(
                         DecodeEndpoint.ReservationHandle.class);
                 Mockito.when(reservation.requestId()).thenReturn(requestId);
-                PrefillState.RouteReservation routeReservation = Mockito.mock(
-                        PrefillState.RouteReservation.class);
+                RouteReservation routeReservation = Mockito.mock(
+                        RouteReservation.class);
                 routeReservations.put(item, routeReservation);
                 Mockito.when(item.prefillEp()).thenReturn(prefill);
                 Mockito.when(item.requiresRouteReservation()).thenReturn(true);
@@ -226,7 +227,7 @@ public final class DeliveryStrategyTestSupport {
             precedingWork = prediction;
         }
 
-        PrefillState.RouteReservation routeReservation(ScheduledRequest item) {
+        RouteReservation routeReservation(ScheduledRequest item) {
             return routeReservations.get(item);
         }
 
