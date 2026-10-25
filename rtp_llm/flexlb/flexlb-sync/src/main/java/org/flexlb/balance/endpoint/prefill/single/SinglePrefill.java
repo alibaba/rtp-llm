@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.prefill.LeaseState;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.RequestEntry;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
+import org.flexlb.balance.endpoint.prefill.TerminalObservation;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.ArrayList;
@@ -151,5 +152,31 @@ public final class SinglePrefill {
         prefillState.removeRequestUnderLock(item.requestId(), entry);
         prefillState.recordMutationUnderLock();
         return true;
+    }
+
+    public int evictExpiredIndividuals(long ttlMs, java.util.function.Predicate<String> retainForSchedulerCleanup) {
+        int evicted = 0;
+        boolean capacityReleased = false;
+        prefillState.lock.lock();
+        try {
+            long nowMs = prefillState.clock.getAsLong();
+            List<RequestEntry> candidates = new ArrayList<>();
+            for (RequestEntry entry : prefillState.requests.values()) {
+                if (entry.batchProgress == null && !entry.isActive()
+                        && nowMs - entry.singleRequestProgress.lastObservedAtMs() >= Math.max(0L, ttlMs)
+                        && !retainForSchedulerCleanup.test(entry.requestId)) {
+                    candidates.add(entry);
+                }
+            }
+            for (RequestEntry entry : candidates) {
+                capacityReleased |= prefillState.removeCommittedEntry(entry,
+                        TerminalObservation.external(entry.requestId), null, new ArrayList<>(0));
+            }
+            evicted = candidates.size();
+        } finally {
+            prefillState.lock.unlock();
+            prefillState.notifyCapacityAvailable(capacityReleased);
+        }
+        return evicted;
     }
 }

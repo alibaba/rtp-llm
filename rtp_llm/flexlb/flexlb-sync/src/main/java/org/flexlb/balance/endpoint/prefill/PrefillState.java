@@ -636,29 +636,7 @@ public final class PrefillState {
     }
 
     public int evictExpiredIndividuals(long ttlMs, java.util.function.Predicate<String> retainForSchedulerCleanup) {
-        int evicted = 0;
-        boolean capacityReleased = false;
-        lock.lock();
-        try {
-            long nowMs = clock.getAsLong();
-            List<RequestEntry> candidates = new ArrayList<>();
-            for (RequestEntry entry : requests.values()) {
-                if (entry.batchProgress == null && !entry.isActive()
-                        && nowMs - entry.singleRequestProgress.lastObservedAtMs() >= Math.max(0L, ttlMs)
-                        && !retainForSchedulerCleanup.test(entry.requestId)) {
-                    candidates.add(entry);
-                }
-            }
-            for (RequestEntry entry : candidates) {
-                capacityReleased |= removeCommittedEntry(entry, TerminalObservation.external(entry.requestId), null,
-                        new ArrayList<>(0));
-            }
-            evicted = candidates.size();
-        } finally {
-            lock.unlock();
-            notifyCapacityAvailable(capacityReleased);
-        }
-        return evicted;
+        return singlePrefill.evictExpiredIndividuals(ttlMs, retainForSchedulerCleanup);
     }
 
     public Stats stats() {
