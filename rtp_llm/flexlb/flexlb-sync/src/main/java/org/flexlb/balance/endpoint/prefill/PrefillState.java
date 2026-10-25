@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.prefill.batch.BatchProgress;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.batch.FinishedBatch;
 import org.flexlb.balance.endpoint.prefill.batch.LiveBatchMembers;
+import org.flexlb.balance.endpoint.prefill.single.SinglePrefill;
 import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.estimate.WorkView.Phase;
@@ -205,6 +206,7 @@ public final class PrefillState {
     public WorkCapture committedWorkCapture;
     private long unknownEngineRequestCount;
     public final BatchPrefill batchPrefill = new BatchPrefill(this);
+    public final SinglePrefill singlePrefill = new SinglePrefill(this);
 
     /** Publish the capacity summary before readers observe a new ownership revision. */
     public void recordMutationUnderLock() {
@@ -527,24 +529,14 @@ public final class PrefillState {
     }
 
     public ReservationResult<SingleReservation> reserveSingle(ScheduledRequest exactItem, long predictedMs) {
-        ScheduledRequest item = exactItem;
-        lock.lock();
-        try {
-            RequestEntry entry = requests.get(item.requestId());
-            if (entry == null || !entry.activeIdentity(item)) {
-                return ReservationResult.fail(ReservationResult.Status.REQUEST_LEFT_QUEUE);
-            }
-            if (entry.reservation != null) {
-                return ReservationResult.fail(ReservationResult.Status.REQUEST_ALREADY_RESERVED);
-            }
-            SingleReservation lease = new SingleReservation(
-                    this, entry, item.requestId(), predictedMs);
-            entry.reservation = lease;
-            recordMutationUnderLock();
-            return ReservationResult.success(lease);
-        } finally {
-            lock.unlock();
-        }
+        return singlePrefill.reserveSingle(exactItem, predictedMs);
+    }
+
+    public CommittedHandoff commitSingleGroup(
+            List<ScheduledRequest> items,
+            List<SingleReservation> exactReservations,
+            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+        return singlePrefill.commitSingleGroup(items, exactReservations, generationHandoff);
     }
 
     public ReservationResult<BatchReservation> reserveBatch(
@@ -580,72 +572,6 @@ public final class PrefillState {
         return new DeliveryAvailability(this, maximum);
     }
 
-    public CommittedHandoff commitSingleGroup(
-            List<ScheduledRequest> items,
-            List<SingleReservation> exactReservations,
-            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
-        if (exactReservations.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "route commit requires at least one reservation");
-        }
-        List<SingleReservation> leases = new ArrayList<>(
-                exactReservations.size());
-        for (SingleReservation reservation : exactReservations) {
-            if (reservation == null || reservation.owner != this) {
-                throw new IllegalArgumentException(
-                        "route reservation belongs to another Prefill ledger");
-            }
-            leases.add(reservation);
-        }
-        lock.lock();
-        try {
-            return commitSinglesUnderLock(items, leases, generationHandoff);
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    private CommittedHandoff commitSinglesUnderLock(
-            List<ScheduledRequest> items,
-            List<SingleReservation> leases,
-            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
-        requireLock();
-        List<ScheduledRequest> members = validateSingleGroup(items);
-        if (members.size() != leases.size()) {
-            throw new IllegalArgumentException(
-                    "route commit requires one exact lease per member");
-        }
-        Set<SingleReservation> unique = java.util.Collections.newSetFromMap(
-                new IdentityHashMap<>());
-        for (int index = 0; index < members.size(); index++) {
-            RequestEntry entry = requests.get(members.get(index).requestId());
-            SingleReservation lease = leases.get(index);
-            if (entry == null || !unique.add(lease)
-                    || entry.reservation != lease
-                    || lease.requestId != entry.requestId
-                    || lease.state != LeaseState.OPEN) {
-                throw new IllegalStateException(
-                        "route commit does not own exact OPEN lease request_id="
-                                + members.get(index).requestId());
-            }
-        }
-        long nowMs = clock.getAsLong();
-        CommittedHandoff committedHandoff = new CommittedHandoff(generationHandoff,
-                capturePrecedingWorkUnderLock(members, nowMs));
-        for (ScheduledRequest item : members) {
-            detachAdmissionIndexUnderLock(requests.get(item.requestId()), item);
-        }
-        for (int index = 0; index < members.size(); index++) {
-            SingleReservation lease = leases.get(index);
-            lease.state = LeaseState.OWNED;
-            RequestEntry entry = requests.get(members.get(index).requestId());
-            entry.commitIndividual(lease, nowMs);
-        }
-        committedWorkCapture = null;
-        recordMutationUnderLock();
-        return committedHandoff;
-    }
-
     public List<ScheduledRequest> validateActiveGroup(List<ScheduledRequest> items) {
         requireState(!items.isEmpty(), "committed group requires members");
         for (ScheduledRequest item : items) {
@@ -667,25 +593,14 @@ public final class PrefillState {
                         + item.requestId());
     }
 
-    private List<ScheduledRequest> validateSingleGroup(List<ScheduledRequest> items) {
-        requireState(!items.isEmpty(), "committed group requires members");
-        for (ScheduledRequest item : items) {
-            RequestEntry entry = requests.get(item.requestId());
-            requireState(entry != null && entry.activeIdentity(item),
-                    "route member is not canonical admission request_id=" + item.requestId());
-            validateAdmissionIndexUnderLock(entry, item);
-        }
-        return items;
-    }
-
-    private void validateAdmissionIndexUnderLock(RequestEntry entry, ScheduledRequest item) {
+    public void validateAdmissionIndexUnderLock(RequestEntry entry, ScheduledRequest item) {
         requireState(entry.queueMembership != QueueMembership.STOP_DETACHED,
                 "stopped admission cannot commit request_id=" + item.requestId());
         requireState(activeIndex.contains(item) == (entry.queueMembership == QueueMembership.WAITING),
                 "canonical admission and waiting index disagree request_id=" + item.requestId());
     }
 
-    private void detachAdmissionIndexUnderLock(RequestEntry entry, ScheduledRequest item) {
+    public void detachAdmissionIndexUnderLock(RequestEntry entry, ScheduledRequest item) {
         validateAdmissionIndexUnderLock(entry, item);
         if (entry.queueMembership == QueueMembership.WAITING) {
             removeValidatedActiveIndex(item);
