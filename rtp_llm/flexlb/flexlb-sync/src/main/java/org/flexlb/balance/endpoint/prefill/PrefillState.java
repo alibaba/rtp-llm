@@ -538,12 +538,12 @@ public final class PrefillState {
         return singlePrefill.evictExpiredSingles(ttlMs, retainForSchedulerCleanup);
     }
 
-    public Stats stats() {
+    public PrefillStats stats() {
         lock.lock();
         try {
-            int locallyOwned = 0;
-            int workerStatusUnconfirmed = 0;
-            int individual = 0;
+            int committed = 0;
+            int waitingForWorkerStatus = 0;
+            int single = 0;
             long maxAgeMs = 0L;
             Set<BatchProgress> batches = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
             long nowMs = clock.getAsLong();
@@ -551,28 +551,23 @@ public final class PrefillState {
                 if (entry.isActive()) {
                     continue;
                 }
-                locallyOwned++;
+                committed++;
                 Phase phase =
                         entry.batchProgress == null ? entry.singleRequestProgress.phase() : entry.batchProgress.phase();
                 if (phase == Phase.COMMITTED && (entry.batchProgress != null
                         || entry.reservation != null && entry.reservation.state == LeaseState.OWNED)) {
-                    workerStatusUnconfirmed++;
+                    waitingForWorkerStatus++;
                 }
                 if (entry.batchProgress == null) {
-                    individual++;
+                    single++;
                     maxAgeMs = Math.max(maxAgeMs, Math.max(0L, nowMs - entry.singleRequestProgress.lastObservedAtMs()));
                 } else {
                     batches.add(entry.batchProgress);
                 }
             }
             maxAgeMs = Math.max(maxAgeMs, BatchPrefill.maxBatchAgeMs(batches, nowMs));
-            return new Stats(
-                    saturatedAdd(requests.size(), unknownEngineRequestCount),
-                    locallyOwned,
-                    workerStatusUnconfirmed,
-                    individual,
-                    batches.size(),
-                    maxAgeMs);
+            return new PrefillStats(saturatedAdd(requests.size(), unknownEngineRequestCount), committed,
+                    waitingForWorkerStatus, single, batches.size(), maxAgeMs);
         } finally {
             lock.unlock();
         }
@@ -642,7 +637,7 @@ public final class PrefillState {
 
     private WorkCapture captureCurrentWork(long nowMs, Set<RequestEntry> excluded) {
         requireLock();
-        List<WorkView.RequestWork> individual = new ArrayList<>();
+        List<WorkView.RequestWork> single = new ArrayList<>();
         IdentityHashMap<BatchProgress, List<String>> batchMembers = new IdentityHashMap<>();
         for (RequestEntry entry : requests.values()) {
             if (excluded.contains(entry)) {
@@ -652,13 +647,13 @@ public final class PrefillState {
                 continue;
             }
             if (entry.batchProgress == null) {
-                individual.add(new WorkView.RequestWork(entry.requestId, entry.singleRequestProgress.phase(),
+                single.add(new WorkView.RequestWork(entry.requestId, entry.singleRequestProgress.phase(),
                         entry.singleRequestProgress.remainingWorkMsAt(nowMs)));
             } else {
                 batchMembers.computeIfAbsent(entry.batchProgress, ignored -> new ArrayList<>()).add(entry.requestId);
             }
         }
-        return new WorkCapture(nowMs, individual, BatchPrefill.buildBatchWork(batchMembers, nowMs),
+        return new WorkCapture(nowMs, single, BatchPrefill.buildBatchWork(batchMembers, nowMs),
                 unknownEngineRequestCount);
     }
 

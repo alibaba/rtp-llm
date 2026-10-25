@@ -6,9 +6,9 @@ import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
 import org.flexlb.balance.endpoint.prefill.HeartbeatResult;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.PrefillStats;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.endpoint.prefill.ShutdownResult;
-import org.flexlb.balance.endpoint.prefill.Stats;
 import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
 import org.flexlb.balance.endpoint.prefill.WorkerStatusResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
@@ -356,16 +356,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * plus individually tracked QUEUE_ROUTE requests.
      */
     public int getLocallyOwnedRequestCount() {
-        Stats stats = prefillState.stats();
-        return stats.locallyOwnedRequests();
+        PrefillStats stats = prefillState.stats();
+        return stats.committedRequests();
     }
 
     /**
      * Individually-accounted QUEUE_ROUTE requests.
      */
     public int getIndividuallyTrackedRequestCount() {
-        Stats stats = prefillState.stats();
-        return stats.individuallyOwnedRequests();
+        PrefillStats stats = prefillState.stats();
+        return stats.singleRequests();
     }
 
     @Override
@@ -469,7 +469,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     public int getInflightBatchCount() {
-        Stats stats = prefillState.stats();
+        PrefillStats stats = prefillState.stats();
         return stats.batchCount();
     }
 
@@ -531,19 +531,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
             sizeByPriority.forEach((priority, size) ->
                     reporter.reportBatcherQueueDepthByPriority(role, engineIp, priority, size));
         }
-        Stats stats = prefillState.stats();
+        PrefillStats stats = prefillState.stats();
         reporter.reportInflightBatchCount(role, engineIp, stats.batchCount());
         if (configSupplier.get().getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH) {
             reporter.reportInflightRequestCount(role, engineIp, engineSubQueueMode
                     ? prefillState.dispatchedRequestCount() : stats.inflightRequests());
-            reporter.reportWorkerStatusUnconfirmedRequestCount(role, engineIp, stats.workerStatusUnconfirmedRequests());
+            reporter.reportWorkerStatusUnconfirmedRequestCount(role, engineIp, stats.waitingForWorkerStatusRequests());
         } else {
-            reporter.reportInflightRequestCount(role, engineIp, stats.workerStatusUnconfirmedRequests());
+            reporter.reportInflightRequestCount(role, engineIp, stats.waitingForWorkerStatusRequests());
         }
-        reporter.reportInflightMaxAgeMs(
-                role,
-                engineIp,
-                stats.maxObservedAgeMs());
+        reporter.reportInflightMaxAgeMs(role, engineIp, stats.maxStatusAgeMs());
         if (engineSubQueueMode) {
             reportQueueMetricSafely("oldest endpoint queue wait", () ->
                     reporter.reportEngineSubQueueOldestWaitMs(role, engineIp, prefillQueue.oldestSubQueueWaitMs()));

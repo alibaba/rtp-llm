@@ -317,7 +317,7 @@ class QueuedBatchDeliveryTest {
 
     private void assertOccupancy(int batches, int requests) {
         assertEquals(batches, ledger.prefill.stats().batchCount());
-        assertEquals(requests, ledger.prefill.stats().locallyOwnedRequests());
+        assertEquals(requests, ledger.prefill.stats().committedRequests());
     }
 
     private static EngineRpcService.EnqueueBatchResponsePB ack(long id) {

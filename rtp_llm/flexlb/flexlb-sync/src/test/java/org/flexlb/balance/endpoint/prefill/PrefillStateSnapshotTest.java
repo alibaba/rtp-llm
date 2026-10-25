@@ -46,19 +46,19 @@ class PrefillStateSnapshotTest {
     @Test
     void workerStatusUnconfirmedCountExcludesQueuedAndConfirmedRequests() {
         enqueue(item(9));
-        assertEquals(0, state.stats().workerStatusUnconfirmedRequests());
+        assertEquals(0, state.stats().waitingForWorkerStatusRequests());
         try (var reservation = reserveQueued(item(8), 10)) {
-            assertEquals(0, state.stats().workerStatusUnconfirmedRequests());
+            assertEquals(0, state.stats().waitingForWorkerStatusRequests());
         }
         var request = item(1);
         try (var reservation = reserveQueued(request, 10);
                 var handoff = state.commitSingleGroup(List.of(request), List.of(reservation),
                         generation.tryAcquireHandoff())) {
-            assertEquals(1, state.stats().workerStatusUnconfirmedRequests());
+            assertEquals(1, state.stats().waitingForWorkerStatusRequests());
         }
         reconcile(Map.of(), Map.of("1", task(1, TaskPhase.RUNNING, 0, 0)), unused -> 0L);
-        assertEquals(0, state.stats().workerStatusUnconfirmedRequests());
-        assertEquals(1, state.stats().locallyOwnedRequests());
+        assertEquals(0, state.stats().waitingForWorkerStatusRequests());
+        assertEquals(1, state.stats().committedRequests());
     }
 
     @Test

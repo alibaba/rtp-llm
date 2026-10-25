@@ -617,7 +617,7 @@ class DeliverySettlementTest {
 
     private void assertOccupancy(int batches, int members) {
         assertEquals(batches, ledger.prefill.stats().batchCount());
-        assertEquals(members, ledger.prefill.stats().locallyOwnedRequests());
+        assertEquals(members, ledger.prefill.stats().committedRequests());
     }
 
     private static void await(CountDownLatch latch) {

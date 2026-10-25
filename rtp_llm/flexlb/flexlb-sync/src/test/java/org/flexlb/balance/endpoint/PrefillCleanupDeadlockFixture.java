@@ -58,7 +58,7 @@ public final class PrefillCleanupDeadlockFixture {
 
     public void sweepSingles(Predicate<String> retain) {
         assertEquals(0, state.evictExpiredSingles(10L, retain));
-        assertEquals(1, state.stats().individuallyOwnedRequests());
+        assertEquals(1, state.stats().singleRequests());
     }
 
     public void reserveNextBatch() {

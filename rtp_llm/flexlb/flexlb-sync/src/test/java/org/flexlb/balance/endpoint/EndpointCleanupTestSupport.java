@@ -101,8 +101,8 @@ public final class EndpointCleanupTestSupport {
 
         public void assertOwned(Owner owner, long predictedMs) {
             var stats = state.stats();
-            assertEquals(1, stats.locallyOwnedRequests());
-            assertEquals(batch ? 0 : 1, stats.individuallyOwnedRequests());
+            assertEquals(1, stats.committedRequests());
+            assertEquals(batch ? 0 : 1, stats.singleRequests());
             assertEquals(batch ? 1 : 0, stats.batchCount());
             var work = state.committedSnapshot();
             assertEquals(predictedMs, work.totalRemainingWorkMs().orElseThrow());
@@ -128,8 +128,8 @@ public final class EndpointCleanupTestSupport {
         }
 
         public void assertEmpty() {
-            assertEquals(0, state.stats().locallyOwnedRequests());
-            assertEquals(0, state.stats().individuallyOwnedRequests());
+            assertEquals(0, state.stats().committedRequests());
+            assertEquals(0, state.stats().singleRequests());
             assertEquals(0, state.stats().batchCount());
             assertTrue(state.committedSnapshot().requests().isEmpty());
             assertTrue(state.committedSnapshot().batches().isEmpty());
