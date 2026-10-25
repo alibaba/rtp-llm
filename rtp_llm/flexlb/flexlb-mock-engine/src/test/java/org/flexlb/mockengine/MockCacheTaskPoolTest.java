@@ -8,6 +8,60 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
 class MockCacheTaskPoolTest {
+    @Test void idlePoolsAndVirtualDrainLeaveCarriersAvailable(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory) throws Exception {
+        var log = directory.resolve("carrier-probe.log");
+        var child = new ProcessBuilder(System.getProperty("java.home") + "/bin/java",
+                "-Djdk.virtualThreadScheduler.parallelism=2", "-Djdk.virtualThreadScheduler.maxPoolSize=4",
+                "-cp", System.getProperty("java.class.path"), CarrierProbe.class.getName())
+                .redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        try {
+            assertTrue(child.waitFor(20, TimeUnit.SECONDS), "cache pools blocked the child JVM");
+            assertEquals(0, child.exitValue(), () -> {
+                try { return java.nio.file.Files.readString(log); }
+                catch (java.io.IOException error) { return error.toString(); }
+            });
+        } finally {
+            child.destroyForcibly();
+            assertTrue(child.waitFor(5, TimeUnit.SECONDS), "carrier probe did not stop");
+        }
+    }
+
+    public static final class CarrierProbe {
+        public static void main(String[] args) throws Exception {
+            var pools = new java.util.ArrayList<MockCacheTaskPool>();
+            var release = new CountDownLatch(1);
+            try {
+                for (int i = 0; i < 8; i++) pools.add(new MockCacheTaskPool(1, 0));
+                Thread.sleep(250); // Let idle workers enter their queue wait before probing unrelated work.
+                var available = new java.util.concurrent.CompletableFuture<Void>();
+                Thread.ofVirtual().start(() -> available.complete(null));
+                available.get(2, TimeUnit.SECONDS);
+                var entered = new CountDownLatch(4);
+                for (var pool : pools.subList(0, 4)) pool.submit(true, () -> {
+                        entered.countDown();
+                        try { release.await(); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+                    }, Long.MAX_VALUE, () -> {});
+                if (!entered.await(2, TimeUnit.SECONDS)) throw new AssertionError("cache work did not start");
+                var drained = new CountDownLatch(4);
+                var waiters = new java.util.ArrayList<Thread>();
+                for (var pool : pools.subList(0, 4)) waiters.add(Thread.ofVirtual().start(() -> {
+                    pool.waitForIdle(); drained.countDown();
+                }));
+                for (var waiter : waiters) {
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+                    while (waiter.getState() != Thread.State.WAITING && System.nanoTime() < deadline) Thread.sleep(1);
+                    if (waiter.getState() != Thread.State.WAITING) throw new AssertionError("drain did not enter its wait");
+                }
+                Thread.ofVirtual().start(release::countDown);
+                if (!drained.await(2, TimeUnit.SECONDS)) throw new AssertionError("virtual drain starved its release task");
+            } finally {
+                release.countDown();
+                for (var pool : pools) pool.close();
+            }
+        }
+    }
+
     @Test void reservesLoadSlotsAndDispatchesCompletionThenFourLoadsThenBackground() throws Exception {
         var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
         var seen = new CopyOnWriteArrayList<String>(); var done = new CountDownLatch(71);
