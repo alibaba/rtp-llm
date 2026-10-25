@@ -98,13 +98,16 @@ class DirectAdmissionContractTest {
                     List.of(first.get(3L, TimeUnit.SECONDS), second.get(3L, TimeUnit.SECONDS));
 
             assertEquals(prefillCapacity, responses.stream().filter(Response::isSuccess).count());
-            responses.stream()
-                    .filter(response -> !response.isSuccess())
-                    .forEach(
-                            response ->
-                                    assertEquals(
-                                            StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
-                                            response.getCode()));
+            for (var response : responses) {
+                if (!response.isSuccess()) {
+                    assertEquals(
+                            StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                            response.getCode());
+                    assertTrue(
+                            response.getErrorMessage()
+                                    .endsWith("trigger=Prefill request capacity exhausted"));
+                }
+            }
             assertEquals(
                     prefillCapacity,
                     fixture.prefill
