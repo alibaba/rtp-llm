@@ -123,7 +123,7 @@ class MockRemoteDecodeProtocolTest {
         try (MockRemoteDecodeStream stream = connect(new CompletableFuture<>(), failure)) {
             stream.allocated().get(3, TimeUnit.SECONDS);
             server.shutdownNow();
-            assertNotNull(failure.get(3, TimeUnit.SECONDS));
+            assertEquals(8208, MockRpcErrors.downstream(failure.get(3, TimeUnit.SECONDS)).getErrorCode());
             assertEquals(0, starts.get());
             assertEquals(0, completions.get());
         }

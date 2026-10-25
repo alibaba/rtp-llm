@@ -37,6 +37,6 @@ final class MockRpcErrors {
         Status status = error == null ? Status.ALREADY_EXISTS : Status.fromThrowable(error);
         return EngineRpcService.ErrorDetailsPB.newBuilder()
                 .setErrorCode(status.getCode() == Status.Code.RESOURCE_EXHAUSTED ? 8211 : fallback)
-                .setErrorMessage("Remote ALLOCATE failed: " + status).build();
+                .setErrorMessage("Remote RPC failed: " + status).build();
     }
 }

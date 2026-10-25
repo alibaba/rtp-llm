@@ -163,6 +163,15 @@ final class MockRemoteDecodeStream implements AutoCloseable {
         if (!terminal.compareAndSet(false, true)) {
             return;
         }
+        // PrefillRpcServer reports transport failures at the observing stage;
+        // an allocated lease that has not attached Fetch will next attempt LOAD.
+        long fallback = switch (stage) {
+            case ALLOCATE -> 8207;
+            case ALLOCATED, LOAD -> 8208;
+            default -> 8209;
+        };
+        var details = MockRpcErrors.downstream(error, fallback);
+        error = MockRpcErrors.error(Status.fromThrowable(error), details.getErrorCode(), details.getErrorMessage());
         stage = Stage.CLOSED;
         settled.completeExceptionally(error);
         allocated.completeExceptionally(error);

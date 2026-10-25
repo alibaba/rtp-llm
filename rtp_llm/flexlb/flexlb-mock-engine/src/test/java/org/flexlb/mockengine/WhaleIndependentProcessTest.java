@@ -9,6 +9,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -199,22 +201,37 @@ class WhaleIndependentProcessTest {
         awaitEndState("127.0.0.3", 802, "cancelled");
     }
 
-    @Test
-    void decodeProcessDeathReachesTheClientAsFailure() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void decodeProcessDeathPreservesTheFailingProtocolStage(boolean generating) throws Exception {
         Process decode = start("127.0.0.3", base + 21, false, false);
         start("127.0.0.2", base + 1, true, false);
         channel = ManagedChannelBuilder.forAddress("127.0.0.2", base + 1).usePlaintext().build();
-        enqueue(803, "127.0.0.3");
+        assertEquals(0, enqueueAck(803, "127.0.0.3", generating ? 500 : 5).getErrorsCount());
+        var fetch = EngineRpcService.FetchRequestPB.newBuilder().setRequestId(803).build();
+        var stub = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS);
+        java.util.Iterator<EngineRpcService.GenerateOutputsPB> frames = null;
+        if (generating) {
+            frames = stub.fetchResponse(fetch);
+            // P emits token one; a second progress frame proves D has generated.
+            for (int i = 0; i < 2; i++) {
+                assertTrue(frames.hasNext());
+                var progress = frames.next();
+                assertFalse(progress.hasErrorInfo());
+                assertFalse(progress.getFlattenOutput().getFinished(0));
+            }
+        }
         decode.destroyForcibly();
         assertTrue(decode.waitFor(3, TimeUnit.SECONDS));
-        var frames = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS)
-                .fetchResponse(EngineRpcService.FetchRequestPB.newBuilder().setRequestId(803).build());
-        boolean failure = false;
-        while (frames.hasNext()) {
-            var frame = frames.next();
-            failure |= frame.getErrorInfo().getErrorCodeValue() == 8209;
-        }
-        assertTrue(failure, "A dead Decode must not produce successful or empty completion");
+        var remaining = generating ? frames : stub.fetchResponse(fetch);
+        var error = assertThrows(io.grpc.StatusRuntimeException.class, () -> {
+            while (remaining.hasNext()) {
+                var progress = remaining.next();
+                assertFalse(progress.getFlattenOutput().getFinishedList().contains(true),
+                        "a dead Decode cannot produce successful completion");
+            }
+        });
+        assertEquals(generating ? 8209 : 8208, MockRpcErrors.downstream(error, 0).getErrorCode());
     }
 
     @Test

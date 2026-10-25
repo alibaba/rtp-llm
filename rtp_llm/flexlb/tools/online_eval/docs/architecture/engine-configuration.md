@@ -156,6 +156,9 @@ channel readiness 同时受 request/retry/max RPC 预算及 15 秒硬上限限�
 MM 成功后跨 D ALLOCATE 重试复用；仅 903/904/906/907 可重试。transport 的 UNAVAILABLE/deadline 转 907，其他未分类错误不重试。
 `prefill_max_wait_timeout_ms` 从 Fetch/自动 continuation 等待 WAITING 开始，进入 LOADING/RUNNING 后结束；不重启这段计时。
 LOAD 采用 request/max RPC/load cache 三者最小预算，load cache 配置非正时回落 5000 ms；阶段超时为 8300；等待运行超时为 8213。
+P 到 D 的传输失败在缺少下游领域详情时按观察阶段区分 ALLOCATE（8207）、LOAD（8208）、GENERATE（8209）；已有领域详情优先保留。
+Fetch 失败通过带领域详情的 gRPC 终态返回，不作为普通成功数据帧交付。
+
 D 当前 RemoteGenerate 不调用 `decode_retry_times/timeout_ms`，这两个字段只读回，不增加 ALLOCATE/LOAD/GENERATE 重执行。
 
 V 分别使用 `vit_concurrency + vit_max_queue_size` 的异步接单额度，
