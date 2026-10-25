@@ -43,7 +43,7 @@ public final class QueuedRequestRemover {
                 return false;
             }
             try {
-                removed = prefillState.terminalizeActiveRouteUnderLock(
+                removed = prefillState.removeQueuedSingleRequest(
                         item, reservation);
             } catch (Throwable failure) {
                 restoreSingleReservation(item, reservation);

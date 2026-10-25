@@ -243,7 +243,7 @@ class PrefillRequestCapacityTest {
     private void cancel(ScheduledRequest item, SingleReservation reservation) {
         lock.lock();
         try {
-            assertTrue(state.terminalizeActiveRouteUnderLock(item, reservation));
+            assertTrue(state.removeQueuedSingleRequest(item, reservation));
         } finally {
             lock.unlock();
         }

@@ -449,8 +449,8 @@ public final class PrefillState {
         return incomingReservation;
     }
 
-    public boolean terminalizeActiveRouteUnderLock(ScheduledRequest item, SingleReservation exactReservation) {
-        return singlePrefill.terminalizeActiveRouteUnderLock(item, exactReservation);
+    public boolean removeQueuedSingleRequest(ScheduledRequest item, SingleReservation exactReservation) {
+        return singlePrefill.removeQueuedSingleRequest(item, exactReservation);
     }
 
     /**

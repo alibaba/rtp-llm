@@ -213,8 +213,8 @@ class PrefillStateSnapshotTest {
         var reservation = reserveQueued(queued, 40L);
         lock.lock();
         try {
-            assertTrue(state.terminalizeActiveRouteUnderLock(queued, reservation));
-            assertFalse(state.terminalizeActiveRouteUnderLock(queued, reservation));
+            assertTrue(state.removeQueuedSingleRequest(queued, reservation));
+            assertFalse(state.removeQueuedSingleRequest(queued, reservation));
         } finally {
             lock.unlock();
         }

@@ -205,7 +205,7 @@ public final class PrefillQueueEnqueuer {
             SingleReservation reservation) {
         boolean removed = reservation == null
                 ? prefillState.terminalizeActiveUnderLock(item)
-                : prefillState.terminalizeActiveRouteUnderLock(
+                : prefillState.removeQueuedSingleRequest(
                         item, reservation);
         if (!removed) {
             throw new IllegalStateException(

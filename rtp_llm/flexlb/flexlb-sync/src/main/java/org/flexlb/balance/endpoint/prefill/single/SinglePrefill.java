@@ -126,7 +126,7 @@ public final class SinglePrefill {
      * Remove one NON_BATCH ACTIVE owner and its item-owned OPEN single reservation
      * in the same ownership transaction.
      */
-    public boolean terminalizeActiveRouteUnderLock(
+    public boolean removeQueuedSingleRequest(
             ScheduledRequest item,
             SingleReservation exactReservation) {
         prefillState.requireLock();
