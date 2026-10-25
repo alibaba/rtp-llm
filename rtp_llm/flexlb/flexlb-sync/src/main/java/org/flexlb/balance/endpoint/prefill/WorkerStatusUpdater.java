@@ -112,9 +112,8 @@ public final class WorkerStatusUpdater {
                     predictBatchTime, predictions);
             outcome = buildResult(finishReports, activeTasks, membersByBatch);
 
-            // Everything below this boundary is assignment/removal against
-            // exact prevalidated identities. Any invariant failure is captured
-            // into the already materialized outcome and forces retirement.
+            // 从这里开始只对上面已经检查过的条目做赋值和删除。
+            // 如果发现数据不一致，就记到已经建好的结果里，并让 worker 下线清理。
             canonicalMutationStarted = true;
             prefillState.cachedCommittedWork = null;
             prefillState.recordMutation();
