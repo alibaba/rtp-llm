@@ -78,10 +78,7 @@ class MasterLifecycle:
         spec = env.spec
         menv = dict(BASE_MASTER_ENV)
         if "FLEXLB_CONFIG" in spec.master_env:
-            # Narrowed channel (SSOT migration): master_env is non-config
-            # env only — a stray FLEXLB_CONFIG here would silently fork
-            # away from the flexlb_cfg render that feeds the mock-side
-            # master_config.json envelope.
+            # Keep generator/raw-config inputs and the archived launch configuration aligned.
             raise ValueError(
                 "EnvSpec.master_env must not carry FLEXLB_CONFIG — use "
                 "config_overrides (flexlb_cfg generator layering) or "

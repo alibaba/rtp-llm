@@ -221,7 +221,7 @@ def write_report(directory, evidence, result, prepared=None, *, run=None, presen
         dict(id=provenance["instance"]),
         implementation=dict(files=provenance.get("files"), master=provenance.get("master_artifact")),
         workload=provenance.get("trace"),
-        configuration={k: provenance.get(k) for k in ("topology", "capacity", "performance", "master_config", "actual_master_config")},
+        configuration={k: provenance.get(k) for k in ("topology", "capacity", "performance", "actual_master_config")},
         environment=provenance.get("client_environment"),
         evidence=[
             dict(

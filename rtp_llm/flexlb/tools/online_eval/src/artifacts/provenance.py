@@ -38,9 +38,7 @@ def gate_provenance(ctx, flow, *, source_files, analyzer_file):
     from runtime.paths import API_JAR, MOCK_JAR
 
     epoch = str(ctx.env_epoch)
-    observed = collect(
-        ctx.artifact_dir, {epoch: ctx.env.run_dir}, required={"master_artifact", "actual_master_config", "master_config", "performance"}
-    )
+    observed = collect(ctx.artifact_dir, {epoch: ctx.env.run_dir}, required={"master_artifact", "actual_master_config", "performance"})
     launch = observed["environments"][epoch]
     trace = dict(flow.trace_manifest)
     trace["workload_sha256"] = trace_workload_sha(trace["path"])
@@ -74,7 +72,6 @@ def gate_provenance(ctx, flow, *, source_files, analyzer_file):
         ),
         master_artifact=launch["master_artifact"],
         actual_master_config=launch["actual_master_config"],
-        master_config=launch["master_config"],
         performance=launch["performance"],
         trace=trace,
         files=files,
