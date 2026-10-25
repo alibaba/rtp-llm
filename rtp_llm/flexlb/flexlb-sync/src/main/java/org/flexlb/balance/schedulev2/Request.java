@@ -6,8 +6,11 @@ import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.util.PriorityNormalizer;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -20,7 +23,24 @@ public final class Request {
     private final BalanceContext ctx;
     private final CompletableFuture<Response> future;
     private final long createdAtMs;
+    /**
+     * 规范化后的优先级（1-100，越大越优先），主队列按它排序。
+     */
+    private final int priority;
     private final AtomicReference<Stage> stage = new AtomicReference<>(Stage.MAIN_WAITING);
+    /**
+     * 主队列名额占用的角色（PREFILL 或 PDFUSION）。主队列出队时设置，
+     * 请求从 Prefill 队列 dispatch 或结束时取走并归还名额；为 null 表示没占名额。
+     */
+    private final AtomicReference<RoleType> queueSlotRole = new AtomicReference<>();
+    /**
+     * 进入主队列的顺序号，同优先级按它先进先出。加入主队列前设置，之后不变。
+     */
+    private volatile long queueSeq;
+    /**
+     * 到期后把请求按超时取消的定时任务，请求结束时取消。
+     */
+    private volatile ScheduledFuture<?> deadlineTask;
     private volatile long updatedAtMs;
     private volatile String detail;
     private volatile CancelReason cancelReason;
@@ -30,6 +50,9 @@ public final class Request {
         this.future = future;
         this.createdAtMs = createdAtMs;
         this.updatedAtMs = createdAtMs;
+        int contextPriority = ctx.getPriority();
+        this.priority =
+                PriorityNormalizer.isValid(contextPriority) ? contextPriority : PriorityNormalizer.DEFAULT_PRIORITY;
     }
 
     public BalanceContext ctx() {
@@ -46,6 +69,46 @@ public final class Request {
 
     public Stage stage() {
         return stage.get();
+    }
+
+    public int priority() {
+        return priority;
+    }
+
+    public long queueSeq() {
+        return queueSeq;
+    }
+
+    public void setQueueSeq(long queueSeq) {
+        this.queueSeq = queueSeq;
+    }
+
+    public void setDeadlineTask(ScheduledFuture<?> deadlineTask) {
+        this.deadlineTask = deadlineTask;
+    }
+
+    /**
+     * 取消超时定时任务。
+     */
+    public void cancelDeadlineTask() {
+        ScheduledFuture<?> task = deadlineTask;
+        if (task != null) {
+            task.cancel(false);
+        }
+    }
+
+    /**
+     * 记下这个请求占用了 role 的一个主队列名额。
+     */
+    public void holdQueueSlot(RoleType role) {
+        queueSlotRole.set(role);
+    }
+
+    /**
+     * 取走占用的名额角色，只有第一个调用方拿到非 null，由它归还名额，所以名额不会重复归还。
+     */
+    public RoleType takeQueueSlot() {
+        return queueSlotRole.getAndSet(null);
     }
 
     /**
@@ -66,10 +129,17 @@ public final class Request {
      * 发布前失败：进入 FAILED 并用错误完成 future。已经发布或结束时返回 false。
      */
     public boolean fail(StrategyErrorType errorType, String failureDetail) {
-        if (!end(Stage.FAILED, failureDetail)) {
+        return fail(Response.buildErrorResponse(errorType, failureDetail));
+    }
+
+    /**
+     * 发布前失败：进入 FAILED 并用给定的错误响应完成 future。已经发布或结束时返回 false。
+     */
+    public boolean fail(Response errorResponse) {
+        if (!end(Stage.FAILED, errorResponse.getErrorMessage())) {
             return false;
         }
-        future.complete(Response.buildErrorResponse(errorType, failureDetail));
+        future.complete(errorResponse);
         return true;
     }
 

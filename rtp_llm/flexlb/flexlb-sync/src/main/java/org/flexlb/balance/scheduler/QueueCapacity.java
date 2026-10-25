@@ -52,6 +52,26 @@ public final class QueueCapacity {
     }
 
     /**
+     * 总数没到 limit 时把请求计入总数，返回是否计入；同一个 future 只计一次。
+     * 用 CAS 判断和加一，并发入队时总数不会超过 limit。
+     */
+    public boolean tryIncreaseTotalQueueCount(CompletableFuture<?> future, long limit) {
+        while (true) {
+            long current = globalQueueAndEngineSubQueueCount.get();
+            if (current >= limit) {
+                return false;
+            }
+            if (globalQueueAndEngineSubQueueCount.compareAndSet(current, current + 1)) {
+                break;
+            }
+        }
+        if (!queuedRequestFutures.add(future)) {
+            globalQueueAndEngineSubQueueCount.decrementAndGet();
+        }
+        return true;
+    }
+
+    /**
      * Stop counting a request after delivery, preemption, cancellation or failure.
      */
     public void decreaseTotalQueueCount(CompletableFuture<?> future) {

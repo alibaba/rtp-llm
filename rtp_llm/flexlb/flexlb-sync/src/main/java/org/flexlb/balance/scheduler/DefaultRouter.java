@@ -199,7 +199,7 @@ public class DefaultRouter {
         }
     }
 
-    String resolvePolicyGroup(BalanceContext context) {
+    public String resolvePolicyGroup(BalanceContext context) {
         if (context == null || context.getRequest() == null) {
             return null;
         }

@@ -19,16 +19,16 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 public final class PlacementAvailability {
 
-    enum ChangeKind {
+    public enum ChangeKind {
         CAPACITY,
         TOPOLOGY
     }
 
-    record Event(PlacementKey key, ChangeKind kind) {
+    public record Event(PlacementKey key, ChangeKind kind) {
     }
 
     @FunctionalInterface
-    interface Listener {
+    public interface Listener {
         void onAvailabilityChanged(Event event);
     }
 
@@ -38,11 +38,11 @@ public final class PlacementAvailability {
     private final ConcurrentMap<Listener, Boolean> listeners =
             new ConcurrentHashMap<>();
 
-    void addListener(Listener candidate) {
+    public void addListener(Listener candidate) {
         listeners.put(candidate, Boolean.TRUE);
     }
 
-    void removeListener(Listener candidate) {
+    public void removeListener(Listener candidate) {
         if (candidate != null) {
             listeners.remove(candidate);
         }
