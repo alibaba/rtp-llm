@@ -6,8 +6,8 @@ import org.flexlb.balance.estimate.QueueView;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
-import org.flexlb.balance.schedulev2.Request;
-import org.flexlb.balance.schedulev2.RequestOrder;
+import org.flexlb.balance.schedulev2.request.Request;
+import org.flexlb.balance.schedulev2.request.RequestOrder;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.TaskPhase;
 

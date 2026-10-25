@@ -1,7 +1,7 @@
 package org.flexlb.balance.schedulev2.prefill;
 
 import org.flexlb.balance.estimate.WorkView;
-import org.flexlb.balance.schedulev2.Request;
+import org.flexlb.balance.schedulev2.request.Request;
 
 /**
  * 已从 Prefill 队列 dispatch 出去、还没在引擎上结束的请求。

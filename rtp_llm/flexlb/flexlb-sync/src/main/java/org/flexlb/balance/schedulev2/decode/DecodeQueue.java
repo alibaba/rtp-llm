@@ -1,7 +1,7 @@
 package org.flexlb.balance.schedulev2.decode;
 
-import org.flexlb.balance.schedulev2.Request;
-import org.flexlb.balance.schedulev2.RequestOrder;
+import org.flexlb.balance.schedulev2.request.Request;
+import org.flexlb.balance.schedulev2.request.RequestOrder;
 
 import java.util.ArrayList;
 import java.util.Iterator;

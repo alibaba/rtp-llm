@@ -1,4 +1,4 @@
-package org.flexlb.balance.schedulev2;
+package org.flexlb.balance.schedulev2.request;
 
 /**
  * 请求在新链路里所处的阶段。

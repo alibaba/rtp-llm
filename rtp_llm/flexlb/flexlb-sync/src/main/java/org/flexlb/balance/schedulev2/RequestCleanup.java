@@ -5,6 +5,8 @@ import org.flexlb.balance.schedulev2.decode.DecodeQueue;
 import org.flexlb.balance.schedulev2.main.MainQueue;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueue;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
+import org.flexlb.balance.schedulev2.request.Request;
+import org.flexlb.balance.schedulev2.request.RequestTable;
 import org.flexlb.dao.route.RoleType;
 
 /**

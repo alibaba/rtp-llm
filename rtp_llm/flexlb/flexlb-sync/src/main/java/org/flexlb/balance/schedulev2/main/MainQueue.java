@@ -2,9 +2,9 @@ package org.flexlb.balance.schedulev2.main;
 
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.schedulev2.LoopSignal;
-import org.flexlb.balance.schedulev2.Request;
-import org.flexlb.balance.schedulev2.RequestOrder;
-import org.flexlb.balance.schedulev2.Stage;
+import org.flexlb.balance.schedulev2.request.Request;
+import org.flexlb.balance.schedulev2.request.RequestOrder;
+import org.flexlb.balance.schedulev2.request.Stage;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 

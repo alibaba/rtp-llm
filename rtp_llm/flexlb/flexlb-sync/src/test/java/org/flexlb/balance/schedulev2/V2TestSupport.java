@@ -2,6 +2,8 @@ package org.flexlb.balance.schedulev2;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.schedulev2.request.PrefillChoice;
+import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;

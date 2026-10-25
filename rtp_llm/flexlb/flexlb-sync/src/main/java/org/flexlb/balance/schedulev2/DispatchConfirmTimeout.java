@@ -1,5 +1,6 @@
 package org.flexlb.balance.schedulev2;
 
+import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 

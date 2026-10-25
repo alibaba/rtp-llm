@@ -1,4 +1,4 @@
-package org.flexlb.balance.schedulev2;
+package org.flexlb.balance.schedulev2.request;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.decode.DecodeRequirement;

@@ -1,8 +1,8 @@
 package org.flexlb.balance.schedulev2.prefill;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.schedulev2.PrefillChoice;
-import org.flexlb.balance.schedulev2.Request;
+import org.flexlb.balance.schedulev2.request.PrefillChoice;
+import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.config.ConfigService;
 import org.springframework.stereotype.Component;
 

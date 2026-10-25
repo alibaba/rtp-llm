@@ -1,4 +1,4 @@
-package org.flexlb.balance.schedulev2;
+package org.flexlb.balance.schedulev2.request;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
