@@ -53,7 +53,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         assertTrue(expired.getErrorMessage().contains("DISPATCH_CONFIRM_TIMEOUT"));
         assertEquals(0, scheduler.getTrackedRequestCount());
         assertEquals(0, getPrefillEndpoint().getInflightBatchCount());
-        assertEquals(0, getPrefillEndpoint().getLocallyOwnedRequestCount());
+        assertEquals(0, getPrefillEndpoint().getCommittedRequestCount());
         assertEquals(0, getDecodeEndpoint().getInflightCount());
         assertTrue(first.join().isSuccess(), "cleanup does not replace an already published ACK");
     }

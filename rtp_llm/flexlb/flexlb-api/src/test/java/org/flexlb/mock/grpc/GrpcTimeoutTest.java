@@ -53,7 +53,7 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         assertTrue(mockPrefillWorker.getEnqueueCount() >= 1,
                 "the worker records EnqueueBatch before delaying its ACK");
         assertEquals(1, getPrefillEndpoint().getInflightBatchCount());
-        assertEquals(1, getPrefillEndpoint().getLocallyOwnedRequestCount());
+        assertEquals(1, getPrefillEndpoint().getCommittedRequestCount());
         assertEquals(1, getDecodeEndpoint().getInflightCount());
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
 
@@ -63,7 +63,7 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         assertTrue(expired.getErrorMessage().contains("DISPATCH_CONFIRM_TIMEOUT"));
         assertEquals(0, scheduler.getTrackedRequestCount());
         assertEquals(0, getPrefillEndpoint().getInflightBatchCount());
-        assertEquals(0, getPrefillEndpoint().getLocallyOwnedRequestCount());
+        assertEquals(0, getPrefillEndpoint().getCommittedRequestCount());
         assertEquals(0, getDecodeEndpoint().getInflightCount());
 
         mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().build());

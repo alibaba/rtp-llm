@@ -287,8 +287,8 @@ class FaultInjectionE2ETest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     @Timeout(30)
-    void c09_crash_after_n_requests_expires_missing_ack_and_isolates_healthy_engine(
-            boolean clientCancellation) throws Exception {
+    void c09_crash_after_n_requests_expires_missing_ack_and_isolates_healthy_engine(boolean clientCancellation)
+            throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
                 BASE_PORT + 80, 2, 1, "5", 1.0, true, DecisionPolicyConfig.single())) {
             h.config.getRequestLifecycle().getRequest().setTimeoutMs(2_000L);
@@ -310,12 +310,12 @@ class FaultInjectionE2ETest {
 
             AutoTpmE2EHarness.await(prefill::isStopped, 2_000,
                     "the first enqueue must trigger the configured engine crash");
-            AutoTpmE2EHarness.await(() -> h.scheduler.getTrackedRequestCount() == 1
-                            && prefillEndpoint.getInflightBatchCount() == 1
-                            && prefillEndpoint.getLocallyOwnedRequestCount() == 1,
+            AutoTpmE2EHarness.await(
+                    () -> h.scheduler.getTrackedRequestCount() == 1 && prefillEndpoint.getInflightBatchCount() == 1
+                            && prefillEndpoint.getCommittedRequestCount() == 1,
                     2_000, "missing ACK must retain scheduler and Prefill accounting");
 
-            assertEquals(0, prefillEndpoint.getIndividuallyTrackedRequestCount(),
+            assertEquals(0, prefillEndpoint.getSingleRequestCount(),
                     "batch delivery must not consume the route-request ledger");
             assertFalse(crashedTerminal.await(250, TimeUnit.MILLISECONDS),
                     "missing ACK stays pending before the request inactivity deadline");
@@ -331,7 +331,7 @@ class FaultInjectionE2ETest {
             assertTrue(healthy.isSuccess(), "the crash never spreads to the healthy engine");
             assertFalse(crashed.isDone(), "healthy delivery must not settle the unrelated unconfirmed request");
             assertEquals(1, prefillEndpoint.getInflightBatchCount());
-            assertEquals(1, prefillEndpoint.getLocallyOwnedRequestCount());
+            assertEquals(1, prefillEndpoint.getCommittedRequestCount());
 
             Response expired = crashed.get(5, TimeUnit.SECONDS);
             assertFalse(expired.isSuccess());
@@ -342,7 +342,7 @@ class FaultInjectionE2ETest {
             assertTrue(expired.getErrorMessage().contains(clientCancellation
                     ? CancelReason.CLIENT_CANCELLED.getMessage() : "DISPATCH_CONFIRM_TIMEOUT"));
             assertEquals(0, prefillEndpoint.getInflightBatchCount());
-            assertEquals(0, prefillEndpoint.getLocallyOwnedRequestCount());
+            assertEquals(0, prefillEndpoint.getCommittedRequestCount());
             AutoTpmE2EHarness.await(() -> h.scheduler.getTrackedRequestCount() == 0
                             && h.decodeEndpoint(0).getInflightCount() == 0,
                     2_000, "TTL must release the crashed request's scheduler and Decode accounting");

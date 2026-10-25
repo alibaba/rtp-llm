@@ -267,9 +267,8 @@ public class HttpLoadBalanceServer {
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
                 ep.put("inflight_batches", endpoint.getInflightBatchCount());
-                ep.put("inflight_requests", endpoint.getLocallyOwnedRequestCount());
-                ep.put("inflight_route_requests",
-                        endpoint.getIndividuallyTrackedRequestCount());
+                ep.put("inflight_requests", endpoint.getCommittedRequestCount());
+                ep.put("inflight_route_requests", endpoint.getSingleRequestCount());
                 ep.put("cache_version",
                         cacheStatus == null ? -1L : cacheStatus.getVersion());
                 ep.put("cache_indexed", cacheIndex.indexInitialized());

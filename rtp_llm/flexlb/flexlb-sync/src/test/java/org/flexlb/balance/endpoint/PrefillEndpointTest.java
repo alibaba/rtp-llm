@@ -153,19 +153,19 @@ class PrefillEndpointTest {
         ScheduledRequest first = createScheduledRequest(101L, 500, 200);
         ScheduledRequest sibling = createScheduledRequest(102L, 300, 100);
         registerBatch(endpoint, 7L, 100, List.of(first, sibling));
-        assertEquals(2, endpoint.getLocallyOwnedRequestCount());
+        assertEquals(2, endpoint.getCommittedRequestCount());
         assertEquals(1, endpoint.getInflightBatchCount());
 
         assertTrue(endpoint.expireCommittedItem(first));
         assertFalse(endpoint.expireCommittedItem(first));
-        assertEquals(1, endpoint.getLocallyOwnedRequestCount());
+        assertEquals(1, endpoint.getCommittedRequestCount());
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.observedRequestCount());
         assertEquals(1, endpoint.captureLoadView().work().batches().size());
 
         assertTrue(endpoint.expireCommittedItem(sibling));
         assertFalse(endpoint.expireCommittedItem(sibling));
-        assertEquals(0, endpoint.getLocallyOwnedRequestCount());
+        assertEquals(0, endpoint.getCommittedRequestCount());
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.captureLoadView().work().batches().size());
         assertEquals(0, endpoint.observedRequestCount());
@@ -582,7 +582,7 @@ class PrefillEndpointTest {
     void calibrateMissingBatchIdRemovesDirectRequestLedgerEntry() {
         commitQueuedRoute(endpoint, 101L, 100L);
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.getIndividuallyTrackedRequestCount());
+        assertEquals(1, endpoint.getSingleRequestCount());
 
         TaskInfo finished = new TaskInfo();
         finished.setRequestId("101");
@@ -590,7 +590,7 @@ class PrefillEndpointTest {
         finished.setErrorCode(0);
         calibrate(Map.of("101", finished), Map.of());
 
-        assertEquals(0, endpoint.getIndividuallyTrackedRequestCount());
+        assertEquals(0, endpoint.getSingleRequestCount());
         assertEquals(0, endpoint.observedRequestCount());
     }
 
@@ -629,14 +629,14 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1,
                 endpoint.captureLoadView().work().batches().size());
-        assertEquals(1, endpoint.getIndividuallyTrackedRequestCount());
+        assertEquals(1, endpoint.getSingleRequestCount());
 
         calibrate(Map.of("101", priorityCanceledTask(101L, -1L)), Map.of());
 
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1,
                 endpoint.captureLoadView().work().batches().size());
-        assertEquals(0, endpoint.getIndividuallyTrackedRequestCount());
+        assertEquals(0, endpoint.getSingleRequestCount());
         assertEquals(1, endpoint.observedRequestCount());
 
         TaskInfo foreignBatchMemberSuccess = new TaskInfo();
@@ -1634,11 +1634,11 @@ class PrefillEndpointTest {
         assertTrue(EndpointTestSupport.offer(endpoint, route));
         List<CommitResult> handoffs = EndpointTestSupport.commitRoutes(endpoint, 200L, List.of(route));
         handoffs.forEach(CommitResult::close);
-        assertEquals(2, endpoint.getIndividuallyTrackedRequestCount());
+        assertEquals(2, endpoint.getSingleRequestCount());
 
         endpoint.close();
 
-        assertEquals(0, endpoint.getIndividuallyTrackedRequestCount());
+        assertEquals(0, endpoint.getSingleRequestCount());
         EndpointTestSupport.PrefillRetirement retirement =
                 requestRuntime.prefillRetirements().stream()
                         .findFirst()

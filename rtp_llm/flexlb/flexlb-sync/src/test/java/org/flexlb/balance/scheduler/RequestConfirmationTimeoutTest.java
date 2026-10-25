@@ -138,7 +138,7 @@ class RequestConfirmationTimeoutTest {
             assertEquals(0, requests.trackedRequestCount());
             verify(requestReporter).reportDispatchConfirmTimeout();
             assertEquals(0L, prefill.observedRequestCount());
-            assertEquals(0, prefill.getLocallyOwnedRequestCount());
+            assertEquals(0, prefill.getCommittedRequestCount());
             assertEquals(0L, decode.routingView().inputKvReserved());
             assertEquals(0L, decode.routingView().inputAndMaxOutputKvReserved());
             assertEquals(0, decode.routingView().engineCapacityUsed());

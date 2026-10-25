@@ -1174,9 +1174,7 @@ class TransientCapacityQueueContractTest {
         }
 
         private int totalPrefillOwnedRequests() {
-            return prefillEndpoints.stream()
-                    .mapToInt(PrefillEndpoint::getLocallyOwnedRequestCount)
-                    .sum();
+            return prefillEndpoints.stream().mapToInt(PrefillEndpoint::getCommittedRequestCount).sum();
         }
 
         private int totalDecodeReservations() {

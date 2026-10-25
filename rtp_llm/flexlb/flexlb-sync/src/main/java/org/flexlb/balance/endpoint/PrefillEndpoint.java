@@ -352,18 +352,17 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Requests owned by a local Prefill lifecycle: admitted QUEUE batch members
-     * plus individually tracked QUEUE_ROUTE requests.
+     * 已提交、还没结束的请求数，包括批次成员和单个请求。
      */
-    public int getLocallyOwnedRequestCount() {
+    public int getCommittedRequestCount() {
         PrefillStats stats = prefillState.stats();
         return stats.committedRequests();
     }
 
     /**
-     * Individually-accounted QUEUE_ROUTE requests.
+     * 已提交、还没结束的单个请求数（NON_BATCH）。
      */
-    public int getIndividuallyTrackedRequestCount() {
+    public int getSingleRequestCount() {
         PrefillStats stats = prefillState.stats();
         return stats.singleRequests();
     }

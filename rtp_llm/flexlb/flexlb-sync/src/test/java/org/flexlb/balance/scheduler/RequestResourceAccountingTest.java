@@ -128,7 +128,7 @@ class RequestResourceAccountingTest {
             // Endpoint ownership can advance before its notification reaches the slot.
             f.requests.cancelRequest(ID, 0, CancelReason.CLIENT_CANCELLED);
             assertEquals(0, f.requests.trackedRequestCount());
-            assertEquals(0, f.prefill.getLocallyOwnedRequestCount());
+            assertEquals(0, f.prefill.getCommittedRequestCount());
             assertEquals(HARD_KV, f.decode.routingView().inputKvReserved());
             assertEquals(1, f.decode.routingView().engineCapacityUsed());
             f.decodeStatus(Map.of(), Map.of("101", task(ID)), TOTAL_KV);
@@ -162,7 +162,7 @@ class RequestResourceAccountingTest {
             assertTrue(f.item.future().get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(1, f.requests.trackedRequestCount());
             assertEquals(1, f.decode.resourceSnapshot().runningCount());
-            assertEquals(1, f.prefill.getLocallyOwnedRequestCount());
+            assertEquals(1, f.prefill.getCommittedRequestCount());
             applyStatus(f.prefill, status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", running), TOTAL_KV));
             f.decodeStatus(Map.of(), Map.of("101", running), TOTAL_KV);
             f.assertEmpty();
@@ -313,7 +313,7 @@ class RequestResourceAccountingTest {
 
         void assertReserved() {
             assertEquals(1, requests.trackedRequestCount());
-            assertEquals(1, prefill.getLocallyOwnedRequestCount());
+            assertEquals(1, prefill.getCommittedRequestCount());
             assertEquals(HARD_KV, decode.routingView().inputKvReserved());
             assertEquals(EXPECTED_KV, decode.routingView().inputAndMaxOutputKvReserved());
         }
@@ -328,8 +328,8 @@ class RequestResourceAccountingTest {
         void assertEmpty() {
             assertEquals(0, requests.trackedRequestCount(), "request inflight");
             assertEquals(0, prefill.queuedRequestCount(), "Prefill queue membership");
-            assertEquals(0, prefill.getLocallyOwnedRequestCount(), "Prefill inflight");
-            assertEquals(0, prefill.getIndividuallyTrackedRequestCount(), "Prefill individual lease");
+            assertEquals(0, prefill.getCommittedRequestCount(), "Prefill inflight");
+            assertEquals(0, prefill.getSingleRequestCount(), "Prefill individual lease");
             assertEquals(0, prefill.getInflightBatchCount(), "Prefill batch occupancy");
             var view = decode.resourceSnapshot();
             assertEquals(0, view.routing().inputKvReserved(), "Decode hard KV reservation");

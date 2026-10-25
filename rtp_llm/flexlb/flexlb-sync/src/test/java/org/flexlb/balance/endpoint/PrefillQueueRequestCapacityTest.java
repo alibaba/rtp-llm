@@ -286,7 +286,7 @@ class PrefillQueueRequestCapacityTest {
                 }
                 assertEquals(3, fixture.endpoint.queuedRequestCount());
                 assertEquals(4L, fixture.endpoint.observedRequestCount());
-                assertEquals(1, fixture.endpoint.getLocallyOwnedRequestCount());
+                assertEquals(1, fixture.endpoint.getCommittedRequestCount());
                 assertFalse(EndpointTestSupport.offer(fixture.endpoint,
                         item(config, fixture.endpoint, 5L)));
                 assertTrue(fixture.endpoint.releaseCommittedItem(delivered));

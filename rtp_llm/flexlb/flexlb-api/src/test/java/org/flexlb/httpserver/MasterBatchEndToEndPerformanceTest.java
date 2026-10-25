@@ -1152,7 +1152,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL)) {
             PrefillEndpoint endpoint = (PrefillEndpoint) endpointRegistry.get(RoleType.PREFILL, address);
             assertEquals(0, endpoint.getInflightBatchCount(), address + " retained batch credits");
-            assertEquals(0, endpoint.getLocallyOwnedRequestCount(), address + " retained Prefill ownership");
+            assertEquals(0, endpoint.getCommittedRequestCount(), address + " retained Prefill ownership");
             assertEquals(0L, endpoint.observedRequestCount(), address + " retained Prefill requests");
         }
         for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.DECODE)) {
