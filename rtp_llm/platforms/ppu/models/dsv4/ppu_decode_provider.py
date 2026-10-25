@@ -182,6 +182,10 @@ class PpuDecodeProvider(PpuModuleProvider):
             fuse_norm=True,
             fuse_moe_sum=self._decode_fusions,
             fuse_pre_quant=self._decode_fusions,
+            # Keep small-batch POST tiling opt-in until the local kernel
+            # improvement is established on the service's critical path.
+            fuse_post=self._decode_fusions
+            and self._bool("DSV4_PPU_HC_POST_TILING", False),
             **kwargs,
         )
 

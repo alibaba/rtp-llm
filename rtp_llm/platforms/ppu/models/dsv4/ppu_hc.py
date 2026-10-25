@@ -3,6 +3,7 @@
 import importlib
 
 import torch
+
 from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import TileLangHCUnit
 
 
@@ -18,6 +19,7 @@ class PpuHCUnit(TileLangHCUnit):
         fuse_norm=False,
         fuse_moe_sum=False,
         fuse_pre_quant=False,
+        fuse_post=False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -26,6 +28,7 @@ class PpuHCUnit(TileLangHCUnit):
         self._fuse_norm = fuse_norm
         self._fuse_moe_sum = fuse_moe_sum
         self._fuse_pre_quant = fuse_pre_quant
+        self._fuse_post = fuse_post
         self._prenorm_partials = None
         self._backend = options.get(
             "DSV4_MHC_PRE_GEMM_BACKEND", "deepgemm_deterministic"
@@ -249,4 +252,9 @@ class PpuHCUnit(TileLangHCUnit):
     def _post_operator(self, x, residual, post, comb, *, hc_mult, out=None):
         if residual.numel() == 0:
             return residual if out is None else out
+        if self._fuse_post:
+            from ...kernels.ppu_hc_sum import hc_post, supports_hc_post
+
+            if supports_hc_post(x, residual, post, comb, out):
+                return hc_post(x, residual, post, comb, out=out)
         return self._post_kernel(x, residual, post, comb, out=out, enable_pdl=False)
