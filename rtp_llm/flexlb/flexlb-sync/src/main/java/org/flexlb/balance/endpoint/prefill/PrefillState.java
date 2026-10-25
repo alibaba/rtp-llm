@@ -466,8 +466,7 @@ public final class PrefillState {
             LiveBatchMembers liveMembers =
                     entry.batchProgress == null ? null : batchPrefill.liveBatchMembersUnderLock(entry.batchProgress);
             // Local cleanup does not prove that Engine omitted this member's work.
-            capacityReleased =
-                    removeCommittedEntry(entry, TerminalObservation.external(entry.requestId), liveMembers, null);
+            capacityReleased = removeCommittedEntry(entry, FinishReport.local(entry.requestId), liveMembers, null);
             return true;
         } finally {
             lock.unlock();
@@ -765,14 +764,14 @@ public final class PrefillState {
     }
 
     public boolean removeCommittedEntry(RequestEntry entry,
-                                        TerminalObservation terminal,
+                                        FinishReport finishReport,
                                         LiveBatchMembers liveMembers,
                                         List<FinishedBatch> finishedBatches) {
-        return removeCommittedEntry(entry, terminal, liveMembers, finishedBatches, clock.getAsLong());
+        return removeCommittedEntry(entry, finishReport, liveMembers, finishedBatches, clock.getAsLong());
     }
 
     public boolean removeCommittedEntry(RequestEntry entry,
-                                        TerminalObservation terminal,
+                                        FinishReport finishReport,
                                         LiveBatchMembers liveMembers,
                                         List<FinishedBatch> finishedBatches,
                                         long nowMs) {
@@ -792,7 +791,7 @@ public final class PrefillState {
                             + " request_id=" + entry.requestId);
         }
         if (batch != null) {
-            BatchPrefill.removeFinishedMember(entry, liveMembers, terminal, nowMs);
+            BatchPrefill.removeFinishedMember(entry, liveMembers, finishReport, nowMs);
         }
         if (!removeRequestUnderLock(entry.requestId, entry)) {
             throw new IllegalStateException(

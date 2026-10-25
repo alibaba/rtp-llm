@@ -120,18 +120,17 @@ public final class BatchProgress {
     /**
      * 按一个成员的结束上报更新进度。workerObserved 为 false 表示本地清理，不是引擎上报。
      */
-    public void updateProgressFromFinishedTask(
-            boolean workerObserved,
-            long errorCode,
-            long executionTimeMs,
-            long nowMs) {
+    public void updateProgressFromFinishedTask(boolean reportedByWorker,
+                                               long errorCode,
+                                               long executionTimeMs,
+                                               long nowMs) {
         lastObservedAtMs = Math.max(lastObservedAtMs, nowMs);
-        engineStarted |= workerObserved && (errorCode == 0L || executionTimeMs > 0L);
+        engineStarted |= reportedByWorker && (errorCode == 0L || executionTimeMs > 0L);
         if (executionTimeMs >= 0L) {
             maxExecutionTimeMs = Math.max(maxExecutionTimeMs, executionTimeMs);
         }
-        anyMemberSucceeded |= workerObserved && errorCode == 0L;
-        usableForLearning &= workerObserved && errorCode == 0L;
+        anyMemberSucceeded |= reportedByWorker && errorCode == 0L;
+        usableForLearning &= reportedByWorker && errorCode == 0L;
     }
 
     /**

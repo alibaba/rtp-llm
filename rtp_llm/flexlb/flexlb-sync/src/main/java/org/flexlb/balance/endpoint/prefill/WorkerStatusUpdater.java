@@ -86,18 +86,16 @@ public final class WorkerStatusUpdater {
             long nowMs = prefillState.clock.getAsLong();
             IdentityHashMap<BatchProgress, LiveBatchMembers> membersByBatch =
                     prefillState.batchPrefill.liveBatchMembersUnderLock();
-            Map<String, TerminalObservation> terminals = collectFinishedTasks(finishedTasks);
+            Map<String, FinishReport> finishReports = collectFinishedTasks(finishedTasks);
             Map<String, WorkerStatus.TaskObservation> activeTasks =
                     engine.runningTaskList();
-            IdentityHashMap<RequestEntry, TerminalObservation> settlements =
-                    new IdentityHashMap<>(terminals.size());
+            IdentityHashMap<RequestEntry, FinishReport> settlements = new IdentityHashMap<>(finishReports.size());
             IdentityHashMap<BatchProgress, Phase> batchPhases = new IdentityHashMap<>();
-            for (TerminalObservation terminal : terminals.values()) {
-                RequestEntry entry = prefillState.requests.get(terminal.requestId());
-                if (entry == null
-                        || settlements.put(entry, terminal) != null) {
+            for (FinishReport finishReport : finishReports.values()) {
+                RequestEntry entry = prefillState.requests.get(finishReport.requestId());
+                if (entry == null || settlements.put(entry, finishReport) != null) {
                     throw new IllegalStateException(
-                            "status terminal lost its exact owner request_id=" + terminal.requestId());
+                            "status terminal lost its exact owner request_id=" + finishReport.requestId());
                 }
             }
             Set<LiveBatchMembers> changedBatches =
@@ -107,12 +105,12 @@ public final class WorkerStatusUpdater {
                     Math.max(0L, engine.runningQueryLen()));
             IdentityHashMap<RequestEntry, Phase> individualPhases =
                     new IdentityHashMap<>();
-            long nextUnknown =
-                    collectRunningTasks(activeTasks, terminals, reportedActive, individualPhases, batchPhases, null);
+            long nextUnknown = collectRunningTasks(activeTasks, finishReports, reportedActive, individualPhases,
+                    batchPhases, null);
             IdentityHashMap<BatchProgress, Long> predictions = new IdentityHashMap<>();
-            prefillState.batchPrefill.prepareBatchPredictionsUnderLock(changedBatches, terminals, batchPhases,
+            prefillState.batchPrefill.prepareBatchPredictionsUnderLock(changedBatches, finishReports, batchPhases,
                     predictBatchTime, predictions);
-            outcome = buildResult(terminals, activeTasks, membersByBatch);
+            outcome = buildResult(finishReports, activeTasks, membersByBatch);
 
             // Everything below this boundary is assignment/removal against
             // exact prevalidated identities. Any invariant failure is captured
@@ -120,8 +118,7 @@ public final class WorkerStatusUpdater {
             canonicalMutationStarted = true;
             prefillState.committedWorkCapture = null;
             prefillState.recordMutationUnderLock();
-            for (Map.Entry<RequestEntry, TerminalObservation> settlement
-                    : settlements.entrySet()) {
+            for (Map.Entry<RequestEntry, FinishReport> settlement : settlements.entrySet()) {
                 RequestEntry entry = settlement.getKey();
                 capacityReleased |= prefillState.removeCommittedEntry(entry, settlement.getValue(),
                         entry.batchProgress == null ? null : membersByBatch.get(entry.batchProgress), null, nowMs);
@@ -174,7 +171,7 @@ public final class WorkerStatusUpdater {
     }
 
     private long collectRunningTasks(Map<String, WorkerStatus.TaskObservation> activeTasks,
-                                     Map<String, TerminalObservation> terminals,
+                                     Map<String, FinishReport> finishReports,
                                      long reportedActive,
                                      IdentityHashMap<RequestEntry, Phase> individualPhases,
                                      IdentityHashMap<BatchProgress, Phase> batchPhases,
@@ -183,7 +180,7 @@ public final class WorkerStatusUpdater {
         Set<String> unknownDetailed = new HashSet<>();
         Set<String> knownObserved = new HashSet<>();
         for (WorkerStatus.TaskObservation task : activeTasks.values()) {
-            if (terminals.containsKey(task.requestId())) {
+            if (finishReports.containsKey(task.requestId())) {
                 continue;
             }
             RequestEntry entry = prefillState.requests.get(task.requestId());
@@ -215,20 +212,18 @@ public final class WorkerStatusUpdater {
         return Math.max(unknownDetailed.size(), scalarUnknown);
     }
 
-    private Map<String, TerminalObservation> collectFinishedTasks(
-            Map<String, WorkerStatus.TaskObservation> finishedTasks) {
+    private Map<String, FinishReport> collectFinishedTasks(Map<String, WorkerStatus.TaskObservation> finishedTasks) {
         prefillState.requireLock();
-        Map<String, TerminalObservation> terminals = new HashMap<>();
+        Map<String, FinishReport> finishReports = new HashMap<>();
         for (WorkerStatus.TaskObservation task : finishedTasks.values()) {
             RequestEntry entry = prefillState.requests.get(task.requestId());
             if (entry == null || !BatchPrefill.matchesObservedBatch(entry, task.batchId())) {
                 continue;
             }
-            TerminalObservation terminal = TerminalObservation.from(task, entry.batchProgress != null);
-            terminals.merge(
-                    task.requestId(), terminal, TerminalObservation::merge);
+            FinishReport finishReport = FinishReport.from(task, entry.batchProgress != null);
+            finishReports.merge(task.requestId(), finishReport, FinishReport::merge);
         }
-        return terminals;
+        return finishReports;
     }
 
     /**
@@ -236,20 +231,19 @@ public final class WorkerStatusUpdater {
      * canonical entry is settled. The returned object is the exact outcome
      * later published by the endpoint; reduction only binds a callback failure.
      */
-    private WorkerStatusResult buildResult(Map<String, TerminalObservation> terminals,
+    private WorkerStatusResult buildResult(Map<String, FinishReport> finishReports,
                                            Map<String, WorkerStatus.TaskObservation> activeTasks,
                                            IdentityHashMap<BatchProgress, LiveBatchMembers> membersByBatch) {
         prefillState.requireLock();
-        List<WorkerStatusFact> schedulerFacts = new ArrayList<>(
-                terminals.size() + activeTasks.size());
-        for (TerminalObservation terminal : terminals.values()) {
-            WorkerStatusFact fact = finishedFact(prefillState.requests.get(terminal.requestId()), terminal);
+        List<WorkerStatusFact> schedulerFacts = new ArrayList<>(finishReports.size() + activeTasks.size());
+        for (FinishReport finishReport : finishReports.values()) {
+            WorkerStatusFact fact = finishedFact(prefillState.requests.get(finishReport.requestId()), finishReport);
             if (fact != null) {
                 schedulerFacts.add(fact);
             }
         }
         for (WorkerStatus.TaskObservation task : activeTasks.values()) {
-            if (terminals.containsKey(task.requestId())) {
+            if (finishReports.containsKey(task.requestId())) {
                 continue;
             }
             WorkerStatusFact fact = runningFact(task);
@@ -258,7 +252,7 @@ public final class WorkerStatusUpdater {
             }
         }
 
-        List<FinishedBatch> finishedBatches = BatchPrefill.collectFinishedBatches(membersByBatch, terminals);
+        List<FinishedBatch> finishedBatches = BatchPrefill.collectFinishedBatches(membersByBatch, finishReports);
         return new WorkerStatusResult(schedulerFacts, finishedBatches, null);
     }
 
@@ -273,16 +267,16 @@ public final class WorkerStatusUpdater {
         return WorkerStatusFact.active(entry.committedItem);
     }
 
-    private static WorkerStatusFact finishedFact(RequestEntry entry, TerminalObservation terminal) {
-        if (entry == null || entry.committedItem == null || !terminal.workerObserved()) {
+    private static WorkerStatusFact finishedFact(RequestEntry entry, FinishReport finishReport) {
+        if (entry == null || entry.committedItem == null || !finishReport.reportedByWorker()) {
             return null;
         }
-        WorkerStatusFact.Kind kind = terminal.errorCode() == 0L
+        WorkerStatusFact.Kind kind = finishReport.errorCode() == 0L
                 ? WorkerStatusFact.Kind.COMPLETED
-                : terminal.preemptionProgress() == PriorityPreemptionProgress.CANCELED
-                        && terminal.errorCode() == StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode()
+                : finishReport.preemptionProgress() == PriorityPreemptionProgress.CANCELED
+                        && finishReport.errorCode() == StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode()
                                 ? WorkerStatusFact.Kind.PRIORITY_CANCELED
                                 : WorkerStatusFact.Kind.FAILED;
-        return WorkerStatusFact.terminal(entry.committedItem, kind, terminal.errorCode());
+        return WorkerStatusFact.terminal(entry.committedItem, kind, finishReport.errorCode());
     }
 }

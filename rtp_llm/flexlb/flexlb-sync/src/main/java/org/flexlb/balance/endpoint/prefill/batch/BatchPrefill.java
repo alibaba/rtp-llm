@@ -2,12 +2,12 @@ package org.flexlb.balance.endpoint.prefill.batch;
 
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.endpoint.EndpointGenerationLifecycle;
+import org.flexlb.balance.endpoint.prefill.FinishReport;
 import org.flexlb.balance.endpoint.prefill.LeaseState;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.RequestEntry;
 import org.flexlb.balance.endpoint.prefill.Reservation;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
-import org.flexlb.balance.endpoint.prefill.TerminalObservation;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.estimate.WorkView.Phase;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
@@ -182,7 +182,7 @@ public final class BatchPrefill {
     }
 
     public void prepareBatchPredictionsUnderLock(Set<LiveBatchMembers> changedBatches,
-                                                 Map<String, TerminalObservation> terminals,
+                                                 Map<String, FinishReport> finishReports,
                                                  IdentityHashMap<BatchProgress, Phase> batchPhases,
                                                  ToLongFunction<List<ScheduledRequest>> predictBatchTime,
                                                  IdentityHashMap<BatchProgress, Long> predictions) {
@@ -195,12 +195,12 @@ public final class BatchPrefill {
             List<ScheduledRequest> survivors = new ArrayList<>(liveMembers.members().size());
             boolean executionObserved = false;
             for (RequestEntry member : liveMembers.members()) {
-                TerminalObservation terminal = terminals.get(member.requestId);
-                if (terminal == null) {
+                FinishReport finishReport = finishReports.get(member.requestId);
+                if (finishReport == null) {
                     survivors.add(member.committedItem);
                 } else {
                     // Completion can arrive before the first RUNNING observation.
-                    executionObserved |= terminal.errorCode() == 0L || terminal.executionTimeMs() > 0L;
+                    executionObserved |= finishReport.errorCode() == 0L || finishReport.executionTimeMs() > 0L;
                 }
             }
             if (executionObserved || survivors.isEmpty()) {
@@ -228,8 +228,8 @@ public final class BatchPrefill {
                     continue;
                 }
                 for (RequestEntry entry : List.copyOf(liveMembers.members())) {
-                    capacityReleased |= prefillState.removeCommittedEntry(entry,
-                            TerminalObservation.external(entry.requestId), liveMembers, new ArrayList<>(0));
+                    capacityReleased |= prefillState.removeCommittedEntry(entry, FinishReport.local(entry.requestId),
+                            liveMembers, new ArrayList<>(0));
                 }
                 evicted++;
             }
@@ -261,10 +261,10 @@ public final class BatchPrefill {
      */
     public static List<FinishedBatch> collectFinishedBatches(
             IdentityHashMap<BatchProgress, LiveBatchMembers> membersByBatch,
-            Map<String, TerminalObservation> terminals) {
-        List<FinishedBatch> finishedBatches = new ArrayList<>(Math.min(terminals.size(), membersByBatch.size()));
+            Map<String, FinishReport> finishReports) {
+        List<FinishedBatch> finishedBatches = new ArrayList<>(Math.min(finishReports.size(), membersByBatch.size()));
         for (LiveBatchMembers liveMembers : membersByBatch.values()) {
-            FinishedBatch finishedBatch = liveMembers.finishedBatchIfAllFinish(terminals);
+            FinishedBatch finishedBatch = liveMembers.finishedBatchIfAllFinish(finishReports);
             if (finishedBatch != null) {
                 finishedBatches.add(finishedBatch);
             }
@@ -288,10 +288,10 @@ public final class BatchPrefill {
      */
     public static void removeFinishedMember(RequestEntry entry,
                                             LiveBatchMembers liveMembers,
-                                            TerminalObservation terminal,
+                                            FinishReport finishReport,
                                             long nowMs) {
-        entry.batchProgress.updateProgressFromFinishedTask(terminal.workerObserved(), terminal.errorCode(),
-                terminal.executionTimeMs(), nowMs);
+        entry.batchProgress.updateProgressFromFinishedTask(finishReport.reportedByWorker(), finishReport.errorCode(),
+                finishReport.executionTimeMs(), nowMs);
         liveMembers.remove(entry);
     }
 

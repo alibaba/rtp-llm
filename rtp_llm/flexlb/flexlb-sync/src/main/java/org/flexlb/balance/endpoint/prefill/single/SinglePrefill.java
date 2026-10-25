@@ -1,11 +1,11 @@
 package org.flexlb.balance.endpoint.prefill.single;
 
 import org.flexlb.balance.endpoint.EndpointGenerationLifecycle;
+import org.flexlb.balance.endpoint.prefill.FinishReport;
 import org.flexlb.balance.endpoint.prefill.LeaseState;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.RequestEntry;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
-import org.flexlb.balance.endpoint.prefill.TerminalObservation;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.ArrayList;
@@ -169,8 +169,8 @@ public final class SinglePrefill {
                 }
             }
             for (RequestEntry entry : candidates) {
-                capacityReleased |= prefillState.removeCommittedEntry(entry,
-                        TerminalObservation.external(entry.requestId), null, new ArrayList<>(0));
+                capacityReleased |= prefillState.removeCommittedEntry(entry, FinishReport.local(entry.requestId), null,
+                        new ArrayList<>(0));
             }
             evicted = candidates.size();
         } finally {

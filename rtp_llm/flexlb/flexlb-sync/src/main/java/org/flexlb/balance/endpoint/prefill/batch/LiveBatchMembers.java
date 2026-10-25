@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint.prefill.batch;
 
+import org.flexlb.balance.endpoint.prefill.FinishReport;
 import org.flexlb.balance.endpoint.prefill.RequestEntry;
-import org.flexlb.balance.endpoint.prefill.TerminalObservation;
 
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -42,20 +42,20 @@ public final class LiveBatchMembers {
     /**
      * 如果这批结束上报能让所有成员都结束，返回整批的汇总；否则返回 null。不修改 batch 进度。
      */
-    public FinishedBatch finishedBatchIfAllFinish(Map<String, TerminalObservation> terminals) {
+    public FinishedBatch finishedBatchIfAllFinish(Map<String, FinishReport> finishReports) {
         long maxExecutionTimeMs = batch.maxExecutionTimeMs();
         boolean anyMemberSucceeded = batch.anyMemberSucceeded();
         boolean usableForLearning = batch.usableForLearning();
         for (RequestEntry member : members) {
-            TerminalObservation terminal = terminals.get(member.requestId);
-            if (terminal == null) {
+            FinishReport finishReport = finishReports.get(member.requestId);
+            if (finishReport == null) {
                 return null;
             }
-            if (terminal.executionTimeMs() >= 0L) {
-                maxExecutionTimeMs = Math.max(maxExecutionTimeMs, terminal.executionTimeMs());
+            if (finishReport.executionTimeMs() >= 0L) {
+                maxExecutionTimeMs = Math.max(maxExecutionTimeMs, finishReport.executionTimeMs());
             }
-            anyMemberSucceeded |= terminal.workerObserved() && terminal.errorCode() == 0L;
-            usableForLearning &= terminal.workerObserved() && terminal.errorCode() == 0L;
+            anyMemberSucceeded |= finishReport.reportedByWorker() && finishReport.errorCode() == 0L;
+            usableForLearning &= finishReport.reportedByWorker() && finishReport.errorCode() == 0L;
         }
         return new FinishedBatch(batch.batchId(), batch.featuresAtCommit(), batch.predictedWorkMs(), maxExecutionTimeMs,
                 anyMemberSucceeded, usableForLearning);
