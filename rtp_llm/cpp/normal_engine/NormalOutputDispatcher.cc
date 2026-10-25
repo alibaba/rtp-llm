@@ -3,9 +3,11 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <ATen/ThreadLocalState.h>
 #include <c10/core/InferenceMode.h>
 #include <cstdlib>
+#include <chrono>
 #include <stdexcept>
 #include <string>
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
@@ -163,8 +165,9 @@ bool NormalOutputDispatcher::restoreCurrentTokenIds(const GenerateStreamPtr& str
     return true;
 }
 
-absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
-                                              const MergedOutput& merge_outputs) const {
+absl::Status NormalOutputDispatcher::dispatch(const StreamGroups&                 stream_groups,
+                                              const MergedOutput&                 merge_outputs,
+                                              const kmonitor::MetricsReporterPtr& metrics_reporter) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     const auto&  model_output         = merge_outputs.model_output;
     const auto&  sampler_output       = merge_outputs.sampler_output;
@@ -409,6 +412,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     }
 
     int custom_output_offset = 0;
+    const auto update_start         = std::chrono::steady_clock::now();
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
@@ -475,6 +479,13 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     // get() can propagate a worker exception and unwind this stack frame.
     for (auto& future : futures) {
         future.wait();
+    }
+    if (metrics_reporter && stream_groups.totalDecodeBatchSize() > 0) {
+        RtpLLMStreamUpdateMetricsCollector collector;
+        collector.latency_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - update_start)
+                .count();
+        metrics_reporter->report<RtpLLMStreamUpdateMetrics, RtpLLMStreamUpdateMetricsCollector>(nullptr, &collector);
     }
     for (auto& future : futures) {
         future.get();

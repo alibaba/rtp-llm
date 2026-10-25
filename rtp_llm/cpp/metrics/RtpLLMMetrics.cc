@@ -339,6 +339,7 @@ void RtpLLMEngineMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMEngine
 }
 
 bool RtpLLMGrammarMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(update_timeout_qps_metric, "rtp_llm_grammar_update_timeout_qps");
     REGISTER_QPS_MUTABLE_METRIC(compile_qps_metric, "rtp_llm_grammar_compile_qps");
     REGISTER_QPS_MUTABLE_METRIC(compile_invalid_qps_metric, "rtp_llm_grammar_compile_invalid_qps");
     REGISTER_QPS_MUTABLE_METRIC(cache_hit_qps_metric, "rtp_llm_grammar_cache_hit_qps");
@@ -350,6 +351,10 @@ bool RtpLLMGrammarMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(compiler_cache_budget_bytes_metric, "rtp_llm_grammar_compiler_cache_budget_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(verdict_cache_budget_bytes_metric, "rtp_llm_grammar_verdict_cache_budget_bytes");
     return true;
+}
+
+void RtpLLMGrammarMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMGrammarUpdateMetricsCollector* collector) {
+    REPORT_QPS(update_timeout_qps);
 }
 
 void RtpLLMGrammarMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMGrammarMetricsCollector* collector) {
@@ -447,6 +452,16 @@ void RtpLLMHiddenStateCaptureMetrics::report(const kmonitor::MetricsTags*       
         REPORT_MUTABLE_METRIC(capture_enabled_metric, collector->capture_enabled);
         REPORT_MUTABLE_METRIC(capture_broken_metric, collector->capture_broken);
     }
+}
+
+bool RtpLLMStreamUpdateMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(latency_us_metric, "rtp_llm_stream_update_latency_us");
+    return true;
+}
+
+void RtpLLMStreamUpdateMetrics::report(const kmonitor::MetricsTags*        tags,
+                                       RtpLLMStreamUpdateMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(latency_us_metric, collector->latency_us);
 }
 
 bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {

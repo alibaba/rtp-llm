@@ -203,12 +203,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     const int async_worker_count =
         tp_rank_ > 0 || warm_up_ || is_propose_ ? 0 : params.runtime_config.output_dispatcher_worker_count;
-    batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.model_config_,
-                                                                 params.pd_sep_config,
-                                                                 params.profiling_debug_logging_config,
-                                                                 cache_config,
-                                                                 warm_up_,
-                                                                 async_worker_count));
+    batch_stream_processor_.reset(
+        new NormalBatchStreamProcessor(params.model_config_,
+                                       params.pd_sep_config,
+                                       params.profiling_debug_logging_config,
+                                       cache_config,
+                                       warm_up_,
+                                       async_worker_count,
+                                       tp_rank_ == 0 && !warm_up_ && !is_propose_ ? metrics_reporter_ : nullptr));
     LogitsProcessorFactory::init(params.model_config_,
                                  params.grammar_config,
                                  params.sp_config.tree_decode_config,

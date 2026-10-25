@@ -23,7 +23,8 @@ public:
                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                                const CacheConfig&                 cache_config,
                                bool                               warm_up,
-                               int                                async_worker_count = 0);
+                               int                                async_worker_count = 0,
+                               kmonitor::MetricsReporterPtr       metrics_reporter   = nullptr);
 
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
     virtual absl::Status dispatchPrefillOnly(const StreamGroups&              stream_groups,
@@ -65,6 +66,7 @@ protected:
                                   bool                          score_batch = false) const;
 
 protected:
+    kmonitor::MetricsReporterPtr                metrics_reporter_;
     NormalModelInputGathererConfig              model_input_gatherer_config_;
     std::unique_ptr<NormalModelInputGatherer>   model_input_gatherer_;
     std::unique_ptr<NormalSamplerInputGatherer> sampler_input_gatherer_;

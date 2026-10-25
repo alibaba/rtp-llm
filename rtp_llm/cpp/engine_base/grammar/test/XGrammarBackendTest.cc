@@ -384,6 +384,27 @@ TEST(XGrammarBackendTest, NonPositiveBoundedCompileSettingsFailFast) {
     EXPECT_THROW(makeBackend(config), std::invalid_argument);
 }
 
+TEST(XGrammarBackendTest, UpdateTimeoutUsesDefaultAndExplicitServiceConfig) {
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
+    EXPECT_EQ(backend->updateTimeoutMs(), 10);
+
+    auto config              = grammarConfig();
+    config.update_timeout_ms = 25;
+    auto configured_backend  = makeBackend(config);
+    ASSERT_TRUE(configured_backend);
+    EXPECT_EQ(configured_backend->updateTimeoutMs(), 25);
+}
+
+TEST(XGrammarBackendTest, NonPositiveUpdateTimeoutIsRejected) {
+    for (int timeout_ms : {0, -1}) {
+        SCOPED_TRACE(timeout_ms);
+        auto config              = grammarConfig();
+        config.update_timeout_ms = timeout_ms;
+        EXPECT_THROW(makeBackend(config), std::invalid_argument);
+    }
+}
+
 TEST(XGrammarBackendTest, TimeoutIsRetryableAndBackgroundCompileWarmsCache) {
     auto config                = grammarConfig();
     config.compile_timeout_ms  = 50;

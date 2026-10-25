@@ -41,6 +41,12 @@ class _PreviousSixTupleGrammarConfig:
         return _new_grammar_config, (), previous_state
 
 
+class _PreviousEightTupleGrammarConfig:
+    def __reduce__(self):
+        previous_state = (True, 8, "eight-tokenizer-info", 8192, True, 1234, 3, 5)
+        return _new_grammar_config, (), previous_state
+
+
 class _LegacyHWKernelConfig:
     def __reduce__(self):
         legacy_state = (
@@ -139,6 +145,11 @@ class PDSepConfigPickleTest(unittest.TestCase):
 
 
 class GrammarConfigPickleTest(unittest.TestCase):
+    def test_default_update_timeout(self):
+        config = GrammarConfig()
+        self.assertEqual(config.update_timeout_ms, 10)
+        self.assertEqual(pickle.loads(pickle.dumps(config)).update_timeout_ms, 10)
+
     def test_current_format_round_trip(self):
         config = GrammarConfig()
         config.constrained_json_disable_any_whitespace = True
@@ -149,6 +160,7 @@ class GrammarConfigPickleTest(unittest.TestCase):
         config.compile_timeout_ms = 1234
         config.compile_concurrency = 3
         config.compile_queue_size = 5
+        config.update_timeout_ms = 25
 
         restored = pickle.loads(pickle.dumps(config))
 
@@ -160,6 +172,7 @@ class GrammarConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.compile_timeout_ms, 1234)
         self.assertEqual(restored.compile_concurrency, 3)
         self.assertEqual(restored.compile_queue_size, 5)
+        self.assertEqual(restored.update_timeout_ms, 25)
         self.assertFalse(hasattr(restored, "override_stop_tokens"))
 
     def test_legacy_five_tuple_is_loaded(self):
@@ -173,6 +186,7 @@ class GrammarConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.compile_timeout_ms, 2000)
         self.assertEqual(restored.compile_concurrency, 1)
         self.assertEqual(restored.compile_queue_size, 2)
+        self.assertEqual(restored.update_timeout_ms, 10)
         self.assertFalse(hasattr(restored, "override_stop_tokens"))
 
     def test_previous_five_tuple_is_loaded(self):
@@ -186,6 +200,7 @@ class GrammarConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.compile_timeout_ms, 2000)
         self.assertEqual(restored.compile_concurrency, 1)
         self.assertEqual(restored.compile_queue_size, 2)
+        self.assertEqual(restored.update_timeout_ms, 10)
         self.assertFalse(hasattr(restored, "override_stop_tokens"))
 
     def test_previous_six_tuple_is_loaded(self):
@@ -199,7 +214,21 @@ class GrammarConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.compile_timeout_ms, 2000)
         self.assertEqual(restored.compile_concurrency, 1)
         self.assertEqual(restored.compile_queue_size, 2)
+        self.assertEqual(restored.update_timeout_ms, 10)
         self.assertFalse(hasattr(restored, "override_stop_tokens"))
+
+    def test_previous_eight_tuple_is_loaded(self):
+        restored = pickle.loads(pickle.dumps(_PreviousEightTupleGrammarConfig()))
+
+        self.assertTrue(restored.constrained_json_disable_any_whitespace)
+        self.assertEqual(restored.num_workers, 8)
+        self.assertEqual(restored.tokenizer_info_json, "eight-tokenizer-info")
+        self.assertEqual(restored.compiler_cache_bytes, 8192)
+        self.assertTrue(restored.terminate_without_stop_token)
+        self.assertEqual(restored.compile_timeout_ms, 1234)
+        self.assertEqual(restored.compile_concurrency, 3)
+        self.assertEqual(restored.compile_queue_size, 5)
+        self.assertEqual(restored.update_timeout_ms, 10)
 
     def test_fabricated_short_layouts_are_rejected(self):
         for state in ((True, 3, 1024), (True, 3, [7, 11], 1024)):
