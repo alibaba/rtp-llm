@@ -129,6 +129,7 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     aux_info.speculative_draft_rounds             = 4;
     aux_info.speculative_accepted_tokens_per_pos  = {3, 2, 1};
     aux_info.generation_prefill_cuda_graph_status = "attention_backend_unsupported";
+    aux_info.xgrammar_update_timeout              = true;
     AuxInfoAdapter aux_info_adapter(aux_info);
     std::string    jsonStr = ToJsonString(aux_info_adapter, true);
     ASSERT_TRUE(jsonStr.find(R"("cost_time":1)") != std::string::npos);
@@ -137,6 +138,7 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     ASSERT_TRUE(jsonStr.find(R"("prefix_len":0)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("output_len":0)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("pd_sep":false)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("xgrammar_update_timeout":true)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("step_output_len":0)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("disk_reuse_len":128)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("prefill_disk_reuse_len":256)") != std::string::npos);
@@ -147,6 +149,16 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     ASSERT_TRUE(jsonStr.find(R"("generation_prefill_cuda_graph_status":"attention_backend_unsupported")")
                 != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("cum_log_probs":)") == std::string::npos);
+}
+
+TEST(InferenceDataTypeTest, AuxInfoAdapterXgrammarTimeoutDefaultsToFalse) {
+    AuxInfoAdapter aux_info;
+    FromJsonString(aux_info, R"({"input_len":8})");
+    EXPECT_FALSE(aux_info.xgrammar_update_timeout);
+    EXPECT_NE(ToJsonString(aux_info, true).find(R"("xgrammar_update_timeout":false)"), std::string::npos);
+
+    FromJsonString(aux_info, R"({"xgrammar_update_timeout":true})");
+    EXPECT_TRUE(aux_info.xgrammar_update_timeout);
 }
 
 TEST(InferenceDataTypeTest, MultiSeqsResponse) {

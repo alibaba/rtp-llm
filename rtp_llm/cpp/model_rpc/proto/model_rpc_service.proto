@@ -323,6 +323,7 @@ message AuxInfoPB {
     int32 disk_reuse_len = 31;
     int32 prefill_disk_reuse_len = 32;
     int32 decode_disk_reuse_len = 33;
+    bool xgrammar_update_timeout = 34;
 }
 
 message PromptLogitsOutputPB {

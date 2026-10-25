@@ -86,7 +86,8 @@ ErrorResult<std::vector<BaseLogitsProcessorPtr>>
 LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                                                int32_t                        init_batch_size,
                                                int32_t                        max_batch_size,
-                                               int64_t                        eos_token_id) {
+                                               int64_t                        eos_token_id,
+                                               std::string                    stream_log_tag) {
     std::vector<BaseLogitsProcessorPtr> result;
 
     auto& config = *generate_input->generate_config;
@@ -127,7 +128,11 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
             }
             return ErrorInfo(error_code, std::string(matcher_or.status().message()));
         }
-        auto grammar_processor = std::make_shared<GrammarLogitsProcessor>(std::move(matcher_or.value()), eos_token_id);
+        auto grammar_processor = std::make_shared<GrammarLogitsProcessor>(std::move(matcher_or.value()),
+                                                                          eos_token_id,
+                                                                          backend->updateTimeoutMs(),
+                                                                          backend->metricsReporter(),
+                                                                          std::move(stream_log_tag));
         result.push_back(std::move(grammar_processor));
     }
 

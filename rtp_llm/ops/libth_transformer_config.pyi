@@ -421,6 +421,7 @@ class GrammarConfig:
     num_workers: int
     terminate_without_stop_token: bool
     tokenizer_info_json: str
+    update_timeout_ms: int
 
     def __getstate__(self) -> tuple:
         ...
@@ -580,6 +581,7 @@ class GrammarConfig:
     num_workers: int
     terminate_without_stop_token: bool
     tokenizer_info_json: str
+    update_timeout_ms: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

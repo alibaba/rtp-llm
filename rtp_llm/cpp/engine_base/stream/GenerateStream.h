@@ -617,6 +617,8 @@ public:
         return logits_processor_list_;
     }
 
+    bool xgrammarUpdateTimedOut() const;
+
     at::Generator getGenerator() {
         return generator_;
     }

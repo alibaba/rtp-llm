@@ -5,7 +5,9 @@
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -173,6 +175,26 @@ private:
 
 class GenerateStreamTest: public DeviceTestBase {
 protected:
+    std::shared_ptr<GrammarLogitsProcessor> makeTimeoutGrammarProcessor() {
+        std::vector<std::string> vocab;
+        for (int i = 0; i < 128; ++i) {
+            vocab.emplace_back(1, static_cast<char>(i));
+        }
+        xgrammar::TokenizerInfo tokenizer_info(vocab, xgrammar::VocabType::RAW, 128, std::vector<int32_t>{0});
+        GrammarConfig           config;
+        config.num_workers = 1;
+        auto backend       = XGrammarBackend::create(tokenizer_info.SerializeJSON(), config);
+        auto matcher       = backend->createMatcherFromKey({"regex", "a*"});
+        EXPECT_TRUE(matcher.ok()) << matcher.status().ToString();
+        if (!matcher.ok()) {
+            return nullptr;
+        }
+        auto processor = std::make_shared<GrammarLogitsProcessor>(matcher.value());
+        // The native startup boundary requires a positive budget; force only the
+        // test instance to expire after its first synchronous update without sleeping.
+        processor->update_timeout_ms_ = 0;
+        return processor;
+    }
 };
 
 template<typename T>
@@ -253,6 +275,86 @@ TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAux
     ASSERT_EQ(decode_output_result.value().generate_outputs.size(), 1);
     EXPECT_EQ(decode_output_result.value().generate_outputs[0].aux_info.generation_prefill_cuda_graph_status,
               "replayed");
+}
+
+TEST_F(GenerateStreamTest, grammarUpdateTimeoutPersistsThroughFinalDecodeOutput) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
+    stream->generateConfig()->max_new_tokens = 2;
+    stream->generateConfig()->is_streaming   = true;
+    stream->generateConfig()->aux_info       = true;
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    auto processor = makeTimeoutGrammarProcessor();
+    ASSERT_TRUE(processor);
+    stream->logits_processor_list_.push_back(processor);
+    EXPECT_FALSE(stream->xgrammarUpdateTimedOut());
+
+    updateOneToken(stream, 'a');
+    ASSERT_FALSE(stream->hasError());
+    EXPECT_TRUE(stream->xgrammarUpdateTimedOut());
+    ASSERT_TRUE(stream->hasOutput());
+    auto first = stream->nextOutput(1);
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(first.value().generate_outputs.size(), 1);
+    EXPECT_TRUE(first.value().generate_outputs[0].aux_info.xgrammar_update_timeout);
+    EXPECT_FALSE(first.value().generate_outputs[0].finished);
+    EXPECT_EQ(first.value().generate_outputs[0].output_ids.item<int32_t>(), 'a');
+
+    // 'b' violates a*, but after timeout generation must continue without a
+    // matcher rejection or a committed-output-length parity error.
+    updateOneToken(stream, 'b');
+    ASSERT_FALSE(stream->hasError());
+    EXPECT_EQ(stream->outputTokenLen(), 2);
+    EXPECT_FALSE(processor->committedOutputLen().has_value());
+    ASSERT_TRUE(stream->hasOutput());
+    auto final = stream->nextOutput(1);
+    ASSERT_TRUE(final.ok());
+    ASSERT_EQ(final.value().generate_outputs.size(), 1);
+    EXPECT_TRUE(final.value().generate_outputs[0].aux_info.xgrammar_update_timeout);
+    EXPECT_TRUE(final.value().generate_outputs[0].finished);
+    EXPECT_EQ(final.value().generate_outputs[0].output_ids.item<int32_t>(), 'b');
+}
+
+TEST_F(GenerateStreamTest, grammarUpdateTimeoutPersistsThroughFinalMtpOutput) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
+    stream->generateConfig()->max_new_tokens = 2;
+    stream->generateConfig()->is_streaming   = false;
+    stream->generateConfig()->aux_info       = true;
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    auto processor = makeTimeoutGrammarProcessor();
+    ASSERT_TRUE(processor);
+    stream->logits_processor_list_.push_back(processor);
+    auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp_output_buffer->tokens = torch::zeros({1, 2}, torch::kInt32);
+    stream->setSPOutputBuffer(sp_output_buffer);
+
+    for (int32_t token : {'a', 'b'}) {
+        StreamSpecUpdateInfo update_info{
+            .new_tokens          = torch::full({1, 1}, token, torch::kInt32),
+            .num_new_tokens      = 1,
+            .draft_token         = -1,
+            .draft_hidden_states = torch::Tensor(),
+            .draft_token_probs   = torch::Tensor(),
+        };
+        stream->specUpdate(update_info);
+        ASSERT_FALSE(stream->hasError());
+        EXPECT_TRUE(stream->xgrammarUpdateTimedOut());
+        if (token == 'a') {
+            EXPECT_FALSE(stream->hasOutput());
+        }
+    }
+
+    EXPECT_EQ(stream->outputTokenLen(), 2);
+    EXPECT_FALSE(processor->committedOutputLen().has_value());
+    ASSERT_TRUE(stream->hasOutput());
+    auto final = stream->nextOutput(1);
+    ASSERT_TRUE(final.ok());
+    ASSERT_EQ(final.value().generate_outputs.size(), 1);
+    EXPECT_TRUE(final.value().generate_outputs[0].aux_info.xgrammar_update_timeout);
+    EXPECT_TRUE(final.value().generate_outputs[0].finished);
+    EXPECT_TRUE(torch::equal(final.value().generate_outputs[0].output_ids,
+                             torch::tensor({{static_cast<int32_t>('a'), static_cast<int32_t>('b')}}, torch::kInt32)));
 }
 
 TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissing) {

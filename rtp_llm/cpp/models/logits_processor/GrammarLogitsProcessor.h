@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <ATen/ATen.h>
+#include "kmonitor/client/MetricsReporter.h"
 
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 
@@ -18,7 +19,11 @@ class RtpGrammarMatcher;
 
 class GrammarLogitsProcessor final: public BaseLogitsProcessor {
 public:
-    explicit GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher, int64_t eos_token_id = 0);
+    explicit GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher,
+                                    int64_t                            eos_token_id      = 0,
+                                    int                                update_timeout_ms = 10,
+                                    kmonitor::MetricsReporterPtr       metrics_reporter  = nullptr,
+                                    std::string                        stream_log_tag    = {});
 
     ~GrammarLogitsProcessor() override;
 
@@ -34,8 +39,10 @@ public:
     // device-side next-step state, so the normal-decode async device-state
     // fast path must keep the pre-sampler wait for streams carrying it.
     bool isStateful() const override {
-        return true;
+        return !updateTimedOut();
     }
+
+    bool updateTimedOut() const;
 
     ErrorResult<int> prepareSpeculative(const SpecLogitsProcessorRequest& request) override;
 
@@ -49,6 +56,10 @@ private:
     std::shared_ptr<RtpGrammarMatcher> matcher_;
     int64_t                            eos_token_id_         = 0;
     int64_t                            committed_output_len_ = 0;
+    int                                update_timeout_ms_;
+    bool                               update_timed_out_ = false;
+    kmonitor::MetricsReporterPtr       metrics_reporter_;
+    const std::string                  stream_log_tag_;
     std::unique_ptr<DecodeMaskBuilder> decode_mask_builder_;
 
     mutable std::mutex state_mutex_;
