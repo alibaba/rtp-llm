@@ -1096,6 +1096,31 @@ def _all_ready(ready: bool, group, device) -> bool:
     return _agree_across_group(group, ready, "collective_workspace")
 
 
+def symmetric_peer_memory_supported(group, device):
+    """Collectively inspect direct peer access before constructing graph state."""
+    try:
+        import torch.distributed._symmetric_memory as symm
+
+        props = torch.cuda.get_device_properties(device)
+        supported = symm.get_backend(device) == "CUDA"
+        metadata = (socket.gethostname(), str(props.uuid), _nvlink_fabric(str(props.uuid)))
+    except Exception:
+        supported = False
+        metadata = None
+    if not _all_ready(supported, group, device):
+        return False
+    peers = [None] * group.size()
+    torch.distributed.all_gather_object(peers, metadata, group=group)
+    try:
+        supported = _nvlink_peers(
+            [peer[1] for peer in peers], hostnames=[peer[0] for peer in peers],
+            fabrics=[peer[2] for peer in peers],
+        )
+    except Exception:
+        supported = False
+    return _all_ready(supported, group, device)
+
+
 def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
     """Return an NVLink workspace for BF16 Decode ReduceScatter.
 
@@ -1721,6 +1746,10 @@ class MlaDcpCommunicator:
         ):
             raise ValueError("MLA DCP requires BF16/E4M3 Q and an even latent dimension")
         self.backend = "a2a"
+        self.peer_memory_supported = (
+            symmetric_peer_memory_supported(self.group, self.device)
+            if torch.cuda.is_available() else False
+        )
         self._pack_a2a, self._combine_a2a = _get_mla_dcp_kernels()
         logging.info(
             "[MLA_DCP] backend=a2a tp=%d rank=%d world_rank=%d dp_rank=%d",
@@ -1742,7 +1771,7 @@ class MlaDcpCommunicator:
         all_gather_into(local_q.view(wire_dtype), output.view(wire_dtype), Group.TP)
         return output
 
-    def combine(self, partial_o, partial_lse, local_seq_lens):
+    def combine(self, partial_o, partial_lse, local_seq_lens, *, a2a_buffers=None):
         import triton
 
         tokens, heads, dim = partial_o.shape
@@ -1755,6 +1784,8 @@ class MlaDcpCommunicator:
             or not (partial_o.device == partial_lse.device == local_seq_lens.device == self.device)
         ):
             raise ValueError("MLA DCP combine requires BF16 O[T,H,L], FP32 LSE[T,H] and int32 lengths[T]")
+        if a2a_buffers is not None:
+            return a2a_buffers.combine(tokens)
         shape = (self.size, tokens, self.local_heads, dim + 2)
         packed = torch.empty(shape, dtype=torch.bfloat16, device=self.device)
         self._pack_a2a[(tokens, heads)](

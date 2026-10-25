@@ -159,14 +159,6 @@ class KimiK3MlaImpl(MlaImplBase):
         if self.fp8_compute and self.token_per_block != 128:
             raise ValueError("K3 FP8 MLA requires 128-token kernel pages")
         operand_dtype = torch.float8_e4m3fn if self.fp8_compute else torch.bfloat16
-        workspace_key = (device, operand_dtype)
-        if workspace_key not in _PAGED_MLA_WORKSPACES:
-            _PAGED_MLA_WORKSPACES[workspace_key] = torch.empty(
-                512 * 1024 * 1024, dtype=torch.uint8, device=device
-            )
-        self._paged_workspace = _PAGED_MLA_WORKSPACES[workspace_key]
-        if self._paged_workspace.dtype != torch.uint8 or not self._paged_workspace.is_cuda:
-            raise ValueError("K3 MLA workspace must be a CUDA uint8 tensor")
         self.scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** -0.5 * self.softmax_extra_scale
         # Prefill and paged attention share the unit-scale FP8 cache contract.
         self._q_scale = 1.0
@@ -179,6 +171,28 @@ class KimiK3MlaImpl(MlaImplBase):
             self._absorbed_query_buffer = torch.empty(shape, dtype=torch.bfloat16, device=device)
             self._query_buffer = torch.empty(shape, dtype=torch.float8_e4m3fn, device=device)
         self.page_rr_communicator = get_mla_dcp(self.attn_configs, device, operand_dtype)
+        self._fia2a_backend = None
+        if torch.cuda.get_device_capability(device) == (10, 3):
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_fia2a_backend import (
+                PageRRFIA2AMLABackend,
+            )
+
+            if PageRRFIA2AMLABackend.is_supported(
+                self.attn_configs, self.page_rr_communicator, operand_dtype,
+            ):
+                self._fia2a_backend = PageRRFIA2AMLABackend(
+                    self.attn_configs, self.page_rr_communicator, operand_dtype,
+                    token_major=self.q_replicated,
+                )
+        if self._fia2a_backend is None:
+            workspace_key = (device, operand_dtype)
+            if workspace_key not in _PAGED_MLA_WORKSPACES:
+                _PAGED_MLA_WORKSPACES[workspace_key] = torch.empty(
+                    512 * 1024 * 1024, dtype=torch.uint8, device=device
+                )
+            self._paged_workspace = _PAGED_MLA_WORKSPACES[workspace_key]
+            if self._paged_workspace.dtype != torch.uint8 or not self._paged_workspace.is_cuda:
+                raise ValueError("K3 MLA workspace must be a CUDA uint8 tensor")
 
     def support_cuda_graph(self):
         return self._paged
@@ -236,6 +250,12 @@ class KimiK3MlaImpl(MlaImplBase):
             raise ValueError("K3 MLA replay requires the captured physical shape")
         self.attn_inputs = inputs
         self.page_rr_metadata.prepare_decode(inputs, forbid_realloc)
+        if self._fia2a_backend is not None:
+            self._fia2a_backend.prepare(
+                self.page_rr_metadata,
+                self.scale * (self._q_scale * self._kv_scale_value if self.fp8_compute else 1.0),
+                self._kv_scale_value if self.fp8_compute else 1.0,
+            )
 
     def _plan_prefill(self, mla_params):
         self.qo_indptr = mla_params.qo_indptr_d
@@ -615,46 +635,57 @@ class KimiK3MlaImpl(MlaImplBase):
 
     def _forward_paged(self, query, kv_cache, layer_id):
         weights = self.weights[layer_id]
-        local_query = query.transpose(0, 1).contiguous()
-        gathered = (
-            local_query
-            if self.q_replicated
-            else self.page_rr_communicator.query_gather(local_query)
-        )
-        batch, queries = self.page_rr_metadata.local_causal_lens.shape
-        dimension = self.kv_lora_rank + self.qk_rope_head_dim
-        partial, lse = self._run_paged_attention(
-            # TokenSpeed accepts the gathered head-major strides, as in
-            # feat/k3_dev. Avoid copying the entire FP8 query after AG.
-            gathered.transpose(0, 1).view(
-                batch, queries, self.page_rr_communicator.heads, dimension
-            ),
-            kv_cache.kv_cache_base.view(-1, self.token_per_block, dimension),
-            self._paged_workspace.view(torch.int8),
-            self.kv_lora_rank,
-            self.qk_rope_head_dim,
-            self.page_rr_metadata.query_block_tables,
-            self.page_rr_metadata.local_causal_lens,
-            self.page_rr_metadata.query_block_tables.shape[1]
-            * self.token_per_block,
-            self.scale
-            * (
-                self._q_scale * self._kv_scale_value
-                if self.fp8_compute
-                else 1.0
-            ),
-            output_scale=self._kv_scale_value if self.fp8_compute else 1.0,
-            normalize_empty=False,
-        )
-        merged = self.page_rr_communicator.combine(
-            partial.view(
-                self.tokens,
-                self.page_rr_communicator.heads,
+        if self._fia2a_backend is not None:
+            gathered = (
+                query if self.q_replicated
+                else self.page_rr_communicator.query_gather(query.transpose(0, 1).contiguous())
+            )
+            merged = self._fia2a_backend.forward(
+                gathered,
+                kv_cache.kv_cache_base.view(-1, self.token_per_block,
+                                            self.kv_lora_rank + self.qk_rope_head_dim),
+            )
+        else:
+            local_query = query.transpose(0, 1).contiguous()
+            gathered = (
+                local_query
+                if self.q_replicated
+                else self.page_rr_communicator.query_gather(local_query)
+            )
+            batch, queries = self.page_rr_metadata.local_causal_lens.shape
+            dimension = self.kv_lora_rank + self.qk_rope_head_dim
+            partial, lse = self._run_paged_attention(
+                # TokenSpeed accepts the gathered head-major strides, as in
+                # feat/k3_dev. Avoid copying the entire FP8 query after AG.
+                gathered.transpose(0, 1).view(
+                    batch, queries, self.page_rr_communicator.heads, dimension
+                ),
+                kv_cache.kv_cache_base.view(-1, self.token_per_block, dimension),
+                self._paged_workspace.view(torch.int8),
                 self.kv_lora_rank,
-            ),
-            lse.view(self.tokens, self.page_rr_communicator.heads),
-            self.page_rr_metadata.local_causal_lens,
-        )
+                self.qk_rope_head_dim,
+                self.page_rr_metadata.query_block_tables,
+                self.page_rr_metadata.local_causal_lens,
+                self.page_rr_metadata.query_block_tables.shape[1]
+                * self.token_per_block,
+                self.scale
+                * (
+                    self._q_scale * self._kv_scale_value
+                    if self.fp8_compute
+                    else 1.0
+                ),
+                output_scale=self._kv_scale_value if self.fp8_compute else 1.0,
+                normalize_empty=False,
+            )
+            merged = self.page_rr_communicator.combine(
+                partial.view(
+                    self.tokens,
+                    self.page_rr_communicator.heads,
+                    self.kv_lora_rank,
+                ),
+                lse.view(self.tokens, self.page_rr_communicator.heads),
+                self.page_rr_metadata.local_causal_lens,
+            )
         output = torch.empty(
             (self.tokens, self.num_heads, weights[W.mla_vc].shape[-1]),
             dtype=torch.bfloat16, device=query.device,
