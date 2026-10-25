@@ -24,7 +24,7 @@ import java.util.function.Supplier;
  *
  * <p>A status entry describes the generation currently being polled. Routing
  * authority always comes from the matching endpoint generation in
- * {@link EndpointRegistry}; callers must capture a pin before using it. Keeping
+ * {@link EndpointRegistry}; callers must take a pin before using it. Keeping
  * both views behind this directory makes disagreement visible instead of
  * hiding it behind a derived capacity value.</p>
  */
@@ -227,7 +227,7 @@ public final class WorkerDirectory implements WorkerStatusProvider {
 
     /**
      * Prefill candidates whose reported DP group has every rank available for routing.
-     * The winning address must still be captured and identity-checked.
+     * The winning address must still be pinned and identity-checked.
      */
     public List<EndpointRegistry.PrefillRoutingEntry> prefillRoutingSnapshot(RoleType role) {
         List<EndpointRegistry.PrefillRoutingEntry> directory = endpointRegistry.prefillRoutingSnapshot(role);
@@ -258,9 +258,8 @@ public final class WorkerDirectory implements WorkerStatusProvider {
     }
 
     /** Capture one exact currently published endpoint generation by address. */
-    public WorkerEndpoint.GenerationPin captureEndpoint(
-            RoleType role, String ipPort) {
-        return endpointRegistry.capture(role, ipPort);
+    public WorkerEndpoint.GenerationPin pinEndpoint(RoleType role, String ipPort) {
+        return endpointRegistry.pin(role, ipPort);
     }
 
     /**
@@ -296,33 +295,30 @@ public final class WorkerDirectory implements WorkerStatusProvider {
     }
 
     /** Pin the exact generation represented by a Decode routing snapshot. */
-    public WorkerEndpoint.GenerationPin captureDecodeGeneration(
-            DecodeEndpoint.DecodeRoutingView expected) {
-        return endpointRegistry.captureDecodeGeneration(expected);
+    public WorkerEndpoint.GenerationPin pinDecodeEndpoint(DecodeEndpoint.DecodeRoutingView expected) {
+        return endpointRegistry.pinDecodeEndpoint(expected);
     }
 
     /** Capture exact endpoint generations for one routing decision. */
-    public List<WorkerEndpoint.GenerationPin> captureEndpoints(
-            RoleType role, String group) {
-        List<WorkerEndpoint.GenerationPin> captured = endpointRegistry.capture(role);
-        List<WorkerEndpoint.GenerationPin> matching =
-                new ArrayList<>(captured.size());
+    public List<WorkerEndpoint.GenerationPin> pinEndpoints(RoleType role, String group) {
+        List<WorkerEndpoint.GenerationPin> pinned = endpointRegistry.pin(role);
+        List<WorkerEndpoint.GenerationPin> matching = new ArrayList<>(pinned.size());
         try {
-            for (int index = 0; index < captured.size(); index++) {
-                WorkerEndpoint.GenerationPin pin = captured.get(index);
+            for (int index = 0; index < pinned.size(); index++) {
+                WorkerEndpoint.GenerationPin pin = pinned.get(index);
                 WorkerStatus.TopologySnapshot topology =
                         pin.endpoint().getStatus().topologySnapshot();
                 if (group != null && !group.equals(topology.group())) {
                     pin.close();
-                    captured.set(index, null);
+                    pinned.set(index, null);
                     continue;
                 }
                 matching.add(pin);
-                captured.set(index, null);
+                pinned.set(index, null);
             }
             return matching;
         } catch (Throwable failure) {
-            closePins(captured);
+            closePins(pinned);
             closePins(matching);
             throw failure;
         }
@@ -330,15 +326,15 @@ public final class WorkerDirectory implements WorkerStatusProvider {
 
     /** Non-owning monitoring view; no live endpoint map escapes. */
     public List<String> endpointAddresses(RoleType role, String group) {
-        List<WorkerEndpoint.GenerationPin> captured = captureEndpoints(role, group);
+        List<WorkerEndpoint.GenerationPin> pinned = pinEndpoints(role, group);
         try {
-            List<String> addresses = new ArrayList<>(captured.size());
-            for (WorkerEndpoint.GenerationPin pin : captured) {
+            List<String> addresses = new ArrayList<>(pinned.size());
+            for (WorkerEndpoint.GenerationPin pin : pinned) {
                 addresses.add(pin.endpoint().ipPort());
             }
             return addresses;
         } finally {
-            closePins(captured);
+            closePins(pinned);
         }
     }
 

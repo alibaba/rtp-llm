@@ -26,7 +26,7 @@ public final class RandomStrategy {
         this.workerDirectory = workerDirectory;
     }
 
-    public SelectedRole select( BalanceContext context, RoleType role, String group) {
+    public SelectedRole select(BalanceContext context, RoleType role, String group) {
         context.beginRoutingAttempt(role);
         if (role != RoleType.VIT) {
             throw new IllegalArgumentException(
@@ -41,8 +41,7 @@ public final class RandomStrategy {
         int start = ThreadLocalRandom.current().nextInt(addresses.size());
         for (int offset = 0; offset < addresses.size(); offset++) {
             String address = addresses.get((start + offset) % addresses.size());
-            WorkerEndpoint.GenerationPin pin =
-                    workerDirectory.captureEndpoint(RoleType.VIT, address);
+            WorkerEndpoint.GenerationPin pin = workerDirectory.pinEndpoint(RoleType.VIT, address);
             if (pin == null) {
                 continue;
             }

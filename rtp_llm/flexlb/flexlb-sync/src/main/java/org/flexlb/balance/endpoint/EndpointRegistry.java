@@ -43,7 +43,7 @@ public class EndpointRegistry {
     /**
      * One non-owning Prefill generation exposed to routing.
      *
-     * <p>The endpoint identity is advisory: a caller must capture the address
+     * <p>The endpoint identity is advisory: a caller must pin the address
      * and verify that the pinned endpoint is still this exact instance before
      * transferring generation ownership to a request.</p>
      */
@@ -118,7 +118,7 @@ public class EndpointRegistry {
      * replacement after changing the endpoint map. A racing reader may finish
      * an older traversal, but it cannot acquire stale ownership because the
      * selected address and generation are always revalidated by
-     * {@link #captureDecodeGeneration(DecodeEndpoint.DecodeRoutingView)}.
+     * {@link #pinDecodeEndpoint(DecodeEndpoint.DecodeRoutingView)}.
      */
     private volatile List<Map.Entry<String, DecodeEndpoint>> decodeDirectory =
             List.of();
@@ -184,40 +184,38 @@ public class EndpointRegistry {
      * retirement waits for the pin) or after detach (and returns {@code null}).
      * The returned route capability is thread-confined.</p>
      */
-    public WorkerEndpoint.GenerationPin capture(
-            RoleType roleType,
-            String ipPort) {
+    public WorkerEndpoint.GenerationPin pin(RoleType roleType, String ipPort) {
         ConcurrentHashMap<String, WorkerEndpoint> endpoints =
                 endpoints(roleType);
-        return endpoints == null ? null : capture(endpoints, ipPort);
+        return endpoints == null ? null : pin(endpoints, ipPort);
     }
 
     /**
      * Capture the currently addressable generations without exposing a live
      * registry map. Addresses are snapshotted first; every exact pin is then
-     * acquired through {@link #capture(RoleType, String)}.
+     * acquired through {@link #pin(RoleType, String)}.
      */
-    public List<WorkerEndpoint.GenerationPin> capture(RoleType roleType) {
+    public List<WorkerEndpoint.GenerationPin> pin(RoleType roleType) {
         List<String> addresses = endpointAddressSnapshot(roleType);
         List<WorkerEndpoint.GenerationPin> pins =
                 new ArrayList<>(addresses.size());
         try {
             for (String address : addresses) {
-                WorkerEndpoint.GenerationPin pin = capture(roleType, address);
+                WorkerEndpoint.GenerationPin pin = pin(roleType, address);
                 if (pin != null) {
                     pins.add(pin);
                 }
             }
             return pins;
-        } catch (RuntimeException | Error captureFailure) {
+        } catch (RuntimeException | Error pinFailure) {
             for (WorkerEndpoint.GenerationPin pin : pins) {
                 try {
                     pin.close();
                 } catch (Throwable closeFailure) {
-                    captureFailure.addSuppressed(closeFailure);
+                    pinFailure.addSuppressed(closeFailure);
                 }
             }
-            throw captureFailure;
+            throw pinFailure;
         }
     }
 
@@ -226,7 +224,7 @@ public class EndpointRegistry {
      *
      * <p>No endpoint object or live registry map escapes.  A caller which needs
      * generation ownership must still pass an address back through
-     * {@link #capture(RoleType, String)}; same-address replacement therefore
+     * {@link #pin(RoleType, String)}; same-address replacement therefore
      * remains linearized by the address key's remapping critical section.</p>
      */
     public List<String> endpointAddressSnapshot(RoleType roleType) {
@@ -254,7 +252,7 @@ public class EndpointRegistry {
      *
      * <p>This removes per-request registry lookups while deliberately avoiding
      * fleet-wide generation pins. A selected entry remains advisory until its
-     * address is captured and the endpoint identity is revalidated.</p>
+     * address is pinned and the endpoint identity is revalidated.</p>
      */
     public List<PrefillRoutingEntry> prefillRoutingSnapshot(RoleType roleType) {
         return switch (roleType) {
@@ -271,7 +269,7 @@ public class EndpointRegistry {
      * <p>The registry is intentionally not locked while an endpoint takes its
      * admission lock.  This avoids introducing a map-bin/admission-lock order;
      * publication races are resolved when the selected generation is pinned
-     * by {@link #captureDecodeGeneration(DecodeEndpoint.DecodeRoutingView)}.</p>
+     * by {@link #pinDecodeEndpoint(DecodeEndpoint.DecodeRoutingView)}.</p>
      */
     public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot() {
         List<Map.Entry<String, DecodeEndpoint>> directory = decodeDirectory;
@@ -284,18 +282,16 @@ public class EndpointRegistry {
     }
 
     /**
-     * Capture the exact Decode generation represented by a routing snapshot.
+     * Pin the exact Decode generation represented by a routing snapshot.
      *
      * <p>The routing values are advisory and may change after selection. The
      * subsequent reservation/dispatch transaction revalidates capacity under
      * the endpoint admission lock. This method authorizes only an identical
-     * endpoint generation; every rejected or exceptional capture is closed
+     * endpoint generation; every rejected or exceptional pin is closed
      * here, while a successful caller owns the returned generation pin.</p>
      */
-    public WorkerEndpoint.GenerationPin captureDecodeGeneration(
-            DecodeEndpoint.DecodeRoutingView expected) {
-        WorkerEndpoint.GenerationPin pin =
-                capture(RoleType.DECODE, expected.address());
+    public WorkerEndpoint.GenerationPin pinDecodeEndpoint(DecodeEndpoint.DecodeRoutingView expected) {
+        WorkerEndpoint.GenerationPin pin = pin(RoleType.DECODE, expected.address());
         if (pin == null) {
             return null;
         }
@@ -314,16 +310,14 @@ public class EndpointRegistry {
         }
     }
 
-    private static WorkerEndpoint.GenerationPin capture(
-            ConcurrentHashMap<String, WorkerEndpoint> endpoints,
-            String ipPort) {
-        AtomicReference<WorkerEndpoint.GenerationPin> captured =
-                new AtomicReference<>();
+    private static WorkerEndpoint.GenerationPin pin(ConcurrentHashMap<String, WorkerEndpoint> endpoints,
+                                                    String ipPort) {
+        AtomicReference<WorkerEndpoint.GenerationPin> pinned = new AtomicReference<>();
         endpoints.computeIfPresent(ipPort, (ignored, current) -> {
-            captured.set(current.tryPinGeneration());
+            pinned.set(current.tryPinGeneration());
             return current;
         });
-        return captured.get();
+        return pinned.get();
     }
 
     /** Return the endpoint only when it belongs to the expected status generation. */

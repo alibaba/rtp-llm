@@ -122,8 +122,7 @@ public class VitCacheSelector {
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
-        try (var pin = workers.captureEndpoint(RoleType.VIT,
-                selected.getServerIp() + ":" + selected.getHttpPort())) {
+        try (var pin = workers.pinEndpoint(RoleType.VIT, selected.getServerIp() + ":" + selected.getHttpPort())) {
             WorkerStatus worker = pin == null ? null : pin.endpoint().getStatus();
             if (selected.getRole() != RoleType.VIT || worker == null
                     || (group != null && !Objects.equals(group, worker.getGroup()))
@@ -142,8 +141,8 @@ public class VitCacheSelector {
         if (!result.isSuccess()) {
             return null;
         }
-        WorkerEndpoint.GenerationPin pin = workers.captureEndpoint(RoleType.VIT,
-                result.getServerIp() + ":" + result.getHttpPort());
+        WorkerEndpoint.GenerationPin pin =
+                workers.pinEndpoint(RoleType.VIT, result.getServerIp() + ":" + result.getHttpPort());
         if (pin == null) {
             return null;
         }

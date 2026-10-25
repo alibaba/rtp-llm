@@ -351,8 +351,14 @@ class EncoderSchedulingIntegrationTest {
         assertEquals(RequestPhase.ENCODER, requests.requestSlot("5", RequestPhase.ENCODER).requestPhase());
     }
 
-    private EncoderEndpoint worker(String ip, int port, boolean alive, String group, long availableKv,
-                                   Map<String, WorkerStatus.TaskObservation> tasks, long running, long waiting) {
+    private EncoderEndpoint worker(String ip,
+                                   int port,
+                                   boolean alive,
+                                   String group,
+                                   long availableKv,
+                                   Map<String, WorkerStatus.TaskObservation> tasks,
+                                   long running,
+                                   long waiting) {
         WorkerStatus status = mock(WorkerStatus.class);
         WorkerStatus.EngineObservation engine = mock(WorkerStatus.EngineObservation.class);
         when(status.isAlive()).thenReturn(alive);
@@ -368,8 +374,7 @@ class EncoderSchedulingIntegrationTest {
         when(engine.runningQueryLen()).thenReturn(running);
         when(engine.waitingQueryLen()).thenReturn(waiting);
         EncoderEndpoint endpoint = new EncoderEndpoint(status, new EndpointEventHandler(requests));
-        when(directory.captureEndpoint(eq(RoleType.ENCODER), eq(ip)))
-                .thenAnswer(invocation -> endpoint.tryPinGeneration());
+        when(directory.pinEndpoint(eq(RoleType.ENCODER), eq(ip))).thenAnswer(invocation -> endpoint.tryPinGeneration());
         return endpoint;
     }
 

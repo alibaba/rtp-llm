@@ -168,14 +168,12 @@ class EndpointRegistryRoleTest {
                         address,
                         replacementStatus);
 
-        assertNull(registry.captureDecodeGeneration(oldView),
-                "an old view must not pin a same-address replacement");
+        assertNull(registry.pinDecodeEndpoint(oldView), "an old view must not pin a same-address replacement");
         DecodeEndpoint.DecodeRoutingView replacementView =
                 registry.decodeRoutingSnapshot().getFirst();
         assertEquals(address, replacementView.address());
         assertTrue(oldView.generationId() != replacementView.generationId());
-        try (WorkerEndpoint.GenerationPin pin =
-                     registry.captureDecodeGeneration(replacementView)) {
+        try (WorkerEndpoint.GenerationPin pin = registry.pinDecodeEndpoint(replacementView)) {
             assertNotNull(pin);
             assertSame(replacement, pin.endpoint());
         }
@@ -235,9 +233,7 @@ class EndpointRegistryRoleTest {
                 .orElseThrow()
                 .endpoint());
         WorkerEndpoint.GenerationPin replacementPin =
-                registry.capture(
-                        RoleType.PREFILL,
-                        originalDirectory.getFirst().address());
+                registry.pin(RoleType.PREFILL, originalDirectory.getFirst().address());
         assertNotNull(replacementPin);
         try (replacementPin) {
             assertSame(replacement, replacementPin.endpoint());

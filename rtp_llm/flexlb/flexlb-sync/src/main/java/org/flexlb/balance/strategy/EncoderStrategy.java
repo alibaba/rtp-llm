@@ -41,7 +41,7 @@ public final class EncoderStrategy {
         long fewestRequests = Long.MAX_VALUE;
         try {
             for (String address : workerDirectory.endpointAddressSnapshot(RoleType.ENCODER)) {
-                WorkerEndpoint.GenerationPin candidate = workerDirectory.captureEndpoint(RoleType.ENCODER, address);
+                WorkerEndpoint.GenerationPin candidate = workerDirectory.pinEndpoint(RoleType.ENCODER, address);
                 if (candidate == null) {
                     continue;
                 }

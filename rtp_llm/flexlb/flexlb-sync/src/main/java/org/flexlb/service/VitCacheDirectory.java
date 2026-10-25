@@ -174,7 +174,7 @@ public class VitCacheDirectory {
 
     private boolean isRoutable(WorkerStatus worker) {
         if (worker == null) { return false; }
-        try (var pin = workers.captureEndpoint(RoleType.VIT, worker.getIpPort())) {
+        try (var pin = workers.pinEndpoint(RoleType.VIT, worker.getIpPort())) {
             return pin != null && pin.endpoint().getStatus() == worker;
         }
     }

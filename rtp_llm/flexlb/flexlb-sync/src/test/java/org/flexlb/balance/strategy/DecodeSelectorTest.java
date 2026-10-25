@@ -230,9 +230,8 @@ class DecodeSelectorTest {
         Mockito.when(racing.decodeRoutingSnapshot(null))
                 .thenReturn(List.of(stale))
                 .thenReturn(List.of(replacement));
-        Mockito.when(racing.captureDecodeGeneration(stale)).thenReturn(null);
-        Mockito.when(racing.captureDecodeGeneration(replacement))
-                .thenReturn(replacementPin);
+        Mockito.when(racing.pinDecodeEndpoint(stale)).thenReturn(null);
+        Mockito.when(racing.pinDecodeEndpoint(replacement)).thenReturn(replacementPin);
 
         PlacementResult<SelectedRole, RoleType> result =
                 new DecodeSelector(racing).select(DecodeRequirement.capture(context(1_000, 1_001L)), null);
@@ -245,8 +244,8 @@ class DecodeSelectorTest {
         selected.close();
         Mockito.verify(replacementPin).close();
         Mockito.verify(racing, Mockito.times(2)).decodeRoutingSnapshot(null);
-        Mockito.verify(racing).captureDecodeGeneration(stale);
-        Mockito.verify(racing).captureDecodeGeneration(replacement);
+        Mockito.verify(racing).pinDecodeEndpoint(stale);
+        Mockito.verify(racing).pinDecodeEndpoint(replacement);
     }
 
     @ParameterizedTest

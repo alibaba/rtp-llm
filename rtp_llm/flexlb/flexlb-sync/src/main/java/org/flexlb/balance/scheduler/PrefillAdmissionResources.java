@@ -55,7 +55,7 @@ public final class PrefillAdmissionResources {
         if (decide.isAbsent()) {
             // The committed topology has no independent Decode resource.
             // Its Prefill/PDFUSION reservation still follows the same handoff.
-            return captureMember(item, null);
+            return buildMember(item, null);
         }
         DecodeEndpoint decode = decide.endpoint();
         if (decode == null || decide.reservation() == null) {
@@ -68,7 +68,7 @@ public final class PrefillAdmissionResources {
             return failed(failure);
         }
         return switch (acquisition.status()) {
-            case SUCCESS, ALREADY_ACCEPTED -> captureMember(item, acquisition.permit());
+            case SUCCESS, ALREADY_ACCEPTED -> buildMember(item, acquisition.permit());
             case CAPACITY_FULL -> decodeCapacityFull(item);
             case NOT_OWNED, NOT_QUEUED -> rejected(
                     DeliveryBlockReason.OWNERSHIP_LOST);
@@ -91,17 +91,15 @@ public final class PrefillAdmissionResources {
      * {@link Member} nor the accepted-result wrapper exists before acquisition,
      * so both allocation windows are guarded by the exact permit rollback.
      */
-    private static DeliveryBlockReason.Attempt<Member> captureMember(
-            ScheduledRequest item,
-            DecodeEndpoint.EngineDispatchPermit permit) {
+    private static DeliveryBlockReason.Attempt<Member> buildMember(ScheduledRequest item,
+                                                                   DecodeEndpoint.EngineDispatchPermit permit) {
         Member member = null;
         try {
             member = new Member(item, permit);
             return accepted(member);
-        } catch (Throwable captureFailure) {
-            Throwable failure = member == null
-                    ? rollbackPermit(permit, captureFailure)
-                    : rollbackMember(member, captureFailure);
+        } catch (Throwable buildFailure) {
+            Throwable failure =
+                    member == null ? rollbackPermit(permit, buildFailure) : rollbackMember(member, buildFailure);
             return failed(failure);
         }
     }

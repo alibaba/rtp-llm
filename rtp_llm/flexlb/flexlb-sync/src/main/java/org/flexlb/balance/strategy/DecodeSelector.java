@@ -105,7 +105,7 @@ public class DecodeSelector {
                     i -> decodeWorkerViews.get(i).address());
             if (selectedIndex < 0) { throw new IllegalStateException("Decode snapshot candidate disappeared"); }
             DecodeRoutingView selected = decodeWorkerViews.get(selectedIndex);
-            WorkerEndpoint.GenerationPin pin = workerDirectory.captureDecodeGeneration(selected);
+            WorkerEndpoint.GenerationPin pin = workerDirectory.pinDecodeEndpoint(selected);
             if (pin != null) {
                 if (context != null) {
                     context.recordSelectionReason(RoleType.DECODE,
@@ -127,7 +127,7 @@ public class DecodeSelector {
         List<Map<String, Object>> evidence = new ArrayList<>();
         for (DecodeRoutingView view : views) {
             Response workerFailure;
-            try (WorkerEndpoint.GenerationPin pin = workerDirectory.captureDecodeGeneration(view)) {
+            try (WorkerEndpoint.GenerationPin pin = workerDirectory.pinDecodeEndpoint(view)) {
                 if (pin == null) {
                     workerFailure = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
                 } else {

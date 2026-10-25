@@ -228,8 +228,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     continue;
                 }
                 String address = status.getLogicalIpPort();
-                WorkerEndpoint.GenerationPin pin = registry.capture(
-                        status.getRole(), address);
+                WorkerEndpoint.GenerationPin pin = registry.pin(status.getRole(), address);
                 if (pin == null) {
                     throw new IllegalStateException(
                             "fixture route references an unpublished endpoint: "

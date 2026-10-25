@@ -96,9 +96,7 @@ public class CostBasedPrefillStrategy {
         long bestCacheHit = survivors.cacheHit(selectedIndex);
         long selectedPrefillMs = survivors.prefillMs(selectedIndex);
         WorkerEndpoint.GenerationPin selectedPin =
-                workerDirectory.captureEndpoint(
-                        roleType,
-                        survivors.endpointAddress(selectedIndex));
+                workerDirectory.pinEndpoint(roleType, survivors.endpointAddress(selectedIndex));
         if (selectedPin == null || selectedPin.endpoint() != best) {
             recordDecision(balanceContext, roleType, group, discovery.registeredCount(), survivors,
                     -1, "ENDPOINT_GENERATION_CHANGED", cacheMatchResult);

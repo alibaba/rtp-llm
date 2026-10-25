@@ -112,13 +112,18 @@ class EncoderStrategyTest {
         assertNull(strategy.select(context, "group"));
     }
 
-    private EncoderEndpoint endpoint(String address, int port, boolean alive, long kv,
-                                     long running, long waiting, int pending) {
+    private EncoderEndpoint endpoint(String address,
+                                     int port,
+                                     boolean alive,
+                                     long kv,
+                                     long running,
+                                     long waiting,
+                                     int pending) {
         WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
         EncoderEndpoint endpoint = mock(EncoderEndpoint.class);
         WorkerStatus status = mock(WorkerStatus.class);
         WorkerStatus.EngineObservation engine = mock(WorkerStatus.EngineObservation.class);
-        when(directory.captureEndpoint(RoleType.ENCODER, address)).thenReturn(pin);
+        when(directory.pinEndpoint(RoleType.ENCODER, address)).thenReturn(pin);
         when(pin.endpoint()).thenReturn(endpoint);
         when(pin.generationId()).thenReturn(1L);
         when(endpoint.getStatus()).thenReturn(status);
