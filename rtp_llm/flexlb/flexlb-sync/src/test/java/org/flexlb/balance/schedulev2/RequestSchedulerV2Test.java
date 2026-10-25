@@ -7,6 +7,7 @@ import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -101,9 +102,9 @@ class RequestSchedulerV2Test {
         Response response = scheduler.submit(context("1", 50, 50L)).get(5, TimeUnit.SECONDS);
 
         assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
-        assertEquals(0, scheduler.trackedRequestCount());
         // 超时由计时线程完成 future，清理在它的回调里，get 返回时清理可能还没结束
         awaitNoTrackedRequest();
+        assertEquals(0, scheduler.trackedRequestCount());
         assertEquals(0L, queueCapacity.globalQueueAndEngineSubQueueCount());
     }
 
@@ -152,7 +153,7 @@ class RequestSchedulerV2Test {
         when(modelMetaConfig.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
         return new RequestSchedulerV2(configService, queueCapacity, mock(EndpointRegistry.class),
                 new PlacementAvailability(), mock(DefaultRouter.class), mock(CostBasedPrefillStrategy.class),
-                modelMetaConfig);
+                new PrefillQueueRegistry(configService), modelMetaConfig);
     }
 
     private BalanceContext context(String requestId, int priority, long expiresInMs) {
@@ -164,7 +165,6 @@ class RequestSchedulerV2Test {
         context.setSchedulingMetadata(SchedulingMetadata.explicit(priority, System.currentTimeMillis() + expiresInMs));
         return context;
     }
-}
 
     private void awaitNoTrackedRequest() throws InterruptedException {
         long deadline = System.currentTimeMillis() + 5_000L;
@@ -172,3 +172,4 @@ class RequestSchedulerV2Test {
             Thread.sleep(5L);
         }
     }
+}

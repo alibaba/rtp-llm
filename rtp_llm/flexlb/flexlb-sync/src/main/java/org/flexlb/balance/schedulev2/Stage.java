@@ -5,6 +5,7 @@ package org.flexlb.balance.schedulev2;
  * <p>
  * 正常顺序是 MAIN_WAITING → PREFILL_WAITING → DECODE_WAITING → DECODE_RESERVED → PUBLISHED。
  * 发布之前的任何阶段都可以进入 FAILED 或 CANCELLED。
+ * 选好的 Prefill 下线时，PREFILL_WAITING 的请求退回 MAIN_WAITING 重新选。
  */
 public enum Stage {
     /**
@@ -56,7 +57,7 @@ public enum Stage {
     public boolean canMoveTo(Stage next) {
         return switch (this) {
             case MAIN_WAITING -> next == PREFILL_WAITING || next.isEnded();
-            case PREFILL_WAITING -> next == DECODE_WAITING || next.isEnded();
+            case PREFILL_WAITING -> next == DECODE_WAITING || next == MAIN_WAITING || next.isEnded();
             case DECODE_WAITING -> next == DECODE_RESERVED || next.isEnded();
             case DECODE_RESERVED -> next == PUBLISHED || next.isEnded();
             case PUBLISHED, FAILED, CANCELLED -> false;

@@ -7,6 +7,8 @@ import org.flexlb.balance.estimate.PrefillLoadProvider;
 import org.flexlb.balance.estimate.PrefillTtftEstimator;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
+import org.flexlb.balance.schedulev2.prefill.QueuePrefillLoadProvider;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -53,9 +55,10 @@ public class DeliveryConfiguration {
     }
 
     @Bean
-    public PrefillLoadProvider prefillLoadProvider(ConfigService configService) {
+    public PrefillLoadProvider prefillLoadProvider(ConfigService configService, PrefillQueueRegistry prefillQueues) {
         return switch (dispatcherType(configService)) {
-            case BATCH, NON_BATCH, NON_BATCH_V2 -> new EndpointPrefillLoadProvider();
+            case BATCH, NON_BATCH -> new EndpointPrefillLoadProvider();
+            case NON_BATCH_V2 -> new QueuePrefillLoadProvider(prefillQueues, configService);
         };
     }
 

@@ -3,11 +3,11 @@ package org.flexlb.balance.schedulev2.main;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.Request;
+import org.flexlb.balance.schedulev2.RequestOrder;
 import org.flexlb.balance.schedulev2.Stage;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 
-import java.util.Comparator;
 import java.util.Iterator;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -39,9 +39,7 @@ public final class MainQueue {
     public MainQueue(QueueCapacity queueCapacity, LoopSignal loopSignal, boolean priorityOrdering) {
         this.queueCapacity = queueCapacity;
         this.loopSignal = loopSignal;
-        Comparator<Request> bySeq = Comparator.comparingLong(Request::queueSeq);
-        this.requests = new ConcurrentSkipListSet<>(
-                priorityOrdering ? Comparator.comparingInt(Request::priority).reversed().thenComparing(bySeq) : bySeq);
+        this.requests = new ConcurrentSkipListSet<>(RequestOrder.of(priorityOrdering));
     }
 
     /**
@@ -97,6 +95,21 @@ public final class MainQueue {
             }
         }
         return null;
+    }
+
+    /**
+     * 把从 Prefill 队列退回来的请求放回主队列。请求还算在排队总数里，这里不再检查上限；
+     * 沿用原来的顺序号，所以排在原来的位置。
+     */
+    public void addBack(Request request) {
+        if (requests.add(request)) {
+            size.incrementAndGet();
+        }
+        // 放回期间请求可能已结束，结束时的清理没看到它，这里补上
+        if (request.stage() != Stage.MAIN_WAITING) {
+            remove(request);
+        }
+        loopSignal.wake();
     }
 
     /**

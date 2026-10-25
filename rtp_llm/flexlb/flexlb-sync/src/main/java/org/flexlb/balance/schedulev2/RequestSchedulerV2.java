@@ -9,8 +9,9 @@ import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.balance.schedulev2.main.MainQueue;
 import org.flexlb.balance.schedulev2.main.MainQueueLoop;
 import org.flexlb.balance.schedulev2.prefill.PrefillPicker;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueLoop;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
-import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
@@ -50,9 +51,12 @@ public class RequestSchedulerV2 {
     private final RoleType prefillRole;
     private final RequestTable requestTable = new RequestTable();
     private final LoopSignal mainLoopSignal = new LoopSignal();
+    private final LoopSignal prefillLoopSignal = new LoopSignal();
     private final MainQueue mainQueue;
+    private final PrefillQueueRegistry prefillQueues;
     private final RequestCleanup cleanup;
     private final MainQueueLoop mainQueueLoop;
+    private final PrefillQueueLoop prefillQueueLoop;
     private final ScheduledThreadPoolExecutor deadlineTimer;
     private final AtomicBoolean closed = new AtomicBoolean();
 
@@ -62,6 +66,7 @@ public class RequestSchedulerV2 {
                               PlacementAvailability placementAvailability,
                               DefaultRouter router,
                               CostBasedPrefillStrategy prefillStrategy,
+                              PrefillQueueRegistry prefillQueues,
                               ModelMetaConfig modelMetaConfig) {
         this.configService = configService;
         this.deployedRoles = Set.copyOf(modelMetaConfig.requiredRoles());
@@ -70,10 +75,14 @@ public class RequestSchedulerV2 {
                 : deployedRoles.contains(RoleType.PDFUSION) ? RoleType.PDFUSION : null;
         this.mainQueue =
                 new MainQueue(queueCapacity, mainLoopSignal, configService.loadBalanceConfig().isPriorityOrdering());
-        this.cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, mainLoopSignal);
+        this.prefillQueues = prefillQueues;
+        this.cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, mainLoopSignal, prefillQueues,
+                prefillLoopSignal);
         this.mainQueueLoop = new MainQueueLoop(mainQueue, mainLoopSignal, cleanup, queueCapacity, endpointRegistry,
                 placementAvailability, configService, new PrefillPicker(router, prefillStrategy), prefillRole,
                 this::sendToPrefillQueue);
+        this.prefillQueueLoop = new PrefillQueueLoop(prefillQueues, prefillLoopSignal, cleanup, mainQueue,
+                endpointRegistry, configService, this::sendToDecodeQueue);
         this.deadlineTimer = new ScheduledThreadPoolExecutor(1, task -> {
             Thread thread = new Thread(task, "flexlb-v2-deadline");
             thread.setDaemon(true);
@@ -81,6 +90,7 @@ public class RequestSchedulerV2 {
         });
         this.deadlineTimer.setRemoveOnCancelPolicy(true);
         mainQueueLoop.start();
+        prefillQueueLoop.start();
     }
 
     public CompletableFuture<Response> submit(BalanceContext context) {
@@ -133,10 +143,14 @@ public class RequestSchedulerV2 {
         return requested == null || deployedRoles.containsAll(requested);
     }
 
-    private void sendToPrefillQueue(Request request, SelectedRole selected) {
-        // Prefill 队列接入前，选好 Prefill 的请求先直接失败
-        selected.close();
-        request.fail(StrategyErrorType.DISPATCH_FAILED, "NON_BATCH_V2 prefill queue is not ready");
+    private void sendToPrefillQueue(Request request) {
+        prefillQueues.addWaiting(request);
+        prefillLoopSignal.wake();
+    }
+
+    private void sendToDecodeQueue(Request request) {
+        // Decode 队列接入前，Prefill dispatch 出去的请求先直接失败
+        request.fail(StrategyErrorType.DISPATCH_FAILED, "NON_BATCH_V2 decode queue is not ready");
     }
 
     /**
@@ -198,6 +212,7 @@ public class RequestSchedulerV2 {
             return;
         }
         mainQueueLoop.close();
+        prefillQueueLoop.close();
         for (Request request : requestTable.list()) {
             request.fail(StrategyErrorType.DISPATCH_FAILED, SHUTTING_DOWN_MESSAGE);
         }

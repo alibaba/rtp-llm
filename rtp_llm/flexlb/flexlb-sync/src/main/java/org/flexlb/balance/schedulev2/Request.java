@@ -41,6 +41,14 @@ public final class Request {
      * 到期后把请求按超时取消的定时任务，请求结束时取消。
      */
     private volatile ScheduledFuture<?> deadlineTask;
+    /**
+     * 主队列给它选的 Prefill。进入 PREFILL_WAITING 前设置；这台 Prefill 下线、请求退回主队列时清空。
+     */
+    private volatile PrefillChoice prefillChoice;
+    /**
+     * 从 Prefill 队列 dispatch 出去的时间，还没 dispatch 时为 0。
+     */
+    private volatile long prefillDecidedAtMs;
     private volatile long updatedAtMs;
     private volatile String detail;
     private volatile CancelReason cancelReason;
@@ -69,6 +77,10 @@ public final class Request {
 
     public Stage stage() {
         return stage.get();
+    }
+
+    public long createdAtMs() {
+        return createdAtMs;
     }
 
     public int priority() {
@@ -109,6 +121,29 @@ public final class Request {
      */
     public RoleType takeQueueSlot() {
         return queueSlotRole.getAndSet(null);
+    }
+
+    public PrefillChoice prefillChoice() {
+        return prefillChoice;
+    }
+
+    public void setPrefillChoice(PrefillChoice prefillChoice) {
+        this.prefillChoice = prefillChoice;
+    }
+
+    public long prefillDecidedAtMs() {
+        return prefillDecidedAtMs;
+    }
+
+    public void setPrefillDecidedAtMs(long prefillDecidedAtMs) {
+        this.prefillDecidedAtMs = prefillDecidedAtMs;
+    }
+
+    /**
+     * 请求的输入 token 数。
+     */
+    public long seqLen() {
+        return ctx.getRequest().getSeqLen();
     }
 
     /**

@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.schedulev2.LoopSignal;
+import org.flexlb.balance.schedulev2.PrefillChoice;
 import org.flexlb.balance.schedulev2.Request;
 import org.flexlb.balance.schedulev2.RequestCleanup;
 import org.flexlb.balance.schedulev2.Stage;
@@ -20,7 +21,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 /**
  * 主队列出队线程：按顺序取请求，先占一个主队列名额，再选 Prefill，然后交给 Prefill 队列。
@@ -53,9 +54,9 @@ public final class MainQueueLoop {
      */
     private final RoleType prefillRole;
     /**
-     * 选好 Prefill 后把请求交给 Prefill 队列；接收方负责关闭 SelectedRole。
+     * 选好 Prefill 后把请求交给 Prefill 队列，请求上已经带着选好的 {@link PrefillChoice}。
      */
-    private final BiConsumer<Request, SelectedRole> sendToPrefillQueue;
+    private final Consumer<Request> sendToPrefillQueue;
     /**
      * Prefill 机器上下线或容量变化时唤醒循环，让等待中的请求马上重试。
      */
@@ -72,7 +73,7 @@ public final class MainQueueLoop {
                          ConfigService configService,
                          PrefillPicker prefillPicker,
                          RoleType prefillRole,
-                         BiConsumer<Request, SelectedRole> sendToPrefillQueue) {
+                         Consumer<Request> sendToPrefillQueue) {
         this.mainQueue = mainQueue;
         this.loopSignal = loopSignal;
         this.cleanup = cleanup;
@@ -190,13 +191,21 @@ public final class MainQueueLoop {
     }
 
     private void sendPicked(Request request, SelectedRole selected) {
+        PrefillChoice choice;
+        try {
+            choice = PrefillChoice.from(selected, request.seqLen());
+        } catch (RuntimeException failure) {
+            cleanup.releaseQueueSlot(request);
+            request.fail(StrategyErrorType.DISPATCH_FAILED, "prefill selection failed: " + failure.getMessage());
+            return;
+        }
+        request.setPrefillChoice(choice);
         if (!request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING)) {
             // 选的过程中请求已经结束
-            selected.close();
             cleanup.releaseQueueSlot(request);
             return;
         }
         mainQueue.remove(request);
-        sendToPrefillQueue.accept(request, selected);
+        sendToPrefillQueue.accept(request);
     }
 }

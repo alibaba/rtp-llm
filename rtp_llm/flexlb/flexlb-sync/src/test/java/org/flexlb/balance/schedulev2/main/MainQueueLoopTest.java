@@ -2,6 +2,8 @@ package org.flexlb.balance.schedulev2.main;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
@@ -11,12 +13,12 @@ import org.flexlb.balance.schedulev2.Request;
 import org.flexlb.balance.schedulev2.RequestCleanup;
 import org.flexlb.balance.schedulev2.RequestTable;
 import org.flexlb.balance.schedulev2.Stage;
+import org.flexlb.balance.schedulev2.V2TestSupport;
 import org.flexlb.balance.schedulev2.prefill.PrefillPicker;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
@@ -24,7 +26,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -44,11 +45,12 @@ class MainQueueLoopTest {
     private final LoopSignal loopSignal = new LoopSignal();
     private final RequestTable requestTable = new RequestTable();
     private final MainQueue mainQueue = new MainQueue(queueCapacity, loopSignal, false);
-    private final RequestCleanup cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, loopSignal);
+    private final RequestCleanup cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, loopSignal,
+            new PrefillQueueRegistry(mock(ConfigService.class)), new LoopSignal());
+    private final PrefillEndpoint endpoint = V2TestSupport.prefillEndpoint("p1:8000");
     private final EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
     private final PrefillPicker picker = mock(PrefillPicker.class);
     private final List<Request> sent = new ArrayList<>();
-    private final List<SelectedRole> sentSelections = new ArrayList<>();
     private final MainQueueLoop loop;
 
     MainQueueLoopTest() {
@@ -56,22 +58,23 @@ class MainQueueLoopTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         when(endpointRegistry.getEndpointCount(RoleType.PREFILL)).thenReturn(1);
         loop = new MainQueueLoop(mainQueue, loopSignal, cleanup, queueCapacity, endpointRegistry,
-                new PlacementAvailability(), configService, picker, RoleType.PREFILL, (request, selected) -> {
-                    sent.add(request);
-                    sentSelections.add(selected);
-                });
+                new PlacementAvailability(), configService, picker, RoleType.PREFILL, sent::add);
     }
 
     @Test
     void pickedRequestHoldsQueueSlotAndGoesToPrefillQueue() {
         Request request = add("1", "g");
-        SelectedRole selected = mock(SelectedRole.class);
+        SelectedRole selected = V2TestSupport.selected(endpoint, 4L, 30L);
+        WorkerEndpoint.EndpointHold hold = selected.takeEndpointHold();
         when(picker.pick(request.ctx(), RoleType.PREFILL, "g")).thenReturn(PlacementResult.success(selected));
 
         assertTrue(loop.runOnce());
 
         assertEquals(List.of(request), sent);
-        assertSame(selected, sentSelections.get(0));
+        assertSame(endpoint, request.prefillChoice().endpoint());
+        assertEquals(4L, request.prefillChoice().hitCacheTokens());
+        assertEquals(30L, request.prefillChoice().predictedMs());
+        verify(hold).close();
         assertEquals(Stage.PREFILL_WAITING, request.stage());
         assertEquals(0, mainQueue.size());
         assertEquals(1, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
@@ -95,8 +98,8 @@ class MainQueueLoopTest {
         Request other = add("2", "b");
         Request sameGroup = add("3", "a");
         when(picker.pick(blocked.ctx(), RoleType.PREFILL, "a")).thenReturn(PlacementResult.blocked(RoleType.PREFILL));
-        when(picker.pick(other.ctx(), RoleType.PREFILL, "b"))
-                .thenReturn(PlacementResult.success(mock(SelectedRole.class)));
+        SelectedRole selected = V2TestSupport.selected(endpoint, 0L, 10L);
+        when(picker.pick(other.ctx(), RoleType.PREFILL, "b")).thenReturn(PlacementResult.success(selected));
 
         assertTrue(loop.runOnce());
 
@@ -122,9 +125,10 @@ class MainQueueLoopTest {
     }
 
     @Test
-    void requestCancelledDuringPickClosesSelectionAndReleasesSlot() {
+    void requestCancelledDuringPickClosesEndpointHoldAndReleasesSlot() {
         Request request = add("1", "g");
-        SelectedRole selected = mock(SelectedRole.class);
+        SelectedRole selected = V2TestSupport.selected(endpoint, 0L, 10L);
+        WorkerEndpoint.EndpointHold hold = selected.takeEndpointHold();
         when(picker.pick(eq(request.ctx()), eq(RoleType.PREFILL), any())).thenAnswer(call -> {
             request.cancel(CancelReason.CLIENT_CANCELLED);
             return PlacementResult.success(selected);
@@ -132,23 +136,17 @@ class MainQueueLoopTest {
 
         loop.runOnce();
 
-        verify(selected).close();
+        verify(hold).close();
         assertTrue(sent.isEmpty());
         assertEquals(0, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
         assertEquals(0L, queueCapacity.globalQueueAndEngineSubQueueCount());
     }
 
     private Request add(String requestId, String group) {
-        org.flexlb.dao.loadbalance.Request body = new org.flexlb.dao.loadbalance.Request();
-        body.setRequestId(requestId);
-        body.setSeqLen(16L);
-        BalanceContext context = new BalanceContext(config);
-        context.setRequest(body);
-        context.setSchedulingMetadata(SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000L));
-        Request request = new Request(context, new CompletableFuture<>(), System.currentTimeMillis());
+        Request request = V2TestSupport.request(config, requestId, 50, 16L);
         request.future().whenComplete((response, failure) -> cleanup.releaseEnded(request));
         requestTable.add(request);
-        when(picker.groupOf(context)).thenReturn(group);
+        when(picker.groupOf(request.ctx())).thenReturn(group);
         assertNull(mainQueue.add(request, config));
         return request;
     }
