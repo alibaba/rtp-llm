@@ -239,6 +239,30 @@ class MiniMaxM31KVCacheTest(unittest.TestCase):
         self.assertEqual(address.positions.tolist(), [0, 1, 128, 129, 130])
         self.assertEqual(address.main_slots.tolist(), [384, 385, 896, 897, 898])
         self.assertEqual(address.index_slots.tolist(), [640, 641, 1152, 1153, 1154])
+        if torch.cuda.is_available():
+            main.kv_cache_kernel_block_id_device = (
+                main.kv_cache_kernel_block_id_device.cuda()
+            )
+            index.kv_cache_kernel_block_id_device = (
+                index.kv_cache_kernel_block_id_device.cuda()
+            )
+            main.input_lengths_device = lengths.cuda()
+            main.prefix_lengths_device = prefixes.cuda()
+            with patch("torch.tensor", side_effect=AssertionError("host CUDA copy")):
+                device_address = m31_prefill_addressing(main, index, 5)
+            self.assertEqual(
+                device_address.positions.cpu().tolist(), [0, 1, 128, 129, 130]
+            )
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = m31_prefill_addressing(main, index, 5)
+            graph.replay()
+            self.assertEqual(
+                captured.main_slots.cpu().tolist(), [384, 385, 896, 897, 898]
+            )
+            main.prefix_lengths_device.add_(1)
+            graph.replay()
+            self.assertEqual(captured.positions.cpu().tolist(), [1, 2, 129, 130, 131])
         with self.assertRaisesRegex(ValueError, "lengths"):
             m31_prefill_addressing(main, index, 4)
         index.context_parallel_info = object()
@@ -552,7 +576,7 @@ class MiniMaxM31KVCacheTest(unittest.TestCase):
             [MAIN_KV_TAG, INDEXER_KV_TAG],
         )
         self.assertIs(MiniMaxM31.get_weight_cls(), MiniMaxM31Weight)
-        self.assertFalse(MiniMaxM31.support_cuda_graph(None))
+        self.assertTrue(MiniMaxM31.support_cuda_graph(None))
 
     def test_prefill_chunking_preserves_reused_outputs_and_dummy_calls(self):
         hidden = torch.arange(12, dtype=torch.float32).view(6, 2)

@@ -64,14 +64,24 @@ def m31_prefill_addressing(
     ):
         raise ValueError("M3.1 Prefill cache page table is too short")
     device = main_table.device
-    counts = torch.tensor(lengths, dtype=torch.int64, device=device)
+    device_lengths = getattr(main_inputs, "input_lengths_device", None)
+    counts = (
+        device_lengths.to(torch.int64)
+        if device_lengths is not None and device_lengths.device == device
+        else torch.tensor(lengths, dtype=torch.int64, device=device)
+    )
     request_ids = torch.repeat_interleave(
         torch.arange(len(lengths), dtype=torch.int64, device=device),
         counts,
         output_size=rows,
     )
     starts = torch.cat((counts.new_zeros(1), counts.cumsum(0)[:-1]))
-    prefix = torch.tensor(prefixes, dtype=torch.int64, device=device)
+    device_prefixes = getattr(main_inputs, "prefix_lengths_device", None)
+    prefix = (
+        device_prefixes.to(torch.int64)
+        if device_prefixes is not None and device_prefixes.device == device
+        else torch.tensor(prefixes, dtype=torch.int64, device=device)
+    )
     positions = (
         torch.arange(rows, dtype=torch.int64, device=device)
         - starts.index_select(0, request_ids)
