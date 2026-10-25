@@ -93,12 +93,30 @@ final class MockVitImage {
                         .followRedirects(HttpClient.Redirect.NORMAL).build();
                 var request = HttpRequest.newBuilder(uri).timeout(Duration.ofMillis(timeoutMs));
                 headers.forEach(request::header);
+                long started = System.nanoTime();
                 try {
                     var response = client.send(request.GET().build(), HttpResponse.BodyHandlers.ofInputStream());
-                    try (var body = response.body()) {
+                    // ofInputStream completes at the headers. Real's downloader also
+                    // bounds body reads; closing the stream releases a stalled origin.
+                    try (var reads = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
+                         var body = response.body()) {
                         if (response.statusCode() != 200) throw MockRpcErrors.error(io.grpc.Status.INTERNAL, 906,
                                 "Multimodal download failed: HTTP " + response.statusCode());
-                        raw = body.readNBytes(maxInputBytes + 1);
+                        long remaining = timeoutMs - java.util.concurrent.TimeUnit.NANOSECONDS
+                                .toMillis(System.nanoTime() - started);
+                        var read = reads.submit(() -> body.readNBytes(maxInputBytes + 1));
+                        try { raw = read.get(Math.max(1, remaining), java.util.concurrent.TimeUnit.MILLISECONDS); }
+                        catch (java.util.concurrent.TimeoutException error) {
+                            read.cancel(true);
+                            throw MockRpcErrors.error(io.grpc.Status.INTERNAL, 906,
+                                    "[MM_DOWNLOAD_FAILED] Download multimodal file timed out");
+                        } catch (InterruptedException error) {
+                            read.cancel(true);
+                            throw error;
+                        } catch (java.util.concurrent.ExecutionException error) {
+                            if (error.getCause() instanceof java.io.IOException failure) throw failure;
+                            throw error;
+                        }
                     }
                 } catch (java.io.IOException error) {
                     throw MockRpcErrors.error(io.grpc.Status.INTERNAL, 906, "Multimodal download failed: " + error.getMessage());

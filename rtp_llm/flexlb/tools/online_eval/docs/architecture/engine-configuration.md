@@ -19,10 +19,13 @@ Mock 的行为配置消费 real 完成解析和推导后的值，不再维护另
 
 ## 获取 real 配置
 
-本分支不修改 real 引擎或 Master 的生产代码，不提供 real 启动时自动导出配置的环境变量。
+配置采集由独立 Mock 工具完成，不向 real 引擎启动流程添加自动导出配置的环境变量。
 Mock 工具 `rtp_llm/flexlb/tools/mock_bundle/real_config_snapshot.py` 提供 `snapshot` 和
 `vit_snapshot`，可由独立采集脚本对已经完成解析、推导的 real 配置对象生成快照。
 工具不会自行启动模型或取得生产进程中的对象，也不会自动记录 CLI/环境变量来源。
+HTTP 图像下载的响应头与正文共享下载期限，正文停滞不能占用预处理线程直到连接自行结束。
+ViT 导出必须显式提供观测到的 `work_budget`（可为 null）、`hash_cache_accounting` 和
+`greennet_enabled` 布尔值；遗漏观测不能被解释为功能关闭。
 
 allocator 容量仍需从真实运行环境独立观测并提供，不能从显存 MB 推算 block 数。
 每个角色选择匹配 rank 的观测；异构 rank 需要分别建立 Mock 配置。
@@ -43,8 +46,8 @@ python3 rtp_llm/flexlb/tools/mock_bundle/real_config_snapshot.py \
 和 `capacity.kind=synthetic`，说明实验来源并给出容量，不能标为 real。
 测试场景只允许覆盖 synthetic 容量，不得覆盖真实 allocator 观测。
 
-Master 保持原有状态归并实现；本分支不再包含针对同 request/batch 的历史成功完成记录与
-活跃 CANCELING overlay 并存时延迟结算的修复，相关 real 端到端竞态仍需独立验收。
+Master 遇到同 request/batch 的历史成功完成记录与活跃 CANCELING overlay 并存时，
+保留该控制记录的所有者，等待权威 CANCELED 终态后结算。不同 batch 的 overlay 不延迟当前任务结算。
 
 ## 支持范围
 
