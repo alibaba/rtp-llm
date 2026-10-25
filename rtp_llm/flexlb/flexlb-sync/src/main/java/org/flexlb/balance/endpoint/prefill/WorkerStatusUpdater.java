@@ -31,19 +31,6 @@ public final class WorkerStatusUpdater {
         this.prefillState = prefillState;
     }
 
-    /**
-     * Reconcile ownership and publish its matching WorkerStatus before the
-     * canonical queue lock is released. Load view readers therefore observe
-     * either the previous pair or the fully reduced new pair.
-     */
-    public WorkerStatusResult updateFromWorkerStatus(WorkerStatus.StatusObservation observation,
-                                                     ToLongFunction<List<ScheduledRequest>> predictBatchTime,
-                                                     Runnable publishStatus,
-                                                     Runnable onPublishFailure) {
-        return reconcileEngineStatus(observation.engine(), observation.finishedTasks(), predictBatchTime, publishStatus,
-                onPublishFailure);
-    }
-
     public HeartbeatResult updateFromHeartbeat(WorkerStatus.StatusObservation observation) {
         List<WorkerStatusFact> facts = new ArrayList<>(
                 observation.activeTasks().size());
@@ -81,11 +68,16 @@ public final class WorkerStatusUpdater {
         return new HeartbeatResult(facts, schedulingInputsChanged);
     }
 
-    private WorkerStatusResult reconcileEngineStatus(WorkerStatus.EngineObservation engine,
-                                                     Map<String, WorkerStatus.TaskObservation> finishedTasks,
+    /**
+     * 处理一次引擎状态上报，并在释放锁之前发布对应的 WorkerStatus。
+     * 读负载视图的线程要么看到上报前的记录和状态，要么看到两者都已更新，不会看到只更新了一半。
+     */
+    public WorkerStatusResult updateFromWorkerStatus(WorkerStatus.StatusObservation observation,
                                                      ToLongFunction<List<ScheduledRequest>> predictBatchTime,
                                                      Runnable publishStatus,
                                                      Runnable onPublishFailure) {
+        WorkerStatus.EngineObservation engine = observation.engine();
+        Map<String, WorkerStatus.TaskObservation> finishedTasks = observation.finishedTasks();
         boolean capacityReleased = false;
         boolean canonicalMutationStarted = false;
         WorkerStatusResult outcome = null;
