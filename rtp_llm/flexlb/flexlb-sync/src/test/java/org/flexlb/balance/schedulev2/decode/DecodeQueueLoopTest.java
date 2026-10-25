@@ -2,6 +2,7 @@ package org.flexlb.balance.schedulev2.decode;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.scheduler.CancelReason;
@@ -11,6 +12,8 @@ import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.balance.scheduler.decode.DecodeRequirement;
+import org.flexlb.balance.schedulev2.DecodeChoice;
 import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.Request;
 import org.flexlb.balance.schedulev2.RequestCleanup;
@@ -36,6 +39,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -230,8 +234,47 @@ class DecodeQueueLoopTest {
         assertEquals(Stage.DECODE_RESERVED, next.stage());
     }
 
+    @Test
+    void endedRequestIsReleasedEvenWhenItsDecodeHasNoPermit() {
+        Request running = addWaiting("1");
+        loop.runOnce();
+        loop.runOnce();
+        assertEquals(Stage.PUBLISHED, running.stage());
+
+        // Decode 上限 1 已经被发布的请求占了，两个请求都在 reserved 里拿不到 permit
+        Request first = addReserved("2");
+        Request second = addReserved("3");
+        second.cancel(CancelReason.CLIENT_CANCELLED);
+        cleanup.releaseEnded(second);
+        assertNotNull(decode.reservationHandle("3"));
+
+        loop.runOnce();
+
+        assertEquals(Stage.DECODE_RESERVED, first.stage());
+        assertNotNull(decode.reservationHandle("2"));
+        assertNull(decode.reservationHandle("3"));
+        assertEquals(1, decodeQueue.reservedCount());
+    }
+
     private Request addWaiting(String requestId) {
         return addWaiting(requestId, 30);
+    }
+
+    /**
+     * 直接放进 reserved 的请求。reserve 不带容量上限，用来造出 reserve 成功但拿不到 permit 的情况。
+     */
+    private Request addReserved(String requestId) {
+        Request request = addWaiting(requestId);
+        decodeQueue.removeWaiting(request);
+        DecodeEndpoint.ReservationHandle reservation;
+        try (WorkerEndpoint.EndpointHold hold = decode.tryHold()) {
+            reservation = decode.reserve(hold, requestId, 16L, 16L, 30, null);
+        }
+        request.setDecodeChoice(
+                new DecodeChoice(decode, reservation, decodeStatus(), DecodeRequirement.capture(request.ctx())));
+        request.moveTo(Stage.DECODE_WAITING, Stage.DECODE_RESERVED);
+        decodeQueue.addReserved(request);
+        return request;
     }
 
     private Request addWaiting(String requestId, int priority) {
