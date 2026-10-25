@@ -1,15 +1,12 @@
 """cuLA KDA prefill with RTP's paged FP32 recurrent checkpoints.
 
-The cache and cuLA checkpoint tensors use [key, value] state layout. Operator
-calls may split at cache boundaries without changing scheduler prefill batches.
+The cache and cuLA checkpoint tensors use [key, value] state layout. Aligned
+batches use one call; in-page prefixes retain page-boundary segmented execution.
 """
 
 from dataclasses import dataclass
 
 import torch
-
-
-_MAX_PACKED_CULA_CHECKPOINT_BYTES = 32 << 20
 
 
 def plan_cula_checkpoint_groups(segments, block_size, max_pages=4):
@@ -35,7 +32,7 @@ def _cula_paged_prefill(
     if block_size % 64:
         raise ValueError("cuLA KDA checkpoint span must be a multiple of 64")
     heads = q.shape[1]
-    output = None
+    output = torch.zeros_like(v)
     for sequence in sequences:
         segments = sequence.segments
         if not segments:
@@ -45,26 +42,7 @@ def _cula_paged_prefill(
             if sequence.initial_block is None
             else cache_states[sequence.initial_block].unsqueeze(0).float().contiguous()
         )
-        # One aligned sequence can publish all page checkpoints in one cuLA
-        # call. Keep a scratch bound and preserve the segmented path for an
-        # in-page reused prefix or a multi-request batch.
-        packed = (
-            len(sequences) == 1
-            and len(segments) > 4
-            and len(segments) * heads * 128 * 128 * 4
-            <= _MAX_PACKED_CULA_CHECKPOINT_BYTES
-            and segments[-1].end == q.shape[0]
-            and all(
-                segment.start == index * block_size
-                and segment.end == min((index + 1) * block_size, q.shape[0])
-                for index, segment in enumerate(segments)
-            )
-        )
-        groups = (
-            (segments,)
-            if packed
-            else plan_cula_checkpoint_groups(segments, block_size)
-        )
+        groups = plan_cula_checkpoint_groups(segments, block_size)
         for group in groups:
             if not group:
                 continue
@@ -93,19 +71,12 @@ def _cula_paged_prefill(
                 )
             if final is not None or published is None or published.data_ptr() != checkpoints.data_ptr():
                 raise RuntimeError("cuLA did not publish the requested FP32 KDA checkpoints")
-            if packed:
-                # The sole group covers every token, so cuLA's result is the
-                # final output; no zero-fill or second full-tensor copy is needed.
-                output = values[0].to(q.dtype)
-            else:
-                if output is None:
-                    output = torch.zeros_like(v)
-                output[start:end].copy_(values[0].to(q.dtype))
+            output[start:end].copy_(values[0].to(q.dtype))
             for index, segment in enumerate(group):
                 if segment.cache_block > 0:
                     cache_states[segment.cache_block].copy_(checkpoints[0, index])
             state = checkpoints[:, -1].contiguous()
-    return torch.zeros_like(v) if output is None else output
+    return output
 
 
 @dataclass(frozen=True)
@@ -119,6 +90,25 @@ class StateSegment:
 class StateSequence:
     initial_block: int | None
     segments: tuple[StateSegment, ...]
+
+
+@dataclass(frozen=True)
+class PackedCulaKdaPrefill:
+    cu_seqlens: torch.Tensor | None
+    cu_seqlens_cpu: torch.Tensor | None
+    checkpoint_offsets: torch.Tensor | None
+    initial_blocks: torch.Tensor
+    checkpoint_blocks: torch.Tensor
+    initial_states: torch.Tensor
+    checkpoints: torch.Tensor
+    padding_ranges: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
+class CulaKdaPrefillMetadata:
+    block_size: int
+    sequences: tuple[StateSequence, ...]
+    packed: PackedCulaKdaPrefill | None
 
 
 def plan_state_sequences(cu_seqlens, prefix_lengths, block_table, block_size):
@@ -163,6 +153,164 @@ def plan_state_sequences(cu_seqlens, prefix_lengths, block_table, block_size):
     return tuple(result)
 
 
+def prepare_cula_kda_prefill_metadata(
+    cu_seqlens,
+    prefix_lengths,
+    block_table,
+    block_size,
+    cache_states,
+):
+    """Prepare one round's immutable page mapping and layer-shared workspace."""
+    if block_size <= 0 or block_size % 64:
+        raise ValueError("cuLA KDA checkpoint span must be a positive multiple of 64")
+    sequences = plan_state_sequences(
+        cu_seqlens, prefix_lengths, block_table, block_size
+    )
+    used_blocks = [s.cache_block for seq in sequences for s in seq.segments]
+    used_blocks += [
+        seq.initial_block for seq in sequences if seq.initial_block is not None
+    ]
+    if used_blocks and max(used_blocks) >= cache_states.shape[0]:
+        raise ValueError("KDA state block exceeds cache capacity")
+    published = set()
+    for seq in sequences:
+        if seq.initial_block in published:
+            # Preserve sequential read-after-write for aliased request state.
+            return CulaKdaPrefillMetadata(block_size, sequences, None)
+        published.update(s.cache_block for s in seq.segments if s.cache_block > 0)
+    if not any(seq.segments for seq in sequences) or any(
+        seq.segments and prefix % block_size
+        for seq, prefix in zip(sequences, prefix_lengths)
+    ):
+        return CulaKdaPrefillMetadata(block_size, sequences, None)
+
+    cu_values, offsets = [0], [0]
+    initial_blocks, checkpoint_blocks, padding = [], [], []
+    for seq, start, end in zip(sequences, cu_seqlens, cu_seqlens[1:]):
+        if start == end:
+            continue
+        cu_values.append(end)
+        initial_blocks.append(
+            seq.initial_block if seq.initial_block is not None else -1
+        )
+        if seq.segments:
+            checkpoint_blocks.extend(segment.cache_block for segment in seq.segments)
+        else:
+            # Keep virtual rows in the token layout, with no state publication.
+            checkpoint_blocks.extend(
+                [-1] * ((end - start + block_size - 1) // block_size)
+            )
+            padding.append((start, end))
+        offsets.append(len(checkpoint_blocks))
+    if not initial_blocks:
+        return CulaKdaPrefillMetadata(block_size, sequences, None)
+
+    # The segmented path publishes in order. Preserve its last-write behavior
+    # if a rolling page table maps several checkpoints to the same slot.
+    seen = set()
+    for index in reversed(range(len(checkpoint_blocks))):
+        block = checkpoint_blocks[index]
+        if block > 0:
+            if block in seen:
+                checkpoint_blocks[index] = -1
+            seen.add(block)
+
+    device = cache_states.device
+    heads = cache_states.shape[1]
+    single_sequence = len(initial_blocks) == 1
+    cpu_cu = (
+        None
+        if single_sequence
+        else torch.tensor(cu_values, dtype=torch.int32, pin_memory=True)
+    )
+    packed = PackedCulaKdaPrefill(
+        cu_seqlens=None if single_sequence else cpu_cu.to(device, non_blocking=True),
+        cu_seqlens_cpu=cpu_cu,
+        checkpoint_offsets=(
+            None
+            if single_sequence
+            else torch.tensor(offsets, dtype=torch.int32, device=device)
+        ),
+        initial_blocks=torch.tensor(initial_blocks, dtype=torch.int64, device=device),
+        checkpoint_blocks=torch.tensor(
+            checkpoint_blocks, dtype=torch.int64, device=device
+        ),
+        initial_states=torch.empty(
+            (len(initial_blocks), heads, 128, 128), dtype=torch.float32, device=device
+        ),
+        checkpoints=torch.empty(
+            (1, len(checkpoint_blocks), heads, 128, 128),
+            dtype=torch.float32,
+            device=device,
+        ),
+        padding_ranges=tuple(padding),
+    )
+    return CulaKdaPrefillMetadata(block_size, sequences, packed)
+
+
+def _cula_packed_prefill(
+    chunk_kda,
+    q,
+    k,
+    v,
+    g,
+    beta,
+    a_log,
+    dt_bias,
+    lower_bound,
+    cache_states,
+    metadata,
+    block_size,
+):
+    from rtp_llm.models_py.triton_kernels.kda.prefill_cache import (
+        load_kda_prefill_states,
+        store_kda_prefill_states,
+    )
+
+    load_kda_prefill_states(
+        cache_states, metadata.initial_blocks, metadata.initial_states
+    )
+    raw_beta = beta.unsqueeze(0).contiguous()
+    if raw_beta.data_ptr() % 16:
+        raw_beta = raw_beta.clone()
+    with torch.inference_mode():
+        output, final, published = chunk_kda(
+            *(x.unsqueeze(0).contiguous() for x in (q, k, v, g)),
+            raw_beta,
+            scale=128**-0.5,
+            initial_state=metadata.initial_states,
+            output_final_state=False,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            use_beta_sigmoid_in_kernel=True,
+            cu_seqlens=metadata.cu_seqlens,
+            cu_seqlens_cpu=metadata.cu_seqlens_cpu,
+            safe_gate=lower_bound is not None,
+            lower_bound=None if lower_bound is None else float(lower_bound),
+            disable_recompute=False,
+            use_intracard_cp=False,
+            A_log=a_log,
+            dt_bias=dt_bias,
+            checkpoint_interval=block_size,
+            checkpoint_states=metadata.checkpoints,
+            checkpoint_offsets=metadata.checkpoint_offsets,
+        )
+    if (
+        final is not None
+        or published is None
+        or published.data_ptr() != metadata.checkpoints.data_ptr()
+    ):
+        raise RuntimeError("cuLA did not publish the requested FP32 KDA checkpoints")
+    store_kda_prefill_states(
+        metadata.checkpoints[0], metadata.checkpoint_blocks, cache_states
+    )
+    with torch.inference_mode():
+        output = output[0].to(q.dtype)
+        for start, end in metadata.padding_ranges:
+            output[start:end].zero_()
+    return output
+
+
 def cula_kda_paged_prefill(
     q,
     k,
@@ -177,6 +325,8 @@ def cula_kda_paged_prefill(
     prefix_lengths,
     block_table,
     block_size,
+    *,
+    metadata=None,
 ):
     """Run BF16 projections and publish only real request states to RTP cache.
 
@@ -209,17 +359,39 @@ def cula_kda_paged_prefill(
         )
     if cu_seqlens[-1] != q.shape[0]:
         raise ValueError("KDA metadata must cover the physical token shape")
-    sequences = plan_state_sequences(
-        cu_seqlens, prefix_lengths, block_table, block_size
-    )
-    used_blocks = [s.cache_block for seq in sequences for s in seq.segments]
-    used_blocks += [
-        seq.initial_block for seq in sequences if seq.initial_block is not None
-    ]
-    if used_blocks and max(used_blocks) >= cache_states.shape[0]:
-        raise ValueError("KDA state block exceeds cache capacity")
+    if block_size <= 0 or block_size % 64:
+        raise ValueError("cuLA KDA checkpoint span must be a positive multiple of 64")
+    if metadata is None:
+        metadata = prepare_cula_kda_prefill_metadata(
+            cu_seqlens, prefix_lengths, block_table, block_size, cache_states
+        )
     a_log, dt_bias = a_log.contiguous(), dt_bias.reshape(q.shape[1], 128).contiguous()
+    if metadata.packed is not None:
+        return _cula_packed_prefill(
+            chunk_kda,
+            q,
+            k,
+            v,
+            g,
+            beta,
+            a_log,
+            dt_bias,
+            lower_bound,
+            cache_states,
+            metadata.packed,
+            block_size,
+        )
     return _cula_paged_prefill(
-        chunk_kda, q, k, v, g, beta, a_log, dt_bias, lower_bound,
-        cache_states, sequences, block_size,
+        chunk_kda,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        a_log,
+        dt_bias,
+        lower_bound,
+        cache_states,
+        metadata.sequences,
+        block_size,
     )
