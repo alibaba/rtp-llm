@@ -1145,7 +1145,6 @@ bool KVCacheManager::initP2PConnector() {
                                                  parallelism_config_,
                                                  pd_sep_config_,
                                                  static_cast<uint32_t>(config_.layer_all_num()),
-                                                 config_.use_mla || config_.is_sparse,
                                                  config_.totalGroupBlockSizeBytes());
     p2p_config.scheduler_config.topology = config_.topologyPtr();
     p2p_config.worker_config.topology    = config_.topologyPtr();

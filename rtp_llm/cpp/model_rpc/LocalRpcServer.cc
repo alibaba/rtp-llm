@@ -330,7 +330,8 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
         }
         if (stream->hasEvent(StreamEvents::PrefillHandoffReady)) {
             if (stream->queryPdSep() && stream->resourceContext().role_type == RoleType::PREFILL) {
-                while (!context->IsCancelled() && !stream->hasError() && stream->getStatus() != StreamState::FINISHED) {
+                while (!context->IsCancelled() && !stream->checkTimeoutAndHasError()
+                       && stream->getStatus() != StreamState::FINISHED) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
                 if (context->IsCancelled()) {

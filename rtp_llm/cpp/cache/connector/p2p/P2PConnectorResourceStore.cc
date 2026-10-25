@@ -95,7 +95,7 @@ int64_t P2PConnectorResourceStore::requestDeadline(const std::string& unique_key
         return 0;
     }
     std::lock_guard<std::mutex> lock(resource_map_mutex_);
-    auto [it, inserted] = request_states_.try_emplace(unique_key, RequestState{now + timeout_ms});
+    auto it = request_states_.try_emplace(unique_key, RequestState{now + timeout_ms}).first;
     if (it->second.terminal) {
         return 0;
     }
@@ -172,7 +172,7 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
             // recreating state after its terminal record has been collected.
             release_layers = true;
         } else {
-            auto [it, inserted] = request_states_.try_emplace(routing->unique_key, RequestState{routing->deadline_ms});
+            auto it = request_states_.try_emplace(routing->unique_key, RequestState{routing->deadline_ms}).first;
             auto& state = it->second;
             release_layers = state.terminal || currentTimeMs() >= state.deadlineMs();
             if (!state.terminal && !state.consumed && currentTimeMs() < state.deadlineMs()
@@ -254,7 +254,7 @@ std::shared_ptr<P2PConnectorResourceEntry> P2PConnectorResourceStore::waitAndSte
     }
     const auto start_time_us = currentTimeUs();
     std::unique_lock<std::mutex> lock(resource_map_mutex_);
-    auto [it, inserted] = request_states_.try_emplace(unique_key, RequestState{request_deadline_ms});
+    auto it = request_states_.try_emplace(unique_key, RequestState{request_deadline_ms}).first;
     auto& state = it->second;
     if (state.terminal || state.consumed || state.request_deadline_ms != request_deadline_ms) {
         return nullptr;
@@ -402,7 +402,7 @@ void P2PConnectorResourceStore::publishPrefillPayload(const std::string&        
         if (currentTimeMs() >= request_deadline_ms) {
             return;
         }
-        auto [it, inserted] = request_states_.try_emplace(unique_key, RequestState{request_deadline_ms});
+        auto it = request_states_.try_emplace(unique_key, RequestState{request_deadline_ms}).first;
         auto& state = it->second;
         scheduleDeadlineCheckLocked(unique_key, state);
         if (state.terminal || currentTimeMs() >= state.deadlineMs()

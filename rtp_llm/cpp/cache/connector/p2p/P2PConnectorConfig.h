@@ -66,7 +66,6 @@ struct P2PConnectorWorkerConfig {
     int64_t  tp_size       = 1;
     int64_t  tp_rank       = 0;
     uint32_t layer_all_num = 0;
-    bool     is_mla        = false;
 
     std::shared_ptr<const CacheTopology> topology;
     size_t                               cache_key_tokens_per_block = 1;
@@ -76,7 +75,6 @@ struct P2PConnectorWorkerConfig {
                                            const PDSepConfig&       pd_sep_config,
                                            const ParallelismConfig& parallelism_config,
                                            uint32_t                 layer_all_num,
-                                           bool                     is_mla,
                                            size_t                   llm_kv_block_size_bytes) {
         P2PConnectorWorkerConfig config;
         config.load_cache_timeout_ms = pd_sep_config.load_cache_timeout_ms;
@@ -109,7 +107,6 @@ struct P2PConnectorWorkerConfig {
         config.tp_size                                 = parallelism_config.tp_size;
         config.tp_rank                                 = parallelism_config.tp_rank;
         config.layer_all_num                           = layer_all_num;
-        config.is_mla                                  = is_mla;
         return config;
     }
 };
@@ -126,7 +123,6 @@ struct P2PConnectorConfig {
                                      const ParallelismConfig& parallelism_config,
                                      const PDSepConfig&       pd_sep_config,
                                      uint32_t                 layer_all_num,
-                                     bool                     is_mla,
                                      size_t                   llm_kv_block_size_bytes) {
         P2PConnectorConfig config;
         config.role_type = pd_sep_config.role_type;
@@ -138,7 +134,6 @@ struct P2PConnectorConfig {
             pd_sep_config,
             parallelism_config,
             layer_all_num,
-            is_mla,
             llm_kv_block_size_bytes);
         return config;
     }

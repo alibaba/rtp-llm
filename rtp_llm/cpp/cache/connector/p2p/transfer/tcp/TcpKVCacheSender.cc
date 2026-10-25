@@ -253,6 +253,9 @@ bool TcpKVCacheSender::tryStagedGatherCopyToHost(std::vector<CopyTask>& copy_tas
     params.tiles.reserve(copy_tasks.size());
     params.host_segments.reserve(copy_tasks.size());
     for (auto& task : copy_tasks) {
+        if (task.device_index != device_index) {
+            return false;
+        }
         size_t offset = alignUp(params.host_bytes, kAlignment);
         params.tiles.push_back(StagedMemoryCopyTile{task.src_ptr, offset, task.size});
         params.host_segments.push_back(StagedMemoryCopyHostSegment{task.dst_ptr, offset, task.size});

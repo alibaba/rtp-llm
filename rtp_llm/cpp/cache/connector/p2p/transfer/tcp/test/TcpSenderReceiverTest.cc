@@ -204,6 +204,22 @@ TEST_F(TcpSenderOnlyTest, BusyStagedScratchSelectsDirectCopyWithoutWaitingForIts
     EXPECT_FALSE(attempt.get());
 }
 
+TEST_F(TcpSenderOnlyTest, MixedDeviceTasksSelectDirectCopyBeforeStagedSubmission) {
+    auto source = torch::ones({64}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+    auto target = torch::zeros({64}, torch::kUInt8);
+    std::vector<CopyTask> tasks(4);
+    for (size_t i = 0; i < tasks.size(); ++i) {
+        tasks[i].src_ptr = source.data_ptr<uint8_t>() + 16 * i;
+        tasks[i].dst_ptr = reinterpret_cast<char*>(target.data_ptr<uint8_t>()) + 16 * i;
+        tasks[i].size = 16;
+        tasks[i].device_index = source.get_device();
+    }
+    // Metadata alone must reject this batch before dereferencing on another GPU.
+    tasks.back().device_index = source.get_device() + 1;
+    EXPECT_FALSE(sender_->tryStagedGatherCopyToHost(tasks, source.get_device()));
+    EXPECT_EQ(target.sum().item<int64_t>(), 0);
+}
+
 TEST_F(TcpSenderOnlyTest, BusyStagedScratchDirectFallbackPreservesEverySerializedByte) {
     auto source = torch::arange(64, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
     at::cuda::getCurrentCUDAStream().synchronize();
@@ -409,7 +425,7 @@ TEST_F(TcpSenderReceiverTest, G2_MultipleSenders_ConcurrentKeys) {
         send_req.unique_key  = "k_g2_" + std::to_string(i);
         send_req.block_info  = makeBlocks(1, src_bufs[i].data_ptr(), size);
         send_req.deadline_ms = currentTimeMs() + 5000;
-    send_req.timeout_ms = 5000;
+        send_req.timeout_ms  = 5000;
 
         auto code = syncSend(*sender_, send_req, std::chrono::seconds(10));
         EXPECT_EQ(code, TransferErrorCode::OK) << "key index " << i;

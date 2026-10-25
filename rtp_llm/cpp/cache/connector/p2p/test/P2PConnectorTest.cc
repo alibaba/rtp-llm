@@ -103,7 +103,6 @@ protected:
                                              parallelism_config,
                                              pd_sep_config,
                                              /*layer_all_num=*/2,
-                                             /*is_mla=*/false,
                                              /*llm_kv_block_size_bytes=*/0);
         config_.scheduler_config.topology =
             test::makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/2, {{0}, {1}});
