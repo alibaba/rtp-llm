@@ -152,21 +152,27 @@ class PrefillQueueLoopTest {
     @Test
     void requestWaitsWhenInflightLimitIsReached() {
         Request first = addWaiting("1");
+        assertFalse(loop.runOnce());
+        assertEquals(null, queues.find(endpoint).tryAcquirePublishSlot(first, 1));
         Request second = addWaiting("2");
-
         assertTrue(loop.runOnce());
-
         assertEquals(List.of(first), sentToDecode);
         assertEquals(Stage.PREFILL_WAITING, second.stage());
         verify(queueReporter).blocked(second, Stage.PREFILL_WAITING, QueueBlockReason.PREFILL_INFLIGHT_FULL, "p1:8000");
-        assertEquals(2, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
-
         V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of("1", TaskPhase.RUNNING));
         assertTrue(loop.runOnce());
         V2TestSupport.report(endpoint, 2L, 1_000L, 1_000L, Map.of());
         assertFalse(loop.runOnce());
-
         assertEquals(List.of(first, second), sentToDecode);
+    }
+
+    @Test
+    void decodeWaitingDoesNotConsumePrefillActiveSlots() {
+        Request first = addWaiting("1");
+        Request second = addWaiting("2");
+        assertFalse(loop.runOnce());
+        assertEquals(List.of(first, second), sentToDecode);
+        assertEquals(Stage.DECODE_WAITING, second.stage());
     }
 
     @Test

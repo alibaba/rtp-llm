@@ -56,11 +56,20 @@ MainQueue -> 每台机器一个 PrefillQueue -> 共用 DecodeQueue -> publish(Pr
   `prefill_return_to_main` 为 `prefill → main`、`action=requeue`，退回不计为拒绝；
   `main_evicted` 为 `main → none`、`action=reject`，受害者报错结束，`endpoint=all`。
   Decode 在抢占指令成功返回后按受害者逐条上报同一指标；`decode_running`、`decode_accepted`、
-  `decode_unconfirmed` 区分运行中、已接收未运行、已下发未确认，`action=return_cancel_instruction`
+  `decode_dispatched_unconfirmed` 区分运行中、已接收未运行、已下发未确认，`action=return_cancel_instruction`
   表示指令已交付而非引擎已确认取消。取消或回滚未发布的抢占不计数。
   两处都要求新请求达到高优先级阈值，并且用阶段 CAS 保证已经出队的请求不会被误踢。
 - Decode 没有单独的队长上限，沿用总排队数和子队列名额。高优先级请求按排序先执行，
   不通过队长触发踢掉 Decode 等待请求。容量不足时的 RETURN 抢占仍由 Decode 线程执行。
+- Prefill 活跃任务数按请求 ID 合并引擎 waiting/running 与已 publish 未确认的请求；
+  等待 Decode 的候选记录只用于排队与负载预测，不占执行额度，也不提前扣引擎 KV。
+  Prefill 出队只检查活跃上限和 KV。Decode 调度请求时通过 CAS 临时获取 Prefill 名额，
+  然后尝试 Decode 选路、预留和下发许可；同一轮成功发布才保留 Prefill 名额，
+  失败、取消、异常或节点变化均归还临时名额，不能占住一端进入下一轮等待。
+  Prefill 名额满时跳过该请求继续检查下一条，不尝试为它预留 Decode。
+  CAS 把引擎快照和本地发布名额作为同一状态更新，避免丢失并发占额或重复计数。
+  已确认任务从引擎列表消失时释放名额；未确认任务沿用发布确认超时回收。
+  引擎状态更新与记录回收会唤醒 Decode 循环，队列扫描不增加大范围锁。
 - P/D 共用 `dispatcher.dispatchStarvationThresholdMs`，默认 500ms，每一轮读取最新配置。
   Prefill 只有 KV 不够时允许较小请求先走，在途数量满时整台机器等待；
   Decode 放不下队头时允许同 group 后面的请求先走。队头等待达到阈值后恢复严格顺序，0 表示始终严格顺序。

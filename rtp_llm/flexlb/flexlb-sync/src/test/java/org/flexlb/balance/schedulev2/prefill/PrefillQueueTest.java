@@ -29,7 +29,9 @@ class PrefillQueueTest {
 
     @Test
     void inflightLimitCountsDispatchedAndUnknownEngineRequests() {
-        queue.addDispatched(new DispatchedRequest(request("1"), 10L, 5L));
+        Request published = request("1");
+        queue.addDispatched(new DispatchedRequest(published, 10L, 5L));
+        assertEquals(null, queue.tryAcquirePublishSlot(published, 4));
         V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of("other", TaskPhase.RUNNING));
         queue.updateFromEngine();
 
@@ -40,7 +42,9 @@ class PrefillQueueTest {
 
     @Test
     void kvCheckSubtractsOnlyRequestsTheEngineHasNotReported() {
-        queue.addDispatched(new DispatchedRequest(request("1"), 60L, 5L));
+        Request published = request("1");
+        queue.addDispatched(new DispatchedRequest(published, 60L, 5L));
+        assertEquals(null, queue.tryAcquirePublishSlot(published, 4));
         V2TestSupport.report(endpoint, 1L, 100L, 1_000L, Map.of());
         queue.updateFromEngine();
 
@@ -98,6 +102,64 @@ class PrefillQueueTest {
         assertEquals(1, queue.removeExpiredDispatched(publishedAtMs + 80L, 80L));
         assertEquals(2, queue.dispatchedCount());
         assertFalse(queue.removeDispatched(notReported));
+    }
+
+    @Test
+    void decodeWaitingCandidatesDoNotConsumeActiveTaskLimit() {
+        for (int i = 0; i < 20; i++) {
+            queue.addDispatched(new DispatchedRequest(request("candidate-" + i), 10L, 5L));
+        }
+        assertTrue(queue.hasDispatchSlot(4));
+        Request first = request("first");
+        queue.addDispatched(new DispatchedRequest(first, 10L, 5L));
+        assertEquals(null, queue.tryAcquirePublishSlot(first, 1));
+        assertFalse(queue.hasDispatchSlot(1));
+        queue.releasePublishSlot(first);
+        assertTrue(queue.hasDispatchSlot(1));
+    }
+
+    @Test
+    void engineAcknowledgementDoesNotDoubleCountPublishedTask() {
+        Request first = request("first");
+        queue.addDispatched(new DispatchedRequest(first, 10L, 5L));
+        assertEquals(null, queue.tryAcquirePublishSlot(first, 4));
+        V2TestSupport.report(endpoint, 1L, 1000L, 1000L,
+                Map.of("first", TaskPhase.RUNNING, "external", TaskPhase.PENDING));
+        queue.updateFromEngine();
+        assertTrue(queue.hasDispatchSlot(3));
+        assertFalse(queue.hasDispatchSlot(2));
+        V2TestSupport.report(endpoint, 2L, 1000L, 1000L, Map.of());
+        queue.updateFromEngine();
+        assertTrue(queue.hasDispatchSlot(1));
+    }
+
+    @Test
+    void concurrentAcquisitionsCannotExceedFourActiveTasks() throws Exception {
+        var workers = java.util.concurrent.Executors.newFixedThreadPool(16);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        var successes = new java.util.concurrent.atomic.AtomicInteger();
+        var futures = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+        try {
+            for (int i = 0; i < 16; i++) {
+                Request request = request("concurrent-" + i);
+                queue.addDispatched(new DispatchedRequest(request, 10L, 5L));
+                futures.add(workers.submit(() -> {
+                    start.await();
+                    if (queue.tryAcquirePublishSlot(request, 4) == null) {
+                        successes.incrementAndGet();
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (var future : futures) {
+                future.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            }
+            assertEquals(4, successes.get());
+            assertFalse(queue.hasDispatchSlot(4));
+        } finally {
+            workers.shutdownNow();
+        }
     }
 
     @Test

@@ -7,6 +7,7 @@ import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
 import org.flexlb.balance.schedulev2.LoopSignal;
+import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.schedulev2.request.RequestOrder;
 import org.flexlb.balance.schedulev2.request.Stage;
@@ -31,10 +32,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * 保存两类请求：
  * <ul>
  * <li>等待 dispatch 的请求，按 {@link RequestOrder} 排序；</li>
- * <li>已 dispatch、还没在引擎上结束的请求（{@link DispatchedRequest}）。</li>
+ * <li>已交给 Decode 调度、或已发布但 Prefill 尚未结束的跟踪记录（{@link DispatchedRequest}）。</li>
  * </ul>
- * dispatch 前检查两件事：已 dispatch 的请求数加上引擎上报里没有对应记录的请求数，要小于每台 Prefill 的在途上限；
- * 引擎剩余 KV 减去已 dispatch 但引擎还没上报的请求要用的 KV，要放得下这个请求。
+ * 出队只检查活跃任务数和 KV，不为等待 Decode 的候选占执行名额。活跃任务按请求 ID 合并引擎任务与本地发布名额；
+ * 引擎剩余 KV 减去已占发布名额但引擎还没上报的请求所需 KV，要放得下这个请求。
  * <p>
  * dispatch 和根据引擎上报更新记录只在 Prefill 队列循环线程里做；加入等待请求和移除请求可以在任意线程。
  */
@@ -42,6 +43,8 @@ public final class PrefillQueue {
 
     private final PrefillEndpoint endpoint;
     private final LoopSignal signal = new LoopSignal();
+    private final PrefillActiveTasks activeTasks = new PrefillActiveTasks();
+    private volatile Runnable capacityChanged = () -> {};
     private final ConcurrentSkipListSet<Request> waiting;
     /**
      * 主队列线程提交退回请求，Prefill 线程在容量检查之前处理。
@@ -59,10 +62,6 @@ public final class PrefillQueue {
      * 引擎上报的任务里，这里没有 dispatch 记录的个数，比如别的 flexlb 发过去的请求。
      */
     private volatile long unknownRequestCount;
-    /**
-     * 最近一次处理过的引擎上报；还没处理过时为 null。
-     */
-    private volatile WorkerStatus.EngineObservation latestEngine;
     /**
      * 最近一次处理过的上报版本号，只由循环线程读写。
      */
@@ -147,8 +146,10 @@ public final class PrefillQueue {
         if (record == null || record.request() != request || !dispatched.remove(request.requestId(), record)) {
             return false;
         }
+        activeTasks.release(request);
         changeVersion.incrementAndGet();
         signal.wake();
+        capacityChanged.run();
         return true;
     }
 
@@ -171,6 +172,7 @@ public final class PrefillQueue {
         }
         handledStatusVersion = status.cursor().statusVersion();
         WorkerStatus.EngineObservation engine = status.fields();
+        activeTasks.updateEngine(engine);
         Map<String, WorkerStatus.TaskObservation> tasks =
                 engine.runningTaskList() == null ? Map.of() : engine.runningTaskList();
         Set<String> engineRequestIds = new HashSet<>();
@@ -198,7 +200,7 @@ public final class PrefillQueue {
             }
         }
         unknownRequestCount = unknown;
-        latestEngine = engine;
+        capacityChanged.run();
         changeVersion.incrementAndGet();
         return true;
     }
@@ -226,32 +228,39 @@ public final class PrefillQueue {
     }
 
     /**
-     * 这个请求现在能不能 dispatch。maxInflight 是每台 Prefill 的在途上限，kvTokens 是这个请求要新占的 KV。
+     * 这个请求能否进入 Decode 候选队列。只检查 Prefill 活跃任务数和 KV，不占名额。
      * 机器上一个在途请求都没有时总是可以，避免大请求一直等不到。
      */
     public boolean canDispatch(long kvTokens, int maxInflight) {
-        long inflight = dispatched.size() + unknownRequestCount;
-        if (!hasDispatchSlot(maxInflight)) {
-            return false;
-        }
-        WorkerStatus.EngineObservation engine = latestEngine;
-        if (inflight == 0L || engine == null || engine.totalKvCacheTokens() <= 0L) {
-            return true;
-        }
-        long kvNotSeenByEngine = 0L;
-        for (DispatchedRequest record : dispatched.values()) {
-            if (!record.seenByEngine()) {
-                kvNotSeenByEngine += record.kvTokens();
-            }
-        }
-        return kvTokens <= engine.availableKvCacheTokens() - kvNotSeenByEngine;
+        return activeTasks.blockReason(kvTokens, maxInflight) == null;
+    }
+
+    public boolean hasDispatchSlot(int maxInflight) {
+        return activeTasks.blockReason(0L, maxInflight) != QueueBlockReason.PREFILL_INFLIGHT_FULL;
     }
 
     /**
-     * 在途数量还有空位时才需要继续按请求大小检查 KV；在途已满时后面的请求也不能 dispatch。
+     * 最终调度尝试先占 Prefill 名额，再尝试 Decode；失败时调用 releasePublishSlot。
      */
-    public boolean hasDispatchSlot(int maxInflight) {
-        return dispatched.size() + unknownRequestCount < maxInflight;
+    public QueueBlockReason tryAcquirePublishSlot(Request request, int maxInflight) {
+        DispatchedRequest record = dispatched.get(request.requestId());
+        if (record == null || record.request() != request || request.stage().isEnded()) {
+            return QueueBlockReason.RESERVATION_CHANGED;
+        }
+        QueueBlockReason reason = activeTasks.tryAcquire(record, maxInflight);
+        if (reason == null && (dispatched.get(request.requestId()) != record || request.stage().isEnded())) {
+            activeTasks.release(request);
+            return QueueBlockReason.RESERVATION_CHANGED;
+        }
+        return reason;
+    }
+
+    public void releasePublishSlot(Request request) {
+        activeTasks.release(request);
+    }
+
+    public void onCapacityChanged(Runnable listener) {
+        capacityChanged = listener;
     }
 
     /**

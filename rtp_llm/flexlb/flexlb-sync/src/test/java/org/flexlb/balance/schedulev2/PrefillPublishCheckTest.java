@@ -22,7 +22,8 @@ class PrefillPublishCheckTest {
     private final PrefillEndpoint prefill = V2TestSupport.prefillEndpoint("p1:8000");
     private final WorkerEndpoint.EndpointHold hold = mock(WorkerEndpoint.EndpointHold.class);
     private final Request request = V2TestSupport.request(SchedulingTestConfig.newConfig(), "1", 50, 16L);
-    private final PrefillPublishCheck check = new PrefillPublishCheck(endpoints);
+    private final PrefillPublishCheck check =
+            new PrefillPublishCheck(endpoints, mock(org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry.class));
 
     PrefillPublishCheckTest() {
         V2TestSupport.choose(request, prefill, 0L, 10L);

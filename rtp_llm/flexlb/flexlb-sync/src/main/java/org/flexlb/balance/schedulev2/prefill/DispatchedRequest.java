@@ -4,9 +4,10 @@ import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.schedulev2.request.Request;
 
 /**
- * 已从 Prefill 队列 dispatch 出去、还没在引擎上结束的请求。
+ * 已从 Prefill 队列交给 Decode 调度、尚未完成 Prefill 的请求跟踪记录。
  * <p>
- * dispatch 时创建，phase 为 COMMITTED（引擎还没上报这个请求）；引擎上报后改成 ENGINE_QUEUED 或 ENGINE_RUNNING。
+ * 进入 Decode 队列时创建，用于负载预测，不代表占用 Prefill 活跃名额。
+ * 最终发布名额由 PrefillActiveTasks 单独管理。引擎上报后改成 ENGINE_QUEUED 或 ENGINE_RUNNING。
  * 引擎上报过、后来又不在引擎的任务列表里时，说明 Prefill 已结束，记录被移除；请求失败或取消时也会移除。
  * 请求发布后超过 {@link org.flexlb.balance.schedulev2.DispatchConfirmTimeout} 引擎还没上报过，记录也会被移除。
  */

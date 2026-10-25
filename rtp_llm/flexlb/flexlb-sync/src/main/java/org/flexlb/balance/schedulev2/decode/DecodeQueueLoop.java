@@ -55,7 +55,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 发布后在 Decode 上有 reserve 的请求进入 published。扫到已经结束的请求就归还它的 reserve 并移出 reserved。
  * 某台 Decode 给不出 permit 时，这一轮跳过 reserve 在它上面的其他请求，等它有空位时被唤醒；</li>
  * <li>调度线程直接计算 waiting 请求的容量需求，读取最新节点负载、选择节点并立即 reserve。
- * reserve、空机器放行、抢占和归还都只在调度线程执行。成功后进入 DECODE_RESERVED。
+ * 先通过 CAS 占 Prefill 活跃名额，再选择 Decode。reserve 成功后在同一轮获取 permit 并发布；
+ * reserve、空机器放行、抢占和归还都只在调度线程执行。未发布的两端名额在本轮归还。
  * 某个 group 排在最前面的请求放不下时，它留在 waiting。是否跳过同 group 后面的请求见 {@link #reserveWaiting}。</li>
  * </ol>
  * reserve 的 Decode 下线或 reserve 丢失时，请求退回 waiting 重新选。
@@ -291,17 +292,25 @@ public final class DecodeQueueLoop {
             if (fullEndpoints.contains(choice.endpoint())) {
                 continue;
             }
-            if (dispatch(request, choice)) {
-                moved = true;
-            } else {
-                fullEndpoints.add(choice.endpoint());
+            if (!acquirePrefill(request)) {
+                sendBackToWaiting(request);
+                continue;
+            }
+            try {
+                if (dispatch(request, choice)) {
+                    moved = true;
+                } else {
+                    fullEndpoints.add(choice.endpoint());
+                }
+            } finally {
+                rollbackUnpublished(request);
             }
         }
         return moved;
     }
 
     /**
-     * 向 reserve 的 Decode 要 permit 并发布。返回 false 表示这台 Decode 暂时给不出 permit，请求留在 reserved。
+     * 向 reserve 的 Decode 要 permit 并发布。返回 false 表示暂无许可，由调用方归还本轮两端名额。
      */
     private boolean dispatch(Request request, DecodeChoice choice) {
         DecodeEndpoint endpoint = choice.endpoint();
@@ -340,6 +349,13 @@ public final class DecodeQueueLoop {
                     permit.release();
                 }
                 returnToMain(request);
+                return;
+            }
+            if (request.stage().isEnded()) {
+                if (permit != null) {
+                    permit.release();
+                }
+                releaseNow(request);
                 return;
             }
             publishResult(request, choice, permit);
@@ -459,11 +475,18 @@ public final class DecodeQueueLoop {
                     continue;
                 }
                 // 只有 token 加法和配置读取，没有缓存查询或网络 IO，直接在当前线程计算。
-                DecodeRequirement requirement = DecodeRequirement.capture(request.ctx());
-                if (pickDecode(request, group, requirement)) {
-                    moved = true;
-                } else if (groupsWithHead.add(group) && isStarved(request, starvationThresholdMs, now)) {
-                    blockedGroups.add(group);
+                if (!acquirePrefill(request)) {
+                    continue;
+                }
+                try {
+                    DecodeRequirement requirement = DecodeRequirement.capture(request.ctx());
+                    if (pickDecode(request, group, requirement)) {
+                        moved = true;
+                    } else if (groupsWithHead.add(group) && isStarved(request, starvationThresholdMs, now)) {
+                        blockedGroups.add(group);
+                    }
+                } finally {
+                    rollbackUnpublished(request);
                 }
             } catch (Throwable failure) {
                 request.fail(StrategyErrorType.DISPATCH_FAILED, "decode selection failed: " + failure.getMessage());
@@ -493,7 +516,38 @@ public final class DecodeQueueLoop {
     }
 
     /**
-     * 给请求选 Decode 并 reserve。返回 false 表示这个 group 暂时没有可选的 Decode，请求留在 waiting。
+     * Prefill 没有活跃名额时不预留 Decode，继续检查下一条请求。
+     */
+    private boolean acquirePrefill(Request request) {
+        QueueBlockReason reason = prefillCheck.tryAcquire(request,
+                configService.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker());
+        if (reason == null) {
+            return true;
+        }
+        queueReporter.blocked(request, request.stage(), reason, request.prefillChoice().endpoint().ipPort());
+        return false;
+    }
+
+    /**
+     * 本轮未发布就归还两端的临时名额，不带着 Prefill 或 Decode 预占进入下一轮等待。
+     */
+    private void rollbackUnpublished(Request request) {
+        if (request.stage() == Stage.PUBLISHED) {
+            return;
+        }
+        try {
+            if (request.stage() == Stage.DECODE_RESERVED) {
+                sendBackToWaiting(request);
+            } else if (request.decodeChoice() != null) {
+                releaseNow(request);
+            }
+        } finally {
+            prefillCheck.release(request);
+        }
+    }
+
+    /**
+     * 在已持有 Prefill 临时名额的本轮中选择 Decode、预留并尝试发布。
      */
     private boolean pickDecode(Request request, String group, DecodeRequirement requirement) {
         reservations.add(request.requestId());
@@ -576,7 +630,8 @@ public final class DecodeQueueLoop {
             return true;
         }
         decodeQueue.addReserved(request);
-        return true;
+        dispatch(request, choice);
+        return request.stage() != Stage.DECODE_RESERVED;
     }
 
     /**

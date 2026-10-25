@@ -99,7 +99,7 @@ public class RequestSchedulerV2 {
         this.queueReporter = queueReporter;
         this.endpointRegistry = endpointRegistry;
         this.configService = configService;
-        this.prefillCheck = new PrefillPublishCheck(endpointRegistry);
+        this.prefillCheck = new PrefillPublishCheck(endpointRegistry, prefillQueues);
         this.deployedRoles = Set.copyOf(modelMetaConfig.requiredRoles());
         this.prefillRole = deployedRoles.contains(RoleType.PREFILL)
                 ? RoleType.PREFILL
@@ -122,8 +122,11 @@ public class RequestSchedulerV2 {
             return thread;
         });
         this.deadlineTimer.setRemoveOnCancelPolicy(true);
-        prefillQueues.start(queue -> new PrefillQueueLoop(queue, prefillQueues, cleanup, mainQueue, endpointRegistry,
-                configService, reporter, this::sendToDecodeQueue, queueReporter));
+        prefillQueues.start(queue -> {
+            queue.onCapacityChanged(decodeLoopSignal::wake);
+            return new PrefillQueueLoop(queue, prefillQueues, cleanup, mainQueue, endpointRegistry, configService,
+                    reporter, this::sendToDecodeQueue, queueReporter);
+        });
         mainQueueLoop.start();
         decodeQueueLoop.start();
     }
@@ -207,11 +210,21 @@ public class RequestSchedulerV2 {
      */
     private void sendToDecodeQueue(Request request) {
         if (!needsDecode(request)) {
+            QueueBlockReason reason = prefillCheck.tryAcquire(request,
+                    configService.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker());
+            if (reason != null) {
+                cleanup.returnToMain(request, Stage.DECODE_WAITING);
+                return;
+            }
             try (WorkerEndpoint.EndpointHold hold = prefillCheck.hold(request)) {
                 if (hold == null) {
                     cleanup.returnToMain(request, Stage.DECODE_WAITING);
                 } else if (request.publish(Stage.DECODE_WAITING, List.of(request.prefillChoice().serverStatus()))) {
                     cleanup.releasePublished(request);
+                }
+            } finally {
+                if (request.stage() != Stage.PUBLISHED) {
+                    prefillCheck.release(request);
                 }
             }
             return;
