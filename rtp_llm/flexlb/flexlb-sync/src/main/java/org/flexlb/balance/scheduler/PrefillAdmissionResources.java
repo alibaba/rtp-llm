@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
 import org.flexlb.balance.endpoint.prefill.Reservation;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
@@ -227,8 +227,7 @@ public final class PrefillAdmissionResources {
         return new CommittedAdmissionOwner(exactMembers);
     }
 
-    private static void releaseCommittedHandoff(
-            PrefillState.CommittedHandoff handoff) {
+    private static void releaseCommittedHandoff(CommittedHandoff handoff) {
         if (handoff == null) {
             return;
         }
@@ -259,7 +258,7 @@ public final class PrefillAdmissionResources {
     public static final class CommittedAdmissionOwner implements AutoCloseable {
         private final IdentityHashMap<ScheduledRequest, Member> membersByIdentity;
         private final Member[] members;
-        private PrefillState.CommittedHandoff handoff;
+        private CommittedHandoff handoff;
         private boolean bound;
         private boolean closed;
 
@@ -282,8 +281,7 @@ public final class PrefillAdmissionResources {
         }
 
         /** No-throw bind after one Prefill group has committed. */
-        public synchronized void bindPrefillHandoff(
-                PrefillState.CommittedHandoff exactHandoff) {
+        public synchronized void bindPrefillHandoff(CommittedHandoff exactHandoff) {
             handoff = exactHandoff;
             bound = true;
         }

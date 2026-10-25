@@ -410,7 +410,7 @@ class PrefillStateSnapshotTest {
         return item;
     }
 
-    private PrefillState.Snapshot capture() {
+    private Snapshot capture() {
         lock.lock();
         try {
             return state.snapshot();

@@ -3,9 +3,12 @@ package org.flexlb.balance.endpoint;
 import lombok.Getter;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
 import org.flexlb.balance.endpoint.prefill.HeartbeatResult;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
+import org.flexlb.balance.endpoint.prefill.Retirement;
+import org.flexlb.balance.endpoint.prefill.Stats;
 import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
 import org.flexlb.balance.endpoint.prefill.WorkerStatusResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
@@ -56,17 +59,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
             this.generationHandoff = generationHandoff;
         }
 
-        public PrefillState.CommittedHandoff commit(
-                List<ScheduledRequest> exactItems,
-                List<SingleReservation> exactReservations) {
+        public CommittedHandoff commit(List<ScheduledRequest> exactItems, List<SingleReservation> exactReservations) {
             EndpointGenerationLifecycle.HandoffPermit exact = generationHandoff;
             if (exact == null) {
                 throw new IllegalStateException(
                         "route commit no longer owns its generation handoff");
             }
-            PrefillState.CommittedHandoff committed =
-                    prefillState.commitSingleGroup(
-                            exactItems, exactReservations, exact);
+            CommittedHandoff committed = prefillState.commitSingleGroup(exactItems, exactReservations, exact);
             generationHandoff = null;
             return committed;
         }
@@ -180,8 +179,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // the exact worker has exited, and are aggregated below.
         Throwable retirementFailure = prefillQueue.stopAndAwait();
         try {
-            PrefillState.Retirement retirement =
-                    prefillState.retireGenerationOwnership();
+            Retirement retirement = prefillState.retireGenerationOwnership();
             if (!retirement.ownedItems().isEmpty()) {
                 try {
                     endpointEvents.onPrefillGenerationRetired(
@@ -360,7 +358,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * plus individually tracked QUEUE_ROUTE requests.
      */
     public int getLocallyOwnedRequestCount() {
-        PrefillState.Stats stats = prefillState.stats();
+        Stats stats = prefillState.stats();
         return stats.locallyOwnedRequests();
     }
 
@@ -368,7 +366,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * Individually-accounted QUEUE_ROUTE requests.
      */
     public int getIndividuallyTrackedRequestCount() {
-        PrefillState.Stats stats = prefillState.stats();
+        Stats stats = prefillState.stats();
         return stats.individuallyOwnedRequests();
     }
 
@@ -473,7 +471,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     public int getInflightBatchCount() {
-        PrefillState.Stats stats = prefillState.stats();
+        Stats stats = prefillState.stats();
         return stats.batchCount();
     }
 
@@ -535,7 +533,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             sizeByPriority.forEach((priority, size) ->
                     reporter.reportBatcherQueueDepthByPriority(role, engineIp, priority, size));
         }
-        PrefillState.Stats stats = prefillState.stats();
+        Stats stats = prefillState.stats();
         reporter.reportInflightBatchCount(role, engineIp, stats.batchCount());
         if (configSupplier.get().getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH) {
             reporter.reportInflightRequestCount(role, engineIp, engineSubQueueMode

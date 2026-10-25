@@ -6,7 +6,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
 import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
@@ -246,7 +246,7 @@ class RequestResourceAccountingTest {
         final ScheduledRequest item;
         final DecodeEndpoint.ReservationHandle reservation;
         final SingleReservation singleReservation;
-        final PrefillState.CommittedHandoff prefillHandoff;
+        final CommittedHandoff prefillHandoff;
         final RequestSlot.AdmissionHandle admission;
         final DecodeEndpoint.AdmissionCapacity capacity = new DecodeEndpoint.AdmissionCapacity(1, 90);
         long version = 1;

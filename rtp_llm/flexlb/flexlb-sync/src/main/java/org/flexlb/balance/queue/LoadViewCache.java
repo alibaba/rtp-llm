@@ -2,6 +2,7 @@ package org.flexlb.balance.queue;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.Snapshot;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.QueueView;
 import org.flexlb.balance.estimate.QueueView.AdmissionBlock;
@@ -82,7 +83,7 @@ public final class LoadViewCache {
         Version version = new Version(queueState.queueVersion(), queueState.schedulingInputVersion(),
                 prefillState.mutationVersion(), fixedWaitMs);
         BatchCapacityView capacity = BatchCapacityView.of(prefillEndpoint, config);
-        PrefillState.Snapshot ownership = prefillState.snapshot();
+        Snapshot ownership = prefillState.snapshot();
         return new CapturedLoadView(
                 version, ownership,
                 new GroupPlanner.Constraints(
@@ -106,13 +107,15 @@ public final class LoadViewCache {
      */
     private final class CapturedLoadView {
         private final Version version;
-        private PrefillState.Snapshot ownership;
+        private Snapshot ownership;
         private final GroupPlanner.Constraints constraints;
         private final AdmissionBlock admissionBlock;
         private volatile PrefillTtftEstimate.LoadView materialized;
 
-        private CapturedLoadView(Version version, PrefillState.Snapshot ownership,
-                                 GroupPlanner.Constraints constraints, AdmissionBlock admissionBlock) {
+        private CapturedLoadView(Version version,
+                                 Snapshot ownership,
+                                 GroupPlanner.Constraints constraints,
+                                 AdmissionBlock admissionBlock) {
             this.version = version;
             this.ownership = ownership;
             this.constraints = constraints;

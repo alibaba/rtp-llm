@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -337,19 +337,15 @@ class WorkerEndpointTest {
         EndpointTestSupport.applyStatus(endpoint, response);
     }
 
-    private void registerBatch(
-            long batchId,
-            long predictedMs,
-            ScheduledRequest... items) {
+    private void registerBatch(long batchId, long predictedMs, ScheduledRequest... items) {
         for (ScheduledRequest item : items) {
             if (!EndpointTestSupport.offer(endpoint, item)) {
                 throw new IllegalStateException(
                         "test item could not be offered to endpoint queue");
             }
         }
-        try (PrefillState.CommittedHandoff ignored =
-                     EndpointTestSupport.commitBatch(
-                             endpoint, batchId, predictedMs, List.of(items))) {
+        try (CommittedHandoff ignored =
+                EndpointTestSupport.commitBatch(endpoint, batchId, predictedMs, List.of(items))) {
             // Closing transfers only the generation handoff. The ledger keeps
             // the exact committed item identities until status/terminal facts.
         }

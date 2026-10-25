@@ -3,7 +3,7 @@ package org.flexlb.balance.endpoint;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.estimate.WorkView;
@@ -1632,10 +1632,8 @@ class PrefillEndpointTest {
         // offered into the ACTIVE queue; reserveSingle rejects a non-active
         // identity with REQUEST_LEFT_QUEUE.
         assertTrue(EndpointTestSupport.offer(endpoint, route));
-        List<PrefillState.CommittedHandoff> handoffs =
-                EndpointTestSupport.commitRoutes(
-                        endpoint, 200L, List.of(route));
-        handoffs.forEach(PrefillState.CommittedHandoff::close);
+        List<CommittedHandoff> handoffs = EndpointTestSupport.commitRoutes(endpoint, 200L, List.of(route));
+        handoffs.forEach(CommittedHandoff::close);
         assertEquals(2, endpoint.getIndividuallyTrackedRequestCount());
 
         endpoint.close();
@@ -1884,20 +1882,17 @@ class PrefillEndpointTest {
         return task;
     }
 
-    private static void registerBatch(
-            PrefillEndpoint target,
-            long batchId,
-            long predictedMs,
-            List<ScheduledRequest> items) {
+    private static void registerBatch(PrefillEndpoint target,
+                                      long batchId,
+                                      long predictedMs,
+                                      List<ScheduledRequest> items) {
         for (ScheduledRequest item : items) {
             if (!EndpointTestSupport.offer(target, item)) {
                 throw new IllegalStateException(
                         "test item could not be offered to the endpoint queue");
             }
         }
-        try (PrefillState.CommittedHandoff ignored =
-                     EndpointTestSupport.commitBatch(
-                             target, batchId, predictedMs, items)) {
+        try (CommittedHandoff ignored = EndpointTestSupport.commitBatch(target, batchId, predictedMs, items)) {
             // Keep canonical ledger ownership; release only the generation pin.
         }
     }

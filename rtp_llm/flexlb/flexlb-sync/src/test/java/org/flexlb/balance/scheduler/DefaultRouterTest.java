@@ -4,7 +4,7 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
@@ -323,10 +323,9 @@ class DefaultRouterTest {
         stubRouteCommit(prefill, new org.flexlb.balance.estimate.WorkView(System.currentTimeMillis(), List.of(), List.of(), 0L));
     }
 
-    private static void stubRouteCommit(PrefillEndpoint endpoint,
-            org.flexlb.balance.estimate.WorkView precedingWork) {
+    private static void stubRouteCommit(PrefillEndpoint endpoint, org.flexlb.balance.estimate.WorkView precedingWork) {
         var commit = mock(PrefillEndpoint.RouteCommitAdmission.class);
-        var handoff = mock(PrefillState.CommittedHandoff.class);
+        var handoff = mock(CommittedHandoff.class);
         when(handoff.precedingWork()).thenReturn(precedingWork);
         when(endpoint.tryBeginRouteCommitAdmission()).thenReturn(commit);
         when(commit.commit(any(), any())).thenReturn(handoff);

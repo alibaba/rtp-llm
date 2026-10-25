@@ -1,7 +1,7 @@
 package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
 import org.flexlb.balance.endpoint.prefill.Reservation;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
@@ -488,8 +488,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             }
             PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted =
                     createCommittedOwner(members);
-            PrefillState.CommittedHandoff handoff =
-                    reservation.commit(items, predictedMs);
+            CommittedHandoff handoff = reservation.commit(items, predictedMs);
             exactCommitted.bindPrefillHandoff(handoff);
             committedAdmission = exactCommitted;
             reservation = null;

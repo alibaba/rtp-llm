@@ -10,7 +10,7 @@ import org.flexlb.balance.delivery.NonBatchDeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
@@ -149,10 +149,10 @@ final class StrategyTestSupport {
         }
     }
 
-    static PrefillState.CommittedHandoff commitBatch(PrefillEndpoint endpoint,
-                                                     long batchId,
-                                                     long predictedMs,
-                                                     List<? extends ScheduledRequest> exactItems) {
+    static CommittedHandoff commitBatch(PrefillEndpoint endpoint,
+                                        long batchId,
+                                        long predictedMs,
+                                        List<? extends ScheduledRequest> exactItems) {
         if (exactItems.isEmpty()) {
             throw new IllegalArgumentException(
                     "committed batch requires at least one item");

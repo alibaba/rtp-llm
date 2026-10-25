@@ -1,7 +1,7 @@
 package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
 import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -163,7 +163,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
                     itemOwnedReservations.set(index, false);
                 }
             }
-            PrefillState.CommittedHandoff handoff = routeCommit.commit(items, reservations);
+            CommittedHandoff handoff = routeCommit.commit(items, reservations);
             exactCommitted.bindPrefillHandoff(handoff);
             committed = exactCommitted;
             reservations = null;

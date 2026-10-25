@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -207,7 +207,7 @@ class TwinOverloadAdmissionTest {
         ReservationResult<BatchReservation> acquisition = endpoint.reserveBatch(items.getFirst(), batchId, limit);
         assertEquals(ReservationResult.Status.SUCCESS, acquisition.status());
         try (BatchReservation reservation = acquisition.reservation();
-                PrefillState.CommittedHandoff ignored = reservation.commit(items, 300_000L)) {
+                CommittedHandoff ignored = reservation.commit(items, 300_000L)) {
             // Releasing the handoff closes only the generation pin, not engine work.
         }
     }

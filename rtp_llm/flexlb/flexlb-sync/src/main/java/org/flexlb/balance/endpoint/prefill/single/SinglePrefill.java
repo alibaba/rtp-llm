@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint.prefill.single;
 
 import org.flexlb.balance.endpoint.EndpointGenerationLifecycle;
+import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
 import org.flexlb.balance.endpoint.prefill.FinishReport;
 import org.flexlb.balance.endpoint.prefill.LeaseState;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
@@ -46,10 +47,9 @@ public final class SinglePrefill {
         }
     }
 
-    public PrefillState.CommittedHandoff commitSingleGroup(
-            List<ScheduledRequest> items,
-            List<SingleReservation> exactReservations,
-            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+    public CommittedHandoff commitSingleGroup(List<ScheduledRequest> items,
+                                              List<SingleReservation> exactReservations,
+                                              EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
         if (exactReservations.isEmpty()) {
             throw new IllegalArgumentException(
                     "single commit requires at least one reservation");
@@ -71,9 +71,9 @@ public final class SinglePrefill {
         }
     }
 
-    private PrefillState.CommittedHandoff commitSingles(List<ScheduledRequest> items,
-                                                        List<SingleReservation> leases,
-                                                        EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+    private CommittedHandoff commitSingles(List<ScheduledRequest> items,
+                                           List<SingleReservation> leases,
+                                           EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
         prefillState.requireLock();
         List<ScheduledRequest> members = validateSingleGroup(items);
         if (members.size() != leases.size()) {
@@ -95,8 +95,8 @@ public final class SinglePrefill {
             }
         }
         long nowMs = prefillState.clock.getAsLong();
-        PrefillState.CommittedHandoff committedHandoff =
-                new PrefillState.CommittedHandoff(generationHandoff, prefillState.capturePrecedingWork(members, nowMs));
+        CommittedHandoff committedHandoff =
+                new CommittedHandoff(generationHandoff, prefillState.capturePrecedingWork(members, nowMs));
         for (ScheduledRequest item : members) {
             prefillState.removeFromWaitingQueue(prefillState.requests.get(item.requestId()), item);
         }
