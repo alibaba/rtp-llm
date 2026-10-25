@@ -3,7 +3,7 @@ package org.flexlb.balance.schedulev2;
 import java.util.Comparator;
 
 /**
- * 主队列和 Prefill 队列里请求的出队顺序。
+ * 主队列、Prefill 队列和 Decode 队列里请求的出队顺序。
  */
 public final class RequestOrder {
 

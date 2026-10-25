@@ -14,6 +14,7 @@ import org.flexlb.balance.schedulev2.RequestCleanup;
 import org.flexlb.balance.schedulev2.RequestTable;
 import org.flexlb.balance.schedulev2.Stage;
 import org.flexlb.balance.schedulev2.V2TestSupport;
+import org.flexlb.balance.schedulev2.decode.DecodeQueue;
 import org.flexlb.balance.schedulev2.prefill.PrefillPicker;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.balance.strategy.SelectedRole;
@@ -46,7 +47,8 @@ class MainQueueLoopTest {
     private final RequestTable requestTable = new RequestTable();
     private final MainQueue mainQueue = new MainQueue(queueCapacity, loopSignal, false);
     private final RequestCleanup cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, loopSignal,
-            new PrefillQueueRegistry(mock(ConfigService.class)), new LoopSignal());
+            new PrefillQueueRegistry(mock(ConfigService.class)), new LoopSignal(), new DecodeQueue(false),
+            new LoopSignal());
     private final PrefillEndpoint endpoint = V2TestSupport.prefillEndpoint("p1:8000");
     private final EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
     private final PrefillPicker picker = mock(PrefillPicker.class);

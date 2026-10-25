@@ -5,10 +5,12 @@ import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.PriorityNormalizer;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicReference;
@@ -49,6 +51,10 @@ public final class Request {
      * 从 Prefill 队列 dispatch 出去的时间，还没 dispatch 时为 0。
      */
     private volatile long prefillDecidedAtMs;
+    /**
+     * Decode 队列给它 reserve 的 Decode。进入 DECODE_RESERVED 前设置；reserve 被归还时取走。
+     */
+    private final AtomicReference<DecodeChoice> decodeChoice = new AtomicReference<>();
     private volatile long updatedAtMs;
     private volatile String detail;
     private volatile CancelReason cancelReason;
@@ -139,6 +145,21 @@ public final class Request {
         this.prefillDecidedAtMs = prefillDecidedAtMs;
     }
 
+    public DecodeChoice decodeChoice() {
+        return decodeChoice.get();
+    }
+
+    public void setDecodeChoice(DecodeChoice choice) {
+        decodeChoice.set(choice);
+    }
+
+    /**
+     * 取走 Decode 的 reserve，只有第一个调用方拿到非 null，由它归还，所以 reserve 不会重复归还。
+     */
+    public DecodeChoice takeDecodeChoice() {
+        return decodeChoice.getAndSet(null);
+    }
+
     /**
      * 请求的输入 token 数。
      */
@@ -157,6 +178,20 @@ public final class Request {
             return false;
         }
         updatedAtMs = System.currentTimeMillis();
+        return true;
+    }
+
+    /**
+     * 从 from 进入 PUBLISHED，并用选好的机器地址完成 future。当前阶段已经不是 from 时返回 false。
+     */
+    public boolean publish(Stage from, List<ServerStatus> serverStatuses) {
+        if (!moveTo(from, Stage.PUBLISHED)) {
+            return false;
+        }
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setServerStatus(serverStatuses);
+        future.complete(response);
         return true;
     }
 

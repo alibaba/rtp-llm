@@ -11,6 +11,7 @@ import org.flexlb.balance.schedulev2.RequestCleanup;
 import org.flexlb.balance.schedulev2.RequestTable;
 import org.flexlb.balance.schedulev2.Stage;
 import org.flexlb.balance.schedulev2.V2TestSupport;
+import org.flexlb.balance.schedulev2.decode.DecodeQueue;
 import org.flexlb.balance.schedulev2.main.MainQueue;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -51,7 +52,8 @@ class PrefillQueueLoopTest {
         when(endpointRegistry.getEndpointCount(RoleType.PREFILL)).thenReturn(1);
         when(endpointRegistry.get(RoleType.PREFILL, "p1:8000")).thenReturn(endpoint);
         queues = new PrefillQueueRegistry(configService);
-        cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, mainLoopSignal, queues, prefillLoopSignal);
+        cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, mainLoopSignal, queues, prefillLoopSignal,
+                new DecodeQueue(false), new LoopSignal());
         loop = new PrefillQueueLoop(queues, prefillLoopSignal, cleanup, mainQueue, endpointRegistry, configService,
                 sentToDecode::add);
     }
