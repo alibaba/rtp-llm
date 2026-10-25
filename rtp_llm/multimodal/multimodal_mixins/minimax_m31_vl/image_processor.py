@@ -11,12 +11,11 @@ from torchvision.transforms import InterpolationMode
 from transformers import BatchFeature
 from transformers.image_processing_utils_fast import (
     BaseImageProcessorFast,
-    DefaultFastImageProcessorKwargs,
     group_images_by_shape,
     reorder_images,
 )
 from transformers.image_utils import PILImageResampling, SizeDict
-from transformers.processing_utils import Unpack
+from transformers.processing_utils import ImagesKwargs, Unpack
 from transformers.utils import TensorType
 
 from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
@@ -227,7 +226,7 @@ def compute_sampled_frame_indices(
 # ==============================================================================
 
 
-class MiniMaxM31VLImageProcessorKwargs(DefaultFastImageProcessorKwargs, total=False):
+class MiniMaxM31VLImageProcessorKwargs(ImagesKwargs, total=False):
     patch_size: int
     temporal_patch_size: int
     merge_size: int

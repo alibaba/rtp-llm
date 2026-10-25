@@ -260,6 +260,9 @@ class _MiniMaxM31VLVisionGraphCache:
             self._stats["miss"] += 1
             if signature in self._disabled:
                 return self._eager(pixel_values, grid_thw)
+            # Keep captured shapes stable; run unseen shapes eagerly once full.
+            if len(self._entries) >= self._max_entries:
+                return self._fallback(pixel_values, grid_thw)
 
             seen = self._seen.get(signature, 0) + 1
             self._seen[signature] = seen
