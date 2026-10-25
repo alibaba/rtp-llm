@@ -128,11 +128,13 @@ cc_test(
             "@//:using_rocm": {
                 "TEST_USING_DEVICE": "ROCM",
                 "RTP_LLM_STREAM_ASYNC": stream_async,
+                "RTP_LLM_DEVICE_INPUT": "0",
             },
             "//conditions:default": {
                 "TEST_USING_DEVICE": "CUDA",
                 "LD_PRELOAD": "libtorch_cpu.so",
                 "RTP_LLM_STREAM_ASYNC": stream_async,
+                "RTP_LLM_DEVICE_INPUT": "0",
             },
         }),
         exec_properties = {"gpu": "L20_CU13"},

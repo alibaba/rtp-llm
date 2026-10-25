@@ -708,7 +708,16 @@ public:
         auto sp_output_buffer = stream->getSPOutputBuffer();
         auto tokens           = sp_output_buffer->tokens;
         auto tokens_h         = tokens.cpu().clone();
-        EXPECT_EQ(expect_propose_tokens, toVec<int>(tokens_h));
+        if (sp_output_buffer->propose_tokens_gpu.defined()) {
+            // Async device state carries the new proposal only in the GPU
+            // mirror; the legacy CPU proposal slot intentionally stays stale.
+            ASSERT_FALSE(expect_propose_tokens.empty());
+            EXPECT_EQ(expect_propose_tokens.front(), tokens_h.reshape({-1})[0].item<int32_t>());
+            EXPECT_EQ(vector<int>(expect_propose_tokens.begin() + 1, expect_propose_tokens.end()),
+                      toVec<int>(sp_output_buffer->propose_tokens_gpu));
+        } else {
+            EXPECT_EQ(expect_propose_tokens, toVec<int>(tokens_h));
+        }
 
         auto all_probs   = sp_output_buffer->all_probs;
         auto all_probs_h = all_probs.is_cuda() ? all_probs.cpu() : all_probs;
@@ -2023,6 +2032,15 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
 
     next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, 3);
 
+    if (components.executor->useStreamAsync()) {
+        // Async MTP device state keeps the full verify width; only the
+        // accepted prefix is committed to the stream after the worker joins.
+        next_draft_input.combo_tokens       = torch::tensor({3, 2, 0, 0, 0}, torch::kInt32);
+        next_draft_input.input_lengths      = torch::tensor({5}, torch::kInt32);
+        next_draft_input.last_hidden_states = target_output.all_hidden_states;
+        next_draft_output.all_hidden_states = next_draft_output.all_hidden_states.to(torch::kCUDA);
+    }
+
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3});
     components.fake_draft_model->expectTargetVerify(false);
@@ -2062,6 +2080,11 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
     draft_sampler_output_3.all_probs    = torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
     next_draft_sampler_output.token_ids = torch::tensor({1}, torch::kInt32).reshape({(int64_t)batch_size, 1});
     next_draft_sampler_output.all_probs = torch::tensor({0.0f, 1.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
+
+    if (components.executor->useStreamAsync()) {
+        next_draft_sampler_output.token_ids = next_draft_sampler_output.token_ids.to(torch::kCUDA);
+        next_draft_sampler_output.all_probs = next_draft_sampler_output.all_probs.to(torch::kCUDA);
+    }
 
     components.fake_fast_topk_sampler->setInputs(
         {draft_output_1.logits, draft_output_2.logits, draft_output_3.logits, next_draft_output.logits});
@@ -2110,6 +2133,15 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
     auto status = with_prefill_only ? components.executor->process({prefill_only_stream, stream1}) :
                                       components.executor->process({stream1});
     ASSERT_TRUE(status.ok());
+    stream1->waitPendingAsyncBookkeeping();
+    if (components.executor->useStreamAsync()) {
+        const auto state = stream1->getMtpAsyncDeviceState();
+        EXPECT_GT(state.epoch, 0u);
+        EXPECT_EQ(state.next_seq_len_upper_bound, 8);
+        ASSERT_TRUE(state.next_seq_len_gpu.defined() && state.next_seq_len_gpu.is_cuda());
+        EXPECT_EQ(state.next_seq_len_gpu.cpu().item<int32_t>(), 6);
+        EXPECT_EQ(stream1->seqLength(), 6);
+    }
     if (with_prefill_only) {
         EXPECT_TRUE(prefill_only_stream->hasEvent(StreamEvents::GenerateDone));
         auto prefill_output = prefill_only_stream->nextOutput();
@@ -2189,6 +2221,15 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     next_draft_output.logits            = torch::tensor({0.2f, 0.1f, 0.8f, 0.0f}).reshape({1, 4});
     next_draft_output.all_hidden_states = torch::tensor({0.21f, 0.22f}).reshape({1, 2});
 
+    if (components.executor->useStreamAsync()) {
+        // Async MTP keeps the full verify width before committing the accepted prefix.
+        next_draft_input.combo_tokens       = torch::tensor({1, 0, 0}, torch::kInt32);
+        next_draft_input.input_lengths      = torch::tensor({3}, torch::kInt32);
+        next_draft_input.last_hidden_states = target_output.all_hidden_states;
+        next_draft_output.all_hidden_states =
+            torch::tensor({0.21f, 0.22f, 0.0f, 0.0f, 0.0f, 0.0f}).reshape({3, 2}).to(torch::kCUDA);
+    }
+
     components.fake_draft_model->setInputs({draft_input_1, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, next_draft_output});
     components.fake_target_model->setInputs({target_input});
@@ -2198,6 +2239,10 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
                                                               torch::tensor({0}, torch::kInt32).reshape({1, 1})};
     auto next_draft_sampler_output = spec::FastTopKSamplerOutput{
         torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4}), torch::tensor({2}, torch::kInt32).reshape({1, 1})};
+    if (components.executor->useStreamAsync()) {
+        next_draft_sampler_output.token_ids = next_draft_sampler_output.token_ids.to(torch::kCUDA);
+        next_draft_sampler_output.all_probs = next_draft_sampler_output.all_probs.to(torch::kCUDA);
+    }
     components.fake_fast_topk_sampler->setInputs({draft_output_1.logits, next_draft_output.logits});
     components.fake_fast_topk_sampler->setOutputs({draft_sampler_output_1, next_draft_sampler_output});
 
@@ -2226,6 +2271,7 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
 
     auto status = components.executor->process({stream});
     ASSERT_TRUE(status.ok());
+    stream->waitPendingAsyncBookkeeping();
 
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.21, 0.22});
 }
@@ -2624,6 +2670,15 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
     next_draft_output.logits            = torch::tensor({0.2f, 0.1f, 0.8f, 0.0f}).reshape({1, 4});
     next_draft_output.all_hidden_states = torch::tensor({0.21f, 0.22f}).reshape({1, 2});
 
+    if (components.executor->useStreamAsync()) {
+        // Async MTP keeps the full verify width before committing the accepted prefix.
+        next_draft_input.combo_tokens       = torch::tensor({1, 2}, torch::kInt32);
+        next_draft_input.input_lengths      = torch::tensor({2}, torch::kInt32);
+        next_draft_input.last_hidden_states = target_output.all_hidden_states;
+        next_draft_output.all_hidden_states =
+            torch::tensor({0.21f, 0.22f, 0.0f, 0.0f}).reshape({2, 2}).to(torch::kCUDA);
+    }
+
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
     components.fake_draft_model->setInputs({next_draft_input});
@@ -2631,6 +2686,10 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
 
     auto next_draft_sampler_output = spec::FastTopKSamplerOutput{
         torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4}), torch::tensor({2}, torch::kInt32).reshape({1, 1})};
+    if (components.executor->useStreamAsync()) {
+        next_draft_sampler_output.token_ids = next_draft_sampler_output.token_ids.to(torch::kCUDA);
+        next_draft_sampler_output.all_probs = next_draft_sampler_output.all_probs.to(torch::kCUDA);
+    }
     components.fake_fast_topk_sampler->setInputs({next_draft_output.logits});
     components.fake_fast_topk_sampler->setOutputs({next_draft_sampler_output});
 
@@ -2658,6 +2717,7 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
 
     auto status = components.executor->process({stream});
     ASSERT_TRUE(status.ok());
+    stream->waitPendingAsyncBookkeeping();
 
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {});
 }
@@ -2760,6 +2820,19 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     next_draft_input.last_hidden_states =
         torch::cat({target_output.all_hidden_states.narrow(0, 0, 1), target_output.all_hidden_states.narrow(0, 5, 5)});
 
+    if (components.executor->useStreamAsync()) {
+        // Each stream retains five verify rows, including rejected positions.
+        next_draft_input.combo_tokens       = torch::tensor({3, 0, 0, 0, 0, 3, 0, 2, 2, 1}, torch::kInt32);
+        next_draft_input.input_lengths      = torch::tensor({5, 5}, torch::kInt32);
+        next_draft_input.lm_output_indexes  = torch::tensor({0, 9}, torch::kInt32);
+        next_draft_input.last_hidden_states = target_output.all_hidden_states;
+        next_draft_output.all_hidden_states =
+            torch::tensor({0.1f, 0.11f, 0.0f, 0.0f,  0.0f, 0.0f,  0.0f, 0.0f,  0.0f, 0.0f,
+                           1.1f, 1.11f, 1.2f, 1.22f, 1.3f, 1.33f, 1.4f, 1.44f, 1.5f, 1.55f})
+                .reshape({10, 2})
+                .to(torch::kCUDA);
+    }
+
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
 
@@ -2786,6 +2859,11 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     next_draft_sampler_output.token_ids = torch::tensor({1, 2}, torch::kInt32).reshape({(int64_t)batch_size, 1});
     next_draft_sampler_output.all_probs =
         torch::tensor({0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
+
+    if (components.executor->useStreamAsync()) {
+        next_draft_sampler_output.token_ids = next_draft_sampler_output.token_ids.to(torch::kCUDA);
+        next_draft_sampler_output.all_probs = next_draft_sampler_output.all_probs.to(torch::kCUDA);
+    }
 
     components.fake_fast_topk_sampler->setInputs(
         {draft_output_1.logits, draft_output_2.logits, draft_output_3.logits, next_draft_output.logits});
@@ -2837,6 +2915,8 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     // Verify executor was created successfully
     auto status = components.executor->process({stream1, stream2});
     ASSERT_TRUE(status.ok());
+    stream1->waitPendingAsyncBookkeeping();
+    stream2->waitPendingAsyncBookkeeping();
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 3}, {3, 1}, {0, 1, 0, 0}, {0.1, 0.11});

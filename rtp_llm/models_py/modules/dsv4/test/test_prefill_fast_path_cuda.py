@@ -680,30 +680,36 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
             compressor_weights=_compressor_weights(KV_HEAD_DIM, device),
         )
         inner_weights = _compressor_weights(INDEXER_HEAD_DIM, device)
-        attn.indexer = IndexerFP8(
-            dim=128,
-            q_lora_rank=128,
-            index_n_heads=1,
-            index_head_dim=INDEXER_HEAD_DIM,
-            rope_head_dim=64,
-            index_topk=4,
-            compress_ratio=4,
-            max_batch_size=2,
-            max_seq_len=512,
-            layer_weights={
-                W.v4_indexer_wq_b_w: torch.zeros(
-                    (128, 128), dtype=torch.uint8, device=device
-                ).view(torch.float8_e4m3fn),
-                W.v4_indexer_wq_b_s: torch.ones((1, 1), device=device),
-                W.v4_indexer_weights_proj_w: torch.zeros(
-                    (1, 128), dtype=torch.bfloat16, device=device
-                ),
-                W.v4_indexer_compressor_ape: inner_weights["ape"],
-                W.v4_indexer_compressor_wkv: inner_weights["wkv"],
-                W.v4_indexer_compressor_wgate: inner_weights["wgate"],
-                W.v4_indexer_compressor_norm: inner_weights["norm"],
-            },
-        )
+        # This metadata/gather test never runs the Q projection.
+        # Leave it unset so no Linear backend registration is required.
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.attention._v4_fp8_linear",
+            return_value=None,
+        ):
+            attn.indexer = IndexerFP8(
+                dim=128,
+                q_lora_rank=128,
+                index_n_heads=1,
+                index_head_dim=INDEXER_HEAD_DIM,
+                rope_head_dim=64,
+                index_topk=4,
+                compress_ratio=4,
+                max_batch_size=2,
+                max_seq_len=512,
+                layer_weights={
+                    W.v4_indexer_wq_b_w: torch.zeros(
+                        (128, 128), dtype=torch.uint8, device=device
+                    ).view(torch.float8_e4m3fn),
+                    W.v4_indexer_wq_b_s: torch.ones((1, 1), device=device),
+                    W.v4_indexer_weights_proj_w: torch.zeros(
+                        (1, 128), dtype=torch.bfloat16, device=device
+                    ),
+                    W.v4_indexer_compressor_ape: inner_weights["ape"],
+                    W.v4_indexer_compressor_wkv: inner_weights["wkv"],
+                    W.v4_indexer_compressor_wgate: inner_weights["wgate"],
+                    W.v4_indexer_compressor_norm: inner_weights["norm"],
+                },
+            )
         x = torch.empty((4, 128), dtype=torch.bfloat16, device=device)
         lengths = torch.tensor([2, 2], dtype=torch.int32, device=device)
         prefixes = torch.tensor([1, 0], dtype=torch.int32, device=device)
