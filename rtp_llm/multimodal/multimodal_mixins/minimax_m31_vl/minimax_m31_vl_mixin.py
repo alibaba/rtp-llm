@@ -282,8 +282,6 @@ class _MiniMaxM31VLVisionGraphCache:
 
             self._entries[signature] = entry
             self._seen.pop(signature, None)
-            while len(self._entries) > self._max_entries:
-                self._entries.popitem(last=False)
             # Capture records the work but some graph-safe kernels do not leave
             # their captured output buffer in a consumable state. Replay once so
             # the request that triggered capture observes the same result as hits.
