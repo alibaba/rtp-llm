@@ -2436,6 +2436,9 @@ void MtpExecutor::launchDSparkCommitOnSideStream(GptModelInputs&      model_inpu
 
     cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(dspark_commit_stream_));
     verify_done_event->block(dspark_commit_stream_);
+    // Run the commit forward (graph replay enqueued on the side stream) so
+    // its GPU work overlaps the engine stream's sampler/rejection tail.
+    auto commit_output = runDraftPrefillForward(model_input);
     dspark_commit_done_event_ = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     dspark_commit_done_event_->record(dspark_commit_stream_);
     dspark_commit_model_output_ = std::move(commit_output);
