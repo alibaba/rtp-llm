@@ -1003,6 +1003,47 @@ TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
     }
 }
 
+TEST(BlockTreeCacheMetricsTest, QuarantineEventsKeepReasonAndWeightedCountsSeparateFromFrozenCapacity) {
+    auto pool  = makeDevicePool({{16, 0}}, 4, "quarantine_metrics");
+    auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    auto  reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto* metrics  = reporter->getMetricsGroup<RtpLLMRemoteCacheQuarantineMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    for (const char* op : {"read", "write"}) {
+        for (const char* reason : {"sdk_timeout", "rpc_timeout", "rpc_error", "invalid_response"}) {
+            RtpLLMRemoteCacheQuarantineEventMetricsCollector collector;
+            collector.op          = op;
+            collector.reason      = reason;
+            collector.block_count = 3;
+            for (int event = 0; event < 2; ++event) {
+                pool->freezeBlock(*block);
+                ASSERT_TRUE((reporter->report<RtpLLMRemoteCacheQuarantineMetrics,
+                                              RtpLLMRemoteCacheQuarantineEventMetricsCollector>(nullptr, &collector)));
+            }
+            kmonitor::MetricsTags tags("op", op);
+            tags.AddTag("reason", reason);
+            EXPECT_DOUBLE_EQ(snapshotQps(metrics->quarantine_qps_metric, tags, "rtp_llm_remote_cache_quarantine_qps"),
+                             2);
+            EXPECT_DOUBLE_EQ(
+                snapshotQps(metrics->quarantine_block_qps_metric, tags, "rtp_llm_remote_cache_quarantine_block_qps"),
+                6);
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+        }
+    }
+    RtpLLMRemoteCacheQuarantineMetricsCollector state;
+    state.quarantined_lease_count = 16;
+    state.quarantined_block_count = 48;
+    state.quarantined_block_ratio = 12;
+    ASSERT_TRUE((reporter->report<RtpLLMRemoteCacheQuarantineMetrics, RtpLLMRemoteCacheQuarantineMetricsCollector>(
+        nullptr, &state)));
+    const kmonitor::MetricsTags empty_tags;
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->quarantined_lease_count_metric, empty_tags), 16);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->quarantined_block_count_metric, empty_tags), 48);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->quarantined_block_ratio_metric, empty_tags), 12);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+}
+
 TEST(BlockTreeCacheMetricsTest, EvictionReferenceMetricKeepsLegacyAlias) {
     kmonitor::MetricsTags tags("pool", "host");
     auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});

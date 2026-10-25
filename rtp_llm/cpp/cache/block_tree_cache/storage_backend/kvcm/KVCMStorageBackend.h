@@ -43,6 +43,7 @@ protected:
     void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override;
     void writeImpl(const StorageRequest& request) override;
     void shutdownImpl() noexcept override;
+    void onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept override;
     void onQuarantineChanged(uint64_t generation, size_t task_count, size_t block_count) noexcept override;
 
 private:

@@ -151,7 +151,7 @@ protected:
     void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override {
         if (timeout_read_) {
             timeout_read_ = false;
-            throw StorageOperationTimeout("read timed out");
+            throw StorageOperationTimeout("read timed out", StorageQuarantineReason::SDK_TIMEOUT);
         }
         if (fail_read_) {
             fail_read_ = false;

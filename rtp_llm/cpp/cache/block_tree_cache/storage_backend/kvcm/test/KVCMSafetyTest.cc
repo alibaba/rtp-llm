@@ -247,10 +247,12 @@ TEST(KVCMSafetyTest, BroadcastWaitClassifiesDeadlineAndRpcFailureBeforeFreezing)
         try {
             backend->readImpl(makeStorageRequest(environment), matched.match_meta);
             FAIL() << "expected broadcast failure";
-        } catch (const StorageOperationTimeout&) {
+        } catch (const StorageOperationTimeout& exception) {
             EXPECT_TRUE(timeout);
-        } catch (const StorageOperationCompletionUnknown&) {
+            EXPECT_EQ(exception.reason(), StorageQuarantineReason::RPC_TIMEOUT);
+        } catch (const StorageOperationCompletionUnknown& exception) {
             EXPECT_FALSE(timeout);
+            EXPECT_EQ(exception.reason(), StorageQuarantineReason::RPC_ERROR);
         }
         const auto error = readStatus(*backend.backend, makeStorageRequest(environment), matched.match_meta);
         EXPECT_EQ(error.code(), timeout ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION);

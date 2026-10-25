@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <mutex>
 #include <exception>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -231,10 +232,13 @@ void StorageBackend::shutdown() {
     lifecycle_cv_.notify_all();
 }
 
-void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state) {
+void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state,
+                                    bool                                                             is_write,
+                                    StorageQuarantineReason                                          reason) {
     if (!state) {
         return;
     }
+    const size_t pinned_block_count = state->pins.size();
     for (const auto& pin : state->pins) {
         pin.pool->freezeBlock(pin.block);
     }
@@ -256,6 +260,9 @@ void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail
     RTP_LLM_LOG_WARNING("quarantine storage request after transfer completion became unknown: tasks=%zu blocks=%zu",
                         task_count,
                         block_count);
+    // Count each operation even if its state snapshot is superseded, and before
+    // onQuarantineChanged may abort due to the configured capacity limit.
+    onQuarantined(is_write, reason, pinned_block_count);
     onQuarantineChanged(generation, task_count, block_count);
 }
 
@@ -347,24 +354,24 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
         ErrorInfo                              error = outcome == Lifecycle::ACCEPTING ?
                                                            ErrorInfo::OkStatus() :
                                                            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "storage backend is not accepting reads");
-        bool quarantine = false;
+        std::optional<StorageQuarantineReason> quarantine_reason;
         if (error.ok()) {
             try {
                 readImpl(state->request, match_meta);
             } catch (const StorageOperationTimeout& exception) {
                 error             = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
-                quarantine = true;
+                quarantine_reason = exception.reason();
             } catch (const StorageOperationCompletionUnknown& exception) {
                 error             = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
-                quarantine = true;
+                quarantine_reason = exception.reason();
             } catch (const std::exception& exception) {
                 error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
             } catch (...) {
                 error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown storage read failure");
             }
         }
-        if (quarantine) {
-            quarantineTask(state);
+        if (quarantine_reason) {
+            quarantineTask(state, /*is_write=*/false, *quarantine_reason);
         } else {
             state->finish();
         }
@@ -387,15 +394,15 @@ bool StorageBackend::write(StorageWriteTask task) {
     RTP_LLM_CHECK(task.state_ != nullptr);
     auto state = std::move(task.state_);
     return dispatch([this, state](Lifecycle outcome) {
-        bool quarantine = false;
+        std::optional<StorageQuarantineReason> quarantine_reason;
         if (outcome == Lifecycle::ACCEPTING) {
             try {
                 writeImpl(state->request);
             } catch (const StorageOperationTimeout& error) {
-                quarantine = true;
+                quarantine_reason = error.reason();
                 RTP_LLM_LOG_WARNING("StorageBackend write timed out; quarantining request pins: %s", error.what());
             } catch (const StorageOperationCompletionUnknown& error) {
-                quarantine = true;
+                quarantine_reason = error.reason();
                 RTP_LLM_LOG_WARNING("StorageBackend write completion is unknown; quarantining request pins: %s",
                                     error.what());
             } catch (const std::exception& error) {
@@ -404,8 +411,8 @@ bool StorageBackend::write(StorageWriteTask task) {
                 RTP_LLM_LOG_ERROR("StorageBackend write failed with an unknown exception");
             }
         }
-        if (quarantine) {
-            quarantineTask(state);
+        if (quarantine_reason) {
+            quarantineTask(state, /*is_write=*/true, *quarantine_reason);
         } else {
             state->finish();
         }
