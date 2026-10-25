@@ -131,3 +131,19 @@ def test_parsed_configs_are_detached_and_yaml_narrowing_is_applied():
         schema.parse(source, {"custom.threshold": NumberRule(integer=False, minimum=4)})
     with pytest.raises(TypeError):
         schema.sections["custom"]["threshold"] = None
+
+
+def test_nested_objects_reject_unknown_and_missing_non_numeric_fields():
+    schema = InputSchema({"custom": {"capture": {"name": None, "limit": NONNEGATIVE}}})
+    valid = {"custom": {"capture": {"name": "sample", "limit": 1}}}
+    assert schema.parse(valid) == valid
+    for capture in ({"name": "sample", "limit": 1, "limti": 2}, {"limit": 1}, []):
+        with pytest.raises(ValueError, match="parameters.custom.capture"):
+            schema.parse({"custom": {"capture": capture}})
+
+
+def test_partial_object_admission_is_explicit_and_retains_declared_validation():
+    schema = InputSchema({"custom": {"source": {"limit": NONNEGATIVE}}}, open_objects={"custom.source"})
+    assert schema.parse({"custom": {"source": {"limit": 1, "kind": "owned"}}})["custom"]["source"]["kind"] == "owned"
+    with pytest.raises(ValueError, match="limit"):
+        schema.parse({"custom": {"source": {"kind": "owned"}}})

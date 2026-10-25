@@ -11,7 +11,8 @@ INPUTS = InputSchema(
         "traffic": {"kind": None, "count": replace(POSITIVE_COUNT, maximum=10000), "input_len": JAVA_LENGTH, "output_len": JAVA_LENGTH},
         "procedure": {"setup_timeout_s": NONNEGATIVE},
         "checks": {"completed": None, "no_errors": {"expected": COUNT}},
-    }
+    },
+    open_objects=frozenset(["checks.no_errors"]),
 )
 
 

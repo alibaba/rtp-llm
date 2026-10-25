@@ -148,18 +148,14 @@ class JavaFlowGroup:
     def request_stop(self):
         """Publish cancellation without waiting for the Java producer."""
         if self.proc is not None and self.proc.alive() and self.control.exists():
-            from adapters.flow_control import stop_sending
-
-            self.stop_command = stop_sending(self.control, self.identity, self.stop_command)
+            self.stop_command = self.control_protocol.stop(self.stop_command)
 
     def stop_sending(self, deadline, *, on_poll=None):
         if self._drain_result is not None:
             return self._drain_result.encode(self.identity)
         observation = self.observe_control()
         if observation.status is None or not observation.status.state.sending_finished:
-            from adapters.flow_control import stop_sending
-
-            self.stop_command = stop_sending(self.control, self.identity, self.stop_command)
+            self.stop_command = self.control_protocol.stop(self.stop_command)
             observation = self._wait_control(
                 lambda o: o.status.state.sending_finished, deadline, "flow did not stop accepting new trace records", on_poll=on_poll
             )

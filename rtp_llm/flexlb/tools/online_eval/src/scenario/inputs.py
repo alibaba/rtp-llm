@@ -26,6 +26,7 @@ class CaseConfig(TypedDict, total=False):
 class InputSchema:
     sections: Mapping
     optional: frozenset = frozenset()
+    open_objects: frozenset = frozenset()  # Partial contracts validated by their owning business parser.
     _numbers: Mapping = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -36,7 +37,7 @@ class InputSchema:
             return MappingProxyType({key: freeze(child) if isinstance(child, Mapping) else child for key, child in value.items()})
 
         sections = snapshot(self.sections)
-        optional, paths, numbers, omitted = frozenset(self.optional), set(), {}, set()
+        optional, paths, objects, numbers, omitted = frozenset(self.optional), set(), set(), {}, set()
 
         def visit(definitions, prefix, required=True):
             if not isinstance(definitions, Mapping):
@@ -48,6 +49,7 @@ class InputSchema:
                 paths.add(path)
                 required_here = required and path not in optional
                 if isinstance(rule, Mapping):
+                    objects.add(path)
                     visit(rule, path, required_here)
                 elif rule is not None:
                     numbers[path] = rule
@@ -58,6 +60,9 @@ class InputSchema:
             if type(name) is not str or not name.isidentifier():
                 raise ValueError("invalid input section")
             visit(definitions, name)
+        if set(self.open_objects) - objects:
+            raise ValueError("open input objects are not declared")
+        object.__setattr__(self, "open_objects", frozenset(self.open_objects))
         if optional - paths:
             raise ValueError("optional inputs are not declared")
         parameter_rules(numbers)
@@ -75,10 +80,15 @@ class InputSchema:
         return self._optional_numbers
 
     def parse(self, parameters, numbers=None) -> CaseConfig:
-        fields(parameters, self.sections, "parameters")
-        for section, definitions in self.sections.items():
-            required = {key for key in definitions if section + "." + key not in self.optional}
-            fields(parameters[section], required, "parameters." + section, optional=set(definitions) - required)
+        def validate_object(value, definitions, path):
+            required = {key for key in definitions if (path + "." + key).lstrip(".") not in self.optional}
+            allowed = set(definitions) | (set(value) if path in self.open_objects and isinstance(value, dict) else set())
+            fields(value, required, "parameters" + ("." + path if path else ""), optional=allowed - required)
+            for key, definition in definitions.items():
+                if key in value and isinstance(definition, Mapping):
+                    validate_object(value[key], definition, (path + "." + key).lstrip("."))
+
+        validate_object(parameters, self.sections, "")
         for path, rule in (self._numbers if numbers is None else numbers).items():
             value = parameters
             for part in path.split("."):

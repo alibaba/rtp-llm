@@ -103,12 +103,19 @@ class ExecutionPlanCodec:
         instances = document["instances"]
         if not isinstance(instances, list):
             raise ScenarioError("execution plan requires compiled instances")
-        if document["dependencies"] != self.current_dependencies(instances):
-            raise ScenarioError("execution code/config changed after planning")
+        self.verify_dependencies(document)
         return document
 
+    def verify_dependencies(self, document):
+        if document["dependencies"] != self.current_dependencies(document["instances"]):
+            raise ScenarioError("execution code/config changed after planning")
+
     def read(self, path, expected_sha):
-        document = self.read_document(path, expected_sha)
+        return self.decode_document(self.read_document(path, expected_sha))
+
+    @staticmethod
+    def decode_document(document):
+        """Decode an already verified envelope after selected case registration."""
         return ExecutionPlan(
             tuple(CompiledInstance.read(instance) for instance in document["instances"]), tuple(sorted(document["dependencies"].items()))
         )

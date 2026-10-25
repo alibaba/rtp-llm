@@ -7,8 +7,6 @@ from typing import List, Optional
 
 import grpc
 
-STREAM_CANCEL_TIMEOUT_S = 5.0
-
 
 @dataclass
 class StreamSnapshot:
@@ -73,14 +71,6 @@ class StreamHandle:
         finally:
             self.snap.terminated = True
             self.snap.terminated_s = time.monotonic()
-
-    def wait_end(self, timeout_s: float = STREAM_CANCEL_TIMEOUT_S) -> bool:
-        self.thread.join(timeout_s)
-        if self.thread.is_alive():
-            self.cancel()
-            self.thread.join(5.0)
-            return False
-        return True
 
     def cancel(self) -> None:
         try:

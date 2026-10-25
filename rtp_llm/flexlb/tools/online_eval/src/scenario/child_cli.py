@@ -117,28 +117,33 @@ def main(argv=None):
                 raise ScenarioError("frozen plans already contain effective experiment parameters")
             if args.list_json or not args.plan_sha256:
                 raise ScenarioError("frozen execution requires --plan-sha256 and cannot list")
-        scope = (
-            using_cases(selected_cases(ExecutionPlanCodec().read_document(args.plan, args.plan_sha256)["instances"]))
-            if args.plan
-            else nullcontext()
-        )
+        document = ExecutionPlanCodec().read_document(args.plan, args.plan_sha256) if args.plan else None
+        scope = using_cases(selected_cases(document["instances"])) if document is not None else nullcontext()
         with scope:
-            return run_selected(args)
+            return run_selected(args, document)
+
     except (ScenarioError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
 
-def run_selected(args):
+def run_selected(args, document=None):
+    typed_plans = {}
     try:
         from scenario.execution_plan import dependency_files
 
         dependencies = dependency_files() if not args.plan else {}
         registry = handlers()
         if args.plan:
-            from scenario.execution_plan import load_plan
+            from scenario.execution_plan import ExecutionPlanCodec
 
-            plans = select(load_plan(args.plan, args.plan_sha256), args.instances)
+            codec = ExecutionPlanCodec()
+            if document is not None:
+                # Case import is executable code; recheck dependencies across that boundary.
+                codec.verify_dependencies(document)
+            decoded = codec.decode_document(document) if document is not None else codec.read(args.plan, args.plan_sha256)
+            typed_plans = {plan.id: plan for plan in decoded.instances}
+            plans = select([plan.to_dict() for plan in decoded.instances], args.instances)
             if any(plan["profile"] != args.profile or plan["grade"] != args.grade for plan in plans):
                 raise ScenarioError("frozen plan profile/grade disagrees with selection")
         else:
@@ -213,7 +218,7 @@ def run_selected(args):
                 backend.retain_tsdb = args.retain_tsdb
                 rows.append(
                     (execute_workload if plan["test_kind"] == "workload" else execute_instance)(
-                        plan,
+                        typed_plans.get(plan["id"], plan),
                         backend,
                         registry,
                         args.out_dir / "instances" / instance_directory(plan["id"]),

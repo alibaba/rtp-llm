@@ -122,7 +122,7 @@ def test_reuse_compares_captured_startup_intent_even_if_caller_mutates_spec(tmp_
 
 def test_new_check_reaches_projection_without_another_field_or_numeric_list():
     checks = CheckSet("trial", {"latency": CheckSpec("max_latency", "latency", "le", "ms", ("window",), number=NONNEGATIVE)})
-    inputs = InputSchema({"checks": checks.input_fields})
+    inputs = InputSchema({"checks": checks.input_fields}, open_objects={"checks.latency"})
     criteria = CriteriaContract({"checks": checks.criteria_fields})
     builder = CaseBuilder(
         {},

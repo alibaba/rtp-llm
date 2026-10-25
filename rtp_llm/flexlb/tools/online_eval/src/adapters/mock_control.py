@@ -1,6 +1,5 @@
 """Deadline-bounded JSON requests and engine snapshots from the mock server."""
 
-import copy
 import json
 import re
 import urllib.request
@@ -38,26 +37,6 @@ def control_json(ops, endpoint, deadline, body=None):
         if not isinstance(result, dict):
             raise ValueError("control response must be a JSON object")
         return result
-
-
-def select_engines(snapshot, targets):
-    entries = snapshot.get("engines")
-    if not isinstance(entries, list):
-        raise ValueError("snapshot has no engine list")
-    selected = {}
-    for name in targets:
-        matches = [entry for entry in entries if isinstance(entry, dict) and entry.get("name") == name]
-        if len(matches) != 1:
-            raise ValueError(f"engine {name!r} missing or ambiguous")
-        entry = matches[0]
-        if (
-            entry.get("role") not in {"prefill", "decode", "pdfusion"}
-            or not isinstance(entry.get("grpc_addr"), str)
-            or type(entry.get("stopped")) is not bool
-        ):
-            raise ValueError(f"engine {name!r} snapshot lacks role/address/stopped evidence")
-        selected[name] = copy.deepcopy(entry)
-    return selected
 
 
 def topology_pools(ctx, deadline, address_field="grpc_addr"):

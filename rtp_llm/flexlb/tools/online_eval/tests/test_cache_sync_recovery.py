@@ -229,7 +229,7 @@ def test_report_preserves_gc_events_and_shared_time_origin(tmp_path):
     assert len(gc_overlay[0]["series"]) == 2
 
 
-@pytest.mark.parametrize("late_failure", ["timeout", "instance", "partial"])
+@pytest.mark.parametrize("late_failure", ["timeout", "instance", "partial", "baseline"])
 def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, monkeypatch, late_failure):
     import contextlib
     from types import SimpleNamespace
@@ -251,7 +251,7 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
     def control(ops, endpoint, deadline, body=None):
         if endpoint.startswith("snapshot"):
             return dict(engines=engines)
-        return dict(engine=body["engine"], status="ok", fixture=dict(version=2))
+        return dict(engine=body["engine"], status="ok", fixture=dict(version=2, reported_keys=241000))
 
     def capture(self, **kwargs):
         from adapters.master_diagnostics import DiagnosticCapture, validate_snapshot
@@ -266,7 +266,9 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
         page["rows"] = []
         for engine in engines:
             value = dict(template, worker_id=engine["role"] + ":" + engine["http_addr"], address=engine["http_addr"], role=engine["role"])
-            value["poll_response_age_ms"] = 10001 if engine["http_addr"] == "h1" and len(snapshots) == 3 else 20
+            value["poll_response_age_ms"] = (
+                10001 if engine["http_addr"] == "h1" and len(snapshots) == 3 and late_failure != "baseline" else 20
+            )
             page["rows"].append(value)
         page["coverage"]["returned_count"] = len(engines)
         if len(snapshots) > 3 and late_failure == "instance":
@@ -279,6 +281,7 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
     ops = SimpleNamespace(
         master_http_port=1, pb2=SimpleNamespace(StatusVersionPB=lambda: None), pb2_grpc=SimpleNamespace(RpcServiceStub=lambda channel: stub)
     )
+    cleanups = []
     ctx = SimpleNamespace(
         ops=ops,
         artifact_dir=tmp_path,
@@ -289,7 +292,7 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
         ),
         clock=lambda: time[0],
         wall_clock=lambda: 100 + time[0],
-        add_cleanup=lambda *a, **kw: None,
+        add_cleanup=lambda name, close: cleanups.append(close),
         record_event=lambda identity: dict(id=identity, epoch_s=100 + time[0]),
     )
     deadline = SimpleNamespace(
@@ -300,10 +303,26 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
     monkeypatch.setattr(traffic, "materialize", lambda *a, **kw: tmp_path / "traffic.jsonl")
     monkeypatch.setattr(actions.grpc, "insecure_channel", lambda address: contextlib.nullcontext(address))
     ctx.monitor = SimpleNamespace(client=SimpleNamespace(metric_snapshot=lambda *a, **kw: []))
+    if late_failure == "baseline":
+        # Healthy RPCs cannot substitute for the expected cache index contents.
+        with pytest.raises(ValueError, match="shared cache baseline failed to converge"):
+            actions.execute(ctx, params, deadline)
+        evidence = json.loads((tmp_path / "cache-stability/evidence.json").read_text())
+        assert evidence["runtime_incomplete"] is True
+        assert evidence["cache_baseline_expected"]["keys"] == dict.fromkeys(("h0", "h1", "h2"), 241000)
+        assert evidence["cache_baseline_last_workers"]["h0"]["cache_key_size"] == 3
+        assert discovery.read_text() == json.dumps(dict(P=["h0", "h1", "h2"], D=["hd"]))
+        return
     result = actions.execute(ctx, params, deadline)
     from scenario.stage_execution import _validate_output
 
     _validate_output(ctx, result, {}, actions.CHECK_IDS)
+    published = {Path(path): Path(path).read_bytes() for path in result.artifacts}
+    for close in reversed(cleanups):
+        close(deadline)
+    # Discovery restoration must never overwrite the already frozen gate artifact.
+    assert {path: path.read_bytes() for path in published} == published
+    assert json.loads(discovery.read_text()) == dict(P=["h0", "h1", "h2"], D=["hd"])
     assert next(c.status for c in result.checks if c.id == "healthy_survivors") == "FAIL"
     assert next(c.status for c in result.checks if c.id == "sampling_complete") == "ERROR"
     evidence = json.loads((tmp_path / "cache-stability/evidence.json").read_text())

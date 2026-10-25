@@ -20,8 +20,6 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.UncheckedIOException;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -588,19 +586,6 @@ public final class JavaMockEngineCluster {
             Set<Long> keys = new HashSet<>(cache.snapshotKeys());
             if (memoryCache != null) keys.addAll(memoryCache.keys());
             return keys;
-        }
-
-        private static Map<Integer, Integer> multimodalLengths(EngineRpcService.GenerateInputPB input) {
-            Map<Integer, Integer> lengths = new java.util.HashMap<>();
-            if (input.hasV41Inputs()) {
-                int rows = input.getV41Inputs().getImagesList().stream().mapToInt(EngineRpcService.V41ImageInputPB::getTypesCount).sum();
-                if (rows > 0) lengths.put(1, rows);
-                return lengths;
-            }
-            int count = Math.min(input.getMultimodalInputsCount(), input.getMultimodalTokenLayout().getSpansCount());
-            for (int i = 0; i < count; i++) lengths.merge(input.getMultimodalInputs(i).getMultimodalType(),
-                    input.getMultimodalTokenLayout().getSpans(i).getLength(), Integer::sum);
-            return lengths;
         }
 
         private void observeCacheDiagnostics(MockPerformanceModel.RequestShape shape) {
@@ -1528,7 +1513,7 @@ public final class JavaMockEngineCluster {
             synchronized boolean cancel(boolean priority) {
                 if (error != null) return cancellation != null && (!priority || cancellation.getErrorCode() == 8429);
                 if (!published && (cancellation == null || priority)) cancellation = priority
-                        ? batchError(8429, "preempted during batch admission") : cancellationError(input.getRequestId());
+                        ? MockRpcErrors.details(8429, "preempted during batch admission") : cancellationError(input.getRequestId());
                 return true;
             }
             synchronized EngineRpcService.ErrorDetailsPB reject(EngineRpcService.ErrorDetailsPB failure) {
@@ -1548,9 +1533,7 @@ public final class JavaMockEngineCluster {
             var observer = batchAdmissionObserver;
             if (observer != null) observer.accept(phase);
         }
-        private static EngineRpcService.ErrorDetailsPB batchError(long code, String message) {
-            return EngineRpcService.ErrorDetailsPB.newBuilder().setErrorCode(code).setErrorMessage(message).build();
-        }
+
 
         private void rejectBatchAdmission(BatchAdmission slot, EngineRpcService.ErrorDetailsPB failure) {
             var error = slot.reject(failure);
@@ -1611,14 +1594,14 @@ public final class JavaMockEngineCluster {
             if (stopped || shuttingDown) {
                 for (var dp : request.getDpSlotsList()) for (var item : dp.getRequestsList())
                     response.addErrorsBuilder().setRequestId(item.hasInput() ? item.getInput().getRequestId() : 0)
-                            .setErrorInfo(batchError(dp.getDpRank() == 0 ? 14 : 3, "Prefill batch server is shutting down"));
+                            .setErrorInfo(MockRpcErrors.details(dp.getDpRank() == 0 ? 14 : 3, "Prefill batch server is shutting down"));
                 return;
             }
             var inputs = new ArrayList<EngineRpcService.GenerateInputPB>();
             for (var dp : request.getDpSlotsList()) for (var item : dp.getRequestsList()) {
                 if (dp.getDpRank() != 0 || !item.hasInput()) response.addErrorsBuilder()
                         .setRequestId(item.hasInput() ? item.getInput().getRequestId() : 0)
-                        .setErrorInfo(batchError(3, dp.getDpRank() != 0 ? "EnqueueBatch dp_rank mismatch" : "missing input"));
+                        .setErrorInfo(MockRpcErrors.details(3, dp.getDpRank() != 0 ? "EnqueueBatch dp_rank mismatch" : "missing input"));
                 else inputs.add(item.getInput());
             }
             var slots = new ArrayList<BatchAdmission>();
@@ -1631,24 +1614,24 @@ public final class JavaMockEngineCluster {
                             .setGroupId(com.google.protobuf.Int64Value.of(request.getBatchId())).build();
                     long id = input.getRequestId();
                     if (!supportsSingleSequence(input)) {
-                        response.addErrorsBuilder().setRequestId(id).setErrorInfo(batchError(12, "mock supports only single-sequence output"));
+                        response.addErrorsBuilder().setRequestId(id).setErrorInfo(MockRpcErrors.details(12, "mock supports only single-sequence output"));
                         continue;
                     }
                     var slot = new BatchAdmission(input);
                     if (batchAdmissions.putIfAbsent(id, slot) != null) {
-                        response.addErrorsBuilder().setRequestId(id).setErrorInfo(batchError(6, "request already exists in active context map"));
+                        response.addErrorsBuilder().setRequestId(id).setErrorInfo(MockRpcErrors.details(6, "request already exists in active context map"));
                         continue;
                     }
                     if (prefillSessions.containsKey(id) || downstreamDecodeOwners.containsKey(id)
                             || (requests.output(id) != null) || runningTasks.containsKey(id)) {
                         batchAdmissions.remove(id, slot);
-                        response.addErrorsBuilder().setRequestId(id).setErrorInfo(batchError(6, "request already exists in active context map"));
+                        response.addErrorsBuilder().setRequestId(id).setErrorInfo(MockRpcErrors.details(6, "request already exists in active context map"));
                         continue;
                     }
                     slots.add(slot); beginRequest(input); recordEventArrival(id);
-                    if (stopped || shuttingDown) rejectBatchAdmission(slot, batchError(14, "Prefill batch server is shutting down"));
-                    else if (hasFencedRequestId(id)) rejectBatchAdmission(slot, batchError(8429, "absent fence: request cancelled before admission"));
-                    else if (index < rejectCount) rejectBatchAdmission(slot, batchError(
+                    if (stopped || shuttingDown) rejectBatchAdmission(slot, MockRpcErrors.details(14, "Prefill batch server is shutting down"));
+                    else if (hasFencedRequestId(id)) rejectBatchAdmission(slot, MockRpcErrors.details(8429, "absent fence: request cancelled before admission"));
+                    else if (index < rejectCount) rejectBatchAdmission(slot, MockRpcErrors.details(
                             faults.getEnqueueAckErrorCode() != 0 ? faults.getEnqueueAckErrorCode() : 13,
                             faults.getEnqueueAckPartialFail() > 0 ? "injected enqueue_ack_partial_fail" : "injected enqueue_ack_error_code"));
                 }
@@ -1664,7 +1647,7 @@ public final class JavaMockEngineCluster {
                         try { prepareBatchAdmission(slot, request.getBatchId()); }
                         finally { slot.preparation.complete(null); }
                     }); } catch (java.util.concurrent.RejectedExecutionException failure) {
-                        rejectBatchAdmission(slot, batchError(stopped || shuttingDown ? 14 : 13, "submit prepare task exception: " + failure));
+                        rejectBatchAdmission(slot, MockRpcErrors.details(stopped || shuttingDown ? 14 : 13, "submit prepare task exception: " + failure));
                         slot.preparation.complete(null);
                     }
                 }
@@ -1692,7 +1675,7 @@ public final class JavaMockEngineCluster {
                 boolean prefillOnly = ready.stream().anyMatch(slot -> slot.shape.input().getGenerateConfig().getMaxNewTokens() == 0);
                 boolean generation = ready.stream().anyMatch(slot -> slot.shape.input().getGenerateConfig().getMaxNewTokens() != 0);
                 if (prefillOnly && generation) {
-                    for (var slot : ready) slot.streamError = batchError(605, "group cannot mix prefill-only and generation streams");
+                    for (var slot : ready) slot.streamError = MockRpcErrors.details(605, "group cannot mix prefill-only and generation streams");
                 } else for (var slot : ready) {
                     var invalid = fifoInputError(slot.shape);
                     if (invalid != null) slot.streamError = invalid;
@@ -1705,12 +1688,12 @@ public final class JavaMockEngineCluster {
                         admitted = false;
                         for (var slot : ready) {
                             slot.schedulerOwned = fifoOwned.contains(slot.input.getRequestId());
-                            rejectBatchAdmission(slot, batchError(13, "enqueueMultiple exception: " + failure));
+                            rejectBatchAdmission(slot, MockRpcErrors.details(13, "enqueueMultiple exception: " + failure));
                         }
                     }
                     for (var slot : ready) {
                         slot.schedulerOwned |= admitted;
-                        if (!admitted && slot.error == null) slot.streamError = batchError(14, "Prefill batch server is shutting down");
+                        if (!admitted && slot.error == null) slot.streamError = MockRpcErrors.details(14, "Prefill batch server is shutting down");
                     }
                 }
                 batchPhase("after_enqueue");
@@ -1726,7 +1709,7 @@ public final class JavaMockEngineCluster {
                     var error = slot.liveError();
                     var deadline = requests.deadline(id);
                     if (error == null && deadline != null && deadline.remainingMs() == 0)
-                        error = batchError(4, "request deadline expired before FetchResponse became available");
+                        error = MockRpcErrors.details(4, "request deadline expired before FetchResponse became available");
                     if (error == null) error = armFetchExpiry(id, request.getFetchAttachTimeoutMs());
                     if (error == null) error = slot.publish(); // R2 / publication vs Cancel linearization
                     if (error != null) {
@@ -1741,7 +1724,7 @@ public final class JavaMockEngineCluster {
             } catch (RuntimeException failure) {
                 for (var slot : slots) if (!slot.answered) {
                     slot.schedulerOwned |= fifoOwned.contains(slot.input.getRequestId());
-                    answerBatchError(slot, batchError(13, "batch admission exception: " + failure), response);
+                    answerBatchError(slot, MockRpcErrors.details(13, "batch admission exception: " + failure), response);
                 }
             } finally {
                 for (var slot : slots) batchAdmissions.remove(slot.input.getRequestId(), slot);
@@ -1939,7 +1922,7 @@ public final class JavaMockEngineCluster {
             if (stopped || shuttingDown) {
                 for (var dp : request.getDpSlotsList()) for (var item : dp.getRequestsList())
                     response.addErrorsBuilder().setRequestId(item.hasInput() ? item.getInput().getRequestId() : 0)
-                            .setErrorInfo(batchError(dp.getDpRank() == 0 ? 14 : 3,
+                            .setErrorInfo(MockRpcErrors.details(dp.getDpRank() == 0 ? 14 : 3,
                                     dp.getDpRank() == 0 ? "Prefill batch server is shutting down" : "EnqueueBatch dp_rank mismatch"));
                 observer.onNext(response.build()); observer.onCompleted(); return;
             }
@@ -2259,13 +2242,7 @@ public final class JavaMockEngineCluster {
         }
 
         private static io.grpc.StatusRuntimeException capacityError(int code, String message) {
-            io.grpc.Metadata trailers = new io.grpc.Metadata();
-            trailers.put(io.grpc.Metadata.Key.of("grpc-status-details-bin",
-                    io.grpc.Metadata.BINARY_BYTE_MARSHALLER),
-                    EngineRpcService.ErrorDetailsPB.newBuilder()
-                            .setErrorCode(code).setErrorMessage(message).build().toByteArray());
-            return io.grpc.Status.RESOURCE_EXHAUSTED.withDescription(message)
-                    .asRuntimeException(trailers);
+            return MockRpcErrors.error(io.grpc.Status.RESOURCE_EXHAUSTED, code, message);
         }
 
         @Override
@@ -5083,35 +5060,8 @@ public final class JavaMockEngineCluster {
         }
 
         private EngineRpcService.GenerateOutputsPB buildOutput(MockPerformanceModel.RequestShape shape,
-                                                               boolean finished, int outputLen,
-                                                               int stepOutputLen) {
-            var flatten = EngineRpcService.FlattenOutputPB.newBuilder()
-                    .addFinished(finished)
-                    .addAuxInfo(EngineRpcService.AuxInfoPB.newBuilder()
-                            .setInputLen(shape.inputLen())
-                            .putAllMultimodalLengths(multimodalLengths(shape.input()))
-                            .setPrefixLen((int) shape.hitTokens())
-                            .setOutputLen(outputLen)
-                            .setIterCount(1)
-                            .setStepOutputLen(stepOutputLen)
-                            .build());
-            if (streamsTokenPayloads()) {
-                // QueryConverter / Python trans_output require [outputs, beams, tokens]
-                // and little-endian INT32 bytes. Repeat an input token, not model inference.
-                int tokenCount = shape.input().getTokenIdsCount();
-                int token = tokenCount == 0 ? 0 : shape.input().getTokenIds(tokenCount - 1);
-                ByteBuffer ids = ByteBuffer.allocate(Math.multiplyExact(stepOutputLen, Integer.BYTES))
-                        .order(ByteOrder.LITTLE_ENDIAN);
-                for (int i = 0; i < stepOutputLen; i++) ids.putInt(token);
-                flatten.setOutputIds(EngineRpcService.TensorPB.newBuilder()
-                        .setDataType(EngineRpcService.TensorPB.DataType.INT32)
-                        .addShape(1).addShape(1).addShape(stepOutputLen)
-                        .setInt32Data(com.google.protobuf.ByteString.copyFrom(ids.array())));
-            }
-            return EngineRpcService.GenerateOutputsPB.newBuilder()
-                    .setRequestId(shape.input().getRequestId())
-                    .setFlattenOutput(flatten)
-                    .build();
+                                                               boolean finished, int outputLen, int stepOutputLen) {
+            return MockResponseEncoding.output(shape, finished, outputLen, stepOutputLen, streamsTokenPayloads());
         }
 
         void getCacheStatusWire(EngineRpcService.CacheVersionPB request,
@@ -5907,7 +5857,7 @@ public final class JavaMockEngineCluster {
          */
         void shutdown() {
             shuttingDown = true;
-            batchAdmissions.values().forEach(slot -> slot.reject(batchError(14, "Prefill batch server is shutting down")));
+            batchAdmissions.values().forEach(slot -> slot.reject(MockRpcErrors.details(14, "Prefill batch server is shutting down")));
             vitClient.close();
             abortWatermarks();
             long expires = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);

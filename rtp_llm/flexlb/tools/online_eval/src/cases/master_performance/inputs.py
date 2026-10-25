@@ -201,5 +201,20 @@ INPUTS = InputSchema(
                 for name in ("rtp_llm_context_tps", "rtp_llm_context_tps_with_cache", "mock_decode_wall_tps")
             },
         },
-    }
+    },
+    open_objects=frozenset(
+        [
+            "traffic.source",
+            "traffic.source.parameters",
+            "traffic.source.parameters.output_distribution",
+            "traffic.client",
+            "traffic.client.playback",
+            "observation.windows.measurement.from",
+            "observation.windows.measurement.until",
+            "checks.engine_tps.rtp_llm_context_tps",
+            "checks.engine_tps.rtp_llm_context_tps_with_cache",
+            "checks.engine_tps.mock_decode_wall_tps",
+        ]
+    )
+    | frozenset("checks." + name for name in CHECKS.specs),
 )

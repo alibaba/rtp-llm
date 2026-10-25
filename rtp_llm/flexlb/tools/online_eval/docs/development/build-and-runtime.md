@@ -7,7 +7,7 @@
 ## 前置条件
 
 - JDK 21；`java -version` 与 Maven 实际使用的 JVM 都必须是 21。
-- Python 3；用 `python3 -m pip install -r tools/online_eval/requirements.txt` 安装编排、gRPC 与标准 exporter SDK 依赖。
+- Python 3.10 或更高版本；用 `python3 -m pip install -r tools/online_eval/requirements.txt` 安装编排、gRPC 与标准 exporter SDK 依赖。
 - Prometheus 可执行文件。workload 通过 `PROMETHEUS_BIN` 指向它；命令名为 `prometheus` 时可省略。
 - 至少一个连续的空闲端口区间。runner 规划 Mock、Master HTTP、management 和 gRPC 端口。
 - 按 YAML 的 P/D 拓扑和 JVM heap 预留内存；改变规模时需同步检查性能门槛。
@@ -22,7 +22,7 @@ python3 scripts/commands/check_quality.py
 python3 -m pytest -q -ra
 ```
 
-`pyproject.toml` 统一 Ruff 与 mypy 配置。 排版采用 140 列并跳过尾逗号强制展开；不按行长拆分静态表和诊断字符串。语法目标保持 Python 3.9，CI 使用 Python 3.11 验证，不因注解改写提高运行版本要求。Ruff 检查源码、脚本、根模块及测试的语法、未定义名称、未使用导入和变量，执行 import 排序及格式检查。mypy 扫描同一全库范围，采用基础渐进检查：检查已有注解与类型边界，runtime/adapters 也检查无注解函数体；其他包未注解的函数体仍由运行回归验证；这不是全库 strict 标注覆盖。类型错误直接阻断，不维护业务错误白名单或源码排除目录；缺失 stub 的豁免仅限第三方 gRPC/Protobuf 模块，项目内部导入错误不豁免。根模块另经 AST 检查，包含函数内部导入，不得依赖业务包。`.importlinter` 检查直接及间接依赖边界：分析不得依赖报表；case 输入不得依赖编译器；`scenario` 的 builder、输入、执行和门禁合同不得依赖业务 case 或测量编排；scenario 库不得依赖命令脚本；制品存储不得依赖展示和执行；运行底座不得依赖业务层；采集与报告不得反向依赖执行注册表或 case。case 模块使用通配匹配，新增 case 不修改边界名单。`online-eval-quality` 工作流在相关 push、PR 和手动触发时执行这些检查。pytest 配置统一设置项目导入路径，测试入口将该路径传给真实子解释器。工作流安装 Prometheus 并运行完整 Python 测试集；本地运行同样需要 Prometheus 和质量检查依赖。根仓库的 pre-commit 对本目录调用同一个质量入口，其他组件保留原 Black/isort 钩子。运行场景 CI 之前也应执行同一入口。
+`pyproject.toml` 统一 Ruff 与 mypy 配置。 排版采用 140 列并跳过尾逗号强制展开；不按行长拆分静态表和诊断字符串。最低运行版本为 Python 3.10，Ruff 使用相同语法目标，CI 使用 Python 3.11 验证。Ruff 检查源码、脚本、根模块及测试的语法、未定义名称、未使用导入和变量，执行 import 排序及格式检查。mypy 扫描同一全库范围，采用基础渐进检查：检查已有注解与类型边界，runtime/adapters 也检查无注解函数体；其他包未注解的函数体仍由运行回归验证；这不是全库 strict 标注覆盖。类型错误直接阻断，不维护业务错误白名单或源码排除目录；缺失 stub 的豁免仅限第三方 gRPC/Protobuf 模块，项目内部导入错误不豁免。根模块另经 AST 检查，包含函数内部导入，不得依赖业务包。`.importlinter` 检查直接及间接依赖边界：分析不得依赖报表；case 输入不得依赖编译器；`scenario` 的 builder、输入、执行和门禁合同不得依赖业务 case 或测量编排；scenario 库不得依赖命令脚本；制品存储不得依赖展示和执行；运行底座不得依赖业务层；采集与报告不得反向依赖执行注册表或 case。case 模块使用通配匹配，新增 case 不修改边界名单。`online-eval-quality` 工作流在相关 push、PR 和手动触发时执行这些检查。pytest 配置统一设置项目导入路径，测试入口将该路径传给真实子解释器。工作流安装 Prometheus 并运行完整 Python 测试集；本地运行同样需要 Prometheus 和质量检查依赖。根仓库的 pre-commit 对本目录调用同一个质量入口，其他组件保留原 Black/isort 钩子。运行场景 CI 之前也应执行同一入口。
 
 ```bash
 ./mvnw -P'opensource,!internal' \

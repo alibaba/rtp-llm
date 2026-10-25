@@ -132,17 +132,17 @@ class HaReplayClient:
         self.proc = None
         self.finished = False
 
-    def stop_sending(self):
-        from adapters.flow_control import stop_sending
+    @property
+    def control_protocol(self):
+        from adapters.flow_control import FlowControlProtocol
 
-        self.stop_command = stop_sending(self.control, self.flow_identity, self.stop_command)
+        return FlowControlProtocol(self.control, self.flow_identity)
+
+    def stop_sending(self):
+        self.stop_command = self.control_protocol.stop(self.stop_command)
 
     def validate_drain(self, rows):
-        from adapters.flow_control import read_status, validate_drain
-
-        validate_drain(
-            read_status(self.control, self.flow_identity), self.flow_identity, terminal_count=len(rows), command_id=self.stop_command
-        )
+        self.control_protocol.validate_completion(len(rows), self.stop_command)
 
     def start(self, deadline=None) -> None:
         from adapters.flow_control import wait_flow_started
