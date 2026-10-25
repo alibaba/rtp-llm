@@ -299,7 +299,7 @@ bool MtpExecutor::reduceDSparkCacheStoreStatus(bool local_ok) {
 
 bool MtpExecutor::finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
                                                       const std::list<GenerateStreamPtr>& streams) {
-    if (!is_dspark_ || model_input.warmup || !model_input.pd_separation) {
+    if (!is_dspark_ || !model_input.pd_separation) {
         return true;
     }
 
@@ -694,16 +694,14 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
                          MlaOpsType                                     mla_ops_type,
-                         int32_t                                        kv_cache_group_num,
-                         bool                                           warm_up):
+                         int32_t                                        kv_cache_group_num):
     Executor(),
     cache_manager_(cache_manager),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
-        params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
+        params.parallelism_config.tp_rank == 0 ? metrics_reporter_ : nullptr)),
     wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
-        params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
-    warm_up_(warm_up),
+        params.parallelism_config.tp_rank == 0 ? metrics_reporter_ : nullptr)),
     role_type_(params.pd_sep_config.role_type),
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
@@ -801,7 +799,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
 
     // Cache-backed target and draft geometry comes from their own resolved configs.
-    // Warmup has no CacheManager and retains the model configuration fallback.
     GroupedCacheLayerLayout target_cache_layer_layout;
     GroupedCacheLayerLayout draft_cache_layer_layout;
     if (cache_manager) {
@@ -829,7 +826,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
-        HiddenStateCaptureModelRole::TARGET, role_type_, warm_up_, params.model_config_.hidden_state_capture_layer_ids);
+        HiddenStateCaptureModelRole::TARGET, role_type_, false, params.model_config_.hidden_state_capture_layer_ids);
     model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     const size_t max_reserved_step = params.sp_config.speculativeReserveStep();
@@ -862,7 +859,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             model_init_params, params.py_model, false, true, DSparkModelRole::NONE, true, dspark_prefill_commit_only_));
     }
 
-    // when warmup, cache manager maybe nullptr
     const auto& cache_config = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
     is_linear_attention_model_ =
         cache_config.groupNums() > 0
@@ -874,12 +870,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                               params.profiling_debug_logging_config,
                                                               cache_config,
                                                               params.sp_config,
-                                                              warm_up_));
+                                                              false));
 
     LogitsProcessorFactory::init(params.model_config_,
                                  params.grammar_config,
                                  params.sp_config.tree_decode_config,
-                                 params.parallelism_config.tp_rank == 0 && !warm_up_ ? metrics_reporter_ : nullptr);
+                                 params.parallelism_config.tp_rank == 0 ? metrics_reporter_ : nullptr);
     cudaProfilerBegin();
 
     for (auto& mtp_params : *propose_params->mtp_model_params_) {
@@ -908,7 +904,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         model_params.hidden_state_capture_layer_ids =
             selectHiddenStateCaptureLayerIds(HiddenStateCaptureModelRole::DRAFT,
                                              role_type_,
-                                             warm_up_,
+                                             false,
                                              mtp_params->model_config_.hidden_state_capture_layer_ids);
         model_params.hidden_state_capture_dtype     = mtp_params->model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
@@ -1176,8 +1172,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         void disarm() {
             armed = false;
         }
-    } cache_store_drain_guard{
-        is_dspark_ && !model_input.warmup && model_input.pd_separation, model_.get(), sp_prefill_draft_model_.get()};
+    } cache_store_drain_guard{is_dspark_ && model_input.pd_separation, model_.get(), sp_prefill_draft_model_.get()};
 
     // release model input before forward
     releaseAllModelBuffers();
@@ -1349,7 +1344,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         return absl::OkStatus();
     }
 
-    if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+    if (!isTpRank0() || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         return absl::OkStatus();
@@ -1611,8 +1606,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
 
-    spec_logits_processor_present =
-        isTpRank0() && !warm_up_ && !model_input.is_fake_stream && hasSpecLogitsProcessor(streams);
+    spec_logits_processor_present = isTpRank0() && !model_input.is_fake_stream && hasSpecLogitsProcessor(streams);
 
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
@@ -1823,7 +1817,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+    if (!isTpRank0() || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         return absl::OkStatus();
@@ -2501,10 +2495,9 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
         schedule_time_us = process_start_time_us;
     }
     MtpMetricsCollector metrics_collector;
-    auto                tps_active_guard =
-        tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
+    auto tps_active_guard = tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !streams.empty());
     auto wall_tps_active_guard =
-        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
+        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !streams.empty());
 
     std::list<GenerateStreamPtr> prefill_streams;
     std::list<GenerateStreamPtr> decode_streams;

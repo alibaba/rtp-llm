@@ -44,8 +44,7 @@ public:
                          std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
                          MlaOpsType                                     mla_ops_type       = MlaOpsType::AUTO,
-                         int32_t                                        kv_cache_group_num = 1,
-                         bool                                           warm_up            = false);
+                         int32_t                                        kv_cache_group_num = 1);
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
@@ -288,7 +287,6 @@ private:
     // Keeps async copy source tensors alive across release points.
     TensorHolder buffer_holder_;
 
-    bool     warm_up_;
     RoleType role_type_;
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
     // hybrid linear+full). Per-step state advances every token, so the page
