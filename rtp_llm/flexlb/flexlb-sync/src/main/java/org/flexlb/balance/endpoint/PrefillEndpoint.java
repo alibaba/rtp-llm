@@ -3,6 +3,7 @@ package org.flexlb.balance.endpoint;
 import lombok.Getter;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.endpoint.prefill.FinishedBatch;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
@@ -187,13 +188,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
             retirementFailure = appendRetirementFailure(
                     retirementFailure, retirement.invariantFailure());
-            List<PrefillState.BatchCompletion> completions =
-                    retirement.batchCompletions();
-            for (int index = 0; index < completions.size(); index++) {
-                PrefillState.BatchCompletion completion =
-                        completions.get(index);
+            List<FinishedBatch> finishedBatches = retirement.finishedBatches();
+            for (int index = 0; index < finishedBatches.size(); index++) {
+                FinishedBatch finishedBatch = finishedBatches.get(index);
                 try {
-                    reportBatchCompletion(completion);
+                    reportFinishedBatch(finishedBatch);
                 } catch (Throwable reportingFailure) {
                     retirementFailure = appendRetirementFailure(
                             retirementFailure, reportingFailure);
@@ -369,9 +368,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     @Override
-    public Runnable applyPreparedStatus(
-            WorkerStatus ws,
-            WorkerStatus.PreparedStatus prepared) {
+    public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
         WorkerStatus.StatusObservation observation = prepared.observation();
         PrefillState.StatusReconciliation reconciliation =
@@ -386,7 +383,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                             ws.publishPreparedStatus(prepared);
                         },
                         this::beginRetirement);
-        reportBatchCompletionsNoFail(reconciliation.batchCompletions());
+        reportFinishedBatchesNoFail(reconciliation.finishedBatches());
         rethrowPublicationFailure(reconciliation.publicationFailure());
         List<PrefillState.WorkerStatusFact> facts =
                 reconciliation.schedulerFacts();
@@ -395,9 +392,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     @Override
-    public Runnable initializeFromPreparedStatus(
-            WorkerStatus ws,
-            WorkerStatus.StatusObservation observation) {
+    public Runnable initializeFromPreparedStatus(WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         PrefillState.StatusReconciliation reconciliation =
                 prefillState.reconcileWorkerStatus(
@@ -405,8 +400,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         this::predictRepackedBatchMs,
                         prefillQueue::signalSchedulingInputsChanged,
                         this::beginRetirement);
-        if (!reconciliation.schedulerFacts().isEmpty()
-                || !reconciliation.batchCompletions().isEmpty()) {
+        if (!reconciliation.schedulerFacts().isEmpty() || !reconciliation.finishedBatches().isEmpty()) {
             throw new IllegalStateException(
                     "Private Prefill candidate produced locally-owned status facts");
         }
@@ -445,14 +439,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
     }
 
-    private void reportBatchCompletionsNoFail(
-            List<PrefillState.BatchCompletion> completions) {
+    private void reportFinishedBatchesNoFail(List<FinishedBatch> finishedBatches) {
         try {
-            reportBatchCompletions(completions);
+            reportFinishedBatches(finishedBatches);
         } catch (Throwable reportingFailure) {
             try {
-                logger.warn("Prefill status committed but completion reporting failed: engine={}",
-                        getIp(), reportingFailure);
+                logger.warn("Prefill status committed but finished batch reporting failed: engine={}", getIp(),
+                        reportingFailure);
             } catch (Throwable ignoredLoggingFailure) {
                 // Status facts must still reach the exact scheduler estimate.
             }
@@ -605,34 +598,31 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * engine-reported actual execution time (max across the batch's finished tasks),
      * then log and emit prediction-accuracy metrics.
      */
-    private void reportBatchCompletions(
-            List<PrefillState.BatchCompletion> completions) {
-        completions.forEach(this::reportBatchCompletion);
+    private void reportFinishedBatches(List<FinishedBatch> finishedBatches) {
+        finishedBatches.forEach(this::reportFinishedBatch);
     }
 
-    private void reportBatchCompletion(
-            PrefillState.BatchCompletion completion) {
-        long batchId = completion.batchId();
-        long actualMs = completion.actualWorkMs();
-        if (!completion.successfulCompletion() || actualMs <= 0) {
-            logger.debug("batch completion not reportable: batchId={} success={} actualMs={}",
-                    batchId, completion.successfulCompletion(), actualMs);
+    private void reportFinishedBatch(FinishedBatch finishedBatch) {
+        long batchId = finishedBatch.batchId();
+        long actualMs = finishedBatch.actualWorkMs();
+        if (!finishedBatch.anyMemberSucceeded() || actualMs <= 0) {
+            logger.debug("finished batch not reportable: batchId={} success={} actualMs={}", batchId,
+                    finishedBatch.anyMemberSucceeded(), actualMs);
             return;
         }
 
-        long predictedMs = completion.predictedWorkMs();
+        long predictedMs = finishedBatch.predictedWorkMs();
         long gapMs = actualMs - predictedMs;
         org.flexlb.util.Logger.debug(
                 "flexlb_batch_complete batch_id={} predicted_ms={} actual_ms={} gap_ms={} batch_size={} engine={}",
-                batchId, predictedMs, actualMs, gapMs,
-                completion.originalFeatures().batchSize(), getIp());
+                batchId, predictedMs, actualMs, gapMs, finishedBatch.featuresAtCommit().batchSize(), getIp());
 
         // A failed/removed member makes the original batch an invalid learning
         // sample even if another member completed successfully.
-        if (completion.learningEligible()) {
+        if (finishedBatch.usableForLearning()) {
             try {
-                PrefillTimePredictor.LearningResult learningResult = predictor.learn(
-                        completion.originalFeatures(), predictedMs, actualMs);
+                PrefillTimePredictor.LearningResult learningResult =
+                        predictor.learn(finishedBatch.featuresAtCommit(), predictedMs, actualMs);
                 if (learningResult
                         == PrefillTimePredictor.LearningResult.MODEL_UPDATED) {
                     prefillQueue.signalSchedulingInputsChanged();
