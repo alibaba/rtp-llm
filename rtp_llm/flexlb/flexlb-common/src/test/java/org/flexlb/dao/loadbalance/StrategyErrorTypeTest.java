@@ -24,7 +24,7 @@ class StrategyErrorTypeTest {
                     case RESOURCE_EXHAUSTED -> reason == RejectReason.RESOURCE_EXHAUSTED;
                     default -> reason == RejectReason.UNSPECIFIED;
                 };
-                assertEquals(valid, type.acceptsAdmissionRejectReason(reason), type + "/" + reason);
+                assertEquals(valid, type.acceptsRejectReason(reason), type + "/" + reason);
                 if (valid) {
                     Response response = Response.error(type, reason);
                     assertFalse(response.isSuccess());

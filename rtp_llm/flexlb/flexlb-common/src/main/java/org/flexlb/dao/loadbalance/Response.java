@@ -105,7 +105,7 @@ public class Response {
         if (admissionRejectReason == null) {
             admissionRejectReason = RejectReason.UNSPECIFIED;
         }
-        if (!strategyErrorType.acceptsAdmissionRejectReason(admissionRejectReason)) {
+        if (!strategyErrorType.acceptsRejectReason(admissionRejectReason)) {
             throw new IllegalArgumentException("invalid schedule error code/reason: "
                     + strategyErrorType + "/" + admissionRejectReason);
         }

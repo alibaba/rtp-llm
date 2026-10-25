@@ -102,7 +102,7 @@ public enum StrategyErrorType {
                 : QUEUE_FULL_HIGH_PRIORITY_REJECTED;
     }
 
-    public boolean acceptsAdmissionRejectReason(RejectReason reason) {
+    public boolean acceptsRejectReason(RejectReason reason) {
         return switch (this) {
             case PRIORITY_ADMISSION_REJECTED ->
                 reason == RejectReason.HIGHER_PRIORITY_AHEAD || reason == RejectReason.SAME_PRIORITY_AHEAD;
