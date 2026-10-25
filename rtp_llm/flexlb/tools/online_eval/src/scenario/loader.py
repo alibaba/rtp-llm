@@ -4,8 +4,10 @@ from pathlib import Path
 
 from document_io import DocumentError as ScenarioError
 from document_io import load_document
+from scenario.registry import compilation_scope
 
 
+@compilation_scope()
 def load_scenarios(root, *, experiment_params=None):
     """Load data-only configurations and invoke their registered Python builders."""
     from scenario.experiment_params import ExperimentParams

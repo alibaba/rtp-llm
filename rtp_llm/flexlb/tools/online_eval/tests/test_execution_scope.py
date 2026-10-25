@@ -107,3 +107,21 @@ def test_workload_keeps_selected_views_and_shared_rendering_assets():
     )
     selected = scope_dependencies(dependencies, [instance])
     assert set(selected) == set(dependencies) - {"config/report_views/cache_scale_in.yaml"}
+
+
+def test_import_time_dependency_change_is_rejected_without_rereading_json(frozen, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    from scenario.child_cli import run_selected
+    from scenario.execution_plan import ExecutionPlanCodec
+
+    root, path, sha = frozen
+    document = ExecutionPlanCodec().read_document(path, sha)
+    (root / "src/runtime/shared.py").write_text("# changed while importing selected case\n")
+
+    def forbidden_read(*args):
+        raise AssertionError("the verified plan must not be read a second time")
+
+    monkeypatch.setattr("scenario.execution_plan.read_json", forbidden_read)
+    assert run_selected(SimpleNamespace(plan=path, plan_sha256=sha), document) == 2
+    assert "execution code/config changed after planning" in capsys.readouterr().err

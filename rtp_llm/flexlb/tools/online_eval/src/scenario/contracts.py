@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Callable, Protocol
 from analysis.checks import CheckResult
 
 if TYPE_CHECKING:
+    from reporting.view_model import ViewDefinition
     from runtime.deadline import Deadline
     from scenario.builder import CaseBuilder
     from scenario.context import RuntimeContext
@@ -45,11 +46,11 @@ class ProgramBuilder(Protocol):
 
 
 class ViewValidator(Protocol):
-    def __call__(self, path: str, data: dict, fail: Callable[[str, str], None]) -> None: ...
+    def __call__(self, path: str | Path, data: ViewDefinition, fail: Callable[[str, str], None]) -> None: ...
 
 
 class ViewRenderer(Protocol):
-    def __call__(self, directory: Path, analysis: dict, presentation: dict, deadline: Deadline | None = None) -> Path: ...
+    def __call__(self, directory: Path, analysis: dict, presentation: ViewDefinition, deadline: Deadline | None = None) -> Path: ...
 
 
 @dataclass(frozen=True)

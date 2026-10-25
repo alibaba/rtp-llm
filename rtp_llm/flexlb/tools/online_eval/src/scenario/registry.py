@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
@@ -214,13 +216,44 @@ def using_cases(names):
         _snapshot = available
 
 
+_compilation_cache: ContextVar[dict | None] = ContextVar("compilation_cache", default=None)
+
+
+@contextmanager
+def compilation_scope():
+    """Share immutable inputs only within one compilation, never across runs."""
+    if _compilation_cache.get() is not None:
+        yield
+        return
+    token = _compilation_cache.set({})
+    try:
+        yield
+    finally:
+        _compilation_cache.reset(token)
+
+
+def _compiled_input(key, read, owner):
+    cache = _compilation_cache.get()
+    if cache is None:
+        return read()
+    # Retain the snapshot while id(owner) is part of a cache key.
+    cache.setdefault(id(owner), owner)
+    if key not in cache:
+        cache[key] = read()
+    return cache[key]
+
+
 def load_metric_plan(name: str, *, capabilities: CaseRegistry | None = None) -> dict:
     """Bind a declarative plan to the currently admitted case capabilities."""
     # Bind after case discovery; case programs import this composition module.
     from monitoring.query_plan import load_plan
 
     current = registry() if capabilities is None else capabilities
-    return load_plan(name, contracts=current.metric_contracts, sources=current.sources)
+    return deepcopy(
+        _compiled_input(
+            ("metrics", id(current), name), lambda: load_plan(name, contracts=current.metric_contracts, sources=current.sources), current
+        )
+    )
 
 
 def view(name: str, *, capabilities: CaseRegistry | None = None) -> ViewDefinition:
@@ -230,7 +263,11 @@ def view(name: str, *, capabilities: CaseRegistry | None = None) -> ViewDefiniti
     from reporting.view_config import view as read_view
 
     current = registry() if capabilities is None else capabilities
-    return read_view(name, capability=current.views.get(name), plan_loader=partial(load_metric_plan, capabilities=current))
+    return _compiled_input(
+        ("view", id(current), name),
+        lambda: read_view(name, capability=current.views.get(name), plan_loader=partial(load_metric_plan, capabilities=current)),
+        current,
+    )
 
 
 def _selected_views(names):

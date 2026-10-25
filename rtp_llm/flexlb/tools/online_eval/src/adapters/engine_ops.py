@@ -22,7 +22,6 @@ from runtime.network import http_get_json
 
 DEFAULT_INPUT_LEN = 2048
 DEFAULT_OUTPUT_LEN = 10
-RECOVERY_TIMEOUT_S = 30.0
 
 CHANNEL_OPTIONS = [("grpc.max_receive_message_length", 64 * 1024 * 1024), ("grpc.max_send_message_length", 64 * 1024 * 1024)]
 
@@ -252,32 +251,6 @@ class EngineOps(MockEngineControl):
             return
         stub = self.pb2_grpc.RpcServiceStub(self._channel(target))
         stub.Cancel(self.pb2.CancelRequestPB(request_id=request_id), timeout=10.0)
-
-    # -- recovery -----------------------------------------------------------
-
-    def verify_recovery(self, output_len: int = 2) -> tuple[bool, str]:
-        """Schedule a fresh request and confirm it completes normally."""
-        rid = self.next_request_id()
-        block_keys = [rid * 100 + 1]
-        try:
-            response = self.schedule(rid, output_len=output_len, block_keys=block_keys)
-            if response.code != 200 or not response.success:
-                return False, f"schedule failed: {response.error_message}"
-            # NON_BATCH re-builds the GenerateInputPB client-side; it must
-            # carry the SAME shape/block-keys the ScheduleRequest carried,
-            # otherwise the engine sees a different request than the master
-            # scheduled (input_len/block cache keys diverge).
-            input_pb = None if response.enqueued_by_master else self.build_generate_input(rid, output_len=output_len, block_keys=block_keys)
-            handle = self.start_stream(response, rid, input_pb=input_pb)
-            handle.thread.join(RECOVERY_TIMEOUT_S)
-            snap = handle.snap
-            if snap.error:
-                return False, f"stream error: {snap.error}"
-            if not snap.completed:
-                return False, "recovery request did not complete"
-            return True, f"ok (outputs={len(snap.outputs)})"
-        except Exception as exc:
-            return False, f"exception: {exc!r}"
 
     # -- Master debug read -------------------------------------------------
 

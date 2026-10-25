@@ -12,6 +12,7 @@ from scenario.config_data import leaf_paths, merge_data, merge_environment, path
 from scenario.declarations import CaseDeclaration, VariantDeclaration
 from scenario.execution_policy import DEFAULT_BUDGETS, EXECUTION_BUDGETS
 from scenario.program import ProgramPlan, VariantPlan
+from scenario.registry import compilation_scope
 
 
 def program_module(name, source):
@@ -22,6 +23,7 @@ def program_module(name, source):
     return registry().cases[name]
 
 
+@compilation_scope()
 def configure_program(config, source) -> ProgramPlan:
     """Build a typed program using a registered Python entry point, without starting services."""
     config = CaseDeclaration.read(config, source)

@@ -135,3 +135,11 @@ def test_ha_waits_cannot_be_redeclared_as_observation_inputs():
 
 
 from program_fixtures import config
+
+
+@pytest.mark.parametrize("name", ["master_performance", "cache_scale_in", "cache_sync_recovery", "master_ha_failover"])
+def test_nested_capture_typo_is_rejected_during_compilation(name):
+    data = config(name)
+    data["parameters"]["observation"]["capture"]["max_sampels"] = 1
+    with pytest.raises(ValueError, match="max_sampels"):
+        configure_program(data, name + ".yaml")

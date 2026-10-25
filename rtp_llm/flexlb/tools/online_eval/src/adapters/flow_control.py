@@ -145,6 +145,12 @@ class FlowControlProtocol:
         self.directory = Path(directory)
         self.identity = identity
 
+    def stop(self, command_id):
+        return stop_sending(self.directory, self.identity, command_id)
+
+    def validate_completion(self, terminal_count, command_id):
+        validate_drain(read_status(self.directory, self.identity), self.identity, terminal_count=terminal_count, command_id=command_id)
+
     def observe(self, process):
         # Poll BEFORE reading: an observed exit guarantees the final file is stable.
         returncode = None if process is None else process.proc.poll()

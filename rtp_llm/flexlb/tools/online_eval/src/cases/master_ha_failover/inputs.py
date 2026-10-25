@@ -60,7 +60,17 @@ INPUTS = InputSchema(
             "capture": section_fields("observation", {"capture"}, CAPTURE_NUMBERS)["capture"],
         },
         "checks": {name: {"expected": rule, "min_samples": POSITIVE_COUNT} for name, rule in CHECK_INPUTS.items()},
-    }
+    },
+    open_objects=frozenset(
+        [
+            "traffic.source",
+            "traffic.source.parameters",
+            "traffic.source.parameters.output_distribution",
+            "observation.windows",
+            "observation.windows.baseline.until",
+        ]
+    )
+    | frozenset("checks." + name for name in CHECK_INPUTS),
 )
 
 

@@ -146,7 +146,10 @@ class WorkloadPolicy:
 
 
 def execute_workload(instance, backend, handlers=None, artifact_dir=".", **kwargs):
-    if instance.get("test_kind") != "workload":
+    from scenario.plan import CompiledInstance
+
+    kind = instance.metadata.to_dict().get("kind") if isinstance(instance, CompiledInstance) else instance.get("test_kind")
+    if kind != "workload":
         raise ValueError("workload executor requires a workload plan")
     return execute_instance(instance, backend, handlers, artifact_dir, _policy=WorkloadPolicy(), **kwargs)
 

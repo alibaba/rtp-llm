@@ -27,7 +27,7 @@ INPUTS = InputSchema({
                 'output_len': JAVA_LENGTH, 'count': POSITIVE_COUNT},
     'procedure': {'setup_timeout_s': NONNEGATIVE},
     'checks': {'no_errors': {'expected': COUNT}},
-})
+}, open_objects={'checks.no_errors'})
 
 def default(case):
     data = case.config
@@ -53,6 +53,8 @@ CASE = CaseDefinition(
     input_schema=INPUTS,
 )
 ```
+
+`InputSchema` 递归拒绝声明对象的未知字段及缺少字段。只声明部分数值叶子、其余字段由业务解析器负责的对象必须显式列入 `open_objects`；该对象仍校验已声明字段，业务解析器负责其余字段的准入。`None` 叶子表示完整委托业务解析器，而不是默认值。
 
 整窗门禁由 action 直接调用 `artifacts.gate.commit_gate(directory, name, evidence, analyze)`，返回 `(result, path)`。指标投影读取冻结结果，报告通过 `CASE.report_views` 声明所选视图。业务分析、指标和报告分别使用普通 Python 函数；相关边界见[用例与公共能力](../architecture/case-plugins.md)。
 

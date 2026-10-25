@@ -88,7 +88,7 @@ case YAML 默认调用 Python 的 `default` 构建器，生成 `ProgramPlan`、`
 
 每个 case 有 `default` program，变体只追加测试点。YAML 保存数据，不能写 action、通用 `$ref` 或任意表达式；具名观测窗口只能选择 program 声明的时间输出，不能编排步骤。配置层次和 action 边界见[新增 case](../development/adding-cases.md)。
 
-资源句柄绑定环境代次。重建环境前清理旧消费者及进程，旧句柄只能显式作为历史证据读取。动态 worker 添加保留尝试预算；移除不返还容量预算。端口租约由父 runner 拥有，子执行器启动前核对范围与最大拓扑。父 runner 将完整 compiled instances 写入 `execution-plan.json`，记录规范化内容摘要、所选 case 源码及公共底座和运行配置的文件摘要。子执行器使用父进程提供的摘要验证计划，再验证当前依赖与租约，直接执行冻结步骤，不重新编译场景 YAML。规划后改变场景文件不改变已经冻结的参数；所选 case、公共底座或运行配置变化使启动失败，必须重新规划；未选中 case 的源码和未选择的报告视图不进入该计划的依赖集合；功能用例不依赖报告展示资源。子执行器在验证计划信封和摘要后，只注册、导入计划选择的 case，执行结束后恢复调用方的注册作用域。
+资源句柄绑定环境代次。重建环境前清理旧消费者及进程，旧句柄只能显式作为历史证据读取。动态 worker 添加保留尝试预算；移除不返还容量预算。端口租约由父 runner 拥有，子执行器启动前核对范围与最大拓扑。父 runner 将完整 compiled instances 写入 `execution-plan.json`，记录规范化内容摘要、所选 case 源码及公共底座和运行配置的文件摘要。子执行器使用父进程提供的摘要验证计划，再验证当前依赖与租约，直接执行冻结步骤，不重新编译场景 YAML。规划后改变场景文件不改变已经冻结的参数；所选 case、公共底座或运行配置变化使启动失败，必须重新规划；未选中 case 的源码和未选择的报告视图不进入该计划的依赖集合；功能用例不依赖报告展示资源。子执行器在验证计划信封和摘要后，只注册、导入计划选择的 case，再从同一份已验证文档解码领域对象；执行结束后恢复调用方的注册作用域。跨进程仍独立验证依赖和领域合同，不因父端验证过而跳过。
 
 `ResourceScope` 持有句柄、环境代次、取证适配器和清理栈；`RuntimeContext` 绑定输出引用及实际事件；`StageExecutor` 负责阶段分发与输出检查；`RunFinalizer` 负责证据和报告预算、检查点与结果提交。取证 exporter 返回 `adapters.resource_evidence.ResourceEvidence`，客户端的具体转换也位于该模块，公共资源作用域只校验合同。deadline 位于运行底座。gRPC 客户端持有 channel，stream 持有消费线程，Mock 控制能力只使用所属环境的 HTTP 地址，不另建资源所有者。
 
@@ -136,7 +136,7 @@ Java 流量控制使用 `FlowState`、`FlowStatus`、`StopCommand` 和 `DrainRes
 
 ## 声明与解析结果
 
-监控默认值、数值规则和预算名称由 `scenario.execution_policy` 单点维护；声明允许省略预算，有效计划要求完整预算，两个准入边界调用同一校验器。数据型 case YAML 在入口解码为 `CaseDeclaration`、`VariantDeclaration`、`ExecutionPolicy` 和 `MonitoringPolicy`。case 的业务参数由所属程序校验，公共构建层不通过任意模块属性寻找入口。`CaseDefinition` 声明全部能力，注册器按目录发现并校验冲突。输入由 `InputSchema` 单点声明字段和数值规则，编译器应用 YAML 收紧约束后解析为 `case.config`。case 显式调用分析和冻结函数；`CASE.metrics` 指向普通指标模块，视图由 `CASE.report_views` 声明。
+监控默认值、数值规则和预算名称由 `scenario.execution_policy` 单点维护；声明允许省略预算，有效计划要求完整预算，两个准入边界调用同一校验器。数据型 case YAML 在入口解码为 `CaseDeclaration`、`VariantDeclaration`、`ExecutionPolicy` 和 `MonitoringPolicy`。case 的业务参数由所属程序校验，公共构建层不通过任意模块属性寻找入口。`CaseDefinition` 声明全部能力，注册器按目录发现并校验冲突。输入由 `InputSchema` 单点声明字段和数值规则，递归验证已声明对象；部分对象的额外字段通过 `open_objects` 显式交给所属业务解析器验证。编译器应用 YAML 收紧约束后解析为 `case.config`。一次编译共享已验证的指标计划和不可变视图，指标字典返回独立副本；编译成功或失败退出后缓存均销毁，不跨运行复用。case 显式调用分析和冻结函数；`CASE.metrics` 指向普通指标模块，视图由 `CASE.report_views` 声明。
 
 环境覆盖通过统一规则合并：配置字段整体替换，profile 按名称及字段继承，列表与完整模型整体替换。编译阶段将最终 Master JSON、preset 性能数据及运行选项冻结为带 SHA 的 `EnvironmentSnapshot`。运行时使用冻结数据投影进程参数，不重新读取 preset 或应用配置默认值。
 
@@ -180,8 +180,6 @@ session 监管只覆盖留在该进程组的后代；主动另建 session 的后
 Mock cluster 的 gRPC 协议调度使用独立的轻量执行器；业务回调由 Java 21 虚拟线程执行，每个逻辑引擎独立限制业务并发和在途调用。cache、status 和推理方法在同一引擎内竞争，不按方法分池；某个引擎阻塞不占用其他引擎的并发额度。`--rpc-threads` 控制每引擎业务并发，`--rpc-max-calls` 控制每引擎在途 RPC 数，与 Netty 的 `--event-loop-threads` 分开配置。Python 环境声明对应 `rpc_threads`、`rpc_max_calls`。
 
 超过 RPC 在途上限的新调用通过正常协议返回 `RESOURCE_EXHAUSTED`，错误描述明确标记为 mock harness 限制；这不表示真实引擎的 KV、调度队列或 GPU 容量不足。已接收调用的取消与终态通知不受该准入限制，取消通知不等待引擎业务额度；已过期的排队调用不执行业务方法。移除引擎时停止该引擎的 RPC 所有者；cluster 收尾先停止并等待服务与传输，再有界回收协议执行器和业务回调，未终止则报告失败并允许重试。该机制仍不模拟真实 Pod 的 CPU、GC 或过载时延。
-
-缓存 RPC 每次复制当前 keys、重新构造完整 protobuf，并使用生成代码的标准序列化。相同版本仍返回完整 keys；不复用成员快照、protobuf 或编码字节。真实引擎的可选缓存状态快照不作为默认行为。协议一致不代表锁竞争、CPU、GC 和 RPC 时延等价；Mock 门禁不能替代真实引擎的缓存同步性能验证。
 
 归档容器由 `artifacts.experiment_store` 管理文件索引、角色、摘要和完整性，不加载报告或监控实现。`reporting.experiment` 负责视图布局、序列数据重建和实验发布。通用原子文本和 JSON 读写由标准库叶子模块 `file_io` 提供。单 Master 与 HA 共用 Master 启动、进程登记、日志边界及就绪检查过程，实例地址、发现配置和资源所有权由各自规格提供。
 缓存 RPC 遵循 real 的 key 版本协议：版本变化时返回完整 key 快照，同版本省略 keys，容量实时刷新；`need_cache_keys=false` 回显请求版本。自然缓存与合成 fixture 共用这一响应规则，fixture 不占推理 KV 容量。同步强度按实际响应 entries/s 和 bytes/s 验收；冻结 churn 会减少 key 载荷。编码优化及其边界见 [Mock Engine](../../../../flexlb-mock-engine/README.md)。协议一致不代表锁竞争、CPU、GC 和 RPC 时延等价；Mock 门禁不能替代真实引擎的缓存同步性能验证。

@@ -9,9 +9,12 @@ import org.flexlb.engine.grpc.EngineRpcService;
 final class MockRpcErrors {
     private static final Metadata.Key<byte[]> DETAILS = Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER);
     private MockRpcErrors() { }
+    static EngineRpcService.ErrorDetailsPB details(long code, String message) {
+        return EngineRpcService.ErrorDetailsPB.newBuilder().setErrorCode(code).setErrorMessage(message).build();
+    }
     static StatusRuntimeException error(Status status, long code, String message) {
         Metadata trailers = new Metadata();
-        trailers.put(DETAILS, EngineRpcService.ErrorDetailsPB.newBuilder().setErrorCode(code).setErrorMessage(message).build().toByteArray());
+        trailers.put(DETAILS, details(code, message).toByteArray());
         return status.withDescription(message).asRuntimeException(trailers);
     }
     static Status status(EngineRpcService.ErrorDetailsPB error) {

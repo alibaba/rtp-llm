@@ -191,5 +191,18 @@ INPUTS = InputSchema(
         },
         "analysis": {"collapse": COLLAPSE_INPUTS},
         "checks": {**CHECKS.input_fields, "collapse": {"expected": NONNEGATIVE}},
-    }
+    },
+    open_objects=frozenset(
+        [
+            "traffic.source",
+            "traffic.source.parameters",
+            "traffic.client",
+            "traffic.client.playback",
+            "observation.windows.baseline.from",
+            "observation.windows.baseline.until",
+            "observation.windows.post.from",
+            "observation.windows.post.until",
+        ]
+    )
+    | frozenset("checks." + name for name in CHECKS.specs),
 )
