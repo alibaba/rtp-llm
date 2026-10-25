@@ -82,12 +82,13 @@ public class V2QueueReporter {
 
     /**
      * 成功返回 Decode 抢占指令后，按每个受害者在选中时的阶段计数，不代表引擎已确认取消。
+     * dispatched_unconfirmed 表示已开始下发，但 WorkerStatus 尚未确认引擎接收，不能归为运行中。
      */
     public void decodePreempted(int preemptorPriority, int victimPriority, DecodeTaskPhase phase, String endpoint) {
         String scenario = switch (phase) {
             case RUNNING -> "decode_running";
             case ACCEPTED_NOT_RUNNING -> "decode_accepted";
-            case ENGINE_MAY_HAVE_SEEN -> "decode_unconfirmed";
+            case ENGINE_MAY_HAVE_SEEN -> "decode_dispatched_unconfirmed";
             case MASTER_QUEUED_NOT_DISPATCHED -> throw new IllegalArgumentException("victim is still in master queue");
         };
         reportPreemption(scenario, "decode_engine", "none", "return_cancel_instruction", preemptorPriority,

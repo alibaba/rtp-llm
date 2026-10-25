@@ -152,6 +152,10 @@ public class BatchSchedulerReporter {
         monitor.report(ROUTING_QUEUE_MAX_LENGTH, tags, maxQueuedRequests);
     }
 
+    public void reportGlobalQueueLimit(int maxQueuedRequests) {
+        monitor.report(ROUTING_QUEUE_MAX_LENGTH, FlexMetricTags.of("type", GLOBAL_QUEUE_TYPE), maxQueuedRequests);
+    }
+
     public void reportTotalQueueWaiting(long depth) {
         monitor.report(TOTAL_QUEUE_WAITING, FlexMetricTags.of(), depth);
     }

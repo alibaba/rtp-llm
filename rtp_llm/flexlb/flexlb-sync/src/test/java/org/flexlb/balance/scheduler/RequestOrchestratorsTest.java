@@ -5,8 +5,10 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.schedulev2.decode.DecodeReservations;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -163,6 +165,27 @@ class RequestOrchestratorsTest {
         } finally {
             endpoint.close();
         }
+    }
+
+    @Test
+    void v2ReportsConfiguredQueueLimitWithoutLegacyGlobalQueue() {
+        ConfigService configs = mock(ConfigService.class);
+        FlexlbConfig config = new FlexlbConfig();
+        config.getScheduler().setType(SchedulerConfig.Type.QUEUE);
+        config.getDispatcher().setType(DispatcherConfig.Type.NON_BATCH_V2);
+        config.getScheduler().setMaxQueuedRequests(1000);
+        when(configs.loadBalanceConfig()).thenReturn(config);
+        RequestRegistry requests = mock(RequestRegistry.class);
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+        SchedulerRuntime runtime = new SchedulerRuntime(requests, mock(EndpointRegistry.class), reporter,
+                mock(RequestSchedulerReporter.class), configs, new QueueCapacity(), new ModelMetaConfig());
+
+        runtime.report();
+        verify(reporter).reportGlobalQueueLimit(1000);
+        config.getScheduler().setMaxQueuedRequests(2000);
+        runtime.report();
+        verify(reporter).reportGlobalQueueLimit(2000);
+        verify(reporter, never()).reportGlobalQueue(anyInt(), anyInt());
     }
 
     @Test

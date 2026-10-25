@@ -67,7 +67,7 @@ class V2QueueReporterTest {
             String scenario = switch (phase) {
                 case RUNNING -> "decode_running";
                 case ACCEPTED_NOT_RUNNING -> "decode_accepted";
-                default -> "decode_unconfirmed";
+                default -> "decode_dispatched_unconfirmed";
             };
             reporter.decodePreempted(50, 40, phase, "d1:8000");
             verify(monitor).report(org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT,

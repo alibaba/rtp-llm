@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.schedulev2.decode.DecodeReservations;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.route.RoleType;
@@ -148,6 +149,9 @@ final class SchedulerRuntime {
             return;
         }
         try {
+            if (config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH_V2) {
+                reporter.reportGlobalQueueLimit(config.getScheduler().getMaxQueuedRequests());
+            }
             reporter.reportTotalQueueWaiting(queueCapacity.globalQueueAndEngineSubQueueCount());
         } catch (RuntimeException failure) {
             warnIsolated("Failed to report total queued requests", failure);
