@@ -4,6 +4,8 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.estimate.EndpointPrefillLoadProvider;
+import org.flexlb.balance.estimate.PrefillLoadProvider;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
@@ -28,6 +30,7 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.AbstractList;
@@ -46,14 +49,24 @@ public class CostBasedPrefillStrategy {
     private final WorkerDirectory workerDirectory;
     private final CacheAwareService cacheAwareService;
     private final EngineHealthReporter engineHealthReporter;
+    private final PrefillLoadProvider loadProvider;
     private final EndpointRoundRobin tieRotation = new EndpointRoundRobin();
 
     public CostBasedPrefillStrategy(WorkerDirectory workerDirectory,
                                     CacheAwareService cacheAwareService,
                                     EngineHealthReporter engineHealthReporter) {
+        this(workerDirectory, cacheAwareService, engineHealthReporter, new EndpointPrefillLoadProvider());
+    }
+
+    @Autowired
+    public CostBasedPrefillStrategy(WorkerDirectory workerDirectory,
+                                    CacheAwareService cacheAwareService,
+                                    EngineHealthReporter engineHealthReporter,
+                                    PrefillLoadProvider loadProvider) {
         this.workerDirectory = workerDirectory;
         this.cacheAwareService = cacheAwareService;
         this.engineHealthReporter = engineHealthReporter;
+        this.loadProvider = loadProvider;
     }
 
     public PlacementResult<SelectedRole, RoleType> select(BalanceContext balanceContext,
@@ -482,7 +495,7 @@ public class CostBasedPrefillStrategy {
             CacheTokenMatch cacheMatch = calculateCacheMatch(ep, cacheMatchResult, request, balanceContext.getConfig());
             long cacheHit = cacheMatch.effectiveHitTokens();
             long routingCacheMatchTokens = cacheMatch.routingHitTokens();
-            PrefillTtftEstimate.LoadView loadView = ep.captureLoadView();
+            PrefillTtftEstimate.LoadView loadView = loadProvider.loadView(ep);
             PrefillTtftEstimate.CandidateView estimate =
                     estimateSession.estimateViewForSelection(
                             loadView,

@@ -3,6 +3,8 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.estimate.EndpointPrefillLoadProvider;
+import org.flexlb.balance.estimate.PrefillLoadProvider;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.cache.domain.CacheMatchResult;
@@ -36,6 +38,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -258,6 +261,22 @@ class CostBasedPrefillSelectionMetricTest {
 
         try (SelectedRole ignored = select()) {
             assertTrue(ignored.serverStatus().isSuccess());
+        }
+    }
+
+    @Test
+    void selectionReadsLoadViewFromInjectedProvider() {
+        List<PrefillEndpoint> visited = new ArrayList<>();
+        EndpointPrefillLoadProvider endpointLoad = new EndpointPrefillLoadProvider();
+        PrefillLoadProvider recordingLoad = endpoint -> {
+            visited.add(endpoint);
+            return endpointLoad.loadView(endpoint);
+        };
+        strategy = new CostBasedPrefillStrategy(new WorkerDirectory(registry), cache, reporter, recordingLoad);
+
+        try (SelectedRole ignored = select()) {
+            assertEquals(1, visited.size());
+            assertEquals("10.0.0.1:8080@0", visited.getFirst().ipPort());
         }
     }
 

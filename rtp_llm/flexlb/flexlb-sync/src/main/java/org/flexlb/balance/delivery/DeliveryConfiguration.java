@@ -1,7 +1,9 @@
 package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.estimate.BatchTtftEstimator;
+import org.flexlb.balance.estimate.EndpointPrefillLoadProvider;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
+import org.flexlb.balance.estimate.PrefillLoadProvider;
 import org.flexlb.balance.estimate.PrefillTtftEstimator;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.RequestRegistry;
@@ -15,6 +17,7 @@ import org.springframework.core.env.Environment;
 /**
  * 按启动配置里的 dispatcher.type 选择投递策略和对应的 TTFT 估算器。
  * 两者必须同时是 BATCH 或同时是 NON_BATCH，所以都在这里创建。
+ * 选 Prefill 时读负载视图的方式也按 dispatcher.type 在这里选择。
  */
 @Configuration(proxyBeanMethods = false)
 public class DeliveryConfiguration {
@@ -45,6 +48,13 @@ public class DeliveryConfiguration {
         return switch (dispatcherType(configService)) {
             case BATCH -> new BatchTtftEstimator();
             case NON_BATCH -> new NonBatchTtftEstimator();
+        };
+    }
+
+    @Bean
+    public PrefillLoadProvider prefillLoadProvider(ConfigService configService) {
+        return switch (dispatcherType(configService)) {
+            case BATCH, NON_BATCH -> new EndpointPrefillLoadProvider();
         };
     }
 
