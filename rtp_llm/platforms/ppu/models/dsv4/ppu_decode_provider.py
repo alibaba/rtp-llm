@@ -14,7 +14,10 @@ class PpuDecodeProvider(PpuModuleProvider):
     name = "m890p-dsv4-fp4-decode-candidate"
     indexer_mode = "FP4"
     capabilities = PpuModuleProvider.capabilities | frozenset(
-        {Dsv4ProviderCapability.DECODE_METADATA}
+        {
+            Dsv4ProviderCapability.DECODE_METADATA,
+            Dsv4ProviderCapability.MTP_INPUT_FUSION,
+        }
     )
     _moe_hint = "capacity"
     _moe_output_dtype = torch.bfloat16
@@ -112,6 +115,13 @@ class PpuDecodeProvider(PpuModuleProvider):
         return super().build_fp8_linear(
             default_factory, *args, quantization="v2_column", **kwargs
         )
+
+    def build_mtp_input_fusion(self, enorm, hnorm, e_proj, h_proj):
+        if not self._decode_fusions:
+            return None
+        from .ppu_mtp_input import PpuMtpInputFusion
+
+        return PpuMtpInputFusion(enorm, hnorm, e_proj, h_proj)
 
     def build_wo_a_fp8_linear(self, default_factory, *args, **kwargs):
         linear = super().build_wo_a_fp8_linear(

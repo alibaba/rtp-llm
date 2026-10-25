@@ -92,6 +92,7 @@
     "compat/topk_prefill_bf16_checked.cuh": "679187d5776c5d0314514f0bd6f33870389d00e41446d0664c2fb5d4cb8adacf",
     "compat/topk_exact.cuh": "a2c857279818321bb466d3fc4733ddcd33ca79a13b9b4b4ed97c9659a0920134",
     "compat/c4_decode_store.cuh": "de2e14f5bb41ce8b247c79463b96b4cf3c107cb107f078d600e0df49ef24ccb9",
-    "compat/c4_decode_queries_store.cuh": "966a122c48c345ebc8f96d3d8b0dcf60188a6fd678d9f96efba432be906e5519"
+    "compat/c4_decode_queries_store.cuh": "966a122c48c345ebc8f96d3d8b0dcf60188a6fd678d9f96efba432be906e5519",
+    "compat/mtp_input_quant.cuh": "c0b28ed3cec65cc2aab2f40d7b7aa3e971408043fab98e8dcd10cf011a066412"
   }
 }

@@ -32,6 +32,7 @@ from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DEFAULT_DSV4_CHUNK_TOKENS,
     dsv4_chunk_tokens_from_env,
 )
+from rtp_llm.models_py.modules.dsv4.platform_provider import Dsv4ProviderCapability
 from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
 from rtp_llm.utils.model_weight import W
 
@@ -90,6 +91,7 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         self.e_proj = None
         self.h_proj = None
         self._mtp_fusion_chunk_logged = False
+        self._mtp_input_fusion = None
 
     def _resolve_mtp_last_hidden_token_capacity(self) -> Optional[int]:
         # Parent allocation is already gated by self._is_speculative.  Any
@@ -137,6 +139,13 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
             gw[W.v4_mtp_h_proj_s],
             platform_provider=self._platform_provider,
         )
+        if (
+            Dsv4ProviderCapability.MTP_INPUT_FUSION
+            in self._platform_provider.capabilities
+        ):
+            self._mtp_input_fusion = self._platform_provider.build_mtp_input_fusion(
+                self.enorm, self.hnorm, self.e_proj, self.h_proj
+            )
 
     # ------------------------------------------------------------------
     # Hidden-state preparation overrides — splice the e/h fusion stage in
@@ -231,6 +240,11 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         # The shared embedding can be sharded along hidden size under TP.
         # Use the target's gather path before the full-width fusion norms.
         inputs_embeds = self.v4._embed(input_ids)  # [T, dim]
+        fusion = getattr(self, "_mtp_input_fusion", None)
+        if fusion is not None:
+            fused = fusion(inputs_embeds, pre_hc, positions)
+            if fused is not None:
+                return fused
         # Suppress position-0 embedding (matches main-model "step 0 of a
         # brand-new request" behavior the official MTP impl relies on).
         inputs_embeds = torch.where(
