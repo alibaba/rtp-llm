@@ -1335,15 +1335,25 @@ public:
     double  quarantined_block_ratio = 0.0;
 };
 
+class RtpLLMRemoteCacheQuarantineEventMetricsCollector final {
+public:
+    const char* op          = "";
+    const char* reason      = "";
+    int64_t     block_count = 0;
+};
+
 class RtpLLMRemoteCacheQuarantineMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
     void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheQuarantineMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheQuarantineEventMetricsCollector* collector);
 
 public:
     kmonitor::MutableMetric* quarantined_lease_count_metric = nullptr;
     kmonitor::MutableMetric* quarantined_block_count_metric = nullptr;
     kmonitor::MutableMetric* quarantined_block_ratio_metric = nullptr;
+    kmonitor::MutableMetric* quarantine_qps_metric          = nullptr;
+    kmonitor::MutableMetric* quarantine_block_qps_metric    = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
