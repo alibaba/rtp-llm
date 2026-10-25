@@ -164,7 +164,7 @@ class MockEngineCancelChannelTest {
         // phases. D has only one execution terminal; never count globally by rid.
         assertTerminalSet(prefill, 51L, 9050L, List.of(0L, 8429L), List.of(0,
                 EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED.getNumber()));
-        assertTerminalSet(decode, 51L, 9050L,
+        assertTerminalSet(decode, 51L, -1L,
                 List.of(8100L), List.of(0));
     }
 
@@ -193,7 +193,7 @@ class MockEngineCancelChannelTest {
         assertEquals(0, prefill.getDownstreamOwnershipCount());
         assertEquals(0, decodeServices.get(0).getUpstreamOwnershipCount());
         assertTerminalSet(prefill, 11L, 9100L, List.of(0L), List.of(0));
-        assertTerminalSet(decodeServices.get(0), 11L, 9100L, List.of(0L), List.of(0));
+        assertTerminalSet(decodeServices.get(0), 11L, -1L, List.of(0L), List.of(0));
     }
 
     @Test
@@ -236,7 +236,7 @@ class MockEngineCancelChannelTest {
         assertEquals(0, prefill.getActivePrefillBatchCount(), "P callback did not drain");
         assertTerminalSet(prefill, 21L, 9200L, List.of(8429L), List.of(
                 EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED.getNumber()));
-        assertTerminalSet(decodeServices.get(0), 21L, 9200L,
+        assertTerminalSet(decodeServices.get(0), 21L, -1L,
                 List.of(8100L), List.of(0));
     }
 

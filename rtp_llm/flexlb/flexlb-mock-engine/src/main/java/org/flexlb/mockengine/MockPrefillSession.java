@@ -18,6 +18,9 @@ final class MockPrefillSession {
     final long preparationStartedNanos;
     private boolean clientAttached;
     private boolean prefillDone;
+    private long executionMs;
+    private long prefillDoneMs;
+    private long arrivalMs;
     private boolean continued;
     private boolean closed;
     private org.flexlb.engine.grpc.EngineRpcService.GenerateOutputsPB failure;
@@ -42,9 +45,17 @@ final class MockPrefillSession {
         return true;
     }
 
-    synchronized void prefillDone() {
+    synchronized void prefillDone(long executionMs, long arrivalMs) {
+        this.arrivalMs = arrivalMs;
+        this.executionMs = executionMs;
+        prefillDoneMs = System.currentTimeMillis();
         prefillDone = true;
     }
+
+    synchronized boolean prefillFinished() { return prefillDoneMs != 0; }
+    synchronized long executionMs() { return executionMs; }
+    synchronized long arrivalMs() { return arrivalMs; }
+    synchronized long prefillDoneMs() { return prefillDoneMs; }
 
     synchronized void fail(org.flexlb.engine.grpc.EngineRpcService.GenerateOutputsPB output) {
         failure = output;

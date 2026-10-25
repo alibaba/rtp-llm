@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
 import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueueAndFetch;
 import static org.flexlb.mockengine.MockEngineTestSupport.input;
 import static org.flexlb.mockengine.MockEngineTestSupport.performanceModel;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
@@ -149,7 +150,7 @@ class CompletionRetainWindowTest {
         long initial = firstRequestId - 1;
         for (int i = 0; i < count; i++) {
             long rid = firstRequestId + i;
-            enqueue(prefill, batch(9000 + rid, slot(0, input(rid, 10))));
+            enqueueAndFetch(prefill, batch(9000 + rid, slot(0, input(rid, 10))));
         }
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (workerStatus(prefill, 0).getFinishedTaskListCount() < Math.min(1000, initial + count)

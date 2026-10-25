@@ -573,8 +573,19 @@ class StatusFaultInjectionTest {
         assertEquals(0, ack.getSuccessesCount(), "empty ack: no successes");
         assertEquals(0, ack.getErrorsCount(), "empty ack: no errors");
 
-        // The engine processed the batch normally (unlike crash_after, it is
-        // not stopped): completions still surface through getWorkerStatus.
+        // A dropped ACK cannot cause the normal helper to attach Fetch.
+        // Compute still executes; runtime completion requires explicit Fetch.
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (prefill.getInflightCount() != 0 && System.nanoTime() < until) Thread.sleep(1);
+        var retained = workerStatus(prefill, 0);
+        assertEquals(0, retained.getFinishedTaskListCount());
+        assertEquals(2, retained.getRunningTaskInfoCount());
+        for (long id : List.of(81L, 82L)) prefill.fetchResponse(
+                EngineRpcService.FetchRequestPB.newBuilder().setRequestId(id).build(), new StreamObserver<>() {
+                    public void onNext(EngineRpcService.GenerateOutputsPB value) { }
+                    public void onError(Throwable error) { throw new AssertionError(error); }
+                    public void onCompleted() { }
+                });
         EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 2, 5_000);
         assertEquals(2, done.getFinishedTaskListCount(),
                 "the silently-acked batch still executes engine-side");

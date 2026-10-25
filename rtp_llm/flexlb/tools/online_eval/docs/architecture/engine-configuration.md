@@ -137,6 +137,17 @@ real 的 gRPC `LocalRpcServer::GetWorkerStatus` 不填旧的 `available_concurre
 `waiting_query_len` 和 `running_query_len`，这些字段保持 protobuf 默认值 0。
 Mock 同样回报 0。调度状态以任务列表的 `phase`、`is_waiting` 和取消进度为准；
 Mock 的 `/snapshot` 与指标仍提供独立诊断队列深度，不能当作 real 填充的字段。
+WorkerStatus 的活动表是 RPC runtime inventory，包含 ALLOCATE 等待、已分配 KV 和执行中的 stream，
+不等于 scheduler running 队列。D 在 ALLOCATE 开始就注册 RECEIVED，分配后为 KV_ALLOCATED，
+GENERATE 入队并被 scheduler 选中后才为 RUNNING；ALLOCATE 失败也产生 finished delta。
+P 计算完成释放执行槽，runtime 仍保留到 Fetch 推进且 D LOAD ACK 到达，届时先释放 connector KV，再发布成功完成。
+P 的成功 stream 指标也在这个 runtime dequeue 点上报，首 token 时间仍取计算产生时间。
+real 的 finished TaskInfo 保留初始 PENDING phase；Mock 同样回报 PENDING/is_waiting=true，不能用该字段反推结束前的执行阶段。
+D 不继承 P 的 group/batch identity，PD 首 token 在 D 入队前已存在；普通自回归剩余 N-1 次 forward，
+直接 D 输入从 0 token 开始。KV 增长在下一次 forward 开始前预留，失败时不执行该 forward；
+MTP 仍用校准的平均 token 增量，不模拟真实接受长度和异步 device 上界。
+下游优先级取消保留 P Fetch 的 8429，同时 D 的本地普通取消记录为 8100。
+
 P 的历史执行完成与同 batch 的 `CANCELING` 控制 overlay 可同时出现；Master 保留该请求归属，直到 `CANCELED` 确认。异 batch 的 overlay 不会延迟完成结算。
 `/snapshot.rpc_runtime` 的 callback worker 和 in-flight 调用额度属于 Mock harness，
 不能当作 real `RtpLLMOp` 的 gRPC `MAX_POLLERS` 或 engine waiting 容量。

@@ -527,14 +527,14 @@ class DynamicEngineScaleTest {
         JavaMockEngineCluster.FastRpcService prefill = services.get(prefillPort);
         assertNotNull(prefill, "added prefill engine must be in the services map");
 
-        EngineRpcService.EnqueueBatchResponsePB ack = enqueue(prefill,
+        EngineRpcService.EnqueueBatchResponsePB ack = MockEngineTestSupport.enqueueAndFetch(prefill,
                 batch(31, slot(0, input(101, 100), input(102, 200))));
         assertEquals(2, ack.getSuccessesCount());
 
         EngineRpcService.WorkerStatusPB finished = awaitStatus(prefill,
                 status -> status.getFinishedTaskListCount() == 2, 2_000);
         assertTrue(finished.getFinishedTaskListList().stream()
-                .allMatch(task -> task.getExecutionTimeMs() == 10));
+                .allMatch(task -> task.getExecutionTimeMs() >= 10), "runtime execution includes continuation time after the forward");
 
         // Decode leg: dynamically added decode engine runs generateStreamCall
         // end-to-end (decode queue scheduling → completion → streamed output).

@@ -107,6 +107,60 @@ class WhaleRemotePrefillTest {
         assertEquals(0, prefill.getInflightCount());
     }
 
+    @Test @Timeout(10)
+    void prefillRuntimeAndStreamMetricsWaitForRemoteLoadAck() throws Exception {
+        pendingLoad(false);
+    }
+
+    @Test @Timeout(10)
+    void failedRemoteLoadPublishesPrefillErrorInsteadOfEarlySuccess() throws Exception {
+        pendingLoad(true);
+    }
+
+    private void pendingLoad(boolean fail) throws Exception {
+        startCluster("10", 5.0);
+        var transfer = new java.util.concurrent.CompletableFuture<Void>();
+        var loading = new CountDownLatch(1);
+        decode.setRemoteLoadBackend(id -> { loading.countDown(); return transfer; });
+        var events = new CopyOnWriteArrayList<Map<String, Number>>();
+        var occupiedAtMetric = new CopyOnWriteArrayList<Long>();
+        var reporter = prefill.getClass().getDeclaredField("eventMetricReporter");
+        reporter.setAccessible(true);
+        reporter.set(prefill, (Consumer<Map<String, Number>>) event -> {
+            events.add(event);
+            if (event.containsKey("rtp_llm_latency_us")) occupiedAtMetric.add(prefill.getOccupiedKvTokens());
+        });
+        assertEquals(1, enqueue(prefill, batch(7901, slot(0,
+                inputWithDecode(7901, 10, decode.getGrpcPort())))).getSuccessesCount());
+        var response = new java.util.concurrent.CompletableFuture<CollectedStream>();
+        Thread.startVirtualThread(() -> {
+            try { response.complete(fetch(prefill, 7901, 5000)); }
+            catch (Throwable error) { response.completeExceptionally(error); }
+        });
+        assertTrue(loading.await(3, TimeUnit.SECONDS));
+        var before = MockEngineTestSupport.workerStatus(prefill, 0);
+        assertEquals(0, before.getFinishedTaskListCount());
+        assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED, before.getRunningTaskInfo(0).getPhase());
+        assertEquals(0, decode.getActiveDecodeCount());
+        assertTrue(prefill.getActiveKvTokens() > 0);
+        assertTrue(events.stream().noneMatch(event -> event.containsKey("rtp_llm_latency_us")));
+        if (fail) transfer.completeExceptionally(MockRpcErrors.error(io.grpc.Status.DEADLINE_EXCEEDED, 8300, "load failed"));
+        else transfer.complete(null);
+        var result = response.get(5, TimeUnit.SECONDS);
+        if (fail) {
+            assertNotNull(result.error.get());
+            assertEquals(8300, MockRpcErrors.downstream(result.error.get()).getErrorCode());
+        } else assertNull(result.error.get());
+        var after = MockEngineTestSupport.workerStatus(prefill, 0);
+        assertEquals(0, after.getRunningTaskInfoCount());
+        assertEquals(1, after.getFinishedTaskListCount());
+        assertEquals(fail ? 8300 : 0, after.getFinishedTaskList(0).getErrorInfo().getErrorCode());
+        assertEquals(fail ? 0 : 1, events.stream().filter(event -> event.containsKey("rtp_llm_latency_us")).count());
+        assertEquals(fail ? List.of() : List.of(0L), occupiedAtMetric,
+                "connector ownership must be released before stream completion reporting");
+        assertEquals(0, prefill.getActiveKvTokens());
+    }
+
     private static void assertFrontendTensor(EngineRpcService.GenerateOutputsPB frame, int tokens, int token) {
         var output = frame.getFlattenOutput();
         assertTrue(output.hasOutputIds(), "normal frontend must receive output_ids");
@@ -209,14 +263,14 @@ class WhaleRemotePrefillTest {
         assertNotNull(stream.frameNanos.get(0), "first frame timestamp");
         assertNotNull(stream.frameNanos.get(1), "terminal frame timestamp");
         long ttftNanos = stream.frameNanos.get(0);
-        long e2eNanos = stream.frameNanos.get(1);
-        // Guard against scheduling noise: decode is 400 ms, so the gap must be
+        long e2eNanos = stream.frameNanos.get(stream.frameNanos.size() - 1);
+        // Seven remaining D forwards take 350 ms, so the terminal gap must be
         // at least 100 ms — far above any timer resolution ambiguity.
         long gapMs = TimeUnit.NANOSECONDS.toMillis(e2eNanos - ttftNanos);
         assertTrue(e2eNanos > ttftNanos,
                 "terminal frame must be strictly AFTER first-token frame (ttft < e2e), gap=" + gapMs + "ms");
         assertTrue(gapMs >= 100,
-                "frame gap must reflect real decode execution (~400ms), got " + gapMs + "ms");
+                "frame gap must reflect remaining decode execution (~350ms), got " + gapMs + "ms");
     }
 
     // ==================== cluster / RPC helpers ====================

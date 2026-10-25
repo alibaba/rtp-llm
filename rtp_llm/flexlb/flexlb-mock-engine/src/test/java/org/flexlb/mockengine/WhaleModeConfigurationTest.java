@@ -367,7 +367,7 @@ class WhaleModeConfigurationTest {
                     "MTP prefill also owns an execution step sample");
             var dSteps = decodeEvents.stream().filter(m -> m.containsKey("mock_decode_step_forward_us"))
                     .map(m -> m.get("mock_decode_step_forward_us").doubleValue()).toList();
-            assertEquals(java.util.Collections.nCopies(8, direct ? 30000.0 : 2000.0), dSteps);
+            assertEquals(java.util.Collections.nCopies(7, direct ? 30000.0 : 2000.0), dSteps);
             assertEquals(1, eventMetrics.stream().filter(m -> m.containsKey("rtp_llm_latency_us")).count());
             assertEquals(1L, eventMetrics.stream().filter(m -> m.containsKey("rtp_llm_output_token_length"))
                     .findFirst().orElseThrow().get("rtp_llm_output_token_length").longValue());

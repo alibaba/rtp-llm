@@ -273,7 +273,8 @@ final class MockEngineTestSupport {
         while (System.nanoTime() < deadline) {
             if (service.getInflightCount() == 0
                     && service.getRunningCount() == 0
-                    && activeDecodeRequests(service) == 0) {
+                    && activeDecodeRequests(service) == 0
+                    && service.getActiveKvTokens() == 0) {
                 return;
             }
             Thread.sleep(10);
