@@ -34,6 +34,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.service.monitor.V2QueueReporter;
 import org.flexlb.sync.status.WorkerDirectory;
@@ -95,7 +96,7 @@ class DecodeQueueLoopTest {
         decodeStatus.setServerIp("127.0.0.2");
         decodeStatus.setHttpPort(8080);
         LoopSignal mainLoopSignal = new LoopSignal();
-        mainQueue = new MainQueue(queueCapacity, mainLoopSignal, false);
+        mainQueue = new MainQueue(queueCapacity, mainLoopSignal, false, mock(V2QueueReporter.class));
         cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, mainLoopSignal,
                 new PrefillQueueRegistry(mock(ConfigService.class)), decodeQueue, decodeLoopSignal);
         when(selector.select(any(), any(), any())).thenAnswer(invocation -> success());
@@ -234,6 +235,9 @@ class DecodeQueueLoopTest {
 
         assertEquals(Stage.PUBLISHED, high.stage());
         assertEquals(List.of("1"), high.future().join().getServerStatus().get(1).getPreemptRequestIds());
+        verify(queueReporter).decodePreempted(80, 30, DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN, decode.ipPort());
+        loop.runOnce();
+        verify(queueReporter).decodePreempted(80, 30, DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN, decode.ipPort());
     }
 
     @Test
@@ -259,10 +263,14 @@ class DecodeQueueLoopTest {
         loop.runOnce();
         assertEquals(Stage.DECODE_RESERVED, high.stage());
 
+        verify(queueReporter, never()).decodePreempted(org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(), any(), any());
         high.cancel(CancelReason.CLIENT_CANCELLED);
         cleanup.releaseEnded(high);
         loop.runOnce();
         assertNull(decode.reservationHandle("2"));
+        verify(queueReporter, never()).decodePreempted(org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(), any(), any());
 
         // 抢占撤销后，被抢占的请求可以再被别的请求抢占
         Request next = addWaiting("3", 80);

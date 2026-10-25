@@ -30,7 +30,7 @@ public final class Request {
      */
     private final int priority;
     private final AtomicReference<QueueProgress> progress = new AtomicReference<>(
-            new QueueProgress(Stage.MAIN_WAITING, System.nanoTime(), 0L, 0L, 0L, Stage.MAIN_WAITING));
+            new QueueProgress(Stage.MAIN_WAITING, System.nanoTime(), 0L, 0L, 0L, Stage.MAIN_WAITING, null));
     private final AtomicReference<QueueBlock> lastBlock = new AtomicReference<>();
     /**
      * 子队列名额占用的角色（PREFILL 或 PDFUSION）。主队列出队时设置，
@@ -207,6 +207,21 @@ public final class Request {
     }
 
     /**
+     * 标记等待 Prefill 线程退回主队列。与下发推进共用 progress CAS，只有一方能取得这个请求。
+     */
+    public boolean markPrefillReturn(int incomingPriority) {
+        while (true) {
+            QueueProgress current = progress.get();
+            if (current.stage() != Stage.PREFILL_WAITING || current.prefillReturnPriority() != null) {
+                return false;
+            }
+            if (progress.compareAndSet(current, current.markPrefillReturn(incomingPriority))) {
+                return true;
+            }
+        }
+    }
+
+    /**
      * 从 from 推进到 to。当前阶段已经不是 from，或者不允许这样推进时返回 false。
      */
     public boolean moveTo(Stage from, Stage to) {
@@ -216,6 +231,10 @@ public final class Request {
         while (true) {
             QueueProgress current = progress.get();
             if (current.stage() != from) {
+                return false;
+            }
+            if (from == Stage.PREFILL_WAITING && to == Stage.DECODE_WAITING
+                    && current.prefillReturnPriority() != null) {
                 return false;
             }
             if (progress.compareAndSet(current, current.next(to, System.nanoTime()))) {

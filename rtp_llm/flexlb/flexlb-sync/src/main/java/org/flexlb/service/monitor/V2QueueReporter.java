@@ -8,6 +8,7 @@ import org.flexlb.balance.schedulev2.request.RequestTable;
 import org.flexlb.balance.schedulev2.request.Stage;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -21,6 +22,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT;
 
 /**
  * V2 的实际等待人数与出队检查结果。人数按请求阶段采样，不把共享名额当作 Prefill 队列长度。
@@ -62,6 +65,47 @@ public class V2QueueReporter {
         if (request.recordBlock(stage, reason.name(), endpoint)) {
             report(BLOCKED, tags, 1L);
         }
+    }
+
+    /**
+     * 高优先级请求使 Prefill 等待请求退回主队列时，每次成功迁移上报一次。
+     * 被退回请求继续排队，不计为拒绝或请求失败。
+     */
+    public void preemptedReturn(int preemptorPriority, int victimPriority, String endpoint) {
+        reportPreemption("prefill_return_to_main", "prefill", "main", "requeue", preemptorPriority, victimPriority,
+                endpoint);
+    }
+
+    public void mainPreempted(int preemptorPriority, int victimPriority) {
+        reportPreemption("main_evicted", "main", "none", "reject", preemptorPriority, victimPriority, "all");
+    }
+
+    /**
+     * 成功返回 Decode 抢占指令后，按每个受害者在选中时的阶段计数，不代表引擎已确认取消。
+     */
+    public void decodePreempted(int preemptorPriority, int victimPriority, DecodeTaskPhase phase, String endpoint) {
+        String scenario = switch (phase) {
+            case RUNNING -> "decode_running";
+            case ACCEPTED_NOT_RUNNING -> "decode_accepted";
+            case ENGINE_MAY_HAVE_SEEN -> "decode_unconfirmed";
+            case MASTER_QUEUED_NOT_DISPATCHED -> throw new IllegalArgumentException("victim is still in master queue");
+        };
+        reportPreemption(scenario, "decode_engine", "none", "return_cancel_instruction", preemptorPriority,
+                victimPriority, endpoint);
+    }
+
+    private void reportPreemption(String scenario,
+                                  String fromQueue,
+                                  String toQueue,
+                                  String action,
+                                  int preemptorPriority,
+                                  int victimPriority,
+                                  String endpoint) {
+        report(AUTO_TPM_VICTIM_COUNT,
+                FlexMetricTags.of("case", scenario, "stage", fromQueue, "from_queue", fromQueue, "to_queue", toQueue,
+                        "action", action, "incoming_priority", String.valueOf(preemptorPriority), "victim_priority",
+                        String.valueOf(victimPriority), "endpoint", endpoint),
+                1L);
     }
 
     /**

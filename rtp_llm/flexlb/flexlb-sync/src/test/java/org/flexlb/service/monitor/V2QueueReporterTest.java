@@ -44,6 +44,42 @@ class V2QueueReporterTest {
     }
 
     @Test
+    void preemptedReturnReportsQueueMovementAndBothPriorities() {
+        reporter.preemptedReturn(50, 40, "p1:8000");
+        verify(monitor).report(org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT,
+                FlexMetricTags.of("case", "prefill_return_to_main", "stage", "prefill", "action", "requeue",
+                        "from_queue", "prefill", "to_queue", "main", "incoming_priority", "50", "victim_priority", "40",
+                        "endpoint", "p1:8000"),
+                1.0);
+        org.mockito.Mockito.verifyNoMoreInteractions(monitor);
+    }
+
+    @Test
+    void mainEvictionAndDecodeInstructionsHaveDistinctScenariosAndActions() {
+        reporter.mainPreempted(50, 40);
+        verify(monitor).report(org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT,
+                FlexMetricTags.of("case", "main_evicted", "stage", "main", "from_queue", "main", "to_queue", "none",
+                        "action", "reject", "incoming_priority", "50", "victim_priority", "40", "endpoint", "all"),
+                1.0);
+        for (var phase : List.of(org.flexlb.enums.DecodeTaskPhase.RUNNING,
+                org.flexlb.enums.DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                org.flexlb.enums.DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN)) {
+            String scenario = switch (phase) {
+                case RUNNING -> "decode_running";
+                case ACCEPTED_NOT_RUNNING -> "decode_accepted";
+                default -> "decode_unconfirmed";
+            };
+            reporter.decodePreempted(50, 40, phase, "d1:8000");
+            verify(monitor).report(org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT,
+                    FlexMetricTags.of("case", scenario, "stage", "decode_engine", "from_queue", "decode_engine",
+                            "to_queue", "none", "action", "return_cancel_instruction", "incoming_priority", "50",
+                            "victim_priority", "40", "endpoint", "d1:8000"),
+                    1.0);
+        }
+        org.mockito.Mockito.verifyNoMoreInteractions(monitor);
+    }
+
+    @Test
     void countsActualStagesAndClearsRemovedEngineSeries() {
         Request main = add("1");
         Request prefill = add("2");

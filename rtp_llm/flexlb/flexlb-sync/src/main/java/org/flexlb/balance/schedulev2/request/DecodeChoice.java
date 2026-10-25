@@ -4,6 +4,8 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.dao.loadbalance.ServerStatus;
 
+import java.util.List;
+
 /**
  * Decode 队列给请求选好并 reserve 的 Decode。
  *
@@ -11,9 +13,21 @@ import org.flexlb.dao.loadbalance.ServerStatus;
  * @param reservation  在这台 Decode 上的 reserve，拿 permit 和归还时都用它
  * @param serverStatus 返回给调用方的 Decode 地址等信息
  * @param requirement  reserve 时用的 KV 需求和容量上限，拿 permit 时用同一份
+ * @param preemptedRequests 抢占成功时的受害者快照，响应成功返回后用于上报双方优先级和受害阶段
  */
 public record DecodeChoice(DecodeEndpoint endpoint,
                            DecodeEndpoint.ReservationHandle reservation,
                            ServerStatus serverStatus,
-                           DecodeRequirement requirement) {
+                           DecodeRequirement requirement,
+                           List<DecodeEndpoint.DecodeRequestView> preemptedRequests) {
+    public DecodeChoice {
+        preemptedRequests = List.copyOf(preemptedRequests);
+    }
+
+    public DecodeChoice(DecodeEndpoint endpoint,
+                        DecodeEndpoint.ReservationHandle reservation,
+                        ServerStatus serverStatus,
+                        DecodeRequirement requirement) {
+        this(endpoint, reservation, serverStatus, requirement, List.of());
+    }
 }

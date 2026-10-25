@@ -47,7 +47,8 @@ class PrefillQueueLoopTest {
     private final QueueCapacity queueCapacity = new QueueCapacity();
     private final LoopSignal mainLoopSignal = new LoopSignal();
     private final RequestTable requestTable = new RequestTable();
-    private final MainQueue mainQueue = new MainQueue(queueCapacity, mainLoopSignal, false);
+    private final MainQueue mainQueue =
+            new MainQueue(queueCapacity, mainLoopSignal, false, mock(V2QueueReporter.class));
     private final PrefillQueueRegistry queues;
     private final RequestCleanup cleanup;
     private final EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
@@ -65,6 +66,47 @@ class PrefillQueueLoopTest {
         queues = new PrefillQueueRegistry(configService);
         cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, mainLoopSignal, queues,
                 new DecodeQueue(false), new LoopSignal());
+    }
+
+    @Test
+    void markedRequestReturnsBeforeCapacityCheckWithoutEndingOrDispatching() {
+        V2TestSupport.report(endpoint, 1L, 0L, 100L, Map.of("busy", TaskPhase.RUNNING));
+        Request request = addWaiting("return");
+        long deadline = request.ctx().getRequestExpiresAtMs();
+        long sequence = request.queueSeq();
+        assertTrue(queues.find(endpoint).markLowerPriorityForReturn(80));
+        assertFalse(queues.find(endpoint).markLowerPriorityForReturn(80));
+
+        loop.runOnce();
+
+        assertEquals(Stage.MAIN_WAITING, request.stage());
+        assertFalse(request.future().isDone());
+        assertNull(request.prefillChoice());
+        assertTrue(sentToDecode.isEmpty());
+        assertEquals(0, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
+        assertEquals(1L, queueCapacity.globalQueueAndEngineSubQueueCount());
+        assertEquals(1, mainQueue.size());
+        assertEquals(deadline, request.ctx().getRequestExpiresAtMs());
+        assertEquals(sequence, request.queueSeq());
+        verify(queueReporter).preemptedReturn(80, 50, endpoint.ipPort());
+        loop.runOnce();
+        verify(queueReporter).preemptedReturn(80, 50, endpoint.ipPort());
+        request.cancel(CancelReason.DEADLINE_EXCEEDED);
+        assertEquals(0L, queueCapacity.globalQueueAndEngineSubQueueCount());
+        assertEquals(0, mainQueue.size());
+    }
+
+    @Test
+    void cancelledMarkedRequestIsNotRequeuedOrReported() {
+        Request request = addWaiting("cancelled-return");
+        assertTrue(queues.find(endpoint).markLowerPriorityForReturn(80));
+        request.cancel(CancelReason.CLIENT_CANCELLED);
+        loop.runOnce();
+        assertEquals(Stage.CANCELLED, request.stage());
+        assertEquals(0, mainQueue.size());
+        assertEquals(0L, queueCapacity.globalQueueAndEngineSubQueueCount());
+        assertEquals(0, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
+        org.mockito.Mockito.verifyNoInteractions(queueReporter);
     }
 
     @Test

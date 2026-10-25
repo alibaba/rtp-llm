@@ -115,6 +115,7 @@ public final class PrefillQueueLoop {
         long nowMs = System.currentTimeMillis();
         long starvationThresholdMs =
                 configService.loadBalanceConfig().getDispatcher().getDispatchStarvationThresholdMs();
+        returnMarkedRequests();
         if (!isCurrent(queue)) {
             queues.remove(queue);
             sendBackToMainQueue(queue);
@@ -125,6 +126,32 @@ public final class PrefillQueueLoop {
         removeExpiredDispatched(queue, nowMs, confirmTimeoutMs);
         dispatchWaiting(queue, maxInflight, starvationThresholdMs, nowMs);
         return queue.waitingCount() > 0;
+    }
+
+    /**
+     * 退回处理不受 Prefill 在途或 KV 容量限制，由同一个线程串行处理退回和下发。
+     */
+    private void returnMarkedRequests() {
+        Request request;
+        while ((request = queue.pollPendingReturn()) != null) {
+            returnToMain(request);
+        }
+    }
+
+    private void returnToMain(Request request) {
+        if (!request.moveTo(Stage.PREFILL_WAITING, Stage.MAIN_WAITING)) {
+            return;
+        }
+        Integer preemptorPriority = request.queueProgress().prefillReturnPriority();
+        queue.removeWaiting(request);
+        request.setPrefillChoice(null);
+        request.setPrefillDecidedAtMs(0L);
+        request.setPrefillQueuedAtMs(0L);
+        cleanup.releaseQueueSlot(request);
+        if (preemptorPriority != null) {
+            queueReporter.preemptedReturn(preemptorPriority, request.priority(), queue.endpoint().ipPort());
+        }
+        mainQueue.addBack(request);
     }
 
     private void removeExpiredDispatched(PrefillQueue queue, long nowMs, long confirmTimeoutMs) {
@@ -150,6 +177,9 @@ public final class PrefillQueueLoop {
             Request request = iterator.next();
             if (request.stage() != Stage.PREFILL_WAITING) {
                 queue.removeWaiting(request);
+                continue;
+            }
+            if (request.queueProgress().prefillReturnPriority() != null) {
                 continue;
             }
             long kvTokens = request.prefillChoice().kvTokens(request.seqLen());
@@ -203,13 +233,7 @@ public final class PrefillQueueLoop {
         Iterator<Request> iterator = queue.waitingIterator();
         while (iterator.hasNext()) {
             Request request = iterator.next();
-            queue.removeWaiting(request);
-            if (!request.moveTo(Stage.PREFILL_WAITING, Stage.MAIN_WAITING)) {
-                continue;
-            }
-            request.setPrefillChoice(null);
-            cleanup.releaseQueueSlot(request);
-            mainQueue.addBack(request);
+            returnToMain(request);
         }
     }
 }

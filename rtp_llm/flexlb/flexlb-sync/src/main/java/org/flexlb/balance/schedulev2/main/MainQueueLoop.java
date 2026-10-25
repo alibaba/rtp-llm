@@ -35,7 +35,7 @@ import java.util.function.Consumer;
  * 每处理一份材料，紧接着占子队列名额、抢占并交给 Prefill 队列，再处理下一份材料。
  * <p>
  * 名额上限 = min(maxQueuedRequests, Prefill 机器数 × maxInflightPerPrefillWorker × prefillSubqueueLimitMultiplier)，
- * 名额满时，高优先级请求尝试挤掉选中 Prefill 队列里的低优先级请求。名额保留到发布时才归还。
+ * 名额满时，高优先级请求尝试将选中 Prefill 队列里的低优先级请求退回主队列。名额保留到发布时才归还。
  * 某个 group 暂时没有可选的 Prefill 或拿不到名额时，这一轮跳过同 group 的请求，
  * 其他 group 的请求照常出队。
  */
@@ -262,7 +262,7 @@ public final class MainQueueLoop {
     }
 
     /**
-     * 先尝试占共享名额；满了只在选中的 Prefill 队列里挤掉一个低优先级请求，再重试一次。
+     * 先尝试占共享名额；满了只标记选中 Prefill 队列里的一个低优先级请求，等待 Prefill 线程退回并归还名额。
      */
     private boolean reserveQueueSlot(Request request, PrefillChoice choice, FlexlbConfig config) {
         int endpointCount = endpointRegistry.getEndpointCount(prefillRole);
@@ -272,13 +272,11 @@ public final class MainQueueLoop {
                 return false;
             }
             PrefillQueue queue = prefillQueues.find(choice.endpoint());
-            if (queue == null || !queue.preemptWaiting(request.priority(),
-                    config.priorityOrdering().getHighPriorityThreshold())) {
-                return false;
+            if (queue != null) {
+                queue.markLowerPriorityForReturn(request.priority());
             }
-            if (!queueCapacity.tryReserveEngineSubQueueSlot(config, prefillRole, endpointCount)) {
-                return false;
-            }
+            // Prefill 线程完成退回并归还名额后会唤醒主队列，本轮不提前占用尚未释放的名额。
+            return false;
         }
         request.holdQueueSlot(prefillRole);
         return true;

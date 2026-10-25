@@ -7,6 +7,7 @@ import org.flexlb.balance.schedulev2.request.RequestOrder;
 import org.flexlb.balance.schedulev2.request.Stage;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.service.monitor.V2QueueReporter;
 
 import java.util.Iterator;
 import java.util.concurrent.ConcurrentSkipListSet;
@@ -30,13 +31,18 @@ public final class MainQueue {
      */
     private static final int MAX_ADD_ATTEMPTS = 3;
 
+    private final V2QueueReporter reporter;
     private final QueueCapacity queueCapacity;
     private final LoopSignal loopSignal;
     private final ConcurrentSkipListSet<Request> requests;
     private final AtomicInteger size = new AtomicInteger();
     private final AtomicLong nextSeq = new AtomicLong();
 
-    public MainQueue(QueueCapacity queueCapacity, LoopSignal loopSignal, boolean priorityOrdering) {
+    public MainQueue(QueueCapacity queueCapacity,
+                     LoopSignal loopSignal,
+                     boolean priorityOrdering,
+                     V2QueueReporter reporter) {
+        this.reporter = reporter;
         this.queueCapacity = queueCapacity;
         this.loopSignal = loopSignal;
         this.requests = new ConcurrentSkipListSet<>(RequestOrder.of(priorityOrdering));
@@ -80,8 +86,10 @@ public final class MainQueue {
                 return StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED;
             }
             // 挤掉的请求结束时会同步减掉它占的排队总数，下一轮重试就能计入
-            victim.fail(Stage.MAIN_WAITING, StrategyErrorType.queueRejectionFor(victim.priority(), threshold),
-                    QUEUE_FULL_MESSAGE);
+            if (victim.fail(Stage.MAIN_WAITING, StrategyErrorType.queueRejectionFor(victim.priority(), threshold),
+                    QUEUE_FULL_MESSAGE)) {
+                reporter.mainPreempted(request.priority(), victim.priority());
+            }
         }
         return StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED;
     }

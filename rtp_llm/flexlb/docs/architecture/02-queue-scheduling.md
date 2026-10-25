@@ -47,7 +47,17 @@ MainQueue -> 每台机器一个 PrefillQueue -> 共用 DecodeQueue -> publish(Pr
   `min(maxQueuedRequests, Prefill 机器数 × maxInflightPerPrefillWorker × prefillSubqueueLimitMultiplier)`。
   两种计数都保留到 publish，失败或取消时也归还。Prefill 下线退回主队列时，只归还子队列名额。
 - 总排队数满时，新来的高优先级请求只从主队列挤掉更低优先级的请求。
-  选中 Prefill 后若共享子队列名额满了，则只在这台 Prefill 的等待队列里挤掉更低优先级的请求。
+  选中 Prefill 后若共享子队列名额满了，则将这台 Prefill 等待队列中的更低优先级请求退回主队列。
+  主队列线程只通过阶段快照 CAS 标记待退回；标记与下发推进互斥，不锁整个队列扫描。
+  Prefill 队列线程在容量检查前处理标记，实际退回并归还名额后唤醒主队列；处理前高优请求继续等待。
+  退回时只释放子队列名额，保留总排队计数、future、优先级、原顺序号和截止时间，不返回错误。
+  每次成功淘汰或退回上报 `auto_tpm.victim.count`，均包含 `incoming_priority`、
+  `victim_priority`、`endpoint`、`stage`、`case`、`action`、`from_queue` 和 `to_queue`。
+  `prefill_return_to_main` 为 `prefill → main`、`action=requeue`，退回不计为拒绝；
+  `main_evicted` 为 `main → none`、`action=reject`，受害者报错结束，`endpoint=all`。
+  Decode 在抢占指令成功返回后按受害者逐条上报同一指标；`decode_running`、`decode_accepted`、
+  `decode_unconfirmed` 区分运行中、已接收未运行、已下发未确认，`action=return_cancel_instruction`
+  表示指令已交付而非引擎已确认取消。取消或回滚未发布的抢占不计数。
   两处都要求新请求达到高优先级阈值，并且用阶段 CAS 保证已经出队的请求不会被误踢。
 - Decode 没有单独的队长上限，沿用总排队数和子队列名额。高优先级请求按排序先执行，
   不通过队长触发踢掉 Decode 等待请求。容量不足时的 RETURN 抢占仍由 Decode 线程执行。

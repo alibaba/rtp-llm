@@ -105,7 +105,7 @@ public class RequestSchedulerV2 {
                 ? RoleType.PREFILL
                 : deployedRoles.contains(RoleType.PDFUSION) ? RoleType.PDFUSION : null;
         boolean priorityOrdering = configService.loadBalanceConfig().isPriorityOrdering();
-        this.mainQueue = new MainQueue(queueCapacity, mainLoopSignal, priorityOrdering);
+        this.mainQueue = new MainQueue(queueCapacity, mainLoopSignal, priorityOrdering, queueReporter);
         this.prefillQueues = prefillQueues;
         this.decodeQueue = new DecodeQueue(priorityOrdering);
         this.cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, mainLoopSignal, prefillQueues,

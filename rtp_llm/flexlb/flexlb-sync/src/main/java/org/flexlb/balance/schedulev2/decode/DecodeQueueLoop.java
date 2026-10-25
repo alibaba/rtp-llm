@@ -34,6 +34,7 @@ import org.flexlb.service.monitor.V2QueueReporter;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -366,6 +367,10 @@ public final class DecodeQueueLoop {
                 List.of(request.prefillChoice().serverStatus(), choice.serverStatus()))) {
             cleanup.releasePublished(request);
             decodeQueue.addPublished(request);
+            for (DecodeEndpoint.DecodeRequestView victim : choice.preemptedRequests()) {
+                queueReporter.decodePreempted(request.priority(), victim.priority(), victim.phase(),
+                        choice.endpoint().ipPort());
+            }
         } else {
             // 请求已经结束，结果没发给调用方，归还 reserve
             releaseNow(request);
@@ -536,6 +541,7 @@ public final class DecodeQueueLoop {
      */
     private boolean reserve(Request request, SelectedRole selected, DecodeRequirement requirement, String group) {
         DecodeChoice choice;
+        List<DecodeEndpoint.DecodeRequestView> preemptedRequests = new ArrayList<>();
         try (selected; WorkerEndpoint.EndpointHold hold = selected.takeEndpointHold()) {
             DecodeEndpoint endpoint = (DecodeEndpoint) hold.endpoint();
             if (endpoint.isRetired()) {
@@ -550,13 +556,13 @@ public final class DecodeQueueLoop {
                 if (placeOnEmptyDecode(request, requirement, group)) {
                     return true;
                 }
-                reservation = preempt(request, hold, requirement, selected.serverStatus());
+                reservation = preempt(request, hold, requirement, selected.serverStatus(), preemptedRequests);
                 if (reservation == null) {
                     reportCapacityBlock(request, endpoint, requirement, false);
                     return false;
                 }
             }
-            choice = new DecodeChoice(endpoint, reservation, selected.serverStatus(), requirement);
+            choice = new DecodeChoice(endpoint, reservation, selected.serverStatus(), requirement, preemptedRequests);
         } catch (RuntimeException failure) {
             request.fail(StrategyErrorType.DISPATCH_FAILED, "decode reserve failed: " + failure.getMessage());
             return true;
@@ -624,7 +630,8 @@ public final class DecodeQueueLoop {
     private DecodeEndpoint.ReservationHandle preempt(Request request,
                                                      WorkerEndpoint.EndpointHold hold,
                                                      DecodeRequirement requirement,
-                                                     ServerStatus serverStatus) {
+                                                     ServerStatus serverStatus,
+                                                     List<DecodeEndpoint.DecodeRequestView> preemptedRequests) {
         PreemptionConfig policy = returnPreemptionPolicy(request, requirement);
         if (policy == null) {
             return null;
@@ -660,6 +667,7 @@ public final class DecodeQueueLoop {
         }
         serverStatus.setPreemptRequestIds(
                 proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());
+        preemptedRequests.addAll(proposal.victims());
         return reservation;
     }
 

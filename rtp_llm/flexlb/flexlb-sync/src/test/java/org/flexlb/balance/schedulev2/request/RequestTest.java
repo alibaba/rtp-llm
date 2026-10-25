@@ -19,6 +19,40 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RequestTest {
 
     @Test
+    void returnMarkerAndDispatchCompeteThroughTheSameAtomicState() throws Exception {
+        var executor = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            for (int i = 0; i < 100; i++) {
+                Request request = request("race-" + i);
+                request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
+                var start = new java.util.concurrent.CountDownLatch(1);
+                var mark = executor.submit(() -> {
+                    start.await();
+                    return request.markPrefillReturn(80);
+                });
+                var dispatch = executor.submit(() -> {
+                    start.await();
+                    return request.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING);
+                });
+                start.countDown();
+                boolean marked = mark.get(5, java.util.concurrent.TimeUnit.SECONDS);
+                boolean dispatched = dispatch.get(5, java.util.concurrent.TimeUnit.SECONDS);
+                assertTrue(marked != dispatched);
+                if (marked) {
+                    assertFalse(request.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING));
+                    assertTrue(request.moveTo(Stage.PREFILL_WAITING, Stage.MAIN_WAITING));
+                    assertTrue(request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING));
+                    assertTrue(request.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING));
+                } else {
+                    assertEquals(Stage.DECODE_WAITING, request.stage());
+                }
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void moveToAdvancesOnlyFromTheExpectedStage() {
         Request request = request("1");
 

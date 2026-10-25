@@ -8,7 +8,7 @@ class QueueProgressTest {
 
     @Test
     void rollbackAndDecodeReservationAccumulateOnlyTheirOwnQueueTime() {
-        QueueProgress progress = new QueueProgress(Stage.MAIN_WAITING, 0L, 0L, 0L, 0L, Stage.MAIN_WAITING);
+        QueueProgress progress = new QueueProgress(Stage.MAIN_WAITING, 0L, 0L, 0L, 0L, Stage.MAIN_WAITING, null);
         progress = progress.next(Stage.PREFILL_WAITING, 10_000_000L);
         progress = progress.next(Stage.DECODE_WAITING, 30_000_000L);
         progress = progress.next(Stage.DECODE_RESERVED, 60_000_000L);

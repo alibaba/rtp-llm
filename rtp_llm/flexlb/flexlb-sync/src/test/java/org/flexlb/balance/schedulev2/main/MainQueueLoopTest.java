@@ -60,7 +60,8 @@ class MainQueueLoopTest {
     private final QueueCapacity queueCapacity = new QueueCapacity();
     private final LoopSignal loopSignal = new LoopSignal();
     private final RequestTable requestTable = new RequestTable();
-    private final MainQueue mainQueue = new MainQueue(queueCapacity, loopSignal, true);
+    private final V2QueueReporter reporter = mock(V2QueueReporter.class);
+    private final MainQueue mainQueue = new MainQueue(queueCapacity, loopSignal, true, reporter);
     private final PrefillQueueRegistry prefillQueues;
     private final RequestCleanup cleanup;
     private final PrefillEndpoint endpoint = V2TestSupport.prefillEndpoint("p1:8000");
@@ -83,7 +84,7 @@ class MainQueueLoopTest {
                 new PlacementAvailability(), configService, picker, prefillQueues, RoleType.PREFILL, request -> {
                     prefillQueues.addWaiting(request);
                     sent.add(request);
-                }, new ProcessWorkers<>(new DirectExecutorService(), 2, loopSignal, true), mock(V2QueueReporter.class));
+                }, new ProcessWorkers<>(new DirectExecutorService(), 2, loopSignal, true), reporter);
     }
 
     @Test
@@ -201,7 +202,25 @@ class MainQueueLoopTest {
     }
 
     @Test
-    void fullSubqueuesPreemptNewestLowestPriorityOnSelectedPrefillOnly() {
+    void fullMainQueueRejectsVictimAndReportsBothPriorities() {
+        SchedulingTestConfig.usePriorityQueue(config);
+        config.priorityOrdering().setHighPriorityThreshold(50);
+        config.getScheduler().setMaxQueuedRequests(1);
+        Request low = add("low", "g", 40);
+        Request high = add("high", "g", 50);
+
+        assertEquals(Stage.FAILED, low.stage());
+        assertEquals(8433, low.future().join().getCode());
+        assertEquals(Stage.MAIN_WAITING, high.stage());
+        assertEquals(1, mainQueue.size());
+        assertSame(high, mainQueue.iterator().next());
+        assertEquals(1L, queueCapacity.globalQueueAndEngineSubQueueCount());
+        verify(reporter).mainPreempted(50, 40);
+        org.mockito.Mockito.verifyNoMoreInteractions(reporter);
+    }
+
+    @Test
+    void fullSubqueuesOnlyMarkNewestLowestPriorityAndWaitForReleasedSlot() {
         SchedulingTestConfig.usePriorityQueue(config);
         config.priorityOrdering().setHighPriorityThreshold(60);
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
@@ -213,14 +232,18 @@ class MainQueueLoopTest {
         loop.runOnce();
         Request high = add("3", "g", 80);
 
-        assertTrue(loop.runOnce());
+        assertFalse(loop.runOnce());
+        assertFalse(loop.runOnce());
 
-        assertEquals(Stage.PREFILL_WAITING, older.stage());
-        assertEquals(Stage.FAILED, newer.stage());
-        assertEquals(Stage.PREFILL_WAITING, high.stage());
+        assertNull(older.queueProgress().prefillReturnPriority());
+        assertEquals(80, newer.queueProgress().prefillReturnPriority());
+        assertEquals(Stage.PREFILL_WAITING, newer.stage());
+        assertFalse(newer.future().isDone());
+        assertEquals(Stage.MAIN_WAITING, high.stage());
         assertEquals(2, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
-        assertEquals(2L, queueCapacity.globalQueueAndEngineSubQueueCount());
-        assertEquals(2, prefillQueues.find(endpoint).waitingCount());
+        assertEquals(3L, queueCapacity.globalQueueAndEngineSubQueueCount());
+        org.mockito.Mockito.verify(reporter, org.mockito.Mockito.never())
+                .preemptedReturn(org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyInt(), any());
     }
 
     @Test

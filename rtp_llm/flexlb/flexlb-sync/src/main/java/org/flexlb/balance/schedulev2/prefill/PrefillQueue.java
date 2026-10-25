@@ -7,11 +7,9 @@ import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
 import org.flexlb.balance.schedulev2.LoopSignal;
-import org.flexlb.balance.schedulev2.main.MainQueue;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.schedulev2.request.RequestOrder;
 import org.flexlb.balance.schedulev2.request.Stage;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.TaskPhase;
 
@@ -23,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -44,6 +43,10 @@ public final class PrefillQueue {
     private final PrefillEndpoint endpoint;
     private final LoopSignal signal = new LoopSignal();
     private final ConcurrentSkipListSet<Request> waiting;
+    /**
+     * 主队列线程提交退回请求，Prefill 线程在容量检查之前处理。
+     */
+    private final ConcurrentLinkedQueue<Request> pendingReturns = new ConcurrentLinkedQueue<>();
     /**
      * requestId → 已 dispatch 的记录。
      */
@@ -90,21 +93,28 @@ public final class PrefillQueue {
     }
 
     /**
-     * 子队列总名额满时，挤掉这台 Prefill 上最低优先级里最晚入队的请求。
-     * 只挤仍在等 Prefill dispatch 且优先级更低的请求，已经出队的请求不受影响。
+     * 标记最低优先级里最晚入队的请求；退回尚未处理时不重复挑选受害者。
+     * 主队列线程只标记，不修改选路结果、名额和等待集合。
      */
-    public boolean preemptWaiting(int priority, int highPriorityThreshold) {
+    public boolean markLowerPriorityForReturn(int priority) {
+        if (!pendingReturns.isEmpty()) {
+            return false;
+        }
         for (Request request : waiting.descendingSet()) {
             if (request.priority() >= priority) {
                 return false;
             }
-            if (request.fail(Stage.PREFILL_WAITING,
-                    StrategyErrorType.queueRejectionFor(request.priority(), highPriorityThreshold),
-                    MainQueue.QUEUE_FULL_MESSAGE)) {
+            if (request.markPrefillReturn(priority)) {
+                pendingReturns.add(request);
+                signal.wake();
                 return true;
             }
         }
         return false;
+    }
+
+    public Request pollPendingReturn() {
+        return pendingReturns.poll();
     }
 
     public synchronized void removeWaiting(Request request) {
