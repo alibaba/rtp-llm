@@ -8,6 +8,7 @@ import org.flexlb.balance.endpoint.prefill.RequestEntry;
 import org.flexlb.balance.endpoint.prefill.Reservation;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.endpoint.prefill.TerminalObservation;
+import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.estimate.WorkView.Phase;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -19,6 +20,7 @@ import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.function.Predicate;
 import java.util.function.ToLongFunction;
@@ -291,6 +293,54 @@ public final class BatchPrefill {
         entry.batchProgress.updateProgressFromFinishedTask(terminal.workerObserved(), terminal.errorCode(),
                 terminal.executionTimeMs(), nowMs);
         liveMembers.remove(entry);
+    }
+
+    /**
+     * 检查 Prefill 下线时还没关闭的 batch 预占。正常情况下这时只剩已提交的预占；
+     * 还没提交的预占说明有人漏了回滚，把它的 generation handoff 交给调用方关闭，并记一条错误。
+     */
+    public static Throwable checkRetiringBatchLease(BatchReservation batch,
+                                                    List<EndpointGenerationLifecycle.HandoffPermit> orphanedHandoffs,
+                                                    Throwable invariantFailure) {
+        if (batch.state == LeaseState.OPEN) {
+            if (batch.generationHandoff == null) {
+                return PrefillState.appendRetirementInvariant(invariantFailure,
+                        "OPEN Prefill batch lease lost its generation handoff");
+            }
+            orphanedHandoffs.add(batch.generationHandoff);
+            return PrefillState.appendRetirementInvariant(invariantFailure,
+                    "retirement reached an OPEN Prefill batch lease");
+        }
+        if (batch.state != LeaseState.OWNED || batch.generationHandoff != null) {
+            return PrefillState.appendRetirementInvariant(invariantFailure,
+                    "canonical retirement owner has an invalid batch lease state");
+        }
+        return invariantFailure;
+    }
+
+    /**
+     * 这些批次里最久没有收到引擎状态的那个，距今多少毫秒。
+     */
+    public static long maxBatchAgeMs(Set<BatchProgress> batches, long nowMs) {
+        long maxAgeMs = 0L;
+        for (BatchProgress batch : batches) {
+            maxAgeMs = Math.max(maxAgeMs, Math.max(0L, nowMs - batch.lastObservedAtMs()));
+        }
+        return maxAgeMs;
+    }
+
+    /**
+     * 为每个批次生成负载视图里的一条记录：成员、阶段和预计剩余耗时。
+     */
+    public static List<WorkView.BatchWork> buildBatchWork(IdentityHashMap<BatchProgress, List<String>> batchMembers,
+                                                          long nowMs) {
+        List<WorkView.BatchWork> batches = new ArrayList<>(batchMembers.size());
+        for (Map.Entry<BatchProgress, List<String>> members : batchMembers.entrySet()) {
+            BatchProgress batch = members.getKey();
+            batches.add(new WorkView.BatchWork(batch.batchId(), members.getValue(), batch.phase(),
+                    OptionalLong.of(batch.remainingWorkMsAt(nowMs))));
+        }
+        return batches;
     }
 
     public static boolean matchesObservedBatch(RequestEntry entry, long observedBatchId) {

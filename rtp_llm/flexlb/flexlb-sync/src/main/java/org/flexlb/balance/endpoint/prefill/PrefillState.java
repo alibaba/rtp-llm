@@ -24,7 +24,6 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
@@ -560,32 +559,13 @@ public final class PrefillState {
             int observedBatchLeases = 0;
             for (Reservation lease : leases) {
                 if (lease instanceof SingleReservation) {
-                    if (lease.state != LeaseState.OPEN
-                            && lease.state != LeaseState.OWNED) {
-                        invariantFailure = appendRetirementInvariant(
-                                invariantFailure,
+                    if (lease.state != LeaseState.OPEN && lease.state != LeaseState.OWNED) {
+                        invariantFailure = appendRetirementInvariant(invariantFailure,
                                 "canonical retirement owner has an invalid single-reservation state");
                     }
-                } else if (lease instanceof BatchReservation) {
+                } else if (lease instanceof BatchReservation batch) {
                     observedBatchLeases++;
-                    BatchReservation batch = (BatchReservation) lease;
-                    if (batch.state == LeaseState.OPEN) {
-                        if (batch.generationHandoff == null) {
-                            invariantFailure = appendRetirementInvariant(
-                                    invariantFailure,
-                                    "OPEN Prefill batch lease lost its generation handoff");
-                        } else {
-                            orphanedHandoffs.add(batch.generationHandoff);
-                            invariantFailure = appendRetirementInvariant(
-                                    invariantFailure,
-                                    "retirement reached an OPEN Prefill batch lease");
-                        }
-                    } else if (batch.state != LeaseState.OWNED
-                            || batch.generationHandoff != null) {
-                        invariantFailure = appendRetirementInvariant(
-                                invariantFailure,
-                                "canonical retirement owner has an invalid batch lease state");
-                    }
+                    invariantFailure = BatchPrefill.checkRetiringBatchLease(batch, orphanedHandoffs, invariantFailure);
                 } else {
                     invariantFailure = appendRetirementInvariant(
                             invariantFailure,
@@ -646,9 +626,7 @@ public final class PrefillState {
         return plannedRetirement;
     }
 
-    private static Throwable appendRetirementInvariant(
-            Throwable first,
-            String message) {
+    public static Throwable appendRetirementInvariant(Throwable first, String message) {
         IllegalStateException next = new IllegalStateException(message);
         if (first == null) {
             return next;
@@ -710,9 +688,7 @@ public final class PrefillState {
                     batches.add(entry.batchProgress);
                 }
             }
-            for (BatchProgress batch : batches) {
-                maxAgeMs = Math.max(maxAgeMs, Math.max(0L, nowMs - batch.lastObservedAtMs()));
-            }
+            maxAgeMs = Math.max(maxAgeMs, BatchPrefill.maxBatchAgeMs(batches, nowMs));
             return new Stats(
                     saturatedAdd(requests.size(), unknownEngineRequestCount),
                     locallyOwned,
@@ -806,17 +782,7 @@ public final class PrefillState {
                 batchMembers.computeIfAbsent(entry.batchProgress, ignored -> new ArrayList<>()).add(entry.requestId);
             }
         }
-        List<WorkView.BatchWork> batches =
-                new ArrayList<>(batchMembers.size());
-        for (Map.Entry<BatchProgress, List<String>> observed : batchMembers.entrySet()) {
-            BatchProgress batch = observed.getKey();
-            batches.add(new WorkView.BatchWork(batch.batchId(), observed.getValue(), batch.phase(),
-                    OptionalLong.of(batch.remainingWorkMsAt(nowMs))));
-        }
-        return new WorkCapture(
-                nowMs,
-                individual,
-                batches,
+        return new WorkCapture(nowMs, individual, BatchPrefill.buildBatchWork(batchMembers, nowMs),
                 unknownEngineRequestCount);
     }
 
