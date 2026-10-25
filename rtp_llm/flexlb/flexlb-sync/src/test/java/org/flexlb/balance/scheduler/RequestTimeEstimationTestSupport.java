@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.RouteTimelineProjector;
 import org.flexlb.balance.projection.WorkSnapshot;
 
@@ -14,9 +14,9 @@ import java.util.List;
 import static com.google.common.base.Preconditions.checkArgument;
 
 /**
- * Frozen-value builders shared by canonical route-projection tests.
+ * Frozen-value builders shared by request time estimation tests.
  */
-public final class RouteProjectionTestSupport {
+public final class RequestTimeEstimationTestSupport {
 
     static final long NOW_MS = 10_000L;
 
@@ -30,13 +30,11 @@ public final class RouteProjectionTestSupport {
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparingLong(GroupPlanner.Item::requestId);
 
-    static final RouteProjection.DeliveryProjection ROUTE =
-            org.flexlb.balance.projection.RouteProjection.forDelivery(
-                    org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+    static final RequestTimeEstimation.DeliveryProjection ROUTE =
+            RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
 
-    static final RouteProjection.DeliveryProjection BATCH =
-            org.flexlb.balance.projection.RouteProjection.forDelivery(
-                    org.flexlb.config.DispatcherConfig.Type.BATCH);
+    static final RequestTimeEstimation.DeliveryProjection BATCH =
+            RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
 
     static final PrefillTimePredictor.Evaluator TOKEN_EVALUATOR =
             new PrefillTimePredictor.Evaluator() {
@@ -57,7 +55,7 @@ public final class RouteProjectionTestSupport {
                 }
             };
 
-    private RouteProjectionTestSupport() {}
+    private RequestTimeEstimationTestSupport() {}
 
     static GroupPlanner.Constraints constraints(int maxRequests, long collectionWindowMs) {
         return new GroupPlanner.Constraints(
@@ -131,14 +129,17 @@ public final class RouteProjectionTestSupport {
         return new WorkSnapshot(NOW_MS, requests, batches, unknownRequestCount);
     }
 
-    static RouteProjection.Candidate project(
+    static RequestTimeEstimation.Candidate project(
             QueueSnapshot queue,
             WorkSnapshot work,
             PrefillTimePredictor.Evaluator evaluator,
             Probe probe,
-            RouteProjection.DeliveryProjection deliveryProjection) {
+            RequestTimeEstimation.DeliveryProjection deliveryProjection) {
         return project(
-                new RouteProjection.Inputs(queue, work, 0L), probe, evaluator, deliveryProjection);
+                new RequestTimeEstimation.Inputs(queue, work, 0L),
+                probe,
+                evaluator,
+                deliveryProjection);
     }
 
     /** Virtual request evaluated against one frozen endpoint snapshot. */
@@ -159,21 +160,21 @@ public final class RouteProjectionTestSupport {
         }
     }
 
-    public static RouteProjection.Candidate project(
-            RouteProjection.Inputs inputs,
+    public static RequestTimeEstimation.Candidate project(
+            RequestTimeEstimation.Inputs inputs,
             Probe probe,
             PrefillTimePredictor.Evaluator evaluator,
-            RouteProjection.DeliveryProjection deliveryProjection) {
+            RequestTimeEstimation.DeliveryProjection deliveryProjection) {
         return project(inputs, probe, evaluator, deliveryProjection, inputs.queue().capturedAtMs());
     }
 
-    public static RouteProjection.Candidate project(
-            RouteProjection.Inputs inputs,
+    public static RequestTimeEstimation.Candidate project(
+            RequestTimeEstimation.Inputs inputs,
             Probe probe,
             PrefillTimePredictor.Evaluator evaluator,
-            RouteProjection.DeliveryProjection deliveryProjection,
+            RequestTimeEstimation.DeliveryProjection deliveryProjection,
             long planningAtMs) {
-        RouteProjection.CandidateView view =
+        RequestTimeEstimation.CandidateView view =
                 RouteTimelineProjector.current()
                         .projectView(
                                 inputs,
@@ -190,10 +191,11 @@ public final class RouteProjectionTestSupport {
         return immutable(view);
     }
 
-    private static RouteProjection.Candidate immutable(RouteProjection.CandidateView source) {
-        return source instanceof RouteProjection.Candidate candidate
+    private static RequestTimeEstimation.Candidate immutable(
+            RequestTimeEstimation.CandidateView source) {
+        return source instanceof RequestTimeEstimation.Candidate candidate
                 ? candidate
-                : new RouteProjection.Candidate(
+                : new RequestTimeEstimation.Candidate(
                         source.state(),
                         source.projectedTtftMsValue(),
                         source.incomingPrefillMs(),

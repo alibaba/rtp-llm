@@ -2,9 +2,9 @@ package org.flexlb.balance.prediction;
 
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.RouteProjectionTestSupport;
+import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -108,8 +108,7 @@ class IncrementalPredictionTest {
     void projectionMatchesFullEvaluationAcrossExpiryPriorityAndProbePositions() throws Exception {
         var model = new FormulaPredictor(formula());
         var policy =
-                org.flexlb.balance.projection.RouteProjection.forDelivery(
-                        org.flexlb.config.DispatcherConfig.Type.BATCH);
+                RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
         var full =
                 new PrefillTimePredictor.Evaluator() {
                     public long estimateMs(long t, long h) {
@@ -145,14 +144,14 @@ class IncrementalPredictionTest {
                             items,
                             null);
             var inputs =
-                    new RouteProjection.Inputs(
+                    new RequestTimeEstimation.Inputs(
                             queue, new WorkSnapshot(1000, List.of(), List.of(), 0), 0L);
             var probe =
-                    new RouteProjectionTestSupport.Probe(
+                    new RequestTimeEstimationTestSupport.Probe(
                             999, trial % 5, 1000, 100_000, 1 + random.nextInt(32768), 0, 0);
             assertEquals(
-                    RouteProjectionTestSupport.project(inputs, probe, full, policy),
-                    RouteProjectionTestSupport.project(inputs, probe, model, policy));
+                    RequestTimeEstimationTestSupport.project(inputs, probe, full, policy),
+                    RequestTimeEstimationTestSupport.project(inputs, probe, model, policy));
         }
     }
 
@@ -210,8 +209,7 @@ class IncrementalPredictionTest {
                 GroupPlanner.selectWithPrediction(
                         items,
                         new GroupPlanner.Constraints(64, 100_000, 100_000, 700, 700),
-                        org.flexlb.balance.projection.RouteProjection.newGroupPredictor(
-                                mode, evaluator));
+                        RequestTimeEstimation.newGroupPredictor(mode, evaluator));
         assertEquals(items.subList(0, 2), selected.items());
         assertEquals(500.5, selected.selectedPredictionMs().orElseThrow());
         assertEquals(
@@ -225,8 +223,7 @@ class IncrementalPredictionTest {
                 GroupPlanner.selectWithPrediction(
                         items,
                         new GroupPlanner.Constraints(64, 100_000, 100_000, 700, 700),
-                        org.flexlb.balance.projection.RouteProjection.newGroupPredictor(
-                                mode, evaluator)));
+                        RequestTimeEstimation.newGroupPredictor(mode, evaluator)));
     }
 
     @Test
@@ -234,7 +231,7 @@ class IncrementalPredictionTest {
         var mode = org.flexlb.config.DispatcherConfig.Type.BATCH;
         int[] fullCalls = {0};
         var predictions =
-                new RouteProjection.Predictions() {
+                new RequestTimeEstimation.Predictions() {
                     public long itemDurationMs(GroupPlanner.Item i) {
                         return 100;
                     }
@@ -263,7 +260,7 @@ class IncrementalPredictionTest {
                         item(1, 100, 0, 100_000),
                         item(2, 100, 0, 100_000),
                         item(3, 100, 0, 100_000));
-        var policy = org.flexlb.balance.projection.RouteProjection.forDelivery(mode);
+        var policy = RequestTimeEstimation.forDelivery(mode);
         var cursor = policy.planning(predictions);
         assertEquals(200.5, cursor.durationMs(items, 1)); // only through probe, not suffix
         assertEquals(201, policy.completionOffsetMs(items, 1, predictions, cursor));
@@ -283,12 +280,11 @@ class IncrementalPredictionTest {
     @Test
     void appendCursorKeepsLatestAndOvershootPredecessorAndRecomputesOlderPrefixes() {
         var policy =
-                org.flexlb.balance.projection.RouteProjection.forDelivery(
-                        org.flexlb.config.DispatcherConfig.Type.BATCH);
+                RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
         int[] appended = {0};
         int[] recomputed = {0};
         var predictions =
-                new RouteProjection.Predictions() {
+                new RequestTimeEstimation.Predictions() {
                     public long itemDurationMs(GroupPlanner.Item item) {
                         return 11;
                     }

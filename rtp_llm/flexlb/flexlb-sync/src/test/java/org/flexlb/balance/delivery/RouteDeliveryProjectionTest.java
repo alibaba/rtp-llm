@@ -2,7 +2,7 @@ package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.config.DispatcherConfig;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -188,12 +188,12 @@ class RouteDeliveryProjectionTest {
         assertThrows(IllegalArgumentException.class, () -> cursor.durationMs(items, 0));
     }
 
-    private static RouteProjection.DeliveryProjection projection(boolean batch) {
-        return RouteProjection.forDelivery(
+    private static RequestTimeEstimation.DeliveryProjection projection(boolean batch) {
+        return RequestTimeEstimation.forDelivery(
                 batch ? DispatcherConfig.Type.BATCH : DispatcherConfig.Type.NON_BATCH);
     }
 
-    private static final class CountingPredictions implements RouteProjection.Predictions {
+    private static final class CountingPredictions implements RequestTimeEstimation.Predictions {
 
         private final Map<Long, Integer> itemCalls = new HashMap<>();
         private Set<Long> failingIds = Set.of();

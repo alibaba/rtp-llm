@@ -27,6 +27,11 @@ for variant in ("before", "after"):
     d.mkdir(exist_ok=True)
     body = source
     directory = baseline if variant == "before" else root
+    if not (
+        directory
+        / "flexlb-sync/src/main/java/org/flexlb/balance/projection/RequestTimeEstimation.java"
+    ).exists():
+        body = body.replace("RequestTimeEstimation", "RouteProjection")
     planner_source = (
         directory
         / "flexlb-sync/src/main/java/org/flexlb/balance/planner/GroupPlanner.java"

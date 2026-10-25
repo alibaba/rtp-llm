@@ -8,7 +8,6 @@ import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueExecutionSettings;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRoute;
-import org.flexlb.balance.scheduler.RouteProjectionTestSupport;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.FlexlbConfig;
@@ -41,8 +40,9 @@ public class SnapshotBench {
     static volatile long sink;
     static FormulaPredictor model;
     static DeliveryDispatcher strategy;
-    static final RouteProjectionTestSupport.Probe PROBE =
-            new RouteProjectionTestSupport.Probe(Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
+    static final RequestTimeEstimationTestSupport.Probe PROBE =
+            new RequestTimeEstimationTestSupport.Probe(
+                    Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
 
     record Endpoint(
             PrefillEndpoint endpoint, PrefillState state, ReentrantLock lock, RequestRoute member) {
@@ -148,11 +148,11 @@ public class SnapshotBench {
                 checksum += inputs.queue().activeItems().size();
                 if (project)
                     checksum +=
-                            RouteProjectionTestSupport.project(
+                            RequestTimeEstimationTestSupport.project(
                                             inputs,
                                             PROBE,
                                             model,
-                                            org.flexlb.balance.projection.RouteProjection
+                                            org.flexlb.balance.projection.RequestTimeEstimation
                                                     .forDelivery(strategy.mode()))
                                     .projectedTtftMsValue();
             }

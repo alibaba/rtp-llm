@@ -7,7 +7,7 @@ import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot.AdmissionBlock;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.scheduler.ContextResult;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementAvailability;
@@ -89,7 +89,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private volatile WorkerBatcher batcher;
     private final DeliveryDispatcher dispatcher;
     private final DispatcherConfig.Type dispatcherType;
-    public final RouteProjection.DeliveryProjection deliveryProjection;
+    public final RequestTimeEstimation.DeliveryProjection deliveryProjection;
     private volatile Comparator<GroupPlanner.Item> projectionOrder;
     private volatile ProjectionSource projectionSource;
 
@@ -133,7 +133,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
                         ? config.getDispatcher().getMaxInflightPerPrefillWorker()
                         : 0L;
-        this.deliveryProjection = RouteProjection.forDelivery(dispatcher.mode());
+        this.deliveryProjection = RequestTimeEstimation.forDelivery(dispatcher.mode());
         this.projectionOrder =
                 config.isPriorityOrdering() ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
         this.ownership =
@@ -152,7 +152,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         private final boolean queueEnabled;
         private final org.flexlb.balance.planner.GroupingPolicy grouping;
         private final Comparator<GroupPlanner.Item> capturedOrder;
-        private volatile RouteProjection.Inputs materialized;
+        private volatile RequestTimeEstimation.Inputs materialized;
 
         private ProjectionSource(
                 PrefillState.Snapshot ownership, WorkerBatcher.PlanningView planning) {
@@ -165,8 +165,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
             this.capturedOrder = projectionOrder;
         }
 
-        private RouteProjection.Inputs materialize() {
-            RouteProjection.Inputs result = materialized;
+        private RequestTimeEstimation.Inputs materialize() {
+            RequestTimeEstimation.Inputs result = materialized;
             if (result != null) {
                 return result;
             }
@@ -182,7 +182,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                                     ownership.active().projectedItems(),
                                     admissionBlock);
                     materialized =
-                            new RouteProjection.Inputs(
+                            new RequestTimeEstimation.Inputs(
                                     queueSnapshot,
                                     ownership.work().materialize(),
                                     version.ownershipVersion());
@@ -194,7 +194,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
     }
 
-    public RouteProjection.Inputs captureRouteProjectionInputs() {
+    public RequestTimeEstimation.Inputs captureRouteProjectionInputs() {
         ProjectionSource source = projectionSource;
         if (source == null || source.version != ownership.progress()) {
             ownership.lock.lock();

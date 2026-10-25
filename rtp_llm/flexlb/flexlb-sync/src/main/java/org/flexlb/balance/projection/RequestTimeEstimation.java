@@ -14,10 +14,10 @@ import java.util.OptionalDouble;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.math.LongMath.saturatedAdd;
 
-/** Projects one incoming route against immutable, coherently captured inputs. */
-public final class RouteProjection {
+/** Inputs, results, and timing rules used by {@link RouteTimelineProjector}. */
+public final class RequestTimeEstimation {
 
-    private RouteProjection() {}
+    private RequestTimeEstimation() {}
 
     /**
      * Pure prediction policy for the configured delivery mode.
@@ -244,11 +244,11 @@ public final class RouteProjection {
         };
     }
 
-    private static final class BatchProjection implements RouteProjection.DeliveryProjection {
+    private static final class BatchProjection implements DeliveryProjection {
 
         @Override
         public long singletonCompletionOffsetMs(
-                long seqLen, long hitCache, RouteProjection.Predictions predictions) {
+                long seqLen, long hitCache, Predictions predictions) {
             // Committed prediction performs the same validated decision-group
             // evaluation before converting to lifecycle milliseconds. Running
             // the planning call first only evaluates the predictor twice for
@@ -257,7 +257,7 @@ public final class RouteProjection {
         }
 
         @Override
-        public RouteProjection.GroupPlanning planning(RouteProjection.Predictions predictions) {
+        public GroupPlanning planning(Predictions predictions) {
             return new AppendPlanning(predictions.newBatchPrediction());
         }
 
@@ -265,8 +265,8 @@ public final class RouteProjection {
         public long completionOffsetMs(
                 List<GroupPlanner.Item> items,
                 int memberIndex,
-                RouteProjection.Predictions predictions,
-                RouteProjection.GroupPlanning planning) {
+                Predictions predictions,
+                GroupPlanning planning) {
             Objects.checkIndex(memberIndex, items.size());
             if (planning != null) {
                 var cached = planning.predictedPrefixMs(memberIndex + 1);
@@ -279,7 +279,7 @@ public final class RouteProjection {
         }
 
         /** One planner invocation; prefixes only grow and the probe boundary never moves backwards. */
-        private static final class AppendPlanning implements RouteProjection.GroupPlanning {
+        private static final class AppendPlanning implements GroupPlanning {
             private final PrefillTimePredictor.BatchPrediction prediction;
             private int size;
             private double latestPredictionMs;
@@ -319,20 +319,20 @@ public final class RouteProjection {
         }
     }
 
-    private static final class RouteProjectionPolicy implements RouteProjection.DeliveryProjection {
+    private static final class RouteProjectionPolicy implements DeliveryProjection {
 
-        private static final ThreadLocal<RouteCursor> PLANNING =
-                ThreadLocal.withInitial(RouteCursor::new);
+        private static final ThreadLocal<TimeAccumulator> PLANNING =
+                ThreadLocal.withInitial(TimeAccumulator::new);
 
         @Override
         public long singletonCompletionOffsetMs(
-                long seqLen, long hitCache, RouteProjection.Predictions predictions) {
+                long seqLen, long hitCache, Predictions predictions) {
             return predictions.itemDurationMs(seqLen, hitCache);
         }
 
         @Override
-        public RouteProjection.GroupPlanning planning(RouteProjection.Predictions predictions) {
-            RouteCursor planning = PLANNING.get();
+        public GroupPlanning planning(Predictions predictions) {
+            TimeAccumulator planning = PLANNING.get();
             planning.reset(predictions);
             return planning;
         }
@@ -341,11 +341,11 @@ public final class RouteProjection {
         public long completionOffsetMs(
                 List<GroupPlanner.Item> items,
                 int memberIndex,
-                RouteProjection.Predictions predictions,
-                RouteProjection.GroupPlanning planning) {
+                Predictions predictions,
+                GroupPlanning planning) {
             Objects.checkIndex(memberIndex, items.size());
             // GroupPlanning belongs to this invocation and its exact selected prefix.
-            if (planning instanceof RouteCursor cursor && cursor.predictions == predictions) {
+            if (planning instanceof TimeAccumulator cursor && cursor.predictions == predictions) {
                 long cached = cursor.cachedDurationMs(memberIndex);
                 if (cached >= 0L) {
                     return cached;
@@ -358,13 +358,13 @@ public final class RouteProjection {
             return durationMs;
         }
 
-        private static final class RouteCursor implements RouteProjection.GroupPlanning {
+        private static final class TimeAccumulator implements GroupPlanning {
             private long durationMs;
             private long previousDurationMs;
             private int computedThrough;
-            private RouteProjection.Predictions predictions;
+            private Predictions predictions;
 
-            private void reset(RouteProjection.Predictions exactPredictions) {
+            private void reset(Predictions exactPredictions) {
                 predictions = exactPredictions;
                 computedThrough = -1;
                 durationMs = 0L;

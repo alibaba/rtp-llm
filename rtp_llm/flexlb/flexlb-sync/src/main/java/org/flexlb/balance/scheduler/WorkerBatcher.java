@@ -11,7 +11,7 @@ import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot.AdmissionBlock;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.DeliveryDispatcher.Member;
 import org.flexlb.config.DecisionPolicyConfig;
@@ -948,7 +948,7 @@ public final class WorkerBatcher {
             PrefillTimePredictor.Evaluator evaluator = prefillEndpoint.predictor.evaluator();
             var predictor =
                     predictionBudgetMs > 0L
-                            ? RouteProjection.newGroupPredictor(
+                            ? RequestTimeEstimation.newGroupPredictor(
                                     settings.dispatcherType(), evaluator)
                             : null;
             long planningAtMs = System.currentTimeMillis();

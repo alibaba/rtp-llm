@@ -3,7 +3,7 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
@@ -554,11 +554,11 @@ class CostBasedPrefillSelectionMetricTest {
         candidates.addCandidate(
                 "unknown:8080",
                 unknown,
-                new RouteProjection.Candidate(
-                        RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK,
-                        RouteProjection.Candidate.UNKNOWN,
+                new RequestTimeEstimation.Candidate(
+                        RequestTimeEstimation.Candidate.State.UNMODELED_ENGINE_WORK,
+                        RequestTimeEstimation.Candidate.UNKNOWN,
                         1L,
-                        RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                        RequestTimeEstimation.Candidate.InitialHeadDisposition.NONE,
                         "",
                         null,
                         600L,
@@ -606,11 +606,11 @@ class CostBasedPrefillSelectionMetricTest {
             candidates.addCandidate(
                     ip + ":8080",
                     endpoint,
-                    new RouteProjection.Candidate(
-                            RouteProjection.Candidate.State.MODELED,
+                    new RequestTimeEstimation.Candidate(
+                            RequestTimeEstimation.Candidate.State.MODELED,
                             ttftMs[i],
                             ttftMs[i],
-                            RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                            RequestTimeEstimation.Candidate.InitialHeadDisposition.NONE,
                             "",
                             null,
                             hitTokens[i],

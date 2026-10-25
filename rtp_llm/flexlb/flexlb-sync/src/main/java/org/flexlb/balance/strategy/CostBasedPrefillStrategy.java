@@ -6,7 +6,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.RouteTimelineProjector;
 import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.RequestRoute;
@@ -424,9 +424,9 @@ public class CostBasedPrefillStrategy {
                     calculateCacheMatch(ep, endpointAddress, cacheMatchResults, request);
             long cacheHit = cacheMatch.effectiveHitTokens();
             long routingCacheMatchTokens = cacheMatch.routingHitTokens();
-            RouteProjection.Inputs projectionInputs = ep.captureRouteProjectionInputs();
+            RequestTimeEstimation.Inputs projectionInputs = ep.captureRouteProjectionInputs();
             PrefillTimePredictor predictor = ep.predictor;
-            RouteProjection.CandidateView projection =
+            RequestTimeEstimation.CandidateView projection =
                     projector.projectRankingView(
                             projectionInputs,
                             request.getRequestId(),
@@ -458,7 +458,8 @@ public class CostBasedPrefillStrategy {
             candidates.addCandidate(
                     endpointAddress, ep, projection, projectionInputs.ownershipVersion());
             var admission =
-                    RouteProjection.applyAdmissionPolicy(projectionInputs.queue(), projection);
+                    RequestTimeEstimation.applyAdmissionPolicy(
+                            projectionInputs.queue(), projection);
             if (!admission.selectable() && !admission.engineWorkUnmodeled()) {
                 candidates.admissionBlock(admission.detail());
             }

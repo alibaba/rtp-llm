@@ -6,6 +6,7 @@ import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.projection.RequestTimeEstimation.Candidate;
 
 import java.util.Comparator;
 import java.util.Iterator;
@@ -17,7 +18,7 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.LongMath.saturatedAdd;
 
 /** Thread-confined frozen-snapshot TTFT projector and invocation-scoped result view. */
-public final class RouteTimelineProjector implements RouteProjection.CandidateView {
+public final class RouteTimelineProjector implements RequestTimeEstimation.CandidateView {
 
     private static final ThreadLocal<RouteTimelineProjector> PROJECTORS =
             ThreadLocal.withInitial(RouteTimelineProjector::new);
@@ -31,10 +32,10 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
     private long seqLen;
     private long hitCache;
     private long routingCacheMatchTokens;
-    private RouteProjection.Candidate.State state;
+    private Candidate.State state;
     private long projectedTtftMsValue;
     private long incomingPrefillMs;
-    private RouteProjection.Candidate.InitialHeadDisposition headDisposition;
+    private Candidate.InitialHeadDisposition headDisposition;
     private String detail;
     private GroupPlanner.Constraints rankingConstraints;
 
@@ -46,8 +47,8 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
     }
 
     /** Borrowed result: read or copy it before this thread's next projectView call. */
-    public RouteProjection.CandidateView projectView(
-            RouteProjection.Inputs inputs,
+    public RequestTimeEstimation.CandidateView projectView(
+            RequestTimeEstimation.Inputs inputs,
             long requestId,
             int priority,
             long enqueuedAtMs,
@@ -56,7 +57,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             long hitCache,
             long routingCacheMatchTokens,
             PrefillTimePredictor.Evaluator evaluator,
-            RouteProjection.DeliveryProjection deliveryProjection,
+            RequestTimeEstimation.DeliveryProjection deliveryProjection,
             long planningAtMs) {
         return projectView(
                 inputs,
@@ -74,8 +75,8 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
     }
 
     /** Rank known serial work without converting a transient KV wait into a cache miss. */
-    public RouteProjection.CandidateView projectRankingView(
-            RouteProjection.Inputs inputs,
+    public RequestTimeEstimation.CandidateView projectRankingView(
+            RequestTimeEstimation.Inputs inputs,
             long requestId,
             int priority,
             long enqueuedAtMs,
@@ -84,7 +85,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             long hitCache,
             long routingCacheMatchTokens,
             PrefillTimePredictor.Evaluator evaluator,
-            RouteProjection.DeliveryProjection deliveryProjection,
+            RequestTimeEstimation.DeliveryProjection deliveryProjection,
             long planningAtMs) {
         return projectView(
                 inputs,
@@ -101,8 +102,8 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
                 true);
     }
 
-    private RouteProjection.CandidateView projectView(
-            RouteProjection.Inputs inputs,
+    private RequestTimeEstimation.CandidateView projectView(
+            RequestTimeEstimation.Inputs inputs,
             long requestId,
             int priority,
             long enqueuedAtMs,
@@ -111,7 +112,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             long hitCache,
             long routingCacheMatchTokens,
             PrefillTimePredictor.Evaluator evaluator,
-            RouteProjection.DeliveryProjection deliveryProjection,
+            RequestTimeEstimation.DeliveryProjection deliveryProjection,
             long planningAtMs,
             boolean rankOnly) {
         this.requestId = requestId;
@@ -130,7 +131,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
                         deliveryProjection,
                         planningAtMs,
                         rankOnly);
-        return rankOnly ? projected : RouteProjection.applyAdmissionPolicy(queue, projected);
+        return rankOnly ? projected : RequestTimeEstimation.applyAdmissionPolicy(queue, projected);
     }
 
     /**
@@ -140,11 +141,11 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
      * and that cursor overlap via {@code max(cursor, readyAt)}. The snapshot's
      * frozen delivery projection defines each group's completion shape.
      */
-    private RouteProjection.CandidateView project(
+    private RequestTimeEstimation.CandidateView project(
             QueueSnapshot queue,
             WorkSnapshot committed,
             PrefillTimePredictor.Evaluator evaluator,
-            RouteProjection.DeliveryProjection deliveryProjection,
+            RequestTimeEstimation.DeliveryProjection deliveryProjection,
             long planningAtMs,
             boolean rankOnly) {
         long projectionAtMs = Math.max(queue.capturedAtMs(), planningAtMs);
@@ -166,10 +167,10 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
         }
     }
 
-    private RouteProjection.CandidateView projectWithPredictions(
+    private RequestTimeEstimation.CandidateView projectWithPredictions(
             QueueSnapshot queue,
             WorkSnapshot committed,
-            RouteProjection.DeliveryProjection deliveryProjection,
+            RequestTimeEstimation.DeliveryProjection deliveryProjection,
             long projectionAtMs,
             PredictionBoundary predictions,
             boolean rankOnly) {
@@ -192,7 +193,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             if (queue.queueScheduling() && seqLen > constraints.batchKvCapacity()) {
                 return blocked(
                         incomingPrefillMs,
-                        RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                        Candidate.InitialHeadDisposition.NONE,
                         "PREFILL_KV_CAPACITY");
             }
             return unmodeledEngineWork(incomingPrefillMs);
@@ -203,10 +204,10 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
         if (!queue.queueScheduling()) {
             long completionMs = saturatedAdd(committedMs, incomingPrefillMs);
             return candidate(
-                    RouteProjection.Candidate.State.MODELED,
+                    Candidate.State.MODELED,
                     completionMs,
                     incomingPrefillMs,
-                    RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                    Candidate.InitialHeadDisposition.NONE,
                     "SERIAL_FROZEN_DIRECT");
         }
         // An empty queue has no membership to merge or decision group to build.
@@ -254,16 +255,16 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
         return cached;
     }
 
-    private RouteProjection.CandidateView projectSingleton(
+    private RequestTimeEstimation.CandidateView projectSingleton(
             GroupPlanner.Constraints constraints,
-            RouteProjection.DeliveryProjection deliveryProjection,
+            RequestTimeEstimation.DeliveryProjection deliveryProjection,
             long projectionAtMs,
             long committedMs,
             long incomingPrefillMs) {
         if (seqLen > constraints.batchKvCapacity()) {
             return blocked(
                     incomingPrefillMs,
-                    RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                    Candidate.InitialHeadDisposition.NONE,
                     "PREFILL_KV_CAPACITY");
         }
         long readyAtMs = projectionAtMs;
@@ -282,22 +283,22 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             long durationMs =
                     deliveryProjection.singletonCompletionOffsetMs(seqLen, hitCache, predictions);
             return candidate(
-                    RouteProjection.Candidate.State.MODELED,
+                    Candidate.State.MODELED,
                     saturatedAdd(
                             Math.max(committedMs, elapsedFromNow(projectionAtMs, readyAtMs)),
                             durationMs),
                     incomingPrefillMs,
-                    RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                    Candidate.InitialHeadDisposition.NONE,
                     "EMPTY_ACTIVE_QUEUE_SINGLETON");
         } catch (PredictionFailure predictionFailure) {
             return unavailable(predictionFailure.detail("SERVICE_PREDICTION_FAILED"));
         }
     }
 
-    private RouteProjection.CandidateView projectQueue(
+    private RequestTimeEstimation.CandidateView projectQueue(
             QueueSnapshot queue,
             GroupPlanner.Constraints constraints,
-            RouteProjection.DeliveryProjection deliveryProjection,
+            RequestTimeEstimation.DeliveryProjection deliveryProjection,
             long projectionAtMs,
             long committedMs,
             long incomingPrefillMs) {
@@ -323,7 +324,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             if (ordered.pruneExpired(decisionNowMs)) {
                 return unavailable("INCOMING_EXPIRED_BEFORE_DISPATCH");
             }
-            RouteProjection.Candidate.InitialHeadDisposition initialHeadDisposition =
+            Candidate.InitialHeadDisposition initialHeadDisposition =
                     ordered.initialHeadDisposition();
 
             GroupPlanner.Item head = ordered.head();
@@ -332,7 +333,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             }
 
             final GroupPlanner.Selection<GroupPlanner.Item> selection;
-            final RouteProjection.GroupPlanning planning;
+            final RequestTimeEstimation.GroupPlanning planning;
             try {
                 // An idle singleton needs no readiness prediction when already full or due.
                 boolean needsPrediction =
@@ -395,7 +396,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
                 long completionMs = saturatedAdd(startMs, durationMs);
                 if (probePosition < selection.items().size()) {
                     return candidate(
-                            RouteProjection.Candidate.State.MODELED,
+                            Candidate.State.MODELED,
                             completionMs,
                             incomingPrefillMs,
                             initialHeadDisposition,
@@ -475,16 +476,16 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
             return new ProjectedQueue(active, probe, low, nowMs);
         }
 
-        private RouteProjection.Candidate.InitialHeadDisposition initialHeadDisposition() {
+        private Candidate.InitialHeadDisposition initialHeadDisposition() {
             if (active.isEmpty()) {
-                return RouteProjection.Candidate.InitialHeadDisposition.NONE;
+                return Candidate.InitialHeadDisposition.NONE;
             }
             if (initialHeadPruned) {
-                return RouteProjection.Candidate.InitialHeadDisposition.TERMINAL_PRUNED;
+                return Candidate.InitialHeadDisposition.TERMINAL_PRUNED;
             }
             return probeIndex == 0
-                    ? RouteProjection.Candidate.InitialHeadDisposition.AFTER_PROBE
-                    : RouteProjection.Candidate.InitialHeadDisposition.BEFORE_PROBE;
+                    ? Candidate.InitialHeadDisposition.AFTER_PROBE
+                    : Candidate.InitialHeadDisposition.BEFORE_PROBE;
         }
 
         private GroupPlanner.Item head() {
@@ -560,41 +561,41 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
         return deadlineMs <= nowMs ? 0L : deadlineMs - nowMs;
     }
 
-    private RouteProjection.CandidateView unavailable(String detail) {
+    private RequestTimeEstimation.CandidateView unavailable(String detail) {
         return candidate(
-                RouteProjection.Candidate.State.UNAVAILABLE,
-                RouteProjection.Candidate.UNKNOWN,
+                Candidate.State.UNAVAILABLE,
+                Candidate.UNKNOWN,
                 0L,
-                RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                Candidate.InitialHeadDisposition.NONE,
                 detail);
     }
 
-    private RouteProjection.CandidateView unmodeledEngineWork(long incomingPrefillMs) {
+    private RequestTimeEstimation.CandidateView unmodeledEngineWork(long incomingPrefillMs) {
         return candidate(
-                RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK,
-                RouteProjection.Candidate.UNKNOWN,
+                Candidate.State.UNMODELED_ENGINE_WORK,
+                Candidate.UNKNOWN,
                 incomingPrefillMs,
-                RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                Candidate.InitialHeadDisposition.NONE,
                 "ENGINE_WORK_UNOBSERVABLE");
     }
 
-    private RouteProjection.CandidateView blocked(
+    private RequestTimeEstimation.CandidateView blocked(
             long incomingPrefillMs,
-            RouteProjection.Candidate.InitialHeadDisposition initialHeadDisposition,
+            Candidate.InitialHeadDisposition initialHeadDisposition,
             String detail) {
         return candidate(
-                RouteProjection.Candidate.State.BLOCKED,
-                RouteProjection.Candidate.UNKNOWN,
+                Candidate.State.BLOCKED,
+                Candidate.UNKNOWN,
                 incomingPrefillMs,
                 initialHeadDisposition,
                 detail);
     }
 
-    private RouteProjection.CandidateView candidate(
-            RouteProjection.Candidate.State state,
+    private RequestTimeEstimation.CandidateView candidate(
+            Candidate.State state,
             long projectedTtftMs,
             long incomingPrefillMs,
-            RouteProjection.Candidate.InitialHeadDisposition headDisposition,
+            Candidate.InitialHeadDisposition headDisposition,
             String detail) {
         this.state = state;
         this.projectedTtftMsValue = projectedTtftMs;
@@ -605,7 +606,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
     }
 
     @Override
-    public RouteProjection.Candidate.State state() {
+    public Candidate.State state() {
         return state;
     }
 
@@ -620,7 +621,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
     }
 
     @Override
-    public RouteProjection.Candidate.InitialHeadDisposition initialHeadDisposition() {
+    public Candidate.InitialHeadDisposition initialHeadDisposition() {
         return headDisposition;
     }
 
@@ -649,7 +650,7 @@ public final class RouteTimelineProjector implements RouteProjection.CandidateVi
      * Predictor failures remain distinguishable from invalid returned values,
      * while every numeric output is validated before it reaches scheduling.
      */
-    private static final class PredictionBoundary implements RouteProjection.Predictions {
+    private static final class PredictionBoundary implements RequestTimeEstimation.Predictions {
 
         private PrefillTimePredictor.Evaluator evaluator;
         // Equal immutable models and request shapes share both singleton predictions across calls.

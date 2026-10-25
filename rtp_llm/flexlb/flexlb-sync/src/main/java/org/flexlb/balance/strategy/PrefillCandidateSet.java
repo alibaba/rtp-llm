@@ -1,7 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 
 import java.util.Arrays;
 
@@ -41,7 +41,7 @@ final class PrefillCandidateSet {
     void addCandidate(
             String address,
             PrefillEndpoint endpoint,
-            RouteProjection.CandidateView candidate,
+            RequestTimeEstimation.CandidateView candidate,
             long ownershipVersion) {
         checkArgument(
                 candidate.selectable() || candidate.engineWorkUnmodeled(),

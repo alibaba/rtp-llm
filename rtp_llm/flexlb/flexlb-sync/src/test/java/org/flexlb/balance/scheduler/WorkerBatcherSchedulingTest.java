@@ -4,7 +4,7 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -649,17 +649,17 @@ class WorkerBatcherSchedulingTest {
         RequestRoute head = item(config, endpoint, 21L, 50, now);
         assertTrue(runtime.offer(head));
         await(delivery.firstCapacity.subscribed);
-        RouteProjection.Inputs inputs = endpoint.captureRouteProjectionInputs();
+        RequestTimeEstimation.Inputs inputs = endpoint.captureRouteProjectionInputs();
         assertNotNull(inputs.queue().admissionBlock());
         assertNull(
                 inputs.queue().admissionBlock().semantics(),
                 "batch capacity waits must not impose publication restrictions");
-        RouteProjection.DeliveryProjection projection =
-                RouteProjection.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
-        RouteProjection.Candidate candidate =
-                RouteProjectionTestSupport.project(
+        RequestTimeEstimation.DeliveryProjection projection =
+                RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
+        RequestTimeEstimation.Candidate candidate =
+                RequestTimeEstimationTestSupport.project(
                         inputs,
-                        new RouteProjectionTestSupport.Probe(
+                        new RequestTimeEstimationTestSupport.Probe(
                                 22L, 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
                         endpoint.predictor.evaluator(),
                         projection,
@@ -715,7 +715,8 @@ class WorkerBatcherSchedulingTest {
             await(materializing);
             var started = new CountDownLatch(15);
             var followers =
-                    new java.util.ArrayList<java.util.concurrent.Future<RouteProjection.Inputs>>();
+                    new java.util.ArrayList<
+                            java.util.concurrent.Future<RequestTimeEstimation.Inputs>>();
             for (int i = 0; i < 15; i++) {
                 followers.add(
                         readers.submit(
@@ -775,7 +776,7 @@ class WorkerBatcherSchedulingTest {
         try {
             assertTrue(runtime.offer(head));
             await(delivery.firstPrepareEntered);
-            CompletableFuture<RouteProjection.Inputs> oldCapture =
+            CompletableFuture<RequestTimeEstimation.Inputs> oldCapture =
                     CompletableFuture.supplyAsync(
                             () -> {
                                 capturingThread.set(Thread.currentThread());
@@ -1085,9 +1086,9 @@ class WorkerBatcherSchedulingTest {
                             ? CapacityBoundary.deliveryUnavailable(resource)
                             : CapacityBoundary.unavailable(
                                     resource,
-                                    new RouteProjection.AdmissionBlockSemantics(
+                                    new RequestTimeEstimation.AdmissionBlockSemantics(
                                             "TEST_CAPACITY",
-                                            RouteProjection.AfterProbeAdmission.BLOCKED,
+                                            RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
                                             "TEST_CAPACITY",
                                             RoleType.PREFILL));
             bindings.put(boundary, availability);

@@ -4,7 +4,8 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.LearningPredictor;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.scheduler.RouteProjectionTestSupport;
+import org.flexlb.balance.projection.RequestTimeEstimation.Candidate;
+import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Probe;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -13,6 +14,7 @@ import java.util.List;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.project;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
@@ -20,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Contract tests for the canonical route-projection value boundary. */
-class RouteProjectionTest {
+class RequestTimeEstimationTest {
 
     @Test
     void runningWorkRetainsSaturationWhenClockDifferenceWraps() {
@@ -148,8 +150,7 @@ class RouteProjectionTest {
                             for (long expiresAt :
                                     new long[] {100L, 101L, 110L, 111L, Long.MAX_VALUE}) {
                                 var incoming =
-                                        new RouteProjectionTestSupport.Probe(
-                                                99L, 0, enqueuedAt, expiresAt, 20L, 3L, 3L);
+                                        new Probe(99L, 0, enqueuedAt, expiresAt, 20L, 3L, 3L);
                                 var constraints =
                                         new GroupPlanner.Constraints(
                                                 maxRequests, 0L, kvCapacity, 0L, window);
@@ -157,8 +158,8 @@ class RouteProjectionTest {
                                     var fastEvaluator = new CountingEvaluator();
                                     var genericEvaluator = new CountingEvaluator();
                                     var fast =
-                                            RouteProjectionTestSupport.project(
-                                                    new RouteProjection.Inputs(
+                                            project(
+                                                    new RequestTimeEstimation.Inputs(
                                                             fixedWindow(constraints, List.of()),
                                                             committed,
                                                             0L),
@@ -169,8 +170,8 @@ class RouteProjectionTest {
                                     // An expired member forces the existing merge/planner path
                                     // without adding live work.
                                     var generic =
-                                            RouteProjectionTestSupport.project(
-                                                    new RouteProjection.Inputs(
+                                            project(
+                                                    new RequestTimeEstimation.Inputs(
                                                             fixedWindow(constraints, expired),
                                                             committed,
                                                             0L),
@@ -202,22 +203,21 @@ class RouteProjectionTest {
     @Test
     void emptyWindowBatchPredictionFailuresMatchTheGenericPlanner() {
         var constraints = new GroupPlanner.Constraints(16, 1_000L, 1_000L, 0L, 10L);
-        var incoming =
-                new RouteProjectionTestSupport.Probe(99L, 0, 100L, Long.MAX_VALUE, 20L, 0L, 0L);
+        var incoming = new Probe(99L, 0, 100L, Long.MAX_VALUE, 20L, 0L, 0L);
         for (String failure : List.of("exception", "nan", "negative", "infinity")) {
             var fastEvaluator = failingBatchEvaluator(failure);
             var genericEvaluator = failingBatchEvaluator(failure);
             var fast =
-                    RouteProjectionTestSupport.project(
-                            new RouteProjection.Inputs(
+                    project(
+                            new RequestTimeEstimation.Inputs(
                                     fixedWindow(constraints, List.of()), emptyWork(100L), 0L),
                             incoming,
                             fastEvaluator,
                             projection(true),
                             100L);
             var generic =
-                    RouteProjectionTestSupport.project(
-                            new RouteProjection.Inputs(
+                    project(
+                            new RequestTimeEstimation.Inputs(
                                     fixedWindow(
                                             constraints,
                                             List.of(
@@ -242,8 +242,8 @@ class RouteProjectionTest {
             var fastEvaluator = new CountingEvaluator();
             var genericEvaluator = new CountingEvaluator();
             var fast =
-                    RouteProjectionTestSupport.project(
-                            new RouteProjection.Inputs(
+                    project(
+                            new RequestTimeEstimation.Inputs(
                                     new QueueSnapshot(
                                             100L,
                                             true,
@@ -259,8 +259,8 @@ class RouteProjectionTest {
                             projection(batch),
                             100L);
             var generic =
-                    RouteProjectionTestSupport.project(
-                            new RouteProjection.Inputs(
+                    project(
+                            new RequestTimeEstimation.Inputs(
                                     new QueueSnapshot(
                                             100L,
                                             true,
@@ -293,8 +293,8 @@ class RouteProjectionTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () ->
-                        RouteProjectionTestSupport.project(
-                                new RouteProjection.Inputs(invalid, emptyWork(100L), 0L),
+                        project(
+                                new RequestTimeEstimation.Inputs(invalid, emptyWork(100L), 0L),
                                 probe(),
                                 new CountingEvaluator(),
                                 routeProjection(),
@@ -313,10 +313,9 @@ class RouteProjectionTest {
                 null);
     }
 
-    private static RouteProjection.DeliveryProjection projection(boolean batch) {
+    private static RequestTimeEstimation.DeliveryProjection projection(boolean batch) {
         return batch
-                ? org.flexlb.balance.projection.RouteProjection.forDelivery(
-                        org.flexlb.config.DispatcherConfig.Type.BATCH)
+                ? RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH)
                 : routeProjection();
     }
 
@@ -358,11 +357,10 @@ class RouteProjectionTest {
                         new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 0L, 0L),
                         items,
                         null);
-        var incoming =
-                new RouteProjectionTestSupport.Probe(9999L, 1, 0L, Long.MAX_VALUE, 20L, 0L, 0L);
+        var incoming = new Probe(9999L, 1, 0L, Long.MAX_VALUE, 20L, 0L, 0L);
         var result =
-                RouteProjectionTestSupport.project(
-                        new RouteProjection.Inputs(queue, emptyWork(13L), 0L),
+                project(
+                        new RequestTimeEstimation.Inputs(queue, emptyWork(13L), 0L),
                         incoming,
                         new CountingEvaluator(),
                         routeProjection());
@@ -389,8 +387,8 @@ class RouteProjectionTest {
                             items,
                             null);
             var known =
-                    RouteProjectionTestSupport.project(
-                            new RouteProjection.Inputs(queue, emptyWork(13L), 0L),
+                    project(
+                            new RequestTimeEstimation.Inputs(queue, emptyWork(13L), 0L),
                             probe(),
                             new CountingEvaluator(),
                             policy);
@@ -401,8 +399,8 @@ class RouteProjectionTest {
                 assertEquals(20L, known.projectedTtftMsValue());
             }
             var unknown =
-                    RouteProjectionTestSupport.project(
-                            new RouteProjection.Inputs(
+                    project(
+                            new RequestTimeEstimation.Inputs(
                                     queue, new WorkSnapshot(13L, List.of(), List.of(), 1L), 0L),
                             probe(),
                             new CountingEvaluator(),
@@ -425,16 +423,12 @@ class RouteProjectionTest {
                         items,
                         null);
         items.clear();
-        var inputs = new RouteProjection.Inputs(queue, emptyWork(13L), 0L);
+        var inputs = new RequestTimeEstimation.Inputs(queue, emptyWork(13L), 0L);
         var policy = routeProjection();
         assertEquals(
                 "INCOMING_ALREADY_ACTIVE",
-                RouteProjectionTestSupport.project(
-                                inputs, probe(), new CountingEvaluator(), policy, 13L)
-                        .detail());
-        var expired =
-                RouteProjectionTestSupport.project(
-                        inputs, probe(), new CountingEvaluator(), policy, 14L);
+                project(inputs, probe(), new CountingEvaluator(), policy, 13L).detail());
+        var expired = project(inputs, probe(), new CountingEvaluator(), policy, 14L);
         assertTrue(expired.selectable());
         assertEquals(20L, expired.projectedTtftMsValue());
         assertEquals(1, queue.activeItems().size());
@@ -460,13 +454,13 @@ class RouteProjectionTest {
                         List.of(),
                         0L);
         assertEquals(
-                RouteProjectionTestSupport.project(
-                        new RouteProjection.Inputs(emptyQueue(20L), current, 0L),
+                project(
+                        new RequestTimeEstimation.Inputs(emptyQueue(20L), current, 0L),
                         probe(),
                         new CountingEvaluator(),
                         routeProjection()),
-                RouteProjectionTestSupport.project(
-                        new RouteProjection.Inputs(emptyQueue(20L), cached, 0L),
+                project(
+                        new RequestTimeEstimation.Inputs(emptyQueue(20L), cached, 0L),
                         probe(),
                         new CountingEvaluator(),
                         routeProjection()));
@@ -474,11 +468,10 @@ class RouteProjectionTest {
 
     @Test
     void queueAndWorkComeFromOneCanonicalInput() {
-        RouteProjection.Inputs inputs = inputs(13L);
+        RequestTimeEstimation.Inputs inputs = inputs(13L);
         CountingEvaluator evaluator = new CountingEvaluator();
 
-        RouteProjection.Candidate result =
-                RouteProjectionTestSupport.project(inputs, probe(), evaluator, routeProjection());
+        Candidate result = project(inputs, probe(), evaluator, routeProjection());
 
         assertTrue(result.selectable());
         assertEquals(20L, result.incomingPrefillMs());
@@ -486,7 +479,7 @@ class RouteProjectionTest {
 
         assertThrows(
                 IllegalArgumentException.class,
-                () -> new RouteProjection.Inputs(emptyQueue(13L), emptyWork(14L), 0L));
+                () -> new RequestTimeEstimation.Inputs(emptyQueue(13L), emptyWork(14L), 0L));
     }
 
     @Test
@@ -502,9 +495,7 @@ class RouteProjectionTest {
         }
 
         assertNotSame(captured, predictor.evaluator());
-        RouteProjection.Candidate result =
-                RouteProjectionTestSupport.project(
-                        inputs(31L), probe(), captured, routeProjection());
+        Candidate result = project(inputs(31L), probe(), captured, routeProjection());
         assertTrue(result.selectable());
         assertEquals(
                 before,
@@ -516,39 +507,36 @@ class RouteProjectionTest {
     void onlyModeledCandidateCarriesKnownTtft() {
         assertThrows(
                 IllegalArgumentException.class,
-                () -> candidate(RouteProjection.Candidate.State.MODELED, OptionalLong.empty()));
+                () -> candidate(Candidate.State.MODELED, OptionalLong.empty()));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> candidate(RouteProjection.Candidate.State.UNAVAILABLE, OptionalLong.of(1L)));
+                () -> candidate(Candidate.State.UNAVAILABLE, OptionalLong.of(1L)));
         assertThrows(
                 IllegalArgumentException.class,
-                () -> candidate(RouteProjection.Candidate.State.MODELED, OptionalLong.of(-2L)));
+                () -> candidate(Candidate.State.MODELED, OptionalLong.of(-2L)));
 
-        RouteProjection.Candidate modeled =
-                candidate(RouteProjection.Candidate.State.MODELED, OptionalLong.of(10L));
-        RouteProjection.Candidate unmodeled =
-                candidate(
-                        RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK,
-                        OptionalLong.empty());
+        Candidate modeled = candidate(Candidate.State.MODELED, OptionalLong.of(10L));
+        Candidate unmodeled =
+                candidate(Candidate.State.UNMODELED_ENGINE_WORK, OptionalLong.empty());
         assertEquals(10L, modeled.projectedTtftMsValue());
         assertTrue(unmodeled.engineWorkUnmodeled());
     }
 
-    private static RouteProjection.Candidate candidate(
-            RouteProjection.Candidate.State state, OptionalLong projectedTtftMs) {
-        return new RouteProjection.Candidate(
+    private static Candidate candidate(Candidate.State state, OptionalLong projectedTtftMs) {
+        return new Candidate(
                 state,
-                projectedTtftMs.orElse(RouteProjection.Candidate.UNKNOWN),
+                projectedTtftMs.orElse(Candidate.UNKNOWN),
                 0L,
-                RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                Candidate.InitialHeadDisposition.NONE,
                 state.name(),
                 null,
                 0L,
                 0L);
     }
 
-    private static RouteProjection.Inputs inputs(long capturedAtMs) {
-        return new RouteProjection.Inputs(emptyQueue(capturedAtMs), emptyWork(capturedAtMs), 0L);
+    private static RequestTimeEstimation.Inputs inputs(long capturedAtMs) {
+        return new RequestTimeEstimation.Inputs(
+                emptyQueue(capturedAtMs), emptyWork(capturedAtMs), 0L);
     }
 
     private static QueueSnapshot emptyQueue(long capturedAtMs) {
@@ -566,13 +554,12 @@ class RouteProjectionTest {
         return new WorkSnapshot(capturedAtMs, List.of(), List.of(), 0L);
     }
 
-    private static RouteProjectionTestSupport.Probe probe() {
-        return new RouteProjectionTestSupport.Probe(99L, 50, 13L, Long.MAX_VALUE, 20L, 0L, 0L);
+    private static Probe probe() {
+        return new Probe(99L, 50, 13L, Long.MAX_VALUE, 20L, 0L, 0L);
     }
 
-    private static RouteProjection.DeliveryProjection routeProjection() {
-        return org.flexlb.balance.projection.RouteProjection.forDelivery(
-                org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+    private static RequestTimeEstimation.DeliveryProjection routeProjection() {
+        return RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
     }
 
     private static final class CountingEvaluator implements PrefillTimePredictor.Evaluator {

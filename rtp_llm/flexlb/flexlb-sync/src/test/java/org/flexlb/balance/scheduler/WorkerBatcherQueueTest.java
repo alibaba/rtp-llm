@@ -4,7 +4,7 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -653,9 +653,9 @@ class WorkerBatcherQueueTest {
             attempts.incrementAndGet();
             return CapacityBoundary.unavailable(
                     CapacityBoundary.Resource.PREFILL_BATCH,
-                    new RouteProjection.AdmissionBlockSemantics(
+                    new RequestTimeEstimation.AdmissionBlockSemantics(
                             "TEST_QUEUE_BLOCK",
-                            RouteProjection.AfterProbeAdmission.BLOCKED,
+                            RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
                             "TEST_QUEUE_BLOCK",
                             RoleType.PREFILL));
         }
