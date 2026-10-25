@@ -122,7 +122,7 @@ class RequestResourceAccountingTest {
     void localRollbackCannotReleaseAnEngineOwnerWhoseEstimateHasNotArrived() throws Exception {
         try (Fixture f = new Fixture()) {
             var acquisition = f.decode.acquireDispatchPermit(f.reservation, f.capacity);
-            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
+            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquisition.status());
             assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquisition.permit().dispatch());
             // Endpoint ownership can advance before its notification reaches the slot.
@@ -300,7 +300,7 @@ class RequestResourceAccountingTest {
 
         DeliveryClaim handoff() {
             var acquisition = decode.acquireDispatchPermit(reservation, capacity);
-            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
+            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquisition.status());
             var member = new PrefillAdmissionResources.Member(item, acquisition.permit());
             try (var owner = PrefillAdmissionResources.createCommittedOwner(List.of(member))) {
                 owner.bindCommitResult(commitResult);
@@ -348,7 +348,7 @@ class RequestResourceAccountingTest {
                 var next = decode.reserve(pin, "999", HARD_KV, EXPECTED_KV, 50);
                 assertNotNull(next);
                 var permit = decode.acquireDispatchPermit(next, capacity);
-                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit.status());
+                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, permit.status());
                 assertTrue(permit.permit().release());
                 decode.release(next, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }

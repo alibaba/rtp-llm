@@ -158,7 +158,7 @@ class TwinOverloadAdmissionTest {
         for (long id = 1; id <= 8; id++) {
             DecodeEndpoint.EngineDispatchPermitAcquisition acquisition = endpoint.acquireDispatchPermit(
                     endpoint.reservationHandle(Long.toString(id)), new DecodeEndpoint.CapacityLimit(8L, 90L));
-            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
+            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquisition.status());
             assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquisition.permit().dispatch());
         }
@@ -170,7 +170,7 @@ class TwinOverloadAdmissionTest {
                 tasks(1L, 1, 10L, TaskPhase.RUNNING));
         DecodeEndpoint.EngineDispatchPermitAcquisition resumed = endpoint
                 .acquireDispatchPermit(endpoint.reservationHandle("9"), new DecodeEndpoint.CapacityLimit(8L, 90L));
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, resumed.status());
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, resumed.status());
         assertTrue(resumed.permit().release());
     }
 

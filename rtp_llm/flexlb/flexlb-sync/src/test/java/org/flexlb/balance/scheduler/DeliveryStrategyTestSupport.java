@@ -256,8 +256,7 @@ public final class DeliveryStrategyTestSupport {
             return ReservationResult.success(batchReservation);
         }
 
-        private DecodeEndpoint.EngineDispatchPermitAcquisition acquirePermit(
-                String requestId) {
+        private DecodeEndpoint.EngineDispatchPermitAcquisition acquirePermit(String requestId) {
             if (permitAttempt++ == rejectPermitAt) {
                 return new DecodeEndpoint.EngineDispatchPermitAcquisition(
                         DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
@@ -272,8 +271,7 @@ public final class DeliveryStrategyTestSupport {
                 permits.put(item, permit);
             }
             return new DecodeEndpoint.EngineDispatchPermitAcquisition(
-                    DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
-                    permit);
+                    DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, permit);
         }
 
         private List<CommitResult> commitResults(int count) {

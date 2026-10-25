@@ -304,8 +304,7 @@ class DecodeEndpointAdmissionTest {
 
         DecodeEndpoint.EngineDispatchPermitAcquisition first =
                 endpoint.acquireDispatchPermit(reservations.get(1L), new DecodeEndpoint.CapacityLimit(256, 90));
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
-                first.status());
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, first.status());
         assertNotNull(first.permit());
         assertTrue(endpoint.resourceSnapshot().isQueued("1"),
                 "capacity is occupied before queued ownership is transferred");
@@ -881,7 +880,7 @@ class DecodeEndpointAdmissionTest {
                         endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
                         return false;
                     }
-                    assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+                    assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquired.status());
                     assertEquals(TRANSFERRED, acquired.permit().dispatch());
                     return true;
                 }));
@@ -979,7 +978,7 @@ class DecodeEndpointAdmissionTest {
                 endpoint.acquireDispatchPermit(stale, capacity).status());
         assertEquals(0, endpoint.routingView().engineCapacityUsed());
         var acquired = endpoint.acquireDispatchPermit(current, capacity);
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquired.status());
         assertTrue(acquired.permit().release());
     }
 
@@ -988,7 +987,7 @@ class DecodeEndpointAdmissionTest {
         updateStatus(Map.of(), Map.of(), 10_000L);
         var handle = reserveQueued(71L, 100L, 1000L, 50);
         var acquired = endpoint.acquireDispatchPermit(handle, new DecodeEndpoint.CapacityLimit(2L, 90L));
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquired.status());
         assertEquals(TRANSFERRED, acquired.permit().dispatch());
         assertEquals(TRANSFERRED, acquired.permit().dispatch());
         assertFalse(acquired.permit().release());
@@ -1130,8 +1129,7 @@ class DecodeEndpointAdmissionTest {
     private DecodeEndpoint.EngineDispatchPermit acquirePermit(long requestId, long concurrencyLimit) {
         DecodeEndpoint.EngineDispatchPermitAcquisition acquisition = endpoint.acquireDispatchPermit(
                 reservations.get(requestId), new DecodeEndpoint.CapacityLimit(concurrencyLimit, 100L));
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
-                acquisition.status());
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquisition.status());
         assertNotNull(acquisition.permit());
         return acquisition.permit();
     }

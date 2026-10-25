@@ -68,7 +68,7 @@ public final class PrefillAdmissionResources {
             return failed(failure);
         }
         return switch (acquisition.status()) {
-            case ACQUIRED, ALREADY_ACCEPTED -> captureMember(item, acquisition.permit());
+            case SUCCESS, ALREADY_ACCEPTED -> captureMember(item, acquisition.permit());
             case CAPACITY_FULL -> decodeCapacityFull(item);
             case NOT_OWNED, NOT_QUEUED -> rejected(
                     DeliveryBlockReason.OWNERSHIP_LOST);

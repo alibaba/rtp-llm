@@ -176,7 +176,7 @@ class DecodeSelectorTest {
                 Assertions.assertEquals(DecodeEndpoint.CapacityRelease.NONE, queued.engineOccupancy(70));
 
                 var acquired = endpoint.acquireDispatchPermit(reservation, new DecodeEndpoint.CapacityLimit(10L, 100L));
-                Assertions.assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+                Assertions.assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquired.status());
                 var dispatching = endpoint.admissionSummary();
                 Assertions.assertNotSame(queued, dispatching);
                 Assertions.assertEquals(queued.placementOccupancy(70), dispatching.engineOccupancy(70));

@@ -173,7 +173,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public static final class EngineDispatchPermit {
 
         private enum Resolution {
-            ACQUIRED,
+            SUCCESS,
             ENGINE_LIFECYCLE_OWNED,
             RELEASED,
             INVALIDATED,
@@ -183,7 +183,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         private final DecodeEndpoint endpoint;
         private final String requestId;
         private final DecodeState.DispatchLease lease;
-        private Resolution resolution = Resolution.ACQUIRED;
+        private Resolution resolution = Resolution.SUCCESS;
 
         private EngineDispatchPermit(DecodeEndpoint endpoint,
                                      String requestId,
@@ -221,7 +221,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     return EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED;
                 }
             }
-            if (resolution != Resolution.ACQUIRED) {
+            if (resolution != Resolution.SUCCESS) {
                 return EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
             }
             EngineDispatchPermitTransferStatus result = endpoint.applyDispatch(this, outcome);
@@ -243,18 +243,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (status == null) {
                 throw new IllegalArgumentException("permit acquisition status is required");
             }
-            boolean ownsHandoff = status == EngineDispatchPermitAcquireStatus.ACQUIRED
+            boolean ownsHandoff = status == EngineDispatchPermitAcquireStatus.SUCCESS
                     || status == EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED;
             if (ownsHandoff != (permit != null)) {
                 throw new IllegalArgumentException(
-                        "only ACQUIRED or ALREADY_ACCEPTED results carry an engine dispatch permit");
+                        "only SUCCESS or ALREADY_ACCEPTED results carry an engine dispatch permit");
             }
         }
     }
 
     public enum EngineDispatchPermitAcquireStatus {
         /** An exact-reservation permit now owns one Decode hard-gate slot. */
-        ACQUIRED,
+        SUCCESS,
         /** Engine already owns this reservation; the permit carries identity without charging capacity. */
         ALREADY_ACCEPTED,
         /** Concurrency or Decode KV has no unreserved hard capacity. */

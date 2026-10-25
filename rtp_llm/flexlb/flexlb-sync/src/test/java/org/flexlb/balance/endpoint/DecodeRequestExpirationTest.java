@@ -58,7 +58,7 @@ class DecodeRequestExpirationTest {
         markQueued(1L);
         DecodeEndpoint.EngineDispatchPermitAcquisition acquired =
                 endpoint.acquireDispatchPermit(reservation, new DecodeEndpoint.CapacityLimit(1, 100L));
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquired.status());
         assertEquals(1, endpoint.resourceSnapshot().activeDispatchPermits());
 
         assertTrue(endpoint.release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED).released());

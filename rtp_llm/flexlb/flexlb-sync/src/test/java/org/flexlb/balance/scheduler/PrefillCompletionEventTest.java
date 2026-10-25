@@ -73,7 +73,7 @@ class PrefillCompletionEventTest {
                 reservation = decode.reserve(pin, "101", 16L, 32L, 50, capacity);
                 assertNotNull(reservation);
                 var acquisition = decode.acquireDispatchPermit(reservation, capacity);
-                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
+                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquisition.status());
                 assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
                         acquisition.permit().dispatch());
             }
@@ -129,7 +129,7 @@ class PrefillCompletionEventTest {
                 var waiting = decode.reserve(pin, "102", 16L, 32L, 50, capacity);
                 assertNotNull(waiting);
                 var acquisition = decode.acquireDispatchPermit(waiting, capacity);
-                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
+                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquisition.status());
                 assertTrue(acquisition.permit().release());
                 decode.release(waiting, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }

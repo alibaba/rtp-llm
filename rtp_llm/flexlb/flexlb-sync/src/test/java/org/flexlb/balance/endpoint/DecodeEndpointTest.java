@@ -362,8 +362,7 @@ class DecodeEndpointTest {
     private DecodeEndpoint.EngineDispatchPermit acquirePermit(long requestId) {
         DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
                 endpoint.acquireDispatchPermit(reservations.get(requestId), new DecodeEndpoint.CapacityLimit(0, 100L));
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
-                acquisition.status());
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquisition.status());
         assertNotNull(acquisition.permit());
         return acquisition.permit();
     }

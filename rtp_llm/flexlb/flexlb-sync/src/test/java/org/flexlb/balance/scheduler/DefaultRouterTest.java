@@ -331,12 +331,12 @@ class DefaultRouterTest {
         when(commit.commit(any(), any())).thenReturn(handoff);
     }
 
-    private static DecodeEndpoint.EngineDispatchPermit stubDecodePermit(
-            DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+    private static DecodeEndpoint.EngineDispatchPermit stubDecodePermit(DecodeEndpoint endpoint,
+                                                                        DecodeEndpoint.ReservationHandle reservation) {
         var permit = mock(DecodeEndpoint.EngineDispatchPermit.class);
         when(endpoint.acquireDispatchPermit(eq(reservation), any()))
                 .thenReturn(new DecodeEndpoint.EngineDispatchPermitAcquisition(
-                        DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit));
+                        DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, permit));
         when(permit.dispatch())
                 .thenReturn(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED);
         return permit;

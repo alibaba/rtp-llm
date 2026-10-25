@@ -1472,7 +1472,7 @@ class PrefillEndpointTest {
                     .when(decode.acquireDispatchPermit(org.mockito.Mockito.any(DecodeEndpoint.ReservationHandle.class),
                             org.mockito.Mockito.any(DecodeEndpoint.CapacityLimit.class)))
                     .thenReturn(new DecodeEndpoint.EngineDispatchPermitAcquisition(
-                            DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit));
+                            DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, permit));
             org.mockito.Mockito.when(permit.dispatch())
                     .thenReturn(
                             DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED);

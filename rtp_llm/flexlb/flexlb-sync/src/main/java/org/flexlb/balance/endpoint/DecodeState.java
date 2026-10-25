@@ -585,8 +585,7 @@ final class DecodeState {
 
             DispatchLease permit = installEngineDispatchPermitLocked(
                     handle.requestId(), reservation);
-            return new DispatchAcquisition(
-                    EngineDispatchPermitAcquireStatus.ACQUIRED, permit);
+            return new DispatchAcquisition(EngineDispatchPermitAcquireStatus.SUCCESS, permit);
         } finally {
             lock.unlock();
         }

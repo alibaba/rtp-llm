@@ -82,7 +82,7 @@ class RequestConfirmationTimeoutTest {
                 reservation = decode.reserve(pin, Long.toString(REQUEST_ID), 16L, 32L, 50, capacity);
                 assertNotNull(reservation);
                 var acquired = decode.acquireDispatchPermit(reservation, capacity);
-                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquired.status());
                 assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
                         acquired.permit().dispatch());
             }
@@ -148,7 +148,7 @@ class RequestConfirmationTimeoutTest {
                 var next = decode.reserve(pin, "102", 16L, 32L, 50, capacity);
                 assertNotNull(next);
                 var acquired = decode.acquireDispatchPermit(next, capacity);
-                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.SUCCESS, acquired.status());
                 assertTrue(acquired.permit().release());
                 decode.release(next, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }
