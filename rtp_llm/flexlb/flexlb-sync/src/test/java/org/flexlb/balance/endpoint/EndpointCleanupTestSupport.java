@@ -97,7 +97,7 @@ public final class EndpointCleanupTestSupport {
 
         public int sweep(Predicate<String> retain) {
             return batch ? state.evictExpiredBatches(10L, retain)
-                    : state.evictExpiredIndividuals(10L, retain);
+                    : state.evictExpiredSingles(10L, retain);
         }
 
         public void assertOwned(Owner owner, long predictedMs) {

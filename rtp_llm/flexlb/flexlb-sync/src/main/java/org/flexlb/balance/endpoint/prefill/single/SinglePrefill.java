@@ -154,7 +154,7 @@ public final class SinglePrefill {
         return true;
     }
 
-    public int evictExpiredIndividuals(long ttlMs, java.util.function.Predicate<String> retainForSchedulerCleanup) {
+    public int evictExpiredSingles(long ttlMs, java.util.function.Predicate<String> retainForSchedulerCleanup) {
         int evicted = 0;
         boolean capacityReleased = false;
         prefillState.lock.lock();

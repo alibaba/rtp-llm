@@ -497,7 +497,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Evict stale individual requests whose IDs are absent from the scheduler directory. */
     public int evictExpiredRequests(long ttlMs,
                                     Predicate<String> retainForSchedulerCleanup) {
-        return prefillState.evictExpiredIndividuals(
+        return prefillState.evictExpiredSingles(
                 ttlMs, retainForSchedulerCleanup);
     }
 

@@ -635,8 +635,8 @@ public final class PrefillState {
         return first;
     }
 
-    public int evictExpiredIndividuals(long ttlMs, java.util.function.Predicate<String> retainForSchedulerCleanup) {
-        return singlePrefill.evictExpiredIndividuals(ttlMs, retainForSchedulerCleanup);
+    public int evictExpiredSingles(long ttlMs, java.util.function.Predicate<String> retainForSchedulerCleanup) {
+        return singlePrefill.evictExpiredSingles(ttlMs, retainForSchedulerCleanup);
     }
 
     public Stats stats() {

@@ -216,7 +216,7 @@ class EndpointCleanupDeadlockTest {
                 boolean batch = kind.equals("prefill");
                 var fixture = new PrefillCleanupDeadlockFixture(id, batch);
                 sweep = batch ? () -> fixture.sweepBatches(ownership)
-                        : () -> fixture.sweepIndividuals(ownership);
+                        : () -> fixture.sweepSingles(ownership);
                 endpointOperation = fixture::reserveNextBatch;
             }
             // Reproduce the production lock order, without mocking either lock or ownership check.
