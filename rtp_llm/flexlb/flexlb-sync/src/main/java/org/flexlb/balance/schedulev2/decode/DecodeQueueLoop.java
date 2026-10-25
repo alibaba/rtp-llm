@@ -431,11 +431,6 @@ public final class DecodeQueueLoop {
                     endpoint.reserve(hold, request.requestId(), requirement.inputKvTokens(),
                             requirement.inputAndMaxOutputKvTokens(), requirement.priority(), requirement.capacity());
             if (reservation == null) {
-                if (endpoint.reservationHandle(request.requestId()) != null) {
-                    request.fail(StrategyErrorType.DISPATCH_FAILED,
-                            "request id is already reserved on decode " + endpoint.ipPort());
-                    return true;
-                }
                 reservation = preempt(request, hold, requirement, selected.serverStatus());
                 if (reservation == null) {
                     return false;
