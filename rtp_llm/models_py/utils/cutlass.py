@@ -23,5 +23,8 @@ def setup_cutlass_import_path() -> None:
     # wheels. The real core package must precede those namespace stubs.
     paths.sort(key=lambda path: not (path / "cutlass/impl_utils.py").is_file())
     for path in reversed(paths):
-        if str(path) not in sys.path:
-            sys.path.insert(0, str(path))
+        # Reapply the complete order: skipping an existing pinned root can
+        # put a newly discovered system installation ahead of it.
+        if str(path) in sys.path:
+            sys.path.remove(str(path))
+        sys.path.insert(0, str(path))
