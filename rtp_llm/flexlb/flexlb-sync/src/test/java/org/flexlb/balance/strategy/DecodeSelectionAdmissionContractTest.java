@@ -124,7 +124,7 @@ class DecodeSelectionAdmissionContractTest {
         private final DecodeSelector strategy;
         private final DecodeEndpoint queued;
         private final DecodeEndpoint free;
-        private final DecodeEndpoint.AdmissionCapacity limits;
+        private final DecodeEndpoint.CapacityLimit limits;
 
         private Fixture(Policy policy, CapacityDimension dimension) {
             config.getRouter().getRoles().getDecode().getCostEstimator().setExpression("0");
@@ -142,7 +142,7 @@ class DecodeSelectionAdmissionContractTest {
             var availability = config.getRouter().getRoles().getDecode().getAvailability();
             availability.setMaxEngineRequests(maxRequests == 0L ? null : maxRequests);
             availability.setMaxKvUsagePercent(90L);
-            limits = new DecodeEndpoint.AdmissionCapacity(maxRequests, 90L);
+            limits = new DecodeEndpoint.CapacityLimit(maxRequests, 90L);
             ConfigService configs = mock(ConfigService.class);
             when(configs.loadBalanceConfig()).thenReturn(config);
             endpoints = StrategyTestSupport.endpointRegistry(configs);

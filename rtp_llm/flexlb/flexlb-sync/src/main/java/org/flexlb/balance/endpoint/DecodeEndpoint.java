@@ -52,8 +52,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return reserve(pin, requestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, null);
     }
 
-    public ReservationHandle reserve(GenerationPin pin, String requestId, long inputKvTokens,
-                                     long inputAndMaxOutputKvTokens, int priority, AdmissionCapacity capacity) {
+    public ReservationHandle reserve(GenerationPin pin,
+                                     String requestId,
+                                     long inputKvTokens,
+                                     long inputAndMaxOutputKvTokens,
+                                     int priority,
+                                     CapacityLimit capacity) {
         requirePinnedGeneration(pin);
         return state.reserve(requestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, true, capacity);
     }
@@ -128,8 +132,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return changed;
     }
 
-    public EngineDispatchPermitAcquisition acquireDispatchPermit(
-            ReservationHandle reservation, AdmissionCapacity capacity) {
+    public EngineDispatchPermitAcquisition acquireDispatchPermit(ReservationHandle reservation,
+                                                                 CapacityLimit capacity) {
         GenerationPin pin = tryPinGeneration();
         if (pin == null) {
             return new EngineDispatchPermitAcquisition(EngineDispatchPermitAcquireStatus.ENDPOINT_RETIRED, null);
@@ -162,7 +166,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Lock-free waiter hint, including retirement or lost ownership. Acquisition still rechecks capacity. */
-    public boolean shouldRetryDispatch(String requestId, AdmissionCapacity capacity) {
+    public boolean shouldRetryDispatch(String requestId, CapacityLimit capacity) {
         return isRetired() || state.shouldRetryDispatch(requestId, capacity);
     }
 
@@ -287,8 +291,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     // Preemption: atomic local replacement or remote cancellation.
 
-    public boolean replaceQueuedRequests(List<ReservationHandle> victims, String incomingRequestId,
-                                         long inputKvTokens, long inputAndMaxOutputKvTokens, int priority, AdmissionCapacity capacity) {
+    public boolean replaceQueuedRequests(List<ReservationHandle> victims,
+                                         String incomingRequestId,
+                                         long inputKvTokens,
+                                         long inputAndMaxOutputKvTokens,
+                                         int priority,
+                                         CapacityLimit capacity) {
         GenerationPin pin = tryPinGeneration();
         if (pin == null) { return false; }
         try (pin) {
@@ -298,9 +306,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    public PreemptionBeginResult beginPreemption(long attemptToken, List<ReservationHandle> victims,
-                                                 String incomingRequestId, long inputKvTokens, long inputAndMaxOutputKvTokens,
-                                                 int priority, AdmissionCapacity capacity) {
+    public PreemptionBeginResult beginPreemption(long attemptToken,
+                                                 List<ReservationHandle> victims,
+                                                 String incomingRequestId,
+                                                 long inputKvTokens,
+                                                 long inputAndMaxOutputKvTokens,
+                                                 int priority,
+                                                 CapacityLimit capacity) {
         if (attemptToken <= 0 || victims == null || victims.isEmpty()) {
             throw new IllegalArgumentException("attempt token and victims are required");
         }
@@ -312,14 +324,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Atomically reserve an instruction-bearing route without issuing Cancel RPCs. */
-    public PreemptionBeginResult beginReturnedPreemption(
-            long attemptToken,
-            List<ReservationHandle> victims,
-            String incomingRequestId,
-            long inputKvTokens,
-            long inputAndMaxOutputKvTokens,
-            int priority,
-            AdmissionCapacity capacity) {
+    public PreemptionBeginResult beginReturnedPreemption(long attemptToken,
+                                                         List<ReservationHandle> victims,
+                                                         String incomingRequestId,
+                                                         long inputKvTokens,
+                                                         long inputAndMaxOutputKvTokens,
+                                                         int priority,
+                                                         CapacityLimit capacity) {
         if (attemptToken <= 0 || victims == null || victims.isEmpty()) {
             throw new IllegalArgumentException("attempt token and victims are required");
         }
@@ -579,11 +590,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         public CapacityRelease engineOccupancy(int priority) { return engineOccupancy[priority]; }
     }
 
-    public record AdmissionCapacity(
-            long maxEngineRequests,
-            long maxKvUsagePercent) {
+    public record CapacityLimit(long maxEngineRequests, long maxKvUsagePercent) {
 
-        public AdmissionCapacity {
+        public CapacityLimit {
             if (maxEngineRequests < 0L || maxKvUsagePercent <= 0L
                     || maxKvUsagePercent > RoutingConfig.PERCENTAGE_SCALE) {
                 throw new IllegalArgumentException(

@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint.AdmissionCapacity;
+import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityLimit;
 import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityUsage;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
@@ -123,8 +123,12 @@ final class DecodeState {
 
     // Reservation: acquire and release exact ownership.
 
-    ReservationHandle reserve(String requestId, long requiredKv, long kvBudget, int priority,
-                              boolean queued, AdmissionCapacity capacity) {
+    ReservationHandle reserve(String requestId,
+                              long requiredKv,
+                              long kvBudget,
+                              int priority,
+                              boolean queued,
+                              CapacityLimit capacity) {
         admissionLock.lock();
         try {
             if (!requestIdAvailableForReservationLocked(requestId)) { return null; }
@@ -185,8 +189,7 @@ final class DecodeState {
         return true;
     }
 
-    private boolean queuedPlacementIsFullLocked(
-            long requiredKvTokens, long kvBudgetTokens, AdmissionCapacity capacity) {
+    private boolean queuedPlacementIsFullLocked(long requiredKvTokens, long kvBudgetTokens, CapacityLimit capacity) {
         return !capacity.evaluate(routingViewLocked().placementUsage(), requiredKvTokens, kvBudgetTokens).fits();
     }
 
@@ -557,7 +560,7 @@ final class DecodeState {
         return true;
     }
 
-    DispatchAcquisition acquireDispatchPermit(ReservationHandle handle, AdmissionCapacity capacity) {
+    DispatchAcquisition acquireDispatchPermit(ReservationHandle handle, CapacityLimit capacity) {
         admissionLock.lock();
         try {
             DecodeRequestState reservation = requestState(handle.requestId());
@@ -690,9 +693,7 @@ final class DecodeState {
         return true;
     }
 
-    boolean shouldRetryDispatch(
-            String requestId,
-            AdmissionCapacity capacity) {
+    boolean shouldRetryDispatch(String requestId, CapacityLimit capacity) {
         DecodeRequestState candidate = shadowReservation(requestId);
         if (candidate == null
                 || !candidate.queued()
@@ -707,10 +708,9 @@ final class DecodeState {
                 committed.fields());
     }
 
-    private boolean isEngineDispatchCapacityFullSnapshot(
-            DecodeRequestState candidate,
-            AdmissionCapacity capacity,
-            WorkerStatus.EngineObservation fields) {
+    private boolean isEngineDispatchCapacityFullSnapshot(DecodeRequestState candidate,
+                                                         CapacityLimit capacity,
+                                                         WorkerStatus.EngineObservation fields) {
         if (candidate.returnedPreemptionToken != 0L) {
             return false;
         }
@@ -774,11 +774,12 @@ final class DecodeState {
 
     // Preemption: local replacement and the complete remote-cancel resource transaction.
 
-    boolean replaceQueuedRequests(
-            List<ReservationHandle> victims,
-            String incomingRequestId, long kvTokens, long kvBudgetTokens,
-            int priority,
-            AdmissionCapacity capacity) {
+    boolean replaceQueuedRequests(List<ReservationHandle> victims,
+                                  String incomingRequestId,
+                                  long kvTokens,
+                                  long kvBudgetTokens,
+                                  int priority,
+                                  CapacityLimit capacity) {
         admissionLock.lock();
         try {
             if (victims == null || victims.isEmpty()
@@ -837,19 +838,20 @@ final class DecodeState {
         }
     }
 
-    private boolean evictionCapacityFitsAfterReleaseLocked(
-            AdmissionCapacity capacity, long requiredKvTokens, long kvBudgetTokens, CapacityRelease released) {
+    private boolean evictionCapacityFitsAfterReleaseLocked(CapacityLimit capacity,
+                                                           long requiredKvTokens,
+                                                           long kvBudgetTokens,
+                                                           CapacityRelease released) {
         return capacity.evaluate(routingViewLocked().placementUsage(), requiredKvTokens, kvBudgetTokens, released).fits();
     }
 
-    PreemptionBeginResult beginPreemption(
-            long attemptToken,
-            List<ReservationHandle> victims,
-            String incomingRequestId,
-            long incomingKvTokens,
-            long incomingKvBudgetTokens,
-            int incomingPriority,
-            AdmissionCapacity capacity) {
+    PreemptionBeginResult beginPreemption(long attemptToken,
+                                          List<ReservationHandle> victims,
+                                          String incomingRequestId,
+                                          long incomingKvTokens,
+                                          long incomingKvBudgetTokens,
+                                          int incomingPriority,
+                                          CapacityLimit capacity) {
         admissionLock.lock();
         try {
             if (preemptionAttempts.containsKey(attemptToken)) {
@@ -984,14 +986,13 @@ final class DecodeState {
         }
     }
 
-    PreemptionBeginResult beginReturnedPreemption(
-            long attemptToken,
-            List<ReservationHandle> victims,
-            String incomingRequestId,
-            long incomingKvTokens,
-            long incomingKvBudgetTokens,
-            int incomingPriority,
-            AdmissionCapacity capacity) {
+    PreemptionBeginResult beginReturnedPreemption(long attemptToken,
+                                                  List<ReservationHandle> victims,
+                                                  String incomingRequestId,
+                                                  long incomingKvTokens,
+                                                  long incomingKvBudgetTokens,
+                                                  int incomingPriority,
+                                                  CapacityLimit capacity) {
         admissionLock.lock();
         try {
             PreemptionBeginResult result = beginPreemption(

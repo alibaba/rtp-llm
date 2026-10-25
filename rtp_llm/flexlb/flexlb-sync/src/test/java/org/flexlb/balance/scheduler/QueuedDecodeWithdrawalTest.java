@@ -52,7 +52,7 @@ class QueuedDecodeWithdrawalTest {
     private RequestRegistry registry;
     private GlobalQueueCoordinator queue;
     private DecodeEndpoint decode;
-    private final DecodeEndpoint.AdmissionCapacity capacity = new DecodeEndpoint.AdmissionCapacity(1, 95);
+    private final DecodeEndpoint.CapacityLimit capacity = new DecodeEndpoint.CapacityLimit(1, 95);
 
     @BeforeEach
     void setUp() {

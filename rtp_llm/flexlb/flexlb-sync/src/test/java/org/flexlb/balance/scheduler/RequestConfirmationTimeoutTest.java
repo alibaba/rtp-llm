@@ -76,7 +76,7 @@ class RequestConfirmationTimeoutTest {
             }
             decode = new DecodeEndpoint(worker(RoleType.DECODE, "127.0.0.2"), eventHandler);
             applyStatus(decode, status(RoleType.DECODE));
-            var capacity = new DecodeEndpoint.AdmissionCapacity(1L, 90L);
+            var capacity = new DecodeEndpoint.CapacityLimit(1L, 90L);
             DecodeEndpoint.ReservationHandle reservation;
             try (var pin = decode.tryPinGeneration()) {
                 reservation = decode.reserve(pin, Long.toString(REQUEST_ID), 16L, 32L, 50, capacity);

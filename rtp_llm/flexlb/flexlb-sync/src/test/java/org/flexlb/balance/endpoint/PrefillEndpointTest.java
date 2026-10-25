@@ -1426,8 +1426,7 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void admittedCallbackCanCloseEndpointBeforeItsHandoffPermitIsReleased()
-            throws Exception {
+    void admittedCallbackCanCloseEndpointBeforeItsHandoffPermitIsReleased() throws Exception {
         FlexlbConfig retirementConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         configureBatch(retirementConfig, 1, 0, null);
         retirementConfig.setDispatcher(DispatcherConfig.nonBatch());
@@ -1469,12 +1468,11 @@ class PrefillEndpointTest {
             org.mockito.Mockito.when(decodeReservation.requestId()).thenReturn("8201");
             DecodeEndpoint.EngineDispatchPermit permit =
                     mock(DecodeEndpoint.EngineDispatchPermit.class);
-            org.mockito.Mockito.when(decode.acquireDispatchPermit(
-                    org.mockito.Mockito.any(DecodeEndpoint.ReservationHandle.class),
-                    org.mockito.Mockito.any(DecodeEndpoint.AdmissionCapacity.class)))
+            org.mockito.Mockito
+                    .when(decode.acquireDispatchPermit(org.mockito.Mockito.any(DecodeEndpoint.ReservationHandle.class),
+                            org.mockito.Mockito.any(DecodeEndpoint.CapacityLimit.class)))
                     .thenReturn(new DecodeEndpoint.EngineDispatchPermitAcquisition(
-                            DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
-                            permit));
+                            DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit));
             org.mockito.Mockito.when(permit.dispatch())
                     .thenReturn(
                             DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED);

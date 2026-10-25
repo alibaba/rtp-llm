@@ -345,8 +345,8 @@ class DecodeEndpointLayeredViewTest {
                         exact.endpointGenerationId(),
                         exact.requestId(),
                         exact.reservationToken() + 1L);
-        DecodeEndpoint.PreemptionBeginResult result =
-                endpoint.beginPreemption(101L, List.of(stale), "9", 700, 708, 70, new DecodeEndpoint.AdmissionCapacity(1, 100));
+        DecodeEndpoint.PreemptionBeginResult result = endpoint.beginPreemption(101L, List.of(stale), "9", 700, 708, 70,
+                new DecodeEndpoint.CapacityLimit(1, 100));
 
         assertEquals(DecodeEndpoint.PreemptionBeginResult.VICTIM_GONE, result);
         assertFalse(confirmedView(1L).claimedForPreemption());
@@ -479,7 +479,8 @@ class DecodeEndpointLayeredViewTest {
         updateStatus(Map.of("2", runningTask(2L, TaskPhase.KV_ALLOCATED, 256),
                 "3", runningTask(3L, TaskPhase.RUNNING, 512)), null, 10_000);
 
-        DecodeEndpointSnapshot snapshot = DecodeEndpointSnapshot.capture(endpoint, new DecodeEndpoint.AdmissionCapacity(4L, 90L));
+        DecodeEndpointSnapshot snapshot =
+                DecodeEndpointSnapshot.capture(endpoint, new DecodeEndpoint.CapacityLimit(4L, 90L));
         assertEquals(List.of("1"), ids(snapshot.reserved()));
         assertEquals(List.of("2"), ids(snapshot.accepted()));
         assertEquals(List.of("3"), ids(snapshot.running()));
@@ -493,7 +494,8 @@ class DecodeEndpointLayeredViewTest {
                 20L, 64, 72, 70);
         beginPreemption(102L, List.of(3L),
                 30L, 64, 72, 70);
-        DecodeEndpointSnapshot after = DecodeEndpointSnapshot.capture(endpoint, new DecodeEndpoint.AdmissionCapacity(4L, 90L));
+        DecodeEndpointSnapshot after =
+                DecodeEndpointSnapshot.capture(endpoint, new DecodeEndpoint.CapacityLimit(4L, 90L));
         assertTrue(after.accepted().isEmpty());
         assertTrue(after.running().isEmpty());
     }
@@ -592,18 +594,17 @@ class DecodeEndpointLayeredViewTest {
                 .anyMatch(view -> view.requestId().equals(Long.toString(requestId)));
     }
 
-    private DecodeEndpoint.PreemptionBeginResult beginPreemption(
-            long attemptToken,
-            List<Long> victimIds,
-            long incomingRequestId,
-            long requiredKv,
-            long kvBudget,
-            int priority) {
+    private DecodeEndpoint.PreemptionBeginResult beginPreemption(long attemptToken,
+                                                                 List<Long> victimIds,
+                                                                 long incomingRequestId,
+                                                                 long requiredKv,
+                                                                 long kvBudget,
+                                                                 int priority) {
         List<DecodeEndpoint.ReservationHandle> victims = victimIds.stream()
                 .map(reservations::get)
                 .toList();
-        return endpoint.beginPreemption(attemptToken, victims, Long.toString(incomingRequestId), requiredKv, kvBudget, priority, new DecodeEndpoint.AdmissionCapacity(
-                        Math.max(1, endpoint.routingView().totalLoad()), 100));
+        return endpoint.beginPreemption(attemptToken, victims, Long.toString(incomingRequestId), requiredKv, kvBudget,
+                priority, new DecodeEndpoint.CapacityLimit(Math.max(1, endpoint.routingView().totalLoad()), 100));
     }
 
     private static TaskInfo runningTask(long requestId, TaskPhase phase, long inputLength) {

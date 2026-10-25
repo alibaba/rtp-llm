@@ -66,11 +66,10 @@ class DecodePreemptionCoordinatorTest {
         DecodePreemptionCoordinator coordinator =
                 new DecodePreemptionCoordinator(cancelChannel, requests, fixture.reporter());
         CompletableFuture<DecodePreemptionCoordinator.PreemptionResult> result =
-                coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(
-                        endpoint, "20", 64L, 64L, 70,
-                        new DecodeEndpoint.AdmissionCapacity(2L, 100L),
-                        List.of(victim(11L, 101L, victimPhase), victim(12L, 102L, victimPhase)),
-                        1_000L, 1_000L, () -> true, "test"));
+                coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(endpoint, "20", 64L, 64L, 70,
+                        new DecodeEndpoint.CapacityLimit(2L, 100L),
+                        List.of(victim(11L, 101L, victimPhase), victim(12L, 102L, victimPhase)), 1_000L, 1_000L,
+                        () -> true, "test"));
 
         assertFalse(result.isDone());
         firstTerminal.complete(new VictimTerminal("11"));
@@ -87,8 +86,8 @@ class DecodePreemptionCoordinatorTest {
 
     @ParameterizedTest
     @EnumSource(value = EngineCancelChannel.CancelAck.class, names = {"ACCEPTED", "FAILED"})
-    void timeoutBeginsAfterAckAndLateTerminalCannotReopenIncoming(
-            EngineCancelChannel.CancelAck acknowledgement) throws Exception {
+    void timeoutBeginsAfterAckAndLateTerminalCannotReopenIncoming(EngineCancelChannel.CancelAck acknowledgement)
+            throws Exception {
         Fixture fixture = fixture();
         CompletableFuture<VictimTerminal> terminal = new CompletableFuture<>();
         PreemptionRegistration victimClaim = claim(11L, terminal);
@@ -100,11 +99,9 @@ class DecodePreemptionCoordinatorTest {
         DecodePreemptionCoordinator coordinator =
                 new DecodePreemptionCoordinator(channel, fixture.requests(), fixture.reporter());
         CompletableFuture<DecodePreemptionCoordinator.PreemptionResult> outcome =
-                coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(
-                        fixture.endpoint(), "20", 64L, 64L, 70,
-                        new DecodeEndpoint.AdmissionCapacity(1L, 100L),
-                        List.of(victim(11L, 101L)),
-                        50L, 20L, () -> true, "test"));
+                coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(fixture.endpoint(), "20", 64L,
+                        64L, 70, new DecodeEndpoint.CapacityLimit(1L, 100L), List.of(victim(11L, 101L)), 50L, 20L,
+                        () -> true, "test"));
 
         // Transport owns the ACK deadline. The terminal-wait budget starts
         // only when that phase resolves, even if the transport outcome is unknown.
@@ -279,19 +276,17 @@ class DecodePreemptionCoordinatorTest {
         verifyNoInteractions(fixture.reporter());
     }
 
-    private static DecodePreemptionCoordinator.PreemptionCommand command(
-            DecodeEndpoint endpoint, List<DecodeRequestView> victims) {
-        return new DecodePreemptionCoordinator.PreemptionCommand(
-                endpoint, "20", 64L, 64L, 70,
-                new DecodeEndpoint.AdmissionCapacity(2L, 100L), victims,
-                1_000L, 1_000L, () -> true, "test");
+    private static DecodePreemptionCoordinator.PreemptionCommand command(DecodeEndpoint endpoint,
+                                                                         List<DecodeRequestView> victims) {
+        return new DecodePreemptionCoordinator.PreemptionCommand(endpoint, "20", 64L, 64L, 70,
+                new DecodeEndpoint.CapacityLimit(2L, 100L), victims, 1_000L, 1_000L, () -> true, "test");
     }
 
     private static void setBeginResult(DecodeEndpoint endpoint, DecodeEndpoint.PreemptionBeginResult result) {
         when(endpoint.beginPreemption(anyLong(), anyList(), anyString(), anyLong(), anyLong(), anyInt(),
-                any(DecodeEndpoint.AdmissionCapacity.class))).thenReturn(result);
+                any(DecodeEndpoint.CapacityLimit.class))).thenReturn(result);
         when(endpoint.beginReturnedPreemption(anyLong(), anyList(), anyString(), anyLong(), anyLong(), anyInt(),
-                any(DecodeEndpoint.AdmissionCapacity.class))).thenReturn(result);
+                any(DecodeEndpoint.CapacityLimit.class))).thenReturn(result);
     }
 
     private static Fixture fixture() {
@@ -300,15 +295,8 @@ class DecodePreemptionCoordinatorTest {
         WorkerStatus status = mock(WorkerStatus.class);
         when(endpoint.getStatus()).thenReturn(status);
         when(status.getGenerationId()).thenReturn(9L);
-        when(endpoint.beginPreemption(
-                anyLong(),
-                anyList(),
-                anyString(),
-                anyLong(),
-                anyLong(),
-                anyInt(),
-                any(DecodeEndpoint.AdmissionCapacity.class)))
-                .thenReturn(DecodeEndpoint.PreemptionBeginResult.SUCCESS);
+        when(endpoint.beginPreemption(anyLong(), anyList(), anyString(), anyLong(), anyLong(), anyInt(),
+                any(DecodeEndpoint.CapacityLimit.class))).thenReturn(DecodeEndpoint.PreemptionBeginResult.SUCCESS);
         when(endpoint.updatePreemption(anyLong(), any(DecodeEndpoint.PreemptionUpdate.class))).thenReturn(true);
         when(endpoint.finishPreemption(anyLong(), eq(DecodeEndpoint.PreemptionDecision.COMMIT))).thenReturn(true);
         when(requests.findCancelTarget(anyString(), anyLong())).thenReturn(

@@ -44,18 +44,17 @@ public final class DecodePreemptionCoordinator {
         }
     }
 
-    record PreemptionCommand(
-            DecodeEndpoint endpoint,
-            String incomingRequestId,
-            long incomingKvTokens,
-            long incomingKvBudgetTokens,
-            int incomingPriority,
-            DecodeEndpoint.AdmissionCapacity capacity,
-            List<DecodeRequestView> victims,
-            long cancelAckTimeoutMs,
-            long preemptionTimeoutMs,
-            BooleanSupplier admissionOpen,
-            String detail) {
+    record PreemptionCommand(DecodeEndpoint endpoint,
+                             String incomingRequestId,
+                             long incomingKvTokens,
+                             long incomingKvBudgetTokens,
+                             int incomingPriority,
+                             DecodeEndpoint.CapacityLimit capacity,
+                             List<DecodeRequestView> victims,
+                             long cancelAckTimeoutMs,
+                             long preemptionTimeoutMs,
+                             BooleanSupplier admissionOpen,
+                             String detail) {
         public PreemptionCommand {
             if (endpoint == null || victims == null || victims.isEmpty()) {
                 throw new IllegalArgumentException("endpoint and victims are required");

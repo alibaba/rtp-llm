@@ -156,19 +156,20 @@ class TwinOverloadAdmissionTest {
             }
         }
         for (long id = 1; id <= 8; id++) {
-            DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
-                    endpoint.acquireDispatchPermit(endpoint.reservationHandle(Long.toString(id)), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
+            DecodeEndpoint.EngineDispatchPermitAcquisition acquisition = endpoint.acquireDispatchPermit(
+                    endpoint.reservationHandle(Long.toString(id)), new DecodeEndpoint.CapacityLimit(8L, 90L));
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
             assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquisition.permit().dispatch());
         }
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
-                endpoint.acquireDispatchPermit(endpoint.reservationHandle("9"), new DecodeEndpoint.AdmissionCapacity(8L, 90L)).status());
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL, endpoint
+                .acquireDispatchPermit(endpoint.reservationHandle("9"), new DecodeEndpoint.CapacityLimit(8L, 90L))
+                .status());
 
         applyStatus(endpoint, tasks(2L, 7, 10L, TaskPhase.RUNNING),
                 tasks(1L, 1, 10L, TaskPhase.RUNNING));
-        DecodeEndpoint.EngineDispatchPermitAcquisition resumed =
-                endpoint.acquireDispatchPermit(endpoint.reservationHandle("9"), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
+        DecodeEndpoint.EngineDispatchPermitAcquisition resumed = endpoint
+                .acquireDispatchPermit(endpoint.reservationHandle("9"), new DecodeEndpoint.CapacityLimit(8L, 90L));
         assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, resumed.status());
         assertTrue(resumed.permit().release());
     }

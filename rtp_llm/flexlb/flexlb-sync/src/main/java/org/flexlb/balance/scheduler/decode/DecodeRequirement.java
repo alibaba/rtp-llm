@@ -14,7 +14,7 @@ public record DecodeRequirement(String requestId,
                                 int priority,
                                 long inputKvTokens,
                                 long inputAndMaxOutputKvTokens,
-                                DecodeEndpoint.AdmissionCapacity capacity,
+                                DecodeEndpoint.CapacityLimit capacity,
                                 DecodeMode mode,
                                 DecodeCostFormula costFormula) {
 
@@ -29,7 +29,7 @@ public record DecodeRequirement(String requestId,
                 promptTokens > Long.MAX_VALUE - maxOutputTokens ? Long.MAX_VALUE : promptTokens + maxOutputTokens;
         return new DecodeRequirement(request.getRequestId(), context.getPriority(), promptTokens,
                 inputAndMaxOutputTokens,
-                new DecodeEndpoint.AdmissionCapacity(
+                new DecodeEndpoint.CapacityLimit(
                         availability.getMaxEngineRequests() == null ? 0L : availability.getMaxEngineRequests(),
                         availability.getMaxKvUsagePercent()),
                 DecodeMode.from(config), decode.getCostEstimator().compiledFormula());

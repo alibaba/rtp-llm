@@ -68,14 +68,13 @@ class EvictionPlannerDecodeContractTest {
                 true, 0L, false, false);
     }
 
-    private static DecodeEndpointSnapshot endpoint(
-            long realKvAvailable, long realKvTotal,
-            int engineLoad, long concurrencyLimit,
-            List<DecodeRequestView> accepted) {
-        return new DecodeEndpointSnapshot(
-                null, "decode-a", new DecodeEndpoint.AdmissionCapacity(concurrencyLimit, 100L),
-                new DecodeEndpoint.CapacityUsage(
-                        engineLoad, realKvTotal, realKvAvailable, 0L,
+    private static DecodeEndpointSnapshot endpoint(long realKvAvailable,
+                                                   long realKvTotal,
+                                                   int engineLoad,
+                                                   long concurrencyLimit,
+                                                   List<DecodeRequestView> accepted) {
+        return new DecodeEndpointSnapshot(null, "decode-a", new DecodeEndpoint.CapacityLimit(concurrencyLimit, 100L),
+                new DecodeEndpoint.CapacityUsage(engineLoad, realKvTotal, realKvAvailable, 0L,
                         Math.max(0L, realKvTotal - realKvAvailable)),
                 List.of(), accepted, List.of());
     }

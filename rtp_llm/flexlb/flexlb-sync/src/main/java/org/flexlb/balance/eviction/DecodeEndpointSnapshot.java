@@ -8,16 +8,15 @@ import java.util.ArrayList;
 import java.util.List;
 
 /** Victims and placement occupancy captured under one endpoint admission lock. */
-public record DecodeEndpointSnapshot(
-        DecodeEndpoint endpoint,
-        String endpointId,
-        DecodeEndpoint.AdmissionCapacity capacity,
-        DecodeEndpoint.CapacityUsage usage,
-        List<DecodeRequestView> reserved,
-        List<DecodeRequestView> accepted,
-        List<DecodeRequestView> running) {
+public record DecodeEndpointSnapshot(DecodeEndpoint endpoint,
+                                     String endpointId,
+                                     DecodeEndpoint.CapacityLimit capacity,
+                                     DecodeEndpoint.CapacityUsage usage,
+                                     List<DecodeRequestView> reserved,
+                                     List<DecodeRequestView> accepted,
+                                     List<DecodeRequestView> running) {
 
-    public static DecodeEndpointSnapshot capture(DecodeEndpoint endpoint, DecodeEndpoint.AdmissionCapacity policy) {
+    public static DecodeEndpointSnapshot capture(DecodeEndpoint endpoint, DecodeEndpoint.CapacityLimit policy) {
         DecodeEndpoint.LayeredAdmissionView view = endpoint.resourceSnapshot();
         DecodeEndpoint.DecodeRoutingView routing = view.routing();
         List<DecodeRequestView> reserved = new ArrayList<>();

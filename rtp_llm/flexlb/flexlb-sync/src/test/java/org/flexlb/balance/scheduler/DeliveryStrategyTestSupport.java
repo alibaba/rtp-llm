@@ -209,7 +209,7 @@ public final class DeliveryStrategyTestSupport {
                 Mockito.when(item.takePublishedSingleReservation(singleReservation))
                         .thenReturn(true);
                 DecodeRequirement requirement = new DecodeRequirement(requestId, item.priority(), item.seqLen(),
-                        item.seqLen(), new DecodeEndpoint.AdmissionCapacity(0L, 100L), DecodeMode.WAIT_AT_PLACEMENT,
+                        item.seqLen(), new DecodeEndpoint.CapacityLimit(0L, 100L), DecodeMode.WAIT_AT_PLACEMENT,
                         DecodeCostFormula.parse("kvcache_used_ratio"));
                 DecodeDecideInfo decide =
                         new DecodeDecideInfo(requirement, new DecodeSelection(null, decode, reservation));

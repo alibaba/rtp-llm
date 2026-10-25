@@ -113,10 +113,13 @@ public class RequestRegistry {
     private record WithdrawnRoute(RequestSlot slot, ScheduledRequest item, AdmissionHandle claim) { }
 
     /** Transfer queued Decode capacity, then return each victim to its original global queue identity. */
-    public boolean replaceQueuedDecodeReservations(
-            DecodeEndpoint endpoint, List<DecodeEndpoint.ReservationHandle> victims,
-            String incomingRequestId, long requiredKv, long kvBudget, int priority,
-            DecodeEndpoint.AdmissionCapacity capacity) {
+    public boolean replaceQueuedDecodeReservations(DecodeEndpoint endpoint,
+                                                   List<DecodeEndpoint.ReservationHandle> victims,
+                                                   String incomingRequestId,
+                                                   long requiredKv,
+                                                   long kvBudget,
+                                                   int priority,
+                                                   DecodeEndpoint.CapacityLimit capacity) {
         GlobalQueueCoordinator queue = globalQueue;
         if (queue == null || shuttingDown.get()) { return false; }
         List<WithdrawnRoute> claimed = new ArrayList<>(victims.size());

@@ -30,7 +30,7 @@ class DecodeCapacityPreemptionTest {
     @ValueSource(booleans = {false, true})
     void outputBudgetRejectionProducesAPlanAndCommitRechecksCurrentUsage(boolean usageChanged) {
         DecodeEndpoint endpoint = endpoint(400L);
-        DecodeEndpoint.AdmissionCapacity policy = new DecodeEndpoint.AdmissionCapacity(0L, 90L);
+        DecodeEndpoint.CapacityLimit policy = new DecodeEndpoint.CapacityLimit(0L, 90L);
         long requiredKvTokens = 100L;
         long kvBudgetTokens = 250L;
         DecodeEndpoint.ReservationHandle victim;
@@ -59,7 +59,7 @@ class DecodeCapacityPreemptionTest {
     @Test
     void queuedReservationReleasesThePlacementRequestCharge() {
         DecodeEndpoint endpoint = endpoint(1000L);
-        DecodeEndpoint.AdmissionCapacity policy = new DecodeEndpoint.AdmissionCapacity(1L, 90L);
+        DecodeEndpoint.CapacityLimit policy = new DecodeEndpoint.CapacityLimit(1L, 90L);
         long requiredKvTokens = 100L;
         long kvBudgetTokens = 100L;
         DecodeEndpoint.ReservationHandle victim;
@@ -79,7 +79,7 @@ class DecodeCapacityPreemptionTest {
     @Test
     void zeroPromptVictimCanReleaseItsFullOutputReservation() {
         DecodeEndpoint endpoint = endpoint(1000L);
-        DecodeEndpoint.AdmissionCapacity policy = new DecodeEndpoint.AdmissionCapacity(0L, 90L);
+        DecodeEndpoint.CapacityLimit policy = new DecodeEndpoint.CapacityLimit(0L, 90L);
         long requiredKvTokens = 100L;
         long kvBudgetTokens = 200L;
         DecodeEndpoint.ReservationHandle victim;
@@ -92,8 +92,11 @@ class DecodeCapacityPreemptionTest {
         assertEquals(200L, endpoint.routingView().inputAndMaxOutputKvReserved());
     }
 
-    private static DecodeEvictionProposal plan(DecodeEndpoint endpoint, long requiredKvTokens, long kvBudgetTokens,
-                                                DecodeEndpoint.AdmissionCapacity policy, VictimStage stage) {
+    private static DecodeEvictionProposal plan(DecodeEndpoint endpoint,
+                                               long requiredKvTokens,
+                                               long kvBudgetTokens,
+                                               DecodeEndpoint.CapacityLimit policy,
+                                               VictimStage stage) {
         PreemptionConfig preemption = new PreemptionConfig();
         preemption.setAllowedVictimStages(EnumSet.of(stage));
         EngineCancelChannel channel = mock(EngineCancelChannel.class);

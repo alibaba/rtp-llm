@@ -175,7 +175,7 @@ class DecodeSelectorTest {
                         queued.placementOccupancy(70));
                 Assertions.assertEquals(DecodeEndpoint.CapacityRelease.NONE, queued.engineOccupancy(70));
 
-                var acquired = endpoint.acquireDispatchPermit(reservation, new DecodeEndpoint.AdmissionCapacity(10L, 100L));
+                var acquired = endpoint.acquireDispatchPermit(reservation, new DecodeEndpoint.CapacityLimit(10L, 100L));
                 Assertions.assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
                 var dispatching = endpoint.admissionSummary();
                 Assertions.assertNotSame(queued, dispatching);
@@ -583,8 +583,8 @@ class DecodeSelectorTest {
         reserveQueued(endpoint, 1L, 400, 700, 50);
         reserveQueued(endpoint, 2L, 400, 700, 50);
 
-        Assertions.assertTrue(endpoint.routingView().realKvUsed()
-                > new DecodeEndpoint.AdmissionCapacity(0L, 90L).kvBudget(endpoint.routingView().totalKv()));
+        Assertions.assertTrue(endpoint.routingView().realKvUsed() > new DecodeEndpoint.CapacityLimit(0L, 90L)
+                .kvBudget(endpoint.routingView().totalKv()));
         Assertions.assertEquals(0L, endpoint.routingView().engineFacingKvUsed());
 
         DecodeSelector strategy = new DecodeSelector(

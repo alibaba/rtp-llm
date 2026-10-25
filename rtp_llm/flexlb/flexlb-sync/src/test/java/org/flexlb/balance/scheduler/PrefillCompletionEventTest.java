@@ -68,7 +68,7 @@ class PrefillCompletionEventTest {
             DecodeEndpoint decode = new DecodeEndpoint(decodeWorker, eventHandler);
             applyStatus(decode, decodeStatus(1L, Map.of()));
             DecodeEndpoint.ReservationHandle reservation;
-            var capacity = new DecodeEndpoint.AdmissionCapacity(10L, 90L);
+            var capacity = new DecodeEndpoint.CapacityLimit(10L, 90L);
             try (var pin = decode.tryPinGeneration()) {
                 reservation = decode.reserve(pin, "101", 16L, 32L, 50, capacity);
                 assertNotNull(reservation);

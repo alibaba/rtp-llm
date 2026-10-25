@@ -248,7 +248,7 @@ class RequestResourceAccountingTest {
         final SingleReservation singleReservation;
         final CommitResult commitResult;
         final RequestSlot.AdmissionHandle admission;
-        final DecodeEndpoint.AdmissionCapacity capacity = new DecodeEndpoint.AdmissionCapacity(1, 90);
+        final DecodeEndpoint.CapacityLimit capacity = new DecodeEndpoint.CapacityLimit(1, 90);
         long version = 1;
 
         Fixture() { this(false); }

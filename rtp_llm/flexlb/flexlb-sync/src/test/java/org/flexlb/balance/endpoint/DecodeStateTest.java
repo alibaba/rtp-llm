@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint.AdmissionCapacity;
+import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityLimit;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DispatchOutcome;
 import org.flexlb.balance.endpoint.DecodeEndpoint.ReleaseReason;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** The resource ledger can run without an Endpoint, scheduler, RPC client or callback. */
 class DecodeStateTest {
-    private static final AdmissionCapacity CAPACITY = new AdmissionCapacity(2, 100);
+    private static final CapacityLimit CAPACITY = new CapacityLimit(2, 100);
 
     private static void assertAdmissionMetricsMatch(DecodeState state) {
         var full = state.resourceSnapshot();
@@ -159,15 +159,14 @@ class DecodeStateTest {
     }
 
     @ParameterizedTest
-    @EnumSource(value = PreemptionCancelPhase.class,
-            names = {"CANCEL_REQUESTED", "NOT_FOUND_STALE", "CANCEL_UNKNOWN"})
+    @EnumSource(value = PreemptionCancelPhase.class, names = {"CANCEL_REQUESTED", "NOT_FOUND_STALE", "CANCEL_UNKNOWN"})
     void regressedClaimKeepsOneHoldAndExplicitFinishedWinsOverActiveSnapshot(PreemptionCancelPhase reply) {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
         var victim = state.reserve("10", 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginPreemption(
-                1, java.util.List.of(victim), "11", 100, 200, 80, new AdmissionCapacity(1, 100)));
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+                state.beginPreemption(1, java.util.List.of(victim), "11", 100, 200, 80, new CapacityLimit(1, 100)));
         assertTrue(state.updatePreemption(1, DecodeEndpoint.PreemptionUpdate.cancelSending()));
         assertTrue(state.updatePreemption(1, DecodeEndpoint.PreemptionUpdate.cancelReply("10", reply)));
         for (int i = 0; i < 2; i++) {
@@ -289,8 +288,8 @@ class DecodeStateTest {
         DecodeState state = new DecodeState(status);
         var victim = state.reserve("10", 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginReturnedPreemption(
-                1, java.util.List.of(victim), "11", 100, 200, 80, new AdmissionCapacity(1, 100)));
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginReturnedPreemption(1,
+                java.util.List.of(victim), "11", 100, 200, 80, new CapacityLimit(1, 100)));
         var incoming = state.reservationHandle("11");
         assertEquals(STILL_OWNED, state.release(incoming, ReleaseReason.COUNTERPART_FINISHED));
         assertEquals(RELEASED, state.release(incoming, ReleaseReason.LOCAL_ROLLBACK));
@@ -306,8 +305,8 @@ class DecodeStateTest {
         DecodeState state = new DecodeState(status);
         var victim = state.reserve("10", 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginReturnedPreemption(
-                1, java.util.List.of(victim), "11", 100, 200, 80, new AdmissionCapacity(1, 100)));
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginReturnedPreemption(1,
+                java.util.List.of(victim), "11", 100, 200, 80, new CapacityLimit(1, 100)));
         var incoming = state.reservationHandle("11");
         calibrate(state, status,
                 Map.of("10", task(10, TaskPhase.RUNNING), "11", task(11, TaskPhase.RUNNING)), Map.of());
@@ -337,11 +336,11 @@ class DecodeStateTest {
         DecodeState state = new DecodeState(status);
         var victim = state.reserve("10", 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginReturnedPreemption(
-                1, java.util.List.of(victim), "11", 100, 200, 80, new AdmissionCapacity(1, 100)));
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginReturnedPreemption(1,
+                java.util.List.of(victim), "11", 100, 200, 80, new CapacityLimit(1, 100)));
         var incoming = state.reservationHandle("11");
         assertTrue(state.markQueued(incoming));
-        var permit = state.acquireDispatchPermit(incoming, new AdmissionCapacity(1, 100)).permit();
+        var permit = state.acquireDispatchPermit(incoming, new CapacityLimit(1, 100)).permit();
         assertEquals(TRANSFERRED, state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
         assertEquals(STILL_OWNED, state.release(incoming, ReleaseReason.COUNTERPART_FINISHED));
         assertTrue(state.hasOwnedResources(victim));
@@ -358,8 +357,8 @@ class DecodeStateTest {
         DecodeState state = new DecodeState(status);
         var victim = state.reserve("10", 100, 200, 50, true, CAPACITY);
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginReturnedPreemption(
-                1, java.util.List.of(victim), "11", 100, 200, 80, new AdmissionCapacity(1, 100)));
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS, state.beginReturnedPreemption(1,
+                java.util.List.of(victim), "11", 100, 200, 80, new CapacityLimit(1, 100)));
         var incoming = state.reservationHandle("11");
 
         var finished = calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)),
