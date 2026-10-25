@@ -2,6 +2,7 @@ package org.flexlb.balance.schedulev2.prefill;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
 import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.PrefillChoice;
 import org.flexlb.balance.schedulev2.Request;
@@ -9,6 +10,7 @@ import org.flexlb.balance.schedulev2.RequestCleanup;
 import org.flexlb.balance.schedulev2.Stage;
 import org.flexlb.balance.schedulev2.main.MainQueue;
 import org.flexlb.config.ConfigService;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Logger;
 
 import java.util.Iterator;
@@ -21,7 +23,7 @@ import java.util.function.Consumer;
  * 每一轮对每个队列：
  * <ol>
  * <li>机器已下线或同一地址已换成重新上线的机器时，把等待的请求退回主队列，丢掉这个队列；</li>
- * <li>有新的引擎上报时更新已 dispatch 记录；</li>
+ * <li>有新的引擎上报时更新已 dispatch 记录，并移除发布后超时还没被引擎上报的记录；</li>
  * <li>按顺序 dispatch 等待的请求，队首放不下时这台机器停在队首，等记录减少或下一次上报。</li>
  * </ol>
  * dispatch 出去的请求进入 DECODE_WAITING，归还主队列名额和排队总数，交给 Decode 队列。
@@ -43,6 +45,7 @@ public final class PrefillQueueLoop {
     private final MainQueue mainQueue;
     private final EndpointRegistry endpointRegistry;
     private final ConfigService configService;
+    private final RequestSchedulerReporter reporter;
     /**
      * dispatch 出去的请求交给 Decode 队列。
      */
@@ -56,6 +59,7 @@ public final class PrefillQueueLoop {
                             MainQueue mainQueue,
                             EndpointRegistry endpointRegistry,
                             ConfigService configService,
+                            RequestSchedulerReporter reporter,
                             Consumer<Request> sendToDecodeQueue) {
         this.queues = queues;
         this.loopSignal = loopSignal;
@@ -63,6 +67,7 @@ public final class PrefillQueueLoop {
         this.mainQueue = mainQueue;
         this.endpointRegistry = endpointRegistry;
         this.configService = configService;
+        this.reporter = reporter;
         this.sendToDecodeQueue = sendToDecodeQueue;
         this.thread = new Thread(this::run, "flexlb-v2-prefill-queue");
         this.thread.setDaemon(true);
@@ -98,6 +103,8 @@ public final class PrefillQueueLoop {
      */
     boolean runOnce() {
         int maxInflight = configService.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker();
+        long confirmTimeoutMs = DispatchConfirmTimeout.timeoutMs(configService);
+        long nowMs = System.currentTimeMillis();
         boolean hasWaiting = false;
         for (PrefillQueue queue : queues.list()) {
             if (!isCurrent(queue)) {
@@ -106,10 +113,18 @@ public final class PrefillQueueLoop {
                 continue;
             }
             queue.updateFromEngine();
+            removeExpiredDispatched(queue, nowMs, confirmTimeoutMs);
             dispatchWaiting(queue, maxInflight);
             hasWaiting |= queue.waitingCount() > 0;
         }
         return hasWaiting;
+    }
+
+    private void removeExpiredDispatched(PrefillQueue queue, long nowMs, long confirmTimeoutMs) {
+        int removed = queue.removeExpiredDispatched(nowMs, confirmTimeoutMs);
+        for (int i = 0; i < removed; i++) {
+            reporter.reportDispatchConfirmTimeout();
+        }
     }
 
     /**

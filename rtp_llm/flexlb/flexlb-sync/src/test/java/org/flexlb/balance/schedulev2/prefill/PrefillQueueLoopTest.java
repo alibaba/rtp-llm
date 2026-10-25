@@ -17,6 +17,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -28,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class PrefillQueueLoopTest {
@@ -44,6 +46,7 @@ class PrefillQueueLoopTest {
     private final EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
     private final PrefillEndpoint endpoint = V2TestSupport.prefillEndpoint("p1:8000");
     private final List<Request> sentToDecode = new ArrayList<>();
+    private final RequestSchedulerReporter reporter = mock(RequestSchedulerReporter.class);
     private final PrefillQueueLoop loop;
 
     PrefillQueueLoopTest() {
@@ -55,7 +58,25 @@ class PrefillQueueLoopTest {
         cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, mainLoopSignal, queues, prefillLoopSignal,
                 new DecodeQueue(false), new LoopSignal());
         loop = new PrefillQueueLoop(queues, prefillLoopSignal, cleanup, mainQueue, endpointRegistry, configService,
-                sentToDecode::add);
+                reporter, sentToDecode::add);
+    }
+
+    @Test
+    void publishedRequestNotReportedByEngineIsRemovedAfterConfirmTimeout() {
+        config.getWorkerRegistry().getHealth().setStatusPollIntervalMs(0L);
+        Request request = addWaiting("1");
+        loop.runOnce();
+        assertEquals(1, queues.find(endpoint).dispatchedCount());
+
+        // 发布前不算超时
+        loop.runOnce();
+        assertEquals(1, queues.find(endpoint).dispatchedCount());
+
+        request.publish(Stage.DECODE_WAITING, List.of());
+        loop.runOnce();
+
+        assertEquals(0, queues.find(endpoint).dispatchedCount());
+        verify(reporter).reportDispatchConfirmTimeout();
     }
 
     @Test
@@ -150,7 +171,11 @@ class PrefillQueueLoopTest {
      */
     private Request addWaiting(String requestId) {
         Request request = V2TestSupport.request(config, requestId, 50, 16L);
-        request.future().whenComplete((response, failure) -> cleanup.releaseEnded(request));
+        request.future().whenComplete((response, failure) -> {
+            if (request.stage().isEnded()) {
+                cleanup.releaseEnded(request);
+            }
+        });
         requestTable.add(request);
         assertNull(mainQueue.add(request, config));
         assertTrue(queueCapacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 4));

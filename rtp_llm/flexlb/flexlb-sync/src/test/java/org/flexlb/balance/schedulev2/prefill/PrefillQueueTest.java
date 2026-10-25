@@ -6,6 +6,7 @@ import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.balance.schedulev2.Request;
+import org.flexlb.balance.schedulev2.Stage;
 import org.flexlb.balance.schedulev2.V2TestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.enums.TaskPhase;
@@ -78,6 +79,28 @@ class PrefillQueueTest {
     }
 
     @Test
+    void publishedRecordNotReportedByEngineIsRemovedAfterConfirmTimeout() {
+        Request unpublished = request("1");
+        Request reported = request("2");
+        Request notReported = request("3");
+        publish(reported);
+        publish(notReported);
+        queue.addDispatched(new DispatchedRequest(unpublished, 10L, 5L));
+        queue.addDispatched(new DispatchedRequest(reported, 10L, 5L));
+        queue.addDispatched(new DispatchedRequest(notReported, 10L, 5L));
+        V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of("2", TaskPhase.RUNNING));
+        queue.updateFromEngine();
+        long publishedAtMs = notReported.publishedAtMs();
+
+        assertEquals(0, queue.removeExpiredDispatched(publishedAtMs + 79L, 80L));
+        assertEquals(3, queue.dispatchedCount());
+
+        assertEquals(1, queue.removeExpiredDispatched(publishedAtMs + 80L, 80L));
+        assertEquals(2, queue.dispatchedCount());
+        assertFalse(queue.removeDispatched(notReported));
+    }
+
+    @Test
     void sameStatusVersionIsHandledOnce() {
         V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of());
 
@@ -107,6 +130,12 @@ class PrefillQueueTest {
 
         queue.removeWaiting(waiting);
         assertNotEquals(view.ownershipVersion(), queue.loadView(1_000L, order, constraints).ownershipVersion());
+    }
+
+    private static void publish(Request request) {
+        request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
+        request.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING);
+        request.publish(Stage.DECODE_WAITING, List.of());
     }
 
     private Request request(String requestId) {

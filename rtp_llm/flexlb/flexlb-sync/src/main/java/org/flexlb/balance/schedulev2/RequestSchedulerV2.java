@@ -22,6 +22,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
@@ -76,7 +77,8 @@ public class RequestSchedulerV2 {
                               DecodeSelector decodeSelector,
                               PrefillQueueRegistry prefillQueues,
                               ModelMetaConfig modelMetaConfig,
-                              DecodePreemptionCoordinator preemptionCoordinator) {
+                              DecodePreemptionCoordinator preemptionCoordinator,
+                              RequestSchedulerReporter reporter) {
         this.configService = configService;
         this.deployedRoles = Set.copyOf(modelMetaConfig.requiredRoles());
         this.prefillRole = deployedRoles.contains(RoleType.PREFILL)
@@ -92,7 +94,7 @@ public class RequestSchedulerV2 {
                 placementAvailability, configService, new PrefillPicker(router, prefillStrategy), prefillRole,
                 this::sendToPrefillQueue);
         this.prefillQueueLoop = new PrefillQueueLoop(prefillQueues, prefillLoopSignal, cleanup, mainQueue,
-                endpointRegistry, configService, this::sendToDecodeQueue);
+                endpointRegistry, configService, reporter, this::sendToDecodeQueue);
         this.decodeQueueLoop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, placementAvailability,
                 decodeSelector, router, preemptionCoordinator);
         this.deadlineTimer = new ScheduledThreadPoolExecutor(1, task -> {

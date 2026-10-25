@@ -8,6 +8,7 @@ import org.flexlb.balance.schedulev2.Request;
  * <p>
  * dispatch 时创建，phase 为 COMMITTED（引擎还没上报这个请求）；引擎上报后改成 ENGINE_QUEUED 或 ENGINE_RUNNING。
  * 引擎上报过、后来又不在引擎的任务列表里时，说明 Prefill 已结束，记录被移除；请求失败或取消时也会移除。
+ * 请求发布后超过 {@link org.flexlb.balance.schedulev2.DispatchConfirmTimeout} 引擎还没上报过，记录也会被移除。
  */
 public final class DispatchedRequest {
 

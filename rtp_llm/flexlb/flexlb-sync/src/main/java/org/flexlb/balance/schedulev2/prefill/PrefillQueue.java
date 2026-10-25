@@ -5,6 +5,7 @@ import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.QueueView;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
 import org.flexlb.balance.schedulev2.Request;
 import org.flexlb.balance.schedulev2.RequestOrder;
 import org.flexlb.dao.master.WorkerStatus;
@@ -157,6 +158,28 @@ public final class PrefillQueue {
         latestEngine = engine;
         changeVersion.incrementAndGet();
         return true;
+    }
+
+    /**
+     * 移除引擎一直没上报、而请求发布后已经超过 confirmTimeoutMs 的记录，返回移除了几条。
+     * <p>
+     * 这类记录说明调用方没把请求发给 Prefill，或者请求在两次上报之间就做完了，留着会一直占在途数。
+     * 删早了也不会多发：引擎之后再上报这个请求时，会算进 unknownRequestCount，照样占在途数。
+     */
+    public int removeExpiredDispatched(long nowMs, long confirmTimeoutMs) {
+        int removed = 0;
+        for (DispatchedRequest record : dispatched.values()) {
+            if (record.seenByEngine()) {
+                continue;
+            }
+            if (!DispatchConfirmTimeout.expired(record.request(), nowMs, confirmTimeoutMs)) {
+                continue;
+            }
+            if (removeDispatched(record.request())) {
+                removed++;
+            }
+        }
+        return removed;
     }
 
     /**

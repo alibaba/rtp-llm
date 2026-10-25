@@ -52,6 +52,10 @@ public final class Request {
      */
     private volatile long prefillDecidedAtMs;
     /**
+     * 进入 PUBLISHED、把结果返回给调用方的时间，还没发布时为 0。调用方从这时起才会把请求发给引擎。
+     */
+    private volatile long publishedAtMs;
+    /**
      * Decode 队列给它 reserve 的 Decode。进入 DECODE_RESERVED 前设置；reserve 被归还时取走。
      */
     private final AtomicReference<DecodeChoice> decodeChoice = new AtomicReference<>();
@@ -145,6 +149,10 @@ public final class Request {
         this.prefillDecidedAtMs = prefillDecidedAtMs;
     }
 
+    public long publishedAtMs() {
+        return publishedAtMs;
+    }
+
     public DecodeChoice decodeChoice() {
         return decodeChoice.get();
     }
@@ -188,6 +196,7 @@ public final class Request {
         if (!moveTo(from, Stage.PUBLISHED)) {
             return false;
         }
+        publishedAtMs = System.currentTimeMillis();
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(serverStatuses);
