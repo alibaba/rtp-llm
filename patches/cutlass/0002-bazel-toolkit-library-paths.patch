@@ -14,3 +14,8 @@
 +    ):
 +        nvidia_root = next(p for p in entry.parents if p.name == "nvidia_cutlass_dsl")
          m = flavor_re.match(entry.name)
+@@ -107,1 +117,3 @@
+-        available[toolkit_ver] = (entry, runtime_dir)
++        # Honor Python path precedence when another DSL version is installed.
++        # A later system wheel must not replace the pinned toolkit binary.
++        available.setdefault(toolkit_ver, (entry, runtime_dir))
