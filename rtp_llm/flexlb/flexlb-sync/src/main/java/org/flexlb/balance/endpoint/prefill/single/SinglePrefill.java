@@ -51,14 +51,14 @@ public final class SinglePrefill {
             EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
         if (exactReservations.isEmpty()) {
             throw new IllegalArgumentException(
-                    "route commit requires at least one reservation");
+                    "single commit requires at least one reservation");
         }
         List<SingleReservation> leases = new ArrayList<>(
                 exactReservations.size());
         for (SingleReservation reservation : exactReservations) {
             if (reservation == null || reservation.owner != prefillState) {
                 throw new IllegalArgumentException(
-                        "route reservation belongs to another Prefill ledger");
+                        "single reservation belongs to another Prefill ledger");
             }
             leases.add(reservation);
         }
@@ -78,7 +78,7 @@ public final class SinglePrefill {
         List<ScheduledRequest> members = validateSingleGroup(items);
         if (members.size() != leases.size()) {
             throw new IllegalArgumentException(
-                    "route commit requires one exact lease per member");
+                    "single commit requires one exact lease per member");
         }
         Set<SingleReservation> unique = Collections.newSetFromMap(
                 new IdentityHashMap<>());
@@ -90,7 +90,7 @@ public final class SinglePrefill {
                     || lease.requestId != entry.requestId
                     || lease.state != LeaseState.OPEN) {
                 throw new IllegalStateException(
-                        "route commit does not own exact OPEN lease request_id="
+                        "single commit does not own exact OPEN lease request_id="
                                 + members.get(index).requestId());
             }
         }
@@ -116,7 +116,7 @@ public final class SinglePrefill {
         for (ScheduledRequest item : items) {
             RequestEntry entry = prefillState.requests.get(item.requestId());
             PrefillState.requireState(entry != null && entry.activeIdentity(item),
-                    "route member is not canonical admission request_id=" + item.requestId());
+                    "single member is not canonical admission request_id=" + item.requestId());
             prefillState.validateAdmissionIndexUnderLock(entry, item);
         }
         return items;

@@ -466,7 +466,7 @@ public final class PrefillState {
                 || entry.reservation != exactReservation
                 || exactReservation.state != LeaseState.OPEN) {
             throw new IllegalStateException(
-                    "ACTIVE route request lost its exact Prefill reservation request_id="
+                    "ACTIVE single request lost its exact Prefill reservation request_id="
                             + item.requestId());
         }
         validateAdmissionIndexUnderLock(entry, item);
@@ -976,7 +976,7 @@ public final class PrefillState {
                             && lease.state != LeaseState.OWNED) {
                         invariantFailure = appendRetirementInvariant(
                                 invariantFailure,
-                                "canonical retirement owner has an invalid route-reservation state");
+                                "canonical retirement owner has an invalid single-reservation state");
                     }
                 } else if (lease instanceof BatchReservation) {
                     observedBatchLeases++;

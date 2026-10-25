@@ -33,7 +33,7 @@ public final class SingleReservation extends Reservation {
                     || !entry.activeIdentity(exactItem)
                     || entry.reservation != this) {
                 throw new IllegalStateException(
-                        "route prediction no longer owns ACTIVE request_id="
+                        "single reservation prediction no longer owns ACTIVE request_id="
                                 + requestId);
             }
             predictedWorkMs = boundedPrediction(predictedMs);

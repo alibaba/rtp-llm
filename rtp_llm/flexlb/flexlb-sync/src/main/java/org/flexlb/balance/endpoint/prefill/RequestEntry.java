@@ -36,7 +36,7 @@ public final class RequestEntry {
 
     public void commitIndividual(SingleReservation lease, long nowMs) {
         if (!isActive() || reservation != lease) {
-            throw new IllegalStateException("request is not an ACTIVE route request_id=" + requestId);
+            throw new IllegalStateException("request is not an ACTIVE single request request_id=" + requestId);
         }
         singleRequestProgress = new SingleRequestProgress(lease.predictedWorkMs(), nowMs);
         committedItem = activeItem;

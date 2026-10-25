@@ -286,7 +286,7 @@ public final class EndpointTestSupport {
                         endpoint.reserveSingle(item, predictedMs);
                 if (result.status() != ReservationResult.Status.SUCCESS) {
                     throw new IllegalStateException(
-                            "route reservation rejected: " + result.status());
+                            "single reservation rejected: " + result.status());
                 }
                 reservations.add(result.reservation());
             }
