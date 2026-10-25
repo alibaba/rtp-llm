@@ -1,0 +1,6306 @@
+{
+  "lm_head_probe.json": {
+    "sha256": "39a2dd6a2ea7a8cef37233edeed6d27db5ceff558beccbc2b8a0040b4f82cab9",
+    "data": {
+      "weight_shape": [
+        129280,
+        4096
+      ],
+      "weight_dtype": "torch.bfloat16",
+      "contract": "BF16 inputs and weights, FP32 accumulation and output; no downcasting",
+      "timing": "single graph, 1 GiB flush outside measurement, 3 alternating rounds x30",
+      "cases": [
+        {
+          "m": 8,
+          "variant": "native_default",
+          "config": {},
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 8,
+          "variant": "algo_0",
+          "config": {
+            "algo": 0
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_1",
+          "config": {
+            "algo": 1
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_2",
+          "config": {
+            "algo": 2
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_3",
+          "config": {
+            "algo": 3
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_4",
+          "config": {
+            "algo": 4
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_5",
+          "config": {
+            "algo": 5
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_6",
+          "config": {
+            "algo": 6
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_7",
+          "config": {
+            "algo": 7
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_8",
+          "config": {
+            "algo": 8
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_9",
+          "config": {
+            "algo": 9
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_10",
+          "config": {
+            "algo": 10
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_11",
+          "config": {
+            "algo": 11
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_12",
+          "config": {
+            "algo": 12
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_13",
+          "config": {
+            "algo": 13
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_14",
+          "config": {
+            "algo": 14
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_15",
+          "config": {
+            "algo": 15
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_16",
+          "config": {
+            "algo": 16
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_17",
+          "config": {
+            "algo": 17
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_18",
+          "config": {
+            "algo": 18
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_19",
+          "config": {
+            "algo": 19
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_20",
+          "config": {
+            "algo": 20
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_21",
+          "config": {
+            "algo": 21
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_22",
+          "config": {
+            "algo": 22
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_23",
+          "config": {
+            "algo": 23
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_99",
+          "config": {
+            "algo": 99
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 8,
+          "variant": "algo_100",
+          "config": {
+            "algo": 100
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_101",
+          "config": {
+            "algo": 101
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_102",
+          "config": {
+            "algo": 102
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_103",
+          "config": {
+            "algo": 103
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_104",
+          "config": {
+            "algo": 104
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_105",
+          "config": {
+            "algo": 105
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_106",
+          "config": {
+            "algo": 106
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_107",
+          "config": {
+            "algo": 107
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_108",
+          "config": {
+            "algo": 108
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_109",
+          "config": {
+            "algo": 109
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_110",
+          "config": {
+            "algo": 110
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_111",
+          "config": {
+            "algo": 111
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_112",
+          "config": {
+            "algo": 112
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_113",
+          "config": {
+            "algo": 113
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_114",
+          "config": {
+            "algo": 114
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "algo_115",
+          "config": {
+            "algo": 115
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 8,
+          "variant": "pretransposed",
+          "config": {
+            "transposed": true
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 8,
+          "variant": "vocab_chunk_4096",
+          "config": {
+            "chunk": 4096
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 1192631,
+              "max_abs": 2.1979212760925293e-07
+            }
+          ]
+        },
+        {
+          "m": 8,
+          "variant": "vocab_chunk_8192",
+          "config": {
+            "chunk": 8192
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 8,
+          "variant": "vocab_chunk_16384",
+          "config": {
+            "chunk": 16384
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 8,
+          "variant": "vocab_chunk_32768",
+          "config": {
+            "chunk": 32768
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 8,
+          "variant": "vocab_chunk_65536",
+          "config": {
+            "chunk": 65536
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 24,
+          "variant": "native_default",
+          "config": {},
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 24,
+          "variant": "algo_0",
+          "config": {
+            "algo": 0
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_1",
+          "config": {
+            "algo": 1
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_2",
+          "config": {
+            "algo": 2
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_3",
+          "config": {
+            "algo": 3
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_4",
+          "config": {
+            "algo": 4
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_5",
+          "config": {
+            "algo": 5
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_6",
+          "config": {
+            "algo": 6
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_7",
+          "config": {
+            "algo": 7
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_8",
+          "config": {
+            "algo": 8
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_9",
+          "config": {
+            "algo": 9
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_10",
+          "config": {
+            "algo": 10
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_11",
+          "config": {
+            "algo": 11
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_12",
+          "config": {
+            "algo": 12
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_13",
+          "config": {
+            "algo": 13
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_14",
+          "config": {
+            "algo": 14
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_15",
+          "config": {
+            "algo": 15
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_16",
+          "config": {
+            "algo": 16
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_17",
+          "config": {
+            "algo": 17
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_18",
+          "config": {
+            "algo": 18
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_19",
+          "config": {
+            "algo": 19
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_20",
+          "config": {
+            "algo": 20
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_21",
+          "config": {
+            "algo": 21
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_22",
+          "config": {
+            "algo": 22
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_23",
+          "config": {
+            "algo": 23
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_99",
+          "config": {
+            "algo": 99
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 24,
+          "variant": "algo_100",
+          "config": {
+            "algo": 100
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_101",
+          "config": {
+            "algo": 101
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_102",
+          "config": {
+            "algo": 102
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_103",
+          "config": {
+            "algo": 103
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_104",
+          "config": {
+            "algo": 104
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_105",
+          "config": {
+            "algo": 105
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_106",
+          "config": {
+            "algo": 106
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_107",
+          "config": {
+            "algo": 107
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_108",
+          "config": {
+            "algo": 108
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_109",
+          "config": {
+            "algo": 109
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_110",
+          "config": {
+            "algo": 110
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_111",
+          "config": {
+            "algo": 111
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_112",
+          "config": {
+            "algo": 112
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_113",
+          "config": {
+            "algo": 113
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_114",
+          "config": {
+            "algo": 114
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "algo_115",
+          "config": {
+            "algo": 115
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 24,
+          "variant": "pretransposed",
+          "config": {
+            "transposed": true
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 24,
+          "variant": "vocab_chunk_4096",
+          "config": {
+            "chunk": 4096
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 3644217,
+              "max_abs": 3.203749656677246e-07
+            }
+          ]
+        },
+        {
+          "m": 24,
+          "variant": "vocab_chunk_8192",
+          "config": {
+            "chunk": 8192
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 24,
+          "variant": "vocab_chunk_16384",
+          "config": {
+            "chunk": 16384
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 24,
+          "variant": "vocab_chunk_32768",
+          "config": {
+            "chunk": 32768
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 24,
+          "variant": "vocab_chunk_65536",
+          "config": {
+            "chunk": 65536
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 32,
+          "variant": "native_default",
+          "config": {},
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 32,
+          "variant": "algo_0",
+          "config": {
+            "algo": 0
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_1",
+          "config": {
+            "algo": 1
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_2",
+          "config": {
+            "algo": 2
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_3",
+          "config": {
+            "algo": 3
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_4",
+          "config": {
+            "algo": 4
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_5",
+          "config": {
+            "algo": 5
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_6",
+          "config": {
+            "algo": 6
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_7",
+          "config": {
+            "algo": 7
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_8",
+          "config": {
+            "algo": 8
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_9",
+          "config": {
+            "algo": 9
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_10",
+          "config": {
+            "algo": 10
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_11",
+          "config": {
+            "algo": 11
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_12",
+          "config": {
+            "algo": 12
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_13",
+          "config": {
+            "algo": 13
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_14",
+          "config": {
+            "algo": 14
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_15",
+          "config": {
+            "algo": 15
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_16",
+          "config": {
+            "algo": 16
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_17",
+          "config": {
+            "algo": 17
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_18",
+          "config": {
+            "algo": 18
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_19",
+          "config": {
+            "algo": 19
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_20",
+          "config": {
+            "algo": 20
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_21",
+          "config": {
+            "algo": 21
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_22",
+          "config": {
+            "algo": 22
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_23",
+          "config": {
+            "algo": 23
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_99",
+          "config": {
+            "algo": 99
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 32,
+          "variant": "algo_100",
+          "config": {
+            "algo": 100
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_101",
+          "config": {
+            "algo": 101
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_102",
+          "config": {
+            "algo": 102
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_103",
+          "config": {
+            "algo": 103
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_104",
+          "config": {
+            "algo": 104
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_105",
+          "config": {
+            "algo": 105
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_106",
+          "config": {
+            "algo": 106
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_107",
+          "config": {
+            "algo": 107
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_108",
+          "config": {
+            "algo": 108
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_109",
+          "config": {
+            "algo": 109
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_110",
+          "config": {
+            "algo": 110
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_111",
+          "config": {
+            "algo": 111
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_112",
+          "config": {
+            "algo": 112
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_113",
+          "config": {
+            "algo": 113
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_114",
+          "config": {
+            "algo": 114
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "algo_115",
+          "config": {
+            "algo": 115
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 32,
+          "variant": "pretransposed",
+          "config": {
+            "transposed": true
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 32,
+          "variant": "vocab_chunk_4096",
+          "config": {
+            "chunk": 4096
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 4945450,
+              "max_abs": 3.501772880554199e-07
+            }
+          ]
+        },
+        {
+          "m": 32,
+          "variant": "vocab_chunk_8192",
+          "config": {
+            "chunk": 8192
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 32,
+          "variant": "vocab_chunk_16384",
+          "config": {
+            "chunk": 16384
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 32,
+          "variant": "vocab_chunk_32768",
+          "config": {
+            "chunk": 32768
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 32,
+          "variant": "vocab_chunk_65536",
+          "config": {
+            "chunk": 65536
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "native_default",
+          "config": {},
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_0",
+          "config": {
+            "algo": 0
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_1",
+          "config": {
+            "algo": 1
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_2",
+          "config": {
+            "algo": 2
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_3",
+          "config": {
+            "algo": 3
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_4",
+          "config": {
+            "algo": 4
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_5",
+          "config": {
+            "algo": 5
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_6",
+          "config": {
+            "algo": 6
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_7",
+          "config": {
+            "algo": 7
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_8",
+          "config": {
+            "algo": 8
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_9",
+          "config": {
+            "algo": 9
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_10",
+          "config": {
+            "algo": 10
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_11",
+          "config": {
+            "algo": 11
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_12",
+          "config": {
+            "algo": 12
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_13",
+          "config": {
+            "algo": 13
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_14",
+          "config": {
+            "algo": 14
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_15",
+          "config": {
+            "algo": 15
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_16",
+          "config": {
+            "algo": 16
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_17",
+          "config": {
+            "algo": 17
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_18",
+          "config": {
+            "algo": 18
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_19",
+          "config": {
+            "algo": 19
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_20",
+          "config": {
+            "algo": 20
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_21",
+          "config": {
+            "algo": 21
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_22",
+          "config": {
+            "algo": 22
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_23",
+          "config": {
+            "algo": 23
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_99",
+          "config": {
+            "algo": 99
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_100",
+          "config": {
+            "algo": 100
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_101",
+          "config": {
+            "algo": 101
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_102",
+          "config": {
+            "algo": 102
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_103",
+          "config": {
+            "algo": 103
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_104",
+          "config": {
+            "algo": 104
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_105",
+          "config": {
+            "algo": 105
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_106",
+          "config": {
+            "algo": 106
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_107",
+          "config": {
+            "algo": 107
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_108",
+          "config": {
+            "algo": 108
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_109",
+          "config": {
+            "algo": 109
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_110",
+          "config": {
+            "algo": 110
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_111",
+          "config": {
+            "algo": 111
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_112",
+          "config": {
+            "algo": 112
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_113",
+          "config": {
+            "algo": 113
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_114",
+          "config": {
+            "algo": 114
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "algo_115",
+          "config": {
+            "algo": 115
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "pretransposed",
+          "config": {
+            "transposed": true
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 117964,
+              "max_abs": 2.7939677238464355e-08
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "vocab_chunk_4096",
+          "config": {
+            "chunk": 4096
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "vocab_chunk_8192",
+          "config": {
+            "chunk": 8192
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "vocab_chunk_16384",
+          "config": {
+            "chunk": 16384
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "vocab_chunk_32768",
+          "config": {
+            "chunk": 32768
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 1,
+          "variant": "vocab_chunk_65536",
+          "config": {
+            "chunk": 65536
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 16,
+          "variant": "native_default",
+          "config": {},
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 16,
+          "variant": "algo_0",
+          "config": {
+            "algo": 0
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_1",
+          "config": {
+            "algo": 1
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_2",
+          "config": {
+            "algo": 2
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_3",
+          "config": {
+            "algo": 3
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_4",
+          "config": {
+            "algo": 4
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_5",
+          "config": {
+            "algo": 5
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_6",
+          "config": {
+            "algo": 6
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_7",
+          "config": {
+            "algo": 7
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_8",
+          "config": {
+            "algo": 8
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_9",
+          "config": {
+            "algo": 9
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_10",
+          "config": {
+            "algo": 10
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_11",
+          "config": {
+            "algo": 11
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_12",
+          "config": {
+            "algo": 12
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_13",
+          "config": {
+            "algo": 13
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_14",
+          "config": {
+            "algo": 14
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_15",
+          "config": {
+            "algo": 15
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_16",
+          "config": {
+            "algo": 16
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_17",
+          "config": {
+            "algo": 17
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_18",
+          "config": {
+            "algo": 18
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_19",
+          "config": {
+            "algo": 19
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_20",
+          "config": {
+            "algo": 20
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_21",
+          "config": {
+            "algo": 21
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_22",
+          "config": {
+            "algo": 22
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_23",
+          "config": {
+            "algo": 23
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_99",
+          "config": {
+            "algo": 99
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 16,
+          "variant": "algo_100",
+          "config": {
+            "algo": 100
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_101",
+          "config": {
+            "algo": 101
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_102",
+          "config": {
+            "algo": 102
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_103",
+          "config": {
+            "algo": 103
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_104",
+          "config": {
+            "algo": 104
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_105",
+          "config": {
+            "algo": 105
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_106",
+          "config": {
+            "algo": 106
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_107",
+          "config": {
+            "algo": 107
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_108",
+          "config": {
+            "algo": 108
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_109",
+          "config": {
+            "algo": 109
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_110",
+          "config": {
+            "algo": 110
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_111",
+          "config": {
+            "algo": 111
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_112",
+          "config": {
+            "algo": 112
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_113",
+          "config": {
+            "algo": 113
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_114",
+          "config": {
+            "algo": 114
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "algo_115",
+          "config": {
+            "algo": 115
+          },
+          "checks": [],
+          "error": "GemmEx status=15"
+        },
+        {
+          "m": 16,
+          "variant": "pretransposed",
+          "config": {
+            "transposed": true
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 16,
+          "variant": "vocab_chunk_4096",
+          "config": {
+            "chunk": 4096
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 2385199,
+              "max_abs": 2.905726432800293e-07
+            }
+          ]
+        },
+        {
+          "m": 16,
+          "variant": "vocab_chunk_8192",
+          "config": {
+            "chunk": 8192
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 16,
+          "variant": "vocab_chunk_16384",
+          "config": {
+            "chunk": 16384
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 16,
+          "variant": "vocab_chunk_32768",
+          "config": {
+            "chunk": 32768
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 16,
+          "variant": "vocab_chunk_65536",
+          "config": {
+            "chunk": 65536
+          },
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        }
+      ],
+      "performance": {
+        "8": {
+          "round_p50_us": {
+            "native_default": [
+              507.1199834346771,
+              502.4400055408478,
+              500.870019197464
+            ],
+            "algo_99": [
+              505.8949887752533,
+              502.8499960899353,
+              502.2999942302704
+            ],
+            "pretransposed": [
+              507.12499022483826,
+              505.744993686676,
+              506.5249800682068
+            ],
+            "vocab_chunk_8192": [
+              637.8600001335144,
+              681.3049912452698,
+              632.0300102233887
+            ],
+            "vocab_chunk_16384": [
+              581.6649794578552,
+              577.0950019359589,
+              579.675018787384
+            ],
+            "vocab_chunk_32768": [
+              536.09499335289,
+              537.7900004386902,
+              534.5650017261505
+            ],
+            "vocab_chunk_65536": [
+              525.5399942398071,
+              572.035014629364,
+              521.384984254837
+            ]
+          },
+          "median_us": {
+            "native_default": 502.4400055408478,
+            "algo_99": 502.8499960899353,
+            "pretransposed": 506.5249800682068,
+            "vocab_chunk_8192": 637.8600001335144,
+            "vocab_chunk_16384": 579.675018787384,
+            "vocab_chunk_32768": 536.09499335289,
+            "vocab_chunk_65536": 525.5399942398071
+          }
+        },
+        "24": {
+          "round_p50_us": {
+            "native_default": [
+              527.3000001907349,
+              527.6550054550171,
+              527.5000035762787
+            ],
+            "algo_99": [
+              527.3700058460236,
+              527.554988861084,
+              527.1500051021576
+            ],
+            "pretransposed": [
+              526.7550051212311,
+              526.5849828720093,
+              526.6200006008148
+            ],
+            "vocab_chunk_8192": [
+              687.9250109195709,
+              680.9500157833099,
+              682.1049749851227
+            ],
+            "vocab_chunk_16384": [
+              660.7050001621246,
+              659.6550047397614,
+              661.7350280284882
+            ],
+            "vocab_chunk_32768": [
+              562.1000230312347,
+              561.849981546402,
+              563.9500021934509
+            ],
+            "vocab_chunk_65536": [
+              551.8650114536285,
+              552.2449910640717,
+              553.045004606247
+            ]
+          },
+          "median_us": {
+            "native_default": 527.5000035762787,
+            "algo_99": 527.3700058460236,
+            "pretransposed": 526.6200006008148,
+            "vocab_chunk_8192": 682.1049749851227,
+            "vocab_chunk_16384": 660.7050001621246,
+            "vocab_chunk_32768": 562.1000230312347,
+            "vocab_chunk_65536": 552.2449910640717
+          }
+        },
+        "32": {
+          "round_p50_us": {
+            "native_default": [
+              536.0499918460846,
+              535.0100100040436,
+              535.3550016880035
+            ],
+            "algo_99": [
+              534.9999964237213,
+              534.9099934101105,
+              535.6299877166748
+            ],
+            "pretransposed": [
+              534.1799855232239,
+              534.3649983406067,
+              534.5050096511841
+            ],
+            "vocab_chunk_8192": [
+              689.6049976348877,
+              683.7849915027618,
+              682.6449930667877
+            ],
+            "vocab_chunk_16384": [
+              670.9400117397308,
+              671.4549958705902,
+              667.7049994468689
+            ],
+            "vocab_chunk_32768": [
+              572.299987077713,
+              572.160005569458,
+              571.304976940155
+            ],
+            "vocab_chunk_65536": [
+              561.1799955368042,
+              560.3649914264679,
+              560.0099861621857
+            ]
+          },
+          "median_us": {
+            "native_default": 535.3550016880035,
+            "algo_99": 534.9999964237213,
+            "pretransposed": 534.3649983406067,
+            "vocab_chunk_8192": 683.7849915027618,
+            "vocab_chunk_16384": 670.9400117397308,
+            "vocab_chunk_32768": 572.160005569458,
+            "vocab_chunk_65536": 560.3649914264679
+          }
+        }
+      },
+      "complete": true
+    }
+  },
+  "lm_head_tiles.json": {
+    "sha256": "43c863e1b948aa67a84562b4d5bd7920f39e8073173b0a268b9460accca4c684",
+    "data": {
+      "complete": true,
+      "checks": [
+        {
+          "m": 8,
+          "tile": [
+            16,
+            64,
+            128,
+            16,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 8,
+          "tile": [
+            16,
+            128,
+            128,
+            16,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 8,
+          "tile": [
+            16,
+            256,
+            128,
+            16,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 8,
+          "tile": [
+            32,
+            128,
+            128,
+            32,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 8,
+          "tile": [
+            32,
+            256,
+            128,
+            32,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 8,
+          "tile": [
+            16,
+            128,
+            64,
+            16,
+            64,
+            4
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 24,
+          "tile": [
+            16,
+            64,
+            128,
+            16,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 24,
+          "tile": [
+            16,
+            128,
+            128,
+            16,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 24,
+          "tile": [
+            16,
+            256,
+            128,
+            16,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 24,
+          "tile": [
+            32,
+            128,
+            128,
+            32,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 24,
+          "tile": [
+            32,
+            256,
+            128,
+            32,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 24,
+          "tile": [
+            16,
+            128,
+            64,
+            16,
+            64,
+            4
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 32,
+          "tile": [
+            16,
+            64,
+            128,
+            16,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 32,
+          "tile": [
+            16,
+            128,
+            128,
+            16,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 32,
+          "tile": [
+            16,
+            256,
+            128,
+            16,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 32,
+          "tile": [
+            32,
+            128,
+            128,
+            32,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 32,
+          "tile": [
+            32,
+            256,
+            128,
+            32,
+            64,
+            3
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        },
+        {
+          "m": 32,
+          "tile": [
+            16,
+            128,
+            64,
+            16,
+            64,
+            4
+          ],
+          "checks": [
+            {
+              "magnitude": 0.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1e-30,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 0.001,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 1.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 8.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            },
+            {
+              "magnitude": 100000000.0,
+              "unequal_bytes": 0,
+              "max_abs": 0.0
+            }
+          ]
+        }
+      ],
+      "performance": [
+        {
+          "m": 8,
+          "tile": [
+            16,
+            64,
+            128,
+            16,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              510.08498668670654,
+              511.2549960613251,
+              513.3049786090851
+            ],
+            "candidate": [
+              515.6050026416779,
+              516.8649852275848,
+              518.3150172233582
+            ]
+          },
+          "median_us": {
+            "baseline": 511.2549960613251,
+            "candidate": 516.8649852275848
+          }
+        },
+        {
+          "m": 8,
+          "tile": [
+            16,
+            128,
+            128,
+            16,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              510.93998551368713,
+              511.19500398635864,
+              512.3350024223328
+            ],
+            "candidate": [
+              515.3500139713287,
+              511.9899809360504,
+              512.6100182533264
+            ]
+          },
+          "median_us": {
+            "baseline": 511.19500398635864,
+            "candidate": 512.6100182533264
+          }
+        },
+        {
+          "m": 8,
+          "tile": [
+            16,
+            256,
+            128,
+            16,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              509.72500443458557,
+              511.7799937725067,
+              510.3600025177002
+            ],
+            "candidate": [
+              506.8399906158447,
+              507.2750151157379,
+              506.44001364707947
+            ]
+          },
+          "median_us": {
+            "baseline": 510.3600025177002,
+            "candidate": 506.8399906158447
+          }
+        },
+        {
+          "m": 8,
+          "tile": [
+            32,
+            128,
+            128,
+            32,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              512.0350122451782,
+              512.5449895858765,
+              511.08500361442566
+            ],
+            "candidate": [
+              520.2549993991852,
+              514.7199928760529,
+              518.2700157165527
+            ]
+          },
+          "median_us": {
+            "baseline": 512.0350122451782,
+            "candidate": 518.2700157165527
+          }
+        },
+        {
+          "m": 8,
+          "tile": [
+            32,
+            256,
+            128,
+            32,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              509.95999574661255,
+              507.779985666275,
+              508.6599886417389
+            ],
+            "candidate": [
+              510.19999384880066,
+              509.3950033187866,
+              510.2250277996063
+            ]
+          },
+          "median_us": {
+            "baseline": 508.6599886417389,
+            "candidate": 510.19999384880066
+          }
+        },
+        {
+          "m": 8,
+          "tile": [
+            16,
+            128,
+            64,
+            16,
+            64,
+            4
+          ],
+          "round_p50_us": {
+            "baseline": [
+              510.1100206375122,
+              509.8100006580353,
+              511.0450088977814
+            ],
+            "candidate": [
+              506.48000836372375,
+              502.5150179862976,
+              505.854994058609
+            ]
+          },
+          "median_us": {
+            "baseline": 510.1100206375122,
+            "candidate": 505.854994058609
+          }
+        },
+        {
+          "m": 24,
+          "tile": [
+            16,
+            64,
+            128,
+            16,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              530.2099883556366,
+              530.7849943637848,
+              529.2800068855286
+            ],
+            "candidate": [
+              657.2900116443634,
+              656.790018081665,
+              656.5850079059601
+            ]
+          },
+          "median_us": {
+            "baseline": 530.2099883556366,
+            "candidate": 656.790018081665
+          }
+        },
+        {
+          "m": 24,
+          "tile": [
+            16,
+            128,
+            128,
+            16,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              529.5799970626831,
+              529.8299789428711,
+              529.6899974346161
+            ],
+            "candidate": [
+              703.2949924468994,
+              703.3699750900269,
+              698.4849870204926
+            ]
+          },
+          "median_us": {
+            "baseline": 529.6899974346161,
+            "candidate": 703.2949924468994
+          }
+        },
+        {
+          "m": 24,
+          "tile": [
+            16,
+            256,
+            128,
+            16,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              529.7899842262268,
+              530.4850041866302,
+              529.4699966907501
+            ],
+            "candidate": [
+              826.6099989414215,
+              837.0150029659271,
+              822.2149908542633
+            ]
+          },
+          "median_us": {
+            "baseline": 529.7899842262268,
+            "candidate": 826.6099989414215
+          }
+        },
+        {
+          "m": 24,
+          "tile": [
+            32,
+            128,
+            128,
+            32,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              529.7449827194214,
+              529.6050012111664,
+              530.7500064373016
+            ],
+            "candidate": [
+              538.334995508194,
+              534.9199771881104,
+              533.8700115680695
+            ]
+          },
+          "median_us": {
+            "baseline": 529.7449827194214,
+            "candidate": 534.9199771881104
+          }
+        },
+        {
+          "m": 24,
+          "tile": [
+            32,
+            256,
+            128,
+            32,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              529.5850038528442,
+              529.6249985694885,
+              529.339998960495
+            ],
+            "candidate": [
+              523.8399803638458,
+              523.0350196361542,
+              523.1600105762482
+            ]
+          },
+          "median_us": {
+            "baseline": 529.5850038528442,
+            "candidate": 523.1600105762482
+          }
+        },
+        {
+          "m": 24,
+          "tile": [
+            16,
+            128,
+            64,
+            16,
+            64,
+            4
+          ],
+          "round_p50_us": {
+            "baseline": [
+              530.115008354187,
+              530.3449928760529,
+              530.1350057125092
+            ],
+            "candidate": [
+              889.739990234375,
+              884.7549855709076,
+              886.8100047111511
+            ]
+          },
+          "median_us": {
+            "baseline": 530.1350057125092,
+            "candidate": 886.8100047111511
+          }
+        },
+        {
+          "m": 32,
+          "tile": [
+            16,
+            64,
+            128,
+            16,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              537.7050042152405,
+              537.86501288414,
+              537.2550189495087
+            ],
+            "candidate": [
+              667.3699915409088,
+              667.3200130462646,
+              666.934996843338
+            ]
+          },
+          "median_us": {
+            "baseline": 537.7050042152405,
+            "candidate": 667.3200130462646
+          }
+        },
+        {
+          "m": 32,
+          "tile": [
+            16,
+            128,
+            128,
+            16,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              537.7900004386902,
+              537.2050106525421,
+              536.7349982261658
+            ],
+            "candidate": [
+              715.4200077056885,
+              712.5750184059143,
+              720.8000123500824
+            ]
+          },
+          "median_us": {
+            "baseline": 537.2050106525421,
+            "candidate": 715.4200077056885
+          }
+        },
+        {
+          "m": 32,
+          "tile": [
+            16,
+            256,
+            128,
+            16,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              536.9850099086761,
+              537.4450087547302,
+              537.434995174408
+            ],
+            "candidate": [
+              841.2249982357025,
+              838.6699855327606,
+              848.2100069522858
+            ]
+          },
+          "median_us": {
+            "baseline": 537.434995174408,
+            "candidate": 841.2249982357025
+          }
+        },
+        {
+          "m": 32,
+          "tile": [
+            32,
+            128,
+            128,
+            32,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              537.5099778175354,
+              537.7999842166901,
+              537.1749997138977
+            ],
+            "candidate": [
+              545.8000004291534,
+              545.3600287437439,
+              549.0149855613708
+            ]
+          },
+          "median_us": {
+            "baseline": 537.5099778175354,
+            "candidate": 545.8000004291534
+          }
+        },
+        {
+          "m": 32,
+          "tile": [
+            32,
+            256,
+            128,
+            32,
+            64,
+            3
+          ],
+          "round_p50_us": {
+            "baseline": [
+              537.8099977970123,
+              537.630021572113,
+              537.2049808502197
+            ],
+            "candidate": [
+              529.4449925422668,
+              529.9100279808044,
+              528.2750129699707
+            ]
+          },
+          "median_us": {
+            "baseline": 537.630021572113,
+            "candidate": 529.4449925422668
+          }
+        },
+        {
+          "m": 32,
+          "tile": [
+            16,
+            128,
+            64,
+            16,
+            64,
+            4
+          ],
+          "round_p50_us": {
+            "baseline": [
+              537.6600027084351,
+              537.5899970531464,
+              537.2300148010254
+            ],
+            "candidate": [
+              910.524994134903,
+              899.8050093650818,
+              900.5999863147736
+            ]
+          },
+          "median_us": {
+            "baseline": 537.5899970531464,
+            "candidate": 900.5999863147736
+          }
+        }
+      ],
+      "contract": "BF16 weights/activation, no split-K, FP32 epilogue with no BF16 rounding"
+    }
+  },
+  "sampling_probe.json": {
+    "sha256": "74f55ea49fd1423c3116a787cf3a54dfb2b7f6ee7bdcdd477244948d9d9948f3",
+    "data": {
+      "complete": true,
+      "checks": [
+        {
+          "batch": 1,
+          "seed": 0,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 129280,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 0,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 130058,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 0,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 0,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 0,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 0,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 0,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 100624,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 0,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 3841,
+          "copy_unequal_bytes": 3856,
+          "candidate_max_abs": 2.4475557580672103e-08
+        },
+        {
+          "batch": 1,
+          "seed": 1,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 129280,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 1,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 285488,
+          "copy_unequal_bytes": 285488,
+          "candidate_max_abs": 5.72156886846642e-06
+        },
+        {
+          "batch": 1,
+          "seed": 1,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 129978,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 1,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 130775,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 1,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 104945,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 1,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 697,
+          "copy_unequal_bytes": 697,
+          "candidate_max_abs": 1.7740021007739415e-08
+        },
+        {
+          "batch": 1,
+          "seed": 2,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 129280,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 2,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 130001,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 2,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 0,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 2,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 130048,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 2,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 0,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 2,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 54,
+          "copy_unequal_bytes": 54,
+          "candidate_max_abs": 4.732487594263613e-30
+        },
+        {
+          "batch": 1,
+          "seed": 3,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 129280,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 3,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 160864,
+          "copy_unequal_bytes": 161653,
+          "candidate_max_abs": 5.100421731185634e-06
+        },
+        {
+          "batch": 1,
+          "seed": 3,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 4,
+          "copy_unequal_bytes": 129962,
+          "candidate_max_abs": 4.773319872697357e-08
+        },
+        {
+          "batch": 1,
+          "seed": 3,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 130022,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 3,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 0,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 3,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 1687,
+          "copy_unequal_bytes": 1687,
+          "candidate_max_abs": 3.85998906449192e-11
+        },
+        {
+          "batch": 1,
+          "seed": 4,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 129280,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 4,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 130076,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 4,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 0,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 4,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 0,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 4,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 0,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 4,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 242,
+          "copy_unequal_bytes": 242,
+          "candidate_max_abs": 6.6138015834162316e-18
+        },
+        {
+          "batch": 1,
+          "seed": 5,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 129280,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 5,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 0,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 5,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 0,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 5,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 130668,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 5,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 112529,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 1,
+          "seed": 5,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 319,
+          "copy_unequal_bytes": 321,
+          "candidate_max_abs": 1.750996266383642e-12
+        },
+        {
+          "batch": 8,
+          "seed": 0,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 1034240,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 8,
+          "seed": 0,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 285648,
+          "copy_unequal_bytes": 675816,
+          "candidate_max_abs": 5.720218723581638e-06
+        },
+        {
+          "batch": 8,
+          "seed": 0,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 262958,
+          "copy_unequal_bytes": 914335,
+          "candidate_max_abs": 1.1254706322461061e-07
+        },
+        {
+          "batch": 8,
+          "seed": 0,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 520822,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 8,
+          "seed": 0,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 1352448,
+          "copy_unequal_bytes": 1912066,
+          "candidate_max_abs": 2.384185791015625e-07
+        },
+        {
+          "batch": 8,
+          "seed": 0,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 7217,
+          "copy_unequal_bytes": 7224,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 8,
+          "seed": 1,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 1034240,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 8,
+          "seed": 1,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 563525,
+          "copy_unequal_bytes": 1083498,
+          "candidate_max_abs": 5.7185593504982535e-06
+        },
+        {
+          "batch": 8,
+          "seed": 1,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 12,
+          "copy_unequal_bytes": 520042,
+          "candidate_max_abs": 6.315804057521746e-08
+        },
+        {
+          "batch": 8,
+          "seed": 1,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 346555,
+          "copy_unequal_bytes": 997155,
+          "candidate_max_abs": 1.4901161193847656e-08
+        },
+        {
+          "batch": 8,
+          "seed": 1,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 1371883,
+          "copy_unequal_bytes": 1791730,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 8,
+          "seed": 1,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 7880,
+          "copy_unequal_bytes": 7888,
+          "candidate_max_abs": 3.2396044957749837e-08
+        },
+        {
+          "batch": 8,
+          "seed": 2,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 1034240,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 8,
+          "seed": 2,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 283396,
+          "copy_unequal_bytes": 804294,
+          "candidate_max_abs": 5.720716217183508e-06
+        },
+        {
+          "batch": 8,
+          "seed": 2,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 266716,
+          "copy_unequal_bytes": 657401,
+          "candidate_max_abs": 1.1822794476756826e-07
+        },
+        {
+          "batch": 8,
+          "seed": 2,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 371408,
+          "copy_unequal_bytes": 656350,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 8,
+          "seed": 2,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 469473,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 8,
+          "seed": 2,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 7420,
+          "copy_unequal_bytes": 8116,
+          "candidate_max_abs": 3.233745005104538e-08
+        },
+        {
+          "batch": 8,
+          "seed": 3,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 1034240,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 8,
+          "seed": 3,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 727765,
+          "copy_unequal_bytes": 989205,
+          "candidate_max_abs": 5.720820809074212e-06
+        },
+        {
+          "batch": 8,
+          "seed": 3,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 129975,
+          "copy_unequal_bytes": 910766,
+          "candidate_max_abs": 5.9541498842463625e-08
+        },
+        {
+          "batch": 8,
+          "seed": 3,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 649981,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 8,
+          "seed": 3,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 453484,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 8,
+          "seed": 3,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 7846,
+          "copy_unequal_bytes": 7860,
+          "candidate_max_abs": 3.192361930359766e-08
+        },
+        {
+          "batch": 8,
+          "seed": 4,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 1034240,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 8,
+          "seed": 4,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 571618,
+          "copy_unequal_bytes": 833029,
+          "candidate_max_abs": 5.720821718568914e-06
+        },
+        {
+          "batch": 8,
+          "seed": 4,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 403778,
+          "copy_unequal_bytes": 793128,
+          "candidate_max_abs": 1.1791455278853391e-07
+        },
+        {
+          "batch": 8,
+          "seed": 4,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 261231,
+          "copy_unequal_bytes": 1152181,
+          "candidate_max_abs": 2.9802322387695312e-08
+        },
+        {
+          "batch": 8,
+          "seed": 4,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 807367,
+          "copy_unequal_bytes": 1461831,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 8,
+          "seed": 4,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 8124,
+          "copy_unequal_bytes": 8511,
+          "candidate_max_abs": 3.9438514676248815e-08
+        },
+        {
+          "batch": 8,
+          "seed": 5,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 1034240,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 8,
+          "seed": 5,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 1424183,
+          "copy_unequal_bytes": 1814151,
+          "candidate_max_abs": 5.7217876019421965e-06
+        },
+        {
+          "batch": 8,
+          "seed": 5,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 666201,
+          "copy_unequal_bytes": 666958,
+          "candidate_max_abs": 1.170577448306176e-07
+        },
+        {
+          "batch": 8,
+          "seed": 5,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 364974,
+          "copy_unequal_bytes": 626858,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 8,
+          "seed": 5,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 729557,
+          "copy_unequal_bytes": 1176673,
+          "candidate_max_abs": 2.384185791015625e-07
+        },
+        {
+          "batch": 8,
+          "seed": 5,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 3078,
+          "copy_unequal_bytes": 3085,
+          "candidate_max_abs": 3.7529171437178377e-10
+        },
+        {
+          "batch": 24,
+          "seed": 0,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 3102720,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 24,
+          "seed": 0,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 1582936,
+          "copy_unequal_bytes": 2883941,
+          "candidate_max_abs": 5.720890840166248e-06
+        },
+        {
+          "batch": 24,
+          "seed": 0,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 811557,
+          "copy_unequal_bytes": 2373032,
+          "candidate_max_abs": 1.1824204193544574e-07
+        },
+        {
+          "batch": 24,
+          "seed": 0,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 231428,
+          "copy_unequal_bytes": 2298971,
+          "candidate_max_abs": 7.450580596923828e-09
+        },
+        {
+          "batch": 24,
+          "seed": 0,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 1825964,
+          "copy_unequal_bytes": 3022955,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 24,
+          "seed": 0,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 17135,
+          "copy_unequal_bytes": 17497,
+          "candidate_max_abs": 2.986438829566396e-08
+        },
+        {
+          "batch": 24,
+          "seed": 1,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 3102720,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 24,
+          "seed": 1,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 1537657,
+          "copy_unequal_bytes": 2838562,
+          "candidate_max_abs": 5.7217393987230025e-06
+        },
+        {
+          "batch": 24,
+          "seed": 1,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 664108,
+          "copy_unequal_bytes": 2224674,
+          "candidate_max_abs": 1.1460783611028091e-07
+        },
+        {
+          "batch": 24,
+          "seed": 1,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 368297,
+          "copy_unequal_bytes": 2190612,
+          "candidate_max_abs": 1.7881393432617188e-07
+        },
+        {
+          "batch": 24,
+          "seed": 1,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 2377746,
+          "copy_unequal_bytes": 3834191,
+          "candidate_max_abs": 1.7881393432617188e-07
+        },
+        {
+          "batch": 24,
+          "seed": 1,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 19628,
+          "copy_unequal_bytes": 19666,
+          "candidate_max_abs": 5.686668913540416e-08
+        },
+        {
+          "batch": 24,
+          "seed": 2,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 3102720,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 24,
+          "seed": 2,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 1709909,
+          "copy_unequal_bytes": 3010167,
+          "candidate_max_abs": 5.721337402064819e-06
+        },
+        {
+          "batch": 24,
+          "seed": 2,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 931439,
+          "copy_unequal_bytes": 2364263,
+          "candidate_max_abs": 1.1751318140795775e-07
+        },
+        {
+          "batch": 24,
+          "seed": 2,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 401404,
+          "copy_unequal_bytes": 2210289,
+          "candidate_max_abs": 1.4901161193847656e-08
+        },
+        {
+          "batch": 24,
+          "seed": 2,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 1289674,
+          "copy_unequal_bytes": 2767336,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 24,
+          "seed": 2,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 19017,
+          "copy_unequal_bytes": 19411,
+          "candidate_max_abs": 2.493450246277007e-08
+        },
+        {
+          "batch": 24,
+          "seed": 3,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 3102720,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 24,
+          "seed": 3,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 565597,
+          "copy_unequal_bytes": 2128105,
+          "candidate_max_abs": 5.7215552260458935e-06
+        },
+        {
+          "batch": 24,
+          "seed": 3,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 929742,
+          "copy_unequal_bytes": 2360442,
+          "candidate_max_abs": 1.1742242378431911e-07
+        },
+        {
+          "batch": 24,
+          "seed": 3,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 749033,
+          "copy_unequal_bytes": 2312541,
+          "candidate_max_abs": 1.7881393432617188e-07
+        },
+        {
+          "batch": 24,
+          "seed": 3,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 1439755,
+          "copy_unequal_bytes": 2993066,
+          "candidate_max_abs": 5.960464477539063e-08
+        },
+        {
+          "batch": 24,
+          "seed": 3,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 25611,
+          "copy_unequal_bytes": 26197,
+          "candidate_max_abs": 3.914578883268405e-08
+        },
+        {
+          "batch": 24,
+          "seed": 4,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 3102720,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 24,
+          "seed": 4,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 1423681,
+          "copy_unequal_bytes": 3245978,
+          "candidate_max_abs": 5.721450179407839e-06
+        },
+        {
+          "batch": 24,
+          "seed": 4,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 1184892,
+          "copy_unequal_bytes": 2355355,
+          "candidate_max_abs": 1.1739043515035519e-07
+        },
+        {
+          "batch": 24,
+          "seed": 4,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 535940,
+          "copy_unequal_bytes": 1967585,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 24,
+          "seed": 4,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 933406,
+          "copy_unequal_bytes": 2737701,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 24,
+          "seed": 4,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 18985,
+          "copy_unequal_bytes": 19832,
+          "candidate_max_abs": 1.4641964973804988e-08
+        },
+        {
+          "batch": 24,
+          "seed": 5,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 3102720,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 24,
+          "seed": 5,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 288817,
+          "copy_unequal_bytes": 1458896,
+          "candidate_max_abs": 5.721396519220434e-06
+        },
+        {
+          "batch": 24,
+          "seed": 5,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 398110,
+          "copy_unequal_bytes": 2087234,
+          "candidate_max_abs": 1.1627058427166048e-07
+        },
+        {
+          "batch": 24,
+          "seed": 5,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 195049,
+          "copy_unequal_bytes": 2016387,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 24,
+          "seed": 5,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 922523,
+          "copy_unequal_bytes": 2668203,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 24,
+          "seed": 5,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 18752,
+          "copy_unequal_bytes": 19143,
+          "candidate_max_abs": 3.801062931074739e-08
+        },
+        {
+          "batch": 32,
+          "seed": 0,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 4136960,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 32,
+          "seed": 0,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 1710283,
+          "copy_unequal_bytes": 3660641,
+          "candidate_max_abs": 5.7217794164898805e-06
+        },
+        {
+          "batch": 32,
+          "seed": 0,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 817617,
+          "copy_unequal_bytes": 2378290,
+          "candidate_max_abs": 1.1740495153844677e-07
+        },
+        {
+          "batch": 32,
+          "seed": 0,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 2213144,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 32,
+          "seed": 0,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 3210255,
+          "copy_unequal_bytes": 5340205,
+          "candidate_max_abs": 1.7881393432617188e-07
+        },
+        {
+          "batch": 32,
+          "seed": 0,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 31855,
+          "copy_unequal_bytes": 32257,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 32,
+          "seed": 1,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 4136960,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 32,
+          "seed": 1,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 1870820,
+          "copy_unequal_bytes": 4211836,
+          "candidate_max_abs": 5.721616162190912e-06
+        },
+        {
+          "batch": 32,
+          "seed": 1,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 658995,
+          "copy_unequal_bytes": 3261855,
+          "candidate_max_abs": 1.1630544349827687e-07
+        },
+        {
+          "batch": 32,
+          "seed": 1,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 828173,
+          "copy_unequal_bytes": 3531757,
+          "candidate_max_abs": 5.960464477539063e-08
+        },
+        {
+          "batch": 32,
+          "seed": 1,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 2140831,
+          "copy_unequal_bytes": 4188940,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 32,
+          "seed": 1,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 29757,
+          "copy_unequal_bytes": 30273,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 32,
+          "seed": 2,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 4136960,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 32,
+          "seed": 2,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 1707394,
+          "copy_unequal_bytes": 3007669,
+          "candidate_max_abs": 5.721924935642164e-06
+        },
+        {
+          "batch": 32,
+          "seed": 2,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 662610,
+          "copy_unequal_bytes": 2615483,
+          "candidate_max_abs": 1.1780132780359054e-07
+        },
+        {
+          "batch": 32,
+          "seed": 2,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 662211,
+          "copy_unequal_bytes": 3384981,
+          "candidate_max_abs": 5.960464477539063e-08
+        },
+        {
+          "batch": 32,
+          "seed": 2,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 1878384,
+          "copy_unequal_bytes": 3489041,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 32,
+          "seed": 2,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 36141,
+          "copy_unequal_bytes": 36515,
+          "candidate_max_abs": 5.960464477539063e-08
+        },
+        {
+          "batch": 32,
+          "seed": 3,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 4136960,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 32,
+          "seed": 3,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 2566337,
+          "copy_unequal_bytes": 4127424,
+          "candidate_max_abs": 5.7216952882299665e-06
+        },
+        {
+          "batch": 32,
+          "seed": 3,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 1051209,
+          "copy_unequal_bytes": 2610615,
+          "candidate_max_abs": 1.1895290441543693e-07
+        },
+        {
+          "batch": 32,
+          "seed": 3,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 523695,
+          "copy_unequal_bytes": 2475697,
+          "candidate_max_abs": 1.4901161193847656e-08
+        },
+        {
+          "batch": 32,
+          "seed": 3,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 1272795,
+          "copy_unequal_bytes": 3910204,
+          "candidate_max_abs": 2.384185791015625e-07
+        },
+        {
+          "batch": 32,
+          "seed": 3,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 28910,
+          "copy_unequal_bytes": 29523,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 32,
+          "seed": 4,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 4136960,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 32,
+          "seed": 4,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 1713055,
+          "copy_unequal_bytes": 3794242,
+          "candidate_max_abs": 5.721394700231031e-06
+        },
+        {
+          "batch": 32,
+          "seed": 4,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 1604587,
+          "copy_unequal_bytes": 3559018,
+          "candidate_max_abs": 1.177791801865169e-07
+        },
+        {
+          "batch": 32,
+          "seed": 4,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 709111,
+          "copy_unequal_bytes": 2283948,
+          "candidate_max_abs": 8.940696716308594e-08
+        },
+        {
+          "batch": 32,
+          "seed": 4,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 1828659,
+          "copy_unequal_bytes": 4057462,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 32,
+          "seed": 4,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 33705,
+          "copy_unequal_bytes": 34017,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 32,
+          "seed": 5,
+          "logit_scale": 0.0,
+          "candidate_unequal_bytes": 0,
+          "copy_unequal_bytes": 4136960,
+          "candidate_max_abs": 0.0
+        },
+        {
+          "batch": 32,
+          "seed": 5,
+          "logit_scale": 0.1,
+          "candidate_unequal_bytes": 1303316,
+          "copy_unequal_bytes": 3255105,
+          "candidate_max_abs": 5.721765774069354e-06
+        },
+        {
+          "batch": 32,
+          "seed": 5,
+          "logit_scale": 1.0,
+          "candidate_unequal_bytes": 660175,
+          "copy_unequal_bytes": 3262246,
+          "candidate_max_abs": 1.130130016235853e-07
+        },
+        {
+          "batch": 32,
+          "seed": 5,
+          "logit_scale": 4.0,
+          "candidate_unequal_bytes": 530680,
+          "copy_unequal_bytes": 2744951,
+          "candidate_max_abs": 2.9802322387695312e-08
+        },
+        {
+          "batch": 32,
+          "seed": 5,
+          "logit_scale": 16.0,
+          "candidate_unequal_bytes": 1829147,
+          "copy_unequal_bytes": 3869220,
+          "candidate_max_abs": 1.1920928955078125e-07
+        },
+        {
+          "batch": 32,
+          "seed": 5,
+          "logit_scale": 64.0,
+          "candidate_unequal_bytes": 32979,
+          "copy_unequal_bytes": 33283,
+          "candidate_max_abs": 4.388654062381647e-08
+        }
+      ],
+      "performance": [],
+      "contract": "native top_p=1 renormalization; same 1024-thread FP32 apply reduction"
+    }
+  },
+  "experiment_sha256": {
+    "lm_head_binding.cpp": "6b79198f215faa33b02085328489bd315e84e3a3f8b429d68e49a25494304430",
+    "bf16_densegemm_fp32.cuh": "3e2190fa196a03b0d2a1f356b4ac5bdbe3bb15adbdd68efdba88c03cc947c425",
+    "probe_sampling.py": "c9b9636278a78a9ee1caac064d132ea2b11b9deeab8d279520e867877bce6afa",
+    "bench_common.py": "68835a4f052475c5524de362f9dc83568a5139b39718518e820235b757d45a4a",
+    "probe_lm_head.py": "bde60bff146e6ccf930f2ae208a0758fee55ec7262a02383e40c2f63c424688a",
+    "sampling_binding.cpp": "c6e2f89528a40234fa92ebcde0df93cb1c4f73975a83edef44f9e1ae55072bf9",
+    "sampling_p1.cu": "cb791acb703f76d8f99184a983f2652a8f595a4262b834f888354ddcafeac1bf",
+    "probe_lm_head_tiles.py": "482312962394ae05560852d7d4f91bd9eef29570b60bcd9c72762dd412abe754"
+  }
+}
