@@ -17,6 +17,24 @@ from scenario.program_compiler import configure_program
 
 
 class CaseConfigTest(unittest.TestCase):
+    def test_performance_case_enables_only_prefill_reuse_in_frozen_profiles(self):
+        from scenario.environment_snapshot import EnvironmentSnapshot
+
+        baseline = load_document(ROOT / "data/performance/deepseek_v4_flash_l20c.json")["engine_config"]["roles"]
+        expected = copy.deepcopy(baseline)
+        expected["prefill"]["kv_cache"]["reuse_cache"] = True
+        with (
+            mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)),
+            mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)),
+        ):
+            plans = compile_scenarios(load_scenarios(ROOT / "config/scenarios/master_performance.yaml"), handlers=handlers())
+        self.assertEqual({plan["profile"] for plan in plans}, {"single-nonbatch", "batch-window"})
+        for plan in plans:
+            with self.subTest(profile=plan["profile"]):
+                roles = EnvironmentSnapshot.read(plan["environment"]["rendered"]).performance["engine_config"]["roles"]
+                self.assertEqual(roles, expected)
+                self.assertEqual(plan["environment"]["model_override"]["baseline"], "deepseek_v4_flash_l20c")
+
     def test_cache_analysis_budget_is_explicit_and_independent_of_gate_thresholds(self):
         config = load_document(ROOT / "config/scenarios/cache_scale_in.yaml")
         original = copy.deepcopy(config["parameters"]["checks"])

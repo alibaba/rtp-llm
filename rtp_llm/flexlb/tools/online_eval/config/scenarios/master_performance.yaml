@@ -12,6 +12,13 @@ profiles:
 environment:
   backend: java_mock
   perf_preset: deepseek_v4_flash_l20c
+  model_override:
+    baseline: deepseek_v4_flash_l20c
+    reason: 验证开启 Prefill 缓存复用后的性能基准，Decode 与共享档案保持原值。
+  prefill_cache_policy:
+    device_tree: true
+    memory_tree: true
+    reuse_cache: true
   config_overrides:
     cache_affinity_max_extra_ttft_ms: 1000000000
   metric_whitelist: flexlb_app_cache_,flexlb_app_flexlb_,flexlb_app_engine_balancing_master_,flexlb_auto_tpm_
