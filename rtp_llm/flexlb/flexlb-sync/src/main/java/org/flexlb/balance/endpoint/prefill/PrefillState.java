@@ -830,19 +830,16 @@ public final class PrefillState {
     }
 
     public boolean settleUnderLock(RequestEntry entry,
-                            TerminalObservation terminal,
-                            LiveBatchMembers liveMembers,
-                            List<FinishedBatch> finishedBatches,
-                            long nowMs) {
+                                   TerminalObservation terminal,
+                                   LiveBatchMembers liveMembers,
+                                   List<FinishedBatch> finishedBatches,
+                                   long nowMs) {
         requireLock();
         BatchProgress batch = entry.batchProgress;
         boolean lastBatchMember = false;
         Reservation lease;
         if (batch != null) {
-            if (liveMembers == null || liveMembers.batch() != batch || !liveMembers.members().contains(entry)) {
-                throw new IllegalStateException("missing live batch members for request_id=" + entry.requestId);
-            }
-            lastBatchMember = liveMembers.members().size() == 1;
+            lastBatchMember = BatchPrefill.isLastLiveMember(entry, liveMembers);
             lease = lastBatchMember ? batch.lease() : null;
         } else {
             lease = entry.reservation;
@@ -853,9 +850,7 @@ public final class PrefillState {
                             + " request_id=" + entry.requestId);
         }
         if (batch != null) {
-            batch.updateProgressFromFinishedTask(terminal.workerObserved(), terminal.errorCode(),
-                    terminal.executionTimeMs(), nowMs);
-            liveMembers.remove(entry);
+            BatchPrefill.removeFinishedMember(entry, liveMembers, terminal, nowMs);
         }
         if (!removeRequestUnderLock(entry.requestId, entry)) {
             throw new IllegalStateException(

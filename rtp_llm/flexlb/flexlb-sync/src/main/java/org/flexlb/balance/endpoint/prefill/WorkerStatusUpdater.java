@@ -112,7 +112,6 @@ public final class WorkerStatusUpdater {
                     engine.runningTaskList();
             IdentityHashMap<RequestEntry, TerminalObservation> settlements =
                     new IdentityHashMap<>(terminals.size());
-            Set<LiveBatchMembers> changedBatches = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
             IdentityHashMap<BatchProgress, Phase> batchPhases = new IdentityHashMap<>();
             for (TerminalObservation terminal : terminals.values()) {
                 RequestEntry entry = prefillState.requests.get(terminal.requestId());
@@ -121,12 +120,9 @@ public final class WorkerStatusUpdater {
                     throw new IllegalStateException(
                             "status terminal lost its exact owner request_id=" + terminal.requestId());
                 }
-                LiveBatchMembers liveMembers =
-                        entry.batchProgress == null ? null : membersByBatch.get(entry.batchProgress);
-                if (liveMembers != null) {
-                    changedBatches.add(liveMembers);
-                }
             }
+            Set<LiveBatchMembers> changedBatches =
+                    BatchPrefill.collectChangedBatches(settlements.keySet(), membersByBatch);
             long reportedActive = PrefillState.saturatedAdd(
                     Math.max(0L, engine.waitingQueryLen()),
                     Math.max(0L, engine.runningQueryLen()));
@@ -286,13 +282,7 @@ public final class WorkerStatusUpdater {
             }
         }
 
-        List<FinishedBatch> finishedBatches = new ArrayList<>(Math.min(terminals.size(), membersByBatch.size()));
-        for (LiveBatchMembers liveMembers : membersByBatch.values()) {
-            FinishedBatch finishedBatch = liveMembers.finishedBatchIfAllFinish(terminals);
-            if (finishedBatch != null) {
-                finishedBatches.add(finishedBatch);
-            }
-        }
+        List<FinishedBatch> finishedBatches = BatchPrefill.collectFinishedBatches(membersByBatch, terminals);
         return new StatusReconciliation(schedulerFacts, finishedBatches, null);
     }
 

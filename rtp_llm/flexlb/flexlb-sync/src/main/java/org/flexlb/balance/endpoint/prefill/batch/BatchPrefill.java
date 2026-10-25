@@ -13,6 +13,8 @@ import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -234,6 +236,61 @@ public final class BatchPrefill {
             prefillState.notifyCapacityAvailable(capacityReleased);
         }
         return evicted;
+    }
+
+    /**
+     * 找出这次上报里有成员完成的批次，后面要重新预测它们剩余的耗时。
+     */
+    public static Set<LiveBatchMembers> collectChangedBatches(
+            Collection<RequestEntry> finishedEntries,
+            IdentityHashMap<BatchProgress, LiveBatchMembers> membersByBatch) {
+        Set<LiveBatchMembers> changedBatches = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (RequestEntry entry : finishedEntries) {
+            LiveBatchMembers liveMembers = entry.batchProgress == null ? null : membersByBatch.get(entry.batchProgress);
+            if (liveMembers != null) {
+                changedBatches.add(liveMembers);
+            }
+        }
+        return changedBatches;
+    }
+
+    /**
+     * 找出这次上报后所有成员都已完成的批次。
+     */
+    public static List<FinishedBatch> collectFinishedBatches(
+            IdentityHashMap<BatchProgress, LiveBatchMembers> membersByBatch,
+            Map<String, TerminalObservation> terminals) {
+        List<FinishedBatch> finishedBatches = new ArrayList<>(Math.min(terminals.size(), membersByBatch.size()));
+        for (LiveBatchMembers liveMembers : membersByBatch.values()) {
+            FinishedBatch finishedBatch = liveMembers.finishedBatchIfAllFinish(terminals);
+            if (finishedBatch != null) {
+                finishedBatches.add(finishedBatch);
+            }
+        }
+        return finishedBatches;
+    }
+
+    /**
+     * 判断这个请求是不是批次里最后一个还没结束的成员；最后一个成员结束时要关闭批次预占。
+     */
+    public static boolean isLastLiveMember(RequestEntry entry, LiveBatchMembers liveMembers) {
+        if (liveMembers == null || liveMembers.batch() != entry.batchProgress
+                || !liveMembers.members().contains(entry)) {
+            throw new IllegalStateException("missing live batch members for request_id=" + entry.requestId);
+        }
+        return liveMembers.members().size() == 1;
+    }
+
+    /**
+     * 把结束的成员从批次里拿掉，并按它的结束结果更新批次进度。
+     */
+    public static void removeFinishedMember(RequestEntry entry,
+                                            LiveBatchMembers liveMembers,
+                                            TerminalObservation terminal,
+                                            long nowMs) {
+        entry.batchProgress.updateProgressFromFinishedTask(terminal.workerObserved(), terminal.errorCode(),
+                terminal.executionTimeMs(), nowMs);
+        liveMembers.remove(entry);
     }
 
     public static boolean matchesObservedBatch(RequestEntry entry, long observedBatchId) {
