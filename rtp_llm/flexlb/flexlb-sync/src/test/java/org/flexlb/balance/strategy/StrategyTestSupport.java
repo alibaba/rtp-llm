@@ -224,7 +224,7 @@ final class StrategyTestSupport {
                         (PrefillState)
                                 org.springframework.test.util.ReflectionTestUtils.getField(
                                         endpoint, "ownership");
-                state.lock.lock();
+                state.queueGuard().lock();
                 try {
                     return state.commitLocked(
                             new PrefillState.CommitPlan(
@@ -237,7 +237,7 @@ final class StrategyTestSupport {
                                     System.currentTimeMillis()),
                             null);
                 } finally {
-                    state.lock.unlock();
+                    state.queueGuard().unlock();
                 }
             }
         }

@@ -416,7 +416,7 @@ class RequestDeliveryLockContractTest {
                                     Thread.holdsLock(registered.item().ctx()),
                                     "resource release must run outside the request monitor");
                             assertFalse(
-                                    state.lock.isHeldByCurrentThread(),
+                                    state.queueGuard().isHeldByCurrentThread(),
                                     "resource release must enter outside the queue ownership lock");
                             boolean released =
                                     org.flexlb.balance.endpoint.EndpointTestSupport.releaseRequest(
@@ -424,7 +424,7 @@ class RequestDeliveryLockContractTest {
                             if (released) {
                                 releases.incrementAndGet();
                             }
-                            assertFalse(state.lock.isHeldByCurrentThread());
+                            assertFalse(state.queueGuard().isHeldByCurrentThread());
                             return released;
                         });
         CountDownLatch queuePublished = new CountDownLatch(1);
@@ -444,7 +444,7 @@ class RequestDeliveryLockContractTest {
                                                         registered.item(),
                                                         RequestProtocolTestSupport.publication(
                                                                 () -> {
-                                                                    state.lock.lock();
+                                                                    state.queueGuard().lock();
                                                                     try {
                                                                         assertSame(
                                                                                 registered.item(),
@@ -457,7 +457,7 @@ class RequestDeliveryLockContractTest {
                                                                                         System
                                                                                                 .currentTimeMillis()));
                                                                     } finally {
-                                                                        state.lock.unlock();
+                                                                        state.queueGuard().unlock();
                                                                     }
                                                                     queuePublished.countDown();
                                                                     await(returnFromPublication);

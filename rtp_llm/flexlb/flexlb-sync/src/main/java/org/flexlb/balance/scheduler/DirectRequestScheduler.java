@@ -46,19 +46,10 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
 
     @Override
     public CompletableFuture<Response> submit(RequestContext context) {
-        if (context != null && context.data().getRequest() != null) {
-            var request = context.data().getRequest();
-            if (request.isVitRouteOnly()) {
-                var result = CompletableFuture.completedFuture(router.routeVit(context));
-                context.data().setFuture(result);
-                return result;
-            }
-            if (request.getSelectedVit() != null
-                    && requests.getRequestState(context.data().getRequestId(), 0L) == null
-                    && !router.selectedVitIsValid(context)) {
-                return CompletableFuture.completedFuture(
-                        Response.error(StrategyErrorType.VIT_ROUTE_STALE));
-            }
+        CompletableFuture<Response> vitResult =
+                RequestSchedulerEntry.tryCompleteVitRequest(context, requests, router);
+        if (vitResult != null) {
+            return vitResult;
         }
         if (context != null && context.data().getConfig().isQueue()) {
             return CompletableFuture.completedFuture(

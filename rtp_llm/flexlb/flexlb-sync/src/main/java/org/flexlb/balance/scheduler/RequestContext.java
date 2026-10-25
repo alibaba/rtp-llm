@@ -10,7 +10,6 @@ import org.flexlb.dao.route.RoleType;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static com.google.common.math.LongMath.saturatedAdd;
 import static org.flexlb.balance.scheduler.ContextResult.Abandonment;
 import static org.flexlb.balance.scheduler.ContextResult.Blocked;
 import static org.flexlb.balance.scheduler.ContextResult.Blocker;
@@ -63,10 +62,11 @@ import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
 import static org.flexlb.balance.scheduler.ContextResult.Update;
 import static org.flexlb.balance.scheduler.ContextResult.UpdateKind;
 
-/** Atomic request facts. Scheduler alone executes transport, publication, ledger and shutdown flows. */
+/**
+ * Atomic request facts. Scheduler alone executes transport, publication, ledger and shutdown flows.
+ */
 public final class RequestContext {
     private static final AtomicLong INCARNATIONS = new AtomicLong();
-    private static final long HANDOFF_GRACE_MS = 10_000L;
     private final RequestData data;
     private Identity key;
     private static final SnapshotFacts EMPTY =
@@ -202,16 +202,7 @@ public final class RequestContext {
                                 placement.pendingRetirement(),
                                 placement.inactivityExpired());
                 route = null;
-                close =
-                        new CloseFacts(
-                                close.endOperation(),
-                                close.releaseOperation(),
-                                true,
-                                true,
-                                close.notificationsDone(),
-                                close.timersDone(),
-                                close.expired(),
-                                close.notificationsAttempted());
+                close = close.withSettlement(true, true);
             }
             return new Granted<>(
                     before,
@@ -237,15 +228,8 @@ public final class RequestContext {
                         placement.inactivityExpired());
         route = acquired;
         close =
-                new CloseFacts(
-                        close.endOperation(),
-                        close.releaseOperation(),
-                        false,
-                        acquired.decodeEp() == null || acquired.decodeReservation() == null,
-                        close.notificationsDone(),
-                        close.timersDone(),
-                        close.expired(),
-                        close.notificationsAttempted());
+                close.withSettlement(
+                        false, acquired.decodeEp() == null || acquired.decodeReservation() == null);
         boolean publishable = phase == Phase.OPEN && cancellation == null;
         var after = refresh(before.updatedAtMs());
         var permit = new RoutePermit(this, exact, acquired, publishable);
@@ -266,16 +250,7 @@ public final class RequestContext {
                 || result == PublicationResult.ROLLBACK_COMPLETED) {
             route = null;
             delivery = null;
-            close =
-                    new CloseFacts(
-                            close.endOperation(),
-                            close.releaseOperation(),
-                            true,
-                            true,
-                            close.notificationsDone(),
-                            close.timersDone(),
-                            close.expired(),
-                            close.notificationsAttempted());
+            close = close.withSettlement(true, true);
         }
         boolean rolledBack =
                 route == null
@@ -285,18 +260,7 @@ public final class RequestContext {
                         && close.prefillSettled()
                         && close.decodeSettled();
         if (rolledBack && pendingEnd != null) {
-            var end = pendingEnd;
-            pendingEnd =
-                    new EndEvidence(
-                            null,
-                            end.kind(),
-                            end.role(),
-                            end.success(),
-                            end.errorCode(),
-                            end.errorType(),
-                            end.detail(),
-                            end.prefillSettled(),
-                            end.decodeSettled());
+            pendingEnd = pendingEnd.withoutRoute();
         }
         boolean admissionFailure =
                 result == PublicationResult.FAILED && outcome == null && cancellation == null;
@@ -306,20 +270,7 @@ public final class RequestContext {
         if (retained.pendingTerminal() != null
                 && !(admissionFailure && retained.pendingTerminal().kind() == EndKind.SHUTDOWN)) {
             var end = retained.pendingTerminal();
-            retainEnd(
-                    rolledBack
-                            ? new EndEvidence(
-                                    null,
-                                    end.kind(),
-                                    end.role(),
-                                    end.success(),
-                                    end.errorCode(),
-                                    end.errorType(),
-                                    end.detail(),
-                                    end.prefillSettled(),
-                                    end.decodeSettled())
-                            : end,
-                    nowMs);
+            retainEnd(rolledBack ? end.withoutRoute() : end, nowMs);
         }
         if (pendingEnd == null && outcome == null && retained.pendingRetirement() != null) {
             var retired = retained.pendingRetirement();
@@ -339,23 +290,20 @@ public final class RequestContext {
         }
         if (outcome == null && retained.inactivityExpired()) {
             retainEnd(
-                    new EndEvidence(
+                    EndEvidence.failure(
                             route,
                             EndKind.INACTIVITY,
-                            null,
-                            false,
-                            0L,
                             StrategyErrorType.BATCH_SLO_EXPIRED,
-                            "request inactive during placement",
-                            false,
-                            false),
+                            "request inactive during placement"),
                     nowMs);
         }
         var after = refresh(nowMs);
         return update(before, after);
     }
 
-    /** Prepare identity only. The endpoint CAS must succeed before commitDelivery exposes a handoff. */
+    /**
+     * Prepare identity only. The endpoint CAS must succeed before commitDelivery exposes a handoff.
+     */
     public synchronized Claim<DeliveryClaim> beginDelivery(
             RequestRoute exact, DeliveryClaimKind kind, long batchId, long nowMs) {
         var before = state;
@@ -388,16 +336,11 @@ public final class RequestContext {
                                 null);
             }
             retainEnd(
-                    new EndEvidence(
+                    EndEvidence.failure(
                             route,
                             EndKind.INACTIVITY,
-                            null,
-                            false,
-                            0L,
                             StrategyErrorType.BATCH_SLO_EXPIRED,
-                            cancellation.detail(),
-                            false,
-                            false),
+                            cancellation.detail()),
                     nowMs);
             return new Rejected<>(before, refresh(nowMs), Rejection.CANCELLED);
         }
@@ -429,18 +372,7 @@ public final class RequestContext {
         if (!transferred) {
             delivery = null;
         } else {
-            delivery =
-                    new DeliveryFacts(
-                            exact,
-                            delivery.send(),
-                            delivery.acknowledged(),
-                            delivery.abandonment(),
-                            delivery.executionFinished(),
-                            delivery.prefillProof(),
-                            delivery.decodeProof(),
-                            true,
-                            delivery.startedAtMs(),
-                            delivery.acknowledgedAtMs());
+            delivery = delivery.transferToSender();
         }
         var after = refresh(nowMs);
         return update(before, after);
@@ -468,18 +400,7 @@ public final class RequestContext {
                 || nowMs - lastWorkerAtMs >= inactivityMs) {
             return new Rejected<>(before, before, Rejection.CANCELLED);
         }
-        delivery =
-                new DeliveryFacts(
-                        exact,
-                        SendState.SENDING,
-                        delivery.acknowledged(),
-                        null,
-                        delivery.executionFinished(),
-                        delivery.prefillProof(),
-                        delivery.decodeProof(),
-                        true,
-                        delivery.startedAtMs(),
-                        delivery.acknowledgedAtMs());
+        delivery = delivery.withSendState(SendState.SENDING);
         return new Granted<>(before, refresh(nowMs), exact);
     }
 
@@ -491,18 +412,7 @@ public final class RequestContext {
             if (route != failed.route() || phase != Phase.OPEN || delivery != null) {
                 return new Update(UpdateKind.STALE, before, before);
             }
-            retainEnd(
-                    new EndEvidence(
-                            route,
-                            EndKind.DELIVERY_FAILURE,
-                            null,
-                            false,
-                            0L,
-                            StrategyErrorType.DISPATCH_FAILED,
-                            failed.detail(),
-                            false,
-                            false),
-                    failed.nowMs());
+            retainEnd(EndEvidence.deliveryFailure(route, failed), failed.nowMs());
             var after = refresh(failed.nowMs());
             return update(before, after);
         }
@@ -521,7 +431,6 @@ public final class RequestContext {
         var send = delivery.send();
         var abandoned = delivery.abandonment();
         boolean p = delivery.prefillProof(), d = delivery.decodeProof();
-        boolean executed = delivery.executionFinished();
         if (evidence instanceof TransportResult transport) {
             if (exact.kind() != DeliveryClaimKind.BATCH_ENQUEUE) {
                 throw new IllegalArgumentException(
@@ -543,31 +452,15 @@ public final class RequestContext {
             send = actual;
             if (transport.result().failed()) {
                 boolean releaseAfterExit =
-                        exact.kind() == DeliveryClaimKind.ROUTE_DECISION
-                                || send == SendState.NOT_SENT
-                                || (abandoned == null ? executed : p && d);
+                        send == SendState.NOT_SENT
+                                || (abandoned == null ? delivery.executionFinished() : p && d);
                 if (!releaseAfterExit && abandoned == null) {
                     abandoned =
                             cancellation == null
                                     ? CancelReason.CLIENT_CANCELLED
                                     : cancellation.reason();
                 }
-                String detail = transport.result().cause().getMessage();
-                if (detail == null || detail.isBlank()) {
-                    detail = transport.result().cause().getClass().getSimpleName();
-                }
-                retainEnd(
-                        new EndEvidence(
-                                route,
-                                EndKind.DELIVERY_FAILURE,
-                                null,
-                                false,
-                                0L,
-                                StrategyErrorType.DISPATCH_FAILED,
-                                "Delivery failed: " + detail,
-                                false,
-                                false),
-                        evidence.nowMs());
+                retainEnd(EndEvidence.deliveryFailure(route, transport), evidence.nowMs());
             }
         } else if (evidence instanceof RouteDelivered) {
             send = SendState.DELIVERED;
@@ -590,64 +483,20 @@ public final class RequestContext {
             if (send == SendState.NOT_STARTED) {
                 send = SendState.NOT_SENT;
             }
-            retainEnd(
-                    new EndEvidence(
-                            route,
-                            EndKind.DELIVERY_FAILURE,
-                            null,
-                            false,
-                            0L,
-                            StrategyErrorType.DISPATCH_FAILED,
-                            failed.detail(),
-                            false,
-                            false),
-                    failed.nowMs());
+            retainEnd(EndEvidence.deliveryFailure(route, failed), failed.nowMs());
         }
         if (evidence instanceof Prediction || evidence instanceof RouteDelivered) {
-            if (engine.predictionSequence() == exact.sequence()) {
-                throw new IllegalStateException("delivery prediction already consumed");
-            }
             long at =
                     evidence instanceof Prediction predicted
                             ? predicted.predictedAtMs()
                             : ((RouteDelivered) evidence).predictedAtMs();
-            if (at < 0L) {
-                throw new IllegalArgumentException("prediction timestamp must be non-negative");
-            }
-            long visibility =
-                    engine.decodeAccepted()
-                                    || engine.prefillObserved()
-                                            && engine.prefillCompletedAtMs() == 0L
-                            ? 0L
-                            : engine.prefillCompletedAtMs() > 0L
-                                    ? saturatedAdd(engine.prefillCompletedAtMs(), HANDOFF_GRACE_MS)
-                                    : at;
-            engine =
-                    new EngineFacts(
-                            engine.prefillObserved(),
-                            engine.prefillCompletedAtMs(),
-                            engine.decodeAccepted(),
-                            visibility,
-                            false,
-                            exact.sequence());
+            engine = engine.predict(exact.sequence(), at);
         }
         if (send != previous.send()
                 || abandoned != previous.abandonment()
                 || p != previous.prefillProof()
-                || d != previous.decodeProof()
-                || executed != previous.executionFinished()) {
-            delivery =
-                    new DeliveryFacts(
-                            exact,
-                            send,
-                            previous.acknowledged(),
-                            abandoned,
-                            executed,
-                            p,
-                            d,
-                            previous.transferred(),
-                            previous.startedAtMs(),
-                            previous.acknowledgedAtMs());
+                || d != previous.decodeProof()) {
+            delivery = previous.recordResult(send, abandoned, p, d);
         }
         var after = refresh(evidence.nowMs());
         return update(before, after);
@@ -665,37 +514,7 @@ public final class RequestContext {
                         || evidence.kind() == EngineKind.FAILED
                         || evidence.kind() == EngineKind.PRIORITY_CANCELLED
                         || evidence.kind() == EngineKind.RETIRED;
-        boolean decodeAccepted =
-                engine.decodeAccepted() || isDecode && evidence.kind() != EngineKind.RETIRED;
-        boolean pObserved =
-                engine.prefillObserved() || !isDecode && evidence.kind() == EngineKind.ACTIVE;
-        long pCompleted =
-                !isDecode
-                                && evidence.kind() == EngineKind.COMPLETED
-                                && engine.prefillCompletedAtMs() == 0L
-                        ? evidence.nowMs()
-                        : engine.prefillCompletedAtMs();
-        long visibility =
-                decodeAccepted || pObserved && pCompleted == 0L
-                        ? 0L
-                        : pCompleted > 0L
-                                        && route.decodeEp() != null
-                                        && engine.predictionSequence() != 0L
-                                ? saturatedAdd(pCompleted, HANDOFF_GRACE_MS)
-                                : engine.visibilityAtMs();
-        if (pObserved != engine.prefillObserved()
-                || pCompleted != engine.prefillCompletedAtMs()
-                || decodeAccepted != engine.decodeAccepted()
-                || visibility != engine.visibilityAtMs()) {
-            engine =
-                    new EngineFacts(
-                            pObserved,
-                            pCompleted,
-                            decodeAccepted,
-                            visibility,
-                            false,
-                            engine.predictionSequence());
-        }
+        engine = engine.observe(evidence, route.decodeEp() != null);
         if (evidence.kind() != EngineKind.RETIRED) {
             lastWorkerAtMs = Math.max(lastWorkerAtMs, evidence.nowMs());
         }
@@ -705,45 +524,15 @@ public final class RequestContext {
                 && (isDecode
                         ? evidence.kind() == EngineKind.ALLOCATED
                         : evidence.kind() == EngineKind.ACTIVE)) {
-            preemption =
-                    new PreemptionFacts(
-                            preemption.identity(),
-                            preemption.phase(),
-                            preemption.cancelAcknowledged(),
-                            false,
-                            preemption.pendingTerminal(),
-                            preemption.confirmationPending(),
-                            true,
-                            preemption.reconciliation());
+            preemption = preemption.observeRestoration();
         }
         if (terminal && delivery != null) {
-            var old = delivery;
             delivery =
-                    new DeliveryFacts(
-                            old.identity(),
-                            old.send(),
-                            old.acknowledged(),
-                            old.abandonment(),
-                            old.executionFinished()
-                                    || isDecode
-                                    || evidence.role() == RoleType.PDFUSION,
-                            old.prefillProof() || !isDecode,
-                            old.decodeProof() || isDecode,
-                            old.transferred(),
-                            old.startedAtMs(),
-                            old.acknowledgedAtMs());
+                    delivery.mergeReleaseProof(
+                            isDecode || evidence.role() == RoleType.PDFUSION, !isDecode, isDecode);
         }
         if (terminal) {
-            close =
-                    new CloseFacts(
-                            close.endOperation(),
-                            close.releaseOperation(),
-                            close.prefillSettled() || !isDecode,
-                            close.decodeSettled() || isDecode,
-                            close.notificationsDone(),
-                            close.timersDone(),
-                            close.expired(),
-                            close.notificationsAttempted());
+            close = close.mergeSettlement(!isDecode, isDecode);
             boolean ending =
                     isDecode
                             || evidence.role() == RoleType.PDFUSION
@@ -850,18 +639,7 @@ public final class RequestContext {
                                     && old.send() == SendState.NOT_STARTED
                             ? SendState.ROUTE_CLOSED
                             : old.send();
-            delivery =
-                    new DeliveryFacts(
-                            old.identity(),
-                            send,
-                            old.acknowledged(),
-                            request.reason(),
-                            old.executionFinished(),
-                            old.prefillProof(),
-                            old.decodeProof(),
-                            old.transferred(),
-                            old.startedAtMs(),
-                            old.acknowledgedAtMs());
+            delivery = old.abandon(send, request.reason());
         }
         CancelKind kind = currentKind;
         var permit =
@@ -896,32 +674,11 @@ public final class RequestContext {
         if (delivery != null
                 && (evidence.kind() == CancelEvidenceKind.CLEANED
                         || evidence.kind() == CancelEvidenceKind.FENCED)) {
-            var old = delivery;
             delivery =
-                    new DeliveryFacts(
-                            old.identity(),
-                            old.send(),
-                            old.acknowledged(),
-                            old.abandonment(),
-                            old.executionFinished(),
-                            old.prefillProof()
-                                    || evidence.kind() == CancelEvidenceKind.CLEANED
-                                    || evidence.kind() == CancelEvidenceKind.FENCED,
-                            old.decodeProof() || evidence.kind() == CancelEvidenceKind.CLEANED,
-                            old.transferred(),
-                            old.startedAtMs(),
-                            old.acknowledgedAtMs());
+                    delivery.mergeReleaseProof(
+                            false, true, evidence.kind() == CancelEvidenceKind.CLEANED);
         }
-        close =
-                new CloseFacts(
-                        close.endOperation(),
-                        close.releaseOperation(),
-                        close.prefillSettled() || evidence.prefillSettled(),
-                        close.decodeSettled() || evidence.decodeSettled(),
-                        close.notificationsDone(),
-                        close.timersDone(),
-                        close.expired(),
-                        close.notificationsAttempted());
+        close = close.mergeSettlement(evidence.prefillSettled(), evidence.decodeSettled());
         if (evidence.kind() == CancelEvidenceKind.LOCAL_WITHDRAWN) {
             retainEnd(
                     new EndEvidence(
@@ -968,14 +725,7 @@ public final class RequestContext {
             return update(before, refresh(nowMs));
         }
         if (exact.kind() == ExpirationTimer.Kind.VISIBILITY) {
-            engine =
-                    new EngineFacts(
-                            engine.prefillObserved(),
-                            engine.prefillCompletedAtMs(),
-                            engine.decodeAccepted(),
-                            0L,
-                            true,
-                            engine.predictionSequence());
+            engine = engine.expireVisibility();
         } else if (exact.kind() == ExpirationTimer.Kind.INACTIVITY) {
             deadlines =
                     new ExpirationTimer.Plan(
@@ -996,27 +746,13 @@ public final class RequestContext {
                                     diagnosis == null ? "request inactive" : diagnosis.detail(),
                                     null);
                 }
-                close =
-                        new CloseFacts(
-                                close.endOperation(),
-                                close.releaseOperation(),
-                                close.prefillSettled(),
-                                close.decodeSettled(),
-                                close.notificationsDone(),
-                                close.timersDone(),
-                                true,
-                                close.notificationsAttempted());
+                close = close.markExpired();
                 retainEnd(
-                        new EndEvidence(
+                        EndEvidence.failure(
                                 route,
                                 EndKind.INACTIVITY,
-                                null,
-                                false,
-                                0L,
                                 StrategyErrorType.BATCH_SLO_EXPIRED,
-                                "request inactive",
-                                false,
-                                false),
+                                "request inactive"),
                         nowMs);
             }
         } else {
@@ -1045,16 +781,11 @@ public final class RequestContext {
                                     true);
                 } else if (delivery == null && !engine.decodeAccepted()) {
                     retainEnd(
-                            new EndEvidence(
+                            EndEvidence.failure(
                                     route,
                                     EndKind.INACTIVITY,
-                                    null,
-                                    false,
-                                    0L,
                                     StrategyErrorType.BATCH_SLO_EXPIRED,
-                                    "request scheduling deadline exceeded",
-                                    false,
-                                    false),
+                                    "request scheduling deadline exceeded"),
                             nowMs);
                 }
             }
@@ -1133,16 +864,7 @@ public final class RequestContext {
         var permit =
                 new ReconciliationPermit(
                         this, exact, route, terminal, preemption.confirmationPending());
-        preemption =
-                new PreemptionFacts(
-                        exact,
-                        preemption.phase(),
-                        preemption.cancelAcknowledged(),
-                        false,
-                        terminal,
-                        preemption.confirmationPending(),
-                        preemption.restorationObserved(),
-                        permit);
+        preemption = preemption.beginReconciliation(permit);
         return new Granted<>(before, refresh(before.updatedAtMs()), permit);
     }
 
@@ -1175,48 +897,20 @@ public final class RequestContext {
                 && !previous.phase().canTransitionTo(next)) {
             return update(before, before);
         }
-        boolean acknowledged =
-                previous.cancelAcknowledged() || next == PreemptionCancelPhase.CANCEL_REQUESTED;
         var terminal = report.terminal() == null ? previous.pendingTerminal() : report.terminal();
-        boolean finished = previous.finished() || report.ledgerCommitted() && terminal != null;
-        preemption =
-                new PreemptionFacts(
-                        exact,
-                        next,
-                        acknowledged,
-                        finished,
-                        terminal,
-                        previous.confirmationPending(),
-                        previous.restorationObserved(),
-                        null);
+        preemption = previous.recordReport(next, terminal, report.ledgerCommitted());
         if (report.ledgerCommitted()) {
             if (delivery != null && terminal != null) {
-                var old = delivery;
                 delivery =
-                        new DeliveryFacts(
-                                old.identity(),
-                                old.send(),
-                                old.acknowledged(),
-                                old.abandonment(),
-                                old.executionFinished() || terminal.kind() == EndKind.WORKER,
-                                old.prefillProof() || terminal.prefillSettled(),
-                                old.decodeProof() || report.decodeSettled(),
-                                old.transferred(),
-                                old.startedAtMs(),
-                                old.acknowledgedAtMs());
+                        delivery.mergeReleaseProof(
+                                terminal.kind() == EndKind.WORKER,
+                                terminal.prefillSettled(),
+                                report.decodeSettled());
             }
             close =
-                    new CloseFacts(
-                            close.endOperation(),
-                            close.releaseOperation(),
-                            close.prefillSettled() || terminal != null && terminal.prefillSettled(),
-                            close.decodeSettled()
-                                    || report.decodeSettled()
-                                    || terminal != null && terminal.decodeSettled(),
-                            close.notificationsDone(),
-                            close.timersDone(),
-                            close.expired(),
-                            close.notificationsAttempted());
+                    close.mergeSettlement(
+                            terminal != null && terminal.prefillSettled(),
+                            report.decodeSettled() || terminal != null && terminal.decodeSettled());
             if (terminal != null) {
                 retainEnd(terminal, nowMs);
             } else {
@@ -1262,16 +956,7 @@ public final class RequestContext {
                 return new Rejected<>(before, before, Rejection.INVALID_STATE);
             }
             if (preemption != null && !preemption.finished() && !delivery.acknowledged()) {
-                preemption =
-                        new PreemptionFacts(
-                                preemption.identity(),
-                                preemption.phase(),
-                                preemption.cancelAcknowledged(),
-                                false,
-                                preemption.pendingTerminal(),
-                                true,
-                                preemption.restorationObserved(),
-                                preemption.reconciliation());
+                preemption = preemption.awaitConfirmation();
                 return new Blocked<>(before, refresh(candidate.nowMs()), Blocker.PREEMPTION);
             }
             long activity = Math.max(lastWorkerAtMs, delivery.startedAtMs());
@@ -1285,33 +970,16 @@ public final class RequestContext {
                                     null);
                 }
                 retainEnd(
-                        new EndEvidence(
+                        EndEvidence.failure(
                                 route,
                                 EndKind.INACTIVITY,
-                                null,
-                                false,
-                                0L,
                                 StrategyErrorType.BATCH_SLO_EXPIRED,
-                                "request inactive before confirmation",
-                                false,
-                                false),
+                                "request inactive before confirmation"),
                         candidate.nowMs());
                 return new Rejected<>(before, refresh(candidate.nowMs()), Rejection.CANCELLED);
             }
             if (!delivery.acknowledged()) {
-                var old = delivery;
-                delivery =
-                        new DeliveryFacts(
-                                old.identity(),
-                                old.send(),
-                                true,
-                                old.abandonment(),
-                                old.executionFinished(),
-                                old.prefillProof(),
-                                old.decodeProof(),
-                                old.transferred(),
-                                old.startedAtMs(),
-                                candidate.nowMs());
+                delivery = delivery.acknowledge(candidate.nowMs());
             }
         } else if (candidate.kind() == ResponseKind.TERMINAL && outcome == null
                 || candidate.kind() == ResponseKind.CANCELLATION && cancellation == null) {
@@ -1372,18 +1040,7 @@ public final class RequestContext {
         if (outcome == null) {
             outcome = classify(pendingEnd);
             phase = Phase.ENDING;
-            close =
-                    new CloseFacts(
-                            null,
-                            close.releaseOperation(),
-                            close.prefillSettled()
-                                    || pendingEnd.prefillSettled()
-                                    || engine.prefillCompletedAtMs() > 0L,
-                            close.decodeSettled() || pendingEnd.decodeSettled(),
-                            false,
-                            false,
-                            close.expired() || pendingEnd.kind() == EndKind.INACTIVITY,
-                            close.notificationsAttempted());
+            close = close.beginEnding(pendingEnd, engine.prefillCompletedAtMs() > 0L);
             if (delivery != null) {
                 var old = delivery;
                 boolean success =
@@ -1398,34 +1055,13 @@ public final class RequestContext {
                                         : cancellation == null
                                                 ? CancelReason.CLIENT_CANCELLED
                                                 : cancellation.reason();
-                var send = old.send();
-                delivery =
-                        new DeliveryFacts(
-                                old.identity(),
-                                send,
-                                old.acknowledged(),
-                                abandoned,
-                                old.executionFinished() || success,
-                                old.prefillProof(),
-                                old.decodeProof(),
-                                old.transferred(),
-                                old.startedAtMs(),
-                                old.acknowledgedAtMs());
+                delivery = old.recordEnd(abandoned, success);
             }
             if (preemption != null
                     && (close.expired()
                             || pendingEnd.kind() == EndKind.RETIREMENT
                                     && pendingEnd.decodeSettled())) {
-                preemption =
-                        new PreemptionFacts(
-                                preemption.identity(),
-                                preemption.phase(),
-                                preemption.cancelAcknowledged(),
-                                true,
-                                preemption.pendingTerminal(),
-                                preemption.confirmationPending(),
-                                preemption.restorationObserved(),
-                                preemption.reconciliation());
+                preemption = preemption.finish();
             }
             pendingEnd = null;
         }
@@ -1437,16 +1073,7 @@ public final class RequestContext {
                         preemption == null || !preemption.finished()
                                 ? null
                                 : preemption.identity());
-        close =
-                new CloseFacts(
-                        exact,
-                        close.releaseOperation(),
-                        close.prefillSettled(),
-                        close.decodeSettled(),
-                        false,
-                        close.timersDone(),
-                        close.expired(),
-                        false);
+        close = close.claimNotifications(exact);
         return new Granted<>(before, refresh(nowMs), exact);
     }
 
@@ -1486,16 +1113,7 @@ public final class RequestContext {
                         close.decodeSettled(),
                         close.notificationsDone(),
                         close.timersDone());
-        close =
-                new CloseFacts(
-                        close.endOperation(),
-                        exact,
-                        close.prefillSettled(),
-                        close.decodeSettled(),
-                        close.notificationsDone(),
-                        close.timersDone(),
-                        close.expired(),
-                        close.notificationsAttempted());
+        close = close.claimRelease(exact);
         return new Granted<>(before, refresh(before.updatedAtMs()), exact);
     }
 
@@ -1517,34 +1135,9 @@ public final class RequestContext {
                 && delivery != null
                 && delivery.identity().kind() == DeliveryClaimKind.ROUTE_DECISION
                 && delivery.send() == SendState.NOT_STARTED) {
-            var old = delivery;
-            delivery =
-                    new DeliveryFacts(
-                            old.identity(),
-                            SendState.ROUTE_CLOSED,
-                            old.acknowledged(),
-                            old.abandonment(),
-                            old.executionFinished(),
-                            old.prefillProof(),
-                            old.decodeProof(),
-                            old.transferred(),
-                            old.startedAtMs(),
-                            old.acknowledgedAtMs());
+            delivery = delivery.withSendState(SendState.ROUTE_CLOSED);
         }
-        boolean notified =
-                close.notificationsDone()
-                        || progress.notificationsDone()
-                                && (preemption == null || preemption.finished());
-        close =
-                new CloseFacts(
-                        notification && notified ? null : close.endOperation(),
-                        notification ? close.releaseOperation() : null,
-                        close.prefillSettled() || progress.prefillSettled(),
-                        close.decodeSettled() || progress.decodeSettled(),
-                        notified,
-                        close.timersDone() || progress.timersDone(),
-                        close.expired(),
-                        close.notificationsAttempted() || notification);
+        close = close.recordProgress(progress, preemption == null || preemption.finished());
         if (preemption != null
                 && close.decodeSettled()
                 && (close.expired()
@@ -1553,16 +1146,7 @@ public final class RequestContext {
                         || delivery.abandonment() != null
                                 && delivery.prefillProof()
                                 && delivery.decodeProof())) {
-            preemption =
-                    new PreemptionFacts(
-                            preemption.identity(),
-                            preemption.phase(),
-                            preemption.cancelAcknowledged(),
-                            true,
-                            preemption.pendingTerminal(),
-                            preemption.confirmationPending(),
-                            preemption.restorationObserved(),
-                            preemption.reconciliation());
+            preemption = preemption.finish();
         }
         if (close.prefillSettled()
                 && close.decodeSettled()
@@ -1593,16 +1177,7 @@ public final class RequestContext {
 
     private void retainEnd(EndEvidence evidence, long nowMs) {
         if (outcome != null) {
-            close =
-                    new CloseFacts(
-                            close.endOperation(),
-                            close.releaseOperation(),
-                            close.prefillSettled() || evidence.prefillSettled(),
-                            close.decodeSettled() || evidence.decodeSettled(),
-                            close.notificationsDone(),
-                            close.timersDone(),
-                            close.expired() || evidence.kind() == EndKind.INACTIVITY,
-                            close.notificationsAttempted());
+            close = close.retainEnd(evidence);
             return;
         }
         boolean deliveryFailure =
@@ -1636,16 +1211,7 @@ public final class RequestContext {
                     previous == null
                             || evidence.kind() == EndKind.WORKER
                                     && previous.kind() != EndKind.WORKER;
-            preemption =
-                    new PreemptionFacts(
-                            preemption.identity(),
-                            preemption.phase(),
-                            preemption.cancelAcknowledged(),
-                            false,
-                            better ? evidence : previous,
-                            preemption.confirmationPending(),
-                            preemption.restorationObserved(),
-                            preemption.reconciliation());
+            preemption = preemption.retainTerminal(better ? evidence : previous);
             return;
         }
         if (pendingEnd == null

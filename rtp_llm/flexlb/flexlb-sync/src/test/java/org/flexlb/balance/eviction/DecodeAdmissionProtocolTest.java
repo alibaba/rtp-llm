@@ -50,7 +50,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-class DecodeCapacityAcquirerProtocolTest {
+class DecodeAdmissionProtocolTest {
 
     private SchedulerRuntime runtime;
 
@@ -120,18 +120,18 @@ class DecodeCapacityAcquirerProtocolTest {
                         anyLong()))
                 .thenReturn(
                         CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.ACCEPTED));
-        DecodeCapacityAcquirer acquirer =
-                new DecodeCapacityAcquirer(
+        DecodeAdmission acquirer =
+                new DecodeAdmission(
                         dispatcher(engineClient),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests),
                         runtime,
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(2L, 100L));
-        CompletableFuture<DecodeCapacityAcquirer.PreemptionResult> result =
+        CompletableFuture<DecodeAdmission.PreemptionResult> result =
                 preempt(
                         acquirer,
-                        new DecodeCapacityAcquirer.PreemptionCommand(
+                        new DecodeAdmission.PreemptionCommand(
                                 endpoint,
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -201,7 +201,7 @@ class DecodeCapacityAcquirerProtocolTest {
                 .thenReturn(
                         CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.ACCEPTED));
         var acquirer =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         dispatcher(channel),
                         SchedulerTestSupport.repository(fixture.requests()),
                         runtime,
@@ -212,7 +212,7 @@ class DecodeCapacityAcquirerProtocolTest {
         var outcome =
                 preempt(
                                 acquirer,
-                                new DecodeCapacityAcquirer.PreemptionCommand(
+                                new DecodeAdmission.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -227,10 +227,11 @@ class DecodeCapacityAcquirerProtocolTest {
         assertFalse(outcome.committed());
         verify(fixture.endpoint(), never()).commitPreemption(anyLong());
         verify(fixture.endpoint()).abortPreemption(1L);
-        verify(fixture.requests(), never())
+        verify(fixture.requests())
                 .onPreemption(
                         victimClaim,
                         new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
+        verify(channel, never()).cancelAsync(any(), anyInt(), any(), anyLong());
     }
 
     @Test
@@ -245,7 +246,7 @@ class DecodeCapacityAcquirerProtocolTest {
         when(fixture.endpoint().commitPreemption(anyLong())).thenReturn(null);
         var channel = mock(EngineGrpcClient.class);
         var acquirer =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         dispatcher(channel),
                         SchedulerTestSupport.repository(fixture.requests()),
                         runtime,
@@ -256,7 +257,7 @@ class DecodeCapacityAcquirerProtocolTest {
         var outcome =
                 preempt(
                                 acquirer,
-                                new DecodeCapacityAcquirer.PreemptionCommand(
+                                new DecodeAdmission.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -283,7 +284,7 @@ class DecodeCapacityAcquirerProtocolTest {
     @EnumSource(
             value = EngineGrpcClient.CancelReply.class,
             names = {"ACCEPTED", "FAILED", "REQUEST_FENCED"})
-    void timeoutBeginsAfterAckAndLateTerminalCannotReopenIncoming(
+    void timeoutIncludesAckWaitAndLateTerminalCannotReopenIncoming(
             EngineGrpcClient.CancelReply acknowledgement) throws Exception {
         Fixture fixture = fixture();
         CompletableFuture<VictimResolution> terminal = new CompletableFuture<>();
@@ -302,8 +303,8 @@ class DecodeCapacityAcquirerProtocolTest {
                                                 == REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED),
                         anyLong()))
                 .thenReturn(ack);
-        DecodeCapacityAcquirer acquirer =
-                new DecodeCapacityAcquirer(
+        DecodeAdmission acquirer =
+                new DecodeAdmission(
                         dispatcher(channel),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 fixture.requests()),
@@ -311,10 +312,10 @@ class DecodeCapacityAcquirerProtocolTest {
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(1L, 100L));
-        CompletableFuture<DecodeCapacityAcquirer.PreemptionResult> outcome =
+        CompletableFuture<DecodeAdmission.PreemptionResult> outcome =
                 preempt(
                         acquirer,
-                        new DecodeCapacityAcquirer.PreemptionCommand(
+                        new DecodeAdmission.PreemptionCommand(
                                 fixture.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -324,11 +325,9 @@ class DecodeCapacityAcquirerProtocolTest {
                                 () -> true,
                                 "test"));
 
-        // Transport owns the ACK deadline. The terminal-wait budget starts
-        // only when that phase resolves, even if the transport outcome is unknown.
-        assertThrows(TimeoutException.class, () -> outcome.get(60L, TimeUnit.MILLISECONDS));
-        ack.complete(acknowledgement);
+        // The admission budget includes the outstanding RPC; a late ACK cannot restart it.
         var timedOut = outcome.get(1L, TimeUnit.SECONDS);
+        ack.complete(acknowledgement);
         assertFalse(timedOut.committed());
         assertTrue(timedOut.controlFailure());
         assertEquals("cancel_terminal_unknown", timedOut.detail());
@@ -383,8 +382,8 @@ class DecodeCapacityAcquirerProtocolTest {
                                                         == 11L
                                                 ? EngineGrpcClient.CancelReply.ACCEPTED
                                                 : EngineGrpcClient.CancelReply.FAILED));
-        DecodeCapacityAcquirer acquirer =
-                new DecodeCapacityAcquirer(
+        DecodeAdmission acquirer =
+                new DecodeAdmission(
                         dispatcher(channel),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 fixture.requests()),
@@ -398,7 +397,7 @@ class DecodeCapacityAcquirerProtocolTest {
         var outcome =
                 preempt(
                         acquirer,
-                        new DecodeCapacityAcquirer.PreemptionCommand(
+                        new DecodeAdmission.PreemptionCommand(
                                 fixture.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -511,7 +510,7 @@ class DecodeCapacityAcquirerProtocolTest {
                                         ? firstAck
                                         : secondAck);
         var acquirer =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         dispatcher(channel),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 fixture.requests()),
@@ -522,7 +521,7 @@ class DecodeCapacityAcquirerProtocolTest {
         var result =
                 preempt(
                         acquirer,
-                        new DecodeCapacityAcquirer.PreemptionCommand(
+                        new DecodeAdmission.PreemptionCommand(
                                 fixture.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -619,7 +618,7 @@ class DecodeCapacityAcquirerProtocolTest {
                         anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(reply));
         var acquirer =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         dispatcher(channel),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 fixture.requests()),
@@ -630,7 +629,7 @@ class DecodeCapacityAcquirerProtocolTest {
         var outcome =
                 preempt(
                         acquirer,
-                        new DecodeCapacityAcquirer.PreemptionCommand(
+                        new DecodeAdmission.PreemptionCommand(
                                 fixture.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -670,7 +669,7 @@ class DecodeCapacityAcquirerProtocolTest {
                 .thenReturn(Optional.of(first), Optional.empty());
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
         var acquirer =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         dispatcher(channel),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 fixture.requests()),
@@ -681,7 +680,7 @@ class DecodeCapacityAcquirerProtocolTest {
         var result =
                 preempt(
                                 acquirer,
-                                new DecodeCapacityAcquirer.PreemptionCommand(
+                                new DecodeAdmission.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -715,7 +714,7 @@ class DecodeCapacityAcquirerProtocolTest {
                         new IllegalStateException("Priority victim has no routable Cancel target"));
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
         var acquirer =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         dispatcher(channel),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 fixture.requests()),
@@ -726,7 +725,7 @@ class DecodeCapacityAcquirerProtocolTest {
         var result =
                 preempt(
                                 acquirer,
-                                new DecodeCapacityAcquirer.PreemptionCommand(
+                                new DecodeAdmission.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -757,7 +756,7 @@ class DecodeCapacityAcquirerProtocolTest {
         when(fixture.requests().tryClaim(eq(stale), anyLong(), any())).thenReturn(Optional.empty());
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
         var acquirer =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         dispatcher(channel),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 fixture.requests()),
@@ -768,7 +767,7 @@ class DecodeCapacityAcquirerProtocolTest {
         var result =
                 preempt(
                                 acquirer,
-                                new DecodeCapacityAcquirer.PreemptionCommand(
+                                new DecodeAdmission.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -796,8 +795,7 @@ class DecodeCapacityAcquirerProtocolTest {
         var deadlineRan = new java.util.concurrent.CountDownLatch(1);
         var settlementThreads = new java.util.concurrent.CopyOnWriteArrayList<String>();
         var outcomes =
-                new java.util.ArrayList<
-                        CompletableFuture<DecodeCapacityAcquirer.PreemptionResult>>();
+                new java.util.ArrayList<CompletableFuture<DecodeAdmission.PreemptionResult>>();
         try {
             for (int i = 0; i < 2; i++) {
                 Fixture fixture = fixture();
@@ -829,7 +827,7 @@ class DecodeCapacityAcquirerProtocolTest {
                                 CompletableFuture.completedFuture(
                                         EngineGrpcClient.CancelReply.ACCEPTED));
                 var acquirer =
-                        new DecodeCapacityAcquirer(
+                        new DecodeAdmission(
                                 dispatcher(channel),
                                 SchedulerTestSupport.repository(fixture.requests()),
                                 runtime,
@@ -840,7 +838,7 @@ class DecodeCapacityAcquirerProtocolTest {
                 outcomes.add(
                         preempt(
                                 acquirer,
-                                new DecodeCapacityAcquirer.PreemptionCommand(
+                                new DecodeAdmission.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -879,7 +877,10 @@ class DecodeCapacityAcquirerProtocolTest {
         when(fixture.requests().tryClaim(any(), anyLong(), any()))
                 .thenReturn(Optional.of(victimClaim));
         var deadline = mock(org.flexlb.balance.scheduler.RequestTaskScheduler.Cancellation.class);
-        var protocolRuntime = runtime;
+        var protocolRuntime =
+                mock(
+                        org.flexlb.balance.scheduler.RequestTaskScheduler.class,
+                        org.mockito.AdditionalAnswers.delegatesTo(runtime));
         org.mockito.Mockito.doAnswer(
                         call -> {
                             call.<Runnable>getArgument(0).run();
@@ -902,7 +903,7 @@ class DecodeCapacityAcquirerProtocolTest {
                 .thenReturn(
                         CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.ACCEPTED));
         var acquirer =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         dispatcher(channel),
                         SchedulerTestSupport.repository(fixture.requests()),
                         protocolRuntime,
@@ -913,14 +914,14 @@ class DecodeCapacityAcquirerProtocolTest {
         var outcome =
                 preempt(
                                 acquirer,
-                                new DecodeCapacityAcquirer.PreemptionCommand(
+                                new DecodeAdmission.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
                                                 70, Long.MAX_VALUE),
                                         List.of(victim(11L, 101L)),
                                         50L,
-                                        1L,
+                                        1000L,
                                         () -> true,
                                         "schedule return race"))
                         .get(1L, TimeUnit.SECONDS);
@@ -1006,7 +1007,7 @@ class DecodeCapacityAcquirerProtocolTest {
                         }
                     };
             var acquirer =
-                    new DecodeCapacityAcquirer(
+                    new DecodeAdmission(
                             dispatcher(channel),
                             SchedulerTestSupport.repository(fixture.requests()),
                             tasks,
@@ -1016,7 +1017,7 @@ class DecodeCapacityAcquirerProtocolTest {
             var outcome =
                     acquirer.preempt(
                             context,
-                            new DecodeCapacityAcquirer.PreemptionCommand(
+                            new DecodeAdmission.PreemptionCommand(
                                     fixture.endpoint(),
                                     incoming(),
                                     org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -1106,7 +1107,7 @@ class DecodeCapacityAcquirerProtocolTest {
         var ack = new CompletableFuture<EngineGrpcClient.CancelReply>();
         when(channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(ack);
         var acquirer =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         dispatcher(channel),
                         SchedulerTestSupport.repository(fixture.requests()),
                         runtime,
@@ -1116,7 +1117,7 @@ class DecodeCapacityAcquirerProtocolTest {
         var outcome =
                 preempt(
                         acquirer,
-                        new DecodeCapacityAcquirer.PreemptionCommand(
+                        new DecodeAdmission.PreemptionCommand(
                                 fixture.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -1170,7 +1171,7 @@ class DecodeCapacityAcquirerProtocolTest {
                 var ack = new CompletableFuture<EngineGrpcClient.CancelReply>();
                 when(channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(ack);
                 var acquirer =
-                        new DecodeCapacityAcquirer(
+                        new DecodeAdmission(
                                 dispatcher(channel),
                                 SchedulerTestSupport.repository(fixture.requests()),
                                 runtime,
@@ -1181,7 +1182,7 @@ class DecodeCapacityAcquirerProtocolTest {
                 outcomes.add(
                         preempt(
                                 acquirer,
-                                new DecodeCapacityAcquirer.PreemptionCommand(
+                                new DecodeAdmission.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -1211,8 +1212,7 @@ class DecodeCapacityAcquirerProtocolTest {
             assertTrue(
                     nextSent.await(1, TimeUnit.SECONDS),
                     "slow coordinators must not occupy stop workers");
-            assertEquals(
-                    EngineGrpcClient.CancelReply.REQUEST_CLEANED, next.get(1, TimeUnit.SECONDS));
+            assertEquals(PreemptionRegistration.Reply.UNKNOWN, next.get(1, TimeUnit.SECONDS));
             release.countDown();
         } finally {
             release.countDown();
@@ -1224,8 +1224,8 @@ class DecodeCapacityAcquirerProtocolTest {
         }
     }
 
-    private CompletableFuture<DecodeCapacityAcquirer.PreemptionResult> preempt(
-            DecodeCapacityAcquirer acquirer, DecodeCapacityAcquirer.PreemptionCommand command) {
+    private CompletableFuture<DecodeAdmission.PreemptionResult> preempt(
+            DecodeAdmission acquirer, DecodeAdmission.PreemptionCommand command) {
         var context =
                 mock(
                         org.flexlb.balance.scheduler.RequestContext.class,
@@ -1358,7 +1358,7 @@ class DecodeCapacityAcquirerProtocolTest {
                     .when(runtime)
                     .executeRequestWork(any(), any());
             var acquirer =
-                    new DecodeCapacityAcquirer(
+                    new DecodeAdmission(
                             dispatcher(channel),
                             SchedulerTestSupport.repository(f.requests()),
                             runtime,
@@ -1368,7 +1368,7 @@ class DecodeCapacityAcquirerProtocolTest {
             var outcome =
                     acquirer.preempt(
                             context,
-                            new DecodeCapacityAcquirer.PreemptionCommand(
+                            new DecodeAdmission.PreemptionCommand(
                                     f.endpoint(),
                                     incoming(),
                                     org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -1409,6 +1409,10 @@ class DecodeCapacityAcquirerProtocolTest {
     @org.junit.jupiter.api.Timeout(15)
     void queuedCoordinationUsesFrozenDeadlineResult(boolean completedInTime, boolean admissionOpen)
             throws Exception {
+        var timing =
+                mock(
+                        org.flexlb.balance.scheduler.RequestTaskScheduler.class,
+                        org.mockito.AdditionalAnswers.delegatesTo(runtime));
         var f = fixture();
         var terminal = new CompletableFuture<VictimResolution>();
         var victimClaim = claim(f.requests(), 11L, terminal);
@@ -1433,12 +1437,14 @@ class DecodeCapacityAcquirerProtocolTest {
         var open = new java.util.concurrent.atomic.AtomicBoolean(true);
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            assertEquals(20L, call.<Long>getArgument(1));
+                            assertTrue(
+                                    call.<Long>getArgument(1) > 0L
+                                            && call.<Long>getArgument(1) <= 20L);
                             timeout.set(call.getArgument(0));
                             registered.countDown();
                             return cancellation;
                         })
-                .when(runtime)
+                .when(timing)
                 .scheduleTimeout(any(), anyLong());
         try {
             for (int i = 0; i < workers.getMaximumPoolSize(); i++)
@@ -1454,17 +1460,17 @@ class DecodeCapacityAcquirerProtocolTest {
                         });
             assertTrue(entered.await(2, TimeUnit.SECONDS));
             var acquirer =
-                    new DecodeCapacityAcquirer(
+                    new DecodeAdmission(
                             dispatcher(channel),
                             SchedulerTestSupport.repository(f.requests()),
-                            runtime,
+                            timing,
                             mock(RequestSchedulerReporter.class),
                             SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                             new DecodeResources.AdmissionCapacity(1L, 100L));
             var outcome =
                     acquirer.preempt(
                             context,
-                            new DecodeCapacityAcquirer.PreemptionCommand(
+                            new DecodeAdmission.PreemptionCommand(
                                     f.endpoint(),
                                     incoming(),
                                     org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -1475,7 +1481,7 @@ class DecodeCapacityAcquirerProtocolTest {
                                     "frozen ACK deadline"));
             verify(channel, org.mockito.Mockito.timeout(1000))
                     .cancelAsync(any(), anyInt(), any(), anyLong());
-            verify(runtime, never()).scheduleTimeout(any(), anyLong());
+            verify(timing).scheduleTimeout(any(), anyLong());
             ack.complete(EngineGrpcClient.CancelReply.ACCEPTED);
             assertTrue(
                     registered.await(2, TimeUnit.SECONDS),
@@ -1529,7 +1535,7 @@ class DecodeCapacityAcquirerProtocolTest {
                                                 ? EngineGrpcClient.CancelReply.ACCEPTED
                                                 : EngineGrpcClient.CancelReply.NOT_FOUND));
         var acquirer =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         dispatcher(channel),
                         SchedulerTestSupport.repository(f.requests()),
                         runtime,
@@ -1539,7 +1545,7 @@ class DecodeCapacityAcquirerProtocolTest {
         var outcome =
                 preempt(
                         acquirer,
-                        new DecodeCapacityAcquirer.PreemptionCommand(
+                        new DecodeAdmission.PreemptionCommand(
                                 f.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -1564,6 +1570,10 @@ class DecodeCapacityAcquirerProtocolTest {
     @ValueSource(booleans = {false, true})
     void completedCanonicalFactUsesTheFrozenDeadlineWhileNotificationIsPaused(boolean expired)
             throws Exception {
+        var timing =
+                mock(
+                        org.flexlb.balance.scheduler.RequestTaskScheduler.class,
+                        org.mockito.AdditionalAnswers.delegatesTo(runtime));
         var f = fixture();
         var terminal = new CompletableFuture<VictimResolution>();
         var victimClaim = claim(f.requests(), 11L, terminal);
@@ -1587,20 +1597,20 @@ class DecodeCapacityAcquirerProtocolTest {
                                     org.flexlb.balance.scheduler.RequestTaskScheduler.Cancellation
                                             .class);
                         })
-                .when(runtime)
+                .when(timing)
                 .scheduleTimeout(any(), anyLong());
         var acquirer =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         dispatcher(channel),
                         SchedulerTestSupport.repository(f.requests()),
-                        runtime,
+                        timing,
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(1L, 100L));
         var outcome =
                 preempt(
                         acquirer,
-                        new DecodeCapacityAcquirer.PreemptionCommand(
+                        new DecodeAdmission.PreemptionCommand(
                                 f.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -1650,6 +1660,11 @@ class DecodeCapacityAcquirerProtocolTest {
             assertTrue(factVisible.await(2, TimeUnit.SECONDS));
             assertTrue(runtime.signals().resolved(victimClaim) != null);
             coordinator.run();
+            while (!outcome.isDone()) {
+                var work = queued.poll(2, TimeUnit.SECONDS);
+                assertTrue(work != null, "normalization and admission must both finish");
+                work.run();
+            }
             var result = outcome.get(2, TimeUnit.SECONDS);
             assertEquals(
                     !expired,
@@ -1677,11 +1692,34 @@ class DecodeCapacityAcquirerProtocolTest {
         }
         org.junit.jupiter.api.Assertions.assertNull(
                 predicate.get(),
-                "a finished wait must release its attempt even when the victim signal never completes");
+                "a finished wait must release its attempt even when the victim signal never"
+                        + " completes");
     }
 
     private java.lang.ref.WeakReference<java.util.function.BooleanSupplier>
             retiredAdmissionPredicate(boolean expire, boolean mixed) throws Exception {
+        var deadline = new CompletableFuture<Runnable>();
+        // A Mockito stubbing retains its last used invocation, even after clearInvocations.
+        // Keep the controllable timer free of recorded Runnable arguments for this GC contract.
+        var timing =
+                new org.flexlb.balance.scheduler.RequestTaskScheduler() {
+                    @Override
+                    public org.flexlb.balance.scheduler.RequestSignals signals() {
+                        return runtime.signals();
+                    }
+
+                    @Override
+                    public Cancellation scheduleTimeout(Runnable work, long delayMs) {
+                        deadline.complete(work);
+                        return () -> deadline.obtrudeValue(null);
+                    }
+
+                    @Override
+                    public void executeRequestWork(
+                            org.flexlb.balance.scheduler.RequestContext context, Runnable work) {
+                        runtime.executeRequestWork(context, work);
+                    }
+                };
         var f = fixture();
         var firstTerminal = new CompletableFuture<VictimResolution>();
         var secondTerminal = new CompletableFuture<VictimResolution>();
@@ -1705,21 +1743,11 @@ class DecodeCapacityAcquirerProtocolTest {
                                                         && (expire || mixed)
                                                 ? EngineGrpcClient.CancelReply.ACCEPTED
                                                 : EngineGrpcClient.CancelReply.NOT_FOUND));
-        var deadline = new CompletableFuture<Runnable>();
-        org.mockito.Mockito.doAnswer(
-                        call -> {
-                            deadline.complete(call.getArgument(0));
-                            return mock(
-                                    org.flexlb.balance.scheduler.RequestTaskScheduler.Cancellation
-                                            .class);
-                        })
-                .when(runtime)
-                .scheduleTimeout(any(), anyLong());
         var acquirer =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         dispatcher(channel),
                         SchedulerTestSupport.repository(f.requests()),
-                        runtime,
+                        timing,
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(2L, 100L));
@@ -1736,7 +1764,7 @@ class DecodeCapacityAcquirerProtocolTest {
         var outcome =
                 preempt(
                         acquirer,
-                        new DecodeCapacityAcquirer.PreemptionCommand(
+                        new DecodeAdmission.PreemptionCommand(
                                 f.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -1756,7 +1784,8 @@ class DecodeCapacityAcquirerProtocolTest {
         var unresolved = mixed ? second : first;
         assertFalse(
                 runtime.signals().preemption(unresolved).toCompletableFuture().isDone(),
-                "ending the local wait must not manufacture remote cleanup evidence or cancel its signal");
+                "ending the local wait must not manufacture remote cleanup evidence or cancel its"
+                        + " signal");
         verify(f.endpoint(), never()).commitPreemption(anyLong());
         // Mockito retains submitted Runnable objects after execution; real executors discard them.
         org.mockito.Mockito.clearInvocations(runtime);

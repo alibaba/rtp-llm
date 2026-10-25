@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
+import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
@@ -34,7 +34,7 @@ public class PlacementConfiguration {
     public RequestScheduler requestScheduler(
             @Lazy RequestWorkerSelector router,
             DeliveryMetricsReporter reporter,
-            @Lazy DecodeCapacityAcquirer decodeCapacity,
+            @Lazy DecodeAdmission decodeCapacity,
             PlacementAvailability availability,
             SchedulerRuntime runtime,
             ConfigService configService,
@@ -60,7 +60,7 @@ public class PlacementConfiguration {
             FlexlbConfig config,
             RequestWorkerSelector router,
             DeliveryMetricsReporter reporter,
-            DecodeCapacityAcquirer decodeCapacity,
+            DecodeAdmission decodeCapacity,
             PlacementAvailability availability,
             AdmissionCapacity capacity,
             RecentCacheKeyTraceReporter traceReporter) {

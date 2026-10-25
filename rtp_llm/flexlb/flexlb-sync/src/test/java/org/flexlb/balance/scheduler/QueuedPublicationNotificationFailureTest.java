@@ -179,7 +179,7 @@ class QueuedPublicationNotificationFailureTest {
                                 assertFalse(
                                         WorkerBatcherTestSupport.state(
                                                         EndpointTestSupport.batcher(prefill))
-                                                .lock
+                                                .queueGuard()
                                                 .isHeldByCurrentThread());
                                 if (metricsFailure != null
                                         && call.getArgument(0, Integer.class) == 20) {

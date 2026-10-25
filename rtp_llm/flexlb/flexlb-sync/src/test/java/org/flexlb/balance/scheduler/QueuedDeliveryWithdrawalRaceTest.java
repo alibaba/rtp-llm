@@ -7,7 +7,7 @@ import org.flexlb.balance.endpoint.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
+import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.config.ConfigService;
@@ -97,7 +97,7 @@ class QueuedDeliveryWithdrawalRaceTest {
             } finally {
                 allowCommit.countDown();
                 if (withdrawal != null) {
-                    fixture.owner.completeWithdrawal(withdrawal, false);
+                    withdrawal.complete(ContextResult.PublicationResult.RESTORED);
                 }
             }
         }
@@ -130,7 +130,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                 assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
                 verify(fixture.client, never()).batchEnqueueAsync(anyString(), anyInt(), any());
             } finally {
-                fixture.owner.completeWithdrawal(withdrawal, false);
+                withdrawal.complete(ContextResult.PublicationResult.RESTORED);
             }
             assertEquals(ContextResult.Phase.OPEN, fixture.context.snapshot().phase());
             assertNotNull(fixture.context.snapshot().route());
@@ -218,7 +218,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                             config,
                             mock(RequestWorkerSelector.class),
                             reporter,
-                            mock(DecodeCapacityAcquirer.class),
+                            mock(DecodeAdmission.class),
                             runtime,
                             availability,
                             new DecodeResources.AdmissionCapacity(64L, 90),

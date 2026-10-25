@@ -170,7 +170,11 @@ class StopExecutorSafetyTest {
     @Test
     void thirtyOutstandingRpcsDoNotOccupyEightStopWorkers() throws Exception {
         var runtime = runtime();
-        var cleanup = new DeliveryCleanup();
+        var cleanup =
+                new DeliveryDispatcher(
+                        null,
+                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null));
         var client = mock(org.flexlb.engine.grpc.EngineGrpcClient.class);
         var rpcReplies =
                 new java.util.concurrent.CopyOnWriteArrayList<

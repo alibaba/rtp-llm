@@ -39,7 +39,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Exact plan commit; only the accepted handoff transfers generation ownership to the sender. */
     public PrefillState.CommittedHandoff commit(PrefillState.CommitPlan plan) {
-        var lock = ownership.lock;
+        var lock = ownership.queueGuard();
         lock.lock();
         try {
             return commitLocked(plan);
@@ -49,8 +49,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     public PrefillState.CommittedHandoff commitLocked(PrefillState.CommitPlan plan) {
-        checkState(
-                ownership.lock.isHeldByCurrentThread(), "commit requires Prefill ownership lock");
+        ownership.queueGuard().requireHeld();
         if (plan.kind() != PrefillState.CommitKind.DIRECT
                 && !ownership.ownsSelectionLocked(plan.items(), plan.selectionTimeMs())) {
             return null;
@@ -143,7 +142,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         System::currentTimeMillis);
     }
 
-    /** Captured under ownership.lock; the shared result is built without that lock. */
+    /** Captured under ownership.queueGuard(); the shared result is built without that lock. */
     private final class ProjectionSource {
         private final PrefillState.Progress version;
         private PrefillState.Snapshot ownership;
@@ -197,7 +196,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public RequestTimeEstimation.Inputs captureRouteProjectionInputs() {
         ProjectionSource source = projectionSource;
         if (source == null || source.version != ownership.progress()) {
-            ownership.lock.lock();
+            ownership.queueGuard().lock();
             try {
                 source = projectionSource;
                 if (source == null || source.version != ownership.progress()) {
@@ -213,7 +212,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     projectionSource = source;
                 }
             } finally {
-                ownership.lock.unlock();
+                ownership.queueGuard().unlock();
             }
         }
         // Concurrent callers share one source per version. A late build only
@@ -234,7 +233,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     public void enableQueueRuntime(QueueExecutionSettings settings) {
-        ownership.lock.lock();
+        ownership.queueGuard().lock();
         try {
             if (batcher != null) {
                 return;
@@ -254,7 +253,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             batcher = newBatcher;
             newBatcher.start();
         } finally {
-            ownership.lock.unlock();
+            ownership.queueGuard().unlock();
         }
     }
 
@@ -275,11 +274,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 if (batcher != null) {
                     batcher.signal(kind == Signal.CAPACITY);
                 } else if (kind == Signal.INPUT) {
-                    ownership.lock.lock();
+                    ownership.queueGuard().lock();
                     try {
                         ownership.schedulingInputsChangedLocked();
                     } finally {
-                        ownership.lock.unlock();
+                        ownership.queueGuard().unlock();
                     }
                 }
             }
@@ -431,7 +430,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         checkArgument(
                 observation.owner() == ws,
                 "Status observation belongs to another Prefill generation");
-        var lock = ownership.lock;
+        var lock = ownership.queueGuard();
         PrefillState.StatusReduction reduction = null;
         PrefillState.StatusReconciliation result = null;
         Map<Long, Long> predictions = Map.of();
@@ -548,7 +547,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 observation.owner() == ws,
                 "Status observation belongs to another Prefill generation");
         PrefillState.StatusReconciliation reconciliation;
-        ownership.lock.lock();
+        ownership.queueGuard().lock();
         try {
             reconciliation =
                     ownership.commitStatusLocked(
@@ -558,7 +557,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 ownership.schedulingInputsChangedLocked();
             }
         } finally {
-            ownership.lock.unlock();
+            ownership.queueGuard().unlock();
         }
         return new StatusChange.Prefill(reconciliation);
     }

@@ -35,8 +35,6 @@ import java.util.OptionalLong;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.ReentrantLock;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -173,13 +171,11 @@ public final class WorkerBatcher {
     private final DeliveryDispatcher dispatcher;
     private Runnable removeCapacityListener;
 
-    /** Shared P ownership lock serializes queue changes, wait predicates and subscriptions. */
-    private final ReentrantLock queueLock;
+    /** Shared P ownership guard serializes queue changes, wait predicates and subscriptions. */
+    private final PrefillState.QueueGuard queueGuard;
 
-    /** Canonical request ownership guarded exclusively by {@link #queueLock}. */
+    /** Canonical request ownership guarded exclusively by {@link #queueGuard}. */
     private final PrefillState prefillState;
-
-    private final Condition stateChanged;
 
     /** Exact queued identities whose stop facts must run before normal grouping. */
     private final ArrayDeque<RequestRoute> controlInbox = new ArrayDeque<>();
@@ -196,7 +192,7 @@ public final class WorkerBatcher {
     /** Exact active head for which this worker is waiting on a capacity event. */
     private BatcherCycleResult capacityBlockedHead;
 
-    /** Last waiting decision; timeout readers never acquire queueLock. */
+    /** Last waiting decision; timeout readers never acquire queueGuard. */
     private volatile QueueWaitSnapshot latestQueueWaitSnapshot;
 
     public WorkerBatcher(
@@ -209,13 +205,12 @@ public final class WorkerBatcher {
         this.prefillEndpoint = Objects.requireNonNull(prefillEp, "prefillEndpoint");
         this.settings = Objects.requireNonNull(settings);
         this.prefillState = Objects.requireNonNull(prefillState, "prefillState");
-        this.queueLock = prefillState.lock;
+        this.queueGuard = prefillState.queueGuard();
         this.capacityAvailableSignal =
                 () -> {
                     signal(true);
                     prefillEndpoint.signal(PrefillEndpoint.Signal.PLACEMENT);
                 };
-        this.stateChanged = queueLock.newCondition();
         this.grouping =
                 settings.grouping() == DecisionPolicyConfig.Type.SINGLE
                         ? GroupingPolicy.SINGLE
@@ -262,7 +257,7 @@ public final class WorkerBatcher {
             return false;
         }
         boolean accepted;
-        queueLock.lock();
+        queueGuard.lock();
         try {
             if (drainClaimed || prefillEndpoint.isGenerationRetiringOrRetired()) {
                 return false;
@@ -274,10 +269,10 @@ public final class WorkerBatcher {
                                     System.currentTimeMillis())
                             != null;
             if (accepted) {
-                stateChanged.signal();
+                queueGuard.signal();
             }
         } finally {
-            queueLock.unlock();
+            queueGuard.unlock();
         }
         return accepted;
     }
@@ -295,7 +290,7 @@ public final class WorkerBatcher {
 
     /** Caller holds P lock; availability only probes the already subscribed resource. */
     public PlanningView planningViewLocked() {
-        checkState(queueLock.isHeldByCurrentThread(), "planning view requires queueLock");
+        queueGuard.requireHeld();
         BatcherCycleResult blocked = capacityBlockedHead;
         AdmissionBlock block =
                 blocked == null
@@ -358,16 +353,16 @@ public final class WorkerBatcher {
         Throwable cleanupFailure = null;
         try {
             try {
-                queueLock.lock();
+                queueGuard.lock();
                 try {
                     controlInbox.clear();
                     cleanupFailure =
                             Failures.run(cleanupFailure, () -> setCapacityBlockedHeadLocked(null));
-                    stateChanged.signalAll();
+                    queueGuard.signalAll();
                 } catch (Throwable wakeFailure) {
                     cleanupFailure = Failures.append(cleanupFailure, wakeFailure);
                 } finally {
-                    cleanupFailure = Failures.run(cleanupFailure, queueLock::unlock);
+                    cleanupFailure = Failures.run(cleanupFailure, queueGuard::unlock);
                 }
             } catch (Throwable lockFailure) {
                 cleanupFailure = Failures.append(cleanupFailure, lockFailure);
@@ -445,7 +440,7 @@ public final class WorkerBatcher {
                 item.prefillEp() == prefillEndpoint,
                 "control belongs to another Prefill generation");
         boolean accepted;
-        queueLock.lock();
+        queueGuard.lock();
         try {
             if (drainClaimed || runtimeState != RuntimeState.RUNNING) {
                 return false;
@@ -462,10 +457,10 @@ public final class WorkerBatcher {
                                 != null;
             }
             if (accepted) {
-                stateChanged.signal();
+                queueGuard.signal();
             }
         } finally {
-            queueLock.unlock();
+            queueGuard.unlock();
         }
         if (accepted && command == Control.REMOVE) {
             capacityAvailableSignal.run();
@@ -532,7 +527,7 @@ public final class WorkerBatcher {
             String reason,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPrediction) {
-        queueLock.lock();
+        queueGuard.lock();
         try {
             if (candidates.isEmpty()
                     || drainClaimed
@@ -540,7 +535,7 @@ public final class WorkerBatcher {
                 return null;
             }
         } finally {
-            queueLock.unlock();
+            queueGuard.unlock();
         }
         Preparation prep = new Preparation(candidates.getFirst(), candidates.size());
         CapacityBoundary boundary = null;
@@ -814,11 +809,11 @@ public final class WorkerBatcher {
     /** Serialize a delivery commit with queue drain and exact generation ownership. */
     PrefillState.CommittedHandoff commitSelection(
             java.util.function.LongFunction<PrefillState.CommittedHandoff> commit) {
-        queueLock.lock();
+        queueGuard.lock();
         try {
             return drainClaimed ? null : commit.apply(System.currentTimeMillis());
         } finally {
-            queueLock.unlock();
+            queueGuard.unlock();
         }
     }
 
@@ -830,7 +825,7 @@ public final class WorkerBatcher {
         boolean capacityBlocked = blockedResult.unavailable();
         boolean failed = blockedResult.status() == CapacityBoundary.Status.FAILED;
         boolean removed = false;
-        queueLock.lock();
+        queueGuard.lock();
         try {
             if (drainClaimed) {
                 return BatcherCycleResult.NO_ACTION;
@@ -849,7 +844,7 @@ public final class WorkerBatcher {
                                 != null;
             }
         } finally {
-            queueLock.unlock();
+            queueGuard.unlock();
         }
         if (capacityBlocked) {
             return BatcherCycleResult.capacityBlocked(blockedItem, blockedResult);
@@ -999,11 +994,11 @@ public final class WorkerBatcher {
                         return;
                     }
                     RequestRoute control;
-                    queueLock.lock();
+                    queueGuard.lock();
                     try {
                         control = controlInbox.pollFirst();
                     } finally {
-                        queueLock.unlock();
+                        queueGuard.unlock();
                     }
                     if (control != null) {
                         control.ctx()
@@ -1062,7 +1057,7 @@ public final class WorkerBatcher {
      */
     private void awaitWork(BatcherCycleResult waiting) throws InterruptedException {
         boolean capacityWait = waiting != null && waiting.unavailable() != null;
-        queueLock.lockInterruptibly();
+        queueGuard.lockInterruptibly();
         try {
             if (capacityWait && !drainClaimed) {
                 setCapacityBlockedHeadLocked(waiting);
@@ -1091,9 +1086,9 @@ public final class WorkerBatcher {
                     return;
                 }
                 if (wakeAtMs == Long.MAX_VALUE) {
-                    stateChanged.await();
+                    queueGuard.await();
                 } else {
-                    stateChanged.awaitNanos(TimeUnit.MILLISECONDS.toNanos(wakeAtMs - nowMs));
+                    queueGuard.awaitNanos(TimeUnit.MILLISECONDS.toNanos(wakeAtMs - nowMs));
                 }
             }
         } finally {
@@ -1102,16 +1097,16 @@ public final class WorkerBatcher {
                     setCapacityBlockedHeadLocked(null);
                 }
             } finally {
-                queueLock.unlock();
+                queueGuard.unlock();
             }
         }
     }
 
     /** Called after Prefill or Decode capacity changes, outside endpoint locks. */
 
-    /** Own the blocked head, its listener and projection invalidation under queueLock. */
+    /** Own the blocked head, its listener and projection invalidation under queueGuard. */
     private void setCapacityBlockedHeadLocked(BatcherCycleResult blocked) {
-        checkState(queueLock.isHeldByCurrentThread(), "capacity block update requires queueLock");
+        queueGuard.requireHeld();
         if (capacityBlockedHead == blocked) {
             return;
         }
@@ -1134,24 +1129,24 @@ public final class WorkerBatcher {
 
     /** Wake after the status transaction has already committed its planning revision. */
     public void wake() {
-        queueLock.lock();
+        queueGuard.lock();
         try {
-            stateChanged.signal();
+            queueGuard.signal();
         } finally {
-            queueLock.unlock();
+            queueGuard.unlock();
         }
     }
 
     /** Wake decisions whose advisory worker-status or predictor input changed. */
     public void signal(boolean capacityOnly) {
-        queueLock.lock();
+        queueGuard.lock();
         try {
             if (!capacityOnly || capacityBlockedHead != null) {
                 prefillState.schedulingInputsChangedLocked();
-                stateChanged.signal();
+                queueGuard.signal();
             }
         } finally {
-            queueLock.unlock();
+            queueGuard.unlock();
         }
     }
 

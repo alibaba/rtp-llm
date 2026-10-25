@@ -3,10 +3,13 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
+import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.Objects;
+
+import static com.google.common.math.LongMath.saturatedAdd;
 
 /** Immutable facts and exact permissions, without execution callbacks or infrastructure handles. */
 public final class ContextResult {
@@ -61,6 +64,7 @@ public final class ContextResult {
 
     public enum PublicationResult {
         PREPARED,
+        RESTORED,
         PUBLISHED,
         NOT_PUBLISHED,
         WITHDRAWN,
@@ -133,7 +137,85 @@ public final class ContextResult {
             StrategyErrorType errorType,
             String detail,
             boolean prefillSettled,
-            boolean decodeSettled) {}
+            boolean decodeSettled) {
+        public static EndEvidence failure(
+                RequestRoute route, EndKind kind, StrategyErrorType errorType, String detail) {
+            return new EndEvidence(route, kind, null, false, 0L, errorType, detail, false, false);
+        }
+
+        public static EndEvidence publicationFailure(RequestRoute route, Response response) {
+            var error = StrategyErrorType.DISPATCH_FAILED;
+            if (response != null) {
+                for (var candidate : StrategyErrorType.values()) {
+                    if (candidate.getErrorCode() == response.getCode()) {
+                        error = candidate;
+                        break;
+                    }
+                }
+            }
+            return failure(
+                    route,
+                    EndKind.FAILURE,
+                    error,
+                    response == null
+                            ? "route publication did not commit"
+                            : response.getErrorMessage());
+        }
+
+        public static EndEvidence withdrawnFailure(String detail) {
+            return new EndEvidence(
+                    null,
+                    EndKind.FAILURE,
+                    null,
+                    false,
+                    0L,
+                    StrategyErrorType.DISPATCH_FAILED,
+                    detail,
+                    true,
+                    true);
+        }
+
+        public static EndEvidence externalFailure(
+                RequestRoute route, Response response, Throwable error) {
+            String detail =
+                    error != null
+                            ? "external future failure: " + error.getMessage()
+                            : response != null && response.getErrorMessage() != null
+                                    ? response.getErrorMessage()
+                                    : "external future completion";
+            return failure(route, EndKind.FRONTEND, StrategyErrorType.DISPATCH_FAILED, detail);
+        }
+
+        public static EndEvidence deliveryFailure(RequestRoute route, DeliveryEvidence evidence) {
+            String detail;
+            if (evidence instanceof PreparationFailure failed) {
+                detail = failed.detail();
+            } else {
+                var cause = ((TransportResult) evidence).result().cause();
+                String message = cause == null ? "unknown delivery failure" : cause.getMessage();
+                detail =
+                        "Delivery failed: "
+                                + (message == null || message.isBlank()
+                                        ? cause.getClass().getSimpleName()
+                                        : message);
+            }
+            return failure(
+                    route, EndKind.DELIVERY_FAILURE, StrategyErrorType.DISPATCH_FAILED, detail);
+        }
+
+        EndEvidence withoutRoute() {
+            return new EndEvidence(
+                    null,
+                    kind,
+                    role,
+                    success,
+                    errorCode,
+                    errorType,
+                    detail,
+                    prefillSettled,
+                    decodeSettled);
+        }
+    }
 
     public record EngineEvidence(
             RequestRoute route,
@@ -150,7 +232,21 @@ public final class ContextResult {
             boolean frontend,
             long nowMs,
             StrategyErrorType errorType,
-            String detail) {}
+            String detail) {
+        public static Cancellation frontend(long nowMs, String exhaustionCause) {
+            return new Cancellation(
+                    0L,
+                    CancelReason.CLIENT_CANCELLED,
+                    true,
+                    nowMs,
+                    exhaustionCause == null
+                            ? StrategyErrorType.REQUEST_CANCELLED
+                            : StrategyErrorType.RESOURCE_EXHAUSTED,
+                    exhaustionCause == null
+                            ? CancelReason.CLIENT_CANCELLED.getMessage()
+                            : exhaustionCause);
+        }
+    }
 
     public record CancellationFacts(
             CancelReason reason,
@@ -282,7 +378,75 @@ public final class ContextResult {
             boolean decodeAccepted,
             long visibilityAtMs,
             boolean visibilityOverdue,
-            long predictionSequence) {}
+            long predictionSequence) {
+        private static final long HANDOFF_GRACE_MS = 10_000L;
+
+        EngineFacts predict(long sequence, long atMs) {
+            if (predictionSequence == sequence) {
+                throw new IllegalStateException("delivery prediction already consumed");
+            }
+            if (atMs < 0L) {
+                throw new IllegalArgumentException("prediction timestamp must be non-negative");
+            }
+            return new EngineFacts(
+                    prefillObserved,
+                    prefillCompletedAtMs,
+                    decodeAccepted,
+                    visibility(decodeAccepted, prefillObserved, prefillCompletedAtMs, atMs, true),
+                    false,
+                    sequence);
+        }
+
+        EngineFacts observe(EngineEvidence evidence, boolean hasDecode) {
+            boolean isDecode = evidence.role() == RoleType.DECODE;
+            boolean accepted = decodeAccepted || isDecode && evidence.kind() != EngineKind.RETIRED;
+            boolean observed = prefillObserved || !isDecode && evidence.kind() == EngineKind.ACTIVE;
+            long completed =
+                    !isDecode
+                                    && evidence.kind() == EngineKind.COMPLETED
+                                    && prefillCompletedAtMs == 0L
+                            ? evidence.nowMs()
+                            : prefillCompletedAtMs;
+            long visibility =
+                    visibility(
+                            accepted,
+                            observed,
+                            completed,
+                            visibilityAtMs,
+                            hasDecode && predictionSequence != 0L);
+            return accepted == decodeAccepted
+                            && observed == prefillObserved
+                            && completed == prefillCompletedAtMs
+                            && visibility == visibilityAtMs
+                    ? this
+                    : new EngineFacts(
+                            observed, completed, accepted, visibility, false, predictionSequence);
+        }
+
+        EngineFacts expireVisibility() {
+            return new EngineFacts(
+                    prefillObserved,
+                    prefillCompletedAtMs,
+                    decodeAccepted,
+                    0L,
+                    true,
+                    predictionSequence);
+        }
+
+        private static long visibility(
+                boolean accepted,
+                boolean observed,
+                long completed,
+                long predicted,
+                boolean handoff) {
+            if (accepted || observed && completed == 0L) {
+                return 0L;
+            }
+            return completed > 0L && handoff
+                    ? saturatedAdd(completed, HANDOFF_GRACE_MS)
+                    : predicted;
+        }
+    }
 
     public record DeliveryFacts(
             DeliveryClaim identity,
@@ -294,7 +458,87 @@ public final class ContextResult {
             boolean decodeProof,
             boolean transferred,
             long startedAtMs,
-            long acknowledgedAtMs) {}
+            long acknowledgedAtMs) {
+        DeliveryFacts transferToSender() {
+            return new DeliveryFacts(
+                    identity,
+                    send,
+                    acknowledged,
+                    abandonment,
+                    executionFinished,
+                    prefillProof,
+                    decodeProof,
+                    true,
+                    startedAtMs,
+                    acknowledgedAtMs);
+        }
+
+        DeliveryFacts withSendState(SendState next) {
+            return recordResult(next, abandonment, prefillProof, decodeProof);
+        }
+
+        DeliveryFacts recordResult(
+                SendState next, CancelReason abandoned, boolean prefillProof, boolean decodeProof) {
+            return new DeliveryFacts(
+                    identity,
+                    next,
+                    acknowledged,
+                    abandoned,
+                    executionFinished,
+                    prefillProof,
+                    decodeProof,
+                    transferred,
+                    startedAtMs,
+                    acknowledgedAtMs);
+        }
+
+        DeliveryFacts mergeReleaseProof(
+                boolean finished, boolean prefillSettled, boolean decodeSettled) {
+            return new DeliveryFacts(
+                    identity,
+                    send,
+                    acknowledged,
+                    abandonment,
+                    executionFinished || finished,
+                    prefillProof || prefillSettled,
+                    decodeProof || decodeSettled,
+                    transferred,
+                    startedAtMs,
+                    acknowledgedAtMs);
+        }
+
+        DeliveryFacts abandon(SendState next, CancelReason reason) {
+            return recordResult(next, reason, prefillProof, decodeProof);
+        }
+
+        DeliveryFacts acknowledge(long nowMs) {
+            return new DeliveryFacts(
+                    identity,
+                    send,
+                    true,
+                    abandonment,
+                    executionFinished,
+                    prefillProof,
+                    decodeProof,
+                    transferred,
+                    startedAtMs,
+                    nowMs);
+        }
+
+        DeliveryFacts recordEnd(CancelReason abandoned, boolean completed) {
+            return new DeliveryFacts(
+                    identity,
+                    send,
+                    acknowledged,
+                    abandoned,
+                    executionFinished || completed,
+                    prefillProof,
+                    decodeProof,
+                    transferred,
+                    startedAtMs,
+                    acknowledgedAtMs);
+        }
+    }
 
     public record PreemptionFacts(
             PreemptionRegistration identity,
@@ -304,7 +548,80 @@ public final class ContextResult {
             EndEvidence pendingTerminal,
             boolean confirmationPending,
             boolean restorationObserved,
-            ReconciliationPermit reconciliation) {}
+            ReconciliationPermit reconciliation) {
+        PreemptionFacts observeRestoration() {
+            return new PreemptionFacts(
+                    identity,
+                    phase,
+                    cancelAcknowledged,
+                    finished,
+                    pendingTerminal,
+                    confirmationPending,
+                    true,
+                    reconciliation);
+        }
+
+        PreemptionFacts beginReconciliation(ReconciliationPermit permit) {
+            return new PreemptionFacts(
+                    identity,
+                    phase,
+                    cancelAcknowledged,
+                    finished,
+                    pendingTerminal,
+                    confirmationPending,
+                    restorationObserved,
+                    permit);
+        }
+
+        PreemptionFacts recordReport(
+                PreemptionCancelPhase next, EndEvidence terminal, boolean ledgerCommitted) {
+            return new PreemptionFacts(
+                    identity,
+                    next,
+                    cancelAcknowledged || next == PreemptionCancelPhase.CANCEL_REQUESTED,
+                    finished || ledgerCommitted && terminal != null,
+                    terminal,
+                    confirmationPending,
+                    restorationObserved,
+                    null);
+        }
+
+        PreemptionFacts awaitConfirmation() {
+            return new PreemptionFacts(
+                    identity,
+                    phase,
+                    cancelAcknowledged,
+                    finished,
+                    pendingTerminal,
+                    true,
+                    restorationObserved,
+                    reconciliation);
+        }
+
+        PreemptionFacts finish() {
+            return new PreemptionFacts(
+                    identity,
+                    phase,
+                    cancelAcknowledged,
+                    true,
+                    pendingTerminal,
+                    confirmationPending,
+                    restorationObserved,
+                    reconciliation);
+        }
+
+        PreemptionFacts retainTerminal(EndEvidence terminal) {
+            return new PreemptionFacts(
+                    identity,
+                    phase,
+                    cancelAcknowledged,
+                    finished,
+                    terminal,
+                    confirmationPending,
+                    restorationObserved,
+                    reconciliation);
+        }
+    }
 
     public record CloseFacts(
             EndToken endOperation,
@@ -314,7 +631,99 @@ public final class ContextResult {
             boolean notificationsDone,
             boolean timersDone,
             boolean expired,
-            boolean notificationsAttempted) {}
+            boolean notificationsAttempted) {
+        CloseFacts withSettlement(boolean prefillSettled, boolean decodeSettled) {
+            return new CloseFacts(
+                    endOperation,
+                    releaseOperation,
+                    prefillSettled,
+                    decodeSettled,
+                    notificationsDone,
+                    timersDone,
+                    expired,
+                    notificationsAttempted);
+        }
+
+        CloseFacts mergeSettlement(boolean prefillSettled, boolean decodeSettled) {
+            return withSettlement(
+                    this.prefillSettled || prefillSettled, this.decodeSettled || decodeSettled);
+        }
+
+        CloseFacts markExpired() {
+            return new CloseFacts(
+                    endOperation,
+                    releaseOperation,
+                    prefillSettled,
+                    decodeSettled,
+                    notificationsDone,
+                    timersDone,
+                    true,
+                    notificationsAttempted);
+        }
+
+        CloseFacts beginEnding(EndEvidence evidence, boolean prefillCompleted) {
+            return new CloseFacts(
+                    null,
+                    releaseOperation,
+                    prefillSettled || evidence.prefillSettled() || prefillCompleted,
+                    decodeSettled || evidence.decodeSettled(),
+                    false,
+                    false,
+                    expired || evidence.kind() == EndKind.INACTIVITY,
+                    notificationsAttempted);
+        }
+
+        CloseFacts claimNotifications(EndToken exact) {
+            return new CloseFacts(
+                    exact,
+                    releaseOperation,
+                    prefillSettled,
+                    decodeSettled,
+                    false,
+                    timersDone,
+                    expired,
+                    false);
+        }
+
+        CloseFacts claimRelease(ClosePermit exact) {
+            return new CloseFacts(
+                    endOperation,
+                    exact,
+                    prefillSettled,
+                    decodeSettled,
+                    notificationsDone,
+                    timersDone,
+                    expired,
+                    notificationsAttempted);
+        }
+
+        CloseFacts recordProgress(CloseProgress progress, boolean preemptionFinished) {
+            boolean notification = progress.kind() == ProgressKind.NOTIFICATIONS;
+            boolean notified =
+                    notificationsDone || progress.notificationsDone() && preemptionFinished;
+            return new CloseFacts(
+                    notification && notified ? null : endOperation,
+                    notification ? releaseOperation : null,
+                    prefillSettled || progress.prefillSettled(),
+                    decodeSettled || progress.decodeSettled(),
+                    notified,
+                    timersDone || progress.timersDone(),
+                    expired,
+                    notificationsAttempted || notification);
+        }
+
+        CloseFacts retainEnd(EndEvidence evidence) {
+            return new CloseFacts(
+                    endOperation,
+                    releaseOperation,
+                    prefillSettled || evidence.prefillSettled(),
+                    decodeSettled || evidence.decodeSettled(),
+                    notificationsDone,
+                    timersDone,
+                    expired || evidence.kind() == EndKind.INACTIVITY,
+                    notificationsAttempted);
+        }
+    }
 
     /** Control facts are shared by observations that change only activity timestamps. */
     public record SnapshotFacts(

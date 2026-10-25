@@ -826,7 +826,8 @@ class RequestTerminalSettlementTest {
                                 context,
                                 RequestFuture.Completion.FAILURE,
                                 null,
-                                new IllegalStateException("late frontend failure")));
+                                new IllegalStateException("late frontend failure"),
+                                true));
         assertTrue(
                 context.snapshot().deliveryReleasable(),
                 "late frontend failure cannot revoke completed execution evidence");

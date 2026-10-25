@@ -344,14 +344,14 @@ class RequestInflightRecoveryTest {
                             reservation,
                             System.currentTimeMillis());
             prefillState = (PrefillState) ReflectionTestUtils.getField(prefill, "ownership");
-            prefillState.lock.lock();
+            prefillState.queueGuard().lock();
             try {
                 ReflectionTestUtils.invokeMethod(
                         prefillState,
                         "enableQueueLocked",
                         Comparator.comparingLong(RequestRoute::requestId));
             } finally {
-                prefillState.lock.unlock();
+                prefillState.queueGuard().unlock();
             }
             try (var admission = owner.claimAdmissionHandle(REQUEST_ID, future);
                     var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
@@ -362,7 +362,7 @@ class RequestInflightRecoveryTest {
                                 route,
                                 RequestProtocolTestSupport.publication(
                                         () -> {
-                                            prefillState.lock.lock();
+                                            prefillState.queueGuard().lock();
                                             try {
                                                 return prefillState.updateQueue(
                                                                 PrefillState.QueueChange.ENQUEUE,
@@ -370,7 +370,7 @@ class RequestInflightRecoveryTest {
                                                                 System.currentTimeMillis())
                                                         == route;
                                             } finally {
-                                                prefillState.lock.unlock();
+                                                prefillState.queueGuard().unlock();
                                             }
                                         })));
             }
@@ -415,7 +415,7 @@ class RequestInflightRecoveryTest {
                                 item,
                                 RequestProtocolTestSupport.publication(
                                         () -> {
-                                            prefillState.lock.lock();
+                                            prefillState.queueGuard().lock();
                                             try {
                                                 return prefillState.updateQueue(
                                                                 PrefillState.QueueChange.ENQUEUE,
@@ -423,7 +423,7 @@ class RequestInflightRecoveryTest {
                                                                 System.currentTimeMillis())
                                                         == item;
                                             } finally {
-                                                prefillState.lock.unlock();
+                                                prefillState.queueGuard().unlock();
                                             }
                                         })));
             }
@@ -441,7 +441,7 @@ class RequestInflightRecoveryTest {
             var batch = prefill.reserveBatch(route, BATCH_ID, 1).reservation();
             assertNotNull(batch);
             PrefillState.CommittedHandoff handoff;
-            prefillState.lock.lock();
+            prefillState.queueGuard().lock();
             try {
                 handoff =
                         prefillState.commitLocked(
@@ -455,7 +455,7 @@ class RequestInflightRecoveryTest {
                                         System.currentTimeMillis()),
                                 null);
             } finally {
-                prefillState.lock.unlock();
+                prefillState.queueGuard().unlock();
             }
             assertNotNull(handoff);
             try (handoff) {

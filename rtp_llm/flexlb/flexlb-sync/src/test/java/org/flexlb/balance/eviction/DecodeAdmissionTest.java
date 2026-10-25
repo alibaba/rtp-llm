@@ -45,15 +45,15 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Admission and preemption contracts for {@link DecodeCapacityAcquirer#tryReclaim}.
+ * Admission and preemption contracts for {@link DecodeAdmission#tryReclaim}.
  *
  * <p>Requirement: every early decline is side-effect free (returns null
  * without reserving a permit, touching any port, or emitting telemetry).
  * Corner cases are derived from the domain requirements, not by echoing
  * if-branches.
  */
-@DisplayName("DecodeCapacityAcquirer.tryReclaim contracts")
-class DecodeCapacityAcquirerTest {
+@DisplayName("DecodeAdmission.tryReclaim contracts")
+class DecodeAdmissionTest {
 
     private RequestSchedulerReporter reporter;
 
@@ -63,7 +63,7 @@ class DecodeCapacityAcquirerTest {
 
     private WorkerEndpoint blockedEndpoint;
 
-    private DecodeCapacityAcquirer acquirer;
+    private DecodeAdmission acquirer;
 
     @BeforeEach
     void setUp() {
@@ -72,7 +72,7 @@ class DecodeCapacityAcquirerTest {
         requests = mock(AbstractRequestScheduler.class);
         blockedEndpoint = mock(WorkerEndpoint.class);
         acquirer =
-                new DecodeCapacityAcquirer(
+                new DecodeAdmission(
                         mock(org.flexlb.balance.scheduler.DeliveryDispatcher.class),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests),
                         mock(org.flexlb.balance.scheduler.SchedulerRuntime.class),
@@ -139,7 +139,7 @@ class DecodeCapacityAcquirerTest {
         when(routing.placementUsage())
                 .thenReturn(new DecodeResources.CapacityUsage(1L, 20_000L, 10_000L, 0L, 10_000L));
 
-        var completion = new CompletableFuture<DecodeCapacityAcquirer.PreemptionResult>();
+        var completion = new CompletableFuture<DecodeAdmission.PreemptionResult>();
         org.mockito.Mockito.doReturn(completion).when(acquirer).preempt(any(), any());
         var incoming = Request.builder().requestId(902L).seqLen(128L).rawPriority(70).build();
         var context = new RequestContext(config);
@@ -155,7 +155,7 @@ class DecodeCapacityAcquirerTest {
         var frozenRequest = context.data().getRequest();
         acquirer =
                 org.mockito.Mockito.spy(
-                        new DecodeCapacityAcquirer(
+                        new DecodeAdmission(
                                 mock(org.flexlb.balance.scheduler.DeliveryDispatcher.class),
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                         requests),
@@ -183,7 +183,7 @@ class DecodeCapacityAcquirerTest {
         }
         assertNotNull(outcome);
 
-        var command = ArgumentCaptor.forClass(DecodeCapacityAcquirer.PreemptionCommand.class);
+        var command = ArgumentCaptor.forClass(DecodeAdmission.PreemptionCommand.class);
         verify(acquirer).preempt(org.mockito.ArgumentMatchers.same(context), command.capture());
         assertEquals(completionTimeoutMs, command.getValue().preemptionTimeoutMs());
         assertEquals(50L, command.getValue().cancelAckTimeoutMs());
@@ -192,7 +192,7 @@ class DecodeCapacityAcquirerTest {
         assertEquals(List.of(victim), command.getValue().victims());
 
         var exact = new DecodeResources.ReservationHandle(7L, 902L, 31L);
-        completion.complete(new DecodeCapacityAcquirer.PreemptionResult(exact, false, "committed"));
+        completion.complete(new DecodeAdmission.PreemptionResult(exact, false, "committed"));
         assertSame(exact, outcome.join().reservation());
         assertNull(
                 context.data().getResponse(),
@@ -230,7 +230,7 @@ class DecodeCapacityAcquirerTest {
         when(context.data().getConfig()).thenReturn(config);
         acquirer =
                 org.mockito.Mockito.spy(
-                        new DecodeCapacityAcquirer(
+                        new DecodeAdmission(
                                 mock(org.flexlb.balance.scheduler.DeliveryDispatcher.class),
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                         requests),
@@ -286,7 +286,7 @@ class DecodeCapacityAcquirerTest {
         verifyNoInteractions(reporter);
     }
 
-    private CompletableFuture<DecodeCapacityAcquirer.PreemptionResult> tryReclaim(
+    private CompletableFuture<DecodeAdmission.PreemptionResult> tryReclaim(
             RequestContext context, CompletableFuture<Response> future) {
         when(context.data().getFuture()).thenReturn(future);
         return acquirer.tryReclaim(context, blockedEndpoint);
