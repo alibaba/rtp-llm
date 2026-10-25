@@ -599,7 +599,7 @@ public final class PrefillState {
     public PrefillLoadView loadView() {
         requireLock();
         long nowMs = clock.getAsLong();
-        return new PrefillLoadView(nowMs, activeIndex.capture(), cachedCommittedWork(nowMs));
+        return new PrefillLoadView(nowMs, activeIndex.waitingQueueView(), cachedCommittedWork(nowMs));
     }
 
     public WorkView committedSnapshot() {

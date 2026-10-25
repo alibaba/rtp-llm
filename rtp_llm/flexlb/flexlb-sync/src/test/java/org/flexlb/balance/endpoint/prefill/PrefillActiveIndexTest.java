@@ -33,7 +33,7 @@ class PrefillActiveIndexTest {
         var expected = new ArrayList<ScheduledRequest>();
         var random = new Random(36);
         for (int step = 0; step < 400; step++) {
-            var old = index.capture();
+            var old = index.waitingQueueView();
             var oldItems = List.copyOf(expected);
             if (expected.isEmpty() || random.nextBoolean()) {
                 var request = item(step, random.nextInt(4));
@@ -48,21 +48,21 @@ class PrefillActiveIndexTest {
                 assertFalse(index.remove(request));
             }
             assertEquals(oldItems, old.items());
-            assertEquals(expected, index.capture().items());
+            assertEquals(expected, index.waitingQueueView().items());
             for (int priority = 0; priority <= 100; priority++) {
                 int exactPriority = priority;
                 assertEquals(expected.stream().filter(item -> item.priority() == exactPriority).count(),
                         index.size(priority));
             }
-            assertSame(index.capture(), index.capture());
+            assertSame(index.waitingQueueView(), index.waitingQueueView());
             assertEquals(expected.isEmpty() ? null : expected.getFirst(), index.peek());
         }
-        var beforeClear = index.capture();
+        var beforeClear = index.waitingQueueView();
         index.clear();
         for (int priority = 0; priority <= 100; priority++) {
             assertEquals(0, index.size(priority));
         }
-        assertTrue(index.capture().items().isEmpty());
+        assertTrue(index.waitingQueueView().items().isEmpty());
         assertEquals(expected, beforeClear.items());
     }
 
@@ -74,7 +74,7 @@ class PrefillActiveIndexTest {
         assertTrue(index.add(first));
         assertTrue(index.add(second));
         assertFalse(index.remove(item(1, 50)));
-        assertEquals(List.of(first, second), index.capture().items());
+        assertEquals(List.of(first, second), index.waitingQueueView().items());
         assertTrue(index.remove(first));
         assertSame(second, index.peek());
     }
@@ -85,9 +85,9 @@ class PrefillActiveIndexTest {
         var index = PrefillActiveIndex.ordered(2, ORDER);
         var first = item(1, 50);
         index.add(first);
-        var old = index.capture();
+        var old = index.waitingQueueView();
         index.add(item(2, 40));
-        var current = index.capture();
+        var current = index.waitingQueueView();
         try (var pool = Executors.newFixedThreadPool(16)) {
             var start = new CountDownLatch(1);
             var tasks = new ArrayList<java.util.concurrent.Future<?>>();
@@ -118,7 +118,7 @@ class PrefillActiveIndexTest {
         when(second.seqLen()).thenThrow(new IllegalStateException("test failure")).thenReturn(10L);
         index.add(first);
         index.add(second);
-        var captured = index.capture();
+        var captured = index.waitingQueueView();
         assertThrows(IllegalStateException.class, captured::plannerItems);
         assertEquals(2, captured.plannerItems().size());
         assertSame(captured.plannerItems(), captured.plannerItems());

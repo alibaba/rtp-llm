@@ -203,7 +203,7 @@ public final class FixedWindowPicker implements QueuePicker {
                 return new ActiveQueueSnapshot(
                         version, inputVersion, List.of());
             }
-            items = queueState.activeIndex().capture().items();
+            items = queueState.activeIndex().waitingQueueView().items();
         } finally {
             queueState.unlock();
         }

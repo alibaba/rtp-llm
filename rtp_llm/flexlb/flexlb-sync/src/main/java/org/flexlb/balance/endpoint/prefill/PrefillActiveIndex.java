@@ -40,8 +40,10 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest> pe
 
     void clear();
 
-    /** Caller holds the owning PrefillState lock. Reused until membership changes. */
-    WaitingQueueView capture();
+    /**
+     * 返回等待队列的一份拷贝。调用方持有 PrefillState 的锁；队列没变化时复用同一份。
+     */
+    WaitingQueueView waitingQueueView();
 
     /** One identity in the active index; survives membership snapshot rebuilds. */
     final class Entry {
@@ -77,7 +79,7 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest> pe
         private final IdentityHashMap<ScheduledRequest, Entry> identities;
         private final int[] priorityCounts = new int[PriorityNormalizer.MAX_PRIORITY + 1];
         private long nextSequence;
-        private WaitingQueueView capture;
+        private WaitingQueueView cachedView;
 
         private Ordered(int initialCapacity, Comparator<ScheduledRequest> ordering) {
             identities = new IdentityHashMap<>(initialCapacity);
@@ -97,7 +99,7 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest> pe
             queue.add(entry);
             identities.put(item, entry);
             priorityCounts[item.priority()]++;
-            capture = null;
+            cachedView = null;
             return true;
         }
 
@@ -110,7 +112,7 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest> pe
             queue.remove(entry);
             identities.remove(item);
             priorityCounts[item.priority()]--;
-            capture = null;
+            cachedView = null;
             return true;
         }
 
@@ -142,15 +144,15 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest> pe
             Arrays.fill(priorityCounts, 0);
             queue.clear();
             identities.clear();
-            capture = null;
+            cachedView = null;
         }
 
         @Override
-        public WaitingQueueView capture() {
-            if (capture == null) {
-                capture = queue.isEmpty() ? WaitingQueueView.EMPTY : new WaitingQueueView(queue);
+        public WaitingQueueView waitingQueueView() {
+            if (cachedView == null) {
+                cachedView = queue.isEmpty() ? WaitingQueueView.EMPTY : new WaitingQueueView(queue);
             }
-            return capture;
+            return cachedView;
         }
 
         @Override

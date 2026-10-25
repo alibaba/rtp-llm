@@ -305,7 +305,7 @@ public final class PrefillQueue {
     // ==================== 排队快照和负载视图 ====================
 
     private List<ScheduledRequest> activeItemsInSchedulingOrder() {
-        return queueState.activeIndex().capture().items();
+        return queueState.activeIndex().waitingQueueView().items();
     }
 
     public PrefillTtftEstimate.LoadView captureLoadView() {
