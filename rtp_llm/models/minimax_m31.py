@@ -26,7 +26,8 @@ class MiniMaxM31(BaseModel):
         finalize_m31_kv_cache(model_config)
 
     def support_cuda_graph(self) -> bool:
-        return True
+        # M3.1 graph capture currently aborts during startup on SM103.
+        return False
 
     @staticmethod
     def get_weight_cls():

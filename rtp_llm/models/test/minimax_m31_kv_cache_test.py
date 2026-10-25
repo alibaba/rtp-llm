@@ -552,7 +552,7 @@ class MiniMaxM31KVCacheTest(unittest.TestCase):
             [MAIN_KV_TAG, INDEXER_KV_TAG],
         )
         self.assertIs(MiniMaxM31.get_weight_cls(), MiniMaxM31Weight)
-        self.assertTrue(MiniMaxM31.support_cuda_graph(None))
+        self.assertFalse(MiniMaxM31.support_cuda_graph(None))
 
     def test_prefill_chunking_preserves_reused_outputs_and_dummy_calls(self):
         hidden = torch.arange(12, dtype=torch.float32).view(6, 2)
