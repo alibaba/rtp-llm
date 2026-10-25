@@ -42,7 +42,7 @@ public enum StrategyErrorType {
     // a strictly higher-priority admission attempt.
     PRIORITY_PREEMPTED(8429, false),
     // Auto-TPM incoming rejection caused by a proven priority blocker.  The
-    // typed AdmissionRejectReason distinguishes higher- and same-priority.
+    // typed RejectReason distinguishes higher- and same-priority.
     PRIORITY_ADMISSION_REJECTED(8430, false),
     // Auto-TPM incoming rejection when no higher/same-priority queue blocker
     // explains the failure and the selected path cannot provide admission
@@ -102,12 +102,12 @@ public enum StrategyErrorType {
                 : QUEUE_FULL_HIGH_PRIORITY_REJECTED;
     }
 
-    public boolean acceptsAdmissionRejectReason(AdmissionRejectReason reason) {
+    public boolean acceptsAdmissionRejectReason(RejectReason reason) {
         return switch (this) {
-            case PRIORITY_ADMISSION_REJECTED -> reason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
-                    || reason == AdmissionRejectReason.SAME_PRIORITY_AHEAD;
-            case RESOURCE_EXHAUSTED -> reason == AdmissionRejectReason.RESOURCE_EXHAUSTED;
-            default -> reason == AdmissionRejectReason.UNSPECIFIED;
+            case PRIORITY_ADMISSION_REJECTED ->
+                reason == RejectReason.HIGHER_PRIORITY_AHEAD || reason == RejectReason.SAME_PRIORITY_AHEAD;
+            case RESOURCE_EXHAUSTED -> reason == RejectReason.RESOURCE_EXHAUSTED;
+            default -> reason == RejectReason.UNSPECIFIED;
         };
     }
 

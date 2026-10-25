@@ -8,7 +8,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.RejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.service.RouteService;
@@ -21,8 +21,8 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
-import static org.flexlb.dao.loadbalance.AdmissionRejectReason.RESOURCE_EXHAUSTED;
-import static org.flexlb.dao.loadbalance.AdmissionRejectReason.UNSPECIFIED;
+import static org.flexlb.dao.loadbalance.RejectReason.RESOURCE_EXHAUSTED;
+import static org.flexlb.dao.loadbalance.RejectReason.UNSPECIFIED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -180,7 +180,7 @@ class SchedulingErrorCodeMatrixTest {
                 .toUpperCase(java.util.Locale.ROOT).contains(role));
     }
 
-    private static void assertFailure(Response response, int code, AdmissionRejectReason reason, String message) {
+    private static void assertFailure(Response response, int code, RejectReason reason, String message) {
         assertFalse(response.isSuccess());
         assertEquals(code, response.getCode(), response.getErrorMessage());
         assertEquals(reason, response.getAdmissionRejectReason());

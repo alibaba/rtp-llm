@@ -2,7 +2,7 @@ package org.flexlb.mockengine;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.config.VictimStage;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.RejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -265,8 +265,7 @@ class PreemptionPhasesE2ETest {
                 Response highResp = high.get(5, TimeUnit.SECONDS);
                 assertFalse(highResp.isSuccess());
                 assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), highResp.getCode());
-                assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                        highResp.getAdmissionRejectReason());
+                assertEquals(RejectReason.RESOURCE_EXHAUSTED, highResp.getAdmissionRejectReason());
                 assertTrue(highResp.getErrorMessage().contains("cancel_terminal_unknown"),
                         "timeout must be explicit: " + highResp.getErrorMessage());
                 assertFalse(decodeEp.resourceSnapshot().reserved().containsKey("312"),

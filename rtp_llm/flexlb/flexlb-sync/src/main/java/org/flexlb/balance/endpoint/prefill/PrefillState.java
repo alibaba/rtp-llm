@@ -13,7 +13,7 @@ import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.estimate.WorkView.Phase;
 import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.RejectReason;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.util.PriorityNormalizer;
 
@@ -258,7 +258,7 @@ public final class PrefillState {
     }
 
     /** Only failed admission needs priority provenance; reuse one summary per revision. */
-    public AdmissionRejectReason rejectReason(int priority, long requestLimit) {
+    public RejectReason rejectReason(int priority, long requestLimit) {
         long[] counts;
         long occupiedRequests;
         lock.lock();
@@ -287,13 +287,12 @@ public final class PrefillState {
             else if (occupant == priority) { same += counts[occupant]; } else { higher += counts[occupant]; }
         }
         if (residual > higher + same && counts[0] > 0) {
-            return AdmissionRejectReason.UNSPECIFIED;
+            return RejectReason.UNSPECIFIED;
         }
         if (residual > 0 && higher + same >= residual) {
-            return higher > 0 ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
-                    : AdmissionRejectReason.SAME_PRIORITY_AHEAD;
+            return higher > 0 ? RejectReason.HIGHER_PRIORITY_AHEAD : RejectReason.SAME_PRIORITY_AHEAD;
         }
-        return AdmissionRejectReason.RESOURCE_EXHAUSTED;
+        return RejectReason.RESOURCE_EXHAUSTED;
     }
 
     public boolean canPreemptQueuedRequest(int priority, long requestLimit) {

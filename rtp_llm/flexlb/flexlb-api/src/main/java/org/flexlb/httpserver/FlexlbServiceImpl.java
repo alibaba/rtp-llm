@@ -12,7 +12,7 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.consistency.MasterElectService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.RejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -1134,8 +1134,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         return builder.build();
     }
 
-    private static FlexlbScheduleProtocol.ScheduleFailureReasonPB toProtoAdmissionRejectReason(
-            AdmissionRejectReason reason) {
+    private static FlexlbScheduleProtocol.ScheduleFailureReasonPB toProtoAdmissionRejectReason(RejectReason reason) {
         if (reason == null) {
             return FlexlbScheduleProtocol.ScheduleFailureReasonPB
                     .SCHEDULE_FAILURE_REASON_UNSPECIFIED;

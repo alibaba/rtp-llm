@@ -41,7 +41,7 @@ public class Response {
     private boolean ready = true;
 
     @JsonProperty("admission_reject_reason")
-    private AdmissionRejectReason admissionRejectReason = AdmissionRejectReason.UNSPECIFIED;
+    private RejectReason admissionRejectReason = RejectReason.UNSPECIFIED;
 
     /** Deep-copy all response data, preserving null collections and entries. */
     public static Response copyOf(Response source) {
@@ -81,25 +81,29 @@ public class Response {
     }
 
     public static Response buildErrorResponse(StrategyErrorType errorType, String message) {
-        return error(errorType, errorType == StrategyErrorType.RESOURCE_EXHAUSTED
-                ? AdmissionRejectReason.RESOURCE_EXHAUSTED : AdmissionRejectReason.UNSPECIFIED, message);
+        return error(errorType,
+                errorType == StrategyErrorType.RESOURCE_EXHAUSTED
+                        ? RejectReason.RESOURCE_EXHAUSTED
+                        : RejectReason.UNSPECIFIED,
+                message);
     }
 
     public static Response error(StrategyErrorType strategyErrorType) {
-        return error(strategyErrorType, strategyErrorType == StrategyErrorType.RESOURCE_EXHAUSTED
-                ? AdmissionRejectReason.RESOURCE_EXHAUSTED : AdmissionRejectReason.UNSPECIFIED);
+        return error(strategyErrorType,
+                strategyErrorType == StrategyErrorType.RESOURCE_EXHAUSTED
+                        ? RejectReason.RESOURCE_EXHAUSTED
+                        : RejectReason.UNSPECIFIED);
     }
 
-    public static Response error(StrategyErrorType strategyErrorType,
-                                 AdmissionRejectReason admissionRejectReason) {
+    public static Response error(StrategyErrorType strategyErrorType, RejectReason admissionRejectReason) {
         return error(strategyErrorType, admissionRejectReason, null);
     }
 
     public static Response error(StrategyErrorType strategyErrorType,
-                                 AdmissionRejectReason admissionRejectReason,
+                                 RejectReason admissionRejectReason,
                                  String detail) {
         if (admissionRejectReason == null) {
-            admissionRejectReason = AdmissionRejectReason.UNSPECIFIED;
+            admissionRejectReason = RejectReason.UNSPECIFIED;
         }
         if (!strategyErrorType.acceptsAdmissionRejectReason(admissionRejectReason)) {
             throw new IllegalArgumentException("invalid schedule error code/reason: "
@@ -109,7 +113,7 @@ public class Response {
         result.setSuccess(false);
         result.setCode(strategyErrorType.getErrorCode());
         detail = switch (strategyErrorType) {
-            case PRIORITY_ADMISSION_REJECTED -> admissionRejectReason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
+            case PRIORITY_ADMISSION_REJECTED -> admissionRejectReason == RejectReason.HIGHER_PRIORITY_AHEAD
                     ? "higher-priority requests are ahead" : "same-priority requests are ahead";
             case ADMISSION_UNAVAILABLE -> "admission unavailable; blocker priority attribution is unavailable";
             case RESOURCE_EXHAUSTED -> {

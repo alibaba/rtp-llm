@@ -13,7 +13,7 @@ import org.flexlb.config.EngineCancellationConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.RejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.enums.DecodeTaskPhase;
@@ -261,9 +261,7 @@ public class EvictionManager {
             DecodeEndpoint.ReservationHandle incoming =
                     decodeEp.reservationHandle(request.requestId());
             if (incoming == null) {
-                handle.terminate(admissionError(
-                        StrategyErrorType.RESOURCE_EXHAUSTED,
-                        AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                handle.terminate(admissionError(StrategyErrorType.RESOURCE_EXHAUSTED, RejectReason.RESOURCE_EXHAUSTED,
                         "Decode reservation disappeared before canonical placement"));
                 return true;
             }
@@ -280,17 +278,14 @@ public class EvictionManager {
     }
 
     /** Publish preempted Decode capacity through the already selected route. */
-    private Response placeReservedDecode(
-            BalanceContext context,
-            CompletableFuture<Response> future,
-            DecodeEndpoint endpoint,
-            DecodeEndpoint.ReservationHandle reservation,
-            RouteAdmission admission,
-            List<String> preemptRequestIds) {
+    private Response placeReservedDecode(BalanceContext context,
+                                         CompletableFuture<Response> future,
+                                         DecodeEndpoint endpoint,
+                                         DecodeEndpoint.ReservationHandle reservation,
+                                         RouteAdmission admission,
+                                         List<String> preemptRequestIds) {
         if (!admission.adoptDecodeReservation(endpoint, reservation)) {
-            return admissionError(
-                    StrategyErrorType.RESOURCE_EXHAUSTED,
-                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
+            return admissionError(StrategyErrorType.RESOURCE_EXHAUSTED, RejectReason.RESOURCE_EXHAUSTED,
                     "Decode generation retired before canonical placement");
         }
         admission.setDecodePreemptRequestIds(preemptRequestIds);
@@ -298,9 +293,7 @@ public class EvictionManager {
                 context, future, System.currentTimeMillis());
         context.setRouteSubmittedNanos(System.nanoTime());
         if (!admission.commitQueuedRequest(requests, item)) {
-            return admissionError(
-                    StrategyErrorType.RESOURCE_EXHAUSTED,
-                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
+            return admissionError(StrategyErrorType.RESOURCE_EXHAUSTED, RejectReason.RESOURCE_EXHAUSTED,
                     "selected Prefill capacity changed before canonical placement");
         }
         reportPlacement(context, item, "Decode eviction");
@@ -426,11 +419,8 @@ public class EvictionManager {
                                             + " request_id={} error={}",
                                     ctx.getRequestId(), callbackError.getMessage(),
                                     callbackError);
-                            terminal = admissionError(
-                                    StrategyErrorType.RESOURCE_EXHAUSTED,
-                                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                                    "Decode eviction placement failed: "
-                                            + callbackError.getMessage());
+                    terminal = admissionError(StrategyErrorType.RESOURCE_EXHAUSTED, RejectReason.RESOURCE_EXHAUSTED,
+                            "Decode eviction placement failed: " + callbackError.getMessage());
                         }
                         if (terminal != null) {
                             handle.terminate(terminal);
@@ -456,18 +446,14 @@ public class EvictionManager {
                     "[eviction-manager] cancel coordinator returned no typed result:"
                             + " request_id={} worker={}",
                     ctx.getRequestId(), proposal.endpointId(), error);
-            return admissionError(
-                    StrategyErrorType.RESOURCE_EXHAUSTED,
-                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
+            return admissionError(StrategyErrorType.RESOURCE_EXHAUSTED, RejectReason.RESOURCE_EXHAUSTED,
                     "Decode eviction control failed before commit");
         }
         if (result.committed()) {
             DecodeEndpoint.ReservationHandle reservation =
                     decodeEp.reservationHandle(admission.decodeDecideInfo().requirement().requestId());
             if (reservation == null) {
-                return admissionError(
-                        StrategyErrorType.RESOURCE_EXHAUSTED,
-                        AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                return admissionError(StrategyErrorType.RESOURCE_EXHAUSTED, RejectReason.RESOURCE_EXHAUSTED,
                         "Decode reservation disappeared before placement");
             }
             reportCommittedEnginePreemption(ctx, proposal, !returnInstructions);
@@ -483,10 +469,7 @@ public class EvictionManager {
         if (!returnInstructions && result.controlFailure()) {
             reportCancelTimeout(ctx, proposal.endpointId());
         }
-        return admissionError(
-                StrategyErrorType.RESOURCE_EXHAUSTED,
-                AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                result.detail());
+        return admissionError(StrategyErrorType.RESOURCE_EXHAUSTED, RejectReason.RESOURCE_EXHAUSTED, result.detail());
     }
 
     /** Metrics never participate in the committed reservation handoff. */
@@ -556,9 +539,7 @@ public class EvictionManager {
         }
     }
 
-    private static Response admissionError(StrategyErrorType errorType,
-                                           AdmissionRejectReason reason,
-                                           String message) {
+    private static Response admissionError(StrategyErrorType errorType, RejectReason reason, String message) {
         return Response.error(errorType, reason, message);
     }
 

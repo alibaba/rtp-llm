@@ -8,7 +8,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.decode.DecodeMode;
 import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.RejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -193,8 +193,8 @@ public class DecodeSelector {
         boolean higherBlocks = residual.requests() > 0 && higher.requests() > 0
                 || residual.requiredKvTokens() > 0 && higher.requiredKvTokens() > 0
                 || residual.kvBudgetTokens() > 0 && higher.kvBudgetTokens() > 0;
-        return Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED, higherBlocks
-                ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD : AdmissionRejectReason.SAME_PRIORITY_AHEAD);
+        return Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                higherBlocks ? RejectReason.HIGHER_PRIORITY_AHEAD : RejectReason.SAME_PRIORITY_AHEAD);
     }
 
     private static Availability availability(DecodeRequirement request, DecodeRoutingView view) {
@@ -210,10 +210,9 @@ public class DecodeSelector {
     }
 
     private static Response oversizedRequestFailure(long required, long maximum) {
-        return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
-                AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                "Decode prompt plus output demand=" + required
-                        + " exceeds every worker KV admission budget; maximum=" + maximum);
+        return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED, RejectReason.RESOURCE_EXHAUSTED,
+                "Decode prompt plus output demand=" + required + " exceeds every worker KV admission budget; maximum="
+                        + maximum);
     }
 
     private SelectedRole buildSelectedRole(

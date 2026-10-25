@@ -27,7 +27,7 @@ import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.RejectReason;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PrefillQueueEnqueueResult;
@@ -303,7 +303,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Explain a failed admission using the current owner-priority summary. */
-    public AdmissionRejectReason rejectReason(int priority, long inflightRequestLimit) {
+    public RejectReason rejectReason(int priority, long inflightRequestLimit) {
         return prefillState.rejectReason(priority, inflightRequestLimit);
     }
 

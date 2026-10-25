@@ -17,7 +17,7 @@ import org.flexlb.balance.scheduler.RequestCompletionPublisher.PublicationPermit
 import org.flexlb.balance.scheduler.RequestCompletionPublisher.ResponseCompletion;
 import org.flexlb.balance.scheduler.RequestCompletionPublisher.SelectedPublication;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.RejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
@@ -1339,8 +1339,7 @@ public final class RequestSlot {
             } else {
                 diagnostics = Map.of("cause", "waiting for placement");
             }
-            cancellationResponse = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
-                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
+            cancellationResponse = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED, RejectReason.RESOURCE_EXHAUSTED,
                     String.valueOf(diagnostics.get("cause")));
             context.setSchedulingDiagnostics(diagnostics);
         } else {

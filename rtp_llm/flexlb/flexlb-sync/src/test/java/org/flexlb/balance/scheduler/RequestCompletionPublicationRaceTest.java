@@ -7,7 +7,7 @@ import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.RejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
@@ -124,8 +124,7 @@ class RequestCompletionPublicationRaceTest {
             callback.get(2L, TimeUnit.SECONDS);
             assertFalse(expired.isSuccess());
             assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), expired.getCode());
-            assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                    expired.getAdmissionRejectReason());
+            assertEquals(RejectReason.RESOURCE_EXHAUSTED, expired.getAdmissionRejectReason());
             assertEquals(RequestState.Phase.TIMED_OUT, slot.snapshot().state());
             verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
             verify(prefill).expireCommittedItem(item);

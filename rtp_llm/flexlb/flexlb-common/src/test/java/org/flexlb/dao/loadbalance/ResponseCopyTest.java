@@ -80,7 +80,7 @@ class ResponseCopyTest {
         assertFalse(failure.isSuccess());
         assertEquals(type.getErrorCode(), failure.getCode());
         assertEquals(type.buildErrorMessage("delivery failed"), failure.getErrorMessage());
-        assertEquals(AdmissionRejectReason.UNSPECIFIED, failure.getAdmissionRejectReason());
+        assertEquals(RejectReason.UNSPECIFIED, failure.getAdmissionRejectReason());
         assertEquals(type.buildErrorMessage(null),
                 Response.buildErrorResponse(type, null).getErrorMessage());
     }

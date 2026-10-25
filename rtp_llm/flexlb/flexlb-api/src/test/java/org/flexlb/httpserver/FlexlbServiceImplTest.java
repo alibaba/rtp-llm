@@ -15,7 +15,7 @@ import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.RejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -749,9 +749,8 @@ class FlexlbServiceImplTest {
     @Test
     void testSchedule_serializesTypedAdmissionReason() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
-        Response response = Response.error(
-                StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
-                AdmissionRejectReason.SAME_PRIORITY_AHEAD);
+        Response response =
+                Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED, RejectReason.SAME_PRIORITY_AHEAD);
         when(routeService.route(any(BalanceContext.class)))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
@@ -780,8 +779,9 @@ class FlexlbServiceImplTest {
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void schedulingDiagnosticsAreLoggedOnlyForFailure(boolean success) throws Exception {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
-        Response response = success ? new Response() : Response.error(
-                StrategyErrorType.RESOURCE_EXHAUSTED, AdmissionRejectReason.RESOURCE_EXHAUSTED);
+        Response response = success
+                ? new Response()
+                : Response.error(StrategyErrorType.RESOURCE_EXHAUSTED, RejectReason.RESOURCE_EXHAUSTED);
         if (success) {
             response.setSuccess(true);
             response.setCode(200);

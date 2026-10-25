@@ -14,8 +14,8 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.cache.HostCacheMatch;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.DebugInfo;
+import org.flexlb.dao.loadbalance.RejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -264,7 +264,7 @@ public class CostBasedPrefillStrategy {
                                                                                     RoleType role,
                                                                                     String group,
                                                                                     long inflightRequestLimit) {
-        AdmissionRejectReason reason = null;
+        RejectReason reason = null;
         int workerCount = 0;
         long observedRequestCount = 0;
         for (var entry : discovery.directory()) {
@@ -274,14 +274,13 @@ public class CostBasedPrefillStrategy {
             }
             workerCount++;
             observedRequestCount += endpoint.observedRequestCount();
-            AdmissionRejectReason workerReason = endpoint.rejectReason(priority, inflightRequestLimit);
+            RejectReason workerReason = endpoint.rejectReason(priority, inflightRequestLimit);
             if (reason == null) {
                 reason = workerReason;
-            } else if (reason == AdmissionRejectReason.UNSPECIFIED
-                    || workerReason == AdmissionRejectReason.UNSPECIFIED) {
-                reason = AdmissionRejectReason.UNSPECIFIED;
+            } else if (reason == RejectReason.UNSPECIFIED || workerReason == RejectReason.UNSPECIFIED) {
+                reason = RejectReason.UNSPECIFIED;
             } else if (reason != workerReason) {
-                reason = AdmissionRejectReason.RESOURCE_EXHAUSTED;
+                reason = RejectReason.RESOURCE_EXHAUSTED;
             }
         }
         Response failure = reason == null ? Response.error(role.getErrorType()) : switch (reason) {
