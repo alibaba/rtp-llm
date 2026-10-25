@@ -805,8 +805,7 @@ class DecodeEndpointAdmissionTest {
     }
 
     @Test
-    void statusFieldApplicationAndCalibrationExcludeConcurrentReserve()
-            throws Exception {
+    void statusFieldApplicationAndCalibrationExcludeConcurrentReserve() throws Exception {
         WorkerStatus blockingStatus = EndpointTestSupport.workerStatus(
                 RoleType.DECODE, "10.0.0.2", 8080, 8081);
         DecodeEndpoint blockingEndpoint = new DecodeEndpoint(
@@ -819,8 +818,8 @@ class DecodeEndpointAdmissionTest {
         response.setFinishedTaskInfo(Map.of());
 
         ExecutorService executor = Executors.newFixedThreadPool(2);
-        ReentrantLock admissionLock = decodeAdmissionLock(blockingEndpoint);
-        admissionLock.lock();
+        ReentrantLock stateLock = decodeStateLock(blockingEndpoint);
+        stateLock.lock();
         try {
             Future<?> statusUpdate = executor.submit(() ->
                     EndpointTestSupport.applyStatus(
@@ -840,7 +839,7 @@ class DecodeEndpointAdmissionTest {
                     () -> reserve.get(100, TimeUnit.MILLISECONDS),
                     "reserve must not cross the status/calibration admission lock");
 
-            admissionLock.unlock();
+            stateLock.unlock();
             statusUpdate.get(5, TimeUnit.SECONDS);
             reserve.get(5, TimeUnit.SECONDS);
 
@@ -851,8 +850,8 @@ class DecodeEndpointAdmissionTest {
             assertEquals(9_500L, blockingEndpoint.realKvAvailable(),
                     "the post-calibration reservation must be retained");
         } finally {
-            if (admissionLock.isHeldByCurrentThread()) {
-                admissionLock.unlock();
+            if (stateLock.isHeldByCurrentThread()) {
+                stateLock.unlock();
             }
             executor.shutdownNow();
             assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
@@ -1021,11 +1020,10 @@ class DecodeEndpointAdmissionTest {
         EndpointTestSupport.applyStatus(endpoint, response);
     }
 
-    private static ReentrantLock decodeAdmissionLock(
-            DecodeEndpoint target) throws ReflectiveOperationException {
+    private static ReentrantLock decodeStateLock(DecodeEndpoint target) throws ReflectiveOperationException {
         java.lang.reflect.Field owner = DecodeEndpoint.class.getDeclaredField("state");
         owner.setAccessible(true);
-        java.lang.reflect.Field field = DecodeState.class.getDeclaredField("admissionLock");
+        java.lang.reflect.Field field = DecodeState.class.getDeclaredField("lock");
         field.setAccessible(true);
         return (ReentrantLock) field.get(owner.get(target));
     }
