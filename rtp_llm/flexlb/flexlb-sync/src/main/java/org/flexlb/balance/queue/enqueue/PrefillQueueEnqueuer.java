@@ -185,12 +185,8 @@ public final class PrefillQueueEnqueuer {
         SingleReservation reservation = result.reservation();
         if (!item.bindPublishedSingleReservation(reservation)) {
             rollbackFreshActiveUnderLock(item, reservation);
-            return new EnqueueAttempt(
-                    false,
-                    null,
-                    new IllegalStateException(
-                            "ACTIVE request already owns a route reservation: request_id="
-                                    + item.requestId()));
+            return new EnqueueAttempt(false, null, new IllegalStateException(
+                    "ACTIVE request already owns a single reservation: request_id=" + item.requestId()));
         }
         item.markSubQueueEntry();
         queueState.signalChange();

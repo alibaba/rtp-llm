@@ -143,19 +143,25 @@ public final class ScheduledRequest implements Prioritized {
         return maxInflightBatchesPerPrefillWorker;
     }
 
-    /** Whether ACTIVE publication must atomically own one route reservation. */
+    /**
+     * Whether ACTIVE publication must atomically own one single reservation.
+     */
     public boolean requiresSingleReservation() {
         return routeDelivery;
     }
 
-    /** Bind the sole publish-time route reservation before ACTIVE becomes visible. */
+    /**
+     * Bind the sole publish-time single reservation before ACTIVE becomes visible.
+     */
     public boolean bindPublishedSingleReservation(
             SingleReservation reservation) {
         return publishedSingleReservation.compareAndSet(
                 null, Objects.requireNonNull(reservation, "reservation"));
     }
 
-    /** Transfer the sole uncommitted route reservation to delivery or cleanup. */
+    /**
+     * Transfer the sole uncommitted single reservation to delivery or cleanup.
+     */
     public SingleReservation takePublishedSingleReservation() {
         return publishedSingleReservation.getAndSet(null);
     }

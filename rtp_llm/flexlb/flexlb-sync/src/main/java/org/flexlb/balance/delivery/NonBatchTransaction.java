@@ -55,7 +55,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
     }
 
     public synchronized DeliveryBlockReason.Attempt<ScheduledRequest> append(ScheduledRequest exact,
-                                                                      PrefillTimePredictor.Evaluator evaluator) {
+                                                                             PrefillTimePredictor.Evaluator evaluator) {
         requirePrepared("append");
         if (prefill.isRetired()) {
             return failed(PrefillAdmissionResources.retired("Prefill", exact));
@@ -75,7 +75,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
         try {
             if (published == null) {
                 return failed(new IllegalStateException(
-                        "ACTIVE NON_BATCH request lost its publish-time route reservation: request_id="
+                        "ACTIVE NON_BATCH request lost its publish-time single reservation: request_id="
                                 + exact.requestId()));
             }
             published.updatePrediction(exact, predictedMs);
@@ -136,8 +136,9 @@ public final class NonBatchTransaction implements DeliveryTransaction {
         for (int index = 0; index < reservations.size(); index++) {
             if (itemOwnedReservations.get(index)
                     && items.get(index).publishedSingleReservation() != reservations.get(index)) {
-                throw new IllegalStateException("ACTIVE NON_BATCH request lost its exact route reservation: request_id="
-                        + items.get(index).requestId());
+                throw new IllegalStateException(
+                        "ACTIVE NON_BATCH request lost its exact single reservation: request_id="
+                                + items.get(index).requestId());
             }
         }
         PrefillEndpoint.RouteCommitAdmission routeCommit = prefill.tryBeginRouteCommitAdmission();
@@ -153,7 +154,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
                 if (itemOwnedReservations.get(index)
                         && !items.get(index).takePublishedSingleReservation(reservations.get(index))) {
                     throw new IllegalStateException(
-                            "ACTIVE NON_BATCH request lost its exact route reservation: request_id="
+                            "ACTIVE NON_BATCH request lost its exact single reservation: request_id="
                                     + items.get(index).requestId());
                 }
                 if (itemOwnedReservations.get(index)) {

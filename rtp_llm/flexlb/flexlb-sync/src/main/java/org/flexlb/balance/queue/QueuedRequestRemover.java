@@ -63,13 +63,10 @@ public final class QueuedRequestRemover {
     /**
      * 把取下来的 Prefill 资源预留放回请求上。用于移除没成功时撤回。
      */
-    public static void restoreSingleReservation(
-            ScheduledRequest item,
-            SingleReservation reservation) {
+    public static void restoreSingleReservation(ScheduledRequest item, SingleReservation reservation) {
         if (!item.restorePublishedSingleReservation(reservation)) {
             throw new IllegalStateException(
-                    "ACTIVE route reservation could not be restored request_id="
-                            + item.requestId());
+                    "ACTIVE single reservation could not be restored request_id=" + item.requestId());
         }
     }
 
