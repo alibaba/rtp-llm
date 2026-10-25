@@ -1,8 +1,8 @@
 package org.flexlb.balance.queue;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.prefill.PrefillLoadView;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
-import org.flexlb.balance.endpoint.prefill.Snapshot;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.QueueView;
 import org.flexlb.balance.estimate.QueueView.AdmissionBlock;
@@ -83,14 +83,11 @@ public final class LoadViewCache {
         Version version = new Version(queueState.queueVersion(), queueState.schedulingInputVersion(),
                 prefillState.mutationVersion(), fixedWaitMs);
         BatchCapacityView capacity = BatchCapacityView.of(prefillEndpoint, config);
-        Snapshot ownership = prefillState.snapshot();
-        return new CapturedLoadView(
-                version, ownership,
-                new GroupPlanner.Constraints(
-                        groupingLimits.maxRequests(), capacity.batchTokenCapacity(),
-                        Long.MAX_VALUE, groupingLimits.predictedExecutionBudgetMs(),
-                        fixedWaitMs),
-                ownership.activeItems().isEmpty() ? null : admissionBlockUnderLock.get());
+        PrefillLoadView prefillView = prefillState.loadView();
+        return new CapturedLoadView(version, prefillView,
+                new GroupPlanner.Constraints(groupingLimits.maxRequests(), capacity.batchTokenCapacity(),
+                        Long.MAX_VALUE, groupingLimits.predictedExecutionBudgetMs(), fixedWaitMs),
+                prefillView.waitingItems().isEmpty() ? null : admissionBlockUnderLock.get());
     }
 
     /**
@@ -107,17 +104,17 @@ public final class LoadViewCache {
      */
     private final class CapturedLoadView {
         private final Version version;
-        private Snapshot ownership;
+        private PrefillLoadView prefillView;
         private final GroupPlanner.Constraints constraints;
         private final AdmissionBlock admissionBlock;
         private volatile PrefillTtftEstimate.LoadView materialized;
 
         private CapturedLoadView(Version version,
-                                 Snapshot ownership,
+                                 PrefillLoadView prefillView,
                                  GroupPlanner.Constraints constraints,
                                  AdmissionBlock admissionBlock) {
             this.version = version;
-            this.ownership = ownership;
+            this.prefillView = prefillView;
             this.constraints = constraints;
             this.admissionBlock = admissionBlock;
         }
@@ -129,12 +126,12 @@ public final class LoadViewCache {
             }
             synchronized (this) {
                 if (materialized == null) {
-                    var queueSnapshot = new QueueView(ownership.capturedAtMs(),
-                            estimateOrder, constraints, ownership.active().plannerItems(), admissionBlock);
-                    materialized = new PrefillTtftEstimate.LoadView(
-                            queueSnapshot, ownership.work().materialize(), version.ownership());
+                    var queueSnapshot = new QueueView(prefillView.takenAtMs(), estimateOrder, constraints,
+                            prefillView.waiting().plannerItems(), admissionBlock);
+                    materialized = new PrefillTtftEstimate.LoadView(queueSnapshot, prefillView.work().materialize(),
+                            version.ownership());
                     // 缓存的视图不能一直引用已完成请求的上下文。
-                    ownership = null;
+                    prefillView = null;
                 }
                 return materialized;
             }

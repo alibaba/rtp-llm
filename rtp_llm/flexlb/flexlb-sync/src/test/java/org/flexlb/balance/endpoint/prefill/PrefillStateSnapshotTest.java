@@ -99,14 +99,14 @@ class PrefillStateSnapshotTest {
         var before = capture();
         assertTrue(state.removeCommittedRequest(committed));
         var after = capture();
-        assertSame(before.active(), after.active());
+        assertSame(before.waiting(), after.waiting());
         assertEquals(1, before.work().materialize().requests().size());
         assertTrue(after.work().materialize().requests().isEmpty());
         enqueue(item(3));
         var added = capture();
-        assertNotSame(after.active(), added.active());
+        assertNotSame(after.waiting(), added.waiting());
         assertSame(after.work(), added.work());
-        assertEquals(List.of(queued), before.activeItems());
+        assertEquals(List.of(queued), before.waitingItems());
     }
 
     @Test
@@ -120,7 +120,7 @@ class PrefillStateSnapshotTest {
         assertNotSame(original.work(), rebased.work());
         assertEquals(100, original.work().materialize().capturedAtMs());
         assertEquals(90, rebased.work().materialize().capturedAtMs());
-        assertEquals(rebased.capturedAtMs(), rebased.work().materialize().capturedAtMs());
+        assertEquals(rebased.takenAtMs(), rebased.work().materialize().capturedAtMs());
         assertEquals(original.work().materialize().requests(), rebased.work().materialize().requests());
     }
 
@@ -410,10 +410,10 @@ class PrefillStateSnapshotTest {
         return item;
     }
 
-    private Snapshot capture() {
+    private PrefillLoadView capture() {
         lock.lock();
         try {
-            return state.snapshot();
+            return state.loadView();
         } finally {
             lock.unlock();
         }
@@ -429,6 +429,6 @@ class PrefillStateSnapshotTest {
     }
 
     private List<ScheduledRequest> waitingItems() {
-        return capture().activeItems();
+        return capture().waitingItems();
     }
 }

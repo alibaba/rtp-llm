@@ -596,10 +596,10 @@ public final class PrefillState {
         }
     }
 
-    public Snapshot snapshot() {
+    public PrefillLoadView loadView() {
         requireLock();
         long nowMs = clock.getAsLong();
-        return new Snapshot(nowMs, activeIndex.capture(), captureWork(nowMs));
+        return new PrefillLoadView(nowMs, activeIndex.capture(), captureWork(nowMs));
     }
 
     public WorkView committedSnapshot() {
