@@ -1297,6 +1297,51 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual({block["length"] for block in full_blocks.values()}, {16})
         self.assertEqual({block["length"] for block in linear_blocks.values()}, {24})
 
+    def test_cyclic_chunks_separate_attention_and_cache_store_views(self) -> None:
+        model = CacheStoreForwardModel()
+        result = run_scenario(model, "cyclic_chunk_views")
+
+        tables = model.seen_cache_tables[0]
+        self.assertEqual(tables["swa"]["physical"], tables["swa"]["kernel"])
+        self.assertEqual(
+            tables["swa"]["physical"],
+            [[3, 4, 3, 4, 0, 0, 0, 0], [5, 6, 5, 6, 0, 0, 0, 0]],
+        )
+        self.assertEqual(tables["full"]["physical"], [[1, 2, 3, 4], [5, 6, 0, 0]])
+        self.assertNotEqual(tables["full"]["physical"], tables["full"]["kernel"])
+
+        self.assertEqual(
+            sorted(record["request_id"] for record in result["records"]),
+            ["301", "301", "302"],
+        )
+        middle = _record_for_request(result, 302)
+        self.assertTrue(
+            all("_tag_full" in block["key"] for block in middle["blocks"])
+        )
+        blocks = _blocks_by_key(result)
+        for tag, stride, expected in (
+            ("swa", 24, {3103: 3, 3104: 4}),
+            ("full", 16, {3103: 3, 3104: 4, 3201: 5, 3202: 6}),
+        ):
+            tag_blocks = {
+                key: block for key, block in blocks.items() if f"_tag_{tag}" in key
+            }
+            self.assertEqual(len(tag_blocks), len(expected))
+            self.assertEqual(
+                {block["length"] for block in tag_blocks.values()}, {stride}
+            )
+            for token_key, block_id in expected.items():
+                matches = [
+                    block
+                    for key, block in tag_blocks.items()
+                    if f"_token_id_str_{token_key}_" in key
+                ]
+                self.assertEqual(len(matches), 1)
+                self.assertEqual(
+                    matches[0]["address"] - result["base_addresses"][tag],
+                    block_id * stride,
+                )
+
     def test_invalid_payload_identity_is_rejected_before_forward(self) -> None:
         for scenario in (
             "duplicate_tags",
