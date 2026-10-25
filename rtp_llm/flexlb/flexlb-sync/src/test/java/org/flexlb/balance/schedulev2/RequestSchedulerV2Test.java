@@ -102,6 +102,8 @@ class RequestSchedulerV2Test {
 
         assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
         assertEquals(0, scheduler.trackedRequestCount());
+        // 超时由计时线程完成 future，清理在它的回调里，get 返回时清理可能还没结束
+        awaitNoTrackedRequest();
         assertEquals(0L, queueCapacity.globalQueueAndEngineSubQueueCount());
     }
 
@@ -163,3 +165,10 @@ class RequestSchedulerV2Test {
         return context;
     }
 }
+
+    private void awaitNoTrackedRequest() throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 5_000L;
+        while (scheduler.trackedRequestCount() > 0 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(5L);
+        }
+    }
