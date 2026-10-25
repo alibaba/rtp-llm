@@ -295,12 +295,12 @@ public final class EndpointTestSupport {
             if (admission == null) {
                 throw new IllegalStateException("route endpoint retired");
             }
-            CommitResult handoff;
+            CommitResult commitResult;
             try (admission) {
-                handoff = admission.commit(items, reservations);
+                commitResult = admission.commit(items, reservations);
             }
             committed = true;
-            return List.of(handoff);
+            return List.of(commitResult);
         } finally {
             if (!committed) {
                 for (int index = reservations.size() - 1;

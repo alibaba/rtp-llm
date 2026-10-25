@@ -95,7 +95,7 @@ public final class SinglePrefill {
             }
         }
         long nowMs = prefillState.clock.getAsLong();
-        CommitResult committedHandoff =
+        CommitResult commitResult =
                 new CommitResult(generationHandoff, prefillState.buildPrecedingWork(members, nowMs));
         for (ScheduledRequest item : members) {
             prefillState.removeFromWaitingQueue(prefillState.requests.get(item.requestId()), item);
@@ -108,7 +108,7 @@ public final class SinglePrefill {
         }
         prefillState.cachedCommittedWork = null;
         prefillState.recordMutation();
-        return committedHandoff;
+        return commitResult;
     }
 
     private List<ScheduledRequest> validateSingleGroup(List<ScheduledRequest> items) {

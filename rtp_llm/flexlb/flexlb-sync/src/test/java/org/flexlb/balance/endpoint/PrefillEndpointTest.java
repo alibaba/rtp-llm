@@ -1130,7 +1130,7 @@ class PrefillEndpointTest {
                 ScheduledRequest item = createScheduledRequest(metricsEndpoint, requestConfig, requestId, 500, 0);
                 try (var reservation = EndpointTestSupport.offerAndTakeSingleReservation(metricsEndpoint, item, 100L);
                         var admission = metricsEndpoint.tryBeginRouteCommitAdmission();
-                        var handoff = admission.commit(List.of(item), List.of(reservation))) {
+                        var commitResult = admission.commit(List.of(item), List.of(reservation))) {
                     running.put(item.requestId(), taskInfo(requestId, 0L, TaskPhase.RUNNING, 0, 0));
                 }
             }
@@ -1165,7 +1165,7 @@ class PrefillEndpointTest {
             ScheduledRequest item = createScheduledRequest(metricsEndpoint, requestConfig, 1L, 500, 0);
             try (var reservation = EndpointTestSupport.offerAndTakeSingleReservation(metricsEndpoint, item, 100L);
                     var admission = metricsEndpoint.tryBeginRouteCommitAdmission();
-                    var handoff = admission.commit(List.of(item), List.of(reservation))) {
+                    var commitResult = admission.commit(List.of(item), List.of(reservation))) {
                 metricsEndpoint.reportBatchMetrics(reporter);
             }
             assertEquals(1.0, registry.get("flexlb.app.flexlb.worker.status.unconfirmed.request.count")
@@ -1274,7 +1274,7 @@ class PrefillEndpointTest {
                 ScheduledRequest item = createScheduledRequest(target, requestConfig, 1L, 500, 0);
                 try (var reservation = EndpointTestSupport.offerAndTakeSingleReservation(target, item, 100L);
                         var admission = target.tryBeginRouteCommitAdmission();
-                        var handoff = admission.commit(List.of(item), List.of(reservation))) {
+                        var commitResult = admission.commit(List.of(item), List.of(reservation))) {
                     target.reportBatchMetrics(reporter);
                 }
             }
@@ -1632,8 +1632,8 @@ class PrefillEndpointTest {
         // offered into the ACTIVE queue; reserveSingle rejects a non-active
         // identity with REQUEST_LEFT_QUEUE.
         assertTrue(EndpointTestSupport.offer(endpoint, route));
-        List<CommitResult> handoffs = EndpointTestSupport.commitRoutes(endpoint, 200L, List.of(route));
-        handoffs.forEach(CommitResult::close);
+        List<CommitResult> commitResults = EndpointTestSupport.commitRoutes(endpoint, 200L, List.of(route));
+        commitResults.forEach(CommitResult::close);
         assertEquals(2, endpoint.getSingleRequestCount());
 
         endpoint.close();
@@ -1903,7 +1903,7 @@ class PrefillEndpointTest {
         ScheduledRequest item = createScheduledRequest(target, routeConfig, requestId, 500, 0);
         try (var reservation = EndpointTestSupport.offerAndTakeSingleReservation(target, item, predictedMs);
                 var admission = target.tryBeginRouteCommitAdmission();
-                var handoff = admission.commit(List.of(item), List.of(reservation))) {
+                var commitResult = admission.commit(List.of(item), List.of(reservation))) {
             // 提交后 Prefill 一直记着这个请求，直到引擎上报它结束。
         }
     }

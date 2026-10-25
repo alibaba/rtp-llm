@@ -168,8 +168,8 @@ class NonBatchDeliveryStrategyTest {
                         fixture.capabilities.singleReservation(second))));
         verify(fixture.capabilities.permit(first)).dispatch();
         verify(fixture.capabilities.permit(second)).dispatch();
-        assertEquals(1, fixture.capabilities.handoffs().size());
-        fixture.capabilities.handoffs().forEach(handoff -> verify(handoff).close());
+        assertEquals(1, fixture.capabilities.commitResults().size());
+        fixture.capabilities.commitResults().forEach(commitResult -> verify(commitResult).close());
     }
 
     @Test
@@ -289,7 +289,7 @@ class NonBatchDeliveryStrategyTest {
         assertEquals(List.of(first, second), fixture.slots.committed());
         assertEquals(2, fixture.slots.completions().size());
         assertEquals(List.of(List.of(second)), fixture.telemetry.routes());
-        fixture.capabilities.handoffs().forEach(handoff -> verify(handoff).close());
+        fixture.capabilities.commitResults().forEach(commitResult -> verify(commitResult).close());
     }
 
     @Test

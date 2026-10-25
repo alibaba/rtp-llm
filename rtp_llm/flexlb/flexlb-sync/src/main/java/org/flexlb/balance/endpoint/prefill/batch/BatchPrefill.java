@@ -155,18 +155,18 @@ public final class BatchPrefill {
             long nowMs = prefillState.clock.getAsLong();
             BatchProgress work = new BatchProgress(lease, predictedMs,
                     PrefillBatchFeatures.from(members, ScheduledRequest::seqLen, ScheduledRequest::hitCache), nowMs);
-            CommitResult committedHandoff =
+            CommitResult commitResult =
                     new CommitResult(openGenerationHandoff(lease), prefillState.buildPrecedingWork(members, nowMs));
             for (ScheduledRequest item : members) {
                 prefillState.removeValidatedActiveIndex(item);
             }
-            moveGenerationHandoffToOwned(lease, committedHandoff);
+            moveGenerationHandoffToOwned(lease, commitResult);
             for (ScheduledRequest item : members) {
                 prefillState.requests.get(item.requestId()).commitBatch(work);
             }
             prefillState.cachedCommittedWork = null;
             prefillState.recordMutation();
-            return committedHandoff;
+            return commitResult;
         } finally {
             prefillState.lock.unlock();
         }
@@ -392,10 +392,10 @@ public final class BatchPrefill {
     /**
      * Move the exact handoff out of the OPEN admission before commit publishes.
      */
-    private void moveGenerationHandoffToOwned(BatchReservation lease, CommitResult committedHandoff) {
+    private void moveGenerationHandoffToOwned(BatchReservation lease, CommitResult commitResult) {
         prefillState.requireLock();
         if (lease.state != LeaseState.OPEN || lease.generationHandoff == null
-                || committedHandoff.workerKeepAlive != lease.generationHandoff) {
+                || commitResult.workerKeepAlive != lease.generationHandoff) {
             throw new IllegalStateException("Prefill commit requires an exact OPEN generation handoff");
         }
         lease.generationHandoff = null;

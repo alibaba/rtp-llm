@@ -246,7 +246,7 @@ class RequestResourceAccountingTest {
         final ScheduledRequest item;
         final DecodeEndpoint.ReservationHandle reservation;
         final SingleReservation singleReservation;
-        final CommitResult prefillHandoff;
+        final CommitResult commitResult;
         final RequestSlot.AdmissionHandle admission;
         final DecodeEndpoint.AdmissionCapacity capacity = new DecodeEndpoint.AdmissionCapacity(1, 90);
         long version = 1;
@@ -293,7 +293,7 @@ class RequestResourceAccountingTest {
             singleReservation = held.get();
             try (var commit = prefill.tryBeginRouteCommitAdmission()) {
                 assertNotNull(commit);
-                prefillHandoff = commit.commit(List.of(item), List.of(singleReservation));
+                commitResult = commit.commit(List.of(item), List.of(singleReservation));
             }
             if (!keepAdmissionOpen) { admission.close(); }
         }
@@ -303,7 +303,7 @@ class RequestResourceAccountingTest {
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
             var member = new PrefillAdmissionResources.Member(item, acquisition.permit());
             try (var owner = PrefillAdmissionResources.createCommittedOwner(List.of(member))) {
-                owner.bindPrefillHandoff(prefillHandoff);
+                owner.bindCommitResult(commitResult);
                 var claim = RequestLifecycleTestSupport.claimBatchWithoutPrediction(
                         requests, item, 1L, () -> owner.transferToEndpoint(item));
                 assertNotNull(claim);
@@ -369,7 +369,7 @@ class RequestResourceAccountingTest {
         public void close() {
             try {
                 admission.close();
-                prefillHandoff.close();
+                commitResult.close();
                 singleReservation.close();
                 runtime.shutdown();
             } finally {

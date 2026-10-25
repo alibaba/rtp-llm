@@ -351,7 +351,7 @@ class QueuedDecodeWithdrawalTest {
         var item = queued(30);
         var member = PrefillAdmissionResources.prepareMember(item).value();
         var admission = PrefillAdmissionResources.createCommittedOwner(List.of(member));
-        admission.bindPrefillHandoff(null);
+        admission.bindCommitResult(null);
         decode.close();
         var failure = assertThrows(EndpointRetiredException.class,
                 () -> registry.claimRouteDelivery(item, admission));

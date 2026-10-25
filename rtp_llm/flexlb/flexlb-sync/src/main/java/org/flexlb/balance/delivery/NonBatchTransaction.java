@@ -163,13 +163,13 @@ public final class NonBatchTransaction implements DeliveryTransaction {
                     itemOwnedReservations.set(index, false);
                 }
             }
-            CommitResult handoff = routeCommit.commit(items, reservations);
-            exactCommitted.bindPrefillHandoff(handoff);
+            CommitResult commitResult = routeCommit.commit(items, reservations);
+            exactCommitted.bindCommitResult(commitResult);
             committed = exactCommitted;
             reservations = null;
             itemOwnedReservations = null;
             members = null;
-            return handoff.precedingWork();
+            return commitResult.precedingWork();
         }
     }
 

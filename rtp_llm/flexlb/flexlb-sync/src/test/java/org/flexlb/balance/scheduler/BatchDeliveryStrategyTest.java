@@ -57,8 +57,8 @@ class BatchDeliveryStrategyTest {
                 org.mockito.ArgumentMatchers.eq(83L));
         verify(fixture.capabilities.permit(first)).dispatch();
         verify(fixture.capabilities.permit(second)).dispatch();
-        assertEquals(1, fixture.capabilities.handoffs().size());
-        fixture.capabilities.handoffs().forEach(handoff -> verify(handoff).close());
+        assertEquals(1, fixture.capabilities.commitResults().size());
+        fixture.capabilities.commitResults().forEach(commitResult -> verify(commitResult).close());
         assertEquals(1, fixture.submission.totalCloseCount());
     }
 
@@ -168,8 +168,7 @@ class BatchDeliveryStrategyTest {
         fixture.submission.completeSynchronously(
                 second, DeliveryResult.delivered());
         fixture.slots.beforeCompletion(() -> {
-            fixture.capabilities.handoffs()
-                    .forEach(handoff -> verify(handoff).close());
+            fixture.capabilities.commitResults().forEach(commitResult -> verify(commitResult).close());
             assertEquals(1, fixture.submission.totalCloseCount(),
                     "transport preparation must close before callbacks open");
         });

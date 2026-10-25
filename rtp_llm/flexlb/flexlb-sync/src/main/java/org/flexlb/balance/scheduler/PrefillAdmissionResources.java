@@ -227,12 +227,12 @@ public final class PrefillAdmissionResources {
         return new CommittedAdmissionOwner(exactMembers);
     }
 
-    private static void releaseCommittedHandoff(CommitResult handoff) {
-        if (handoff == null) {
+    private static void releaseCommitResult(CommitResult commitResult) {
+        if (commitResult == null) {
             return;
         }
         try {
-            handoff.close();
+            commitResult.close();
         } catch (Throwable failure) {
             Logger.error(
                     "Committed Prefill handoff cleanup isolated", failure);
@@ -258,7 +258,7 @@ public final class PrefillAdmissionResources {
     public static final class CommittedAdmissionOwner implements AutoCloseable {
         private final IdentityHashMap<ScheduledRequest, Member> membersByIdentity;
         private final Member[] members;
-        private CommitResult handoff;
+        private CommitResult commitResult;
         private boolean bound;
         private boolean closed;
 
@@ -281,8 +281,8 @@ public final class PrefillAdmissionResources {
         }
 
         /** No-throw bind after one Prefill group has committed. */
-        public synchronized void bindPrefillHandoff(CommitResult exactHandoff) {
-            handoff = exactHandoff;
+        public synchronized void bindCommitResult(CommitResult exactCommitResult) {
+            commitResult = exactCommitResult;
             bound = true;
         }
 
@@ -342,7 +342,7 @@ public final class PrefillAdmissionResources {
                     }
                 }
             }
-            releaseCommittedHandoff(handoff);
+            releaseCommitResult(commitResult);
         }
     }
 

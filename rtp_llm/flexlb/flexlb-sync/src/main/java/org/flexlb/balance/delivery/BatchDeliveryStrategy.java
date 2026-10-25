@@ -488,13 +488,13 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             }
             PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted =
                     createCommittedOwner(members);
-            CommitResult handoff = reservation.commit(items, predictedMs);
-            exactCommitted.bindPrefillHandoff(handoff);
+            CommitResult commitResult = reservation.commit(items, predictedMs);
+            exactCommitted.bindCommitResult(commitResult);
             committedAdmission = exactCommitted;
             reservation = null;
             members = null;
             phase = Phase.COMMITTED;
-            return handoff.precedingWork();
+            return commitResult.precedingWork();
         }
 
         @Override

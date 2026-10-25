@@ -171,7 +171,7 @@ public final class DeliveryStrategyTestSupport {
                 permits = new IdentityHashMap<>();
         private final Map<String, ScheduledRequest> itemsByRequestId =
                 new HashMap<>();
-        private final List<CommitResult> handoffs = new ArrayList<>();
+        private final List<CommitResult> commitResults = new ArrayList<>();
         private BatchReservation batchReservation;
         private int permitAttempt;
         private int rejectPermitAt = -1;
@@ -182,9 +182,8 @@ public final class DeliveryStrategyTestSupport {
                     .thenReturn(unavailable);
             Mockito.when(prefill.tryBeginRouteCommitAdmission())
                     .thenReturn(routeCommit);
-            Mockito.when(routeCommit.commit(
-                            Mockito.anyList(), Mockito.anyList()))
-                    .thenAnswer(invocation -> committedHandoffs(1).getFirst());
+            Mockito.when(routeCommit.commit(Mockito.anyList(), Mockito.anyList()))
+                    .thenAnswer(invocation -> commitResults(1).getFirst());
             Mockito.when(prefill.reserveBatch(
                             Mockito.any(), Mockito.anyLong(), Mockito.anyInt()))
                     .thenAnswer(invocation -> reserveBatch());
@@ -246,15 +245,14 @@ public final class DeliveryStrategyTestSupport {
             return batchReservation;
         }
 
-        List<CommitResult> handoffs() {
-            return List.copyOf(handoffs);
+        List<CommitResult> commitResults() {
+            return List.copyOf(commitResults);
         }
 
         private ReservationResult<BatchReservation> reserveBatch() {
             batchReservation = Mockito.mock(BatchReservation.class);
-            Mockito.when(batchReservation.commit(
-                            Mockito.anyList(), Mockito.anyLong()))
-                    .thenAnswer(invocation -> committedHandoffs(1).getFirst());
+            Mockito.when(batchReservation.commit(Mockito.anyList(), Mockito.anyLong()))
+                    .thenAnswer(invocation -> commitResults(1).getFirst());
             return ReservationResult.success(batchReservation);
         }
 
@@ -278,13 +276,13 @@ public final class DeliveryStrategyTestSupport {
                     permit);
         }
 
-        private List<CommitResult> committedHandoffs(int count) {
+        private List<CommitResult> commitResults(int count) {
             List<CommitResult> committed = new ArrayList<>(count);
             for (int index = 0; index < count; index++) {
-                CommitResult handoff = Mockito.mock(CommitResult.class);
-                Mockito.when(handoff.precedingWork()).thenReturn(precedingWork);
-                handoffs.add(handoff);
-                committed.add(handoff);
+                CommitResult commitResult = Mockito.mock(CommitResult.class);
+                Mockito.when(commitResult.precedingWork()).thenReturn(precedingWork);
+                commitResults.add(commitResult);
+                committed.add(commitResult);
             }
             return committed;
         }
