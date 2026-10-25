@@ -80,7 +80,11 @@ class ResponsePumpParityTest {
             }
             assertSame(afterTerminal, queue.peek(), "never consume frames after a terminal");
             service.cancel(71);
+            long cleanupDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(7000);
             cluster.awaitAllInflightZero(7000);
+            // Observer delivery can precede the pump's finally cleanup. Keep
+            // both resource and output-table checks inside the original budget.
+            while (service.requests.outputCount() != 0 && System.nanoTime() < cleanupDeadline) Thread.sleep(1);
             assertEquals(0, service.requests.outputCount());
             assertNull(service.requests.deadline(71));
         }

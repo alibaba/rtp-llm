@@ -138,6 +138,7 @@ class MockEngineCancelChannelTest {
 
         assertEquals(CancelAck.ACCEPTED, outcome);
         assertEquals(1, decode.getInflightCount(), "cancel intent retains running ownership until the forward returns");
+        long cancellationDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2_000);
         awaitNoInflight(decode, 2_000);
         assertEquals(0, decode.getInflightCount());
         assertFalse(prefill.hasDownstreamOwnership(51L));
@@ -148,12 +149,15 @@ class MockEngineCancelChannelTest {
                         == 8100);
         assertTrue(cancelledReported,
                 "Decode must retain its ordinary CANCELLED terminal");
-        boolean typedCanceledReported = workerStatus(prefill, 0).getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId() == 51L
-                        && task.getErrorInfo().getErrorCode() == 8429L
-                        && task.getPriorityPreemptionProgress()
-                        == EngineRpcService.PriorityPreemptionProgressPB
-                        .PRIORITY_PREEMPTION_CANCELED);
+        boolean typedCanceledReported;
+        do {
+            typedCanceledReported = workerStatus(prefill, 0).getFinishedTaskListList().stream()
+                    .anyMatch(task -> task.getRequestId() == 51L
+                            && task.getErrorInfo().getErrorCode() == 8429L
+                            && task.getPriorityPreemptionProgress()
+                            == EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED);
+            if (!typedCanceledReported) Thread.sleep(1);
+        } while (!typedCanceledReported && System.nanoTime() < cancellationDeadline);
         assertTrue(typedCanceledReported,
                 "original Prefill must report authoritative typed CANCELED+8429");
         // P execution success and its later priority-control terminal are distinct
