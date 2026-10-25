@@ -85,7 +85,7 @@ def validate_snapshot(payload):
                     if type(row["index_initialized"]) is not bool:
                         raise ValueError("invalid cache state")
                     for field in ("received_cache_version", "indexed_cache_version"):
-                        if row[field] is not None and not _decimal(row[field]):
+                        if row[field] is not None and row[field] != "-1" and not _decimal(row[field]):
                             raise ValueError("invalid cache version")
                     if row["cached_key_count"] is not None and not _integer(row["cached_key_count"]):
                         raise ValueError("invalid cache size")

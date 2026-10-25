@@ -14,6 +14,8 @@ Worker 范围明确为 `prefill_decode_endpoint_registry`，不代表服务发�
 
 Worker 身份由 `(instance_id, worker_id, generation)` 组成。`worker_id` 为角色和地址；generation、状态和缓存版本以十进制字符串传输。所有年龄由 Master 单调时钟计算，单位毫秒；未知值为 null，不能补零或默认健康。
 
+缓存发布版本保留 real BlockTree 的初始值 `"-1"`，它与未知的 null 不同；后续版本为非负十进制字符串，其他负值和数值类型均拒绝。
+
 | 字段 | 来源与含义 |
 |---|---|
 | `lifecycle_state` | WorkerStatus generation 的 active/retiring，不等于容量可用 |

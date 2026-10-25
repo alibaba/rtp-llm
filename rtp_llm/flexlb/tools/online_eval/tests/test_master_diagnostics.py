@@ -52,6 +52,23 @@ def test_unknown_health_remains_unknown():
     assert validate_snapshot(data)["components"]["workers"]["rows"][0]["applied_observation_age_ms"] is None
 
 
+@pytest.mark.parametrize("field", ["received_cache_version", "indexed_cache_version"])
+@pytest.mark.parametrize("value", [None, "-1", "0", "9007199254740993"])
+def test_initial_and_published_cache_versions_are_preserved(field, value):
+    data = payload()
+    data["components"]["workers"]["rows"][0][field] = value
+    assert validate_snapshot(data)["components"]["workers"]["rows"][0][field] == value
+
+
+@pytest.mark.parametrize("field", ["received_cache_version", "indexed_cache_version"])
+@pytest.mark.parametrize("value", ["-2", "-01", "+1", "-1.0", "", -1, True])
+def test_cache_versions_reject_other_negative_or_malformed_values(field, value):
+    data = payload()
+    data["components"]["workers"]["rows"][0][field] = value
+    with pytest.raises(DebugUnavailable):
+        validate_snapshot(data)
+
+
 def test_duplicate_rows_are_not_a_complete_fleet():
     data = payload()
     page = data["components"]["workers"]
