@@ -24,6 +24,7 @@ MOE_STRATEGY_CHOICES = (
     "mega_moe",
     "mega_moe_se",
     "grouped_fp4",
+    "grouped_fp8",
     "local_loop",
     "rocm_ep_normal",
     "rocm_ep_low_latency",

@@ -105,7 +105,7 @@ def synchronized_moe_chunk_plan(
 
     needs_sync = any(
         getattr(getattr(layer, "ffn", layer), "strategy_name", None)
-        in {"mega_moe", "mega_moe_se"}
+        in {"mega_moe", "mega_moe_se", "grouped_fp8"}
         and not getattr(getattr(layer, "ffn", layer), "_is_decode_role", False)
         and getattr(getattr(layer, "ffn", layer), "chunking_enabled", False)
         for layer in layers
@@ -150,6 +150,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         n_physical_experts: Optional[int] = None,
         *,
         chunking_enabled: bool = True,
+        enable_cuda_graph: bool = False,
         model_type: str = "generic_fp8_fp4_moe",
         moe_w1_layout: str = "up_gate",
         has_shared_expert_gate: bool = False,
@@ -190,6 +191,8 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             moe_w1_layout=moe_w1_layout,
             has_shared_expert_gate=has_shared_expert_gate,
             physical_expert_num=n_physical_experts,
+            is_decode_role=is_decode_role,
+            enable_cuda_graph=enable_cuda_graph,
         )
         self.strategy_name = self._moe.strategy_name
 
@@ -231,7 +234,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         is_decode_forward: bool = False,
     ) -> int:
         if (
-            self.strategy_name not in {"mega_moe", "mega_moe_se"}
+            self.strategy_name not in {"mega_moe", "mega_moe_se", "grouped_fp8"}
             or self._is_decode_role
             or is_decode_forward
             or not self.chunking_enabled
