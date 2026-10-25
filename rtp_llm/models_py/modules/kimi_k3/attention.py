@@ -116,6 +116,7 @@ class KimiK3MLA(nn.Module):
     def __init__(self, config, parallelism, weights, layer_idx, hardware=None):
         super().__init__()
         self._fp8_collective = None
+        self._bf16_collective = None
         self._mtp_bf16_collectives = None
         cfg = config.attn_config
         if (
@@ -222,6 +223,12 @@ class KimiK3MLA(nn.Module):
         if use_fused_ag:
             fused_input = self._fp8_collective.all_gather_gemm(hidden, self.input)
             full_hidden = None
+        elif self._bf16_collective is not None and self._bf16_collective.eligible(
+            hidden.shape[0], attention_inputs, metadata,
+        ):
+            fused_input = self._bf16_collective.all_gather_gemm(hidden, self.input)
+            full_hidden = None
+            use_fused_ag = True
         else:
             full_hidden = (
                 self._mtp_bf16_collectives.all_gather(hidden)
@@ -282,6 +289,10 @@ class KimiK3MLA(nn.Module):
             return self._fp8_collective.gemm_reduce_scatter(
                 values, scales, self.output
             )
+        if self._bf16_collective is not None and self._bf16_collective.eligible(
+            output.shape[0], attention_inputs, metadata, gathered=True,
+        ):
+            return self._bf16_collective.gemm_reduce_scatter(output, self.output)
         output = (
             self.output.forward_quantized(values, scales)
             if self._fp8_output_gate

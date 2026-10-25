@@ -63,6 +63,7 @@ class KdaAttention(nn.Module):
             else self._project_forget_contiguous
         )
         self._fp8_collective = None
+        self._bf16_collective = None
 
     def _project_forget_contiguous(self, latent):
         return self.f_b(latent.contiguous())
@@ -94,6 +95,10 @@ class KdaAttention(nn.Module):
             raise RuntimeError("prequantized FP8 input requires the FP8 AG/GEMM path")
         if use_fused_ag:
             fused = self._fp8_collective.all_gather_gemm(hidden, self.input)
+        elif self._bf16_collective is not None and self._bf16_collective.eligible(
+            hidden.shape[0], attention_inputs, metadata,
+        ):
+            fused = self._bf16_collective.all_gather_gemm(hidden, self.input)
         elif use_overlap:
             from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_comm_fusion import (
                 all_gather_project_local_overlap,
@@ -162,6 +167,12 @@ class KdaAttention(nn.Module):
         if use_fused_rs:
             return self._fp8_collective.gemm_reduce_scatter(
                 values, scales, self.output
+            )
+        if self._bf16_collective is not None and self._bf16_collective.eligible(
+            output.numel() // self.width, attention_inputs, metadata, gathered=True,
+        ):
+            return self._bf16_collective.gemm_reduce_scatter(
+                output.reshape(-1, self.width), self.output,
             )
         output = (
             self.output.forward_quantized(values, scales)
