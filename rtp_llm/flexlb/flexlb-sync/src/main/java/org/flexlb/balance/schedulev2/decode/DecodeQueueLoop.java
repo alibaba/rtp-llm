@@ -15,10 +15,8 @@ import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
 import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.PrefillPublishCheck;
-import org.flexlb.balance.schedulev2.ProcessWorkers;
 import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.RequestCleanup;
-import org.flexlb.balance.schedulev2.SelectionResult;
 import org.flexlb.balance.schedulev2.request.DecodeChoice;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.schedulev2.request.Stage;
@@ -55,7 +53,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <li>reserved 的请求按顺序向 reserve 的那台 Decode 要 permit，拿到后发布结果（PUBLISHED）。
  * 发布后在 Decode 上有 reserve 的请求进入 published。扫到已经结束的请求就归还它的 reserve 并移出 reserved。
  * 某台 Decode 给不出 permit 时，这一轮跳过 reserve 在它上面的其他请求，等它有空位时被唤醒；</li>
- * <li>waiting 的请求交给 worker 准备容量需求，调度线程读取最新节点负载、作最终选择并立即 reserve。
+ * <li>调度线程直接计算 waiting 请求的容量需求，读取最新节点负载、选择节点并立即 reserve。
  * reserve、空机器放行、抢占和归还都只在调度线程执行。成功后进入 DECODE_RESERVED。
  * 某个 group 排在最前面的请求放不下时，它留在 waiting。是否跳过同 group 后面的请求见 {@link #reserveWaiting}。</li>
  * </ol>
@@ -89,7 +87,6 @@ public final class DecodeQueueLoop {
     private final EmptyDecodeFinder emptyDecodeFinder;
     private final ConfigService configService;
     private final RequestSchedulerReporter reporter;
-    private final ProcessWorkers<DecodeInputs> processWorkers;
     private final PrefillPublishCheck prefillCheck;
     private final DecodeReservations reservations;
     private final V2QueueReporter queueReporter;
@@ -118,7 +115,6 @@ public final class DecodeQueueLoop {
                            EmptyDecodeFinder emptyDecodeFinder,
                            ConfigService configService,
                            RequestSchedulerReporter reporter,
-                           ProcessWorkers<DecodeInputs> processWorkers,
                            PrefillPublishCheck prefillCheck,
                            DecodeReservations reservations,
                            V2QueueReporter queueReporter) {
@@ -133,7 +129,6 @@ public final class DecodeQueueLoop {
         this.emptyDecodeFinder = emptyDecodeFinder;
         this.configService = configService;
         this.reporter = reporter;
-        this.processWorkers = processWorkers;
         this.prefillCheck = prefillCheck;
         this.reservations = reservations;
         this.capacityListener = loopSignal::wake;
@@ -149,7 +144,6 @@ public final class DecodeQueueLoop {
     }
 
     public void close() {
-        processWorkers.close();
         if (running.compareAndSet(true, false)) {
             placementAvailability.removeListener(decodeChangeListener);
             loopSignal.wake();
@@ -391,14 +385,13 @@ public final class DecodeQueueLoop {
     }
 
     /**
-     * Prefill 已不可用，先在 Decode 线程归还预占、丢弃本阶段材料，再退回主队列重新选 Prefill。
+     * Prefill 已不可用，先在 Decode 线程归还预占，再退回主队列重新选 Prefill。
      */
     private void returnToMain(Request request) {
         Stage expected = request.stage();
         decodeQueue.removeWaiting(request);
         decodeQueue.removeReserved(request);
         releaseNow(request);
-        processWorkers.discard(request);
         if (expected == Stage.DECODE_WAITING || expected == Stage.DECODE_RESERVED) {
             cleanup.returnToMain(request, expected);
         }
@@ -432,9 +425,6 @@ public final class DecodeQueueLoop {
      * 让归还的容量先留给队头。阈值是 0 时一直严格按顺序。
      */
     private boolean reserveWaiting() {
-        // Decode 材料只有请求需求和评分公式，随请求阶段清理，不使用缓存匹配结果的 TTL。
-        long cacheTtlMs = Long.MAX_VALUE;
-        processWorkers.removeExpired(cacheTtlMs);
         long starvationThresholdMs =
                 configService.loadBalanceConfig().getDispatcher().getDispatchStarvationThresholdMs();
         long now = System.currentTimeMillis();
@@ -459,29 +449,13 @@ public final class DecodeQueueLoop {
                 continue;
             }
             scanned++;
-            SelectionResult<DecodeInputs> completed = processWorkers.get(request, cacheTtlMs);
-            if (completed == null) {
-                processWorkers.submit(request, () -> new DecodeInputs(DecodeRequirement.capture(request.ctx())));
-                completed = processWorkers.get(request, cacheTtlMs);
-            }
-            if (completed == null) {
-                // 已等太久的队头还在准备材料时，也不能让后面的请求先占走容量。
-                queueReporter.blocked(request, Stage.DECODE_WAITING, QueueBlockReason.PREPARING, "all");
-                if (groupsWithHead.add(group) && isStarved(request, starvationThresholdMs, now)) {
-                    blockedGroups.add(group);
-                }
-                continue;
-            }
-            SelectionResult<DecodeInputs> result = completed;
             try {
                 if (request.stage() != Stage.DECODE_WAITING) {
                     continue;
                 }
-                if (result.failure() != null) {
-                    request.fail(StrategyErrorType.DISPATCH_FAILED,
-                            "decode selection failed: " + result.failure().getMessage());
-                    moved = true;
-                } else if (pickDecode(request, group, result.value())) {
+                // 只有 token 加法和配置读取，没有缓存查询或网络 IO，直接在当前线程计算。
+                DecodeRequirement requirement = DecodeRequirement.capture(request.ctx());
+                if (pickDecode(request, group, requirement)) {
                     moved = true;
                 } else if (groupsWithHead.add(group) && isStarved(request, starvationThresholdMs, now)) {
                     blockedGroups.add(group);
@@ -490,10 +464,6 @@ public final class DecodeQueueLoop {
                 request.fail(StrategyErrorType.DISPATCH_FAILED, "decode selection failed: " + failure.getMessage());
                 Logger.error("V2 decode selection result failed", failure);
                 moved = true;
-            } finally {
-                if (request.stage() != Stage.DECODE_WAITING) {
-                    processWorkers.discard(request);
-                }
             }
         }
         return moved;
@@ -520,10 +490,10 @@ public final class DecodeQueueLoop {
     /**
      * 给请求选 Decode 并 reserve。返回 false 表示这个 group 暂时没有可选的 Decode，请求留在 waiting。
      */
-    private boolean pickDecode(Request request, String group, DecodeInputs inputs) {
+    private boolean pickDecode(Request request, String group, DecodeRequirement requirement) {
         reservations.add(request.requestId());
         try {
-            return selectAndReserve(request, group, inputs);
+            return selectAndReserve(request, group, requirement);
         } finally {
             if (request.decodeChoice() == null) {
                 reservations.remove(request.requestId());
@@ -531,8 +501,7 @@ public final class DecodeQueueLoop {
         }
     }
 
-    private boolean selectAndReserve(Request request, String group, DecodeInputs inputs) {
-        DecodeRequirement requirement = inputs.requirement();
+    private boolean selectAndReserve(Request request, String group, DecodeRequirement requirement) {
         PlacementResult<SelectedRole, RoleType> result = decodeSelector.select(request.ctx(), requirement, group);
         switch (result.status()) {
             case SUCCESS -> {

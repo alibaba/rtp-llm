@@ -13,10 +13,8 @@ import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.balance.scheduler.decode.DecodeRequirement;
-import org.flexlb.balance.schedulev2.DirectExecutorService;
 import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.PrefillPublishCheck;
-import org.flexlb.balance.schedulev2.ProcessWorkers;
 import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.RequestCleanup;
 import org.flexlb.balance.schedulev2.V2TestSupport;
@@ -44,8 +42,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -107,9 +103,7 @@ class DecodeQueueLoopTest {
                 router,
                 new DecodePreemptionCoordinator(mock(EngineCancelChannel.class), mock(RequestRegistry.class),
                         mock(RequestSchedulerReporter.class)),
-                emptyDecodeFinder, configService(), reporter,
-                new ProcessWorkers<>(new DirectExecutorService(), 2, decodeLoopSignal, false), prefillCheck,
-                reservations, queueReporter);
+                emptyDecodeFinder, configService(), reporter, prefillCheck, reservations, queueReporter);
     }
 
     @AfterEach
@@ -493,7 +487,7 @@ class DecodeQueueLoopTest {
     }
 
     @Test
-    void preparedRequestsChooseDecodeUsingPreviousReservation() throws Exception {
+    void decisionsUsePreviousReservationOnDecodeThread() throws Exception {
         config.getDispatcher().setDispatchStarvationThresholdMs(60_000L);
         Request first = addWaiting("1");
         Request second = addWaiting("2");
@@ -511,17 +505,10 @@ class DecodeQueueLoopTest {
             assertEquals("flexlb-v2-decode-queue", Thread.currentThread().getName());
             return call.callRealMethod();
         }).when(realSelector).select(any(), any(), any());
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        ProcessWorkers<DecodeInputs> workers = new ProcessWorkers<>(executor, 2, decodeLoopSignal, false);
-        workers.submit(first, () -> new DecodeInputs(DecodeRequirement.capture(first.ctx())));
-        workers.submit(second, () -> new DecodeInputs(DecodeRequirement.capture(second.ctx())));
-        executor.shutdown();
-        assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
-        DecodeQueueLoop parallelLoop =
-                new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, new PlacementAvailability(), realSelector,
-                        router, mock(DecodePreemptionCoordinator.class), emptyDecodeFinder, configService, reporter,
-                        workers, prefillCheck, reservations, mock(V2QueueReporter.class));
-        parallelLoop.start();
+        DecodeQueueLoop realLoop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup,
+                new PlacementAvailability(), realSelector, router, mock(DecodePreemptionCoordinator.class),
+                emptyDecodeFinder, configService, reporter, prefillCheck, reservations, mock(V2QueueReporter.class));
+        realLoop.start();
         try {
             assertTrue(first.future().get(5, TimeUnit.SECONDS).isSuccess());
             assertTrue(second.future().get(5, TimeUnit.SECONDS).isSuccess());
@@ -530,13 +517,12 @@ class DecodeQueueLoopTest {
             assertEquals(1, decode.routingView().totalLoad());
             assertEquals(1, emptyDecode.routingView().totalLoad());
         } finally {
-            parallelLoop.close();
-            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+            realLoop.close();
         }
     }
 
     @Test
-    void preparedLaterRequestDoesNotPassStarvedHead() throws Exception {
+    void laterRequestDoesNotPassStarvedHead() {
         config.getDispatcher().setDispatchStarvationThresholdMs(60_000L);
         Request head = addWaiting("1");
         Request later = addWaiting("2");
@@ -545,28 +531,27 @@ class DecodeQueueLoopTest {
         doAnswer(call -> {
             return call.getArgument(0) == head.ctx() ? PlacementResult.blocked(RoleType.DECODE) : success();
         }).when(selector).select(any(), any(), any());
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        ProcessWorkers<DecodeInputs> workers = new ProcessWorkers<>(executor, 2, decodeLoopSignal, false);
-        workers.submit(head, () -> new DecodeInputs(DecodeRequirement.capture(head.ctx())));
-        workers.submit(later, () -> new DecodeInputs(DecodeRequirement.capture(later.ctx())));
-        executor.shutdown();
-        assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
-        DecodeQueueLoop parallelLoop =
-                new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, new PlacementAvailability(), selector,
-                        router, mock(DecodePreemptionCoordinator.class), emptyDecodeFinder, configService, reporter,
-                        workers, prefillCheck, reservations, mock(V2QueueReporter.class));
-        try {
-            head.setPrefillDecidedAtMs(System.currentTimeMillis() - 120_000L);
+        head.setPrefillDecidedAtMs(System.currentTimeMillis() - 120_000L);
 
-            parallelLoop.runOnce();
+        loop.runOnce();
 
-            assertEquals(Stage.DECODE_WAITING, head.stage());
-            assertEquals(Stage.DECODE_WAITING, later.stage());
-            assertEquals(0, decode.routingView().totalLoad());
-        } finally {
-            parallelLoop.close();
-            executor.shutdownNow();
-        }
+        assertEquals(Stage.DECODE_WAITING, head.stage());
+        assertEquals(Stage.DECODE_WAITING, later.stage());
+        assertEquals(0, decode.routingView().totalLoad());
+    }
+
+    @Test
+    void requirementCalculationFailureFailsRequestWithoutReservation() {
+        Request request = addWaiting("1");
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(0L);
+
+        assertTrue(loop.runOnce());
+
+        assertEquals(Stage.FAILED, request.stage());
+        assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), request.future().join().getCode());
+        assertNull(decode.reservationHandle("1"));
+        assertFalse(reservations.contains("1"));
+        verify(selector, never()).select(any(), any(), any());
     }
 
     private Request addWaiting(String requestId) {

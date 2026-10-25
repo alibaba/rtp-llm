@@ -22,6 +22,7 @@ import org.flexlb.balance.schedulev2.request.RequestTable;
 import org.flexlb.balance.schedulev2.request.Stage;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.PrefillInputs;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
@@ -111,11 +112,10 @@ public class RequestSchedulerV2 {
                 decodeQueue, decodeLoopSignal);
         this.mainQueueLoop = new MainQueueLoop(mainQueue, mainLoopSignal, cleanup, queueCapacity, endpointRegistry,
                 placementAvailability, configService, new PrefillPicker(router, prefillStrategy, prefillQueues),
-                prefillQueues, prefillRole, this::sendToPrefillQueue, processWorkers("main", mainLoopSignal),
-                queueReporter);
+                prefillQueues, prefillRole, this::sendToPrefillQueue, prefillWorkers(), queueReporter);
         this.decodeQueueLoop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, placementAvailability,
                 decodeSelector, router, preemptionCoordinator, new EmptyDecodeFinder(workerDirectory), configService,
-                reporter, processWorkers("decode", decodeLoopSignal), prefillCheck, reservations, queueReporter);
+                reporter, prefillCheck, reservations, queueReporter);
         this.deadlineTimer = new ScheduledThreadPoolExecutor(1, task -> {
             Thread thread = new Thread(task, "flexlb-v2-deadline");
             thread.setDaemon(true);
@@ -186,17 +186,18 @@ public class RequestSchedulerV2 {
     }
 
     /**
-     * 主队列和 Decode 各自使用独立的准备线程池，线程数沿用原主队列的启动配置。
+     * 主队列使用线程池查询缓存和预测 Prefill 耗时，线程数沿用原主队列的启动配置。
      */
-    private <T extends AutoCloseable> ProcessWorkers<T> processWorkers(String name, LoopSignal signal) {
+    private ProcessWorkers<PrefillInputs> prefillWorkers() {
         int count = configService.loadBalanceConfig().getInternalRuntime().getQueuePlannerThreads();
         AtomicInteger workerId = new AtomicInteger();
         ExecutorService executor = Executors.newFixedThreadPool(count, task -> {
-            Thread thread = new Thread(task, "flexlb-v2-" + name + "-worker-" + workerId.incrementAndGet());
+            Thread thread = new Thread(task, "flexlb-v2-main-worker-" + workerId.incrementAndGet());
             thread.setDaemon(true);
             return thread;
         });
-        return new ProcessWorkers<>(executor, count, signal, configService.loadBalanceConfig().isPriorityOrdering());
+        return new ProcessWorkers<>(executor, count, mainLoopSignal,
+                configService.loadBalanceConfig().isPriorityOrdering());
     }
 
     /**

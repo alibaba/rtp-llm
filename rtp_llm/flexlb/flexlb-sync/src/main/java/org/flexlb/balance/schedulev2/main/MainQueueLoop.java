@@ -176,7 +176,7 @@ public final class MainQueueLoop {
                 completed = processWorkers.get(request, cacheTtlMs);
             }
             if (completed == null) {
-                queueReporter.blocked(request, Stage.MAIN_WAITING, QueueBlockReason.PREPARING, "all");
+                queueReporter.blocked(request, Stage.MAIN_WAITING, QueueBlockReason.WAITING_FOR_CACHE_MATCH, "all");
                 continue;
             }
             SelectionResult<PrefillInputs> result = completed;
