@@ -1,10 +1,81 @@
 from __future__ import annotations
 
+import os
 from typing import Optional, Sequence
 
 import torch
+import triton
+import triton.language as tl
 
 _WORKSPACES: dict[torch.device, torch.Tensor] = {}
+_TRITON_CANONICAL_TOPK = os.environ.get("DSV4_SM120_TRITON_CANON", "1") == "1"
+
+
+@triton.jit
+def _canonical_topk_kernel(
+    idx_ptr,
+    idx_stride,
+    len_ptr,
+    out_ptr,
+    out_len_ptr,
+    width,
+    rows_per_len,
+    HAS_LEN: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    col = tl.arange(0, BLOCK)
+    idx = tl.load(idx_ptr + row * idx_stride + col, mask=col < width, other=-1)
+    valid = idx >= 0
+    if HAS_LEN:
+        n = tl.load(len_ptr + row // rows_per_len).to(tl.int32)
+        n = tl.minimum(tl.maximum(n, 0), BLOCK)
+        valid = valid & (col < n)
+    v = valid.to(tl.int32)
+    pos = tl.cumsum(v, axis=0)
+    count = tl.sum(v, axis=0)
+    dest = tl.where(valid, pos - 1, count + col - pos)
+    tl.store(out_ptr + row * BLOCK + dest, tl.where(valid, idx, -1))
+    tl.store(out_len_ptr + row, count)
+
+
+def _canonical_topk_triton(
+    indices: torch.Tensor,
+    lengths: Optional[torch.Tensor],
+    padded_width: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    rows, width = indices.shape
+    if indices.dtype != torch.int32:
+        indices = indices.to(torch.int32)
+    if indices.stride(-1) != 1:
+        indices = indices.contiguous()
+    out = torch.empty((rows, padded_width), dtype=torch.int32, device=indices.device)
+    out_len = torch.empty((rows,), dtype=torch.int32, device=indices.device)
+    if rows == 0:
+        return out, out_len
+    rows_per_len = 1
+    if lengths is not None:
+        lengths = lengths.reshape(-1)
+        if lengths.numel() == 0 or rows % lengths.numel() != 0:
+            raise ValueError(
+                f"top-k lengths have {lengths.numel()} entries; expected {rows}"
+            )
+        rows_per_len = rows // lengths.numel()
+        if not lengths.is_contiguous():
+            lengths = lengths.contiguous()
+    _canonical_topk_kernel[(rows,)](
+        indices,
+        indices.stride(0),
+        lengths if lengths is not None else out_len,
+        out,
+        out_len,
+        width,
+        rows_per_len,
+        HAS_LEN=lengths is not None,
+        BLOCK=padded_width,
+        num_warps=4 if padded_width <= 1024 else 8,
+    )
+    return out, out_len
 
 # FlashInfer's DSV4 sparse-decode dispatcher specializes on the static index
 # width.  HCA compresses one entry per 128 input tokens, so a 1M context needs
@@ -133,15 +204,25 @@ def canonical_topk(
         raise ValueError(
             f"supported top-k widths must be positive, got {supported_widths}"
         )
+    target_width = width
     if width not in supported_widths:
-        padded_width = next(
+        target_width = next(
             (value for value in supported_widths if value >= width), None
         )
-        if padded_width is None:
+        if target_width is None:
             raise RuntimeError(
                 f"SM120 sparse MLA Top-K width {width} exceeds the largest "
                 f"FlashInfer instantiation ({supported_widths[-1]})"
             )
+    if (
+        _TRITON_CANONICAL_TOPK
+        and indices.is_cuda
+        and target_width & (target_width - 1) == 0
+        and target_width <= 8192
+    ):
+        return _canonical_topk_triton(indices, lengths, int(target_width))
+    if width != target_width:
+        padded_width = target_width
         padded = torch.full(
             (rows, padded_width), -1, dtype=torch.int32, device=indices.device
         )

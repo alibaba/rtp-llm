@@ -88,6 +88,15 @@ class Sm120FusedMoeStrategy(RoutedExpertsStrategy):
         else:
             self._local = LocalLoopStrategy(cfg)
 
+        if (
+            self._sm120_grouped is not None
+            and os.environ.get("DSV4_SM120_TP_REPLICATED_MOE", "1") == "1"
+            and os.environ.get("DSV4_SM120_MOE_BF16_ALLREDUCE", "1") == "1"
+            and cfg.tp_size > 1
+            and cfg.tp_size == cfg.ep_size
+            and not cfg.cp_enabled
+        ):
+            self._sm120_grouped._return_bf16 = True
         self._fused_moe = build_sm120_fused_moe(
             cfg,
             self._local,

@@ -733,8 +733,12 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         # workspace and tuning bound are therefore derived from this actual
         # invocation rather than rejecting the call against that hint.
         actual_tokens = max(int(x.size(0)), 1)
-        fake_input_scale = torch.ones(num_experts, dtype=torch.float32, device=x.device)
-        swiglu_limit = torch.full_like(fake_input_scale, cfg.swiglu_limit)
+        consts = getattr(self, "_sm120_moe_consts", None)
+        if consts is None or consts[0].device != x.device:
+            ones = torch.ones(num_experts, dtype=torch.float32, device=x.device)
+            consts = (ones, torch.full_like(ones, cfg.swiglu_limit))
+            self._sm120_moe_consts = consts
+        fake_input_scale, swiglu_limit = consts
         output = torch.empty_like(x)
         kernel_input, input_sf = mxfp8_quantize(
             x.contiguous(), is_sf_swizzled_layout=True
@@ -744,10 +748,10 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         # block_scale_interleave (prepared in setup_weights).  The separate
         # TRT-LLM NVFP4 weight shuffle is a block-16 format and must not be
         # applied to these DSv4 MXFP4 weights.
-        routed_ids = torch.where(weights != 0, indices, torch.full_like(indices, -1))
+        routed_ids = indices.to(torch.int32).masked_fill(weights == 0, -1)
         moe_kwargs = dict(
             input=kernel_input,
-            token_selected_experts=routed_ids.to(torch.int32).contiguous(),
+            token_selected_experts=routed_ids,
             token_final_scales=weights.float().contiguous(),
             fc1_expert_weights=self._w13.view(torch.uint8).view(torch.long),
             fc2_expert_weights=self._w2.view(torch.uint8).view(torch.long),
@@ -780,6 +784,8 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
                 cutlass_fused_moe(**moe_kwargs)
         else:
             cutlass_fused_moe(**moe_kwargs)
+        if getattr(self, "_return_bf16", False):
+            return output
         return output.float()
 
     def _forward_capture_topk(

@@ -215,6 +215,18 @@ class MoE(nn.Module):
         self.n_local_experts = n_routed_experts // max(ep_size, 1)
         self.local_expert_start = ep_rank * self.n_local_experts
         self.local_expert_end = self.local_expert_start + self.n_local_experts
+        routed_inter_dim = moe_inter_dim
+        if (
+            os.environ.get("DSV4_SM120_TP_MOE", "0") == "1"
+            and int(moe_tp_size) > 1
+            and not cp_enabled
+        ):
+            # TP-sharded routed experts: all experts live on every rank with a
+            # 1/tp slice of the intermediate dim; partial sums are all-reduced.
+            self.n_local_experts = n_routed_experts
+            self.local_expert_start = 0
+            self.local_expert_end = n_routed_experts
+            routed_inter_dim = moe_inter_dim // int(moe_tp_size)
 
         from rtp_llm.utils.model_weight import W
 
@@ -235,7 +247,7 @@ class MoE(nn.Module):
         cfg = MoeCfg(
             layer_id=layer_id,
             dim=dim,
-            moe_inter_dim=moe_inter_dim,
+            moe_inter_dim=routed_inter_dim,
             n_routed_experts=n_routed_experts,
             n_activated_experts=n_activated_experts,
             swiglu_limit=swiglu_limit,
