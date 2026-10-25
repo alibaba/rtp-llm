@@ -284,7 +284,7 @@ public final class PrefillState {
         return true;
     }
 
-    public boolean terminalizeActiveUnderLock(ScheduledRequest item) {
+    public boolean removeQueuedRequest(ScheduledRequest item) {
         requireLock();
         RequestEntry entry = requests.get(item.requestId());
         if (entry == null || !entry.activeIdentity(item)) {
@@ -296,7 +296,7 @@ public final class PrefillState {
                         + item.requestId());
         detachAdmissionIndexUnderLock(entry, item);
         // BATCH preparation owns any OPEN batch lease together with a
-        // generation handoff. NON_BATCH item-owned route reservations use the
+        // generation handoff. NON_BATCH item-owned single reservations use the
         // atomic counterpart below so retirement can never observe an orphan.
         removeRequestUnderLock(item.requestId(), entry);
         recordMutationUnderLock();
@@ -587,7 +587,7 @@ public final class PrefillState {
      * Total counterpart cleanup bound to one exact committed ScheduledRequest. A
      * reused request id or an ACTIVE item is a no-op.
      */
-    public boolean terminalizeCommittedItem(ScheduledRequest exactItem) {
+    public boolean removeCommittedRequest(ScheduledRequest exactItem) {
         boolean capacityReleased = false;
         lock.lock();
         try {

@@ -95,10 +95,10 @@ class QueuedBatchDeliveryTest {
         when(prefill.releaseCommittedItem(any())).thenAnswer(call -> {
             ScheduledRequest item = call.getArgument(0);
             assertFalse(Thread.holdsLock(registry.requestSlot(item.requestId())));
-            return ledger.prefill.terminalizeCommittedItem(item);
+            return ledger.prefill.removeCommittedRequest(item);
         });
         when(prefill.expireCommittedItem(any())).thenAnswer(call ->
-                ledger.prefill.terminalizeCommittedItem(call.getArgument(0)));
+                ledger.prefill.removeCommittedRequest(call.getArgument(0)));
         doAnswer(call -> { prefill.releaseCommittedItem(call.getArgument(0)); return null; })
                 .when(prefill).settleFailedRequest(any());
         decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null,

@@ -338,7 +338,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Exact counterpart cleanup; stale item generations are a no-op. */
     public boolean releaseCommittedItem(ScheduledRequest exactItem) {
-        return prefillState.terminalizeCommittedItem(exactItem);
+        return prefillState.removeCommittedRequest(exactItem);
     }
 
     /** End the exact failed member, whether still queued or committed to a batch. */
@@ -349,7 +349,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Expire an exact local committed lease without claiming Engine completion. */
     public boolean expireCommittedItem(ScheduledRequest exactItem) {
-        return prefillState.terminalizeCommittedItem(exactItem);
+        return prefillState.removeCommittedRequest(exactItem);
     }
 
     /**

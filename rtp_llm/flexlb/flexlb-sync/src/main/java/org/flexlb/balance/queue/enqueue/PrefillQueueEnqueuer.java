@@ -204,7 +204,7 @@ public final class PrefillQueueEnqueuer {
             ScheduledRequest item,
             SingleReservation reservation) {
         boolean removed = reservation == null
-                ? prefillState.terminalizeActiveUnderLock(item)
+                ? prefillState.removeQueuedRequest(item)
                 : prefillState.removeQueuedSingleRequest(
                         item, reservation);
         if (!removed) {

@@ -67,14 +67,14 @@ class DeliverySettlementTest {
             RequestSlot slot = registry.requestSlot(item.requestId());
             assertTrue(slot == null || !Thread.holdsLock(slot),
                     "endpoint accounting must run outside the Slot monitor");
-            return ledger.prefill.terminalizeCommittedItem(item);
+            return ledger.prefill.removeCommittedRequest(item);
         });
         doAnswer(invocation -> {
             prefill.releaseCommittedItem(invocation.getArgument(0));
             return null;
         }).when(prefill).settleFailedRequest(any());
         when(prefill.expireCommittedItem(any())).thenAnswer(invocation ->
-                ledger.prefill.terminalizeCommittedItem(invocation.getArgument(0)));
+                ledger.prefill.removeCommittedRequest(invocation.getArgument(0)));
     }
 
     @AfterEach
@@ -269,7 +269,7 @@ class DeliverySettlementTest {
 
         if (decodeFirst) { decodeFinished(member); }
         // Retirement drains endpoint ownership before handling its exact items.
-        assertTrue(ledger.prefill.terminalizeCommittedItem(member.item()));
+        assertTrue(ledger.prefill.removeCommittedRequest(member.item()));
         registry.applyPrefillRetirementItem(prefill, member.item());
         if (!decodeFirst) {
             assertFalse(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));

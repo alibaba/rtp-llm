@@ -124,7 +124,7 @@ public final class EndpointCleanupTestSupport {
         }
 
         public void assertStaleReleaseIsIgnored(Owner old) {
-            assertFalse(state.terminalizeCommittedItem(old.item()));
+            assertFalse(state.removeCommittedRequest(old.item()));
             old.reservation().close();
         }
 

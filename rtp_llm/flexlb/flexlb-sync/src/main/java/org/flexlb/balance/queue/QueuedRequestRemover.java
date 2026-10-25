@@ -35,7 +35,7 @@ public final class QueuedRequestRemover {
     public boolean removeTerminalActiveUnderLock(ScheduledRequest item) {
         boolean removed;
         if (!item.requiresSingleReservation()) {
-            removed = prefillState.terminalizeActiveUnderLock(item);
+            removed = prefillState.removeQueuedRequest(item);
         } else {
             SingleReservation reservation =
                     item.takePublishedSingleReservation();

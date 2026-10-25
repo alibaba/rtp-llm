@@ -83,8 +83,8 @@ class PrefillStateSnapshotTest {
             }
             assertEquals(List.of("1", "2"), shared.requests().stream()
                     .map(WorkView.RequestWork::requestId).toList());
-            assertTrue(state.terminalizeCommittedItem(second));
-            assertTrue(state.terminalizeCommittedItem(first));
+            assertTrue(state.removeCommittedRequest(second));
+            assertTrue(state.removeCommittedRequest(first));
             assertEquals(2, shared.requests().size());
             assertTrue(capture().work().materialize().requests().isEmpty());
         }
@@ -97,7 +97,7 @@ class PrefillStateSnapshotTest {
         var queued = item(1);
         enqueue(queued);
         var before = capture();
-        assertTrue(state.terminalizeCommittedItem(committed));
+        assertTrue(state.removeCommittedRequest(committed));
         var after = capture();
         assertSame(before.active(), after.active());
         assertEquals(1, before.work().materialize().requests().size());
@@ -141,8 +141,8 @@ class PrefillStateSnapshotTest {
             }
         }
         assertEquals(2, state.committedSnapshot().requests().size(), "closing committed capabilities cannot release Engine ownership");
-        assertTrue(state.terminalizeCommittedItem(first));
-        assertTrue(state.terminalizeCommittedItem(second));
+        assertTrue(state.removeCommittedRequest(first));
+        assertTrue(state.removeCommittedRequest(second));
         assertTrue(state.committedSnapshot().requests().isEmpty());
     }
 
@@ -178,7 +178,7 @@ class PrefillStateSnapshotTest {
                 assertThrows(IllegalStateException.class, () -> state.commitSingleGroup(List.of(kept, removed),
                         List.of(keptReservation, removedReservation), handoff));
             }
-            assertFalse(state.terminalizeCommittedItem(kept));
+            assertFalse(state.removeCommittedRequest(kept));
             assertTrue(waiting.add(removed));
             try (var handoff = state.commitSingleGroup(List.of(kept, removed),
                     List.of(keptReservation, removedReservation), generation.tryAcquireHandoff())) {
@@ -272,13 +272,13 @@ class PrefillStateSnapshotTest {
                 });
 
         clock.set(150);
-        assertTrue(state.terminalizeCommittedItem(a));
+        assertTrue(state.removeCommittedRequest(a));
         assertEquals(List.of("2", "3"), state.committedSnapshot().batches().getFirst().requestIds());
         assertEquals(250L, remainingWork());
         clock.set(190);
-        assertTrue(state.terminalizeCommittedItem(b));
-        assertFalse(state.terminalizeCommittedItem(a));
-        assertFalse(state.terminalizeCommittedItem(item(3)), "cleanup must match the exact item");
+        assertTrue(state.removeCommittedRequest(b));
+        assertFalse(state.removeCommittedRequest(a));
+        assertFalse(state.removeCommittedRequest(item(3)), "cleanup must match the exact item");
         assertEquals(210L, remainingWork());
 
         // Returning to QUEUED pauses elapsed-time accounting, but does not undo work already started.

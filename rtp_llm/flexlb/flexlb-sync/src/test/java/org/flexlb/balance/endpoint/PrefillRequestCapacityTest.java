@@ -47,8 +47,8 @@ class PrefillRequestCapacityTest {
         }
         registration.close();
         assertEquals(2L, state.observedRequestCount(), "ACK and capability closure cannot release Engine ownership");
-        assertTrue(state.terminalizeCommittedItem(prepared));
-        assertFalse(state.terminalizeCommittedItem(prepared));
+        assertTrue(state.removeCommittedRequest(prepared));
+        assertFalse(state.removeCommittedRequest(prepared));
         assertTrue(enqueue(item(3), 2L));
         assertEquals(2L, state.observedRequestCount());
     }
@@ -108,10 +108,10 @@ class PrefillRequestCapacityTest {
         try (var handoff = reservation.commit(List.of(first, second), 0L)) { }
         assertFalse(state.batchAvailability(1).isAvailable());
         assertTrue(enqueue(item(3), 0L));
-        assertTrue(state.terminalizeCommittedItem(first));
+        assertTrue(state.removeCommittedRequest(first));
         assertEquals(2L, state.observedRequestCount());
         assertFalse(state.batchAvailability(1).isAvailable());
-        assertTrue(state.terminalizeCommittedItem(second));
+        assertTrue(state.removeCommittedRequest(second));
         assertEquals(1L, state.observedRequestCount());
         assertTrue(state.batchAvailability(1).isAvailable());
     }
@@ -124,7 +124,7 @@ class PrefillRequestCapacityTest {
         ScheduledRequest reused = item(1);
         var current = reserve(reused, 1L).reservation();
         old.close();
-        assertFalse(state.terminalizeCommittedItem(previous));
+        assertFalse(state.removeCommittedRequest(previous));
         assertEquals(1L, state.observedRequestCount());
         cancel(reused, current);
         assertEquals(0L, state.observedRequestCount());
@@ -149,7 +149,7 @@ class PrefillRequestCapacityTest {
             try {
                 assertFalse(reader.submit(() -> state.canAcceptRequest(1L)).get(5, TimeUnit.SECONDS));
                 assertTrue(reader.submit(() -> state.canAcceptRequest(2L)).get(5, TimeUnit.SECONDS));
-                assertTrue(state.terminalizeActiveUnderLock(queued));
+                assertTrue(state.removeQueuedRequest(queued));
                 assertTrue(reader.submit(() -> state.canAcceptRequest(1L)).get(5, TimeUnit.SECONDS),
                         "removal publishes capacity before the ownership lock is released");
             } finally {
