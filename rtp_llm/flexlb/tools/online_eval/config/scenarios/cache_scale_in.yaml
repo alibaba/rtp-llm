@@ -1,0 +1,227 @@
+case_schema_version: 2
+case: cache_scale_in
+program: default
+metadata:
+  kind: workload
+  description: Shared healthy warmup and fixed scale-in control with a cache-affinity
+    intervention.
+  category: kv
+profiles:
+- single-nonbatch
+- batch-window
+environment:
+  backend: java_mock
+  perf_preset: glm_5_3_l20d
+  model_override:
+    baseline: glm_5_3_l20d
+    reason: 测试 flat Device 缓存迁移路径，覆盖设备树开关
+  discovery: discovery_file
+  prefill_cache_policy:
+    device_tree: false
+    memory_tree: false
+  config_overrides:
+    cache_affinity_max_extra_ttft_ms: 1000000000
+  master_test_control: true
+execution:
+  timeout_s: 3600
+  stage_timeout_s: 60
+  cleanup_timeout_s: 660
+  collection: request
+  monitoring:
+    query_plan: cache_scale_in.yaml
+    max_sample_gap_s: 10
+  finalize_timeout_s: 600
+  report_timeout_s: 300
+parameters:
+  traffic:
+    kind: java_flow
+    group_id: scale_in
+    phase_id: continuous
+    source:
+      kind: trace
+      model: prefix_lineage
+      parameters:
+        path: ../../data/traffic_trace/glm-5.3_20260921_2126_3h.xz
+        count: 587711
+        output_tokens: 420
+        priority: 50
+    client:
+      playback:
+        duration_s: 1350
+        mode: uniform
+        qps: 240.0
+        max_laps: 1
+      limits:
+        max_concurrency: 32768
+        request_timeout_s: 600
+        drain_timeout_s: 660
+      transport:
+        channels: 16
+        event_loop_threads: 16
+    max_requests: 324001
+    poll_s: 0.1
+    jvm_xms: 1g
+    jvm_xmx: 48g
+  procedure:
+    target_p: 64
+    removal_mode: graceful
+    drain_timeout_ms: 30000
+    topology_timeout_s: 37
+    analysis_timeout_s: 300
+    warmup_min_s: 900
+    post_affinity_ms: 1000000000
+    startup_timeout_s: 900
+  observation:
+    warmup_timeout_s: 1050
+    sample_s: 1
+    window_s: 10
+    step_s: 1
+    max_gap_s: 5
+    inputs:
+      engine_counters:
+        fields:
+          running:
+            metric: mock/running
+            labels:
+              role: prefill
+          waiting:
+            metric: mock/waiting
+            labels:
+              role: prefill
+          hit_tokens_total:
+            metric: mock/hit_tokens_total
+            labels:
+              role: prefill
+          context_tokens_total:
+            metric: mock/context_tokens_total
+            labels:
+              role: prefill
+          context_requests_total:
+            metric: mock/context_requests_total
+            labels:
+              role: prefill
+          cache_evictions:
+            metric: mock/cache_evictions
+            labels:
+              role: prefill
+          prefill_ms_avg:
+            metric: mock/prefill_ms_avg
+            labels:
+              role: prefill
+          prefill_batches:
+            metric: mock/prefill_batches
+            labels:
+              role: prefill
+          prefill_batch_requests:
+            metric: mock/prefill_batch_requests
+            labels:
+              role: prefill
+          cache_key_hits:
+            metric: mock/cache_key_hits
+            labels:
+              role: prefill
+          cache_keys_requested:
+            metric: mock/cache_keys_requested
+            labels:
+              role: prefill
+          admission_open:
+            metric: mock/admission_open
+            labels:
+              role: prefill
+          admitted_rpcs_total:
+            metric: mock/admitted_rpcs_total
+            labels:
+              role: prefill
+          rejected_rpcs_total:
+            metric: mock/rejected_rpcs_total
+            labels:
+              role: prefill
+          worker_status_qps:
+            metric: mock/worker_status_qps
+            labels:
+              role: prefill
+          worker_status_rt_us:
+            metric: mock/worker_status_rt_us
+            labels:
+              role: prefill
+    capture:
+      max_samples: 1500
+      max_bytes: 67108864
+    windows:
+      baseline:
+        from:
+          event: baseline_ready
+          offset_s: -60
+        until:
+          event: baseline_ready
+          offset_s: 0
+      post:
+        from:
+          event: target_topology_observed
+          offset_s: 0
+        until:
+          event: target_topology_observed
+          offset_s: 240
+  analysis:
+    collapse:
+      absolute_min_hit: 0.45
+      max_drop: 0.25
+      sustain_s: 30
+  checks:
+    offered_load:
+      metric: cache_gate/offered_qps_deviation
+      windows:
+      - baseline
+      - post
+      unit: ratio
+      op: le
+      expected: 0.1
+    baseline_hit:
+      metric: cache_gate/baseline_min_half_hit
+      windows:
+      - baseline
+      unit: ratio
+      op: ge
+      expected: 0.85
+    baseline_stability:
+      metric: cache_gate/baseline_half_spread
+      windows:
+      - baseline
+      unit: ratio
+      op: le
+      expected: 0.05
+    completed:
+      metric: cache_gate/min_window_completed
+      windows:
+      - baseline
+      - post
+      unit: requests
+      op: ge
+      expected: 20
+    collapse:
+      metric: cache_gate/collapse_detected
+      windows:
+      - post
+      unit: boolean
+      op: eq
+      expected: 0
+variants:
+- id: affinity_disabled
+  parameters:
+    procedure:
+      post_affinity_ms: 0
+    checks:
+      collapse:
+        expected: 1
+reporting:
+  time_axis:
+    origin:
+      event: traffic_started
+    range:
+      from: origin
+      until:
+        stage: drain
+        boundary: end
+reports:
+- default.yaml
+- cache_scale_in.yaml

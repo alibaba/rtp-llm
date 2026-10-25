@@ -1,0 +1,225 @@
+case_schema_version: 2
+case: master_performance
+program: default
+metadata:
+  kind: workload
+  description: Frozen 48P/192D Whale Mock regression reference; post-switch Flash
+    frontend capture from 16/20 pods, output mean from real Decode monitoring. Absolute
+    provisional contract, not production capacity.
+  category: master
+profiles:
+- single-nonbatch
+- batch-window
+environment:
+  backend: java_mock
+  perf_preset: deepseek_v4_flash_l20c
+  config_overrides:
+    cache_affinity_max_extra_ttft_ms: 1000000000
+  metric_whitelist: flexlb_app_cache_,flexlb_app_flexlb_,flexlb_app_engine_balancing_master_,flexlb_auto_tpm_
+  profile_overrides:
+    batch-window:
+      max_requests: 64
+      max_collection_wait_ms: 350
+      max_predicted_execution_ms: 350
+execution:
+  timeout_s: 1000
+  stage_timeout_s: 60
+  cleanup_timeout_s: 90
+  collection: request
+  monitoring:
+    query_plan: master_performance.yaml
+parameters:
+  traffic:
+    kind: java_flow
+    group_id: performance
+    phase_id: continuous
+    source:
+      kind: trace
+      model: prefix_lineage
+      parameters:
+        path: ../../data/traffic_trace/deepseek_v4_flash_20260923_0920_16m.xz
+        count: 844864
+        output_tokens: 8192
+        output_distribution:
+          kind: geometric
+          mean_tokens: 294
+          seed: 20260922
+        priority: 50
+        max_input_tokens: 32768
+    client:
+      playback:
+        duration_s: 390
+        mode: uniform
+        qps: 1536.0
+        ramp_up_seconds: 10.0
+        max_laps: 1
+        identity: structural-relabel
+      limits:
+        max_concurrency: 65536
+        request_timeout_s: 120
+        drain_timeout_s: 130
+      transport:
+        channels: 8
+        event_loop_threads: 8
+    poll_s: 0.1
+    jvm_xms: 8g
+    jvm_xmx: 8g
+  procedure:
+    analysis_timeout_s: 165
+  observation:
+    sample_s: 1
+    max_gap_s: 3
+    inputs:
+      engine_tps:
+        fields:
+          rtp_llm_context_tps:
+            metric: mock/rtp_llm_context_tps
+            labels:
+              role: prefill
+          rtp_llm_context_tps_with_cache:
+            metric: mock/rtp_llm_context_tps_with_cache
+            labels:
+              role: prefill
+          mock_decode_wall_tps:
+            metric: mock/mock_decode_wall_tps
+            labels:
+              role: decode
+    capture:
+      max_samples: 1000
+      max_bytes: 67108864
+    windows:
+      measurement:
+        from:
+          event: observation_start
+          offset_s: 180
+        until:
+          event: observation_start
+          offset_s: 360
+  analysis:
+    slo:
+      ttft_ms: 2000
+      e2e_ms: 30000
+      tpot_ms: 50
+  checks:
+    offered_load:
+      metric: performance_gate/offered_qps_deviation
+      windows:
+      - measurement
+      unit: ratio
+      op: le
+      expected: 0.05
+    requests:
+      metric: performance_gate/cohort_requests
+      windows:
+      - measurement
+      unit: requests
+      op: ge
+      expected: 260000
+    pacing_lag:
+      metric: performance_gate/pacing_lag_max_ms
+      windows:
+      - measurement
+      unit: ms
+      op: le
+      expected: 250
+    input_tps:
+      metric: performance_gate/input_tps
+      windows:
+      - measurement
+      unit: tokens/s
+      op: ge
+      expected: 4290000
+    output_tps:
+      metric: performance_gate/output_tps
+      windows:
+      - measurement
+      unit: tokens/s
+      op: ge
+      expected: 429000
+    goodput:
+      metric: performance_gate/goodput_rps
+      windows:
+      - measurement
+      unit: requests/s
+      op: ge
+      expected: 1440
+    slo_fraction:
+      metric: performance_gate/slo_fraction
+      windows:
+      - measurement
+      unit: ratio
+      op: ge
+      expected: 0.95
+    errors:
+      metric: performance_gate/error_rate
+      windows:
+      - full_run
+      unit: ratio
+      op: le
+      expected: 0
+    ttft:
+      metric: performance_gate/ttft_p99_ms
+      windows:
+      - measurement
+      unit: ms
+      op: le
+      expected: 2000
+    e2e:
+      metric: performance_gate/e2e_p99_ms
+      windows:
+      - measurement
+      unit: ms
+      op: le
+      expected: 30000
+    tpot:
+      metric: performance_gate/tpot_p99_ms
+      windows:
+      - measurement
+      unit: ms
+      op: le
+      expected: 50
+    inflight_growth:
+      metric: performance_gate/inflight_growth_rps
+      windows:
+      - measurement
+      unit: requests/s
+      op: le
+      expected: 10
+    engine_tps:
+      rtp_llm_context_tps:
+        metric: performance_gate/rtp_llm_context_tps_scrape_engine_mean
+        windows:
+        - measurement
+        unit: tokens/s
+        op: ge
+        expected: 50000
+        expected_by_profile:
+          single-nonbatch: 45000
+      rtp_llm_context_tps_with_cache:
+        metric: performance_gate/rtp_llm_context_tps_with_cache_scrape_engine_mean
+        windows:
+        - measurement
+        unit: tokens/s
+        op: ge
+        expected: 100000
+        expected_by_profile:
+          single-nonbatch: 90000
+      mock_decode_wall_tps:
+        metric: performance_gate/mock_decode_wall_tps_scrape_engine_mean
+        windows:
+        - measurement
+        unit: tokens/s
+        op: ge
+        expected: 2230
+reporting:
+  time_axis:
+    origin:
+      event: traffic_started
+    range:
+      from: origin
+      until:
+        stage: drain
+        boundary: end
+reports:
+- default.yaml
+- master_performance.yaml
