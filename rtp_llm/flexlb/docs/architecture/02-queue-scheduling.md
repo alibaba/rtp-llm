@@ -91,7 +91,7 @@ MainQueue -> 每台机器一个 PrefillQueue -> 共用 DecodeQueue -> publish(Pr
   截止时间触发的取消单独标为 `REQUEST_TIMEOUT`，不与复用同一错误码的其他失败混淆。
 - Prefill 阻塞区分在途满、KV 不足；Decode 区分请求数满、KV 不足和同时不足，
   并区分等待预占与等待许可。Decode 原因使用失败后的即时容量视图，若容量已恢复则记状态变化。
-  主队列尚未取得缓存匹配及关联预测结果时记为 `WAITING_FOR_CACHE_MATCH`；Decode 没有异步准备等待阶段。
+  主队列异步等待缓存匹配及关联预测结果属于正常准备流程，不上报阻塞请求或阻塞检查指标；Decode 没有异步准备等待阶段。
 - `QueueProgress` 把阶段和累计时间放在同一次 CAS 中更新，退回重排时累加，失败与取消也记录最后一段。
   完成响应前写入 PV：`globalQueueMs` 是主队列累计时间，`prefillQueueMs` 和 `decodeQueueMs` 是分项，
   `subQueueMs` 是 Prefill 与 Decode 的总等待时间；`schedule_v2.queue.wait_ms` 提供相同口径的监控。
