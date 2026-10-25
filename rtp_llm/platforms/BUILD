@@ -278,6 +278,19 @@ py_test(
 )
 
 py_test(
+    name = "mega_moe_contract_test",
+    srcs = ["ppu/test/test_mega_moe_contract.py"],
+    main = "ppu/test/test_mega_moe_contract.py",
+    data = [":platform_sources", ":ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    tags = ["gpu", "ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "decode_moe_output_test",
     srcs = ["ppu/test/test_decode_moe_output.py"],
     main = "ppu/test/test_decode_moe_output.py",

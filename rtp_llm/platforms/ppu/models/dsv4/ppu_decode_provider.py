@@ -3,6 +3,7 @@
 import weakref
 
 import torch
+
 from rtp_llm.models_py.modules.dsv4.platform_provider import Dsv4ProviderCapability
 
 from .manifest import DECODE_EXECUTION_OPTIONS, _check_execution_options
@@ -54,6 +55,23 @@ class PpuDecodeProvider(PpuModuleProvider):
         self._mtp_batch_indexer = batch_indexer == "1"
         # Opt-in is captured in the model's execution-options snapshot.
         self._decode_fusions = self._bool("DSV4_PPU_DECODE_FUSIONS", False)
+        self._moe_backend = self.execution_options.get(
+            "DSV4_PPU_DECODE_MOE_BACKEND", "deepep"
+        )
+        if self._moe_backend not in ("deepep", "megamoe"):
+            raise ValueError("DSV4_PPU_DECODE_MOE_BACKEND must be deepep or megamoe")
+        self._mega_resources = None
+        self._mega_module_name = self.execution_options.get(
+            "DSV4_PPU_MEGAMOE_PACKAGE", "deep_gemm"
+        )
+        if self._moe_backend == "megamoe":
+            if self._mega_module_name not in ("deep_gemm", "deep_gemm_mega"):
+                raise ValueError(
+                    "DSV4_PPU_MEGAMOE_PACKAGE must be deep_gemm or deep_gemm_mega"
+                )
+            from .ppu_mega_moe import PpuMegaMoEResources
+
+            self._mega_resources = PpuMegaMoEResources()
         self._decode_attention_refs = []
         self.stream_pool = PpuStreamPool()
 
