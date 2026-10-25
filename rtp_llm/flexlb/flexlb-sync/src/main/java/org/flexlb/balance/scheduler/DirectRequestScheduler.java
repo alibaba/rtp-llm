@@ -208,8 +208,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                         if (result != PlacementResult.Status.SUCCESS) {
                             return result == PlacementResult.Status.CLOSED
                                     ? PlacementResult.closed()
-                                    : PlacementResult.rejected(
-                                            Response.error(reservationAttempt.failure()));
+                                    : PlacementResult.rejected(reservationAttempt.failure());
                         }
                         handoff =
                                 routing.prefillEp()
@@ -321,15 +320,18 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
             return result == null ? null : result.reservation();
         }
 
-        StrategyErrorType failure() {
+        Response failure() {
             if (result == null) {
-                return StrategyErrorType.REQUEST_CANCELLED;
+                return Response.error(StrategyErrorType.REQUEST_CANCELLED);
             }
             return switch (result.status()) {
-                case CAPACITY_FULL -> StrategyErrorType.RESOURCE_EXHAUSTED;
-                case ENDPOINT_RETIRED -> StrategyErrorType.DISPATCH_FAILED;
+                case CAPACITY_FULL ->
+                        Response.buildErrorResponse(
+                                StrategyErrorType.RESOURCE_EXHAUSTED,
+                                CapacityBoundary.Resource.PREFILL_REQUEST.getDescription());
+                case ENDPOINT_RETIRED -> Response.error(StrategyErrorType.DISPATCH_FAILED);
                 case REQUEST_ALREADY_RESERVED, REQUEST_NOT_ACTIVE, BATCH_ID_ALREADY_RESERVED ->
-                        StrategyErrorType.RESOURCE_EXHAUSTED;
+                        Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
                 case ACQUIRED ->
                         throw new IllegalStateException("successful admission cannot be rejected");
             };

@@ -46,26 +46,14 @@ import static com.google.common.math.LongMath.saturatedAdd;
 public final class WorkerBatcher {
 
     /** Frozen decision evidence; the log representation is materialized only on failure. */
+    @lombok.RequiredArgsConstructor(access = lombok.AccessLevel.PRIVATE)
     private static final class QueueWaitSnapshot {
         private final String endpoint;
         private final String cause;
-        private final long capturedAtMs;
+        private final long capturedAtMs = System.currentTimeMillis();
         private final PrefillState.QueueCounters counters;
         private final DecodeRoutingView decode;
         private volatile Map<String, Object> snapshotValues;
-
-        private QueueWaitSnapshot(
-                String endpoint,
-                String cause,
-                long capturedAtMs,
-                PrefillState.QueueCounters counters,
-                DecodeRoutingView decode) {
-            this.endpoint = endpoint;
-            this.cause = cause;
-            this.capturedAtMs = capturedAtMs;
-            this.counters = counters;
-            this.decode = decode;
-        }
 
         private Map<String, Object> asMap() {
             Map<String, Object> cached = snapshotValues;
@@ -141,9 +129,7 @@ public final class WorkerBatcher {
                     0L,
                     0L,
                     0L,
-                    unavailable.projectionSemantics() == null
-                            ? "Prefill batch capacity exhausted"
-                            : unavailable.projectionSemantics().blockedDetail());
+                    unavailable.resource().getDescription());
         }
 
         private static BatcherCycleResult awaitingSchedulingChange(
@@ -497,8 +483,7 @@ public final class WorkerBatcher {
     private void recordQueueWait(RequestRoute head, String reason) {
         PrefillState.QueueCounters counters = prefillState.captureQueueCounters();
         DecodeRoutingView decode = head.decodeEp() == null ? null : head.decodeEp().routingView();
-        latestQueueWaitSnapshot =
-                new QueueWaitSnapshot(key, reason, System.currentTimeMillis(), counters, decode);
+        latestQueueWaitSnapshot = new QueueWaitSnapshot(key, reason, counters, decode);
     }
 
     // ==================== Queue ownership and projection ====================
