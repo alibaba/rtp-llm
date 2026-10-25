@@ -9,6 +9,12 @@ py_library(
     deps = ["//rtp_llm:torch"],
 )
 
+filegroup(
+    name = "fia2a_plan_sources",
+    srcs = ["modules/factory/attention/cuda_mla_impl/fia2a_plan.py"],
+    visibility = ["//rtp_llm/models_py/modules/factory/attention/cuda_mla_impl/test:__pkg__"],
+)
+
 # CPU-only subset of the DSv4 decode package: pure-torch modules plus the
 # package __init__ chain, without the CUDA/testlib closure. The lazily
 # imported paged/pool helpers (pool_slot_mapping, _pool_triton) are part of
@@ -134,8 +140,8 @@ py_library(
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
         # cuda13 locks ship flashinfer-python and deep-ep.
-        "@//:using_cuda13_x86": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl"],
-        "@//:using_cuda13_arm": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl"],
+        "@//:using_cuda13_x86": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl", "//rtp_llm:apache-tvm-ffi"],
+        "@//:using_cuda13_arm": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl", "//rtp_llm:apache-tvm-ffi"],
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
         "@//:using_rocm": [
