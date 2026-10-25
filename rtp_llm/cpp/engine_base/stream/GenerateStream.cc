@@ -754,6 +754,16 @@ bool GenerateStream::isFinished() const {
     return getStatus() == StreamState::FINISHED;
 }
 
+void GenerateStream::cancelIfNotFinished() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    // nextOutput() can expose GenerateDone before moveToNext() commits FINISHED.
+    // Checking and cancelling under the same lock prevents successful work from
+    // gaining an Error event that would suppress the scheduler's cache publication.
+    if (!generate_status_->checkFinished()) {
+        reportEventWithoutLock(StreamEvents::Error, ErrorCode::CANCELLED, "cancel stream");
+    }
+}
+
 bool GenerateStream::isActive() const {
     std::lock_guard<std::mutex> lock(*mutex_);
     return !hasErrorWithoutLock() && getStatus() != StreamState::FINISHED;
