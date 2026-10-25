@@ -3,6 +3,7 @@ package org.flexlb.balance.endpoint;
 import lombok.Getter;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.endpoint.prefill.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.FinishedBatch;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
@@ -241,15 +242,15 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return new FormulaPredictor(estimator.getExpression());
     }
 
-    public ReservationResult<PrefillState.BatchReservation> reserveBatch(ScheduledRequest exactHead,
-                                                                         long batchId,
-                                                                         int maximumInflightBatches) {
+    public ReservationResult<BatchReservation> reserveBatch(ScheduledRequest exactHead,
+                                                            long batchId,
+                                                            int maximumInflightBatches) {
         EndpointGenerationLifecycle.HandoffPermit handoffPermit =
                 tryAcquireGenerationHandoff();
         if (handoffPermit == null) {
             return ReservationResult.fail(ReservationResult.Status.ENDPOINT_RETIRED);
         }
-        ReservationResult<PrefillState.BatchReservation> result;
+        ReservationResult<BatchReservation> result;
         try {
             result = prefillState.reserveBatch(
                     exactHead,

@@ -1,7 +1,9 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.endpoint.prefill.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.Reservation;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -50,7 +52,7 @@ public final class EndpointCleanupTestSupport {
             this.batch = batch;
         }
 
-        public record Owner(ScheduledRequest item, PrefillState.Reservation reservation) { }
+        public record Owner(ScheduledRequest item, Reservation reservation) {}
 
         public Owner commit(String requestId, long batchId, long predictedMs) {
             ScheduledRequest item = mock(ScheduledRequest.class);
@@ -110,8 +112,7 @@ public final class EndpointCleanupTestSupport {
                 assertTrue(work.requests().isEmpty());
                 assertEquals(1, work.batches().size());
                 assertEquals(List.of(owner.item().requestId()), work.batches().getFirst().requestIds());
-                assertEquals(((PrefillState.BatchReservation) owner.reservation()).batchId(),
-                        work.batches().getFirst().batchId());
+                assertEquals(((BatchReservation) owner.reservation()).batchId(), work.batches().getFirst().batchId());
                 // Check the actual admission gate, not just the derived batch count.
                 assertFalse(state.batchAvailability(1).isAvailable());
                 assertTrue(state.batchAvailability(2).isAvailable());

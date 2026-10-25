@@ -10,6 +10,7 @@ import org.flexlb.balance.delivery.NonBatchDeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.endpoint.prefill.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
@@ -157,14 +158,13 @@ final class StrategyTestSupport {
                     "committed batch requires at least one item");
         }
         List<ScheduledRequest> items = List.copyOf(exactItems);
-        ReservationResult<PrefillState.BatchReservation> result =
+        ReservationResult<BatchReservation> result =
                 endpoint.reserveBatch(items.getFirst(), batchId, Integer.MAX_VALUE);
         if (result.status() != ReservationResult.Status.SUCCESS) {
             throw new IllegalStateException(
                     "batch reservation rejected: " + result.status());
         }
-        try (PrefillState.BatchReservation reservation =
-                     result.reservation()) {
+        try (BatchReservation reservation = result.reservation()) {
             return reservation.commit(items, predictedMs);
         }
     }

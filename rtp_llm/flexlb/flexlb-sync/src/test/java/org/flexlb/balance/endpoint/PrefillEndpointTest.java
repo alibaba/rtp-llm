@@ -3,6 +3,7 @@ package org.flexlb.balance.endpoint;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.endpoint.prefill.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.WorkView;
@@ -655,7 +656,7 @@ class PrefillEndpointTest {
         ScheduledRequest reusedRequestId = createScheduledRequest(101L, 300, 100);
         registerBatch(endpoint, 700L, 100, List.of(first));
 
-        ReservationResult<PrefillState.BatchReservation> duplicate = endpoint.reserveBatch(reusedRequestId, 701L, 10);
+        ReservationResult<BatchReservation> duplicate = endpoint.reserveBatch(reusedRequestId, 701L, 10);
 
         assertFalse(duplicate.status() == ReservationResult.Status.SUCCESS,
                 "the canonical ledger rejects ambiguous duplicate live owners");

@@ -1,7 +1,9 @@
 package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.prefill.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.Reservation;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
@@ -353,7 +355,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         private final long batchId;
         private final PrefillEndpoint prefill;
         private PreparedSubmission submission;
-        private PrefillState.BatchReservation reservation;
+        private BatchReservation reservation;
         private ArrayList<PrefillAdmissionResources.Member> members;
         private PrefillAdmissionResources.CommittedAdmissionOwner
                 committedAdmission;
@@ -397,7 +399,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 members.ensureCapacity(Math.addExact(members.size(), 1));
                 boolean first = members.isEmpty();
                 if (first) {
-                    ReservationResult<PrefillState.BatchReservation> result =
+                    ReservationResult<BatchReservation> result =
                             prefill.reserveBatch(exact, batchId, exact.maxInflightBatchesPerPrefillWorker());
                     if (!result.isSuccess()) {
                         return rejectedPrefill(
@@ -661,7 +663,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
         /** Detach once, then attempt every admission rollback leaf. */
         private Throwable rollbackAdmission(Throwable priorFailure) {
-            PrefillState.Reservation exactReservation;
+            Reservation exactReservation;
             ArrayList<PrefillAdmissionResources.Member> exactMembers;
             synchronized (this) {
                 if (members == null) {

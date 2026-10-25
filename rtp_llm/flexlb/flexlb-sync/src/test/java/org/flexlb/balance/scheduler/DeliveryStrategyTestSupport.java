@@ -10,6 +10,7 @@ import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.delivery.NonBatchTransaction;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.prefill.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
@@ -171,7 +172,7 @@ public final class DeliveryStrategyTestSupport {
                 new HashMap<>();
         private final List<PrefillState.CommittedHandoff> handoffs =
                 new ArrayList<>();
-        private PrefillState.BatchReservation batchReservation;
+        private BatchReservation batchReservation;
         private int permitAttempt;
         private int rejectPermitAt = -1;
 
@@ -241,7 +242,7 @@ public final class DeliveryStrategyTestSupport {
             return permits.get(item);
         }
 
-        PrefillState.BatchReservation batchReservation() {
+        BatchReservation batchReservation() {
             return batchReservation;
         }
 
@@ -249,8 +250,8 @@ public final class DeliveryStrategyTestSupport {
             return List.copyOf(handoffs);
         }
 
-        private ReservationResult<PrefillState.BatchReservation> reserveBatch() {
-            batchReservation = Mockito.mock(PrefillState.BatchReservation.class);
+        private ReservationResult<BatchReservation> reserveBatch() {
+            batchReservation = Mockito.mock(BatchReservation.class);
             Mockito.when(batchReservation.commit(
                             Mockito.anyList(), Mockito.anyLong()))
                     .thenAnswer(invocation -> committedHandoffs(1).getFirst());

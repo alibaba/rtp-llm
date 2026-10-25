@@ -7,7 +7,7 @@ import org.flexlb.balance.prediction.PrefillBatchFeatures;
  * BATCH 提交给 Prefill 之后整批共享的执行进度。同一批的成员引用同一份，由 PrefillState 的锁保护。
  */
 final class BatchProgress {
-    private final PrefillState.BatchReservation lease;
+    private final BatchReservation lease;
     private final long predictedWorkMs;
     private final PrefillBatchFeatures featuresAtCommit;
     private Phase phase = Phase.COMMITTED;
@@ -40,10 +40,7 @@ final class BatchProgress {
      */
     private boolean usableForLearning = true;
 
-    BatchProgress(PrefillState.BatchReservation lease,
-                  long predictedWorkMs,
-                  PrefillBatchFeatures featuresAtCommit,
-                  long nowMs) {
+    BatchProgress(BatchReservation lease, long predictedWorkMs, PrefillBatchFeatures featuresAtCommit, long nowMs) {
         if (lease.batchId() < 0L) {
             throw new IllegalArgumentException("batchId must be non-negative");
         }
@@ -58,7 +55,7 @@ final class BatchProgress {
         this.lastObservedAtMs = nowMs;
     }
 
-    PrefillState.BatchReservation lease() {
+    BatchReservation lease() {
         return lease;
     }
 

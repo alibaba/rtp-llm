@@ -6,6 +6,7 @@ import org.flexlb.balance.delivery.DeliveryGroup;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
+import org.flexlb.balance.endpoint.prefill.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
@@ -510,7 +511,7 @@ class PrefillQueueRequestCapacityTest {
         FlexlbConfig config = productionConfig();
         try (Fixture fixture = fixture(config)) {
             var items = new ArrayList<ScheduledRequest>();
-            var reservations = new ArrayList<PrefillState.BatchReservation>();
+            var reservations = new ArrayList<BatchReservation>();
             try {
                 for (long id = 1L; id <= 3L; id++) {
                     ScheduledRequest queued = item(config, fixture.endpoint, id);
@@ -532,7 +533,7 @@ class PrefillQueueRequestCapacityTest {
                 assertEquals(ReservationResult.Status.SUCCESS, replacement.status());
                 reservations.add(replacement.reservation());
             } finally {
-                reservations.forEach(PrefillState.BatchReservation::close);
+                reservations.forEach(BatchReservation::close);
             }
         }
     }

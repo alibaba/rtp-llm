@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.Reservation;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
@@ -149,9 +150,7 @@ public final class PrefillAdmissionResources {
         return rejected(DeliveryBlockReason.failed(cause));
     }
 
-    public static Throwable rollbackReservation(
-            PrefillState.Reservation reservation,
-            Throwable priorFailure) {
+    public static Throwable rollbackReservation(Reservation reservation, Throwable priorFailure) {
         if (reservation == null) {
             return priorFailure;
         }

@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.endpoint.prefill.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -111,19 +112,19 @@ class TwinOverloadAdmissionTest {
         ScheduledRequest staged = item(endpoint, config, 2L);
         assertTrue(EndpointTestSupport.offer(endpoint, first));
         assertTrue(EndpointTestSupport.offer(endpoint, staged));
-        ReservationResult<PrefillState.BatchReservation> acquired = endpoint.reserveBatch(first, 70L, 1);
+        ReservationResult<BatchReservation> acquired = endpoint.reserveBatch(first, 70L, 1);
         assertEquals(ReservationResult.Status.SUCCESS, acquired.status());
-        try (PrefillState.BatchReservation ignored = acquired.reservation()) {
+        try (BatchReservation ignored = acquired.reservation()) {
             assertEquals(2, endpoint.queuedRequestCount());
-            ReservationResult<PrefillState.BatchReservation> blocked = endpoint.reserveBatch(staged, 71L, 1);
-            try (PrefillState.BatchReservation unexpected = blocked.reservation()) {
+            ReservationResult<BatchReservation> blocked = endpoint.reserveBatch(staged, 71L, 1);
+            try (BatchReservation unexpected = blocked.reservation()) {
                 assertEquals(ReservationResult.Status.CAPACITY_FULL, blocked.status(),
                         "a locally reserved batch must occupy the only slot at final admission");
             }
         }
         assertEquals(2, endpoint.queuedRequestCount());
-        ReservationResult<PrefillState.BatchReservation> resumed = endpoint.reserveBatch(staged, 71L, 1);
-        try (PrefillState.BatchReservation ignored = resumed.reservation()) {
+        ReservationResult<BatchReservation> resumed = endpoint.reserveBatch(staged, 71L, 1);
+        try (BatchReservation ignored = resumed.reservation()) {
             assertEquals(ReservationResult.Status.SUCCESS, resumed.status());
         }
     }
@@ -203,11 +204,10 @@ class TwinOverloadAdmissionTest {
             items.add(item);
         }
         int limit = config.getDispatcher().getMaxInflightPerPrefillWorker();
-        ReservationResult<PrefillState.BatchReservation> acquisition =
-                endpoint.reserveBatch(items.getFirst(), batchId, limit);
+        ReservationResult<BatchReservation> acquisition = endpoint.reserveBatch(items.getFirst(), batchId, limit);
         assertEquals(ReservationResult.Status.SUCCESS, acquisition.status());
-        try (PrefillState.BatchReservation reservation = acquisition.reservation();
-             PrefillState.CommittedHandoff ignored = reservation.commit(items, 300_000L)) {
+        try (BatchReservation reservation = acquisition.reservation();
+                PrefillState.CommittedHandoff ignored = reservation.commit(items, 300_000L)) {
             // Releasing the handoff closes only the generation pin, not engine work.
         }
     }

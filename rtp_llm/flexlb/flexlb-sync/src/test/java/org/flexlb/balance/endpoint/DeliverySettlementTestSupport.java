@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.endpoint.prefill.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
@@ -36,9 +37,7 @@ public final class DeliverySettlementTestSupport {
         }
     }
 
-    public ReservationResult<PrefillState.BatchReservation> reserveBatch(ScheduledRequest head,
-                                                                         long batchId,
-                                                                         int maxBatches) {
+    public ReservationResult<BatchReservation> reserveBatch(ScheduledRequest head, long batchId, int maxBatches) {
         return prefill.reserveBatch(head, batchId, maxBatches, generation.tryAcquireHandoff());
     }
 
