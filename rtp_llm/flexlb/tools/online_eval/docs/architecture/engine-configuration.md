@@ -150,7 +150,7 @@ GPU→host 先持有两端资源，成功后才释放源；pending release 不�
 
 P 准备重试依次包围连接准备、multimodalProcess 和 D ALLOCATE，最多执行 `max(0, prefill_retry_times)+1` 次。
 `prefill_retry_timeout_ms<=0` 关闭重试期限；首次尝试允许开始，后续尝试检查剩余重试预算。
-channel readiness 同时受 request/retry/max RPC 预算限制；已开始的 ALLOCATE RPC 只受 request/max RPC 预算限制。
+channel readiness 同时受 request/retry/max RPC 预算及 15 秒硬上限限制；已开始的 ALLOCATE RPC 只受 request/max RPC 预算限制。
 准备池大小使用 real 解析后的 `max(128, configured>0 ? configured : max(1, concurrency_limit)*2)`，其等待队列同大小。
 同组 slot 的 MM 与 ALLOCATE 均在准备池内并行，完成后汇合；失败 slot 保留具体错误并释放该 attempt 的资源。
 MM 成功后跨 D ALLOCATE 重试复用；仅 903/904/906/907 可重试。transport 的 UNAVAILABLE/deadline 转 907，其他未分类错误不重试。

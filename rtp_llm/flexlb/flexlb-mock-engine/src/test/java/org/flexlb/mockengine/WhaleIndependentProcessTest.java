@@ -48,18 +48,26 @@ class WhaleIndependentProcessTest {
     private Process start(String ip, int grpcPort, boolean prefill, boolean automatic) throws Exception {
         Path perf = directory.resolve("performance.json");
         Path master = directory.resolve("master.json");
+        Path engine = directory.resolve("engine.json");
         if (!Files.exists(perf)) {
             new ObjectMapper().writeValue(perf.toFile(), Map.of("sleep_scale", 1,
                     "jitter_pct", 0, "prefill", Map.of("scale", 1, "expression", "30"), "decode", Map.of("scale", 1,
                             "tokens_per_step", 1, "step_ms_by_batch", List.of(List.of(1, 20)))));
             MockMasterConfig.writeWithPrefillExpression(master, "30");
+            var config = MockEngineConfigFixture.load().snapshot();
+            assertEquals("synthetic", config.path("source").path("kind").asText());
+            // This suite checks cross-process routing/ownership, independently of
+            // cold-JVM connection latency. Retry-budget boundaries have their own tests.
+            ((com.fasterxml.jackson.databind.node.ObjectNode) config.path("roles").path("prefill").path("pd_sep"))
+                    .put("prefill_retry_timeout_ms", 1000);
+            new ObjectMapper().writeValue(engine.toFile(), config);
         }
         Path log = directory.resolve(ip + ".log");
         Process process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                 "-cp", System.getProperty("java.class.path"), JavaMockEngineCluster.class.getName(),
                 "--whale", "true", "--n-prefill", prefill ? "1" : "0", "--n-decode", prefill ? "0" : "1",
                 "--host", ip, "--bind-host", ip, "--base-grpc-port", String.valueOf(grpcPort),
-                "--engine-config", "../tools/mock_bundle/engine-config.json", "--calibration", perf.toString(),
+                "--engine-config", engine.toString(), "--calibration", perf.toString(),
                 "--endpoint-file", directory.resolve(ip + "-unused-endpoint.json").toString(),
                 "--auto-fetch", String.valueOf(automatic))
                 .redirectErrorStream(true).redirectOutput(log.toFile()).start();
@@ -210,12 +218,12 @@ class WhaleIndependentProcessTest {
     }
 
     @Test
-    void unreachableDecodeIsNotMisclassifiedAsKvExhaustion() throws Exception {
+    void unreachableDecodeReportsConnectionFailureBeforeAllocation() throws Exception {
         start("127.0.0.2", base + 1, true, false);
         channel = ManagedChannelBuilder.forAddress("127.0.0.2", base + 1).usePlaintext().build();
         var ack = enqueueAck(804, "127.0.0.5");
         assertEquals(0, ack.getSuccessesCount());
         assertEquals(1, ack.getErrorsCount());
-        assertEquals(8207, ack.getErrors(0).getErrorInfo().getErrorCode());
+        assertEquals(8201, ack.getErrors(0).getErrorInfo().getErrorCode());
     }
 }

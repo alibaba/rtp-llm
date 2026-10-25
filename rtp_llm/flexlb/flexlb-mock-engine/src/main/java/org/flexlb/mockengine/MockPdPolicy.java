@@ -38,7 +38,10 @@ record MockPdPolicy(long prefillRetryTimes, long prefillRetryTimeoutMs, long pre
         return deadline == Long.MAX_VALUE ? Long.MAX_VALUE : Math.max(0, TimeUnit.NANOSECONDS.toMillis(deadline - now));
     }
     private static final ThreadLocal<Long> PREPARE_DEADLINE = ThreadLocal.withInitial(() -> Long.MAX_VALUE);
-    long readyMs(long requestRemaining) { return Math.min(rpcMs(requestRemaining), remaining(PREPARE_DEADLINE.get(), System.nanoTime())); }
+    // PrefillRpcServer::decodeChannelReadyDeadline also imposes a 15s cap.
+    long readyMs(long requestRemaining) {
+        return Math.min(15000, Math.min(rpcMs(requestRemaining), remaining(PREPARE_DEADLINE.get(), System.nanoTime())));
+    }
     interface Attempt { boolean run() throws Exception; }
     boolean prepare(Attempt attempt, BooleanSupplier cancelled, LongSupplier requestRemaining) throws Exception {
         long retryDeadline = deadline(System.nanoTime(), prefillRetryTimeoutMs);
