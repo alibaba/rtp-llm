@@ -98,7 +98,7 @@ public final class SinglePrefill {
         PrefillState.CommittedHandoff committedHandoff =
                 new PrefillState.CommittedHandoff(generationHandoff, prefillState.capturePrecedingWork(members, nowMs));
         for (ScheduledRequest item : members) {
-            prefillState.detachAdmissionIndex(prefillState.requests.get(item.requestId()), item);
+            prefillState.removeFromWaitingQueue(prefillState.requests.get(item.requestId()), item);
         }
         for (int index = 0; index < members.size(); index++) {
             SingleReservation lease = leases.get(index);
@@ -117,7 +117,7 @@ public final class SinglePrefill {
             RequestEntry entry = prefillState.requests.get(item.requestId());
             PrefillState.requireState(entry != null && entry.activeIdentity(item),
                     "single member is not canonical admission request_id=" + item.requestId());
-            prefillState.validateAdmissionIndex(entry, item);
+            prefillState.checkQueueMembership(entry, item);
         }
         return items;
     }
@@ -140,11 +140,11 @@ public final class SinglePrefill {
                     "ACTIVE single request lost its exact Prefill reservation request_id="
                             + item.requestId());
         }
-        prefillState.validateAdmissionIndex(entry, item);
+        prefillState.checkQueueMembership(entry, item);
 
         // Every operation below is allocation-free and runs under the same
         // lock used by generation retirement.
-        prefillState.detachAdmissionIndex(entry, item);
+        prefillState.removeFromWaitingQueue(entry, item);
         prefillState.closeOpenLease(exactReservation);
         prefillState.removeRequest(item.requestId(), entry);
         prefillState.recordMutation();

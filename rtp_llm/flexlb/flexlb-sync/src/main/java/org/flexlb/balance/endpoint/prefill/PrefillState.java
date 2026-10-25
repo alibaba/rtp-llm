@@ -248,7 +248,7 @@ public final class PrefillState {
         requireState(lease == null || lease.state == LeaseState.OPEN,
                 "ACTIVE request owns a non-OPEN Prefill lease request_id="
                         + item.requestId());
-        detachAdmissionIndex(entry, item);
+        removeFromWaitingQueue(entry, item);
         // BATCH preparation owns any OPEN batch lease together with a
         // generation handoff. NON_BATCH item-owned single reservations use the
         // atomic counterpart below so retirement can never observe an orphan.
@@ -350,7 +350,7 @@ public final class PrefillState {
     }
 
     /** Remove only the exact stop-pending owner whose callback completed. */
-    public boolean acknowledgeStopTerminal(ScheduledRequest item) {
+    public boolean removeStoppedRequest(ScheduledRequest item) {
         requireLock();
         RequestEntry entry = requests.get(item.requestId());
         if (entry == null
@@ -431,15 +431,15 @@ public final class PrefillState {
                         + item.requestId());
     }
 
-    public void validateAdmissionIndex(RequestEntry entry, ScheduledRequest item) {
+    public void checkQueueMembership(RequestEntry entry, ScheduledRequest item) {
         requireState(entry.queueMembership != QueueMembership.STOP_DETACHED,
                 "stopped admission cannot commit request_id=" + item.requestId());
         requireState(activeIndex.contains(item) == (entry.queueMembership == QueueMembership.WAITING),
                 "canonical admission and waiting index disagree request_id=" + item.requestId());
     }
 
-    public void detachAdmissionIndex(RequestEntry entry, ScheduledRequest item) {
-        validateAdmissionIndex(entry, item);
+    public void removeFromWaitingQueue(RequestEntry entry, ScheduledRequest item) {
+        checkQueueMembership(entry, item);
         if (entry.queueMembership == QueueMembership.WAITING) {
             removeValidatedActiveIndex(item);
         }

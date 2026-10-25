@@ -321,7 +321,7 @@ public final class PrefillQueueLifecycle {
     private boolean acknowledgeStoppedItem(ScheduledRequest item) {
         queueState.lock();
         try {
-            return acknowledgeStopTerminalUnderLock(item);
+            return removeStoppedRequest(item);
         } finally {
             queueState.unlock();
         }
@@ -376,8 +376,8 @@ public final class PrefillQueueLifecycle {
     /**
      * 调用方持有队列锁。
      */
-    private boolean acknowledgeStopTerminalUnderLock(ScheduledRequest item) {
-        return prefillState.acknowledgeStopTerminal(item);
+    private boolean removeStoppedRequest(ScheduledRequest item) {
+        return prefillState.removeStoppedRequest(item);
     }
 
     private static void releaseUnconsumedSingleReservation(
