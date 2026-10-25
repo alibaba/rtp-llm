@@ -7,7 +7,7 @@ import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
-import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
+import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
@@ -95,11 +95,11 @@ class RequestConfirmationTimeoutTest {
             prefillMetadata.setGrpcPort(8081);
             ScheduledRequest item = new ScheduledRequest(context, future, new Response(), prefillMetadata,
                     null, prefill, decode, reservation, slot.createdAtMs());
-            AtomicReference<RouteReservation> routeReservation = new AtomicReference<>();
+            AtomicReference<SingleReservation> singleReservation = new AtomicReference<>();
             try (var mutation = requests.claimAdmissionHandle(Long.toString(REQUEST_ID), future)) {
                 assertNotNull(mutation);
                 assertTrue(requests.commitItemForPublication(item, () -> {
-                    routeReservation.set(EndpointTestSupport.offerAndTakeRoute(prefill, item, 30_000L));
+                    singleReservation.set(EndpointTestSupport.offerAndTakeRoute(prefill, item, 30_000L));
                     return true;
                 }));
             }
@@ -107,7 +107,7 @@ class RequestConfirmationTimeoutTest {
             try (var routeCommit = prefill.tryBeginRouteCommitAdmission()) {
                 assertNotNull(routeCommit);
                 java.util.function.BooleanSupplier commitPrefill = () -> {
-                    try (var handoff = routeCommit.commit(List.of(item), List.of(routeReservation.get()))) {
+                    try (var handoff = routeCommit.commit(List.of(item), List.of(singleReservation.get()))) {
                         return true;
                     }
                 };

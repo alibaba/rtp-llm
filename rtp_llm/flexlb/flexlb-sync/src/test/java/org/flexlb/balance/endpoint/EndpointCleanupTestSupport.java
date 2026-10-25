@@ -81,9 +81,9 @@ public final class EndpointCleanupTestSupport {
             } finally {
                 lock.unlock();
             }
-            try (var reservation = state.reserveRoute(item, predictedMs).reservation()) {
+            try (var reservation = state.reserveSingle(item, predictedMs).reservation()) {
                 assertNotNull(reservation);
-                try (var handoff = state.commitRouteGroup(List.of(item), List.of(reservation),
+                try (var handoff = state.commitSingleGroup(List.of(item), List.of(reservation),
                         generation.tryAcquireHandoff())) {
                     assertNotNull(handoff);
                 }

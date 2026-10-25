@@ -2,7 +2,7 @@ package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
-import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
+import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.scheduler.PrefillAdmissionResources;
@@ -30,7 +30,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
     private final PrefillEndpoint prefill;
     private List<ScheduledRequest> items = List.of();
     private BlockedRequest blocked;
-    private ArrayList<RouteReservation> reservations;
+    private ArrayList<SingleReservation> reservations;
     private ArrayList<Boolean> itemOwnedReservations;
     private final IdentityHashMap<ScheduledRequest, Long> predictions = new IdentityHashMap<>();
     private ArrayList<PrefillAdmissionResources.Member> members;
@@ -71,7 +71,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
             return failed(failure);
         }
 
-        RouteReservation published = exact.publishedRouteReservation();
+        SingleReservation published = exact.publishedSingleReservation();
         try {
             if (published == null) {
                 return failed(new IllegalStateException(
@@ -83,7 +83,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
             return failed(failure);
         }
         predictions.put(exact, predictedMs);
-        RouteReservation reservation = published;
+        SingleReservation reservation = published;
         final DeliveryBlockReason.Attempt<PrefillAdmissionResources.Member> memberAttempt;
         try {
             memberAttempt = prepareMember(exact);
@@ -135,7 +135,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
         // pass and the transfer pass below.
         for (int index = 0; index < reservations.size(); index++) {
             if (itemOwnedReservations.get(index)
-                    && items.get(index).publishedRouteReservation() != reservations.get(index)) {
+                    && items.get(index).publishedSingleReservation() != reservations.get(index)) {
                 throw new IllegalStateException("ACTIVE NON_BATCH request lost its exact route reservation: request_id="
                         + items.get(index).requestId());
             }
@@ -151,7 +151,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
             PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted = createCommittedOwner(members);
             for (int index = 0; index < reservations.size(); index++) {
                 if (itemOwnedReservations.get(index)
-                        && !items.get(index).takePublishedRouteReservation(reservations.get(index))) {
+                        && !items.get(index).takePublishedSingleReservation(reservations.get(index))) {
                     throw new IllegalStateException(
                             "ACTIVE NON_BATCH request lost its exact route reservation: request_id="
                                     + items.get(index).requestId());
@@ -215,7 +215,7 @@ public final class NonBatchTransaction implements DeliveryTransaction {
     }
 
     private Throwable rollbackPrepared(Throwable priorFailure) {
-        List<RouteReservation> exactReservations;
+        List<SingleReservation> exactReservations;
         List<Boolean> exactItemOwnedReservations;
         List<PrefillAdmissionResources.Member> exactMembers;
         synchronized (this) {

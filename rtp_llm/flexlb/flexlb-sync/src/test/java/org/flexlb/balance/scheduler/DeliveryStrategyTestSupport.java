@@ -13,7 +13,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
-import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
+import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.DecodeCostFormula;
@@ -165,8 +165,8 @@ public final class DeliveryStrategyTestSupport {
         private final PrefillEndpoint.RouteCommitAdmission routeCommit =
                 Mockito.mock(PrefillEndpoint.RouteCommitAdmission.class);
         private final DecodeEndpoint decode = Mockito.mock(DecodeEndpoint.class);
-        private final Map<ScheduledRequest, RouteReservation>
-                routeReservations = new IdentityHashMap<>();
+        private final Map<ScheduledRequest, SingleReservation>
+                singleReservations = new IdentityHashMap<>();
         private final Map<ScheduledRequest, DecodeEndpoint.EngineDispatchPermit>
                 permits = new IdentityHashMap<>();
         private final Map<String, ScheduledRequest> itemsByRequestId =
@@ -201,14 +201,14 @@ public final class DeliveryStrategyTestSupport {
                 DecodeEndpoint.ReservationHandle reservation = Mockito.mock(
                         DecodeEndpoint.ReservationHandle.class);
                 Mockito.when(reservation.requestId()).thenReturn(requestId);
-                RouteReservation routeReservation = Mockito.mock(
-                        RouteReservation.class);
-                routeReservations.put(item, routeReservation);
+                SingleReservation singleReservation = Mockito.mock(
+                        SingleReservation.class);
+                singleReservations.put(item, singleReservation);
                 Mockito.when(item.prefillEp()).thenReturn(prefill);
-                Mockito.when(item.requiresRouteReservation()).thenReturn(true);
-                Mockito.when(item.publishedRouteReservation())
-                        .thenReturn(routeReservation);
-                Mockito.when(item.takePublishedRouteReservation(routeReservation))
+                Mockito.when(item.requiresSingleReservation()).thenReturn(true);
+                Mockito.when(item.publishedSingleReservation())
+                        .thenReturn(singleReservation);
+                Mockito.when(item.takePublishedSingleReservation(singleReservation))
                         .thenReturn(true);
                 DecodeRequirement requirement = new DecodeRequirement(requestId, item.priority(), item.seqLen(),
                         item.seqLen(), new DecodeEndpoint.AdmissionCapacity(0L, 100L), DecodeMode.WAIT_AT_PLACEMENT,
@@ -227,8 +227,8 @@ public final class DeliveryStrategyTestSupport {
             precedingWork = prediction;
         }
 
-        RouteReservation routeReservation(ScheduledRequest item) {
-            return routeReservations.get(item);
+        SingleReservation singleReservation(ScheduledRequest item) {
+            return singleReservations.get(item);
         }
 
         PrefillEndpoint prefill() {

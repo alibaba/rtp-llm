@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
+import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.scheduler.decode.DecodeDecideInfo;
 import org.flexlb.balance.scheduler.decode.DecodeSelection;
 import org.flexlb.config.DispatcherConfig;
@@ -54,8 +54,8 @@ public final class ScheduledRequest implements Prioritized {
      * this ACTIVE item until NonBatchDeliveryStrategy takes it, then the route
      * transaction. ACTIVE terminal paths take and close the same capability.
      */
-    private final AtomicReference<RouteReservation>
-            publishedRouteReservation = new AtomicReference<>();
+    private final AtomicReference<SingleReservation>
+            publishedSingleReservation = new AtomicReference<>();
 
     public ScheduledRequest(BalanceContext ctx,
                             CompletableFuture<Response> future,
@@ -144,38 +144,38 @@ public final class ScheduledRequest implements Prioritized {
     }
 
     /** Whether ACTIVE publication must atomically own one route reservation. */
-    public boolean requiresRouteReservation() {
+    public boolean requiresSingleReservation() {
         return routeDelivery;
     }
 
     /** Bind the sole publish-time route reservation before ACTIVE becomes visible. */
-    public boolean bindPublishedRouteReservation(
-            RouteReservation reservation) {
-        return publishedRouteReservation.compareAndSet(
+    public boolean bindPublishedSingleReservation(
+            SingleReservation reservation) {
+        return publishedSingleReservation.compareAndSet(
                 null, Objects.requireNonNull(reservation, "reservation"));
     }
 
     /** Transfer the sole uncommitted route reservation to delivery or cleanup. */
-    public RouteReservation takePublishedRouteReservation() {
-        return publishedRouteReservation.getAndSet(null);
+    public SingleReservation takePublishedSingleReservation() {
+        return publishedSingleReservation.getAndSet(null);
     }
 
     /** Observe without transferring; optimistic preparation does not transfer ownership. */
-    public RouteReservation publishedRouteReservation() {
-        return publishedRouteReservation.get();
+    public SingleReservation publishedSingleReservation() {
+        return publishedSingleReservation.get();
     }
 
     /** Transfer only the reservation validated during optimistic preparation. */
-    public boolean takePublishedRouteReservation(
-            RouteReservation expected) {
-        return publishedRouteReservation.compareAndSet(
+    public boolean takePublishedSingleReservation(
+            SingleReservation expected) {
+        return publishedSingleReservation.compareAndSet(
                 Objects.requireNonNull(expected, "expected"), null);
     }
 
     /** Restore ownership after a pre-commit operation made no state change. */
-    public boolean restorePublishedRouteReservation(
-            RouteReservation reservation) {
-        return publishedRouteReservation.compareAndSet(
+    public boolean restorePublishedSingleReservation(
+            SingleReservation reservation) {
+        return publishedSingleReservation.compareAndSet(
                 null, Objects.requireNonNull(reservation, "reservation"));
     }
 

@@ -2,7 +2,7 @@ package org.flexlb.balance.queue.loop;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
-import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
+import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.queue.CapacityBlockedHead;
 import org.flexlb.balance.queue.QueueState;
 import org.flexlb.balance.scheduler.EndpointEventHandler;
@@ -244,7 +244,7 @@ public final class PrefillQueueLifecycle {
                     break;
                 }
                 try {
-                    releaseUnconsumedRouteReservation(item);
+                    releaseUnconsumedSingleReservation(item);
                 } catch (Throwable reservationFailure) {
                     cleanupFailure = appendCleanupFailure(
                             cleanupFailure, reservationFailure);
@@ -382,13 +382,13 @@ public final class PrefillQueueLifecycle {
         return prefillState.acknowledgeStopTerminalUnderLock(item);
     }
 
-    private static void releaseUnconsumedRouteReservation(
+    private static void releaseUnconsumedSingleReservation(
             ScheduledRequest item) {
         if (item == null) {
             return;
         }
-        RouteReservation reservation =
-                item.takePublishedRouteReservation();
+        SingleReservation reservation =
+                item.takePublishedSingleReservation();
         if (reservation != null) {
             reservation.close();
         }

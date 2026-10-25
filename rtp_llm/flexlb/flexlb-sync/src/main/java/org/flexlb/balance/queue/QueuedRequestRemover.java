@@ -2,7 +2,7 @@ package org.flexlb.balance.queue;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
-import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
+import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
@@ -34,11 +34,11 @@ public final class QueuedRequestRemover {
      */
     public boolean removeTerminalActiveUnderLock(ScheduledRequest item) {
         boolean removed;
-        if (!item.requiresRouteReservation()) {
+        if (!item.requiresSingleReservation()) {
             removed = prefillState.terminalizeActiveUnderLock(item);
         } else {
-            RouteReservation reservation =
-                    item.takePublishedRouteReservation();
+            SingleReservation reservation =
+                    item.takePublishedSingleReservation();
             if (reservation == null) {
                 return false;
             }
@@ -46,11 +46,11 @@ public final class QueuedRequestRemover {
                 removed = prefillState.terminalizeActiveRouteUnderLock(
                         item, reservation);
             } catch (Throwable failure) {
-                restoreRouteReservation(item, reservation);
+                restoreSingleReservation(item, reservation);
                 throw failure;
             }
             if (!removed) {
-                restoreRouteReservation(item, reservation);
+                restoreSingleReservation(item, reservation);
             }
         }
         if (removed) {
@@ -63,10 +63,10 @@ public final class QueuedRequestRemover {
     /**
      * 把取下来的 Prefill 资源预留放回请求上。用于移除没成功时撤回。
      */
-    public static void restoreRouteReservation(
+    public static void restoreSingleReservation(
             ScheduledRequest item,
-            RouteReservation reservation) {
-        if (!item.restorePublishedRouteReservation(reservation)) {
+            SingleReservation reservation) {
+        if (!item.restorePublishedSingleReservation(reservation)) {
             throw new IllegalStateException(
                     "ACTIVE route reservation could not be restored request_id="
                             + item.requestId());

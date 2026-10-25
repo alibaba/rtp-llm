@@ -1,8 +1,8 @@
 package org.flexlb.balance.endpoint.prefill;
 
 import org.flexlb.balance.endpoint.prefill.batch.BatchProgress;
-import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
 import org.flexlb.balance.endpoint.prefill.single.SingleRequestProgress;
+import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
 /**
@@ -34,7 +34,7 @@ public final class RequestEntry {
         return activeItem != null && activeItem == item && queueMembership != QueueMembership.STOP_DETACHED;
     }
 
-    public void commitIndividual(RouteReservation lease, long nowMs) {
+    public void commitIndividual(SingleReservation lease, long nowMs) {
         if (!isActive() || reservation != lease) {
             throw new IllegalStateException("request is not an ACTIVE route request_id=" + requestId);
         }

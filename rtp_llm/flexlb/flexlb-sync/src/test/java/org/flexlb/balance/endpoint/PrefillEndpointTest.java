@@ -1416,7 +1416,7 @@ class PrefillEndpointTest {
 
             assertEquals(ReservationResult.Status.ENDPOINT_RETIRED,
                     retirementEndpoint
-                            .reserveRouteOwnership(
+                            .reserveSingle(
                                     createScheduledRequest(retirementEndpoint, retirementConfig, 8_102L, 128, 0), 0L)
                             .status());
         } finally {
@@ -1629,7 +1629,7 @@ class PrefillEndpointTest {
         commitQueuedRoute(endpoint, 100L, 100L);
         ScheduledRequest route = createScheduledRequest(200L, 200L, 0L);
         // A queue route can only be reserved after its canonical item has been
-        // offered into the ACTIVE queue; reserveRoute rejects a non-active
+        // offered into the ACTIVE queue; reserveSingle rejects a non-active
         // identity with REQUEST_LEFT_QUEUE.
         assertTrue(EndpointTestSupport.offer(endpoint, route));
         List<PrefillState.CommittedHandoff> handoffs =

@@ -39,9 +39,9 @@ public final class PrefillCleanupDeadlockFixture {
             }
         } else {
             enqueue(first);
-            try (var reservation = state.reserveRoute(first, 20L).reservation()) {
+            try (var reservation = state.reserveSingle(first, 20L).reservation()) {
                 assertNotNull(reservation);
-                try (var handoff = state.commitRouteGroup(
+                try (var handoff = state.commitSingleGroup(
                         List.of(first), List.of(reservation), generation.tryAcquireHandoff())) {
                     assertNotNull(handoff);
                 }

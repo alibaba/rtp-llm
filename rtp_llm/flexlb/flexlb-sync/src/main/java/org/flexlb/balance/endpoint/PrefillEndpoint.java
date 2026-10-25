@@ -7,7 +7,7 @@ import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.batch.FinishedBatch;
-import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
+import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.PrefillTtftEstimator;
 import org.flexlb.balance.prediction.FormulaPredictor;
@@ -55,14 +55,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
         public PrefillState.CommittedHandoff commit(
                 List<ScheduledRequest> exactItems,
-                List<RouteReservation> exactReservations) {
+                List<SingleReservation> exactReservations) {
             EndpointGenerationLifecycle.HandoffPermit exact = generationHandoff;
             if (exact == null) {
                 throw new IllegalStateException(
                         "route commit no longer owns its generation handoff");
             }
             PrefillState.CommittedHandoff committed =
-                    prefillState.commitRouteGroup(
+                    prefillState.commitSingleGroup(
                             exactItems, exactReservations, exact);
             generationHandoff = null;
             return committed;
@@ -272,12 +272,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * Bind exact NON_BATCH ownership inside the caller's pinned placement
      * transaction.
      */
-    public ReservationResult<RouteReservation> reserveRouteOwnership(ScheduledRequest exactItem,
+    public ReservationResult<SingleReservation> reserveSingle(ScheduledRequest exactItem,
                                                                                   long predictedMs) {
         if (isGenerationRetiringOrRetired()) {
             return ReservationResult.fail(ReservationResult.Status.ENDPOINT_RETIRED);
         }
-        return prefillState.reserveRoute(
+        return prefillState.reserveSingle(
                 exactItem, predictedMs);
     }
 

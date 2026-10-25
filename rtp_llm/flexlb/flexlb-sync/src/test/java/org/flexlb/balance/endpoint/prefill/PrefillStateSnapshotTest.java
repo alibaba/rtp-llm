@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint.prefill;
 
 import org.flexlb.balance.endpoint.EndpointGenerationLifecycle;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
-import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
+import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.TaskInfo;
@@ -52,7 +52,7 @@ class PrefillStateSnapshotTest {
         }
         var request = item(1);
         try (var reservation = reserveQueued(request, 10);
-                var handoff = state.commitRouteGroup(List.of(request), List.of(reservation),
+                var handoff = state.commitSingleGroup(List.of(request), List.of(reservation),
                         generation.tryAcquireHandoff())) {
             assertEquals(1, state.stats().workerStatusUnconfirmedRequests());
         }
@@ -130,7 +130,7 @@ class PrefillStateSnapshotTest {
         try (var firstReservation = reserveQueued(first, 30L); var secondReservation = reserveQueued(second, 40L)) {
             assertEquals(List.of(first, second), waitingItems());
             assertTrue(state.committedSnapshot().requests().isEmpty());
-            try (var handoff = state.commitRouteGroup(List.of(first, second),
+            try (var handoff = state.commitSingleGroup(List.of(first, second),
                     List.of(firstReservation, secondReservation), generation.tryAcquireHandoff())) {
                 assertTrue(waitingItems().isEmpty());
                 assertEquals(0L, handoff.precedingWork().totalRemainingWorkMs().orElseThrow(),
@@ -153,7 +153,7 @@ class PrefillStateSnapshotTest {
             assertTrue(capture().work().materialize().requests().isEmpty(), "queued work is not committed work");
             reservation.updatePrediction(queued, 80L);
             try (var handoff =
-                    state.commitRouteGroup(List.of(queued), List.of(reservation), generation.tryAcquireHandoff())) {
+                    state.commitSingleGroup(List.of(queued), List.of(reservation), generation.tryAcquireHandoff())) {
                 assertEquals(80L, capture().work().materialize().knownRemainingWorkMsAt(System.currentTimeMillis()));
             }
         }
@@ -163,10 +163,10 @@ class PrefillStateSnapshotTest {
     void leaseRollbackKeepsTheRequestQueued() {
         ScheduledRequest queued = item(1);
         enqueue(queued);
-        state.reserveRoute(queued, 30L).reservation().close();
+        state.reserveSingle(queued, 30L).reservation().close();
         assertEquals(List.of(queued), waitingItems());
         assertTrue(state.committedSnapshot().requests().isEmpty());
-        assertTrue(state.reserveRoute(queued, 35L).reservation() != null);
+        assertTrue(state.reserveSingle(queued, 35L).reservation() != null);
     }
 
     @Test
@@ -175,12 +175,12 @@ class PrefillStateSnapshotTest {
         try (var removedReservation = reserveQueued(removed, 30L); var keptReservation = reserveQueued(kept, 40L)) {
             assertTrue(waiting.remove(removed));
             try (var handoff = generation.tryAcquireHandoff()) {
-                assertThrows(IllegalStateException.class, () -> state.commitRouteGroup(List.of(kept, removed),
+                assertThrows(IllegalStateException.class, () -> state.commitSingleGroup(List.of(kept, removed),
                         List.of(keptReservation, removedReservation), handoff));
             }
             assertFalse(state.terminalizeCommittedItem(kept));
             assertTrue(waiting.add(removed));
-            try (var handoff = state.commitRouteGroup(List.of(kept, removed),
+            try (var handoff = state.commitSingleGroup(List.of(kept, removed),
                     List.of(keptReservation, removedReservation), generation.tryAcquireHandoff())) {
                 assertTrue(waiting.isEmpty());
             }
@@ -193,7 +193,7 @@ class PrefillStateSnapshotTest {
         enqueue(queued);
         var preparedReservation = reserveQueued(prepared, 20L);
         var committedReservation = reserveQueued(committed, 30L);
-        try (var handoff = state.commitRouteGroup(List.of(committed), List.of(committedReservation),
+        try (var handoff = state.commitSingleGroup(List.of(committed), List.of(committedReservation),
                 generation.tryAcquireHandoff())) {
             assertEquals(1, state.committedSnapshot().requests().size());
         }
@@ -228,12 +228,12 @@ class PrefillStateSnapshotTest {
     void interleavedRouteCommitsSeeOnlyWorkCommittedBeforeThem() {
         ScheduledRequest first = item(1), second = item(2);
         try (var firstReservation = reserveQueued(first, 30L); var secondReservation = reserveQueued(second, 40L)) {
-            try (var secondHandoff = state.commitRouteGroup(List.of(second), List.of(secondReservation),
+            try (var secondHandoff = state.commitSingleGroup(List.of(second), List.of(secondReservation),
                     generation.tryAcquireHandoff())) {
                 assertEquals(0L, secondHandoff.precedingWork().totalRemainingWorkMs().orElseThrow(),
                         "a request still waiting in the queue is not preceding work");
             }
-            try (var firstHandoff = state.commitRouteGroup(List.of(first), List.of(firstReservation),
+            try (var firstHandoff = state.commitSingleGroup(List.of(first), List.of(firstReservation),
                     generation.tryAcquireHandoff())) {
                 assertEquals(40L, firstHandoff.precedingWork().totalRemainingWorkMs().orElseThrow(),
                         "the earlier reservation must see work committed before its own commit");
@@ -245,7 +245,7 @@ class PrefillStateSnapshotTest {
     void batchAndIndividualCommitsCaptureTheSamePrecedingTimeline() {
         ScheduledRequest individual = item(1), batchMember = item(2), later = item(3);
         try (var individualReservation = reserveQueued(individual, 30L);
-                var firstHandoff = state.commitRouteGroup(List.of(individual), List.of(individualReservation),
+                var firstHandoff = state.commitSingleGroup(List.of(individual), List.of(individualReservation),
                         generation.tryAcquireHandoff())) {
             assertEquals(0L, firstHandoff.precedingWork().totalRemainingWorkMs().orElseThrow());
             enqueue(batchMember);
@@ -254,7 +254,7 @@ class PrefillStateSnapshotTest {
                 assertEquals(30L, batchHandoff.precedingWork().totalRemainingWorkMs().orElseThrow());
             }
             try (var laterReservation = reserveQueued(later, 50L);
-                    var laterHandoff = state.commitRouteGroup(List.of(later), List.of(laterReservation),
+                    var laterHandoff = state.commitSingleGroup(List.of(later), List.of(laterReservation),
                             generation.tryAcquireHandoff())) {
                 assertEquals(70L, laterHandoff.precedingWork().totalRemainingWorkMs().orElseThrow());
             }
@@ -363,15 +363,15 @@ class PrefillStateSnapshotTest {
         }
     }
 
-    private RouteReservation reserveQueued(ScheduledRequest item, long predictedMs) {
+    private SingleReservation reserveQueued(ScheduledRequest item, long predictedMs) {
         enqueue(item);
-        return state.reserveRoute(item, predictedMs).reservation();
+        return state.reserveSingle(item, predictedMs).reservation();
     }
 
     private void commitRoute(ScheduledRequest item, long predictedMs) {
         try (var reservation = reserveQueued(item, predictedMs);
                 var handoff =
-                        state.commitRouteGroup(List.of(item), List.of(reservation), generation.tryAcquireHandoff())) {
+                        state.commitSingleGroup(List.of(item), List.of(reservation), generation.tryAcquireHandoff())) {
             assertTrue(waitingItems().isEmpty());
         }
     }

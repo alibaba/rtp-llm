@@ -7,7 +7,7 @@ import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
-import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
+import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
@@ -245,7 +245,7 @@ class RequestResourceAccountingTest {
         final DecodeEndpoint decode;
         final ScheduledRequest item;
         final DecodeEndpoint.ReservationHandle reservation;
-        final RouteReservation routeReservation;
+        final SingleReservation singleReservation;
         final PrefillState.CommittedHandoff prefillHandoff;
         final RequestSlot.AdmissionHandle admission;
         final DecodeEndpoint.AdmissionCapacity capacity = new DecodeEndpoint.AdmissionCapacity(1, 90);
@@ -283,17 +283,17 @@ class RequestResourceAccountingTest {
             var context = RequestLifecycleTestSupport.context(config, ID);
             var future = requests.register(context);
             item = new ScheduledRequest(context, future, new Response(), null, null, prefill, decode, reservation, System.currentTimeMillis());
-            var held = new AtomicReference<RouteReservation>();
+            var held = new AtomicReference<SingleReservation>();
             admission = requests.claimAdmissionHandle(ID, future);
             assertNotNull(admission);
             assertTrue(requests.commitItemForPublication(item, () -> {
                 held.set(EndpointTestSupport.offerAndTakeRoute(prefill, item, 30_000));
                 return true;
             }));
-            routeReservation = held.get();
+            singleReservation = held.get();
             try (var commit = prefill.tryBeginRouteCommitAdmission()) {
                 assertNotNull(commit);
-                prefillHandoff = commit.commit(List.of(item), List.of(routeReservation));
+                prefillHandoff = commit.commit(List.of(item), List.of(singleReservation));
             }
             if (!keepAdmissionOpen) { admission.close(); }
         }
@@ -370,7 +370,7 @@ class RequestResourceAccountingTest {
             try {
                 admission.close();
                 prefillHandoff.close();
-                routeReservation.close();
+                singleReservation.close();
                 runtime.shutdown();
             } finally {
                 decode.close();

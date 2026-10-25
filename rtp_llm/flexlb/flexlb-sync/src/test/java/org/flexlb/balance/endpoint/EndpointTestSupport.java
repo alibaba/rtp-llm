@@ -12,7 +12,7 @@ import org.flexlb.balance.delivery.NonBatchDeliveryStrategy;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
-import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
+import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.BatchTtftEstimator;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
@@ -241,13 +241,13 @@ public final class EndpointTestSupport {
      * 把 NON_BATCH 请求放进 Prefill 等待队列，取出入队时预留的 Prefill 资源，并换上给定的耗时预测。
      * 调用方随后自己提交这份预留。
      */
-    public static RouteReservation offerAndTakeRoute(PrefillEndpoint endpoint,
+    public static SingleReservation offerAndTakeRoute(PrefillEndpoint endpoint,
                                                                   ScheduledRequest item,
                                                                   long predictedMs) {
         if (!offer(endpoint, item)) {
             throw new IllegalStateException("Prefill queue rejected request_id=" + item.requestId());
         }
-        RouteReservation reservation = item.takePublishedRouteReservation();
+        SingleReservation reservation = item.takePublishedSingleReservation();
         reservation.updatePrediction(item, predictedMs);
         return reservation;
     }
@@ -277,13 +277,13 @@ public final class EndpointTestSupport {
             throw new IllegalArgumentException("route group requires an item");
         }
         List<ScheduledRequest> items = List.copyOf(exactItems);
-        List<RouteReservation> reservations =
+        List<SingleReservation> reservations =
                 new ArrayList<>(items.size());
         boolean committed = false;
         try {
             for (ScheduledRequest item : items) {
-                ReservationResult<RouteReservation> result =
-                        endpoint.reserveRouteOwnership(item, predictedMs);
+                ReservationResult<SingleReservation> result =
+                        endpoint.reserveSingle(item, predictedMs);
                 if (result.status() != ReservationResult.Status.SUCCESS) {
                     throw new IllegalStateException(
                             "route reservation rejected: " + result.status());

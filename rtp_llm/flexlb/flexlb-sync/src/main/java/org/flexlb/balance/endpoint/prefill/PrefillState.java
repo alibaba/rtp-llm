@@ -7,7 +7,7 @@ import org.flexlb.balance.endpoint.prefill.batch.BatchProgress;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.batch.FinishedBatch;
 import org.flexlb.balance.endpoint.prefill.batch.LiveBatchMembers;
-import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
+import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.estimate.WorkView.Phase;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -394,7 +394,7 @@ public final class PrefillState {
         RequestEntry entry = requests.get(item.requestId());
         return PriorityNormalizer.hasPriority(item.priority()) && item.priority() < priority
                 && !item.future().isDone() && entry != null && entry.activeIdentity(item)
-                && entry.reservation instanceof RouteReservation && entry.reservation.state == LeaseState.OPEN;
+                && entry.reservation instanceof SingleReservation && entry.reservation.state == LeaseState.OPEN;
     }
 
     private long requestSlotsToReleaseUnderLock(long requestLimit) {
@@ -406,8 +406,8 @@ public final class PrefillState {
     /**
      * Replace the selected waiting requests and their route reservations in one transaction.
      */
-    public RouteReservation replaceQueuedRoutesUnderLock(List<ScheduledRequest> victims,
-                                                         List<RouteReservation> reservations,
+    public SingleReservation replaceQueuedRoutesUnderLock(List<ScheduledRequest> victims,
+                                                         List<SingleReservation> reservations,
                                                          ScheduledRequest incoming) {
         requireLock();
         if (victims.isEmpty() || victims.size() != reservations.size()
@@ -418,7 +418,7 @@ public final class PrefillState {
         for (int index = 0; index < victims.size(); index++) {
             ScheduledRequest victim = victims.get(index);
             RequestEntry entry = requests.get(victim.requestId());
-            RouteReservation reservation = reservations.get(index);
+            SingleReservation reservation = reservations.get(index);
             if (!ids.add(victim.requestId()) || entry == null || !entry.activeIdentity(victim)
                     || !activeIndex.contains(victim) || reservation == null || reservation.owner != this
                     || entry.reservation != reservation || reservation.state != LeaseState.OPEN
@@ -427,7 +427,7 @@ public final class PrefillState {
             }
         }
         RequestEntry incomingEntry = new RequestEntry(incoming);
-        RouteReservation incomingReservation = new RouteReservation(this, incomingEntry, incoming.requestId(), 0L);
+        SingleReservation incomingReservation = new SingleReservation(this, incomingEntry, incoming.requestId(), 0L);
         incomingEntry.reservation = incomingReservation;
         activeIndex.add(incoming);
         try {
@@ -453,7 +453,7 @@ public final class PrefillState {
      */
     public boolean terminalizeActiveRouteUnderLock(
             ScheduledRequest item,
-            RouteReservation exactReservation) {
+            SingleReservation exactReservation) {
         requireLock();
         RequestEntry entry = requests.get(item.requestId());
         if (entry == null || !entry.activeIdentity(item)) {
@@ -526,7 +526,7 @@ public final class PrefillState {
         return removed;
     }
 
-    public ReservationResult<RouteReservation> reserveRoute(ScheduledRequest exactItem, long predictedMs) {
+    public ReservationResult<SingleReservation> reserveSingle(ScheduledRequest exactItem, long predictedMs) {
         ScheduledRequest item = exactItem;
         lock.lock();
         try {
@@ -537,7 +537,7 @@ public final class PrefillState {
             if (entry.reservation != null) {
                 return ReservationResult.fail(ReservationResult.Status.REQUEST_ALREADY_RESERVED);
             }
-            RouteReservation lease = new RouteReservation(
+            SingleReservation lease = new SingleReservation(
                     this, entry, item.requestId(), predictedMs);
             entry.reservation = lease;
             recordMutationUnderLock();
@@ -580,17 +580,17 @@ public final class PrefillState {
         return new DeliveryAvailability(this, maximum);
     }
 
-    public CommittedHandoff commitRouteGroup(
+    public CommittedHandoff commitSingleGroup(
             List<ScheduledRequest> items,
-            List<RouteReservation> exactReservations,
+            List<SingleReservation> exactReservations,
             EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
         if (exactReservations.isEmpty()) {
             throw new IllegalArgumentException(
                     "route commit requires at least one reservation");
         }
-        List<RouteReservation> leases = new ArrayList<>(
+        List<SingleReservation> leases = new ArrayList<>(
                 exactReservations.size());
-        for (RouteReservation reservation : exactReservations) {
+        for (SingleReservation reservation : exactReservations) {
             if (reservation == null || reservation.owner != this) {
                 throw new IllegalArgumentException(
                         "route reservation belongs to another Prefill ledger");
@@ -599,27 +599,27 @@ public final class PrefillState {
         }
         lock.lock();
         try {
-            return commitRoutesUnderLock(items, leases, generationHandoff);
+            return commitSinglesUnderLock(items, leases, generationHandoff);
         } finally {
             lock.unlock();
         }
     }
 
-    private CommittedHandoff commitRoutesUnderLock(
+    private CommittedHandoff commitSinglesUnderLock(
             List<ScheduledRequest> items,
-            List<RouteReservation> leases,
+            List<SingleReservation> leases,
             EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
         requireLock();
-        List<ScheduledRequest> members = validateRouteGroup(items);
+        List<ScheduledRequest> members = validateSingleGroup(items);
         if (members.size() != leases.size()) {
             throw new IllegalArgumentException(
                     "route commit requires one exact lease per member");
         }
-        Set<RouteReservation> unique = java.util.Collections.newSetFromMap(
+        Set<SingleReservation> unique = java.util.Collections.newSetFromMap(
                 new IdentityHashMap<>());
         for (int index = 0; index < members.size(); index++) {
             RequestEntry entry = requests.get(members.get(index).requestId());
-            RouteReservation lease = leases.get(index);
+            SingleReservation lease = leases.get(index);
             if (entry == null || !unique.add(lease)
                     || entry.reservation != lease
                     || lease.requestId != entry.requestId
@@ -636,7 +636,7 @@ public final class PrefillState {
             detachAdmissionIndexUnderLock(requests.get(item.requestId()), item);
         }
         for (int index = 0; index < members.size(); index++) {
-            RouteReservation lease = leases.get(index);
+            SingleReservation lease = leases.get(index);
             lease.state = LeaseState.OWNED;
             RequestEntry entry = requests.get(members.get(index).requestId());
             entry.commitIndividual(lease, nowMs);
@@ -667,7 +667,7 @@ public final class PrefillState {
                         + item.requestId());
     }
 
-    private List<ScheduledRequest> validateRouteGroup(List<ScheduledRequest> items) {
+    private List<ScheduledRequest> validateSingleGroup(List<ScheduledRequest> items) {
         requireState(!items.isEmpty(), "committed group requires members");
         for (ScheduledRequest item : items) {
             RequestEntry entry = requests.get(item.requestId());
@@ -1056,7 +1056,7 @@ public final class PrefillState {
 
             int observedBatchLeases = 0;
             for (Reservation lease : leases) {
-                if (lease instanceof RouteReservation) {
+                if (lease instanceof SingleReservation) {
                     if (lease.state != LeaseState.OPEN
                             && lease.state != LeaseState.OWNED) {
                         invariantFailure = appendRetirementInvariant(
@@ -1504,7 +1504,7 @@ public final class PrefillState {
         requireLock();
         if (lease instanceof BatchReservation) {
             batchPrefill.releaseBatchSlotUnderLock();
-        } else if (!(lease instanceof RouteReservation)) {
+        } else if (!(lease instanceof SingleReservation)) {
             throw new IllegalStateException("unknown Prefill reservation type");
         }
     }

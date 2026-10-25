@@ -5,7 +5,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
+import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.config.ConfigService;
@@ -81,18 +81,18 @@ class PrefillCompletionEventTest {
             var future = requests.register(context);
             ScheduledRequest item = new ScheduledRequest(context, future, new Response(), null, null,
                     prefill, decode, reservation, System.currentTimeMillis());
-            AtomicReference<RouteReservation> routeReservation = new AtomicReference<>();
+            AtomicReference<SingleReservation> singleReservation = new AtomicReference<>();
             try (var mutation = requests.claimAdmissionHandle("101", future)) {
                 assertNotNull(mutation);
                 assertTrue(requests.commitItemForPublication(item, () -> {
-                    routeReservation.set(EndpointTestSupport.offerAndTakeRoute(prefill, item, 30_000L));
+                    singleReservation.set(EndpointTestSupport.offerAndTakeRoute(prefill, item, 30_000L));
                     return true;
                 }));
             }
             try (var routeCommit = prefill.tryBeginRouteCommitAdmission()) {
                 assertNotNull(routeCommit);
                 var claim = RequestLifecycleTestSupport.claimRouteWithoutPrediction(requests, item, () -> {
-                    try (var handoff = routeCommit.commit(List.of(item), List.of(routeReservation.get()))) {
+                    try (var handoff = routeCommit.commit(List.of(item), List.of(singleReservation.get()))) {
                         return true;
                     }
                 });

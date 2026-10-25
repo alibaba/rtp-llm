@@ -157,15 +157,15 @@ class NonBatchDeliveryStrategyTest {
                 fixture.slots.completions());
         assertEquals(List.of(List.of(first, second)),
                 fixture.telemetry.routes());
-        verify(fixture.capabilities.routeReservation(first))
+        verify(fixture.capabilities.singleReservation(first))
                 .updatePrediction(first, 90L);
-        verify(fixture.capabilities.routeReservation(second))
+        verify(fixture.capabilities.singleReservation(second))
                 .updatePrediction(second, 90L);
         verify(fixture.capabilities.routeCommit()).commit(
                 org.mockito.ArgumentMatchers.eq(List.of(first, second)),
                 org.mockito.ArgumentMatchers.eq(List.of(
-                        fixture.capabilities.routeReservation(first),
-                        fixture.capabilities.routeReservation(second))));
+                        fixture.capabilities.singleReservation(first),
+                        fixture.capabilities.singleReservation(second))));
         verify(fixture.capabilities.permit(first)).dispatch();
         verify(fixture.capabilities.permit(second)).dispatch();
         assertEquals(1, fixture.capabilities.handoffs().size());
@@ -303,7 +303,7 @@ class NonBatchDeliveryStrategyTest {
                 "lost-commit", 0, OptionalLong.empty());
 
         assertEquals("NOT_COMMITTED", result);
-        verify(fixture.capabilities.routeReservation(head), never()).close();
+        verify(fixture.capabilities.singleReservation(head), never()).close();
         verify(fixture.capabilities.permit(head)).release();
         verify(fixture.capabilities.permit(head), never())
                 .dispatch();

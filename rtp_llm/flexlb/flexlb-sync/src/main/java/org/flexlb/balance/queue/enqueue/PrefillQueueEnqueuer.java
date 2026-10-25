@@ -3,7 +3,7 @@ package org.flexlb.balance.queue.enqueue;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
-import org.flexlb.balance.endpoint.prefill.single.RouteReservation;
+import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.queue.QueueFailures;
 import org.flexlb.balance.queue.QueueState;
 import org.flexlb.balance.queue.QueuedRequestRemover;
@@ -119,11 +119,11 @@ public final class PrefillQueueEnqueuer {
 
     private EnqueueAttempt replaceQueuedRequestsUnderLock(ScheduledRequest incoming,
                                                           List<ScheduledRequest> victims) {
-        List<RouteReservation> reservations = new ArrayList<>(victims.size());
-        RouteReservation replacement = null;
+        List<SingleReservation> reservations = new ArrayList<>(victims.size());
+        SingleReservation replacement = null;
         try {
             for (ScheduledRequest victim : victims) {
-                RouteReservation reservation = victim.takePublishedRouteReservation();
+                SingleReservation reservation = victim.takePublishedSingleReservation();
                 if (reservation == null) {
                     return new EnqueueAttempt(false, null, null);
                 }
@@ -133,7 +133,7 @@ public final class PrefillQueueEnqueuer {
             if (replacement == null) {
                 return new EnqueueAttempt(false, null, null);
             }
-            if (!incoming.bindPublishedRouteReservation(replacement)) {
+            if (!incoming.bindPublishedSingleReservation(replacement)) {
                 throw new IllegalStateException("replacement request already owns a Prefill reservation: "
                         + incoming.requestId());
             }
@@ -144,7 +144,7 @@ public final class PrefillQueueEnqueuer {
         } finally {
             if (replacement == null) {
                 for (int index = 0; index < reservations.size(); index++) {
-                    QueuedRequestRemover.restoreRouteReservation(victims.get(index), reservations.get(index));
+                    QueuedRequestRemover.restoreSingleReservation(victims.get(index), reservations.get(index));
                 }
             }
         }
@@ -160,17 +160,17 @@ public final class PrefillQueueEnqueuer {
         if (!publishActiveIndexUnderLock(item)) {
             return new EnqueueAttempt(false, null, null);
         }
-        if (!item.requiresRouteReservation()) {
+        if (!item.requiresSingleReservation()) {
             item.markSubQueueEntry();
             queueState.signalChange();
             return new EnqueueAttempt(true, null, null);
         }
 
-        ReservationResult<RouteReservation> result;
+        ReservationResult<SingleReservation> result;
         try {
             // 队列锁可重入，同时也是 PrefillState 的锁，所以登记进排队索引和预留 Prefill 资源
             // 在同一把锁里完成，其他线程看不到只做了一半的状态。
-            result = prefillEndpoint.reserveRouteOwnership(
+            result = prefillEndpoint.reserveSingle(
                     item,
                     0L);
         } catch (Throwable failure) {
@@ -182,8 +182,8 @@ public final class PrefillQueueEnqueuer {
             return new EnqueueAttempt(false, null, null);
         }
 
-        RouteReservation reservation = result.reservation();
-        if (!item.bindPublishedRouteReservation(reservation)) {
+        SingleReservation reservation = result.reservation();
+        if (!item.bindPublishedSingleReservation(reservation)) {
             rollbackFreshActiveUnderLock(item, reservation);
             return new EnqueueAttempt(
                     false,
@@ -202,7 +202,7 @@ public final class PrefillQueueEnqueuer {
      */
     private void rollbackFreshActiveUnderLock(
             ScheduledRequest item,
-            RouteReservation reservation) {
+            SingleReservation reservation) {
         boolean removed = reservation == null
                 ? prefillState.terminalizeActiveUnderLock(item)
                 : prefillState.terminalizeActiveRouteUnderLock(

@@ -6,12 +6,12 @@ import org.flexlb.balance.endpoint.prefill.RequestEntry;
 import org.flexlb.balance.endpoint.prefill.Reservation;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
-public final class RouteReservation extends Reservation {
+public final class SingleReservation extends Reservation {
     public final String requestId;
     /* guarded by PrefillState.lock until the reservation commits */
     private long predictedWorkMs;
 
-    public RouteReservation(PrefillState owner, RequestEntry originalOwner, String requestId, long predictedWorkMs) {
+    public SingleReservation(PrefillState owner, RequestEntry originalOwner, String requestId, long predictedWorkMs) {
         super(owner, originalOwner);
         this.requestId = requestId;
         this.predictedWorkMs = boundedPrediction(predictedWorkMs);
