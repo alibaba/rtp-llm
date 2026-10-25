@@ -4,6 +4,7 @@
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
+#include "rtp_llm/models_py/bindings/common/FusedCopyOp.h"
 #include "rtp_llm/models_py/bindings/rocm/TrtllmAllReduceFusion.h"
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
 #include "rtp_llm/models_py/bindings/rocm/FakeBalanceExpertOp.h"
@@ -12,6 +13,12 @@ namespace py = pybind11;
 namespace rtp_llm {
 
 void registerBasicRocmOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("fused_multimodal_copy_",
+                  &fusedMultimodalCopy,
+                  "Fuse multimodal embedding D2D copies",
+                  py::arg("dst"),
+                  py::arg("srcs"),
+                  py::arg("row_offsets"));
     rtp_ops_m.def("fused_add_layernorm",
                   &fused_add_layernorm,
                   "Fused Add LayerNorm kernel",
@@ -35,7 +42,7 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
 
     rtp_ops_m.def("embedding",
                   &embedding,
-                  "Embedding lookup kernel",
+                  "Embedding lookup kernel; position_ids and token_type_ids are retained for compatibility and ignored",
                   py::arg("output"),
                   py::arg("input"),
                   py::arg("weight"),
@@ -45,7 +52,7 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
 
     rtp_ops_m.def("embedding_bert",
                   &embeddingBert,
-                  "EmbeddingBert lookup kernel",
+                  "EmbeddingBert lookup kernel; text_tokens_mask=0 skips word-embedding lookup for that token",
                   py::arg("output"),
                   py::arg("input"),
                   py::arg("weight"),
@@ -53,7 +60,8 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
                   py::arg("position_encoding"),
                   py::arg("combo_tokens_type_ids"),
                   py::arg("token_type_embedding"),
-                  py::arg("input_embedding_scalar") = 1.0f);
+                  py::arg("input_embedding_scalar") = 1.0f,
+                  py::arg("text_tokens_mask")       = py::none());
 
     rtp_ops_m.def("fused_qk_rmsnorm",
                   &FusedQKRMSNorm,

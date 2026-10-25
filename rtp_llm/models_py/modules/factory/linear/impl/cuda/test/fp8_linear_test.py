@@ -22,6 +22,9 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear im
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
     CudaFp8GEMMLinear,
 )
+from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_vllm_blockwise_sm120_linear import (
+    CudaFp8VllmBlockwiseLinear,
+)
 from rtp_llm.test.utils.bench_util import bench
 from rtp_llm.test.utils.numeric_util import calc_diff, per_block_cast_to_fp8
 
@@ -1048,6 +1051,12 @@ class CudaFp8GEMMDispatchTest(CudaFp8LinearTestBase, unittest.TestCase):
 
 CudaFp8DeepGEMMLinearTestBase = CudaFp8GEMMLinearTestBase
 CudaFp8DeepGEMMLinearTest = CudaFp8GEMMLinearTest
+
+
+class CudaSm120RegistrationTest(unittest.TestCase):
+    def test_sm120_strategy_registered_on_non_sm120_device(self):
+        self.assertNotEqual(torch.cuda.get_device_capability(), (12, 0))
+        self.assertIn(CudaFp8VllmBlockwiseLinear, LinearFactory._strategies)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,34 @@
+load("//:def.bzl", "copts")
+load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch")
+load("@arch_config//:arch_select.bzl", "torch_deps")
+
+sm120_cuda_copts = copts() + cuda_default_copts_without_arch() + [
+    # CUTLASS block-scaled instructions are architecture-conditional and must
+    # be compiled for the accelerated SM120 target.
+    '--cuda-include-ptx=sm_120a', '--cuda-gpu-arch=sm_120a',
+]
+
+# FP8 PER_BLOCK GEMM for sm_120 family (consumer Blackwell). Ported from vLLM
+# (Apache 2.0).
+cc_library(
+    name = "fp8_blockwise_sm120_cu",
+    srcs = glob([
+        "cutlass_kernels/fp8_blockwise_sm120/*.cu",
+    ]),
+    hdrs = glob([
+        "cutlass_kernels/fp8_blockwise_sm120/*.h",
+        "cutlass_kernels/fp8_blockwise_sm120/*.cuh",
+    ]),
+    deps = [
+        "@cutlass4.0//:cutlass",
+        "@cutlass4.0//:cutlass_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "@local_config_cuda//cuda:cuda_driver",
+    ] + torch_deps(),
+    copts = sm120_cuda_copts + [
+        "-DCUTLASS_ARCH_MMA_SM120_SUPPORTED",
+    ],
+    alwayslink = True,
+    visibility = ["//visibility:public"],
+)

@@ -125,11 +125,28 @@ class LinearFactory:
                     "install or register a backend with W8A8 INT8 per-channel "
                     "execution support"
                 )
+            rejection_reasons = []
+            for strategy_class in cls._strategies:
+                reason = strategy_class.rejection_reason(
+                    quant_config,
+                    weight,
+                    weight_scales,
+                    hw_kernel_config,
+                    weight_scale_2,
+                    input_scale,
+                )
+                if reason is not None and reason not in rejection_reasons:
+                    rejection_reasons.append(reason)
+            details = (
+                f" Rejections: {'; '.join(rejection_reasons)}"
+                if rejection_reasons
+                else ""
+            )
             raise ValueError(
                 f"No suitable Linear strategy found for:"
                 f"weight.dtype={weight.dtype}, "
                 f"has_scales={weight_scales is not None}, "
-                f"quant_config={quant_config}"
+                f"quant_config={quant_config}.{details}"
             )
 
         # Check uniqueness - should only have one matching strategy
