@@ -47,6 +47,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class DecodeQueueLoopTest {
@@ -62,6 +64,7 @@ class DecodeQueueLoopTest {
             new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"),
                     mock(EndpointEventHandler.class));
     private final ServerStatus decodeStatus = new ServerStatus();
+    private final RequestSchedulerReporter reporter = mock(RequestSchedulerReporter.class);
     private final DecodeQueueLoop loop;
 
     DecodeQueueLoopTest() {
@@ -77,7 +80,8 @@ class DecodeQueueLoopTest {
         when(selector.select(any(), any(), any())).thenAnswer(invocation -> success());
         loop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, new PlacementAvailability(), selector,
                 mock(DefaultRouter.class), new DecodePreemptionCoordinator(mock(EngineCancelChannel.class),
-                        mock(RequestRegistry.class), mock(RequestSchedulerReporter.class)));
+                        mock(RequestRegistry.class), mock(RequestSchedulerReporter.class)),
+                configService(), reporter);
     }
 
     @AfterEach
@@ -254,6 +258,43 @@ class DecodeQueueLoopTest {
         assertNotNull(decode.reservationHandle("2"));
         assertNull(decode.reservationHandle("3"));
         assertEquals(1, decodeQueue.reservedCount());
+    }
+
+    @Test
+    void publishedReservationNotReportedByEngineIsExpiredAfterConfirmTimeout() {
+        config.getWorkerRegistry().getHealth().setStatusPollIntervalMs(0L);
+        Request request = addWaiting("1");
+        loop.runOnce();
+        loop.runOnce();
+        assertEquals(Stage.PUBLISHED, request.stage());
+        assertEquals(1, decodeQueue.publishedCount());
+        assertNotNull(decode.reservationHandle("1"));
+
+        loop.runOnce();
+
+        assertEquals(0, decodeQueue.publishedCount());
+        assertNull(decode.reservationHandle("1"));
+        verify(reporter).reportDispatchConfirmTimeout();
+    }
+
+    @Test
+    void publishedRequestIsNoLongerTrackedAfterItsReservationIsGone() {
+        Request request = addWaiting("1");
+        loop.runOnce();
+        loop.runOnce();
+        assertEquals(1, decodeQueue.publishedCount());
+
+        decode.release(request.decodeChoice().reservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
+        loop.runOnce();
+
+        assertEquals(0, decodeQueue.publishedCount());
+        verify(reporter, never()).reportDispatchConfirmTimeout();
+    }
+
+    private ConfigService configService() {
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        return configService;
     }
 
     private Request addWaiting(String requestId) {

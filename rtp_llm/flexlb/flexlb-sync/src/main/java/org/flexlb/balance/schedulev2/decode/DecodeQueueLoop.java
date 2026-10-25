@@ -13,18 +13,21 @@ import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.decode.DecodeMode;
 import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.balance.schedulev2.DecodeChoice;
+import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
 import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.Request;
 import org.flexlb.balance.schedulev2.RequestCleanup;
 import org.flexlb.balance.schedulev2.Stage;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.EngineCancellationConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
 
@@ -40,10 +43,12 @@ import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Decode 队列线程，每一轮做两件事：
+ * Decode 队列线程，每一轮做三件事：
  * <ol>
+ * <li>检查 published 的请求：引擎上报了，reserve 就交给 Decode 的状态同步管，不再跟踪；
+ * 发布后超过 {@link DispatchConfirmTimeout} 引擎还没上报，说明调用方没把请求发给引擎，按 EXPIRED 归还 reserve；</li>
  * <li>reserved 的请求按顺序向 reserve 的那台 Decode 要 permit，拿到后发布结果（PUBLISHED）。
- * 扫到已经结束的请求就归还它的 reserve 并移出 reserved。
+ * 发布后在 Decode 上有 reserve 的请求进入 published。扫到已经结束的请求就归还它的 reserve 并移出 reserved。
  * 某台 Decode 给不出 permit 时，这一轮跳过 reserve 在它上面的其他请求，等它有空位时被唤醒；</li>
  * <li>waiting 的请求按顺序选 Decode 并 reserve，成功后进入 DECODE_RESERVED。reserve 带容量上限，放不下就不 reserve。
  * 某个 group 没有放得下的 Decode 时，请求留在 waiting，这一轮跳过同 group 的请求，等 Decode 归还容量时被唤醒。</li>
@@ -71,6 +76,8 @@ public final class DecodeQueueLoop {
     private final DecodeSelector decodeSelector;
     private final DefaultRouter router;
     private final DecodePreemptionCoordinator preemptionCoordinator;
+    private final ConfigService configService;
+    private final RequestSchedulerReporter reporter;
     /**
      * Decode 上下线或 reserve 容量变化时唤醒循环，让 waiting 的请求马上重试。
      */
@@ -92,7 +99,9 @@ public final class DecodeQueueLoop {
                            PlacementAvailability placementAvailability,
                            DecodeSelector decodeSelector,
                            DefaultRouter router,
-                           DecodePreemptionCoordinator preemptionCoordinator) {
+                           DecodePreemptionCoordinator preemptionCoordinator,
+                           ConfigService configService,
+                           RequestSchedulerReporter reporter) {
         this.decodeQueue = decodeQueue;
         this.loopSignal = loopSignal;
         this.cleanup = cleanup;
@@ -100,6 +109,8 @@ public final class DecodeQueueLoop {
         this.decodeSelector = decodeSelector;
         this.router = router;
         this.preemptionCoordinator = preemptionCoordinator;
+        this.configService = configService;
+        this.reporter = reporter;
         this.capacityListener = loopSignal::wake;
         this.thread = new Thread(this::run, "flexlb-v2-decode-queue");
         this.thread.setDaemon(true);
@@ -149,7 +160,8 @@ public final class DecodeQueueLoop {
      * 处理一轮，返回这一轮有没有请求发布、换了状态或离开队列。
      */
     boolean runOnce() {
-        boolean moved = dispatchReserved();
+        boolean moved = checkPublished();
+        moved |= dispatchReserved();
         moved |= reserveWaiting();
         return moved;
     }
@@ -179,6 +191,46 @@ public final class DecodeQueueLoop {
             }
         } catch (RuntimeException failure) {
             Logger.error("V2 decode reservation release failed: request_id={}", choice.reservation().requestId(),
+                    failure);
+        }
+    }
+
+    /**
+     * 检查已发布请求在 Decode 上的 reserve，返回有没有按超时归还 reserve。
+     * <p>
+     * 引擎已经上报、reserve 已经不在（引擎做完了或被别的清理删了）、Decode 已经下线时，不再跟踪；
+     * 发布后超时引擎还没上报时，按 EXPIRED 归还 reserve。
+     */
+    private boolean checkPublished() {
+        long confirmTimeoutMs = DispatchConfirmTimeout.timeoutMs(configService);
+        long nowMs = System.currentTimeMillis();
+        boolean released = false;
+        Iterator<Request> iterator = decodeQueue.publishedIterator();
+        while (iterator.hasNext()) {
+            Request request = iterator.next();
+            DecodeChoice choice = request.decodeChoice();
+            DecodeEndpoint endpoint = choice.endpoint();
+            DecodeEndpoint.ReservationHandle reservation = choice.reservation();
+            if (endpoint.isRetired() || endpoint.isAcceptedByEngine(reservation)
+                    || !reservation.equals(endpoint.reservationHandle(request.requestId()))) {
+                iterator.remove();
+                continue;
+            }
+            if (DispatchConfirmTimeout.expired(request, nowMs, confirmTimeoutMs)) {
+                iterator.remove();
+                expire(choice);
+                reporter.reportDispatchConfirmTimeout();
+                released = true;
+            }
+        }
+        return released;
+    }
+
+    private static void expire(DecodeChoice choice) {
+        try {
+            choice.endpoint().release(choice.reservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
+        } catch (RuntimeException failure) {
+            Logger.error("V2 decode reservation expire failed: request_id={}", choice.reservation().requestId(),
                     failure);
         }
     }
@@ -261,6 +313,7 @@ public final class DecodeQueueLoop {
         if (request.publish(Stage.DECODE_RESERVED,
                 List.of(request.prefillChoice().serverStatus(), choice.serverStatus()))) {
             cleanup.releasePublished(request);
+            decodeQueue.addPublished(request);
         } else {
             // 请求已经结束，结果没发给调用方，归还 reserve
             releaseNow(request);

@@ -96,7 +96,7 @@ public class RequestSchedulerV2 {
         this.prefillQueueLoop = new PrefillQueueLoop(prefillQueues, prefillLoopSignal, cleanup, mainQueue,
                 endpointRegistry, configService, reporter, this::sendToDecodeQueue);
         this.decodeQueueLoop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, placementAvailability,
-                decodeSelector, router, preemptionCoordinator);
+                decodeSelector, router, preemptionCoordinator, configService, reporter);
         this.deadlineTimer = new ScheduledThreadPoolExecutor(1, task -> {
             Thread thread = new Thread(task, "flexlb-v2-deadline");
             thread.setDaemon(true);
