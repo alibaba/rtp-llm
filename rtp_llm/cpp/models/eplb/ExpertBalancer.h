@@ -16,6 +16,7 @@ struct GptModelInitParams;
 class EplbController {
 public:
     void init(const EPLBConfig& config, size_t world_size);
+    // For updates only, eplb_update_time == -1 preserves the last requested interval.
     void setData(const EPLBConfig& config);
     // All ranks call at the same boundary; only root's request is published.
     std::optional<EPLBConfig> step();
@@ -39,6 +40,7 @@ public:
     // Forward completed on the current GPU stream. Warmup discards counts;
     // Real steps sample/migrate before the monitor records and clears counts.
     void step(bool warmup = false, bool is_prompt = false);
+    // update_time == -1 is the RPC's omitted-interval sentinel, never a runtime interval.
     bool updateEplbConfig(const EPLBConfig& config);
     // Fixed int32 [model_layers, local_physical] storage, shared with graph capture.
     const torch::Tensor& stable_expert_token_counts() const {

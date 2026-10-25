@@ -106,6 +106,8 @@ The following legacy options and environment variables were removed and must no 
 
 Each rearrangement handles every layer in a homogeneous weight-layout group. The former CPU layer-selection and debug options (`balance_method`, `eplb_balance_layer_per_step`, `eplb_force_repack`, and `eplb_test_mode`) have been removed.
 
+`POST /update_eplb_config` accepts `{"mode": "ALL", "update_time": 5000}`. `update_time` is a non-negative integer step interval: omit it to keep the current interval, or use `0` to disable rearrangement. The preallocated count window must fit any positive interval. A runtime started with `NONE` cannot be enabled online; start with `STATS` to allow online enabling.
+
 `moe_lb` follows DeepInfer: sum the maximum EP-rank load for each step and layer,
 then divide by the sum of their mean EP-rank loads. `1.0` means balanced; larger
 values indicate more imbalance. A window with no routed tokens reports `1.0`.

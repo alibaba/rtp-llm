@@ -363,10 +363,20 @@ class TestExpertBalancerStep(unittest.TestCase):
         self.assertEqual(window["rank_samples"], [[[4], [6]]])
         self.assertEqual(window["mapping_epoch"], 0)
 
+    def test_mode_only_update_keeps_last_requested_interval(self):
+        model = FakeModel()
+        balancer = self.balancer(model, interval=0)
+        self.assertTrue(balancer.update_config(mode=3, update_time=7))
+        self.assertTrue(balancer.update_config(mode=1, update_time=-1))
+        balancer.counts.fill_(2)
+        balancer.step()
+        self.assertIn(("update", 1, 7), model.state.calls)
+        self.assertNotIn(("update", 1, -1), model.state.calls)
+
     def test_invalid_dynamic_configuration_is_rejected(self):
         model = FakeModel()
         balancer = self.balancer(model, interval=0)
-        self.assertFalse(balancer.update_config(mode=2, update_time=-1))
+        self.assertFalse(balancer.update_config(mode=2, update_time=-2))
         self.assertFalse(balancer.update_config(mode=-1))
         self.assertFalse(balancer.update_config(mode=4))
         balancer.counts.fill_(2)

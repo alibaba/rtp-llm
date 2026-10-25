@@ -609,7 +609,10 @@ message CheckHealthResponsePB {
 
 message UpdateEplbConfigRequestPB {
     string mode = 1;
-    int32 update_time = 2;
+    // Step interval: omitted keeps the current value; zero disables rearrangement.
+    oneof update_interval {
+        int32 update_time = 2;
+    }
 }
 
 enum TaskPhase {

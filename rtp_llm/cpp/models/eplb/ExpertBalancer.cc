@@ -18,8 +18,10 @@ void EplbController::init(const EPLBConfig& config, size_t world_size) {
 
 void EplbController::setData(const EPLBConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
-    requested_.eplb_mode        = config.eplb_mode;
-    requested_.eplb_update_time = config.eplb_update_time;
+    requested_.eplb_mode = config.eplb_mode;
+    if (config.eplb_update_time >= 0) {
+        requested_.eplb_update_time = config.eplb_update_time;
+    }
 }
 
 std::optional<EPLBConfig> EplbController::step() {
@@ -150,7 +152,7 @@ bool ExpertBalancer::updateEplbConfig(const EPLBConfig& config) {
     if (!runtime_requested_) {
         return config.eplb_mode == EplbMode::NONE;
     }
-    if (config.eplb_update_time < 0 || config.eplb_mode < EplbMode::NONE || config.eplb_mode > EplbMode::ALL
+    if (config.eplb_update_time < -1 || config.eplb_mode < EplbMode::NONE || config.eplb_mode > EplbMode::ALL
         || (config.eplb_update_time > 0
             && (config_.eplb_stats_window_size == 0 || config_.eplb_stats_window_size > config.eplb_update_time))) {
         return false;

@@ -1145,7 +1145,12 @@ grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*             c
         RTP_LLM_LOG_WARNING("set eplb mode failed, unknown mode : %s", mode_str.c_str());
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid eplb mode");
     }
-    config.eplb_update_time = request->update_time();
+    const bool has_update_time = request->update_interval_case() == UpdateEplbConfigRequestPB::kUpdateTime;
+    if (has_update_time && request->update_time() < 0) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "EPLB update_time must be non-negative");
+    }
+    // The update-only sentinel is resolved by the controller before publication.
+    config.eplb_update_time = has_update_time ? request->update_time() : -1;
     if (!engine_->updateEplbConfig(config)) {
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "Engine rejected EPLB configuration update");
     }

@@ -559,6 +559,39 @@ TEST(LocalRpcServerTest, UpdateEplbConfigReturnsEngineResult) {
     }
 }
 
+TEST(LocalRpcServerTest, UpdateEplbConfigDistinguishesMissingIntervalFromZero) {
+    for (const bool supplied : {false, true}) {
+        TestLocalRpcServer server;
+        auto               engine = std::make_shared<FailingEngine>(EngineFailureMode::REJECT_ALL);
+        server.setEngineForTest(engine);
+        UpdateEplbConfigRequestPB request;
+        request.set_mode("ALL");
+        if (supplied) {
+            request.set_update_time(0);
+        }
+        grpc::ServerContext context;
+        EmptyPB             response;
+        EXPECT_CALL(*engine, updateEplbConfig(_)).WillOnce(Invoke([supplied](const EPLBConfig& config) {
+            EXPECT_EQ(config.eplb_update_time, supplied ? 0 : -1);
+            return true;
+        }));
+        EXPECT_TRUE(server.UpdateEplbConfig(&context, &request, &response).ok());
+    }
+}
+
+TEST(LocalRpcServerTest, UpdateEplbConfigRejectsNegativeExplicitInterval) {
+    TestLocalRpcServer server;
+    auto               engine = std::make_shared<FailingEngine>(EngineFailureMode::REJECT_ALL);
+    server.setEngineForTest(engine);
+    UpdateEplbConfigRequestPB request;
+    request.set_mode("ALL");
+    request.set_update_time(-1);
+    grpc::ServerContext context;
+    EmptyPB             response;
+    EXPECT_CALL(*engine, updateEplbConfig(_)).Times(0);
+    EXPECT_EQ(server.UpdateEplbConfig(&context, &request, &response).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
 TEST(LocalRpcServerTest, UpdateEplbConfigRejectsUnknownModeWithoutCallingEngine) {
     TestLocalRpcServer server;
     auto               engine = std::make_shared<FailingEngine>(EngineFailureMode::REJECT_ALL);
