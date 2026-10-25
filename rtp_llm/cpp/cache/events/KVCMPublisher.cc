@@ -758,6 +758,15 @@ private:
                + std::to_string(next_request_id_.fetch_add(1, std::memory_order_relaxed));
     }
 
+    void refreshNormalAckDeadline() {
+        const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const int64_t deadline = now_ms + std::max(config_.ack_recovery_timeout_ms, 1);
+        auto previous = normal_ack_deadline_ms_.load(std::memory_order_relaxed);
+        while (previous < deadline && !normal_ack_deadline_ms_.compare_exchange_weak(
+                   previous, deadline, std::memory_order_relaxed)) {}
+    }
+
     ReportResult postReportEvent(const std::shared_ptr<KVCacheEventReporter>& reporter,
                                  const std::string& request, bool respect_retry_after = true,
                                  bool require_registration = true) {
@@ -795,7 +804,10 @@ private:
     bool observeReportResponse(const std::string& response, bool success, uint64_t snapshot_epoch,
                                bool apply_retry_after = true) {
         const auto feedback = detail::parseKVCMReportFeedback(response);
-        if (!feedback.valid || feedback.registration_required || (!success && feedback.ok)) {
+        // An unknown transport outcome does not prove that registration was lost.
+        if (feedback.registration_required) {
+            // Explicit recovery consumes the same one-shot allowance.
+            normal_ack_deadline_ms_.store(0, std::memory_order_relaxed);
             registered_.store(false, std::memory_order_relaxed);
             report_retry_deadline_ms_.store(0, std::memory_order_relaxed);
             queue_.wake();
@@ -895,18 +907,28 @@ private:
         }
         const auto coalesced = coalesceMutations(batch);
         const auto trace_id  = nextTraceId("mutation");
-        return postReportEvent(reporter_, buildMutationReport(context_, trace_id, coalesced));
+        const auto result = postReportEvent(reporter_, buildMutationReport(context_, trace_id, coalesced));
+        if (result == ReportResult::SUCCESS) {
+            refreshNormalAckDeadline();
+        }
+        return result;
     }
 
     bool heartbeat() {
         const auto trace_id = nextTraceId("heartbeat");
         // Snapshot rate limiting must not suppress liveness refreshes.
-        return postReportEvent(reporter_, buildControlReport(context_, trace_id, ControlEventType::HEARTBEAT), false)
-               == ReportResult::SUCCESS;
+        const bool success =
+            postReportEvent(reporter_, buildControlReport(context_, trace_id, ControlEventType::HEARTBEAT), false)
+            == ReportResult::SUCCESS;
+        if (success) {
+            refreshNormalAckDeadline();
+        }
+        return success;
     }
 
     void heartbeatLoop() noexcept {
         const auto heartbeat_interval = std::chrono::milliseconds(std::max(config_.heartbeat_interval_ms, 1));
+        size_t consecutive_failures = 0;
         while (!stopping_.load(std::memory_order_relaxed)) {
             queue_.waitForStop(heartbeat_interval);
             if (stopping_.load(std::memory_order_relaxed)) {
@@ -919,11 +941,32 @@ private:
                 if (stopping_.load(std::memory_order_relaxed)) {
                     break;
                 }
-                dirty_generation_.fetch_add(1, std::memory_order_relaxed);
-                state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
-                RTP_LLM_LOG_WARNING(
-                    "KVCMPublisher heartbeat failed; the worker will re-register or resync as needed");
-                queue_.wake();
+                // Heartbeats carry no cache mutations. Explicit recovery signals
+                // have already been handled by observeReportResponse.
+                ++consecutive_failures;
+                if ((consecutive_failures & (consecutive_failures - 1)) == 0) {
+                    RTP_LLM_LOG_WARNING("KVCMPublisher heartbeat failed %zu consecutive time(s)",
+                                        consecutive_failures);
+                }
+                const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                auto deadline = normal_ack_deadline_ms_.load(std::memory_order_relaxed);
+                // Claim only if no newer ACK has refreshed this deadline.
+                // Zero stays disarmed across registration/snapshot ACKs.
+                if (deadline != 0 && now_ms >= deadline
+                    && normal_ack_deadline_ms_.compare_exchange_strong(
+                        deadline, 0, std::memory_order_relaxed)) {
+                    registered_.store(false, std::memory_order_relaxed);
+                    report_retry_deadline_ms_.store(0, std::memory_order_relaxed);
+                    queue_.wake();
+                    RTP_LLM_LOG_WARNING("KVCMPublisher received no heartbeat or mutation ACK for %d ms; "
+                                        "requesting one registration recovery",
+                                        std::max(config_.ack_recovery_timeout_ms, 1));
+                }
+            } else if (consecutive_failures != 0) {
+                RTP_LLM_LOG_INFO("KVCMPublisher heartbeat recovered after %zu consecutive failure(s)",
+                                 consecutive_failures);
+                consecutive_failures = 0;
             }
         }
     }
@@ -980,13 +1023,17 @@ private:
                         waitWithBackoff();
                         continue;
                     }
+                    if (!registered_once_.load(std::memory_order_relaxed)) {
+                        // Bootstrap the first window only. Recovery ACKs cannot rearm it.
+                        refreshNormalAckDeadline();
+                    }
                     registered_.store(true, std::memory_order_relaxed);
                     registered_once_.store(true, std::memory_order_relaxed);
                     dirty_generation_.fetch_add(1, std::memory_order_relaxed);
                 }
 
                 const auto now = std::chrono::steady_clock::now();
-                if (now >= next_snapshot) {
+                if (!pending_snapshot_report_ && now >= next_snapshot) {
                     dirty_generation_.fetch_add(1, std::memory_order_relaxed);
                     next_snapshot = now + std::chrono::milliseconds(std::max(config_.snapshot_interval_ms, 1));
                 }
@@ -1010,6 +1057,8 @@ private:
                         continue;
                     }
                     retry_interval = base_retry_interval;
+                    next_snapshot = std::chrono::steady_clock::now()
+                                    + std::chrono::milliseconds(std::max(config_.snapshot_interval_ms, 1));
 
                     const uint64_t current_generation = dirty_generation_.load(std::memory_order_relaxed);
                     if (needsReconciliation(current_generation)) {
@@ -1088,6 +1137,8 @@ private:
     std::atomic<uint64_t>                 requested_snapshot_epoch_{0};
     std::atomic<uint64_t>                 next_request_id_{1};
     std::atomic<int64_t>                  report_retry_deadline_ms_{0};
+    // Zero means this outage already consumed its registration recovery.
+    std::atomic<int64_t>                  normal_ack_deadline_ms_{0};
     std::optional<PendingSnapshotReport>  pending_snapshot_report_;
 };
 

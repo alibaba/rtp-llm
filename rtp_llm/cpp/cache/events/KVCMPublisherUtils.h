@@ -9,7 +9,7 @@ struct KVCMReportFeedback {
     bool valid = false;
     bool ok = false;
     bool snapshot_required = false;
-    bool registration_required = true;
+    bool registration_required = false;
     uint64_t retry_after_ms = 0;
 };
 
