@@ -97,7 +97,18 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
         for name, value in zip(("_w13", "_s13", "_w2", "_s2"), (*pair13, *pair2)):
             self.register_buffer(name, value, persistent=False)
 
-    def forward(self, x, weights, indices, *, active_token_mask=None):
+    def require_staged_shared(self):
+        import inspect
+
+        if (
+            "after_gemm1"
+            not in inspect.signature(self._mega.fp4_fp4_mega_moe).parameters
+        ):
+            raise RuntimeError(
+                "Staged shared execution requires DeepGEMM's after_gemm1 API"
+            )
+
+    def forward(self, x, weights, indices, *, active_token_mask=None, after_gemm1=None):
         from rtp_llm.platforms.ppu.kernels.ppu_topk_padding import pad_inactive_routes
 
         if self._sym is None:
@@ -115,6 +126,7 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
             active_token_mask=active_token_mask,
         )
         y = torch.empty_like(x, dtype=torch.bfloat16)
+        kwargs = {} if after_gemm1 is None else {"after_gemm1": after_gemm1}
         self._mega.fp4_fp4_mega_moe(
             y,
             (self._w13, self._s13),
@@ -125,5 +137,6 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
             ),
             preserve_bf16=True,
             fuse_reduce=False,
+            **kwargs,
         )
         return y

@@ -157,6 +157,8 @@ class PpuEPMoE(nn.Module):
         )
         self._shared_executor = platform_provider.build_shared_expert_executor()
         self._shared_executor.prepare(self.shared_experts)
+        if getattr(self._shared_executor, "staged", False):
+            self._strategy.require_staged_shared()
 
     def _route_and_start_shared(
         self, x, input_ids, active_token_mask=None, input_quantized=None
@@ -176,7 +178,10 @@ class PpuEPMoE(nn.Module):
                 routing = weights, indices, active_token_mask
         except Exception:
             if early:
-                self._shared_executor.finish()
+                if hasattr(self._shared_executor, "abort"):
+                    self._shared_executor.abort()
+                else:
+                    self._shared_executor.finish()
             raise
         if not early:
             self._shared_executor.start(self.shared_experts, x, **shared_kwargs)
@@ -204,14 +209,20 @@ class PpuEPMoE(nn.Module):
                 observer("input", x)
                 observer("topk_weights", weights)
                 observer("topk_indices", indices)
+            schedule = {}
+            if getattr(self._shared_executor, "staged", False):
+                schedule["after_gemm1"] = self._shared_executor.after_routed_gemm1
             if remaining_mask is None:
-                routed = self._strategy(x, weights, indices)
+                routed = self._strategy(x, weights, indices, **schedule)
             else:
                 routed = self._strategy(
-                    x, weights, indices, active_token_mask=remaining_mask
+                    x, weights, indices, active_token_mask=remaining_mask, **schedule
                 )
         except Exception:
-            self._shared_executor.finish()
+            if hasattr(self._shared_executor, "abort"):
+                self._shared_executor.abort()
+            else:
+                self._shared_executor.finish()
             raise
         shared = self._shared_executor.finish()
         if observer is not None:

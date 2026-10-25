@@ -28,16 +28,23 @@ class PpuSharedExpert(W13SharedExpert):
             raise ValueError("Quantized shared inputs require the PPU BF16 contract")
         if not self.preserve_output_dtype or weights is not None:
             return super().forward(x, weights)
-        from rtp_llm.platforms.ppu.kernels.ppu_shared_swiglu import silu_mul_merged_bf16
+        return self.finish_projection(self.project(x, input_quantized=input_quantized))
 
+    def project(self, x, *, input_quantized=None):
+        """First shared GEMM, retaining its BF16 output boundary."""
         with record_function_range("dsv4.shared_expert.w13"):
-            gate_up = (
+            return (
                 self._apply_layer(self.w13, x)
                 if input_quantized is None
                 else self.w13.forward_quantized(*input_quantized).view(
                     *x.shape[:-1], self.w13.n
                 )
             )
+
+    def finish_projection(self, gate_up):
+        """Activation, quantization and second GEMM with unchanged arithmetic."""
+        from rtp_llm.platforms.ppu.kernels.ppu_shared_swiglu import silu_mul_merged_bf16
+
         if getattr(self, "fuse_activation_quant", False):
             from rtp_llm.platforms.ppu.kernels.ppu_decode_fused_quant import (
                 supports_swiglu_fp8,
@@ -72,9 +79,13 @@ class PpuSharedExpertExecutor(SharedExpertExecutor):
 
     name = "ppu_sequential"
 
-    def __init__(self, stream_pool=None, *, start_before_routing=False):
+    def __init__(self, stream_pool=None, *, start_before_routing=False, staged=False):
         if start_before_routing and stream_pool is None:
             raise ValueError("Early shared execution requires a PPU overlap stream")
+        if staged and (stream_pool is None or not start_before_routing):
+            raise ValueError("Staged shared execution requires early overlap")
+        self.staged = bool(staged)
+        self._gate_up = None
         self.start_before_routing = bool(start_before_routing)
         self._shared = None
         self._out = None
@@ -85,7 +96,7 @@ class PpuSharedExpertExecutor(SharedExpertExecutor):
     def prepare(self, shared_experts):
         from rtp_llm.platforms.ppu.modules.linear.fp8_linear import PpuFp8Linear
 
-        if self._out is not None:
+        if self._out is not None or self._gate_up is not None:
             raise RuntimeError("PPU shared executor still has a pending output")
         if not isinstance(shared_experts, PpuSharedExpert) or not all(
             isinstance(getattr(shared_experts, name, None), PpuFp8Linear)
@@ -103,7 +114,7 @@ class PpuSharedExpertExecutor(SharedExpertExecutor):
     def start(self, shared_experts, x, *, input_quantized=None):
         if self._shared is None or shared_experts is not self._shared:
             raise RuntimeError("PPU shared executor must use its prepared module")
-        if self._out is not None:
+        if self._out is not None or self._gate_up is not None:
             raise RuntimeError("PPU shared executor still has a pending output")
         if self._stream is None:
             with record_function_range("dsv4.moe.shared_expert"):
@@ -125,16 +136,39 @@ class PpuSharedExpertExecutor(SharedExpertExecutor):
         try:
             with torch.cuda.stream(self._stream):
                 with record_function_range("dsv4.moe.shared_expert"):
-                    self._out = (
-                        shared_experts(x)
-                        if input_quantized is None
-                        else shared_experts(x, input_quantized=input_quantized)
-                    )
+                    if self.staged:
+                        self._gate_up = shared_experts.project(
+                            x, input_quantized=input_quantized
+                        )
+                    else:
+                        self._out = (
+                            shared_experts(x)
+                            if input_quantized is None
+                            else shared_experts(x, input_quantized=input_quantized)
+                        )
         except Exception:
             current.wait_stream(self._stream)
+            self._out = self._gate_up = None
             raise
 
+    def after_routed_gemm1(self):
+        """Enqueue shared G2 alongside routed G2 after the producer boundary."""
+        if not self.staged or self._gate_up is None or self._out is not None:
+            raise RuntimeError("Staged shared executor has no pending projection")
+        self._stream.wait_stream(torch.cuda.current_stream(self._gate_up.device))
+        with torch.cuda.stream(self._stream):
+            self._out = self._shared.finish_projection(self._gate_up)
+        self._gate_up = None
+
+    def abort(self):
+        """Join already-enqueued work and release a failed invocation's storage."""
+        if self._stream is not None:
+            torch.cuda.current_stream(self._stream.device).wait_stream(self._stream)
+        self._out = self._gate_up = None
+
     def finish(self):
+        if self._gate_up is not None:
+            raise RuntimeError("Routed G1 did not complete the staged shared schedule")
         if self._out is None:
             raise RuntimeError("PPU shared executor has no pending output")
         if self._stream is not None:

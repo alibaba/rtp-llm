@@ -3,7 +3,6 @@
 import weakref
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4.platform_provider import Dsv4ProviderCapability
 
 from .manifest import DECODE_EXECUTION_OPTIONS, _check_execution_options
@@ -63,6 +62,9 @@ class PpuDecodeProvider(PpuModuleProvider):
         )
         if self._moe_backend not in ("deepep", "megamoe"):
             raise ValueError("DSV4_PPU_DECODE_MOE_BACKEND must be deepep or megamoe")
+        self._shared_staged = self._bool("DSV4_PPU_MEGAMOE_SHARED_STAGED", False)
+        if self._shared_staged and self._moe_backend != "megamoe":
+            raise ValueError("Staged shared execution requires the MegaMoE backend")
         self._mega_resources = None
         self._mega_module_name = self.execution_options.get(
             "DSV4_PPU_MEGAMOE_PACKAGE", "deep_gemm"
@@ -168,7 +170,9 @@ class PpuDecodeProvider(PpuModuleProvider):
         from .ppu_shared_expert import PpuSharedExpertExecutor
 
         return PpuSharedExpertExecutor(
-            stream_pool=self.stream_pool, start_before_routing=True
+            stream_pool=self.stream_pool,
+            start_before_routing=True,
+            staged=self._shared_staged,
         )
 
     def build_hc_unit(self, *args, **kwargs):
