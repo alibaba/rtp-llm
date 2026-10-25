@@ -90,7 +90,7 @@ public final class PrefillQueueLoop {
             boolean hasWaiting;
             try {
                 hasWaiting = runOnce();
-            } catch (RuntimeException failure) {
+            } catch (Throwable failure) {
                 Logger.error("V2 prefill queue loop round failed", failure);
                 hasWaiting = true;
             }

@@ -23,11 +23,15 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -185,5 +189,24 @@ class PrefillQueueLoopTest {
         mainQueue.remove(request);
         queues.addWaiting(request);
         return request;
+    }
+
+    @Test
+    void loopContinuesAfterError() throws InterruptedException {
+        CountDownLatch nextRound = new CountDownLatch(1);
+        AtomicInteger calls = new AtomicInteger();
+        doAnswer(call -> {
+            if (calls.getAndIncrement() == 0) {
+                throw new AssertionError("test round failure");
+            }
+            nextRound.countDown();
+            return config;
+        }).when(configService).loadBalanceConfig();
+        loop.start();
+        try {
+            assertTrue(nextRound.await(5, TimeUnit.SECONDS));
+        } finally {
+            loop.close();
+        }
     }
 }

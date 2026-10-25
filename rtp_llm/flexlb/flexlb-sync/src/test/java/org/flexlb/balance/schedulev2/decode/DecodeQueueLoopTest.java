@@ -37,6 +37,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -55,6 +58,7 @@ import static org.mockito.Mockito.when;
 class DecodeQueueLoopTest {
 
     private final FlexlbConfig config = SchedulingTestConfig.newConfig();
+    private final ConfigService configService = mock(ConfigService.class);
     private final QueueCapacity queueCapacity = new QueueCapacity();
     private final RequestTable requestTable = new RequestTable();
     private final LoopSignal decodeLoopSignal = new LoopSignal();
@@ -415,9 +419,27 @@ class DecodeQueueLoopTest {
     }
 
     private ConfigService configService() {
-        ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         return configService;
+    }
+
+    @Test
+    void loopContinuesAfterError() throws InterruptedException {
+        CountDownLatch nextRound = new CountDownLatch(1);
+        AtomicInteger calls = new AtomicInteger();
+        doAnswer(call -> {
+            if (calls.getAndIncrement() == 0) {
+                throw new AssertionError("test round failure");
+            }
+            nextRound.countDown();
+            return config;
+        }).when(configService).loadBalanceConfig();
+        loop.start();
+        try {
+            assertTrue(nextRound.await(5, TimeUnit.SECONDS));
+        } finally {
+            loop.close();
+        }
     }
 
     private Request addWaiting(String requestId) {

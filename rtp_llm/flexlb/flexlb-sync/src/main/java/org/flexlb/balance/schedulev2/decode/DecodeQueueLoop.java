@@ -148,7 +148,7 @@ public final class DecodeQueueLoop {
             boolean moved;
             try {
                 moved = runOnce();
-            } catch (RuntimeException failure) {
+            } catch (Throwable failure) {
                 Logger.error("V2 decode queue loop round failed", failure);
                 moved = false;
             }

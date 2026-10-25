@@ -27,6 +27,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -35,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -151,5 +155,25 @@ class MainQueueLoopTest {
         when(picker.groupOf(request.ctx())).thenReturn(group);
         assertNull(mainQueue.add(request, config));
         return request;
+    }
+
+    @Test
+    void loopContinuesAfterError() throws InterruptedException {
+        add("1", "g");
+        CountDownLatch nextRound = new CountDownLatch(1);
+        AtomicInteger calls = new AtomicInteger();
+        doAnswer(call -> {
+            if (calls.getAndIncrement() == 0) {
+                throw new AssertionError("test round failure");
+            }
+            nextRound.countDown();
+            return 0;
+        }).when(endpointRegistry).getEndpointCount(RoleType.PREFILL);
+        loop.start();
+        try {
+            assertTrue(nextRound.await(5, TimeUnit.SECONDS));
+        } finally {
+            loop.close();
+        }
     }
 }

@@ -113,7 +113,7 @@ public final class MainQueueLoop {
             boolean moved;
             try {
                 moved = runOnce();
-            } catch (RuntimeException failure) {
+            } catch (Throwable failure) {
                 Logger.error("V2 main queue loop round failed", failure);
                 moved = false;
             }
