@@ -59,7 +59,7 @@ public final class WorkerStatusUpdater {
             prefillState.unknownEngineRequestCount = nextUnknown;
             if (schedulingInputsChanged) {
                 prefillState.committedWorkCapture = null;
-                prefillState.recordMutationUnderLock();
+                prefillState.recordMutation();
             }
         } finally {
             prefillState.lock.unlock();
@@ -85,7 +85,7 @@ public final class WorkerStatusUpdater {
         try {
             long nowMs = prefillState.clock.getAsLong();
             IdentityHashMap<BatchProgress, LiveBatchMembers> membersByBatch =
-                    prefillState.batchPrefill.liveBatchMembersUnderLock();
+                    prefillState.batchPrefill.liveBatchMembers();
             Map<String, FinishReport> finishReports = collectFinishedTasks(finishedTasks);
             Map<String, WorkerStatus.TaskObservation> activeTasks =
                     engine.runningTaskList();
@@ -108,7 +108,7 @@ public final class WorkerStatusUpdater {
             long nextUnknown = collectRunningTasks(activeTasks, finishReports, reportedActive, individualPhases,
                     batchPhases, null);
             IdentityHashMap<BatchProgress, Long> predictions = new IdentityHashMap<>();
-            prefillState.batchPrefill.prepareBatchPredictionsUnderLock(changedBatches, finishReports, batchPhases,
+            prefillState.batchPrefill.prepareBatchPredictions(changedBatches, finishReports, batchPhases,
                     predictBatchTime, predictions);
             outcome = buildResult(finishReports, activeTasks, membersByBatch);
 
@@ -117,7 +117,7 @@ public final class WorkerStatusUpdater {
             // into the already materialized outcome and forces retirement.
             canonicalMutationStarted = true;
             prefillState.committedWorkCapture = null;
-            prefillState.recordMutationUnderLock();
+            prefillState.recordMutation();
             for (Map.Entry<RequestEntry, FinishReport> settlement : settlements.entrySet()) {
                 RequestEntry entry = settlement.getKey();
                 capacityReleased |= prefillState.removeCommittedEntry(entry, settlement.getValue(),
@@ -130,7 +130,7 @@ public final class WorkerStatusUpdater {
             capacityReleased |= nextUnknown < prefillState.unknownEngineRequestCount;
             prefillState.unknownEngineRequestCount = nextUnknown;
             // Status reduction changes counts after invalidating the old work revision.
-            prefillState.publishRequestCountUnderLock();
+            prefillState.publishRequestCount();
             try {
                 publishStatus.run();
             } catch (Throwable failure) {

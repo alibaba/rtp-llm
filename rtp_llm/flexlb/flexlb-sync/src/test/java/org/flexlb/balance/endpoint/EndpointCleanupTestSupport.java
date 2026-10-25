@@ -61,7 +61,7 @@ public final class EndpointCleanupTestSupport {
             if (batch) {
                 lock.lock();
                 try {
-                    assertTrue(state.enqueueActiveUnderLock(item, Long.MAX_VALUE));
+                    assertTrue(state.enqueueActive(item, Long.MAX_VALUE));
                 } finally {
                     lock.unlock();
                 }
@@ -76,8 +76,7 @@ public final class EndpointCleanupTestSupport {
             }
             lock.lock();
             try {
-                assertTrue(state.enqueueActiveUnderLock(item, 1L),
-                        "the expired individual must release its sole capacity slot");
+                assertTrue(state.enqueueActive(item, 1L), "the expired individual must release its sole capacity slot");
             } finally {
                 lock.unlock();
             }

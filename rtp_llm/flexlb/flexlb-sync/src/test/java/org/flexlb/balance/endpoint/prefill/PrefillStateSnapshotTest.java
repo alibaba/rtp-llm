@@ -413,7 +413,7 @@ class PrefillStateSnapshotTest {
     private PrefillState.Snapshot capture() {
         lock.lock();
         try {
-            return state.snapshotUnderLock();
+            return state.snapshot();
         } finally {
             lock.unlock();
         }
@@ -422,7 +422,7 @@ class PrefillStateSnapshotTest {
     private void enqueue(ScheduledRequest item) {
         lock.lock();
         try {
-            assertTrue(state.enqueueActiveUnderLock(item, 0L));
+            assertTrue(state.enqueueActive(item, 0L));
         } finally {
             lock.unlock();
         }

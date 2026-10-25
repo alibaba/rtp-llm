@@ -42,7 +42,7 @@ public final class QueueWaitRecorder {
         try {
             version = queueState.queueVersion();
             prefillRequests = prefillState.observedRequestCount();
-            prefillBatchSlots = prefillState.batchLeasesInUseUnderLock();
+            prefillBatchSlots = prefillState.batchLeasesInUse();
             for (int priority = 0; priority < requestCountsByPriority.length; priority++) {
                 requestCountsByPriority[priority] = queueState.activeIndex().size(priority);
             }

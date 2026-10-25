@@ -39,7 +39,7 @@ public final class SinglePrefill {
             SingleReservation lease = new SingleReservation(
                     prefillState, entry, item.requestId(), predictedMs);
             entry.reservation = lease;
-            prefillState.recordMutationUnderLock();
+            prefillState.recordMutation();
             return ReservationResult.success(lease);
         } finally {
             prefillState.lock.unlock();
@@ -65,16 +65,15 @@ public final class SinglePrefill {
         }
         prefillState.lock.lock();
         try {
-            return commitSinglesUnderLock(items, leases, generationHandoff);
+            return commitSingles(items, leases, generationHandoff);
         } finally {
             prefillState.lock.unlock();
         }
     }
 
-    private PrefillState.CommittedHandoff commitSinglesUnderLock(
-            List<ScheduledRequest> items,
-            List<SingleReservation> leases,
-            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+    private PrefillState.CommittedHandoff commitSingles(List<ScheduledRequest> items,
+                                                        List<SingleReservation> leases,
+                                                        EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
         prefillState.requireLock();
         List<ScheduledRequest> members = validateSingleGroup(items);
         if (members.size() != leases.size()) {
@@ -96,10 +95,10 @@ public final class SinglePrefill {
             }
         }
         long nowMs = prefillState.clock.getAsLong();
-        PrefillState.CommittedHandoff committedHandoff = new PrefillState.CommittedHandoff(generationHandoff,
-                prefillState.capturePrecedingWorkUnderLock(members, nowMs));
+        PrefillState.CommittedHandoff committedHandoff =
+                new PrefillState.CommittedHandoff(generationHandoff, prefillState.capturePrecedingWork(members, nowMs));
         for (ScheduledRequest item : members) {
-            prefillState.detachAdmissionIndexUnderLock(prefillState.requests.get(item.requestId()), item);
+            prefillState.detachAdmissionIndex(prefillState.requests.get(item.requestId()), item);
         }
         for (int index = 0; index < members.size(); index++) {
             SingleReservation lease = leases.get(index);
@@ -108,7 +107,7 @@ public final class SinglePrefill {
             entry.commitIndividual(lease, nowMs);
         }
         prefillState.committedWorkCapture = null;
-        prefillState.recordMutationUnderLock();
+        prefillState.recordMutation();
         return committedHandoff;
     }
 
@@ -118,7 +117,7 @@ public final class SinglePrefill {
             RequestEntry entry = prefillState.requests.get(item.requestId());
             PrefillState.requireState(entry != null && entry.activeIdentity(item),
                     "single member is not canonical admission request_id=" + item.requestId());
-            prefillState.validateAdmissionIndexUnderLock(entry, item);
+            prefillState.validateAdmissionIndex(entry, item);
         }
         return items;
     }
@@ -127,9 +126,7 @@ public final class SinglePrefill {
      * Remove one NON_BATCH ACTIVE owner and its item-owned OPEN single reservation
      * in the same ownership transaction.
      */
-    public boolean removeQueuedSingleRequest(
-            ScheduledRequest item,
-            SingleReservation exactReservation) {
+    public boolean removeQueuedSingleRequest(ScheduledRequest item, SingleReservation exactReservation) {
         prefillState.requireLock();
         RequestEntry entry = prefillState.requests.get(item.requestId());
         if (entry == null || !entry.activeIdentity(item)) {
@@ -143,14 +140,14 @@ public final class SinglePrefill {
                     "ACTIVE single request lost its exact Prefill reservation request_id="
                             + item.requestId());
         }
-        prefillState.validateAdmissionIndexUnderLock(entry, item);
+        prefillState.validateAdmissionIndex(entry, item);
 
         // Every operation below is allocation-free and runs under the same
         // lock used by generation retirement.
-        prefillState.detachAdmissionIndexUnderLock(entry, item);
-        prefillState.closeOpenLeaseUnderLock(exactReservation);
-        prefillState.removeRequestUnderLock(item.requestId(), entry);
-        prefillState.recordMutationUnderLock();
+        prefillState.detachAdmissionIndex(entry, item);
+        prefillState.closeOpenLease(exactReservation);
+        prefillState.removeRequest(item.requestId(), entry);
+        prefillState.recordMutation();
         return true;
     }
 

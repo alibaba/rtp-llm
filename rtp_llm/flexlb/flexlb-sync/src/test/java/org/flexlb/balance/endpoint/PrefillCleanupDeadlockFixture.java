@@ -69,7 +69,9 @@ public final class PrefillCleanupDeadlockFixture {
 
     private void enqueue(ScheduledRequest item) {
         lock.lock();
-        try { assertTrue(state.enqueueActiveUnderLock(item, Long.MAX_VALUE)); }
+        try {
+            assertTrue(state.enqueueActive(item, Long.MAX_VALUE));
+        }
         finally { lock.unlock(); }
     }
 

@@ -53,7 +53,7 @@ public final class BatchPrefill {
             if (entry.reservation != null) {
                 return ReservationResult.fail(ReservationResult.Status.REQUEST_ALREADY_RESERVED);
             }
-            if (findBatchReservationUnderLock(batchId) != null) {
+            if (findBatchReservation(batchId) != null) {
                 return ReservationResult.fail(ReservationResult.Status.BATCH_ID_ALREADY_RESERVED);
             }
             if (batchLeasesInUse >= maximum) {
@@ -63,14 +63,14 @@ public final class BatchPrefill {
                     new BatchReservation(prefillState, entry, head.requestId(), batchId, generationHandoff);
             entry.reservation = lease;
             batchLeasesInUse++;
-            prefillState.recordMutationUnderLock();
+            prefillState.recordMutation();
             return ReservationResult.success(lease);
         } finally {
             prefillState.lock.unlock();
         }
     }
 
-    public int batchLeasesInUseUnderLock() {
+    public int batchLeasesInUse() {
         prefillState.requireLock();
         return batchLeasesInUse;
     }
@@ -142,7 +142,7 @@ public final class BatchPrefill {
                     || !members.contains(headItem) || openGenerationHandoff(lease) == null) {
                 throw new IllegalStateException("batch commit does not own exact OPEN lease batch_id=" + lease.batchId);
             }
-            if (findBatchProgressUnderLock(lease.batchId) != null) {
+            if (findBatchProgress(lease.batchId) != null) {
                 throw new IllegalStateException("batch id already committed batch_id=" + lease.batchId);
             }
             for (ScheduledRequest item : members) {
@@ -157,27 +157,27 @@ public final class BatchPrefill {
             BatchProgress work = new BatchProgress(lease, predictedMs,
                     PrefillBatchFeatures.from(members, ScheduledRequest::seqLen, ScheduledRequest::hitCache), nowMs);
             PrefillState.CommittedHandoff committedHandoff = new PrefillState.CommittedHandoff(
-                    openGenerationHandoff(lease), prefillState.capturePrecedingWorkUnderLock(members, nowMs));
+                    openGenerationHandoff(lease), prefillState.capturePrecedingWork(members, nowMs));
             for (ScheduledRequest item : members) {
                 prefillState.removeValidatedActiveIndex(item);
             }
-            moveGenerationHandoffToOwnedUnderLock(lease, committedHandoff);
+            moveGenerationHandoffToOwned(lease, committedHandoff);
             for (ScheduledRequest item : members) {
                 prefillState.requests.get(item.requestId()).commitBatch(work);
             }
             prefillState.committedWorkCapture = null;
-            prefillState.recordMutationUnderLock();
+            prefillState.recordMutation();
             return committedHandoff;
         } finally {
             prefillState.lock.unlock();
         }
     }
 
-    public void prepareBatchPredictionsUnderLock(Set<LiveBatchMembers> changedBatches,
-                                                 Map<String, FinishReport> finishReports,
-                                                 IdentityHashMap<BatchProgress, Phase> batchPhases,
-                                                 ToLongFunction<List<ScheduledRequest>> predictBatchTime,
-                                                 IdentityHashMap<BatchProgress, Long> predictions) {
+    public void prepareBatchPredictions(Set<LiveBatchMembers> changedBatches,
+                                        Map<String, FinishReport> finishReports,
+                                        IdentityHashMap<BatchProgress, Phase> batchPhases,
+                                        ToLongFunction<List<ScheduledRequest>> predictBatchTime,
+                                        IdentityHashMap<BatchProgress, Long> predictions) {
         prefillState.requireLock();
         for (LiveBatchMembers liveMembers : changedBatches) {
             BatchProgress batch = liveMembers.batch();
@@ -211,7 +211,7 @@ public final class BatchPrefill {
         prefillState.lock.lock();
         try {
             long nowMs = prefillState.clock.getAsLong();
-            for (LiveBatchMembers liveMembers : liveBatchMembersUnderLock().values()) {
+            for (LiveBatchMembers liveMembers : liveBatchMembers().values()) {
                 boolean retained = nowMs - liveMembers.batch().lastObservedAtMs() < Math.max(0L, ttlMs);
                 for (RequestEntry entry : liveMembers.members()) {
                     retained |= retainForSchedulerCleanup.test(entry.requestId);
@@ -348,7 +348,7 @@ public final class BatchPrefill {
                 : Phase.ENGINE_QUEUED;
     }
 
-    public IdentityHashMap<BatchProgress, LiveBatchMembers> liveBatchMembersUnderLock() {
+    public IdentityHashMap<BatchProgress, LiveBatchMembers> liveBatchMembers() {
         prefillState.requireLock();
         IdentityHashMap<BatchProgress, LiveBatchMembers> membersByBatch = new IdentityHashMap<>();
         for (RequestEntry entry : prefillState.requests.values()) {
@@ -362,7 +362,7 @@ public final class BatchPrefill {
     /**
      * Build only the exact batch needed by a single-item terminal path.
      */
-    public LiveBatchMembers liveBatchMembersUnderLock(BatchProgress exactBatch) {
+    public LiveBatchMembers liveBatchMembers(BatchProgress exactBatch) {
         prefillState.requireLock();
         LiveBatchMembers liveMembers = new LiveBatchMembers(exactBatch);
         for (RequestEntry entry : prefillState.requests.values()) {
@@ -373,7 +373,7 @@ public final class BatchPrefill {
         return liveMembers;
     }
 
-    private BatchReservation findBatchReservationUnderLock(long batchId) {
+    private BatchReservation findBatchReservation(long batchId) {
         for (RequestEntry entry : prefillState.requests.values()) {
             if (entry.reservation instanceof BatchReservation reservation && reservation.batchId == batchId) {
                 return reservation;
@@ -393,8 +393,7 @@ public final class BatchPrefill {
     /**
      * Move the exact handoff out of the OPEN admission before commit publishes.
      */
-    private void moveGenerationHandoffToOwnedUnderLock(BatchReservation lease,
-                                                       PrefillState.CommittedHandoff committedHandoff) {
+    private void moveGenerationHandoffToOwned(BatchReservation lease, PrefillState.CommittedHandoff committedHandoff) {
         prefillState.requireLock();
         if (lease.state != LeaseState.OPEN || lease.generationHandoff == null
                 || committedHandoff.generationHandoff != lease.generationHandoff) {
@@ -404,7 +403,7 @@ public final class BatchPrefill {
         lease.state = LeaseState.OWNED;
     }
 
-    private BatchProgress findBatchProgressUnderLock(long batchId) {
+    private BatchProgress findBatchProgress(long batchId) {
         for (RequestEntry entry : prefillState.requests.values()) {
             if (entry.batchProgress != null && entry.batchProgress.batchId() == batchId) {
                 return entry.batchProgress;
@@ -413,7 +412,7 @@ public final class BatchPrefill {
         return null;
     }
 
-    public void releaseBatchSlotUnderLock() {
+    public void releaseBatchSlot() {
         prefillState.requireLock();
         if (batchLeasesInUse <= 0) {
             throw new IllegalStateException("Prefill batch capacity accounting underflow");
@@ -421,7 +420,7 @@ public final class BatchPrefill {
         batchLeasesInUse--;
     }
 
-    public void resetBatchLeasesInUseUnderLock() {
+    public void resetBatchLeasesInUse() {
         prefillState.requireLock();
         batchLeasesInUse = 0;
     }

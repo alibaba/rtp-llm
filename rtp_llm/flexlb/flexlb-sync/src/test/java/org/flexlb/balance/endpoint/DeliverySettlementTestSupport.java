@@ -32,7 +32,7 @@ public final class DeliverySettlementTestSupport {
     public void enqueue(ScheduledRequest item) {
         lock.lock();
         try {
-            assertTrue(prefill.enqueueActiveUnderLock(item, Long.MAX_VALUE));
+            assertTrue(prefill.enqueueActive(item, Long.MAX_VALUE));
         } finally {
             lock.unlock();
         }
@@ -46,7 +46,7 @@ public final class DeliverySettlementTestSupport {
         lock.lock();
         try {
             for (ScheduledRequest item : items) {
-                assertTrue(prefill.enqueueActiveUnderLock(item, Long.MAX_VALUE));
+                assertTrue(prefill.enqueueActive(item, Long.MAX_VALUE));
             }
         } finally {
             lock.unlock();

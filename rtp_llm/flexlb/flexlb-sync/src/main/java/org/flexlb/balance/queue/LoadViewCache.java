@@ -82,7 +82,7 @@ public final class LoadViewCache {
         Version version = new Version(queueState.queueVersion(), queueState.schedulingInputVersion(),
                 prefillState.mutationVersion(), fixedWaitMs);
         BatchCapacityView capacity = BatchCapacityView.of(prefillEndpoint, config);
-        PrefillState.Snapshot ownership = prefillState.snapshotUnderLock();
+        PrefillState.Snapshot ownership = prefillState.snapshot();
         return new CapturedLoadView(
                 version, ownership,
                 new GroupPlanner.Constraints(

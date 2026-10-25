@@ -37,7 +37,7 @@ public final class SingleReservation extends Reservation {
                                 + requestId);
             }
             predictedWorkMs = boundedPrediction(predictedMs);
-            owner.recordMutationUnderLock();
+            owner.recordMutation();
         } finally {
             owner.lock.unlock();
         }

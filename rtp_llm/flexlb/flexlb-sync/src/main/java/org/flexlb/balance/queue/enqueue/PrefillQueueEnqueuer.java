@@ -61,7 +61,7 @@ public final class PrefillQueueEnqueuer {
                     // 共享排队名额已满：只能替换掉这台 Prefill 上一个还在排队的请求。
                     attempt = new EnqueueAttempt(false, null, null);
                     if (!queueState.isStopped() && config.allowsPreemption(VictimStage.PREFILL_QUEUED)) {
-                        ScheduledRequest victim = prefillState.oneQueuedPreemptionVictimUnderLock(item.priority());
+                        ScheduledRequest victim = prefillState.oneQueuedPreemptionVictim(item.priority());
                         if (victim != null) {
                             victims = List.of(victim);
                             attempt = replaceQueuedRequestsUnderLock(item, victims);
@@ -76,7 +76,7 @@ public final class PrefillQueueEnqueuer {
                 if (!attempt.accepted() && attempt.failure() == null && !queueState.isStopped()
                         && config.allowsPreemption(VictimStage.PREFILL_QUEUED)) {
                     long maxOutstandingRequests = maxOutstandingRequests(item);
-                    victims = prefillState.queuedPreemptionVictimsUnderLock(item.priority(), maxOutstandingRequests);
+                    victims = prefillState.queuedPreemptionVictims(item.priority(), maxOutstandingRequests);
                     if (!victims.isEmpty()) {
                         attempt = replaceQueuedRequestsUnderLock(item, victims);
                     }
@@ -215,7 +215,7 @@ public final class PrefillQueueEnqueuer {
      * 调用方持有队列锁。
      */
     private boolean publishActiveIndexUnderLock(ScheduledRequest item) {
-        boolean published = prefillState.enqueueActiveUnderLock(item, 0L);
+        boolean published = prefillState.enqueueActive(item, 0L);
         if (published) {
             queueState.incrementQueueVersion();
         }

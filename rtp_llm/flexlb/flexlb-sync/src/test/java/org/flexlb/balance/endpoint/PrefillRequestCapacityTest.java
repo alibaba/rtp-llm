@@ -257,7 +257,9 @@ class PrefillRequestCapacityTest {
 
     private boolean enqueue(ScheduledRequest item, long limit) {
         lock.lock();
-        try { return state.enqueueActiveUnderLock(item, limit); }
+        try {
+            return state.enqueueActive(item, limit);
+        }
         finally { lock.unlock(); }
     }
 

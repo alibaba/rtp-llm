@@ -26,7 +26,7 @@ public final class QueuedPreemption {
     public boolean canPreemptQueuedRequest(int priority, long requestLimit) {
         prefillState.lock.lock();
         try {
-            long required = requestSlotsToReleaseUnderLock(requestLimit);
+            long required = requestSlotsToRelease(requestLimit);
             if (!PriorityNormalizer.hasPriority(priority) || required == 0L
                     || required > prefillState.activeIndex.size()) {
                 return false;
@@ -45,18 +45,18 @@ public final class QueuedPreemption {
     /**
      * Select only uncommitted requests; Engine work cannot release a local queue seat.
      */
-    public List<ScheduledRequest> queuedPreemptionVictimsUnderLock(int priority, long requestLimit) {
+    public List<ScheduledRequest> queuedPreemptionVictims(int priority, long requestLimit) {
         prefillState.requireLock();
-        return findQueuedPreemptionVictimsUnderLock(priority, requestSlotsToReleaseUnderLock(requestLimit));
+        return findQueuedPreemptionVictims(priority, requestSlotsToRelease(requestLimit));
     }
 
-    public ScheduledRequest oneQueuedPreemptionVictimUnderLock(int priority) {
+    public ScheduledRequest oneQueuedPreemptionVictim(int priority) {
         prefillState.requireLock();
-        List<ScheduledRequest> victims = findQueuedPreemptionVictimsUnderLock(priority, 1L);
+        List<ScheduledRequest> victims = findQueuedPreemptionVictims(priority, 1L);
         return victims.isEmpty() ? null : victims.getFirst();
     }
 
-    private List<ScheduledRequest> findQueuedPreemptionVictimsUnderLock(int priority, long victimsNeeded) {
+    private List<ScheduledRequest> findQueuedPreemptionVictims(int priority, long victimsNeeded) {
         prefillState.requireLock();
         if (!PriorityNormalizer.hasPriority(priority) || victimsNeeded == 0L
                 || victimsNeeded > prefillState.activeIndex.size()) {
@@ -84,7 +84,7 @@ public final class QueuedPreemption {
                 && entry.reservation instanceof SingleReservation && entry.reservation.state == LeaseState.OPEN;
     }
 
-    private long requestSlotsToReleaseUnderLock(long requestLimit) {
+    private long requestSlotsToRelease(long requestLimit) {
         prefillState.requireLock();
         return requestLimit <= 0L ? 0L
                 : Math.max(0L, PrefillState.saturatedAdd(prefillState.requests.size(),
@@ -95,8 +95,8 @@ public final class QueuedPreemption {
      * Replace the selected waiting requests and their single reservations in one transaction.
      */
     public SingleReservation replaceQueuedRequests(List<ScheduledRequest> victims,
-                                                         List<SingleReservation> reservations,
-                                                         ScheduledRequest incoming) {
+                                                   List<SingleReservation> reservations,
+                                                   ScheduledRequest incoming) {
         prefillState.requireLock();
         if (victims.isEmpty() || victims.size() != reservations.size()
                 || prefillState.requests.containsKey(incoming.requestId())) {
@@ -121,7 +121,7 @@ public final class QueuedPreemption {
         incomingEntry.reservation = incomingReservation;
         prefillState.activeIndex.add(incoming);
         try {
-            prefillState.putRequestUnderLock(incoming.requestId(), incomingEntry);
+            prefillState.putRequest(incoming.requestId(), incomingEntry);
         } catch (RuntimeException | Error failure) {
             prefillState.activeIndex.remove(incoming);
             throw failure;
@@ -129,11 +129,11 @@ public final class QueuedPreemption {
         for (int index = 0; index < victims.size(); index++) {
             ScheduledRequest victim = victims.get(index);
             RequestEntry entry = prefillState.requests.get(victim.requestId());
-            prefillState.closeOpenLeaseUnderLock(reservations.get(index));
+            prefillState.closeOpenLease(reservations.get(index));
             prefillState.activeIndex.remove(victim);
-            prefillState.removeRequestUnderLock(victim.requestId(), entry);
+            prefillState.removeRequest(victim.requestId(), entry);
         }
-        prefillState.recordMutationUnderLock();
+        prefillState.recordMutation();
         return incomingReservation;
     }
 }

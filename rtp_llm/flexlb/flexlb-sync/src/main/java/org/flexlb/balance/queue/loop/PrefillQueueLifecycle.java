@@ -365,8 +365,7 @@ public final class PrefillQueueLifecycle {
      * 调用方持有队列锁。
      */
     private ScheduledRequest detachNextStopTerminalUnderLock() {
-        ScheduledRequest item =
-                prefillState.detachNextActiveForStopUnderLock();
+        ScheduledRequest item = prefillState.detachNextActiveForStop();
         if (item != null) {
             queueCapacity.releaseEngineSubQueueSlot(prefillEndpoint.getStatus().getRole());
             queueState.incrementQueueVersion();
@@ -377,9 +376,8 @@ public final class PrefillQueueLifecycle {
     /**
      * 调用方持有队列锁。
      */
-    private boolean acknowledgeStopTerminalUnderLock(
-            ScheduledRequest item) {
-        return prefillState.acknowledgeStopTerminalUnderLock(item);
+    private boolean acknowledgeStopTerminalUnderLock(ScheduledRequest item) {
+        return prefillState.acknowledgeStopTerminal(item);
     }
 
     private static void releaseUnconsumedSingleReservation(
