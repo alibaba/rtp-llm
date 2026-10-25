@@ -286,16 +286,15 @@ public final class PrefillState {
 
     public CommitResult commitSingleGroup(List<ScheduledRequest> items,
                                           List<SingleReservation> exactReservations,
-                                          EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
-        return singlePrefill.commitSingleGroup(items, exactReservations, generationHandoff);
+                                          EndpointGenerationLifecycle.HandoffPermit workerKeepAlive) {
+        return singlePrefill.commitSingleGroup(items, exactReservations, workerKeepAlive);
     }
 
-    public ReservationResult<BatchReservation> reserveBatch(
-            ScheduledRequest exactHead,
-            long batchId,
-            int maximum,
-            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
-        return batchPrefill.reserveBatch(exactHead, batchId, maximum, generationHandoff);
+    public ReservationResult<BatchReservation> reserveBatch(ScheduledRequest exactHead,
+                                                            long batchId,
+                                                            int maximum,
+                                                            EndpointGenerationLifecycle.HandoffPermit workerKeepAlive) {
+        return batchPrefill.reserveBatch(exactHead, batchId, maximum, workerKeepAlive);
     }
 
     public int batchLeasesInUse() {
@@ -497,7 +496,7 @@ public final class PrefillState {
             }
             for (Reservation lease : leases) {
                 if (lease instanceof BatchReservation batch) {
-                    batch.generationHandoff = null;
+                    batch.workerKeepAlive = null;
                 }
                 lease.state = LeaseState.CLOSED;
             }
@@ -710,12 +709,12 @@ public final class PrefillState {
             throw new IllegalStateException(
                     "Prefill lease rollback cannot run under queueLock");
         }
-        EndpointGenerationLifecycle.HandoffPermit generationHandoff = null;
+        EndpointGenerationLifecycle.HandoffPermit workerKeepAlive = null;
         boolean capacityReleased = false;
         lock.lock();
         try {
             if (lease.state == LeaseState.OPEN) {
-                generationHandoff = closeOpenLease(lease);
+                workerKeepAlive = closeOpenLease(lease);
                 capacityReleased = true;
             }
         } finally {
@@ -726,8 +725,8 @@ public final class PrefillState {
         }
         Throwable failure = null;
         try {
-            if (generationHandoff != null) {
-                generationHandoff.close();
+            if (workerKeepAlive != null) {
+                workerKeepAlive.close();
             }
         } catch (Throwable handoffFailure) {
             failure = handoffFailure;
@@ -770,14 +769,14 @@ public final class PrefillState {
             throw new IllegalStateException(
                     "OPEN Prefill lease has a non-ACTIVE canonical owner");
         }
-        EndpointGenerationLifecycle.HandoffPermit generationHandoff = null;
+        EndpointGenerationLifecycle.HandoffPermit workerKeepAlive = null;
         if (lease instanceof BatchReservation batch) {
-            generationHandoff = batch.generationHandoff;
-            if (generationHandoff == null) {
+            workerKeepAlive = batch.workerKeepAlive;
+            if (workerKeepAlive == null) {
                 throw new IllegalStateException(
                         "Prefill batch rollback lost its generation handoff");
             }
-            batch.generationHandoff = null;
+            batch.workerKeepAlive = null;
         }
         lease.state = LeaseState.CLOSED;
         releaseBatchSlot(lease);
@@ -785,7 +784,7 @@ public final class PrefillState {
             owner.reservation = null;
         }
         recordMutation();
-        return generationHandoff;
+        return workerKeepAlive;
     }
 
     /**
@@ -794,8 +793,7 @@ public final class PrefillState {
     private void closeOwnedLease(Reservation lease) {
         requireLock();
         if (lease.state != LeaseState.OWNED
-                || lease instanceof BatchReservation batch
-                && batch.generationHandoff != null) {
+                || lease instanceof BatchReservation batch && batch.workerKeepAlive != null) {
             throw new IllegalStateException(
                     "Prefill OWNED terminal still owns an admission handoff");
         }

@@ -38,11 +38,10 @@ public final class BatchPrefill {
         this.prefillState = prefillState;
     }
 
-    public ReservationResult<BatchReservation> reserveBatch(
-            ScheduledRequest exactHead,
-            long batchId,
-            int maximum,
-            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+    public ReservationResult<BatchReservation> reserveBatch(ScheduledRequest exactHead,
+                                                            long batchId,
+                                                            int maximum,
+                                                            EndpointGenerationLifecycle.HandoffPermit workerKeepAlive) {
         requirePositiveBatchLimit(maximum);
         ScheduledRequest head = exactHead;
         prefillState.lock.lock();
@@ -61,7 +60,7 @@ public final class BatchPrefill {
                 return ReservationResult.fail(ReservationResult.Status.CAPACITY_FULL);
             }
             BatchReservation lease =
-                    new BatchReservation(prefillState, entry, head.requestId(), batchId, generationHandoff);
+                    new BatchReservation(prefillState, entry, head.requestId(), batchId, workerKeepAlive);
             entry.reservation = lease;
             batchLeasesInUse++;
             prefillState.recordMutation();
@@ -160,7 +159,7 @@ public final class BatchPrefill {
             for (ScheduledRequest item : members) {
                 prefillState.removeValidatedActiveIndex(item);
             }
-            moveGenerationHandoffToOwned(lease, commitResult);
+            markCommitted(lease, commitResult);
             for (ScheduledRequest item : members) {
                 prefillState.requests.get(item.requestId()).commitBatch(work);
             }
@@ -294,15 +293,15 @@ public final class BatchPrefill {
                                                     List<EndpointGenerationLifecycle.HandoffPermit> orphanedHandoffs,
                                                     Throwable checkFailure) {
         if (batch.state == LeaseState.OPEN) {
-            if (batch.generationHandoff == null) {
+            if (batch.workerKeepAlive == null) {
                 return PrefillState.appendRetirementInvariant(checkFailure,
                         "OPEN Prefill batch lease lost its generation handoff");
             }
-            orphanedHandoffs.add(batch.generationHandoff);
+            orphanedHandoffs.add(batch.workerKeepAlive);
             return PrefillState.appendRetirementInvariant(checkFailure,
                     "retirement reached an OPEN Prefill batch lease");
         }
-        if (batch.state != LeaseState.OWNED || batch.generationHandoff != null) {
+        if (batch.state != LeaseState.OWNED || batch.workerKeepAlive != null) {
             return PrefillState.appendRetirementInvariant(checkFailure,
                     "canonical retirement owner has an invalid batch lease state");
         }
@@ -386,19 +385,19 @@ public final class BatchPrefill {
 
     private EndpointGenerationLifecycle.HandoffPermit openGenerationHandoff(BatchReservation lease) {
         prefillState.requireLock();
-        return lease.generationHandoff;
+        return lease.workerKeepAlive;
     }
 
     /**
      * Move the exact handoff out of the OPEN admission before commit publishes.
      */
-    private void moveGenerationHandoffToOwned(BatchReservation lease, CommitResult commitResult) {
+    private void markCommitted(BatchReservation lease, CommitResult commitResult) {
         prefillState.requireLock();
-        if (lease.state != LeaseState.OPEN || lease.generationHandoff == null
-                || commitResult.workerKeepAlive != lease.generationHandoff) {
+        if (lease.state != LeaseState.OPEN || lease.workerKeepAlive == null
+                || commitResult.workerKeepAlive != lease.workerKeepAlive) {
             throw new IllegalStateException("Prefill commit requires an exact OPEN generation handoff");
         }
-        lease.generationHandoff = null;
+        lease.workerKeepAlive = null;
         lease.state = LeaseState.OWNED;
     }
 

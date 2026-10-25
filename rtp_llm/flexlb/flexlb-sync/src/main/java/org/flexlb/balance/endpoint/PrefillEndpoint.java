@@ -52,28 +52,27 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * endpoint generation alive while waiting for delivery.
      */
     public final class RouteCommitAdmission implements AutoCloseable {
-        private EndpointGenerationLifecycle.HandoffPermit generationHandoff;
+        private EndpointGenerationLifecycle.HandoffPermit workerKeepAlive;
 
-        private RouteCommitAdmission(
-                EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
-            this.generationHandoff = generationHandoff;
+        private RouteCommitAdmission(EndpointGenerationLifecycle.HandoffPermit workerKeepAlive) {
+            this.workerKeepAlive = workerKeepAlive;
         }
 
         public CommitResult commit(List<ScheduledRequest> exactItems, List<SingleReservation> exactReservations) {
-            EndpointGenerationLifecycle.HandoffPermit exact = generationHandoff;
+            EndpointGenerationLifecycle.HandoffPermit exact = workerKeepAlive;
             if (exact == null) {
                 throw new IllegalStateException(
                         "route commit no longer owns its generation handoff");
             }
             CommitResult committed = prefillState.commitSingleGroup(exactItems, exactReservations, exact);
-            generationHandoff = null;
+            workerKeepAlive = null;
             return committed;
         }
 
         @Override
         public void close() {
-            EndpointGenerationLifecycle.HandoffPermit exact = generationHandoff;
-            generationHandoff = null;
+            EndpointGenerationLifecycle.HandoffPermit exact = workerKeepAlive;
+            workerKeepAlive = null;
             if (exact != null) {
                 exact.close();
             }

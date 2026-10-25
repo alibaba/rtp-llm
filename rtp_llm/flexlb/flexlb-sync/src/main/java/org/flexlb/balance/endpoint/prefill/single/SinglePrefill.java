@@ -49,7 +49,7 @@ public final class SinglePrefill {
 
     public CommitResult commitSingleGroup(List<ScheduledRequest> items,
                                           List<SingleReservation> exactReservations,
-                                          EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+                                          EndpointGenerationLifecycle.HandoffPermit workerKeepAlive) {
         if (exactReservations.isEmpty()) {
             throw new IllegalArgumentException(
                     "single commit requires at least one reservation");
@@ -65,7 +65,7 @@ public final class SinglePrefill {
         }
         prefillState.lock.lock();
         try {
-            return commitSingles(items, leases, generationHandoff);
+            return commitSingles(items, leases, workerKeepAlive);
         } finally {
             prefillState.lock.unlock();
         }
@@ -73,7 +73,7 @@ public final class SinglePrefill {
 
     private CommitResult commitSingles(List<ScheduledRequest> items,
                                        List<SingleReservation> leases,
-                                       EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+                                       EndpointGenerationLifecycle.HandoffPermit workerKeepAlive) {
         prefillState.requireLock();
         List<ScheduledRequest> members = validateSingleGroup(items);
         if (members.size() != leases.size()) {
@@ -95,8 +95,7 @@ public final class SinglePrefill {
             }
         }
         long nowMs = prefillState.clock.getAsLong();
-        CommitResult commitResult =
-                new CommitResult(generationHandoff, prefillState.buildPrecedingWork(members, nowMs));
+        CommitResult commitResult = new CommitResult(workerKeepAlive, prefillState.buildPrecedingWork(members, nowMs));
         for (ScheduledRequest item : members) {
             prefillState.removeFromWaitingQueue(prefillState.requests.get(item.requestId()), item);
         }

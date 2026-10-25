@@ -13,17 +13,17 @@ public final class BatchReservation extends Reservation {
     public final String headRequestId;
     public final long batchId;
     /* guarded by PrefillState.lock; non-null only while OPEN */
-    public EndpointGenerationLifecycle.HandoffPermit generationHandoff;
+    public EndpointGenerationLifecycle.HandoffPermit workerKeepAlive;
 
     public BatchReservation(PrefillState owner,
-                     RequestEntry originalOwner,
-                     String headRequestId,
-                     long batchId,
-                     EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+                            RequestEntry originalOwner,
+                            String headRequestId,
+                            long batchId,
+                            EndpointGenerationLifecycle.HandoffPermit workerKeepAlive) {
         super(owner, originalOwner);
         this.headRequestId = headRequestId;
         this.batchId = batchId;
-        this.generationHandoff = generationHandoff;
+        this.workerKeepAlive = workerKeepAlive;
     }
 
     public long batchId() {
