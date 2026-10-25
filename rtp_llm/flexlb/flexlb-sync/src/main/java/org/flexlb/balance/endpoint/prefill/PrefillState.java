@@ -71,7 +71,7 @@ public final class PrefillState {
     /**
      * 已提交工作的不可变拷贝，按需重建。等待队列的变化不影响它。
      */
-    public WorkCapture committedWorkCapture;
+    public RawWorkView cachedCommittedWork;
     public long unknownEngineRequestCount;
     public final BatchPrefill batchPrefill = new BatchPrefill(this);
     public final SinglePrefill singlePrefill = new SinglePrefill(this);
@@ -122,7 +122,7 @@ public final class PrefillState {
             return false;
         }
         if (entry.queueMembership == QueueMembership.UNINDEXED) {
-            committedWorkCapture = null;
+            cachedCommittedWork = null;
         }
         return true;
     }
@@ -505,7 +505,7 @@ public final class PrefillState {
             activeIndex.clear();
             batchPrefill.resetBatchLeasesInUse();
             unknownEngineRequestCount = 0L;
-            committedWorkCapture = null;
+            cachedCommittedWork = null;
             recordMutation();
         } finally {
             lock.unlock();
@@ -599,42 +599,42 @@ public final class PrefillState {
     public PrefillLoadView loadView() {
         requireLock();
         long nowMs = clock.getAsLong();
-        return new PrefillLoadView(nowMs, activeIndex.capture(), captureWork(nowMs));
+        return new PrefillLoadView(nowMs, activeIndex.capture(), cachedCommittedWork(nowMs));
     }
 
     public WorkView committedSnapshot() {
-        WorkCapture capture;
+        RawWorkView rawView;
         lock.lock();
         try {
-            capture = captureCurrentWork(clock.getAsLong());
+            rawView = copyCommittedWork(clock.getAsLong());
         } finally {
             lock.unlock();
         }
-        return capture.materialize();
+        return rawView.toWorkView();
     }
 
-    private WorkCapture captureWork(long nowMs) {
+    private RawWorkView cachedCommittedWork(long nowMs) {
         requireLock();
-        if (committedWorkCapture == null || committedWorkCapture.capturedAtMs > nowMs) {
-            committedWorkCapture = captureCurrentWork(nowMs);
+        if (cachedCommittedWork == null || cachedCommittedWork.capturedAtMs > nowMs) {
+            cachedCommittedWork = copyCommittedWork(nowMs);
         }
-        return committedWorkCapture;
+        return cachedCommittedWork;
     }
 
-    public WorkView capturePrecedingWork(List<ScheduledRequest> members, long nowMs) {
+    public WorkView buildPrecedingWork(List<ScheduledRequest> members, long nowMs) {
         requireLock();
         Set<RequestEntry> excluded = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         for (ScheduledRequest member : members) {
             excluded.add(requests.get(member.requestId()));
         }
-        return captureCurrentWork(nowMs, excluded).materialize();
+        return copyCommittedWork(nowMs, excluded).toWorkView();
     }
 
-    private WorkCapture captureCurrentWork(long nowMs) {
-        return captureCurrentWork(nowMs, Set.of());
+    private RawWorkView copyCommittedWork(long nowMs) {
+        return copyCommittedWork(nowMs, Set.of());
     }
 
-    private WorkCapture captureCurrentWork(long nowMs, Set<RequestEntry> excluded) {
+    private RawWorkView copyCommittedWork(long nowMs, Set<RequestEntry> excluded) {
         requireLock();
         List<WorkView.RequestWork> single = new ArrayList<>();
         IdentityHashMap<BatchProgress, List<String>> batchMembers = new IdentityHashMap<>();
@@ -652,7 +652,7 @@ public final class PrefillState {
                 batchMembers.computeIfAbsent(entry.batchProgress, ignored -> new ArrayList<>()).add(entry.requestId);
             }
         }
-        return new WorkCapture(nowMs, single, BatchPrefill.buildBatchWork(batchMembers, nowMs),
+        return new RawWorkView(nowMs, single, BatchPrefill.buildBatchWork(batchMembers, nowMs),
                 unknownEngineRequestCount);
     }
 
@@ -691,7 +691,7 @@ public final class PrefillState {
                     "terminal request is not canonical request_id="
                             + entry.requestId);
         }
-        committedWorkCapture = null;
+        cachedCommittedWork = null;
         recordMutation();
         if (lease != null) {
             closeOwnedLease(lease);

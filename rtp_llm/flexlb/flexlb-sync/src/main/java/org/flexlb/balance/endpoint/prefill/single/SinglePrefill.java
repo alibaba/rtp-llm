@@ -96,7 +96,7 @@ public final class SinglePrefill {
         }
         long nowMs = prefillState.clock.getAsLong();
         CommitResult committedHandoff =
-                new CommitResult(generationHandoff, prefillState.capturePrecedingWork(members, nowMs));
+                new CommitResult(generationHandoff, prefillState.buildPrecedingWork(members, nowMs));
         for (ScheduledRequest item : members) {
             prefillState.removeFromWaitingQueue(prefillState.requests.get(item.requestId()), item);
         }
@@ -106,7 +106,7 @@ public final class SinglePrefill {
             RequestEntry entry = prefillState.requests.get(members.get(index).requestId());
             entry.commitIndividual(lease, nowMs);
         }
-        prefillState.committedWorkCapture = null;
+        prefillState.cachedCommittedWork = null;
         prefillState.recordMutation();
         return committedHandoff;
     }

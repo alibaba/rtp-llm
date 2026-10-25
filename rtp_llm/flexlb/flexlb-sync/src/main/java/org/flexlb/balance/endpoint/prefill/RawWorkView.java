@@ -6,16 +6,18 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
- * Immutable leaves copied under the ownership lock; load view is built outside it.
+ * 还没加工的 WorkView：持锁时把已提交工作复制成原始列表，不排序也不计算。
+ *
+ * <p>锁外第一次调用 {@link #toWorkView()} 时才排序并生成 WorkView，结果保存下来，之后直接复用。</p>
  */
-public final class WorkCapture {
+public final class RawWorkView {
     public final long capturedAtMs;
     private final List<WorkView.RequestWork> requests;
     private final List<WorkView.BatchWork> batches;
     private final long unknownRequestCount;
-    private volatile WorkView materialized;
+    private volatile WorkView workView;
 
-    public WorkCapture(long capturedAtMs,
+    public RawWorkView(long capturedAtMs,
                        List<WorkView.RequestWork> requests,
                        List<WorkView.BatchWork> batches,
                        long unknownRequestCount) {
@@ -26,15 +28,15 @@ public final class WorkCapture {
     }
 
     /**
-     * Shared lazy load view; callers never hold the endpoint ownership lock.
+     * 排序并生成 WorkView，只做一次。调用方不持有 PrefillState 的锁。
      */
-    public WorkView materialize() {
-        WorkView snapshot = materialized;
-        if (snapshot != null) {
-            return snapshot;
+    public WorkView toWorkView() {
+        WorkView result = workView;
+        if (result != null) {
+            return result;
         }
         synchronized (this) {
-            if (materialized == null) {
+            if (workView == null) {
                 List<WorkView.RequestWork> orderedRequests =
                         requests.stream().sorted(Comparator.comparing(WorkView.RequestWork::requestId)).toList();
                 List<WorkView.BatchWork> orderedBatches = batches.stream()
@@ -42,9 +44,9 @@ public final class WorkCapture {
                         .map(batch -> new WorkView.BatchWork(batch.batchId(),
                                 batch.requestIds().stream().sorted().toList(), batch.phase(), batch.remainingWorkMs()))
                         .toList();
-                materialized = new WorkView(capturedAtMs, orderedRequests, orderedBatches, unknownRequestCount);
+                workView = new WorkView(capturedAtMs, orderedRequests, orderedBatches, unknownRequestCount);
             }
-            return materialized;
+            return workView;
         }
     }
 }

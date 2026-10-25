@@ -156,7 +156,7 @@ public final class BatchPrefill {
             BatchProgress work = new BatchProgress(lease, predictedMs,
                     PrefillBatchFeatures.from(members, ScheduledRequest::seqLen, ScheduledRequest::hitCache), nowMs);
             CommitResult committedHandoff =
-                    new CommitResult(openGenerationHandoff(lease), prefillState.capturePrecedingWork(members, nowMs));
+                    new CommitResult(openGenerationHandoff(lease), prefillState.buildPrecedingWork(members, nowMs));
             for (ScheduledRequest item : members) {
                 prefillState.removeValidatedActiveIndex(item);
             }
@@ -164,7 +164,7 @@ public final class BatchPrefill {
             for (ScheduledRequest item : members) {
                 prefillState.requests.get(item.requestId()).commitBatch(work);
             }
-            prefillState.committedWorkCapture = null;
+            prefillState.cachedCommittedWork = null;
             prefillState.recordMutation();
             return committedHandoff;
         } finally {

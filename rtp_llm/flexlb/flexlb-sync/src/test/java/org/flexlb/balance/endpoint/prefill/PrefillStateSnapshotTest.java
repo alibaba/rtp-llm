@@ -73,7 +73,7 @@ class PrefillStateSnapshotTest {
             for (int i = 0; i < 32; i++) {
                 readers.add(executor.submit(() -> {
                     assertTrue(start.await(5, TimeUnit.SECONDS));
-                    return captured.work().materialize();
+                    return captured.work().toWorkView();
                 }));
             }
             start.countDown();
@@ -86,7 +86,7 @@ class PrefillStateSnapshotTest {
             assertTrue(state.removeCommittedRequest(second));
             assertTrue(state.removeCommittedRequest(first));
             assertEquals(2, shared.requests().size());
-            assertTrue(capture().work().materialize().requests().isEmpty());
+            assertTrue(capture().work().toWorkView().requests().isEmpty());
         }
     }
 
@@ -100,8 +100,8 @@ class PrefillStateSnapshotTest {
         assertTrue(state.removeCommittedRequest(committed));
         var after = capture();
         assertSame(before.waiting(), after.waiting());
-        assertEquals(1, before.work().materialize().requests().size());
-        assertTrue(after.work().materialize().requests().isEmpty());
+        assertEquals(1, before.work().toWorkView().requests().size());
+        assertTrue(after.work().toWorkView().requests().isEmpty());
         enqueue(item(3));
         var added = capture();
         assertNotSame(after.waiting(), added.waiting());
@@ -118,10 +118,10 @@ class PrefillStateSnapshotTest {
         clock.set(90);
         var rebased = capture();
         assertNotSame(original.work(), rebased.work());
-        assertEquals(100, original.work().materialize().capturedAtMs());
-        assertEquals(90, rebased.work().materialize().capturedAtMs());
-        assertEquals(rebased.takenAtMs(), rebased.work().materialize().capturedAtMs());
-        assertEquals(original.work().materialize().requests(), rebased.work().materialize().requests());
+        assertEquals(100, original.work().toWorkView().capturedAtMs());
+        assertEquals(90, rebased.work().toWorkView().capturedAtMs());
+        assertEquals(rebased.takenAtMs(), rebased.work().toWorkView().capturedAtMs());
+        assertEquals(original.work().toWorkView().requests(), rebased.work().toWorkView().requests());
     }
 
     @Test
@@ -150,11 +150,11 @@ class PrefillStateSnapshotTest {
     void routeCommitUsesTheUpdatedPrediction() {
         ScheduledRequest queued = item(1);
         try (var reservation = reserveQueued(queued, 40L)) {
-            assertTrue(capture().work().materialize().requests().isEmpty(), "queued work is not committed work");
+            assertTrue(capture().work().toWorkView().requests().isEmpty(), "queued work is not committed work");
             reservation.updatePrediction(queued, 80L);
             try (var handoff =
                     state.commitSingleGroup(List.of(queued), List.of(reservation), generation.tryAcquireHandoff())) {
-                assertEquals(80L, capture().work().materialize().knownRemainingWorkMsAt(System.currentTimeMillis()));
+                assertEquals(80L, capture().work().toWorkView().knownRemainingWorkMsAt(System.currentTimeMillis()));
             }
         }
     }
@@ -221,7 +221,7 @@ class PrefillStateSnapshotTest {
         reservation.close();
         assertTrue(waitingItems().isEmpty());
         assertTrue(state.committedSnapshot().requests().isEmpty());
-        assertTrue(capture().work().materialize().requests().isEmpty());
+        assertTrue(capture().work().toWorkView().requests().isEmpty());
     }
 
     @Test

@@ -128,7 +128,7 @@ public final class LoadViewCache {
                 if (materialized == null) {
                     var queueSnapshot = new QueueView(prefillView.takenAtMs(), estimateOrder, constraints,
                             prefillView.waiting().plannerItems(), admissionBlock);
-                    materialized = new PrefillTtftEstimate.LoadView(queueSnapshot, prefillView.work().materialize(),
+                    materialized = new PrefillTtftEstimate.LoadView(queueSnapshot, prefillView.work().toWorkView(),
                             version.ownership());
                     // 缓存的视图不能一直引用已完成请求的上下文。
                     prefillView = null;

@@ -58,7 +58,7 @@ public final class WorkerStatusUpdater {
             capacityReleased = nextUnknown < prefillState.unknownEngineRequestCount;
             prefillState.unknownEngineRequestCount = nextUnknown;
             if (schedulingInputsChanged) {
-                prefillState.committedWorkCapture = null;
+                prefillState.cachedCommittedWork = null;
                 prefillState.recordMutation();
             }
         } finally {
@@ -116,7 +116,7 @@ public final class WorkerStatusUpdater {
             // exact prevalidated identities. Any invariant failure is captured
             // into the already materialized outcome and forces retirement.
             canonicalMutationStarted = true;
-            prefillState.committedWorkCapture = null;
+            prefillState.cachedCommittedWork = null;
             prefillState.recordMutation();
             for (Map.Entry<RequestEntry, FinishReport> settlement : settlements.entrySet()) {
                 RequestEntry entry = settlement.getKey();
