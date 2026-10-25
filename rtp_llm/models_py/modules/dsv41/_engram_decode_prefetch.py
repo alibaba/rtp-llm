@@ -85,6 +85,8 @@ class _GraphTables:
 
 class _LookupWork:
     def __init__(self, module, ids, state):
+        from rtp_llm.models_py.modules.dsv41.engram import _lookup_for_projection
+
         self.module, self.ids, self.state = module, ids, state
         self.current = torch.cuda.current_stream(ids.device)
         self.rows = None
@@ -93,7 +95,9 @@ class _LookupWork:
         try:
             with torch.cuda.stream(state.stream):
                 try:
-                    self.rows = state.embedding(ids, ids.device, prefetch=True)
+                    self.rows = _lookup_for_projection(
+                        module, ids, ids.device, prefetch=True
+                    )
                 finally:
                     state.done.record(state.stream)
         except BaseException:
@@ -105,14 +109,19 @@ class _LookupWork:
         if stream not in self.joined:
             stream.wait_stream(self.state.stream)
             if self.rows is not None:
-                self.rows.record_stream(stream)
+                outputs = self.rows if isinstance(self.rows, tuple) else (self.rows,)
+                for tensor in outputs:
+                    tensor.record_stream(stream)
             self.joined.add(stream)
 
     def consume(self, ids, hidden):
+        outputs = self.rows if isinstance(self.rows, tuple) else (self.rows,)
         if (
             ids is not self.ids
-            or hidden.shape[0] != self.rows.shape[0]
-            or hidden.device != self.rows.device
+            or any(
+                t is None or hidden.shape[0] != t.shape[0] or hidden.device != t.device
+                for t in outputs
+            )
             or not self.state.matches(self.module.embed_tokens)
         ):
             raise RuntimeError("Engram decode lookup inputs changed within forward")

@@ -388,6 +388,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
                 tuple(layer.q_weight.shape),
                 layer.eps,
                 tuple(layer.embed_tokens.weight.shape),
+                getattr(layer, "_direct_fp8_lookup", False) is True,
             )
             for layer in layers
         ),
@@ -434,17 +435,27 @@ def warmup_v41_engram_jit(model, *, max_m, device):
         for layer in layers:
             ids = hashes[:, layer.layer_hash_index].contiguous()
             if rows <= limit:
+                lookup = (
+                    layer.warmup_lookup
+                    if getattr(layer, "_direct_fp8_lookup", False) is True
+                    else layer.embed_tokens
+                )
                 common._run_triton_warmup_launch_with_retry(
                     "DSV41 Engram",
                     f"lookup rows={rows}",
-                    partial(layer.embed_tokens, ids, device),
+                    partial(lookup, ids, device),
                     device=device,
                 )
             if rows <= prefetch_limit:
+                lookup = (
+                    layer.warmup_lookup
+                    if getattr(layer, "_direct_fp8_lookup", False) is True
+                    else layer.embed_tokens.warmup_prefetch
+                )
                 common._run_triton_warmup_launch_with_retry(
                     "DSV41 Engram",
                     f"prefetch lookup rows={rows} config={prefetch_config}",
-                    partial(layer.embed_tokens.warmup_prefetch, ids, device),
+                    partial(lookup, ids, device),
                     device=device,
                 )
         if rows in (1, 16):

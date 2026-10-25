@@ -732,6 +732,7 @@ class HostEngramEmbedding:
         self._pinned = pinned
         self._uva = None
         self._device_scale_lease = None
+        self._quantized_lookup_supported = False
         if pinned is not None:
             if os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1":
                 if torch.cuda.is_current_stream_capturing():
@@ -749,9 +750,38 @@ class HostEngramEmbedding:
                     pinned.cuda_view(self.weight),
                     pinned.cuda_view(self.scales),
                 )
-            self._num_sms = torch.cuda.get_device_properties(
-                pinned.device
-            ).multi_processor_count
+            properties = torch.cuda.get_device_properties(pinned.device)
+            self._num_sms = properties.multi_processor_count
+            self._quantized_lookup_supported = (
+                self._device_scale_lease is not None
+                and (properties.major, properties.minor) in ((10, 0), (10, 3))
+                and weight.dtype == torch.float8_e4m3fn
+                and weight.shape[1] == 256
+                and self.scales.dtype == torch.uint8
+                and block_size == 32
+            )
+
+    def lookup_quantized(self, indices: torch.Tensor, device, *, prepare=False):
+        """Gather native FP8 and packed GPU scales in a single lookup kernel."""
+        from rtp_llm.models_py.modules.dsv41 import _engram_quantized_triton
+
+        if not self._quantized_lookup_supported or indices.device != torch.device(
+            device
+        ):
+            raise ValueError(
+                "Native Engram lookup requires supported Blackwell GPU tables"
+            )
+        lease = self._device_scale_resources()
+        if torch.cuda.is_current_stream_capturing():
+            _DeviceScaleCapturePermit.require(self, lease)
+        uva = self._uva
+        try:
+            return _engram_quantized_triton.lookup_host_rows(
+                *uva, indices, self._num_sms, prepare=prepare
+            )
+        finally:
+            # The lease owns future graph replays; cover queued eager reads too.
+            uva[1].record_stream(torch.cuda.current_stream(indices.device))
 
     def _device_scale_resources(self):
         lease = self._device_scale_lease
@@ -1484,6 +1514,23 @@ def _tensor_version(tensor):
     return tensor._version
 
 
+def _lookup_tensors(rows):
+    return rows if isinstance(rows, tuple) else (rows,)
+
+
+def _lookup_for_projection(module, ids, device, *, prefetch=False):
+    if (
+        getattr(module, "_direct_fp8_lookup", False) is True
+        and ids.is_cuda
+        and ids.dtype == torch.int64
+        and ids.device == torch.device(device)
+    ):
+        return module.embed_tokens.lookup_quantized(ids, device)
+    if prefetch:
+        return module.embed_tokens(ids, device, prefetch=True)
+    return module.embed_tokens(ids, device)
+
+
 class _EngramLookupWork:
     """One forward's lookup; CUDA dependencies never imply a host-side wait."""
 
@@ -1496,13 +1543,17 @@ class _EngramLookupWork:
         self.done = done
 
     def consume(self, ids, hidden):
+        outputs = _lookup_tensors(self.rows) if self.rows is not None else ()
         valid = (
-            self.ids is ids
+            bool(outputs)
+            and self.ids is ids
             and self.signature
             == (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
             and self.version == _tensor_version(ids)
-            and self.rows.shape[0] == hidden.shape[0]
-            and self.rows.device == hidden.device
+            and all(
+                t.shape[0] == hidden.shape[0] and t.device == hidden.device
+                for t in outputs
+            )
         )
         if not valid:
             self.clear()
@@ -1510,7 +1561,8 @@ class _EngramLookupWork:
         current = torch.cuda.current_stream(hidden.device)
         current.wait_event(self.done)
         rows = self.rows
-        rows.record_stream(current)
+        for tensor in outputs:
+            tensor.record_stream(current)
         self.rows = self.ids = self.embedding = None
         return rows
 
@@ -1597,6 +1649,21 @@ class Engram(nn.Module):
         self._lookup_done = None
         self._lookup_work = None
         self._cpu_lookup_work = None
+        self._direct_fp8_lookup = False
+        if (
+            getattr(embedding, "_quantized_lookup_supported", False) is True
+            and layout.n_hash_cols == 24
+            and layout.head_dim == 256
+            and os.getenv("DSV41_ENGRAM_DIRECT_FP8", "1") == "1"
+        ):
+            from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+            self._direct_fp8_lookup = type(wkv) is V41MXFP8Linear
+
+    def warmup_lookup(self, ids, device):
+        if self._direct_fp8_lookup:
+            return self.embed_tokens.lookup_quantized(ids, device, prepare=True)
+        return self.embed_tokens(ids, device)
 
     def prepare_lookup_prefetch(self):
         """Called after lookup JIT warmup, never from a request or capture."""
@@ -1639,7 +1706,9 @@ class Engram(nn.Module):
         hash_ids.record_stream(stream)
         try:
             with torch.cuda.stream(stream):
-                rows = self.embed_tokens(hash_ids, hash_ids.device, prefetch=True)
+                rows = _lookup_for_projection(
+                    self, hash_ids, hash_ids.device, prefetch=True
+                )
                 self._lookup_done.record(stream)
         except BaseException:
             # Preserve owners until queued reads have finished, then propagate
@@ -1789,9 +1858,11 @@ class Engram(nn.Module):
             self._lookup_work = None
             rows = work.consume(hash_ids, hidden)
         if rows is None:
-            rows = self.embed_tokens(hash_ids, hidden.device)
-        rows = rows.flatten(-2)
-        kv = self.wkv(rows)
+            rows = _lookup_for_projection(self, hash_ids, hidden.device)
+        if isinstance(rows, tuple):
+            kv = self.wkv.forward_quantized(*rows)
+        else:
+            kv = self.wkv(rows.flatten(-2))
         return gated_engram_residual(
             hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask, out=out
         )
