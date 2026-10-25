@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.prefill.batch.BatchProgress;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.batch.FinishedBatch;
 import org.flexlb.balance.endpoint.prefill.batch.LiveBatchMembers;
+import org.flexlb.balance.endpoint.prefill.single.QueuedPreemption;
 import org.flexlb.balance.endpoint.prefill.single.SinglePrefill;
 import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.WorkView;
@@ -189,7 +190,7 @@ public final class PrefillState {
 
     public final ReentrantLock lock;
     /** Non-owning index containing only ACTIVE ScheduledRequest identities. */
-    private final PrefillActiveIndex activeIndex;
+    public final PrefillActiveIndex activeIndex;
     /** Canonical request ownership, changed only under the endpoint lock. */
     public final Map<String, RequestEntry> requests = new HashMap<>();
     public final LongSupplier clock;
@@ -204,9 +205,10 @@ public final class PrefillState {
     private long[] requestCountsByPriority;
     /** Derived immutable work; ACTIVE queue mutations leave committed work unchanged. */
     public WorkCapture committedWorkCapture;
-    private long unknownEngineRequestCount;
+    public long unknownEngineRequestCount;
     public final BatchPrefill batchPrefill = new BatchPrefill(this);
     public final SinglePrefill singlePrefill = new SinglePrefill(this);
+    public final QueuedPreemption queuedPreemption = new QueuedPreemption(this);
 
     /** Publish the capacity summary before readers observe a new ownership revision. */
     public void recordMutationUnderLock() {
@@ -239,7 +241,7 @@ public final class PrefillState {
         this.capacityAvailable = capacityAvailable;
     }
 
-    private RequestEntry putRequestUnderLock(String requestId, RequestEntry entry) {
+    public RequestEntry putRequestUnderLock(String requestId, RequestEntry entry) {
         requireLock();
         return requests.put(requestId, entry);
     }
@@ -343,110 +345,21 @@ public final class PrefillState {
     }
 
     public boolean canPreemptQueuedRequest(int priority, long requestLimit) {
-        lock.lock();
-        try {
-            long required = requestSlotsToReleaseUnderLock(requestLimit);
-            if (!PriorityNormalizer.hasPriority(priority) || required == 0L || required > activeIndex.size()) {
-                return false;
-            }
-            for (ScheduledRequest item : activeIndex) {
-                if (isQueuedPreemptionCandidate(item, priority) && --required == 0L) { return true; }
-            }
-            return false;
-        } finally {
-            lock.unlock();
-        }
+        return queuedPreemption.canPreemptQueuedRequest(priority, requestLimit);
     }
 
-    /**
-     * Select only uncommitted requests; Engine work cannot release a local queue seat.
-     */
     public List<ScheduledRequest> queuedPreemptionVictimsUnderLock(int priority, long requestLimit) {
-        requireLock();
-        return findQueuedPreemptionVictimsUnderLock(priority, requestSlotsToReleaseUnderLock(requestLimit));
+        return queuedPreemption.queuedPreemptionVictimsUnderLock(priority, requestLimit);
     }
 
     public ScheduledRequest oneQueuedPreemptionVictimUnderLock(int priority) {
-        requireLock();
-        List<ScheduledRequest> victims = findQueuedPreemptionVictimsUnderLock(priority, 1L);
-        return victims.isEmpty() ? null : victims.getFirst();
+        return queuedPreemption.oneQueuedPreemptionVictimUnderLock(priority);
     }
 
-    private List<ScheduledRequest> findQueuedPreemptionVictimsUnderLock(int priority, long victimsNeeded) {
-        requireLock();
-        if (!PriorityNormalizer.hasPriority(priority) || victimsNeeded == 0L || victimsNeeded > activeIndex.size()) {
-            return List.of();
-        }
-        List<ScheduledRequest> candidates = new ArrayList<>();
-        for (ScheduledRequest item : activeIndex) {
-            if (isQueuedPreemptionCandidate(item, priority)) {
-                candidates.add(item);
-            }
-        }
-        if (candidates.size() < victimsNeeded) {
-            return List.of();
-        }
-        candidates.sort(Comparator.comparingInt(ScheduledRequest::priority)
-                .thenComparing(Comparator.comparingLong(ScheduledRequest::enqueueSeq).reversed()));
-        return candidates.subList(0, (int) victimsNeeded);
-    }
-
-    private boolean isQueuedPreemptionCandidate(ScheduledRequest item, int priority) {
-        requireLock();
-        RequestEntry entry = requests.get(item.requestId());
-        return PriorityNormalizer.hasPriority(item.priority()) && item.priority() < priority
-                && !item.future().isDone() && entry != null && entry.activeIdentity(item)
-                && entry.reservation instanceof SingleReservation && entry.reservation.state == LeaseState.OPEN;
-    }
-
-    private long requestSlotsToReleaseUnderLock(long requestLimit) {
-        requireLock();
-        return requestLimit <= 0L ? 0L
-                : Math.max(0L, saturatedAdd(requests.size(), unknownEngineRequestCount) - requestLimit + 1L);
-    }
-
-    /**
-     * Replace the selected waiting requests and their route reservations in one transaction.
-     */
     public SingleReservation replaceQueuedRoutesUnderLock(List<ScheduledRequest> victims,
                                                          List<SingleReservation> reservations,
                                                          ScheduledRequest incoming) {
-        requireLock();
-        if (victims.isEmpty() || victims.size() != reservations.size()
-                || requests.containsKey(incoming.requestId())) {
-            return null;
-        }
-        Set<String> ids = new HashSet<>();
-        for (int index = 0; index < victims.size(); index++) {
-            ScheduledRequest victim = victims.get(index);
-            RequestEntry entry = requests.get(victim.requestId());
-            SingleReservation reservation = reservations.get(index);
-            if (!ids.add(victim.requestId()) || entry == null || !entry.activeIdentity(victim)
-                    || !activeIndex.contains(victim) || reservation == null || reservation.owner != this
-                    || entry.reservation != reservation || reservation.state != LeaseState.OPEN
-                    || !PriorityNormalizer.hasPriority(victim.priority()) || victim.priority() >= incoming.priority()) {
-                return null;
-            }
-        }
-        RequestEntry incomingEntry = new RequestEntry(incoming);
-        SingleReservation incomingReservation = new SingleReservation(this, incomingEntry, incoming.requestId(), 0L);
-        incomingEntry.reservation = incomingReservation;
-        activeIndex.add(incoming);
-        try {
-            putRequestUnderLock(incoming.requestId(), incomingEntry);
-        } catch (RuntimeException | Error failure) {
-            activeIndex.remove(incoming);
-            throw failure;
-        }
-        for (int index = 0; index < victims.size(); index++) {
-            ScheduledRequest victim = victims.get(index);
-            RequestEntry entry = requests.get(victim.requestId());
-            closeOpenLeaseUnderLock(reservations.get(index));
-            activeIndex.remove(victim);
-            removeRequestUnderLock(victim.requestId(), entry);
-        }
-        recordMutationUnderLock();
-        return incomingReservation;
+        return queuedPreemption.replaceQueuedRoutesUnderLock(victims, reservations, incoming);
     }
 
     public boolean removeQueuedSingleRequest(ScheduledRequest item, SingleReservation exactReservation) {
@@ -1441,7 +1354,7 @@ public final class PrefillState {
         }
     }
 
-    private static long saturatedAdd(long left, long right) {
+    public static long saturatedAdd(long left, long right) {
         return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
     }
 }
