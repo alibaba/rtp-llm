@@ -9,7 +9,10 @@ float infinity. Direct UE8M0 consumption must be checked separately at WKV;
 neither exceptional-scale nor general BF16-round-trip equivalence is claimed.
 
 Contract: native contiguous uint8 UVA weight[table_rows,256], contiguous GPU
-uint8 scales[table_rows,8], and strided int64 indices[M,24], M>0. Values are
+uint8 scales[table_rows,8] or a ShardedScaleDescriptor, and strided int64
+indices[M,24], M>0. A descriptor supplies ceil-divided scale partitions and
+a CUDA pointer table of locally mapped peer addresses; no forward collective
+or full-table scale replication is performed by this kernel. Values are
 contiguous float8_e4m3fn[M,6144]. Scale words are int32[M,48] with strides
 (1,align4(M)); all padded rows are written with neutral E8M0=127. Invalid IDs
 produce zero FP8 values and neutral scales. The CPU table layout is unchanged.
@@ -39,7 +42,14 @@ _PREPARED_KERNELS = {}
 
 
 @triton.jit(
-    do_not_specialize=["tokens", "table_rows", "stride_t", "stride_h", "scale_stride"]
+    do_not_specialize=[
+        "tokens",
+        "table_rows",
+        "stride_t",
+        "stride_h",
+        "scale_stride",
+        "shard_rows",
+    ]
 )
 def _lookup_quantized_epilogue_kernel(
     weight,
@@ -52,7 +62,10 @@ def _lookup_quantized_epilogue_kernel(
     stride_t,
     stride_h,
     scale_stride,
+    scale_ptrs,
+    shard_rows,
     GRID: tl.constexpr,
+    SHARDED: tl.constexpr,
 ):
     weight32 = weight.to(tl.pointer_type(tl.uint32))
     values32 = values.to(tl.pointer_type(tl.uint32))
@@ -80,7 +93,18 @@ def _lookup_quantized_epilogue_kernel(
         ).to(tl.int64)
         valid = (token < tokens) & (index >= 0) & (index < table_rows)
         index = tl.where(valid, index, 0)
-        bits = tl.load(scales64 + index, valid, other=0x7F7F7F7F7F7F7F7F)
+        if SHARDED:
+            owner = index // shard_rows
+            local_row = index - owner * shard_rows
+            # Mask before touching the pointer table. The global bound also
+            # excludes the unused rows in the final ceil-divided partition.
+            address = tl.load(scale_ptrs + owner, valid, other=0).to(tl.uint64)
+            source = (address + local_row.to(tl.uint64) * 8).to(
+                tl.pointer_type(tl.uint64)
+            )
+        else:
+            source = scales64 + index
+        bits = tl.load(source, valid, other=0x7F7F7F7F7F7F7F7F)
         low = bits.to(tl.uint32).to(tl.int32, bitcast=True)
         high = (bits >> 32).to(tl.uint32).to(tl.int32, bitcast=True)
         target = head * 2 * scale_stride + token
@@ -204,6 +228,29 @@ def _check_table(table, indices, columns, label, alignment=4):
         )
 
 
+def _scale_arguments(scales_gpu, indices, table_rows):
+    """Resolve metadata without reading the GPU pointer table on the host."""
+    if isinstance(scales_gpu, torch.Tensor):
+        _check_table(scales_gpu, indices, 8, "GPU scales", alignment=8)
+        if scales_gpu.shape[0] != table_rows:
+            raise ValueError("Weight/scales table row counts differ")
+        # SHARDED=False removes the unused pointer-table argument and division.
+        return scales_gpu, scales_gpu, max(1, table_rows), 1
+
+    from ._engram_scale_shards import ShardedScaleDescriptor
+
+    if not isinstance(scales_gpu, ShardedScaleDescriptor):
+        raise ValueError("Expected a GPU scale tensor or ShardedScaleDescriptor")
+    if scales_gpu.validate_metadata(indices.device, table_rows) is False:
+        raise ValueError("Invalid sharded GPU scale metadata")
+    return (
+        scales_gpu.local_scales,
+        scales_gpu.peer_ptrs,
+        scales_gpu.rows_per_shard,
+        scales_gpu.group_size,
+    )
+
+
 def _gather_grid(num_sms):
     if type(num_sms) is not int or num_sms <= 0:
         raise ValueError("num_sms must be a positive integer")
@@ -231,12 +278,10 @@ def is_supported(weight_uva, scales_gpu, indices, num_sms):
         _gather_grid(num_sms)
         _check_indices(indices)
         _check_table(weight_uva, indices, 256, "native UVA weight")
-        _check_table(scales_gpu, indices, 8, "GPU scales", alignment=8)
+        _scale_arguments(scales_gpu, indices, weight_uva.shape[0])
     except (ValueError, AttributeError, TypeError):
         return False
-    return weight_uva.shape[0] == scales_gpu.shape[0] and supports_device(
-        indices.device
-    )
+    return supports_device(indices.device)
 
 
 def _prepare_kernel_cached(kernel):
@@ -276,12 +321,15 @@ def launch_epilogue(weight_uva, scales_gpu, indices, outputs, num_sms=128):
             "Native quantized lookup requires supported SM100/SM103 inputs"
         )
     outputs = _as_outputs(outputs)
-    _check_outputs(indices, outputs, (weight_uva, scales_gpu))
+    local_scales, peer_ptrs, shard_rows, group_size = _scale_arguments(
+        scales_gpu, indices, weight_uva.shape[0]
+    )
+    _check_outputs(indices, outputs, (weight_uva, local_scales, peer_ptrs))
     grid = _gather_grid(num_sms)
     with torch.cuda.device(indices.device):
         kernel = _lookup_quantized_epilogue_kernel[(grid,)](
             weight_uva,
-            scales_gpu,
+            local_scales,
             indices,
             outputs.values,
             outputs.scales,
@@ -290,9 +338,14 @@ def launch_epilogue(weight_uva, scales_gpu, indices, outputs, num_sms=128):
             indices.stride(0),
             indices.stride(1),
             outputs.scales.stride(1),
+            peer_ptrs,
+            shard_rows,
             GRID=grid,
+            SHARDED=group_size > 1,
             num_warps=NUM_WARPS,
         )
+        if not isinstance(scales_gpu, torch.Tensor):
+            scales_gpu.record_stream(torch.cuda.current_stream(indices.device))
         _prepare_kernel_cached(kernel)
     return {"epilogue": kernel}
 
@@ -325,6 +378,9 @@ def prepare_lookup(weight_uva, scales_gpu, indices, outputs, *, num_sms=128):
     loops = [max(0, triton.cdiv(rows - pid, grid)) for pid in range(grid)]
     tasks = HEADS * triton.cdiv(outputs.scales.stride(1), EPILOGUE_BLOCK_TOKENS)
     scale_loops = [max(0, triton.cdiv(tasks - pid, grid)) for pid in range(grid)]
+    local_scales, peer_ptrs, shard_rows, group_size = _scale_arguments(
+        scales_gpu, indices, weight_uva.shape[0]
+    )
     resources = {
         "kernel_name": kernel.name,
         "grid": [grid, 1, 1],
@@ -346,6 +402,15 @@ def prepare_lookup(weight_uva, scales_gpu, indices, outputs, *, num_sms=128):
         "scale_epilogue_iterations_max": max(scale_loops),
         "inter_cta_raw_dependency": False,
         "same_kernel_epilogue": True,
+        "scale_group_size": group_size,
+        "scale_rows_per_shard": shard_rows,
+        "local_scale_bytes": local_scales.numel() * local_scales.element_size(),
+        "scale_pointer_table_bytes": (
+            peer_ptrs.numel() * peer_ptrs.element_size()
+            if not isinstance(scales_gpu, torch.Tensor)
+            else 0
+        ),
+        "scale_addressing": "peer_pointer_table" if group_size > 1 else "direct_local",
     }
     launch_epilogue(weight_uva, scales_gpu, indices, outputs, num_sms)
     torch.cuda.current_stream(indices.device).synchronize()

@@ -4,6 +4,23 @@ load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
+cuda13_sm100_py_test(
+    name = "test_engram_scale_shards",
+    srcs = glob(["*.py"]) + ["//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "3", "$(location :test_engram_scale_shards.py)"],
+    gpu_count = 3,
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)
+
 py_test(
     name = "test_v41_front_gemm",
     srcs = ["test_v41_front_gemm.py"],

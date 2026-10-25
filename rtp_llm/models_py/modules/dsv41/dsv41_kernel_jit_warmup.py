@@ -389,6 +389,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
                 layer.eps,
                 tuple(layer.embed_tokens.weight.shape),
                 getattr(layer, "_direct_fp8_lookup", False) is True,
+                getattr(layer.embed_tokens, "_scale_shard_count", 1),
             )
             for layer in layers
         ),

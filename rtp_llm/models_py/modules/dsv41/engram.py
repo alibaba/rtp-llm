@@ -716,7 +716,14 @@ class HostEngramEmbedding:
     """
 
     def __init__(
-        self, weight: torch.Tensor, scales: torch.Tensor, block_size=32, pinned=None
+        self,
+        weight: torch.Tensor,
+        scales: torch.Tensor,
+        block_size=32,
+        pinned=None,
+        *,
+        scale_group=None,
+        scale_identity=None,
     ):
         if weight.device.type != "cpu" or scales.device.type != "cpu":
             raise ValueError("Engram embedding tables must remain in host RAM")
@@ -733,6 +740,8 @@ class HostEngramEmbedding:
         self._uva = None
         self._device_scale_lease = None
         self._quantized_lookup_supported = False
+        self._scale_shard_count = 1
+        self._legacy_scale_uva = None
         if pinned is not None:
             if os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1":
                 if torch.cuda.is_current_stream_capturing():
@@ -740,9 +749,24 @@ class HostEngramEmbedding:
                         "Engram device scales require startup allocation"
                     )
                 # Keep the CPU source and all FP8/E8M0 bytes unchanged.
+                if scale_group is not None:
+                    from rtp_llm.models_py.modules.dsv41._engram_scale_shards import (
+                        create_sharded_scales,
+                    )
+
+                    gpu_scales = create_sharded_scales(
+                        self.scales, scale_group, pinned.device, scale_identity
+                    )
+                    self._scale_shard_count = getattr(gpu_scales, "group_size", 1)
+                    if self._scale_shard_count > 1:
+                        # Preserve the BF16 embedding API for diagnostic callers
+                        # without recreating a full GPU scales replica.
+                        self._legacy_scale_uva = pinned.cuda_view(self.scales)
+                else:
+                    gpu_scales = self.scales.to(pinned.device)
                 self._uva = (
                     pinned.cuda_view(self.weight),
-                    self.scales.to(pinned.device),
+                    gpu_scales,
                 )
                 self._device_scale_lease = _DeviceScaleLease(self._uva, pinned)
             else:
@@ -806,7 +830,12 @@ class HostEngramEmbedding:
         lease = self._device_scale_resources()
         uva = self._uva
         try:
-            return warmup_lookup_prefetch_rows(*uva, indices, self._num_sms)
+            lookup_scales = (
+                self._legacy_scale_uva if self._legacy_scale_uva is not None else uva[1]
+            )
+            return warmup_lookup_prefetch_rows(
+                uva[0], lookup_scales, indices, self._num_sms
+            )
         finally:
             if lease is not None:
                 uva[1].record_stream(torch.cuda.current_stream(indices.device))
@@ -827,7 +856,12 @@ class HostEngramEmbedding:
                 _DeviceScaleCapturePermit.require(self, lease)
             uva = self._uva
             try:
-                return lookup(*uva, indices, self._num_sms)
+                lookup_scales = (
+                    self._legacy_scale_uva
+                    if self._legacy_scale_uva is not None
+                    else uva[1]
+                )
+                return lookup(uva[0], lookup_scales, indices, self._num_sms)
             finally:
                 if lease is not None:
                     # This covers queued eager uses. The generation lease,
@@ -1726,7 +1760,9 @@ class Engram(nn.Module):
             work.clear()
 
     @classmethod
-    def from_checkpoint(cls, config, layer_id: int, checkpoint_path: str, device):
+    def from_checkpoint(
+        cls, config, layer_id: int, checkpoint_path: str, device, *, scale_group=None
+    ):
         from safetensors import safe_open
 
         layout = EngramLayout(config)
@@ -1752,6 +1788,7 @@ class Engram(nn.Module):
                 f"Engram table shape {table.shape} does not match {expected}"
             )
         pinned = None
+        scale_identity = None
         if torch.device(device).type == "cuda":
             from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
@@ -1762,7 +1799,8 @@ class Engram(nn.Module):
                 identity.extend(
                     [str(path.resolve()), str(stat.st_size), str(stat.st_mtime_ns)]
                 )
-            pinned = _PinnedSharedTable(table, scales, "|".join(identity), device)
+            scale_identity = "|".join(identity)
+            pinned = _PinnedSharedTable(table, scales, scale_identity, device)
             table, scales = pinned.weight, pinned.scales
             projection = V41MXFP8Linear(
                 load("wkv.weight").to(device), load("wkv.scale").to(device)
@@ -1776,7 +1814,13 @@ class Engram(nn.Module):
         return cls(
             layout,
             layer_hash_index,
-            HostEngramEmbedding(table, scales, pinned=pinned),
+            HostEngramEmbedding(
+                table,
+                scales,
+                pinned=pinned,
+                scale_group=scale_group,
+                scale_identity=scale_identity,
+            ),
             projection,
             load("q_weight").to(device),
             load("k_weight").to(device),
