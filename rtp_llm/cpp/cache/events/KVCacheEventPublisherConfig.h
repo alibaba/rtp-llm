@@ -22,6 +22,8 @@ struct KVCacheEventPublisherConfig {
     int    retry_interval_ms     = 500;
     int    max_retry_after_ms    = 300000;
     int    snapshot_interval_ms  = 300000;
+    // Only heartbeat and nonempty mutation ACKs rearm this recovery window.
+    int    ack_recovery_timeout_ms = 60000;
 };
 
 struct KVCacheEventSpec {
