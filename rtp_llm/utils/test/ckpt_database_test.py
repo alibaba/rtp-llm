@@ -291,5 +291,54 @@ class HandleRecyclingTest(unittest.TestCase):
             self.assertIsNone(_LAYER_RE.search(name), name)
 
 
+class PageCacheShedTest(unittest.TestCase):
+    """Scratch loads shed faulted page cache once a shard has supplied a
+    threshold of reads (pod memcg protection); see CkptFileInfo._drop_page_cache."""
+
+    @staticmethod
+    def _write_shard(tmp, rows=1024):
+        path = os.path.join(tmp, "test.safetensors")
+        save_file({"w": torch.zeros(rows, dtype=torch.float32)}, path)
+        return path
+
+    def test_threshold_triggers_shed_and_close_sheds_finally(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            info = ckpt_file_info.CkptFileInfo(file_name=self._write_shard(tmp))
+            with patch.object(ckpt_file_info, "_DROP_PAGE_CACHE", True), patch.object(
+                ckpt_file_info, "_DROP_PAGE_CACHE_THRESHOLD", 1024
+            ), patch.object(info, "_drop_page_cache") as drop:
+                info.load_tensor("w", torch.float32)  # 4KiB > 1KiB threshold
+                self.assertEqual(drop.call_count, 1)
+                info.load_tensor_slice("w", (slice(None),), torch.float32)
+                self.assertEqual(drop.call_count, 2)
+                info.close_safetensor_handle()
+                self.assertEqual(drop.call_count, 3)
+
+    def test_killswitch_disables_shedding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            info = ckpt_file_info.CkptFileInfo(file_name=self._write_shard(tmp))
+            with patch.object(ckpt_file_info, "_DROP_PAGE_CACHE", False), patch.object(
+                info, "_drop_page_cache"
+            ) as drop:
+                info.load_tensor("w", torch.float32)
+                info.load_tensor_slice("w", (slice(None),), torch.float32)
+                info.close_safetensor_handle()
+                drop.assert_not_called()
+
+    def test_fadvise_error_disables_without_raising(self):
+        if not hasattr(os, "posix_fadvise"):
+            self.skipTest("posix_fadvise unavailable on this platform")
+        with tempfile.TemporaryDirectory() as tmp:
+            info = ckpt_file_info.CkptFileInfo(file_name=self._write_shard(tmp))
+            with patch.object(ckpt_file_info, "_DROP_PAGE_CACHE", True), patch.object(
+                os, "posix_fadvise", side_effect=OSError("EINVAL")
+            ) as fadvise:
+                info._note_bytes_read(ckpt_file_info._DROP_PAGE_CACHE_THRESHOLD)
+                self.assertTrue(info._fadvise_broken)
+                # Broken stays quiet: no retry, no raise.
+                info._note_bytes_read(ckpt_file_info._DROP_PAGE_CACHE_THRESHOLD)
+                self.assertEqual(fadvise.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
