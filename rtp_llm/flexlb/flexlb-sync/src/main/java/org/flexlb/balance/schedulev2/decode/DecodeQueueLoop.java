@@ -51,7 +51,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 发布后在 Decode 上有 reserve 的请求进入 published。扫到已经结束的请求就归还它的 reserve 并移出 reserved。
  * 某台 Decode 给不出 permit 时，这一轮跳过 reserve 在它上面的其他请求，等它有空位时被唤醒；</li>
  * <li>waiting 的请求按顺序选 Decode 并 reserve，成功后进入 DECODE_RESERVED。reserve 带容量上限，放不下就不 reserve。
- * 某个 group 没有放得下的 Decode 时，请求留在 waiting，这一轮跳过同 group 的请求，等 Decode 归还容量时被唤醒。</li>
+ * 某个 group 排在最前面的请求放不下时，它留在 waiting。是否跳过同 group 后面的请求见 {@link #reserveWaiting}。</li>
  * </ol>
  * reserve 的 Decode 下线或 reserve 丢失时，请求退回 waiting 重新选。
  * <p>
@@ -359,7 +359,17 @@ public final class DecodeQueueLoop {
         }
     }
 
+    /**
+     * waiting 的请求按顺序选 Decode 并 reserve。
+     * <p>
+     * 每个 group 排在最前面、放不下的请求叫队头。队头等得不久时，同 group 后面放得下的请求可以先走；
+     * 队头从选完 Prefill 起等了超过 {@code dispatcher.decodeStarvationThresholdMs}，这一轮跳过同 group 后面的请求，
+     * 让归还的容量先留给队头。阈值是 0 时一直严格按顺序。
+     */
     private boolean reserveWaiting() {
+        long starvationThresholdMs = configService.loadBalanceConfig().getDispatcher().getDecodeStarvationThresholdMs();
+        long now = System.currentTimeMillis();
+        Set<String> groupsWithHead = new HashSet<>();
         Set<String> blockedGroups = new HashSet<>();
         boolean moved = false;
         int scanned = 0;
@@ -377,11 +387,20 @@ public final class DecodeQueueLoop {
             }
             if (pickDecode(request, group)) {
                 moved = true;
-            } else {
+                continue;
+            }
+            if (groupsWithHead.add(group) && isStarved(request, starvationThresholdMs, now)) {
                 blockedGroups.add(group);
             }
         }
         return moved;
+    }
+
+    /**
+     * 队头是否等得太久，需要同 group 严格按顺序。阈值是 0 时总是返回 true。
+     */
+    private static boolean isStarved(Request request, long starvationThresholdMs, long now) {
+        return now - request.prefillDecidedAtMs() >= starvationThresholdMs;
     }
 
     /**

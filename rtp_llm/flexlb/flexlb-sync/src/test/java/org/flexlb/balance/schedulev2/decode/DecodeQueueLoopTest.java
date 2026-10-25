@@ -337,6 +337,74 @@ class DecodeQueueLoopTest {
         assertNotNull(emptyDecode.reservationHandle("1"));
     }
 
+    @Test
+    void laterRequestWaitsBehindHeadThatDoesNotFitWhenThresholdIsZero() {
+        config.getDispatcher().setDecodeStarvationThresholdMs(0L);
+        Request head = addWaiting("1");
+        head.setPrefillDecidedAtMs(System.currentTimeMillis());
+        Request later = addWaiting("2");
+        blockOnly(head);
+
+        loop.runOnce();
+
+        assertEquals(Stage.DECODE_WAITING, head.stage());
+        assertEquals(Stage.DECODE_WAITING, later.stage());
+    }
+
+    @Test
+    void laterRequestGoesFirstWhileHeadHasNotWaitedLong() {
+        config.getDispatcher().setDecodeStarvationThresholdMs(60_000L);
+        Request head = addWaiting("1");
+        head.setPrefillDecidedAtMs(System.currentTimeMillis());
+        Request later = addWaiting("2");
+        blockOnly(head);
+
+        loop.runOnce();
+
+        assertEquals(Stage.DECODE_WAITING, head.stage());
+        assertEquals(Stage.DECODE_RESERVED, later.stage());
+    }
+
+    @Test
+    void laterRequestWaitsBehindHeadThatHasWaitedTooLong() {
+        config.getDispatcher().setDecodeStarvationThresholdMs(60_000L);
+        Request head = addWaiting("1");
+        head.setPrefillDecidedAtMs(System.currentTimeMillis() - 120_000L);
+        Request later = addWaiting("2");
+        blockOnly(head);
+
+        loop.runOnce();
+
+        assertEquals(Stage.DECODE_WAITING, head.stage());
+        assertEquals(Stage.DECODE_WAITING, later.stage());
+    }
+
+    @Test
+    void changedStarvationThresholdIsUsedInNextRound() {
+        config.getDispatcher().setDecodeStarvationThresholdMs(0L);
+        Request head = addWaiting("1");
+        head.setPrefillDecidedAtMs(System.currentTimeMillis());
+        Request later = addWaiting("2");
+        blockOnly(head);
+        loop.runOnce();
+        assertEquals(Stage.DECODE_WAITING, later.stage());
+
+        config.getDispatcher().setDecodeStarvationThresholdMs(60_000L);
+        loop.runOnce();
+
+        assertEquals(Stage.DECODE_WAITING, head.stage());
+        assertEquals(Stage.DECODE_RESERVED, later.stage());
+    }
+
+    /**
+     * 只有 blocked 这个请求选不到 Decode，其他请求正常选中。
+     */
+    private void blockOnly(Request blocked) {
+        doAnswer(invocation -> invocation.getArgument(0) == blocked.ctx()
+                ? PlacementResult.blocked(RoleType.DECODE)
+                : success()).when(selector).select(any(), any(), any());
+    }
+
     private ServerStatus emptyDecodeStatus() {
         ServerStatus status = new ServerStatus();
         status.setRole(RoleType.DECODE);

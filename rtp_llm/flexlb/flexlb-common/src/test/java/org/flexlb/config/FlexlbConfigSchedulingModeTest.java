@@ -303,6 +303,15 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
+    void decode_starvation_threshold_defaults_to_500ms_and_rejects_negative() {
+        assertEquals(500L, parse("QUEUE", "NON_BATCH_V2", "").getDispatcher().getDecodeStarvationThresholdMs());
+        FlexlbConfig config = parse("QUEUE", "NON_BATCH_V2", ",\"decodeStarvationThresholdMs\":5000");
+        assertEquals(5000L, config.getDispatcher().getDecodeStarvationThresholdMs());
+        assertThrows(ConfigValidationException.class,
+                () -> parse("QUEUE", "NON_BATCH_V2", ",\"decodeStarvationThresholdMs\":-1"));
+    }
+
+    @Test
     void fetch_attach_timeout_requires_a_positive_integer_without_json_coercion() {
         for (String value : new String[]{"0", "-1", "1.5", "\"3000\"", "true", "null", "[]", "{}", "2147483648"}) {
             assertThrows(ConfigValidationException.class,
