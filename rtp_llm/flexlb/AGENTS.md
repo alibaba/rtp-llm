@@ -12,6 +12,10 @@ This file provides guidance to agents when working with code in this repository.
 - **用具体、常见的词表达用途。** 名称优先说明业务对象和实际动作，不使用显得高级但含义
   模糊的词汇。不要单独用 ownership、terminal、settlement、proof 等抽象词概括不同职责。
   必须使用协议或领域术语时，在首次出现处用简单语言说明它对应哪个字段、对象或行为。
+- **方法名和类名优先用朴素动词。** 推荐 `update`、`handle`、`collect`、`build`、`remove`、
+  `add`、`find`、`publish`、`release` 这类一眼能看出动作的词，例如 `WorkerStatusUpdater`、
+  `updateFromHeartbeat`、`collectFinishedTasks`、`removeCommittedRequest`。避免 `reconcile`、
+  `apply`、`observe`、`capture`、`settle`、`terminalize`、`admission` 这类需要再解释一遍的词。
 - **变量名要说明保存的内容，状态名要说明正在发生的事。** 布尔值应能读成一个明确判断，
   例如“是否正在等待引擎的 Finished 上报”。相较于 `awaitingTerminal`，
   `waitingForWorkerFinishedReport` 更直接地说明等待谁、等待什么。
