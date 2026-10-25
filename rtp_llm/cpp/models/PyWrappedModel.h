@@ -87,6 +87,9 @@ public:
     GptModelOutputs            forward(const GptModelInputs& inputs) override;
     GptModelOutputs            forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
     void                       releaseBuffers() override;
+    py::object&                getPyModel() {
+        return py_model_;
+    }
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
     bool                       hasMtpTargetHiddenBuffer() const override;

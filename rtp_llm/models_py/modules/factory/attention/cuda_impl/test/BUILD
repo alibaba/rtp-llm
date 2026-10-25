@@ -59,6 +59,15 @@ flashinfer_test_deps = py_test_deps + select({
     "//conditions:default": [],
 })
 
+py_test(
+    name = "dynamic_decode_replay_test",
+    srcs = ["dynamic_decode_replay_test.py", "base_attention_test.py"],
+    main = "dynamic_decode_replay_test.py",
+    deps = flashinfer_test_deps,
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+)
+
 flashinfer_platforms = [
     {
         "sm": "sm90",

@@ -301,6 +301,7 @@ struct HWKernelConfig {
     std::string rocm_hipblaslt_config        = "gemm_config.csv";
     bool        use_swizzleA                 = false;
     bool        enable_cuda_graph            = false;
+    bool        enable_dynamic_decode_backend = false;
     bool        enable_cuda_graph_debug_mode = false;
     // Generation-prefill graph is enabled only when the CUDA graph master
     // switch is on and this capture bucket list is explicitly configured.
@@ -498,6 +499,7 @@ struct RuntimeConfig {
     int64_t reserve_runtime_mem_mb = 0;
     bool    warm_up                = false;
     bool    warm_up_with_loss      = false;
+    bool    enable_accuracy_check  = false;
     bool    model_warm_up          = true;
 
     int output_dispatcher_worker_count = 0;

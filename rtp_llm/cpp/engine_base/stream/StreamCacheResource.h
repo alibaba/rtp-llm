@@ -78,6 +78,10 @@ public:
         block_update_mapping_.clear();
     }
 
+    void setKVBlockUpdateMapping(const std::vector<TaggedBlockIdPair>& mapping) {
+        block_update_mapping_ = mapping;
+    }
+
     // get block copy mapping of last kv cache update
     const std::vector<TaggedBlockIdPair>& getKVBlockUpdateMapping() const {
         return block_update_mapping_;

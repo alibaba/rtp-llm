@@ -3,6 +3,14 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "dynamic_decode_gate_test",
+    srcs = ["dynamic_decode_gate_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+)
+
+py_test(
     name = "qwen_gdn_graph_replay_test_rocm",
     srcs = ["qwen_gdn_graph_replay_test.py"],
     main = "qwen_gdn_graph_replay_test.py",

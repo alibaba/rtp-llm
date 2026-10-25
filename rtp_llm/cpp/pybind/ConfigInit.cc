@@ -867,6 +867,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("rocm_hipblaslt_config", &HWKernelConfig::rocm_hipblaslt_config)
         .def_readwrite("use_swizzleA", &HWKernelConfig::use_swizzleA)
         .def_readwrite("enable_cuda_graph", &HWKernelConfig::enable_cuda_graph)
+        .def_readwrite("enable_dynamic_decode_backend", &HWKernelConfig::enable_dynamic_decode_backend)
         .def_readwrite("enable_cuda_graph_debug_mode", &HWKernelConfig::enable_cuda_graph_debug_mode)
         .def_readwrite("generation_prefill_cuda_graph_max_requests",
                        &HWKernelConfig::generation_prefill_cuda_graph_max_requests)
@@ -896,10 +897,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disable_dpc_random,
                                       self.rocm_disable_custom_ag,
                                       self.generation_prefill_cuda_graph_max_requests,
-                                      self.generation_prefill_capture_token_buckets);
+                                      self.generation_prefill_capture_token_buckets,
+                                      self.enable_dynamic_decode_backend);
             },
             [](py::tuple t) {
-                if (t.size() != 14 && t.size() != 16)
+                if (t.size() != 14 && t.size() != 16 && t.size() != 17)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -917,9 +919,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.decode_capture_batch_sizes   = t[11].cast<std::vector<int>>();
                     c.disable_dpc_random           = t[12].cast<bool>();
                     c.rocm_disable_custom_ag       = t[13].cast<bool>();
-                    if (t.size() == 16) {
+                    if (t.size() >= 16) {
                         c.generation_prefill_cuda_graph_max_requests = t[14].cast<int>();
                         c.generation_prefill_capture_token_buckets   = t[15].cast<std::vector<int>>();
+                    }
+                    if (t.size() == 17) {
+                        c.enable_dynamic_decode_backend = t[16].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
@@ -1598,6 +1603,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reserve_runtime_mem_mb", &RuntimeConfig::reserve_runtime_mem_mb)
         .def_readwrite("warm_up", &RuntimeConfig::warm_up)
         .def_readwrite("warm_up_with_loss", &RuntimeConfig::warm_up_with_loss)
+        .def_readwrite("enable_accuracy_check", &RuntimeConfig::enable_accuracy_check)
         .def_readwrite("model_warm_up", &RuntimeConfig::model_warm_up)
         .def_readwrite("output_dispatcher_worker_count", &RuntimeConfig::output_dispatcher_worker_count)
         .def_readwrite("use_batch_decode_scheduler", &RuntimeConfig::use_batch_decode_scheduler)
@@ -1631,10 +1637,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.worker_addrs,
                                       self.specify_gpu_arch,
                                       self.model_warm_up,
-                                      self.output_dispatcher_worker_count);
+                                      self.output_dispatcher_worker_count,
+                                      self.enable_accuracy_check);
             },
             [](py::tuple t) {
-                if (t.size() != 12 && t.size() != 13 && t.size() != 14)
+                if (t.size() != 12 && t.size() != 13 && t.size() != 14 && t.size() != 15)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1655,6 +1662,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 14) {
                         c.output_dispatcher_worker_count = t[13].cast<int>();
+                    }
+                    if (t.size() == 15) {
+                        c.enable_accuracy_check = t[14].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());

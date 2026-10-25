@@ -72,6 +72,35 @@ class GptModelBase(nn.Module):
         self._mtp_aux_capture_index = 0
 
         self._capture_context = CaptureContext.unsupported()
+        self._decode_gate = None
+        self._dynamic_decode_enabled = False
+        self.decode_backend_plan = {}
+
+    def set_decode_backend_gate(self, names) -> None:
+        from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+            DECODE_MHA_IMPS,
+        )
+
+        self.decode_backend_plan.clear()
+        if names is None:
+            self._decode_gate = None
+            return
+        registry = {cls.__name__: cls for cls in DECODE_MHA_IMPS}
+        if not names or any(name not in registry for name in names):
+            raise ValueError("decode gate contains no backend or an unknown backend")
+        self._decode_gate = frozenset(registry[name] for name in names)
+
+    def configure_dynamic_decode(self, enabled: bool) -> None:
+        if enabled and not self._decode_gate:
+            raise RuntimeError(
+                "dynamic decode cannot start before precision qualification"
+            )
+        if enabled and getattr(self.config, "headwise_config", None) is not None:
+            raise NotImplementedError(
+                "dynamic decode precision gate does not qualify headwise attention"
+            )
+        self._dynamic_decode_enabled = enabled
+        self.decode_backend_plan.clear()
 
     def _init_capture_context(
         self,
@@ -124,6 +153,41 @@ class GptModelBase(nn.Module):
         cuda_graph_selection_mode: Optional[str] = None,
     ) -> AttentionImpl | dict[str, AttentionImpl]:
         attention_inputs = get_attention_inputs_value(inputs)
+        if getattr(self, "_dynamic_decode_enabled", False) and is_cuda_graph:
+            from rtp_llm.config.cuda_graph import CudaGraphSelectionMode
+            from rtp_llm.models_py.modules.factory.attention.dispatch.backend_selector import (
+                instantiate_decode_backend,
+                select_decode_backend,
+            )
+
+            mode = CudaGraphSelectionMode(
+                cuda_graph_selection_mode or CudaGraphSelectionMode.DECODE_GRAPH
+            )
+            primary = (
+                next(iter(attention_inputs.values()))
+                if isinstance(attention_inputs, Mapping)
+                else attention_inputs
+            )
+            if mode == CudaGraphSelectionMode.DECODE_GRAPH and not primary.is_prefill:
+                if isinstance(attention_inputs, Mapping) and len(attention_inputs) != 1:
+                    raise RuntimeError(
+                        "dynamic decode does not support multiple cache groups"
+                    )
+                primary.headwise_config = getattr(self.config, "headwise_config", None)
+                primary.is_cuda_graph = True
+                batch = primary.input_lengths.numel()
+                if batch not in self.decode_backend_plan:
+                    self.decode_backend_plan[batch] = select_decode_backend(
+                        self, primary, self._decode_gate
+                    )
+                cls = self.decode_backend_plan[batch]
+                instance = instantiate_decode_backend(self, primary, cls)
+                logging.info(
+                    "dynamic decode capture batch=%d backend=%s", batch, cls.__name__
+                )
+                if isinstance(attention_inputs, Mapping):
+                    return {next(iter(attention_inputs)): instance}
+                return instance
         if isinstance(attention_inputs, Mapping):
             fmha_group_tags = self._get_fmha_group_tags()
             selected_group_inputs = (
