@@ -139,6 +139,47 @@ class PrefillQueueTest {
         request.publish(Stage.DECODE_WAITING, List.of());
     }
 
+    @Test
+    void ttftCountsRequestOnceWhileItMovesFromWaitingToDispatched() {
+        Request earlier = request("1");
+        earlier.setQueueSeq(1L);
+        V2TestSupport.choose(earlier, endpoint, 0L, 10L);
+        earlier.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
+        queue.addWaiting(earlier);
+        Request incoming = request("2");
+        incoming.setQueueSeq(2L);
+        assertEquals(25L, queue.estimatedTtftMs(incoming, 15L));
+
+        queue.addDispatched(new DispatchedRequest(earlier, 16L, 10L));
+        assertEquals(25L, queue.estimatedTtftMs(incoming, 15L));
+        earlier.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING);
+        queue.removeWaiting(earlier);
+        assertEquals(25L, queue.estimatedTtftMs(incoming, 15L));
+    }
+
+    @Test
+    void ttftDoesNotInventDurationForUnknownEngineWork() {
+        V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of("other", TaskPhase.RUNNING));
+        queue.updateFromEngine();
+        assertEquals(-1L, queue.estimatedTtftMs(request("1"), 15L));
+    }
+
+    @Test
+    void highPriorityTtftExcludesLowerPriorityWaitingWork() {
+        PrefillQueue priorityQueue = new PrefillQueue(endpoint, true);
+        Request low = V2TestSupport.request(config, "low", 10, 16L);
+        low.setQueueSeq(1L);
+        V2TestSupport.choose(low, endpoint, 0L, 100L);
+        low.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
+        priorityQueue.addWaiting(low);
+        Request high = V2TestSupport.request(config, "high", 80, 16L);
+        high.setQueueSeq(2L);
+
+        assertEquals(15L, priorityQueue.estimatedTtftMs(high, 15L));
+        priorityQueue.addDispatched(new DispatchedRequest(low, 16L, 100L));
+        assertEquals(115L, priorityQueue.estimatedTtftMs(high, 15L));
+    }
+
     private Request request(String requestId) {
         return V2TestSupport.request(config, requestId, 50, 16L);
     }

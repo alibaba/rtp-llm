@@ -18,9 +18,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /**
- * Prefill 队列线程：轮流处理每台 Prefill 的队列。
+ * 一台 Prefill 的独立队列线程。不同机器互不等待，同一机器的容量检查和 dispatch 串行执行。
  * <p>
- * 每一轮对每个队列：
+ * 每一轮处理自己的队列：
  * <ol>
  * <li>机器已下线或同一地址已换成重新上线的机器时，把等待的请求退回主队列，丢掉这个队列；</li>
  * <li>有新的引擎上报时更新已 dispatch 记录，并移除发布后超时还没被引擎上报的记录；</li>
@@ -41,6 +41,7 @@ public final class PrefillQueueLoop {
     static final long IDLE_WAIT_MS = 50L;
 
     private final PrefillQueueRegistry queues;
+    private final PrefillQueue queue;
     private final LoopSignal loopSignal;
     private final RequestCleanup cleanup;
     private final MainQueue mainQueue;
@@ -54,8 +55,8 @@ public final class PrefillQueueLoop {
     private final AtomicBoolean running = new AtomicBoolean();
     private final Thread thread;
 
-    public PrefillQueueLoop(PrefillQueueRegistry queues,
-                            LoopSignal loopSignal,
+    public PrefillQueueLoop(PrefillQueue queue,
+                            PrefillQueueRegistry queues,
                             RequestCleanup cleanup,
                             MainQueue mainQueue,
                             EndpointRegistry endpointRegistry,
@@ -63,14 +64,15 @@ public final class PrefillQueueLoop {
                             RequestSchedulerReporter reporter,
                             Consumer<Request> sendToDecodeQueue) {
         this.queues = queues;
-        this.loopSignal = loopSignal;
+        this.queue = queue;
+        this.loopSignal = queue.signal();
         this.cleanup = cleanup;
         this.mainQueue = mainQueue;
         this.endpointRegistry = endpointRegistry;
         this.configService = configService;
         this.reporter = reporter;
         this.sendToDecodeQueue = sendToDecodeQueue;
-        this.thread = new Thread(this::run, "flexlb-v2-prefill-queue");
+        this.thread = new Thread(this::run, "flexlb-v2-prefill-" + queue.endpoint().ipPort());
         this.thread.setDaemon(true);
     }
 
@@ -100,7 +102,7 @@ public final class PrefillQueueLoop {
     }
 
     /**
-     * 处理一轮所有队列，返回处理完后还有没有请求在等 dispatch。
+     * 处理自己这台机器的队列，返回还有没有请求在等 dispatch。机器下线时退回请求并停止这个线程。
      */
     boolean runOnce() {
         int maxInflight = configService.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker();
@@ -108,19 +110,16 @@ public final class PrefillQueueLoop {
         long nowMs = System.currentTimeMillis();
         long starvationThresholdMs =
                 configService.loadBalanceConfig().getDispatcher().getDispatchStarvationThresholdMs();
-        boolean hasWaiting = false;
-        for (PrefillQueue queue : queues.list()) {
-            if (!isCurrent(queue)) {
-                queues.remove(queue);
-                sendBackToMainQueue(queue);
-                continue;
-            }
-            queue.updateFromEngine();
-            removeExpiredDispatched(queue, nowMs, confirmTimeoutMs);
-            dispatchWaiting(queue, maxInflight, starvationThresholdMs, nowMs);
-            hasWaiting |= queue.waitingCount() > 0;
+        if (!isCurrent(queue)) {
+            queues.remove(queue);
+            sendBackToMainQueue(queue);
+            close();
+            return false;
         }
-        return hasWaiting;
+        queue.updateFromEngine();
+        removeExpiredDispatched(queue, nowMs, confirmTimeoutMs);
+        dispatchWaiting(queue, maxInflight, starvationThresholdMs, nowMs);
+        return queue.waitingCount() > 0;
     }
 
     private void removeExpiredDispatched(PrefillQueue queue, long nowMs, long confirmTimeoutMs) {
@@ -135,7 +134,8 @@ public final class PrefillQueueLoop {
      */
     private boolean isCurrent(PrefillQueue queue) {
         PrefillEndpoint endpoint = queue.endpoint();
-        return endpointRegistry.get(endpoint.getStatus().getRole(), endpoint.ipPort()) == endpoint;
+        return !endpoint.isRetired()
+                && endpointRegistry.get(endpoint.getStatus().getRole(), endpoint.ipPort()) == endpoint;
     }
 
     private void dispatchWaiting(PrefillQueue queue, int maxInflight, long starvationThresholdMs, long nowMs) {

@@ -7,6 +7,7 @@ import org.flexlb.balance.schedulev2.prefill.PrefillQueue;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.schedulev2.request.RequestTable;
+import org.flexlb.balance.schedulev2.request.Stage;
 import org.flexlb.dao.route.RoleType;
 
 /**
@@ -19,7 +20,6 @@ public final class RequestCleanup {
     private final QueueCapacity queueCapacity;
     private final LoopSignal mainLoopSignal;
     private final PrefillQueueRegistry prefillQueues;
-    private final LoopSignal prefillLoopSignal;
     private final DecodeQueue decodeQueue;
     private final LoopSignal decodeLoopSignal;
 
@@ -28,7 +28,6 @@ public final class RequestCleanup {
                           QueueCapacity queueCapacity,
                           LoopSignal mainLoopSignal,
                           PrefillQueueRegistry prefillQueues,
-                          LoopSignal prefillLoopSignal,
                           DecodeQueue decodeQueue,
                           LoopSignal decodeLoopSignal) {
         this.requestTable = requestTable;
@@ -36,7 +35,6 @@ public final class RequestCleanup {
         this.queueCapacity = queueCapacity;
         this.mainLoopSignal = mainLoopSignal;
         this.prefillQueues = prefillQueues;
-        this.prefillLoopSignal = prefillLoopSignal;
         this.decodeQueue = decodeQueue;
         this.decodeLoopSignal = decodeLoopSignal;
     }
@@ -52,9 +50,7 @@ public final class RequestCleanup {
         PrefillQueue prefillQueue = prefillQueues.find(request);
         if (prefillQueue != null) {
             prefillQueue.removeWaiting(request);
-            if (prefillQueue.removeDispatched(request)) {
-                prefillLoopSignal.wake();
-            }
+            prefillQueue.removeDispatched(request);
         }
         decodeQueue.removeWaiting(request);
         if (request.decodeChoice() != null) {
@@ -74,6 +70,27 @@ public final class RequestCleanup {
         queueCapacity.decreaseTotalQueueCount(request.future());
         request.cancelDeadlineTask();
         requestTable.remove(request);
+    }
+
+    /**
+     * Prefill 不可用时退回主队列，保留总排队名额和原顺序号。调用方已在 Decode 线程归还可能存在的预占。
+     */
+    public void returnToMain(Request request, Stage expected) {
+        if (request.stage() != expected) {
+            return;
+        }
+        PrefillQueue queue = prefillQueues.find(request);
+        if (queue != null) {
+            queue.removeWaiting(request);
+            queue.removeDispatched(request);
+        }
+        releaseQueueSlot(request);
+        request.setPrefillChoice(null);
+        request.setPrefillDecidedAtMs(0L);
+        request.setPrefillQueuedAtMs(0L);
+        if (request.moveTo(expected, Stage.MAIN_WAITING)) {
+            mainQueue.addBack(request);
+        }
     }
 
     /**

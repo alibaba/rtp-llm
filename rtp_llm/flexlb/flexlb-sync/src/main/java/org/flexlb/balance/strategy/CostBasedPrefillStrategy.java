@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.estimate.EndpointPrefillLoadProvider;
 import org.flexlb.balance.estimate.PrefillLoadProvider;
 import org.flexlb.balance.estimate.PrefillTtftEstimate;
+import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -36,9 +37,11 @@ import org.springframework.stereotype.Component;
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.ToLongFunction;
 
 @Component
 public class CostBasedPrefillStrategy {
@@ -74,7 +77,6 @@ public class CostBasedPrefillStrategy {
                                                           String group) {
         balanceContext.beginRoutingAttempt(roleType);
         String requestId = balanceContext.getRequestId();
-        long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
         long inflightRequestLimit = config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
                 ? config.getDispatcher().getMaxInflightPerPrefillWorker() : 0L;
@@ -90,6 +92,108 @@ public class CostBasedPrefillStrategy {
         CacheMatchResult cacheMatchResult = getCacheMatchResult(balanceContext, roleType, group);
 
         PrefillCandidateSet survivors = evaluateCandidates(discovery, balanceContext, cacheMatchResult);
+
+        return finishSelection(balanceContext, roleType, group, discovery, cacheMatchResult, survivors);
+    }
+
+    /**
+     * 并行准备完整候选集合的缓存匹配和请求自身耗时。排队负载留到调度线程作最终决策时再读取。
+     */
+    public PrefillInputs prepare(BalanceContext context, RoleType role, String group) {
+        context.beginRoutingAttempt(role);
+        EndpointDiscovery discovery = discoverActiveEndpoints(role, group);
+        if (discovery.candidates().isEmpty()) {
+            return new PrefillInputs(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC), List.of());
+        }
+        CacheMatchResult cacheMatch = getCacheMatchResult(context, role, group);
+        List<PrefillCandidateWork> candidates = new ArrayList<>();
+        for (EndpointRegistry.PrefillRoutingEntry entry : discovery.candidates()) {
+            CacheTokenMatch match =
+                    calculateCacheMatch(entry.endpoint(), cacheMatch, context.getRequest(), context.getConfig());
+            long predictedMs =
+                    PrefillPredictionBoundary.predictSingleRequestMs(entry.endpoint().getPredictor().evaluator(),
+                            context.getRequest().getSeqLen(), match.effectiveHitTokens());
+            candidates.add(new PrefillCandidateWork(entry.address(), entry.endpoint(), match.effectiveHitTokens(),
+                    match.routingHitTokens(), predictedMs));
+        }
+        return new PrefillInputs(cacheMatch, candidates);
+    }
+
+    /**
+     * 调度线程根据当前队列计算最终 TTFT，再沿用缓存亲和与同分轮询规则选点。
+     * 新增或重启的节点没有对应材料时重新准备，不能把旧节点的缓存和耗时套到新节点上。
+     */
+    public PlacementResult<SelectedRole, RoleType> selectPrepared(BalanceContext context,
+                                                                  RoleType role,
+                                                                  String group,
+                                                                  PrefillInputs inputs,
+                                                                  ToLongFunction<PrefillCandidateWork> ttft) {
+        EndpointDiscovery discovery = discoverActiveEndpoints(role, group);
+        if (discovery.candidates().isEmpty()) {
+            return classifyAdmissionFailure(discovery, context.getPriority(), role, group, 0L);
+        }
+        Map<PrefillEndpoint, PrefillCandidateWork> prepared = new IdentityHashMap<>();
+        for (PrefillCandidateWork candidate : inputs.candidates()) {
+            prepared.put(candidate.endpoint(), candidate);
+        }
+        PrefillCandidateSet candidates = new PrefillCandidateSet();
+        candidates.reset(discovery.candidates().size());
+        for (EndpointRegistry.PrefillRoutingEntry entry : discovery.candidates()) {
+            PrefillCandidateWork candidate = prepared.get(entry.endpoint());
+            if (candidate == null) {
+                return PlacementResult.blocked(role);
+            }
+            long estimatedMs = ttft.applyAsLong(candidate);
+            PrefillTtftEstimate.Candidate estimate = new PrefillTtftEstimate.Candidate(
+                    estimatedMs < 0L
+                            ? PrefillTtftEstimate.Candidate.State.UNMODELED_ENGINE_WORK
+                            : PrefillTtftEstimate.Candidate.State.MODELED,
+                    estimatedMs, candidate.predictedMs(), PrefillTtftEstimate.Candidate.InitialHeadDisposition.NONE, "",
+                    null, candidate.cacheHitTokens(), candidate.routingCacheMatchTokens());
+            candidates.addCandidate(entry.address(), entry.endpoint(), estimate, entry.endpoint().placementVersion());
+        }
+        return finishSelection(context, role, group, discovery, inputs.cacheMatch(), candidates);
+    }
+
+    /**
+     * 材料对应的候选集合是否仍然有效。增加、移除、重启或开始下线的节点都会使材料失效。
+     */
+    public boolean inputsAreCurrent(PrefillInputs inputs, RoleType role, String group) {
+        EndpointDiscovery current = discoverActiveEndpoints(role, group);
+        if (current.candidates().size() != inputs.candidates().size()) {
+            return false;
+        }
+        Map<PrefillEndpoint, String> prepared = new IdentityHashMap<>();
+        for (PrefillCandidateWork candidate : inputs.candidates()) {
+            prepared.put(candidate.endpoint(), candidate.address());
+        }
+        for (EndpointRegistry.PrefillRoutingEntry candidate : current.candidates()) {
+            if (candidate.endpoint().isRetired() || !candidate.address().equals(prepared.get(candidate.endpoint()))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * V2 只排除已开始下线的节点，所有仍可接收请求的候选都参与缓存匹配。
+     */
+    private EndpointDiscovery discoverActiveEndpoints(RoleType role, String group) {
+        EndpointDiscovery discovery = discoverAvailableEndpoints(role, group);
+        List<EndpointRegistry.PrefillRoutingEntry> active =
+                discovery.candidates().stream().filter(entry -> !entry.endpoint().isRetired()).toList();
+        return new EndpointDiscovery(discovery.directory(), active, discovery.registeredCount());
+    }
+
+    private PlacementResult<SelectedRole, RoleType> finishSelection(BalanceContext balanceContext,
+                                                                    RoleType roleType,
+                                                                    String group,
+                                                                    EndpointDiscovery discovery,
+                                                                    CacheMatchResult cacheMatchResult,
+                                                                    PrefillCandidateSet survivors) {
+        String requestId = balanceContext.getRequestId();
+        long seqLen = balanceContext.getRequest().getSeqLen();
+        FlexlbConfig config = balanceContext.getConfig();
 
         int selectedIndex = selectBestCandidate(survivors, survivors.minimumTtftRank, roleType, group, seqLen, config);
 

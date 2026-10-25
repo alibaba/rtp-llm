@@ -7,6 +7,7 @@ package org.flexlb.balance.schedulev2.request;
  * 发布之前的任何阶段都可以进入 FAILED 或 CANCELLED。
  * 选好的 Prefill 下线时，PREFILL_WAITING 的请求退回 MAIN_WAITING 重新选；
  * reserve 的 Decode 下线或 reserve 丢失时，DECODE_RESERVED 的请求退回 DECODE_WAITING 重新选。
+ * 发布前 Prefill 已开始下线时，DECODE_WAITING / DECODE_RESERVED 归还 Decode 预占后退回 MAIN_WAITING。
  * 没部署 Decode（PD 合一）时，DECODE_WAITING 直接进入 PUBLISHED。
  */
 public enum Stage {
@@ -60,8 +61,10 @@ public enum Stage {
         return switch (this) {
             case MAIN_WAITING -> next == PREFILL_WAITING || next.isEnded();
             case PREFILL_WAITING -> next == DECODE_WAITING || next == MAIN_WAITING || next.isEnded();
-            case DECODE_WAITING -> next == DECODE_RESERVED || next == PUBLISHED || next.isEnded();
-            case DECODE_RESERVED -> next == PUBLISHED || next == DECODE_WAITING || next.isEnded();
+            case DECODE_WAITING ->
+                next == MAIN_WAITING || next == DECODE_RESERVED || next == PUBLISHED || next.isEnded();
+            case DECODE_RESERVED ->
+                next == MAIN_WAITING || next == PUBLISHED || next == DECODE_WAITING || next.isEnded();
             case PUBLISHED, FAILED, CANCELLED -> false;
         };
     }

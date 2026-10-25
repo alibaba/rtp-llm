@@ -6,6 +6,7 @@ import org.flexlb.balance.estimate.QueueView;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
+import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.main.MainQueue;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.schedulev2.request.RequestOrder;
@@ -41,6 +42,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class PrefillQueue {
 
     private final PrefillEndpoint endpoint;
+    private final LoopSignal signal = new LoopSignal();
     private final ConcurrentSkipListSet<Request> waiting;
     /**
      * requestId → 已 dispatch 的记录。
@@ -72,7 +74,11 @@ public final class PrefillQueue {
         return endpoint;
     }
 
-    public void addWaiting(Request request) {
+    public LoopSignal signal() {
+        return signal;
+    }
+
+    public synchronized void addWaiting(Request request) {
         request.setPrefillQueuedAtMs(System.currentTimeMillis());
         if (waiting.add(request)) {
             changeVersion.incrementAndGet();
@@ -80,6 +86,7 @@ public final class PrefillQueue {
         if (request.stage() != Stage.PREFILL_WAITING) {
             removeWaiting(request);
         }
+        signal.wake();
     }
 
     /**
@@ -100,7 +107,7 @@ public final class PrefillQueue {
         return false;
     }
 
-    public void removeWaiting(Request request) {
+    public synchronized void removeWaiting(Request request) {
         if (waiting.remove(request)) {
             changeVersion.incrementAndGet();
         }
@@ -117,7 +124,7 @@ public final class PrefillQueue {
         return waiting.size();
     }
 
-    public void addDispatched(DispatchedRequest record) {
+    public synchronized void addDispatched(DispatchedRequest record) {
         dispatched.put(record.request().requestId(), record);
         changeVersion.incrementAndGet();
     }
@@ -125,12 +132,13 @@ public final class PrefillQueue {
     /**
      * 只移除这个请求对象的记录，返回是否移除了。
      */
-    public boolean removeDispatched(Request request) {
+    public synchronized boolean removeDispatched(Request request) {
         DispatchedRequest record = dispatched.get(request.requestId());
         if (record == null || record.request() != request || !dispatched.remove(request.requestId(), record)) {
             return false;
         }
         changeVersion.incrementAndGet();
+        signal.wake();
         return true;
     }
 
@@ -146,7 +154,7 @@ public final class PrefillQueue {
      * 有新的引擎上报时更新已 dispatch 记录：引擎上报了的改成 ENGINE_QUEUED 或 ENGINE_RUNNING；
      * 上报过、这次不在任务列表里的说明 Prefill 已结束，移除记录。返回有没有处理新的上报。
      */
-    public boolean updateFromEngine() {
+    public synchronized boolean updateFromEngine() {
         WorkerStatus.CommittedWorkerStatus status = endpoint.getStatus().committedWorkerStatus();
         if (status == null || status.cursor().statusVersion() == handledStatusVersion) {
             return false;
@@ -234,6 +242,40 @@ public final class PrefillQueue {
      */
     public boolean hasDispatchSlot(int maxInflight) {
         return dispatched.size() + unknownRequestCount < maxInflight;
+    }
+
+    /**
+     * 用最新的排队与在途记录计算 TTFT，只累加已经预测好的耗时，不调用预测器。
+     * <p>
+     * 队列线程先加 dispatched 再移除 waiting，过渡期间同一个请求只能算一次。
+     * 锁只保护这一台机器的内存记录，避免读到转换了一半的计数。未知引擎任务不虚构耗时，返回 -1。
+     */
+    public synchronized long estimatedTtftMs(Request incoming, long predictedMs) {
+        if (unknownRequestCount > 0L) {
+            return -1L;
+        }
+        long total = predictedMs;
+        for (DispatchedRequest record : dispatched.values()) {
+            if (!record.request().stage().isEnded()) {
+                total = addDuration(total, record.predictedMs());
+            }
+        }
+        long nowMs = System.currentTimeMillis();
+        for (Request request : waiting) {
+            if (waiting.comparator().compare(request, incoming) >= 0) {
+                break;
+            }
+            if (request.stage() != Stage.PREFILL_WAITING || request.ctx().requestExpired(nowMs)
+                    || dispatched.containsKey(request.requestId())) {
+                continue;
+            }
+            total = addDuration(total, request.prefillChoice().predictedMs());
+        }
+        return total;
+    }
+
+    private static long addDuration(long total, long duration) {
+        return total > Long.MAX_VALUE - duration ? Long.MAX_VALUE : total + duration;
     }
 
     /**

@@ -1,6 +1,7 @@
 package org.flexlb.balance.schedulev2;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultRouter;
@@ -9,6 +10,7 @@ import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.balance.schedulev2.decode.DecodeQueue;
 import org.flexlb.balance.schedulev2.decode.DecodeQueueLoop;
+import org.flexlb.balance.schedulev2.decode.DecodeReservations;
 import org.flexlb.balance.schedulev2.decode.EmptyDecodeFinder;
 import org.flexlb.balance.schedulev2.main.MainQueue;
 import org.flexlb.balance.schedulev2.main.MainQueueLoop;
@@ -37,10 +39,13 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * NON_BATCH_V2 链路的入口，只处理 Generation 请求，Encoder 请求仍由 RequestScheduler 处理。
@@ -61,14 +66,13 @@ public class RequestSchedulerV2 {
     private final RoleType prefillRole;
     private final RequestTable requestTable = new RequestTable();
     private final LoopSignal mainLoopSignal = new LoopSignal();
-    private final LoopSignal prefillLoopSignal = new LoopSignal();
     private final LoopSignal decodeLoopSignal = new LoopSignal();
     private final MainQueue mainQueue;
     private final PrefillQueueRegistry prefillQueues;
     private final DecodeQueue decodeQueue;
     private final RequestCleanup cleanup;
+    private final PrefillPublishCheck prefillCheck;
     private final MainQueueLoop mainQueueLoop;
-    private final PrefillQueueLoop prefillQueueLoop;
     private final DecodeQueueLoop decodeQueueLoop;
     private final ScheduledThreadPoolExecutor deadlineTimer;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -84,8 +88,10 @@ public class RequestSchedulerV2 {
                               ModelMetaConfig modelMetaConfig,
                               DecodePreemptionCoordinator preemptionCoordinator,
                               RequestSchedulerReporter reporter,
-                              WorkerDirectory workerDirectory) {
+                              WorkerDirectory workerDirectory,
+                              DecodeReservations reservations) {
         this.configService = configService;
+        this.prefillCheck = new PrefillPublishCheck(endpointRegistry);
         this.deployedRoles = Set.copyOf(modelMetaConfig.requiredRoles());
         this.prefillRole = deployedRoles.contains(RoleType.PREFILL)
                 ? RoleType.PREFILL
@@ -95,23 +101,22 @@ public class RequestSchedulerV2 {
         this.prefillQueues = prefillQueues;
         this.decodeQueue = new DecodeQueue(priorityOrdering);
         this.cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, mainLoopSignal, prefillQueues,
-                prefillLoopSignal, decodeQueue, decodeLoopSignal);
+                decodeQueue, decodeLoopSignal);
         this.mainQueueLoop = new MainQueueLoop(mainQueue, mainLoopSignal, cleanup, queueCapacity, endpointRegistry,
-                placementAvailability, configService, new PrefillPicker(router, prefillStrategy), prefillQueues,
-                prefillRole, this::sendToPrefillQueue);
-        this.prefillQueueLoop = new PrefillQueueLoop(prefillQueues, prefillLoopSignal, cleanup, mainQueue,
-                endpointRegistry, configService, reporter, this::sendToDecodeQueue);
-        this.decodeQueueLoop =
-                new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, placementAvailability, decodeSelector,
-                        router, preemptionCoordinator, new EmptyDecodeFinder(workerDirectory), configService, reporter);
+                placementAvailability, configService, new PrefillPicker(router, prefillStrategy, prefillQueues),
+                prefillQueues, prefillRole, this::sendToPrefillQueue, processWorkers("main", mainLoopSignal));
+        this.decodeQueueLoop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, placementAvailability,
+                decodeSelector, router, preemptionCoordinator, new EmptyDecodeFinder(workerDirectory), configService,
+                reporter, processWorkers("decode", decodeLoopSignal), prefillCheck, reservations);
         this.deadlineTimer = new ScheduledThreadPoolExecutor(1, task -> {
             Thread thread = new Thread(task, "flexlb-v2-deadline");
             thread.setDaemon(true);
             return thread;
         });
         this.deadlineTimer.setRemoveOnCancelPolicy(true);
+        prefillQueues.start(queue -> new PrefillQueueLoop(queue, prefillQueues, cleanup, mainQueue, endpointRegistry,
+                configService, reporter, this::sendToDecodeQueue));
         mainQueueLoop.start();
-        prefillQueueLoop.start();
         decodeQueueLoop.start();
     }
 
@@ -167,7 +172,20 @@ public class RequestSchedulerV2 {
 
     private void sendToPrefillQueue(Request request) {
         prefillQueues.addWaiting(request);
-        prefillLoopSignal.wake();
+    }
+
+    /**
+     * 主队列和 Decode 各自使用独立的准备线程池，线程数沿用原主队列的启动配置。
+     */
+    private <T extends AutoCloseable> ProcessWorkers<T> processWorkers(String name, LoopSignal signal) {
+        int count = configService.loadBalanceConfig().getInternalRuntime().getQueuePlannerThreads();
+        AtomicInteger workerId = new AtomicInteger();
+        ExecutorService executor = Executors.newFixedThreadPool(count, task -> {
+            Thread thread = new Thread(task, "flexlb-v2-" + name + "-worker-" + workerId.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        });
+        return new ProcessWorkers<>(executor, count, signal, configService.loadBalanceConfig().isPriorityOrdering());
     }
 
     /**
@@ -175,8 +193,12 @@ public class RequestSchedulerV2 {
      */
     private void sendToDecodeQueue(Request request) {
         if (!needsDecode(request)) {
-            if (request.publish(Stage.DECODE_WAITING, List.of(request.prefillChoice().serverStatus()))) {
-                cleanup.releasePublished(request);
+            try (WorkerEndpoint.EndpointHold hold = prefillCheck.hold(request)) {
+                if (hold == null) {
+                    cleanup.returnToMain(request, Stage.DECODE_WAITING);
+                } else if (request.publish(Stage.DECODE_WAITING, List.of(request.prefillChoice().serverStatus()))) {
+                    cleanup.releasePublished(request);
+                }
             }
             return;
         }
@@ -255,7 +277,7 @@ public class RequestSchedulerV2 {
             request.fail(StrategyErrorType.DISPATCH_FAILED, SHUTTING_DOWN_MESSAGE);
         }
         mainQueueLoop.close();
-        prefillQueueLoop.close();
+        prefillQueues.close();
         decodeQueueLoop.close();
         deadlineTimer.shutdownNow();
     }

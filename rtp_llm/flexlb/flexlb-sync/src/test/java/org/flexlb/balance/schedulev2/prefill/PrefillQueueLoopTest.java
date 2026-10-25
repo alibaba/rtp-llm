@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -43,7 +44,6 @@ class PrefillQueueLoopTest {
     private final ConfigService configService = mock(ConfigService.class);
     private final QueueCapacity queueCapacity = new QueueCapacity();
     private final LoopSignal mainLoopSignal = new LoopSignal();
-    private final LoopSignal prefillLoopSignal = new LoopSignal();
     private final RequestTable requestTable = new RequestTable();
     private final MainQueue mainQueue = new MainQueue(queueCapacity, mainLoopSignal, false);
     private final PrefillQueueRegistry queues;
@@ -52,7 +52,7 @@ class PrefillQueueLoopTest {
     private final PrefillEndpoint endpoint = V2TestSupport.prefillEndpoint("p1:8000");
     private final List<Request> sentToDecode = new ArrayList<>();
     private final RequestSchedulerReporter reporter = mock(RequestSchedulerReporter.class);
-    private final PrefillQueueLoop loop;
+    private PrefillQueueLoop loop;
 
     PrefillQueueLoopTest() {
         when(configService.loadBalanceConfig()).thenReturn(config);
@@ -60,10 +60,8 @@ class PrefillQueueLoopTest {
         when(endpointRegistry.getEndpointCount(RoleType.PREFILL)).thenReturn(1);
         when(endpointRegistry.get(RoleType.PREFILL, "p1:8000")).thenReturn(endpoint);
         queues = new PrefillQueueRegistry(configService);
-        cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, mainLoopSignal, queues, prefillLoopSignal,
+        cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, mainLoopSignal, queues,
                 new DecodeQueue(false), new LoopSignal());
-        loop = new PrefillQueueLoop(queues, prefillLoopSignal, cleanup, mainQueue, endpointRegistry, configService,
-                reporter, sentToDecode::add);
     }
 
     @Test
@@ -96,6 +94,7 @@ class PrefillQueueLoopTest {
         assertEquals(1, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
         assertEquals(1L, queueCapacity.globalQueueAndEngineSubQueueCount());
         assertEquals(1, queues.find(endpoint).dispatchedCount());
+
         Request other = addWaiting("2");
         assertTrue(request.publish(Stage.DECODE_WAITING, List.of()));
         cleanup.releasePublished(request);
@@ -186,6 +185,10 @@ class PrefillQueueLoopTest {
     }
 
     private Request addWaiting(String requestId, long seqLen) {
+        return addWaiting(requestId, seqLen, endpoint);
+    }
+
+    private Request addWaiting(String requestId, long seqLen, PrefillEndpoint target) {
         Request request = V2TestSupport.request(config, requestId, 50, seqLen);
         request.future().whenComplete((response, failure) -> {
             if (request.stage().isEnded()) {
@@ -196,10 +199,14 @@ class PrefillQueueLoopTest {
         assertNull(mainQueue.add(request, config));
         assertTrue(queueCapacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 4));
         request.holdQueueSlot(RoleType.PREFILL);
-        V2TestSupport.choose(request, endpoint, 0L, 10L);
+        V2TestSupport.choose(request, target, 0L, 10L);
         assertTrue(request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING));
         mainQueue.remove(request);
         queues.addWaiting(request);
+        if (loop == null) {
+            loop = new PrefillQueueLoop(queues.find(endpoint), queues, cleanup, mainQueue, endpointRegistry,
+                    configService, reporter, sentToDecode::add);
+        }
         return request;
     }
 
@@ -210,9 +217,12 @@ class PrefillQueueLoopTest {
         V2TestSupport.report(endpoint, 1L, 50L, 1_000L, Map.of("engine-request", TaskPhase.RUNNING));
         Request head = addWaiting("1", 100L);
         Request small = addWaiting("2", 16L);
+
         assertTrue(loop.runOnce());
+
         assertEquals(Stage.PREFILL_WAITING, head.stage());
         assertEquals(List.of(small), sentToDecode);
+
         head.setPrefillQueuedAtMs(System.currentTimeMillis() - 120_000L);
         Request later = addWaiting("3", 16L);
         loop.runOnce();
@@ -229,8 +239,10 @@ class PrefillQueueLoopTest {
         Request small = addWaiting("2", 16L);
         loop.runOnce();
         assertTrue(sentToDecode.isEmpty());
+
         config.getDispatcher().setDispatchStarvationThresholdMs(60_000L);
         loop.runOnce();
+
         assertEquals(Stage.PREFILL_WAITING, head.stage());
         assertEquals(List.of(small), sentToDecode);
     }
@@ -241,7 +253,9 @@ class PrefillQueueLoopTest {
         V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of("engine-request", TaskPhase.RUNNING));
         Request head = addWaiting("1", 100L);
         Request small = addWaiting("2", 1L);
+
         loop.runOnce();
+
         assertEquals(Stage.PREFILL_WAITING, head.stage());
         assertEquals(Stage.PREFILL_WAITING, small.stage());
         assertTrue(sentToDecode.isEmpty());
@@ -253,8 +267,10 @@ class PrefillQueueLoopTest {
         Request request = addWaiting("1");
         loop.runOnce();
         Request next = V2TestSupport.request(config, "2", 50, 16L);
+
         assertEquals(StrategyErrorType.QUEUE_FULL, mainQueue.add(next, config));
         assertEquals(Stage.DECODE_WAITING, request.stage());
+
         request.publish(Stage.DECODE_WAITING, List.of());
         cleanup.releasePublished(request);
         assertNull(mainQueue.add(next, config));
@@ -262,6 +278,7 @@ class PrefillQueueLoopTest {
 
     @Test
     void loopContinuesAfterError() throws InterruptedException {
+        addWaiting("1");
         CountDownLatch nextRound = new CountDownLatch(1);
         AtomicInteger calls = new AtomicInteger();
         doAnswer(call -> {
@@ -271,11 +288,44 @@ class PrefillQueueLoopTest {
             nextRound.countDown();
             return config;
         }).when(configService).loadBalanceConfig();
+
         loop.start();
         try {
             assertTrue(nextRound.await(5, TimeUnit.SECONDS));
         } finally {
             loop.close();
+        }
+    }
+
+    @Test
+    void eachPrefillHasItsOwnThreadAndSlowMachineDoesNotBlockOthers() throws Exception {
+        PrefillEndpoint other = V2TestSupport.prefillEndpoint("p2:8000");
+        when(endpointRegistry.get(RoleType.PREFILL, "p2:8000")).thenReturn(other);
+        CountDownLatch firstReadingStatus = new CountDownLatch(1);
+        CountDownLatch finishStatus = new CountDownLatch(1);
+        CompletableFuture<Request> secondSent = new CompletableFuture<>();
+        var status = endpoint.getStatus();
+        doAnswer(call -> {
+            firstReadingStatus.countDown();
+            assertTrue(finishStatus.await(5, TimeUnit.SECONDS));
+            return null;
+        }).when(status).committedWorkerStatus();
+        queues.start(queue -> new PrefillQueueLoop(queue, queues, cleanup, mainQueue, endpointRegistry, configService,
+                reporter, request -> {
+                    if (request.prefillChoice().endpoint() == other) {
+                        secondSent.complete(request);
+                    }
+                }));
+        Request first = addWaiting("1");
+        try {
+            assertTrue(firstReadingStatus.await(5, TimeUnit.SECONDS));
+            Request second = addWaiting("2", 16L, other);
+            assertEquals(second, secondSent.get(5, TimeUnit.SECONDS));
+            assertEquals(Stage.PREFILL_WAITING, first.stage());
+        } finally {
+            first.cancel(CancelReason.CLIENT_CANCELLED);
+            queues.close();
+            finishStatus.countDown();
         }
     }
 }

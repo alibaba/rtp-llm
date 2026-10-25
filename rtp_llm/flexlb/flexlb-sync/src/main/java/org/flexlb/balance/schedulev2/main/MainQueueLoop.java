@@ -5,13 +5,16 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.schedulev2.LoopSignal;
+import org.flexlb.balance.schedulev2.ProcessWorkers;
 import org.flexlb.balance.schedulev2.RequestCleanup;
+import org.flexlb.balance.schedulev2.SelectionResult;
 import org.flexlb.balance.schedulev2.prefill.PrefillPicker;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueue;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.balance.schedulev2.request.PrefillChoice;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.schedulev2.request.Stage;
+import org.flexlb.balance.strategy.PrefillInputs;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -26,7 +29,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /**
- * 主队列出队线程：按顺序取请求，选 Prefill，再占子队列名额，然后交给 Prefill 队列。
+ * 多个 worker 并行准备缓存匹配和请求自身耗时，主队列调度线程用最新负载作最终选择。
+ * 每处理一份材料，紧接着占子队列名额、抢占并交给 Prefill 队列，再处理下一份材料。
  * <p>
  * 名额上限 = min(maxQueuedRequests, Prefill 机器数 × maxInflightPerPrefillWorker × prefillSubqueueLimitMultiplier)，
  * 名额满时，高优先级请求尝试挤掉选中 Prefill 队列里的低优先级请求。名额保留到发布时才归还。
@@ -53,6 +57,7 @@ public final class MainQueueLoop {
     private final ConfigService configService;
     private final PrefillPicker prefillPicker;
     private final PrefillQueueRegistry prefillQueues;
+    private final ProcessWorkers<PrefillInputs> processWorkers;
     /**
      * 这个部署里 Prefill 用的角色：PD 分离时是 PREFILL，PD 合一时是 PDFUSION。
      */
@@ -78,7 +83,8 @@ public final class MainQueueLoop {
                          PrefillPicker prefillPicker,
                          PrefillQueueRegistry prefillQueues,
                          RoleType prefillRole,
-                         Consumer<Request> sendToPrefillQueue) {
+                         Consumer<Request> sendToPrefillQueue,
+                         ProcessWorkers<PrefillInputs> processWorkers) {
         this.mainQueue = mainQueue;
         this.loopSignal = loopSignal;
         this.cleanup = cleanup;
@@ -88,6 +94,7 @@ public final class MainQueueLoop {
         this.configService = configService;
         this.prefillPicker = prefillPicker;
         this.prefillQueues = prefillQueues;
+        this.processWorkers = processWorkers;
         this.prefillRole = prefillRole;
         this.sendToPrefillQueue = sendToPrefillQueue;
         this.thread = new Thread(this::run, "flexlb-v2-main-queue");
@@ -102,6 +109,7 @@ public final class MainQueueLoop {
     }
 
     public void close() {
+        processWorkers.close();
         if (running.compareAndSet(true, false)) {
             placementAvailability.removeListener(prefillChangeListener);
             loopSignal.wake();
@@ -134,6 +142,8 @@ public final class MainQueueLoop {
      */
     boolean runOnce() {
         FlexlbConfig config = configService.loadBalanceConfig();
+        long cacheTtlMs = config.getDispatcher().getCacheMatchResultTtlMs();
+        processWorkers.removeExpired(cacheTtlMs);
         if (endpointRegistry.getEndpointCount(prefillRole) == 0) {
             return false;
         }
@@ -152,10 +162,38 @@ public final class MainQueueLoop {
                 continue;
             }
             scanned++;
-            if (pickPrefill(request, group, config)) {
+            SelectionResult<PrefillInputs> completed = processWorkers.get(request, cacheTtlMs);
+            if (completed == null) {
+                processWorkers.submit(request, () -> prefillPicker.prepare(request.ctx(), prefillRole, group));
+                completed = processWorkers.get(request, cacheTtlMs);
+            }
+            if (completed == null) {
+                continue;
+            }
+            SelectionResult<PrefillInputs> result = completed;
+            try {
+                if (request.stage() != Stage.MAIN_WAITING) {
+                    continue;
+                }
+                if (result.failure() != null) {
+                    request.fail(StrategyErrorType.DISPATCH_FAILED,
+                            "prefill selection failed: " + result.failure().getMessage());
+                    moved = true;
+                } else if (!prefillPicker.inputsAreCurrent(result.value(), prefillRole, group)) {
+                    processWorkers.discard(request);
+                } else if (pickPrefill(request, group, result.value(), config)) {
+                    moved = true;
+                } else {
+                    blockedGroups.add(group);
+                }
+            } catch (Throwable failure) {
+                request.fail(StrategyErrorType.DISPATCH_FAILED, "prefill selection failed: " + failure.getMessage());
+                Logger.error("V2 prefill selection result failed", failure);
                 moved = true;
-            } else {
-                blockedGroups.add(group);
+            } finally {
+                if (request.stage() != Stage.MAIN_WAITING) {
+                    processWorkers.discard(request);
+                }
             }
         }
         return moved;
@@ -164,17 +202,13 @@ public final class MainQueueLoop {
     /**
      * 选 Prefill 并尝试占子队列名额。返回 false 表示暂时没有机器或名额，请求留在主队列。
      */
-    private boolean pickPrefill(Request request, String group, FlexlbConfig config) {
-        PlacementResult<SelectedRole, RoleType> result;
-        try {
-            result = prefillPicker.pick(request.ctx(), prefillRole, group);
-        } catch (RuntimeException failure) {
-            request.fail(StrategyErrorType.DISPATCH_FAILED, "prefill selection failed: " + failure.getMessage());
-            return true;
-        }
+    private boolean pickPrefill(Request request, String group, PrefillInputs inputs, FlexlbConfig config) {
+        PlacementResult<SelectedRole, RoleType> result = prefillPicker.pick(request, prefillRole, group, inputs);
         switch (result.status()) {
             case SUCCESS -> {
-                return sendPicked(request, result.value(), config);
+                try (SelectedRole selected = result.value()) {
+                    return sendPicked(request, selected, config);
+                }
             }
             case BLOCKED -> {
                 return false;

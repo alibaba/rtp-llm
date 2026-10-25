@@ -14,7 +14,10 @@ import org.flexlb.balance.scheduler.decode.DecodeMode;
 import org.flexlb.balance.scheduler.decode.DecodeRequirement;
 import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
 import org.flexlb.balance.schedulev2.LoopSignal;
+import org.flexlb.balance.schedulev2.PrefillPublishCheck;
+import org.flexlb.balance.schedulev2.ProcessWorkers;
 import org.flexlb.balance.schedulev2.RequestCleanup;
+import org.flexlb.balance.schedulev2.SelectionResult;
 import org.flexlb.balance.schedulev2.request.DecodeChoice;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.schedulev2.request.Stage;
@@ -50,7 +53,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <li>reserved 的请求按顺序向 reserve 的那台 Decode 要 permit，拿到后发布结果（PUBLISHED）。
  * 发布后在 Decode 上有 reserve 的请求进入 published。扫到已经结束的请求就归还它的 reserve 并移出 reserved。
  * 某台 Decode 给不出 permit 时，这一轮跳过 reserve 在它上面的其他请求，等它有空位时被唤醒；</li>
- * <li>waiting 的请求按顺序选 Decode 并 reserve，成功后进入 DECODE_RESERVED。reserve 带容量上限，放不下就不 reserve。
+ * <li>waiting 的请求交给 worker 准备容量需求，调度线程读取最新节点负载、作最终选择并立即 reserve。
+ * reserve、空机器放行、抢占和归还都只在调度线程执行。成功后进入 DECODE_RESERVED。
  * 某个 group 排在最前面的请求放不下时，它留在 waiting。是否跳过同 group 后面的请求见 {@link #reserveWaiting}。</li>
  * </ol>
  * reserve 的 Decode 下线或 reserve 丢失时，请求退回 waiting 重新选。
@@ -83,6 +87,9 @@ public final class DecodeQueueLoop {
     private final EmptyDecodeFinder emptyDecodeFinder;
     private final ConfigService configService;
     private final RequestSchedulerReporter reporter;
+    private final ProcessWorkers<DecodeInputs> processWorkers;
+    private final PrefillPublishCheck prefillCheck;
+    private final DecodeReservations reservations;
     /**
      * Decode 上下线或 reserve 容量变化时唤醒循环，让 waiting 的请求马上重试。
      */
@@ -107,7 +114,10 @@ public final class DecodeQueueLoop {
                            DecodePreemptionCoordinator preemptionCoordinator,
                            EmptyDecodeFinder emptyDecodeFinder,
                            ConfigService configService,
-                           RequestSchedulerReporter reporter) {
+                           RequestSchedulerReporter reporter,
+                           ProcessWorkers<DecodeInputs> processWorkers,
+                           PrefillPublishCheck prefillCheck,
+                           DecodeReservations reservations) {
         this.decodeQueue = decodeQueue;
         this.loopSignal = loopSignal;
         this.cleanup = cleanup;
@@ -118,6 +128,9 @@ public final class DecodeQueueLoop {
         this.emptyDecodeFinder = emptyDecodeFinder;
         this.configService = configService;
         this.reporter = reporter;
+        this.processWorkers = processWorkers;
+        this.prefillCheck = prefillCheck;
+        this.reservations = reservations;
         this.capacityListener = loopSignal::wake;
         this.thread = new Thread(this::run, "flexlb-v2-decode-queue");
         this.thread.setDaemon(true);
@@ -131,6 +144,7 @@ public final class DecodeQueueLoop {
     }
 
     public void close() {
+        processWorkers.close();
         if (running.compareAndSet(true, false)) {
             placementAvailability.removeListener(decodeChangeListener);
             loopSignal.wake();
@@ -157,6 +171,10 @@ public final class DecodeQueueLoop {
             }
         }
         releaseEndedReserved();
+        for (Iterator<Request> iterator = decodeQueue.publishedIterator(); iterator.hasNext();) {
+            reservations.remove(iterator.next().requestId());
+            iterator.remove();
+        }
         for (DecodeEndpoint endpoint : listenedEndpoints) {
             endpoint.removeEngineDispatchCapacityListener(capacityListener);
         }
@@ -178,8 +196,12 @@ public final class DecodeQueueLoop {
      */
     private void releaseNow(Request request) {
         DecodeChoice choice = request.takeDecodeChoice();
-        if (choice != null) {
-            release(choice);
+        try {
+            if (choice != null) {
+                release(choice);
+            }
+        } finally {
+            reservations.remove(request.requestId());
         }
     }
 
@@ -221,11 +243,13 @@ public final class DecodeQueueLoop {
             if (endpoint.isRetired() || endpoint.isAcceptedByEngine(reservation)
                     || !reservation.equals(endpoint.reservationHandle(request.requestId()))) {
                 iterator.remove();
+                reservations.remove(request.requestId());
                 continue;
             }
             if (DispatchConfirmTimeout.expired(request, nowMs, confirmTimeoutMs)) {
                 iterator.remove();
                 expire(choice);
+                reservations.remove(request.requestId());
                 reporter.reportDispatchConfirmTimeout();
                 released = true;
             }
@@ -257,6 +281,11 @@ public final class DecodeQueueLoop {
             DecodeChoice choice = request.decodeChoice();
             if (request.stage() != Stage.DECODE_RESERVED || choice == null) {
                 decodeQueue.removeReserved(request);
+                continue;
+            }
+            if (!prefillCheck.isAvailable(request)) {
+                returnToMain(request);
+                moved = true;
                 continue;
             }
             if (fullEndpoints.contains(choice.endpoint())) {
@@ -304,11 +333,27 @@ public final class DecodeQueueLoop {
     }
 
     private void publish(Request request, DecodeChoice choice, DecodeEndpoint.EngineDispatchPermit permit) {
+        try (WorkerEndpoint.EndpointHold hold = prefillCheck.hold(request)) {
+            if (hold == null) {
+                if (permit != null) {
+                    permit.release();
+                }
+                returnToMain(request);
+                return;
+            }
+            publishResult(request, choice, permit);
+        }
+    }
+
+    private void publishResult(Request request, DecodeChoice choice, DecodeEndpoint.EngineDispatchPermit permit) {
         DecodeEndpoint.EngineDispatchPermitTransferStatus transfer;
         try {
-            transfer = permit.dispatch();
+            transfer =
+                    permit == null ? DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED : permit.dispatch();
         } catch (RuntimeException failure) {
-            permit.release();
+            if (permit != null) {
+                permit.release();
+            }
             request.fail(StrategyErrorType.DISPATCH_FAILED, "decode dispatch failed: " + failure.getMessage());
             return;
         }
@@ -340,6 +385,20 @@ public final class DecodeQueueLoop {
     }
 
     /**
+     * Prefill 已不可用，先在 Decode 线程归还预占、丢弃本阶段材料，再退回主队列重新选 Prefill。
+     */
+    private void returnToMain(Request request) {
+        Stage expected = request.stage();
+        decodeQueue.removeWaiting(request);
+        decodeQueue.removeReserved(request);
+        releaseNow(request);
+        processWorkers.discard(request);
+        if (expected == Stage.DECODE_WAITING || expected == Stage.DECODE_RESERVED) {
+            cleanup.returnToMain(request, expected);
+        }
+    }
+
+    /**
      * 线程退出前归还 reserved 里已经结束的请求的 reserve。
      */
     private void releaseEndedReserved() {
@@ -367,6 +426,9 @@ public final class DecodeQueueLoop {
      * 让归还的容量先留给队头。阈值是 0 时一直严格按顺序。
      */
     private boolean reserveWaiting() {
+        // Decode 材料只有请求需求和评分公式，随请求阶段清理，不使用缓存匹配结果的 TTL。
+        long cacheTtlMs = Long.MAX_VALUE;
+        processWorkers.removeExpired(cacheTtlMs);
         long starvationThresholdMs =
                 configService.loadBalanceConfig().getDispatcher().getDispatchStarvationThresholdMs();
         long now = System.currentTimeMillis();
@@ -381,17 +443,50 @@ public final class DecodeQueueLoop {
                 decodeQueue.removeWaiting(request);
                 continue;
             }
+            if (!prefillCheck.isAvailable(request)) {
+                returnToMain(request);
+                moved = true;
+                continue;
+            }
             String group = groupOf(request);
             if (blockedGroups.contains(group)) {
                 continue;
             }
             scanned++;
-            if (pickDecode(request, group)) {
-                moved = true;
+            SelectionResult<DecodeInputs> completed = processWorkers.get(request, cacheTtlMs);
+            if (completed == null) {
+                processWorkers.submit(request, () -> new DecodeInputs(DecodeRequirement.capture(request.ctx())));
+                completed = processWorkers.get(request, cacheTtlMs);
+            }
+            if (completed == null) {
+                // 已等太久的队头还在准备材料时，也不能让后面的请求先占走容量。
+                if (groupsWithHead.add(group) && isStarved(request, starvationThresholdMs, now)) {
+                    blockedGroups.add(group);
+                }
                 continue;
             }
-            if (groupsWithHead.add(group) && isStarved(request, starvationThresholdMs, now)) {
-                blockedGroups.add(group);
+            SelectionResult<DecodeInputs> result = completed;
+            try {
+                if (request.stage() != Stage.DECODE_WAITING) {
+                    continue;
+                }
+                if (result.failure() != null) {
+                    request.fail(StrategyErrorType.DISPATCH_FAILED,
+                            "decode selection failed: " + result.failure().getMessage());
+                    moved = true;
+                } else if (pickDecode(request, group, result.value())) {
+                    moved = true;
+                } else if (groupsWithHead.add(group) && isStarved(request, starvationThresholdMs, now)) {
+                    blockedGroups.add(group);
+                }
+            } catch (Throwable failure) {
+                request.fail(StrategyErrorType.DISPATCH_FAILED, "decode selection failed: " + failure.getMessage());
+                Logger.error("V2 decode selection result failed", failure);
+                moved = true;
+            } finally {
+                if (request.stage() != Stage.DECODE_WAITING) {
+                    processWorkers.discard(request);
+                }
             }
         }
         return moved;
@@ -418,16 +513,20 @@ public final class DecodeQueueLoop {
     /**
      * 给请求选 Decode 并 reserve。返回 false 表示这个 group 暂时没有可选的 Decode，请求留在 waiting。
      */
-    private boolean pickDecode(Request request, String group) {
-        DecodeRequirement requirement;
-        PlacementResult<SelectedRole, RoleType> result;
+    private boolean pickDecode(Request request, String group, DecodeInputs inputs) {
+        reservations.add(request.requestId());
         try {
-            requirement = DecodeRequirement.capture(request.ctx());
-            result = decodeSelector.select(request.ctx(), requirement, group);
-        } catch (RuntimeException failure) {
-            request.fail(StrategyErrorType.DISPATCH_FAILED, "decode selection failed: " + failure.getMessage());
-            return true;
+            return selectAndReserve(request, group, inputs);
+        } finally {
+            if (request.decodeChoice() == null) {
+                reservations.remove(request.requestId());
+            }
         }
+    }
+
+    private boolean selectAndReserve(Request request, String group, DecodeInputs inputs) {
+        DecodeRequirement requirement = inputs.requirement();
+        PlacementResult<SelectedRole, RoleType> result = decodeSelector.select(request.ctx(), requirement, group);
         switch (result.status()) {
             case SUCCESS -> {
                 return reserve(request, result.value(), requirement, group);
@@ -455,6 +554,9 @@ public final class DecodeQueueLoop {
         DecodeChoice choice;
         try (selected; WorkerEndpoint.EndpointHold hold = selected.takeEndpointHold()) {
             DecodeEndpoint endpoint = (DecodeEndpoint) hold.endpoint();
+            if (endpoint.isRetired()) {
+                return false;
+            }
             DecodeEndpoint.ReservationHandle reservation =
                     endpoint.reserve(hold, request.requestId(), requirement.inputKvTokens(),
                             requirement.inputAndMaxOutputKvTokens(), requirement.priority(), requirement.capacity());
@@ -510,13 +612,19 @@ public final class DecodeQueueLoop {
         // 先设置再发布：发布前请求随时可能结束，结束时的清理要能看到它有 reserve
         request.setDecodeChoice(choice);
         decodeQueue.removeWaiting(request);
-        if (request.publish(Stage.DECODE_WAITING,
-                List.of(request.prefillChoice().serverStatus(), choice.serverStatus()))) {
-            cleanup.releasePublished(request);
-            decodeQueue.addPublished(request);
-        } else {
-            // 请求已经结束，结果没发给调用方，归还 reserve
-            releaseNow(request);
+        try (WorkerEndpoint.EndpointHold hold = prefillCheck.hold(request)) {
+            if (hold == null) {
+                returnToMain(request);
+                return true;
+            }
+            if (request.publish(Stage.DECODE_WAITING,
+                    List.of(request.prefillChoice().serverStatus(), choice.serverStatus()))) {
+                cleanup.releasePublished(request);
+                decodeQueue.addPublished(request);
+            } else {
+                // 请求已经结束，结果没发给调用方，归还 reserve
+                releaseNow(request);
+            }
         }
         return true;
     }

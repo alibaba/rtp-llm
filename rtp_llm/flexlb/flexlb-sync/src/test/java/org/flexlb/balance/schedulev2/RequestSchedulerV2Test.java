@@ -8,6 +8,7 @@ import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.balance.schedulev2.decode.DecodeReservations;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
@@ -159,7 +160,7 @@ class RequestSchedulerV2Test {
                 new PlacementAvailability(), mock(DefaultRouter.class), mock(CostBasedPrefillStrategy.class),
                 mock(DecodeSelector.class), new PrefillQueueRegistry(configService), modelMetaConfig,
                 mock(DecodePreemptionCoordinator.class), mock(RequestSchedulerReporter.class),
-                mock(WorkerDirectory.class));
+                mock(WorkerDirectory.class), new DecodeReservations());
     }
 
     private BalanceContext context(String requestId, int priority, long expiresInMs) {
