@@ -8,6 +8,7 @@ from torch import nn
 
 from rtp_llm.models_py.model_desc.kimi_k3_mtp import KimiK3MtpModel
 from rtp_llm.models_py.modules import Embedding
+from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
 from rtp_llm.ops import RoleType
 
 
@@ -78,12 +79,29 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
                         )
                         self.assertEqual(ctor.call_args.args[-1], expected)
 
-    def test_fp8_collective_flags_do_not_initialize_bf16_draft(self):
+    def _bf16_mtp_model(self, device="cpu"):
         model = object.__new__(KimiK3MtpModel)
         nn.Module.__init__(model)
         model.tp_size = 8
         model.parallelism_config = SimpleNamespace(role_type=RoleType.PREFILL)
+        model.config = SimpleNamespace(hidden_size=8)
+        model.fp8_collective_max_tokens = 64
         model._fp8_collective = None
+        attention = nn.Module()
+        attention.input = CudaF16Linear(
+            torch.ones(8, 8, dtype=torch.bfloat16, device=device)
+        )
+        attention.output = CudaF16Linear(
+            torch.ones(8, 8, dtype=torch.bfloat16, device=device)
+        )
+        attention._bf16_collective = None
+        layer = nn.Module()
+        layer.attention = attention
+        model.layers = nn.ModuleList([layer])
+        return model
+
+    def test_fp8_collective_flags_do_not_initialize_bf16_draft(self):
+        model = self._bf16_mtp_model()
         init_resource = SimpleNamespace(kv_cache=None, is_decode_role=False)
         with (
             patch.dict(
@@ -97,9 +115,46 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
             patch(
                 "rtp_llm.models_py.modules.kimi_k3.kernel_jit_warmup.warmup_kimi_k3_kernel_jit",
             ) as warmup,
+            patch(
+                "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_comm_fusion.Fp8CollectiveProjection",
+            ) as fp8_collective,
         ):
             self.assertTrue(model.initialize(init_resource))
         warmup.assert_called_once_with(model, init_resource)
+        fp8_collective.assert_not_called()
+        self.assertIsNone(model._fp8_collective)
+
+    def test_bf16_draft_initializes_eligible_prefill_collective(self):
+        model = self._bf16_mtp_model(device="cuda")
+        init_resource = SimpleNamespace(kv_cache=None, is_decode_role=False)
+        group = object()
+        with (
+            patch(
+                "rtp_llm.models_py.model_desc.module_base.GptModelBase.initialize",
+                return_value=True,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.kimi_k3.kernel_jit_warmup.warmup_kimi_k3_kernel_jit",
+            ),
+            patch("torch.cuda.get_device_capability", return_value=(10, 3)),
+            patch(
+                "rtp_llm.models_py.model_desc.kimi_k3._get_group",
+                return_value=group,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.factory.linear.impl.cuda.bf16_comm_fusion.Bf16CollectiveProjection",
+            ) as bf16_collective,
+        ):
+            self.assertTrue(model.initialize(init_resource))
+        attention = model.layers[0].attention
+        bf16_collective.assert_called_once_with(
+            group,
+            attention.input.weight.device,
+            max_m=64,
+            hidden_size=8,
+            output_projections=[attention.output],
+        )
+        self.assertIs(attention._bf16_collective, bf16_collective.return_value)
         self.assertIsNone(model._fp8_collective)
 
     def test_local_projection_matches_full_projection_slice(self):

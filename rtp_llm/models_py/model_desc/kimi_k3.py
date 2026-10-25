@@ -326,12 +326,41 @@ class KimiK3Model(GptModelBase):
     def initialize(self, init_resource) -> bool:
         ready = super().initialize(init_resource)
         self._initialize_fp8_collective()
+        self._initialize_bf16_collective(init_resource)
         from rtp_llm.models_py.modules.kimi_k3.kernel_jit_warmup import (
             warmup_kimi_k3_kernel_jit,
         )
 
         warmup_kimi_k3_kernel_jit(self, init_resource)
         return ready
+
+    def _initialize_bf16_collective(self, init_resource):
+        if self.tp_size == 1 or init_resource.is_decode_role:
+            return
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.bf16_comm_fusion import Bf16CollectiveProjection
+
+        attentions = [layer.attention for layer in self.layers]
+        if not attentions or any(
+            not isinstance(projection, CudaF16Linear)
+            or projection.weight.dtype != torch.bfloat16
+            or not projection.weight.is_cuda
+            or projection.bias is not None
+            for attention in attentions
+            for projection in (attention.input, attention.output)
+        ):
+            return
+        device = attentions[0].input.weight.device
+        if torch.cuda.get_device_capability(device) not in ((10, 0), (10, 3)):
+            return
+        collective = Bf16CollectiveProjection(
+            _get_group(Group.TP), device,
+            max_m=self.fp8_collective_max_tokens,
+            hidden_size=self.config.hidden_size,
+            output_projections=[attention.output for attention in attentions],
+        )
+        for attention in attentions:
+            attention._bf16_collective = collective
 
     def _initialize_fp8_collective(self) -> None:
         if self._fp8_collective is not None:

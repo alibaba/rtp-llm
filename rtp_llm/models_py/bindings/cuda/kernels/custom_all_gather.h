@@ -13,6 +13,7 @@ namespace rtp_llm {
 //
 // Staging uses uint8[2 * TP * slot_bytes] and int32[SM_count] phase counters.
 // BF16 staging may change +zero to -zero; all other payload bits are preserved.
+// Direct uses uint8[SM_count, 128] semaphores and preserves all payload bits.
 // FP8 output scales use int32[ceil(K/512), align(global_rows,4)].
 void custom_all_gather_staging(const torch::Tensor& input,
                                torch::Tensor&       output,
@@ -22,6 +23,15 @@ void custom_all_gather_staging(const torch::Tensor& input,
                                int64_t              rank,
                                int64_t              blocks,
                                int64_t              threads);
+
+void custom_all_gather_direct(const torch::Tensor& input,
+                              torch::Tensor&       output,
+                              torch::Tensor&       semaphores,
+                              int64_t              output_mc_ptr,
+                              int64_t              semaphore_mc_ptr,
+                              int64_t              rank,
+                              int64_t              blocks,
+                              int64_t              threads);
 
 // FP8 payloads are raw uint8[local_rows, K], with packed scale words in
 // int32[ceil(K/512), align(local_rows, 4)]. Outputs are uint8[8*local_rows, K]
@@ -38,5 +48,17 @@ void custom_all_gather_fp8_staging(const torch::Tensor& values,
                                    int64_t              rank,
                                    int64_t              blocks,
                                    int64_t              threads);
+
+void custom_all_gather_fp8_direct(const torch::Tensor& values,
+                                  const torch::Tensor& scales,
+                                  torch::Tensor&       output_values,
+                                  torch::Tensor&       output_scales,
+                                  torch::Tensor&       semaphores,
+                                  int64_t              output_values_mc_ptr,
+                                  int64_t              output_scales_mc_ptr,
+                                  int64_t              semaphore_mc_ptr,
+                                  int64_t              rank,
+                                  int64_t              blocks,
+                                  int64_t              threads);
 
 }  // namespace rtp_llm
