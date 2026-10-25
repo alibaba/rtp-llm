@@ -6,7 +6,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
 import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.estimate.WorkView;
@@ -152,7 +152,7 @@ class RequestConfirmationTimeoutTest {
                 assertTrue(acquired.permit().release());
                 decode.release(next, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }
-            requests.processPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
+            requests.processPrefillStatus(prefill, RoleType.PREFILL, WorkerStatusFact.active(item));
             requests.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(reservation));
             assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(Long.toString(REQUEST_ID), 0L).state());
             assertEquals(0, requests.trackedRequestCount());

@@ -4,7 +4,7 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -520,8 +520,8 @@ class DeliverySettlementTest {
         assertFalse(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
 
         ledger.finish(111L, member.item());
-        member.slot().processPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.terminal(
-                member.item(), PrefillState.WorkerStatusFact.Kind.PRIORITY_CANCELED,
+        member.slot().processPrefillStatus(prefill, RoleType.PREFILL, WorkerStatusFact.terminal(
+                member.item(), WorkerStatusFact.Kind.PRIORITY_CANCELED,
                 StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode()));
 
         assertSame(response, member.item().future().join());

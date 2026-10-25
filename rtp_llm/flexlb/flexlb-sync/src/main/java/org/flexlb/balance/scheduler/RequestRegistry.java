@@ -8,7 +8,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.preemption.CancelTarget;
@@ -277,7 +277,7 @@ public class RequestRegistry {
         if (exactSlot != null) { exactSlot.expireInactiveRequest(nowMs); }
     }
 
-    void processPrefillStatus(PrefillEndpoint source, RoleType role, PrefillState.WorkerStatusFact fact) {
+    void processPrefillStatus(PrefillEndpoint source, RoleType role, WorkerStatusFact fact) {
         RequestSlot slot = requestSlot(fact.item().requestId());
         if (slot != null) { slot.processPrefillStatus(source, role, fact); }
     }

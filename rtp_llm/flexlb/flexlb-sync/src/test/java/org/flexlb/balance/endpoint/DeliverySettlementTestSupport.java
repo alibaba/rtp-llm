@@ -3,6 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.endpoint.prefill.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
+import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.TaskInfo;
@@ -59,7 +60,7 @@ public final class DeliverySettlementTestSupport {
         }
     }
 
-    public List<PrefillState.WorkerStatusFact> finish(long batchId, ScheduledRequest item) {
+    public List<WorkerStatusFact> finish(long batchId, ScheduledRequest item) {
         TaskInfo finished = new TaskInfo();
         finished.setRequestId(item.requestId());
         finished.setBatchId(batchId);

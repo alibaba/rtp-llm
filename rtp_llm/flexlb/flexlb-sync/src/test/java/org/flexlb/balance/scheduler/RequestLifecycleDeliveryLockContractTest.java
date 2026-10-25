@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
@@ -419,8 +419,8 @@ class RequestLifecycleDeliveryLockContractTest {
         RequestSlot original = lifecycle.requestSlot("207");
 
         new EndpointEventHandler(lifecycle).onPrefillStatus(endpoint, RoleType.PDFUSION,
-                List.of(PrefillState.WorkerStatusFact.terminal(
-                        registered.item(), PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L)));
+                List.of(WorkerStatusFact.terminal(
+                        registered.item(), WorkerStatusFact.Kind.COMPLETED, 0L)));
         Response terminal = registered.future().get(5L, TimeUnit.SECONDS);
         assertTrue(terminal.isSuccess());
 

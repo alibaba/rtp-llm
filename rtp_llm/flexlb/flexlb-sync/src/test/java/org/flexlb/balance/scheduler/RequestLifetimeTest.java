@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
@@ -349,7 +349,7 @@ class RequestLifetimeTest {
             EndpointEventHandler eventHandler = new EndpointEventHandler(registry);
             if (evidenceSource == RoleType.PREFILL) {
                 eventHandler.onPrefillStatus(prefill, RoleType.PREFILL,
-                        List.of(PrefillState.WorkerStatusFact.active(item)));
+                        List.of(WorkerStatusFact.active(item)));
             } else {
                 eventHandler.onDecodeStatus(decode, List.of(DecodeEndpoint.WorkerStatusFact.active(reservation)));
             }
@@ -423,7 +423,7 @@ class RequestLifetimeTest {
                 if (checks.incrementAndGet() == 1) {
                     // A matching status wins after the old timer fired but before cancellation.
                     org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(fixture.slot, "applyPrefillStatusLocked", fixture.item.prefillEp(), RoleType.PREFILL,
-                            PrefillState.WorkerStatusFact.active(fixture.item), start + 50L);
+                            WorkerStatusFact.active(fixture.item), start + 50L);
                     assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "requestInactiveLocked", invocation.getArgument(1, Long.class)));
                     now.set(start + 150L);
                 } else {
@@ -456,8 +456,8 @@ class RequestLifetimeTest {
             var oldTimer = mock(ExpirationTimer.DecisionDeadline.class);
             when(oldTimer.deadlineAtMs()).thenReturn(oldDeadline);
             org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(fixture.slot, "applyPrefillStatusLocked", fixture.item.prefillEp(), RoleType.PREFILL,
-                    PrefillState.WorkerStatusFact.terminal(fixture.item,
-                            PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L), oldDeadline + 100L);
+                    WorkerStatusFact.terminal(fixture.item,
+                            WorkerStatusFact.Kind.COMPLETED, 0L), oldDeadline + 100L);
             assertFalse(fixture.slot.installDecisionDeadline(oldTimer));
             var handoffTimer = mock(ExpirationTimer.DecisionDeadline.class);
             when(handoffTimer.deadlineAtMs()).thenReturn(fixture.slot.decisionDeadlineAtMs().orElseThrow());
@@ -512,9 +512,9 @@ class RequestLifetimeTest {
 
     private static void observePrefillAt(Fixture fixture, boolean completed, long nowMs) {
         org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(fixture.slot, "applyPrefillStatusLocked", fixture.item.prefillEp(), RoleType.PREFILL,
-                completed ? PrefillState.WorkerStatusFact.terminal(fixture.item,
-                        PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L)
-                        : PrefillState.WorkerStatusFact.active(fixture.item), nowMs);
+                completed ? WorkerStatusFact.terminal(fixture.item,
+                        WorkerStatusFact.Kind.COMPLETED, 0L)
+                        : WorkerStatusFact.active(fixture.item), nowMs);
     }
 
     private static Fixture fixture(boolean separateDecode) { return fixture(separateDecode, false); }
@@ -544,8 +544,8 @@ class RequestLifetimeTest {
 
     private static RequestSlot.EngineObservation observePrefill(RequestSlot slot, ScheduledRequest item, boolean completed) {
         return org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyPrefillStatusLocked", item.prefillEp(), RoleType.PREFILL,
-                completed ? PrefillState.WorkerStatusFact.terminal(item, PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L)
-                        : PrefillState.WorkerStatusFact.active(item), System.currentTimeMillis());
+                completed ? WorkerStatusFact.terminal(item, WorkerStatusFact.Kind.COMPLETED, 0L)
+                        : WorkerStatusFact.active(item), System.currentTimeMillis());
     }
 
     private static void startPrediction(RequestSlot slot) {

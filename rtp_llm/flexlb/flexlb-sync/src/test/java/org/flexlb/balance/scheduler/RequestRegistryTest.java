@@ -691,7 +691,7 @@ class RequestRegistryTest {
         RequestSlot slot = lifecycle.requestSlot("602");
         synchronized (slot) {
             org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyPrefillStatusLocked", registered.item().prefillEp(), org.flexlb.dao.route.RoleType.PREFILL,
-                    org.flexlb.balance.endpoint.prefill.PrefillState.WorkerStatusFact.active(registered.item()),
+                    org.flexlb.balance.endpoint.prefill.WorkerStatusFact.active(registered.item()),
                     System.currentTimeMillis());
         }
         lifecycle.cancelRequest("602", 0L, CancelReason.DEADLINE_EXCEEDED);

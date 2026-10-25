@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.dao.BalanceContext;
@@ -79,7 +79,7 @@ class RequestSlotTerminalSettlementTest {
         PreemptionRegistration claim = f.slot().tryInstallPreemption(3L, 4L, "victim");
         assertTrue(f.slot().updatePreemption(claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
         when(f.item().decodeEp().updatePreemption(4L, DecodeEndpoint.PreemptionUpdate.finished(RESERVATION))).thenReturn(false, true);
-        var failed = PrefillState.WorkerStatusFact.terminal(f.item(), PrefillState.WorkerStatusFact.Kind.FAILED, 9L);
+        var failed = WorkerStatusFact.terminal(f.item(), WorkerStatusFact.Kind.FAILED, 9L);
 
         f.slot().processPrefillStatus(f.item().prefillEp(), RoleType.PREFILL, failed);
         assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(f.slot(), "isTerminalRecordLocked"));

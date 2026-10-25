@@ -3,8 +3,11 @@ package org.flexlb.balance.endpoint;
 import lombok.Getter;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.endpoint.prefill.HeartbeatReconciliation;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
+import org.flexlb.balance.endpoint.prefill.StatusReconciliation;
+import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.batch.FinishedBatch;
 import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
@@ -373,7 +376,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
         WorkerStatus.StatusObservation observation = prepared.observation();
-        PrefillState.StatusReconciliation reconciliation =
+        StatusReconciliation reconciliation =
                 prefillState.reconcileWorkerStatus(
                         observation,
                         this::predictRepackedBatchMs,
@@ -387,7 +390,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         this::beginRetirement);
         reportFinishedBatchesNoFail(reconciliation.finishedBatches());
         rethrowPublicationFailure(reconciliation.publicationFailure());
-        List<PrefillState.WorkerStatusFact> facts =
+        List<WorkerStatusFact> facts =
                 reconciliation.schedulerFacts();
         return () -> endpointEvents.onPrefillStatus(
                 this, observation.role(), facts);
@@ -396,7 +399,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     @Override
     public Runnable initializeFromPreparedStatus(WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
-        PrefillState.StatusReconciliation reconciliation =
+        StatusReconciliation reconciliation =
                 prefillState.reconcileWorkerStatus(
                         observation,
                         this::predictRepackedBatchMs,
@@ -419,7 +422,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             throw new IllegalArgumentException(
                     "Status observation belongs to another Prefill generation");
         }
-        PrefillState.HeartbeatReconciliation reconciliation =
+        HeartbeatReconciliation reconciliation =
                 prefillState.reconcileHeartbeat(observation);
         if (reconciliation.schedulingInputsChanged()) {
             prefillQueue.signalSchedulingInputsChanged();

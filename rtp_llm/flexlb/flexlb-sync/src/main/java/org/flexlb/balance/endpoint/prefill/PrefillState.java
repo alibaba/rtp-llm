@@ -46,48 +46,6 @@ import java.util.function.ToLongFunction;
  */
 public final class PrefillState {
 
-    public record WorkerStatusFact(
-            ScheduledRequest item,
-            Kind kind,
-            long errorCode) {
-        public WorkerStatusFact {
-            Objects.requireNonNull(kind, "kind");
-            if (kind == Kind.ACTIVE && errorCode != 0L) {
-                throw new IllegalArgumentException(
-                        "an active Prefill fact cannot carry an error code");
-            }
-        }
-
-        public static WorkerStatusFact active(ScheduledRequest item) {
-            return new WorkerStatusFact(item, Kind.ACTIVE, 0L);
-        }
-
-        public static WorkerStatusFact terminal(
-                ScheduledRequest item, Kind kind, long errorCode) {
-            if (kind == Kind.ACTIVE) {
-                throw new IllegalArgumentException(
-                        "terminal Prefill fact requires a terminal kind");
-            }
-            return new WorkerStatusFact(item, kind, errorCode);
-        }
-
-        public enum Kind {
-            ACTIVE,
-            COMPLETED,
-            FAILED,
-            PRIORITY_CANCELED
-        }
-    }
-
-    public record StatusReconciliation(List<WorkerStatusFact> schedulerFacts,
-                                       List<FinishedBatch> finishedBatches,
-                                       Throwable publicationFailure) {
-        public StatusReconciliation {
-            schedulerFacts = List.copyOf(schedulerFacts);
-            finishedBatches = List.copyOf(finishedBatches);
-        }
-    }
-
     public record Retirement(List<ScheduledRequest> ownedItems,
                              List<FinishedBatch> finishedBatches,
                              Throwable invariantFailure) {
@@ -536,13 +494,6 @@ public final class PrefillState {
                 repredictor,
                 committedPublication,
                 failedReduction);
-    }
-
-    public record HeartbeatReconciliation(List<WorkerStatusFact> schedulerFacts,
-                                          boolean schedulingInputsChanged) {
-        public HeartbeatReconciliation {
-            schedulerFacts = List.copyOf(schedulerFacts);
-        }
     }
 
     public HeartbeatReconciliation reconcileHeartbeat(WorkerStatus.StatusObservation observation) {

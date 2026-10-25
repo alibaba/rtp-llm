@@ -6,7 +6,7 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimTerminal;
@@ -1073,7 +1073,7 @@ public final class RequestSlot {
 
     // ── Worker 事实与 Endpoint 退出：接收、核验、推进 ──
 
-    void processPrefillStatus(PrefillEndpoint source, RoleType role, PrefillState.WorkerStatusFact fact) {
+    void processPrefillStatus(PrefillEndpoint source, RoleType role, WorkerStatusFact fact) {
         EngineObservation observation;
         RequestEffect work;
         boolean cleanupUnblocked;
@@ -1094,17 +1094,17 @@ public final class RequestSlot {
     }
 
     private EngineObservation applyPrefillStatusLocked(PrefillEndpoint source, RoleType role,
-                                         PrefillState.WorkerStatusFact fact, long nowMs) {
+                                         WorkerStatusFact fact, long nowMs) {
         requireSlotLock("Prefill fact reduction");
         if (!ownsPrefillFactLocked(source, fact.item())) { return EngineObservation.STALE; }
         lastWorkerStatusAtMs = Math.max(lastWorkerStatusAtMs, nowMs);
         engineStatusReceived = true;
         if (cleanupProgress != null) {
-            if (fact.kind() == PrefillState.WorkerStatusFact.Kind.ACTIVE) {
+            if (fact.kind() == WorkerStatusFact.Kind.ACTIVE) {
                 return new EngineObservation(applyPrefillActivityLocked(source, fact.item()), null);
             }
             cleanupProgress.prefillSettled = true;
-            if (fact.kind() == PrefillState.WorkerStatusFact.Kind.PRIORITY_CANCELED
+            if (fact.kind() == WorkerStatusFact.Kind.PRIORITY_CANCELED
                     && preemption != null && !preemption.isFinished()) {
                 return new EngineObservation(applyPriorityCancellationLocked(source, fact.item()), null);
             }
