@@ -11,6 +11,7 @@ from program_fixtures import ScenarioCompiler
 from runtime_fixtures import Backend, Clock, source
 from scenario.backend_spec import make_env_spec
 from scenario.environment_config import environment
+from scenario.environment_declaration import PrefillCachePolicy
 from scenario.environment_snapshot import EnvironmentSnapshot
 from scenario.execution_plan import ExecutionPlanCodec, _sha
 from scenario.plan import CompiledInstance, ExecutionPlan
@@ -86,6 +87,29 @@ def test_final_effective_mock_settings_are_frozen_before_backend_projection():
     with patch("adapters.perf_presets.load_preset_bundle", side_effect=AssertionError("late preset read")):
         spec = make_env_spec(plan, "batch-window", {"master_base": 28000})
     assert spec.perf == snapshot.performance
+
+
+@pytest.mark.parametrize("reuse", [None, False, True])
+def test_prefill_reuse_override_is_explicit_frozen_and_does_not_change_decode(reuse):
+    baseline = EnvironmentSnapshot.read(environment({}, "env", "batch-window")["rendered"])
+    policy = dict(device_tree=False, memory_tree=False)
+    if reuse is not None:
+        policy["reuse_cache"] = reuse
+    plan = environment(dict(prefill_cache_policy=policy), "env", "batch-window")
+    snapshot = EnvironmentSnapshot.read(plan["rendered"])
+    roles = snapshot.performance["engine_config"]["roles"]
+    original = baseline.performance["engine_config"]["roles"]
+    assert roles["prefill"]["kv_cache"]["reuse_cache"] == (original["prefill"]["kv_cache"]["reuse_cache"] if reuse is None else reuse)
+    assert roles["decode"] == original["decode"]
+    assert make_env_spec(plan, "batch-window", {"master_base": 28000}).perf == snapshot.performance
+
+
+@pytest.mark.parametrize("value", [0, "true", 1.0])
+def test_prefill_reuse_override_rejects_non_boolean_values(value):
+    with pytest.raises(ValueError, match="boolean"):
+        PrefillCachePolicy(False, False, reuse_cache=value)
+    with pytest.raises(ScenarioError, match="boolean"):
+        environment(dict(prefill_cache_policy=dict(device_tree=False, memory_tree=False, reuse_cache=value)), "env", "batch-window")
 
 
 def test_each_environment_declaration_loads_preset_once_and_checks_excluded_profile():

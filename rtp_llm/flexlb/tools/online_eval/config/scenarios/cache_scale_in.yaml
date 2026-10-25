@@ -13,13 +13,14 @@ environment:
   perf_preset: deepseek_v4_flash_l20c
   model_override:
     baseline: deepseek_v4_flash_l20c
-    reason: 测试 flat Device 缓存迁移路径，覆盖设备树开关
+    reason: 测试 flat Device 缓存迁移路径，开启 Prefill 复用并覆盖设备树开关
   discovery: discovery_file
   n_prefill: 48
   n_decode: 192
   prefill_cache_policy:
     device_tree: false
     memory_tree: false
+    reuse_cache: true
   config_overrides:
     cache_affinity_max_extra_ttft_ms: 1000000000
   master_test_control: true
@@ -197,7 +198,7 @@ data_archives:
         perf_preset: glm_5_3_l20d
         model_override:
           baseline: glm_5_3_l20d
-          reason: 测试 flat Device 缓存迁移路径，覆盖设备树开关
+          reason: 测试 flat Device 缓存迁移路径，开启 Prefill 复用并覆盖设备树开关
         n_prefill: 125
         n_decode: 536
         profile_overrides:

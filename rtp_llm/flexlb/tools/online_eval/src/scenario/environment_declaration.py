@@ -86,10 +86,13 @@ class PrefillCachePolicy:
     device_tree: bool
     memory_tree: bool
     memory_blocks: int | None = None
+    reuse_cache: bool | None = None
 
     def __post_init__(self):
         if type(self.device_tree) is not bool or type(self.memory_tree) is not bool:
             raise ValueError("cache prefix-tree flags must be booleans")
+        if self.reuse_cache is not None and type(self.reuse_cache) is not bool:
+            raise ValueError("cache reuse flag must be a boolean")
         if self.memory_blocks is not None and (type(self.memory_blocks) is not int or self.memory_blocks < 0):
             raise ValueError("memory cache blocks must be a nonnegative integer")
 
@@ -105,6 +108,8 @@ class PrefillCachePolicy:
             enable_gpu_prefix_tree=self.device_tree, memory_blocks=capacity, enable_memory_prefix_tree=self.memory_tree
         )
         prefill["kv_cache"]["enable_memory_cache"] = capacity > 0
+        if self.reuse_cache is not None:
+            prefill["kv_cache"]["reuse_cache"] = self.reuse_cache
 
 
 @dataclass(frozen=True)

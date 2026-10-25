@@ -53,11 +53,13 @@ def read_environment(value, path):
     result["master_stable_window_s"] = number(value.get("master_stable_window_s", 3), path + ".master_stable_window_s")
     if "prefill_cache_policy" in value:
         field = path + ".prefill_cache_policy"
-        keys = {"device_tree", "memory_tree", "memory_blocks"}
+        keys = {"device_tree", "memory_tree", "memory_blocks", "reuse_cache"}
         cache = mapping(value["prefill_cache_policy"], field, keys, {"device_tree", "memory_tree"})
         for key in ("device_tree", "memory_tree"):
             if type(cache[key]) is not bool:
                 fail(field + "." + key, "expected boolean")
+        if "reuse_cache" in cache and type(cache["reuse_cache"]) is not bool:
+            fail(field + ".reuse_cache", "expected boolean")
         if "memory_blocks" in cache:
             number(cache["memory_blocks"], field + ".memory_blocks", integer=True)
         result["prefill_cache_policy"] = dict(cache)

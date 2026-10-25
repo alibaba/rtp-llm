@@ -46,6 +46,8 @@ python3 rtp_llm/flexlb/tools/mock_bundle/real_config_snapshot.py \
 和 `capacity.kind=synthetic`，说明实验来源并给出容量，不能标为 real。
 测试场景只允许覆盖 synthetic 容量，不得覆盖真实 allocator 观测。
 
+合成 Prefill 缓存实验可通过 `prefill_cache_policy.reuse_cache` 显式覆盖复用开关；省略时继承档案，不隐式开启，也不改变 Decode 或共享档案。要求缓存预热的实验必须保证复用已开启，并在 `model_override` 中说明偏离。
+
 Master 遇到同 request/batch 的历史成功完成记录与活跃 CANCELING overlay 并存时，
 保留该控制记录的所有者，等待权威 CANCELED 终态后结算。不同 batch 的 overlay 不延迟当前任务结算。
 

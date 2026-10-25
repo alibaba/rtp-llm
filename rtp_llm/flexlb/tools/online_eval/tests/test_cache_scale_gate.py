@@ -403,6 +403,12 @@ class CacheGateTest(unittest.TestCase):
             plans = compile_scenarios(load_scenarios(ROOT / "config/scenarios/cache_scale_in.yaml"), handlers=handlers())
         self.assertEqual(len(plans), 8)
         self.assertEqual(plans[0]["environment"]["prefill_cache_policy"]["memory_tree"], False)
+        from scenario.environment_snapshot import EnvironmentSnapshot
+
+        for plan in plans:
+            roles = EnvironmentSnapshot.read(plan["environment"]["rendered"]).performance["engine_config"]["roles"]
+            self.assertIs(roles["prefill"]["kv_cache"]["reuse_cache"], True)
+            self.assertIs(roles["decode"]["kv_cache"]["reuse_cache"], False)
         self.assertIn("cache_scale_in_check", [s["action"] for s in plans[0]["stages"]])
 
     def test_topology_budget_is_independent_of_drain(self):
