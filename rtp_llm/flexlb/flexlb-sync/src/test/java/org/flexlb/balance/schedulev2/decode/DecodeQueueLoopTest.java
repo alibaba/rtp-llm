@@ -351,7 +351,7 @@ class DecodeQueueLoopTest {
 
     @Test
     void laterRequestWaitsBehindHeadThatDoesNotFitWhenThresholdIsZero() {
-        config.getDispatcher().setDecodeStarvationThresholdMs(0L);
+        config.getDispatcher().setDispatchStarvationThresholdMs(0L);
         Request head = addWaiting("1");
         head.setPrefillDecidedAtMs(System.currentTimeMillis());
         Request later = addWaiting("2");
@@ -365,7 +365,7 @@ class DecodeQueueLoopTest {
 
     @Test
     void laterRequestGoesFirstWhileHeadHasNotWaitedLong() {
-        config.getDispatcher().setDecodeStarvationThresholdMs(60_000L);
+        config.getDispatcher().setDispatchStarvationThresholdMs(60_000L);
         Request head = addWaiting("1");
         head.setPrefillDecidedAtMs(System.currentTimeMillis());
         Request later = addWaiting("2");
@@ -379,7 +379,7 @@ class DecodeQueueLoopTest {
 
     @Test
     void laterRequestWaitsBehindHeadThatHasWaitedTooLong() {
-        config.getDispatcher().setDecodeStarvationThresholdMs(60_000L);
+        config.getDispatcher().setDispatchStarvationThresholdMs(60_000L);
         Request head = addWaiting("1");
         head.setPrefillDecidedAtMs(System.currentTimeMillis() - 120_000L);
         Request later = addWaiting("2");
@@ -393,7 +393,7 @@ class DecodeQueueLoopTest {
 
     @Test
     void changedStarvationThresholdIsUsedInNextRound() {
-        config.getDispatcher().setDecodeStarvationThresholdMs(0L);
+        config.getDispatcher().setDispatchStarvationThresholdMs(0L);
         Request head = addWaiting("1");
         head.setPrefillDecidedAtMs(System.currentTimeMillis());
         Request later = addWaiting("2");
@@ -401,7 +401,7 @@ class DecodeQueueLoopTest {
         loop.runOnce();
         assertEquals(Stage.DECODE_WAITING, later.stage());
 
-        config.getDispatcher().setDecodeStarvationThresholdMs(60_000L);
+        config.getDispatcher().setDispatchStarvationThresholdMs(60_000L);
         loop.runOnce();
 
         assertEquals(Stage.DECODE_WAITING, head.stage());
@@ -433,7 +433,7 @@ class DecodeQueueLoopTest {
 
     @Test
     void skippedRequestsDoNotHideAnotherGroupBeyondScanLimit() {
-        config.getDispatcher().setDecodeStarvationThresholdMs(0L);
+        config.getDispatcher().setDispatchStarvationThresholdMs(0L);
         for (int i = 1; i <= 300; i++) {
             Request request = addWaiting(Integer.toString(i));
             when(router.resolvePolicyGroup(request.ctx())).thenReturn("a");

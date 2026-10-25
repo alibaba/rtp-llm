@@ -14,7 +14,7 @@ public final class DispatcherConfig {
     public static final int DEFAULT_PREFILL_SUBQUEUE_LIMIT_MULTIPLIER = 4;
     public static final int DEFAULT_MAX_INFLIGHT_PER_ENCODER_WORKER = Integer.MAX_VALUE;
     public static final int DEFAULT_FETCH_ATTACH_TIMEOUT_MS = 3_000;
-    public static final long DEFAULT_DECODE_STARVATION_THRESHOLD_MS = 500L;
+    public static final long DEFAULT_DISPATCH_STARVATION_THRESHOLD_MS = 500L;
 
     public enum Type {
         BATCH, NON_BATCH,
@@ -32,11 +32,11 @@ public final class DispatcherConfig {
     /** BATCH only: engine wait for FetchResponse attachment, not generation duration. */
     private int fetchAttachTimeoutMs = DEFAULT_FETCH_ATTACH_TIMEOUT_MS;
     /**
-     * NON_BATCH_V2：同一个 group 里排在最前面的请求放不下时，后面放得下的请求可以先走；
-     * 最前面的请求从选完 Prefill 起等了超过这个时间，这个 group 改回严格按顺序。0 表示一直严格按顺序。
-     * 支持热更新，Decode 队列每一轮都读最新值。
+     * NON_BATCH_V2：Prefill 因 KV 不够、或 Decode 放不下队头时，后面放得下的请求可以先走。
+     * 队头在当前阶段等到这个时间后改为严格按顺序。Prefill 从进入机器队列起算，Decode 从 Prefill dispatch 起算。
+     * 0 表示一直严格按顺序。支持热更新，Prefill 和 Decode 队列每一轮都读最新值。
      */
-    private long decodeStarvationThresholdMs = DEFAULT_DECODE_STARVATION_THRESHOLD_MS;
+    private long dispatchStarvationThresholdMs = DEFAULT_DISPATCH_STARVATION_THRESHOLD_MS;
 
     public static DispatcherConfig nonBatch() {
         DispatcherConfig config = new DispatcherConfig();
@@ -72,8 +72,8 @@ public final class DispatcherConfig {
             throw new ConfigValidationException("dispatcher.fetchAttachTimeoutMs",
                     "must be greater than zero");
         }
-        if (decodeStarvationThresholdMs < 0L) {
-            throw new ConfigValidationException("dispatcher.decodeStarvationThresholdMs", "must not be negative");
+        if (dispatchStarvationThresholdMs < 0L) {
+            throw new ConfigValidationException("dispatcher.dispatchStarvationThresholdMs", "must not be negative");
         }
     }
 }

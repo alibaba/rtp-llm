@@ -49,6 +49,10 @@ MainQueue -> 每台机器一个 PrefillQueue -> 共用 DecodeQueue -> publish(Pr
   两处都要求新请求达到高优先级阈值，并且用阶段 CAS 保证已经出队的请求不会被误踢。
 - Decode 没有单独的队长上限，沿用总排队数和子队列名额。高优先级请求按排序先执行，
   不通过队长触发踢掉 Decode 等待请求。容量不足时的 RETURN 抢占仍由 Decode 线程执行。
+- P/D 共用 `dispatcher.dispatchStarvationThresholdMs`，默认 500ms，每一轮读取最新配置。
+  Prefill 只有 KV 不够时允许较小请求先走，在途数量满时整台机器等待；
+  Decode 放不下队头时允许同 group 后面的请求先走。队头等待达到阈值后恢复严格顺序，0 表示始终严格顺序。
+  Prefill 等待从进入这台机器的队列起算，Decode 等待从 Prefill dispatch 起算。
 - 每个循环最外层捕获 `Throwable`，记录异常后继续下一轮。主队列和 Decode waiting 每轮最多尝试 256 次选点；
   已结束或因 group 被阻塞而直接跳过的请求不占尝试次数。Decode 的 published 和 reserved 每轮遍历全部记录。
 

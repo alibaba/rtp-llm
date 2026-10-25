@@ -24,7 +24,8 @@ import java.util.function.Consumer;
  * <ol>
  * <li>机器已下线或同一地址已换成重新上线的机器时，把等待的请求退回主队列，丢掉这个队列；</li>
  * <li>有新的引擎上报时更新已 dispatch 记录，并移除发布后超时还没被引擎上报的记录；</li>
- * <li>按顺序 dispatch 等待的请求，队首放不下时这台机器停在队首，等记录减少或下一次上报。</li>
+ * <li>按顺序 dispatch 等待的请求。在途满时停在队首；只有 KV 不够时，允许后面较小的请求先走，
+ * 直到队首等到饥饿阈值，这台机器改为严格按顺序。</li>
  * </ol>
  * dispatch 出去的请求进入 DECODE_WAITING，带着名额交给 Decode 队列，发布后才归还名额和排队总数。
  */
@@ -105,6 +106,8 @@ public final class PrefillQueueLoop {
         int maxInflight = configService.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker();
         long confirmTimeoutMs = DispatchConfirmTimeout.timeoutMs(configService);
         long nowMs = System.currentTimeMillis();
+        long starvationThresholdMs =
+                configService.loadBalanceConfig().getDispatcher().getDispatchStarvationThresholdMs();
         boolean hasWaiting = false;
         for (PrefillQueue queue : queues.list()) {
             if (!isCurrent(queue)) {
@@ -114,7 +117,7 @@ public final class PrefillQueueLoop {
             }
             queue.updateFromEngine();
             removeExpiredDispatched(queue, nowMs, confirmTimeoutMs);
-            dispatchWaiting(queue, maxInflight);
+            dispatchWaiting(queue, maxInflight, starvationThresholdMs, nowMs);
             hasWaiting |= queue.waitingCount() > 0;
         }
         return hasWaiting;
@@ -135,7 +138,8 @@ public final class PrefillQueueLoop {
         return endpointRegistry.get(endpoint.getStatus().getRole(), endpoint.ipPort()) == endpoint;
     }
 
-    private void dispatchWaiting(PrefillQueue queue, int maxInflight) {
+    private void dispatchWaiting(PrefillQueue queue, int maxInflight, long starvationThresholdMs, long nowMs) {
+        Request head = null;
         Iterator<Request> iterator = queue.waitingIterator();
         while (iterator.hasNext()) {
             Request request = iterator.next();
@@ -144,8 +148,17 @@ public final class PrefillQueueLoop {
                 continue;
             }
             long kvTokens = request.prefillChoice().kvTokens(request.seqLen());
-            if (!queue.canDispatch(kvTokens, maxInflight)) {
+            if (!queue.hasDispatchSlot(maxInflight)) {
                 return;
+            }
+            if (!queue.canDispatch(kvTokens, maxInflight)) {
+                if (head == null) {
+                    head = request;
+                }
+                if (starvationThresholdMs == 0L || nowMs - head.prefillQueuedAtMs() >= starvationThresholdMs) {
+                    return;
+                }
+                continue;
             }
             dispatch(queue, request, kvTokens);
         }

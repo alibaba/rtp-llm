@@ -397,17 +397,17 @@ class ConfigServiceTest {
     }
 
     @Test
-    void runtimeUpdateChangesDecodeStarvationThreshold() {
+    void runtimeUpdateChangesDispatchStarvationThreshold() {
         FakeConfigSource source = new FakeConfigSource("Nacos", 200, """
                 {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
                  "dispatcher":{"type":"NON_BATCH_V2"}}
                 """);
         ConfigService service = createService(List.of(environmentSource(Map.of()), source));
-        assertThat(service.loadBalanceConfig().getDispatcher().getDecodeStarvationThresholdMs()).isEqualTo(500L);
+        assertThat(service.loadBalanceConfig().getDispatcher().getDispatchStarvationThresholdMs()).isEqualTo(500L);
 
-        source.emit("{\"schemaVersion\":3,\"dispatcher\":{\"decodeStarvationThresholdMs\":2000}}");
+        source.emit("{\"schemaVersion\":3,\"dispatcher\":{\"dispatchStarvationThresholdMs\":2000}}");
 
-        assertThat(service.loadBalanceConfig().getDispatcher().getDecodeStarvationThresholdMs()).isEqualTo(2000L);
+        assertThat(service.loadBalanceConfig().getDispatcher().getDispatchStarvationThresholdMs()).isEqualTo(2000L);
     }
 
     @Test

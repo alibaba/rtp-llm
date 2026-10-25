@@ -363,11 +363,12 @@ public final class DecodeQueueLoop {
      * waiting 的请求按顺序选 Decode 并 reserve。
      * <p>
      * 每个 group 排在最前面、放不下的请求叫队头。队头等得不久时，同 group 后面放得下的请求可以先走；
-     * 队头从选完 Prefill 起等了超过 {@code dispatcher.decodeStarvationThresholdMs}，这一轮跳过同 group 后面的请求，
+     * 队头从 Prefill dispatch 起等到 {@code dispatcher.dispatchStarvationThresholdMs}，这一轮跳过同 group 后面的请求，
      * 让归还的容量先留给队头。阈值是 0 时一直严格按顺序。
      */
     private boolean reserveWaiting() {
-        long starvationThresholdMs = configService.loadBalanceConfig().getDispatcher().getDecodeStarvationThresholdMs();
+        long starvationThresholdMs =
+                configService.loadBalanceConfig().getDispatcher().getDispatchStarvationThresholdMs();
         long now = System.currentTimeMillis();
         Set<String> groupsWithHead = new HashSet<>();
         Set<String> blockedGroups = new HashSet<>();
@@ -400,7 +401,7 @@ public final class DecodeQueueLoop {
      * 队头是否等得太久，需要同 group 严格按顺序。阈值是 0 时总是返回 true。
      */
     private static boolean isStarved(Request request, long starvationThresholdMs, long now) {
-        return now - request.prefillDecidedAtMs() >= starvationThresholdMs;
+        return starvationThresholdMs == 0L || now - request.prefillDecidedAtMs() >= starvationThresholdMs;
     }
 
     /**

@@ -73,6 +73,7 @@ public final class PrefillQueue {
     }
 
     public void addWaiting(Request request) {
+        request.setPrefillQueuedAtMs(System.currentTimeMillis());
         if (waiting.add(request)) {
             changeVersion.incrementAndGet();
         }
@@ -212,7 +213,7 @@ public final class PrefillQueue {
      */
     public boolean canDispatch(long kvTokens, int maxInflight) {
         long inflight = dispatched.size() + unknownRequestCount;
-        if (inflight >= maxInflight) {
+        if (!hasDispatchSlot(maxInflight)) {
             return false;
         }
         WorkerStatus.EngineObservation engine = latestEngine;
@@ -226,6 +227,13 @@ public final class PrefillQueue {
             }
         }
         return kvTokens <= engine.availableKvCacheTokens() - kvNotSeenByEngine;
+    }
+
+    /**
+     * 在途数量还有空位时才需要继续按请求大小检查 KV；在途已满时后面的请求也不能 dispatch。
+     */
+    public boolean hasDispatchSlot(int maxInflight) {
+        return dispatched.size() + unknownRequestCount < maxInflight;
     }
 
     /**

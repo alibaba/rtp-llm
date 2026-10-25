@@ -48,6 +48,10 @@ public final class Request {
      */
     private volatile PrefillChoice prefillChoice;
     /**
+     * 最近一次进入 Prefill 队列的时间，KV 不够时用来判断队头是否等得太久。
+     */
+    private volatile long prefillQueuedAtMs;
+    /**
      * 从 Prefill 队列 dispatch 出去的时间，还没 dispatch 时为 0。
      */
     private volatile long prefillDecidedAtMs;
@@ -143,6 +147,14 @@ public final class Request {
 
     public long prefillDecidedAtMs() {
         return prefillDecidedAtMs;
+    }
+
+    public long prefillQueuedAtMs() {
+        return prefillQueuedAtMs;
+    }
+
+    public void setPrefillQueuedAtMs(long prefillQueuedAtMs) {
+        this.prefillQueuedAtMs = prefillQueuedAtMs;
     }
 
     public void setPrefillDecidedAtMs(long prefillDecidedAtMs) {
