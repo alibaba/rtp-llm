@@ -2,9 +2,7 @@ import com.sun.management.ThreadMXBean;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.RouteProjectionTestSupport;
 
 import java.lang.management.ManagementFactory;
 import java.nio.file.Files;
@@ -25,7 +23,7 @@ public class PlanningBench {
             Comparator.comparingInt(GroupPlanner.Item::priority)
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq);
     static FormulaPredictor model;
-    static RouteProjection.DeliveryProjection policy;
+    static RequestTimeEstimation.DeliveryProjection policy;
 
     static GroupPlanner.Constraints constraints(int size) {
         return new GroupPlanner.Constraints(size, 1_000_000, 2_000_000, 700, 700);
@@ -81,7 +79,7 @@ public class PlanningBench {
 
     public static void main(String[] args) throws Exception {
         model = new FormulaPredictor(Files.readString(Path.of(args[0])));
-        policy = RouteProjection.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
+        policy = RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
         for (int size : new int[] {1, 8, 32, 64}) {
             var inputs = new ArrayList<List<GroupPlanner.Item>>();
             for (int i = 0; i < 64; i++) inputs.add(items(size, i));
@@ -89,10 +87,10 @@ public class PlanningBench {
             bench("select_" + size, () -> select(inputs.get(index[0]++ & 63), size));
         }
         for (int depth : new int[] {0, 32, 128, 512}) {
-            var endpoints = new ArrayList<RouteProjection.Inputs>();
+            var endpoints = new ArrayList<RequestTimeEstimation.Inputs>();
             for (int i = 0; i < 5; i++) {
                 endpoints.add(
-                        new RouteProjection.Inputs(
+                        new RequestTimeEstimation.Inputs(
                                 new QueueSnapshot(
                                         1000,
                                         true,
@@ -104,10 +102,10 @@ public class PlanningBench {
                                 new WorkSnapshot(1000, List.of(), List.of(), 0),
                                 0L));
             }
-            var probes = new ArrayList<RouteProjectionTestSupport.Probe>();
+            var probes = new ArrayList<RequestTimeEstimationTestSupport.Probe>();
             for (int i = 0; i < 64; i++)
                 probes.add(
-                        new RouteProjectionTestSupport.Probe(
+                        new RequestTimeEstimationTestSupport.Probe(
                                 99999, 0, 1000, 61_000, 1024 + i * 32, i * 8, i * 8));
             int[] index = {0};
             bench(
@@ -117,7 +115,7 @@ public class PlanningBench {
                         double total = 0;
                         for (var endpoint : endpoints) {
                             var candidate =
-                                    RouteProjectionTestSupport.project(
+                                    RequestTimeEstimationTestSupport.project(
                                             endpoint, probe, model, policy);
                             total += candidate.projectedTtftMsValue();
                         }

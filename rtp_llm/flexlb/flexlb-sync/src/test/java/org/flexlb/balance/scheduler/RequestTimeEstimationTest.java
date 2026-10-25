@@ -4,32 +4,34 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
+import org.flexlb.balance.projection.RequestTimeEstimation.Candidate;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Probe;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.BATCH;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.NOW_MS;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.ROUTE;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.TOKEN_EVALUATOR;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.constraints;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.item;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.noCommittedWork;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.probe;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.project;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.queue;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.work;
+import static org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.BATCH;
+import static org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.NOW_MS;
+import static org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.ROUTE;
+import static org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.TOKEN_EVALUATOR;
+import static org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.constraints;
+import static org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.item;
+import static org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.noCommittedWork;
+import static org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.probe;
+import static org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.project;
+import static org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.queue;
+import static org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.work;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Canonical frozen-snapshot route timeline and candidate contract. */
-class RouteProjectionTest {
+class RequestTimeEstimationTest {
 
     @Test
     void disabledExecutionBudgetDoesNotConstructAnUnusedPrefixPredictor() {
@@ -59,7 +61,7 @@ class RouteProjectionTest {
                                 item(1L, 50, 1L, 10L),
                                 item(2L, 50, 2L, 10L),
                                 item(3L, 50, 3L, 10L)));
-        for (RouteProjection.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+        for (RequestTimeEstimation.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
             assertModeled(
                     project(
                             snapshot,
@@ -97,7 +99,7 @@ class RouteProjectionTest {
                         precedingMs += 10L;
                     }
                 }
-                for (RouteProjection.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+                for (RequestTimeEstimation.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
                     var result =
                             project(
                                     queue(true, limits, active),
@@ -126,7 +128,7 @@ class RouteProjectionTest {
                                 item(6L, 90, 6L, 600L, NOW_MS + 10L),
                                 item(7L, 80, 7L, 50L),
                                 item(8L, 60, 8L, 700L, NOW_MS + 5L)));
-        for (RouteProjection.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+        for (RequestTimeEstimation.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
             assertModeled(
                     project(
                             snapshot,
@@ -140,7 +142,7 @@ class RouteProjectionTest {
 
     @Test
     void emptyQueueUsesTheSameWindowAndBudgetReadinessAsLiveGrouping() {
-        for (RouteProjection.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+        for (RequestTimeEstimation.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
             var waiting =
                     project(
                             queue(false, constraints(4, 30L), List.of()),
@@ -167,7 +169,7 @@ class RouteProjectionTest {
     @Test
     void emptyQueueCannotProjectDeliveryBeyondAvailableKv() {
         var limits = new GroupPlanner.Constraints(4, Long.MAX_VALUE, 19L, 0L, 30L);
-        for (RouteProjection.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+        for (RequestTimeEstimation.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
             var result =
                     project(
                             queue(false, limits, List.of()),
@@ -175,11 +177,9 @@ class RouteProjectionTest {
                             TOKEN_EVALUATOR,
                             probe(99L, 50, 20L, 0L),
                             delivery);
-            assertEquals(RouteProjection.Candidate.State.BLOCKED, result.state());
+            assertEquals(Candidate.State.BLOCKED, result.state());
             assertEquals("PREFILL_KV_CAPACITY", result.detail());
-            assertEquals(
-                    RouteProjection.Candidate.InitialHeadDisposition.NONE,
-                    result.initialHeadDisposition());
+            assertEquals(Candidate.InitialHeadDisposition.NONE, result.initialHeadDisposition());
         }
     }
 
@@ -193,7 +193,7 @@ class RouteProjectionTest {
                         List.of(),
                         0L);
 
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(false, constraints(4, 30L), List.of()),
                         committed,
@@ -207,7 +207,7 @@ class RouteProjectionTest {
 
     @Test
     void singleRequestGroupNeverPaysCollectionWindow() {
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(false, constraints(1, 30L), List.of()),
                         noCommittedWork(),
@@ -222,7 +222,7 @@ class RouteProjectionTest {
     void successiveDecisionGroupsUseOneSerialCursor() {
         List<GroupPlanner.Item> active = List.of(item(1L, 50, 1L, 10L), item(2L, 50, 2L, 10L));
 
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(false, constraints(2, 30L), active),
                         noCommittedWork(),
@@ -250,7 +250,7 @@ class RouteProjectionTest {
                                         OptionalLong.of(40L))),
                         0L);
 
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(false, false, constraints(1, 0L), List.of(), null),
                         committed,
@@ -268,22 +268,23 @@ class RouteProjectionTest {
         WorkSnapshot later = new WorkSnapshot(NOW_MS + 1L, List.of(), List.of(), 0L);
 
         assertThrows(
-                IllegalArgumentException.class, () -> new RouteProjection.Inputs(queue, later, 0L));
+                IllegalArgumentException.class,
+                () -> new RequestTimeEstimation.Inputs(queue, later, 0L));
     }
 
     @Test
     void fifoAndPriorityPlaceProbeInDifferentDecisionGroups() {
         List<GroupPlanner.Item> active = List.of(item(1L, 100, 1L, 10L), item(2L, 10, 2L, 100L));
-        RouteProjectionTestSupport.Probe probe = probe(99L, 90, 20L, 0L);
+        Probe probe = probe(99L, 90, 20L, 0L);
 
-        RouteProjection.Candidate fifo =
+        Candidate fifo =
                 project(
                         queue(false, constraints(2, 0L), active),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
                         probe,
                         BATCH);
-        RouteProjection.Candidate priority =
+        Candidate priority =
                 project(
                         queue(true, constraints(2, 0L), active),
                         noCommittedWork(),
@@ -293,19 +294,16 @@ class RouteProjectionTest {
 
         assertModeled(fifo, 130L);
         assertModeled(priority, 30L);
+        assertEquals(Candidate.InitialHeadDisposition.BEFORE_PROBE, fifo.initialHeadDisposition());
         assertEquals(
-                RouteProjection.Candidate.InitialHeadDisposition.BEFORE_PROBE,
-                fifo.initialHeadDisposition());
-        assertEquals(
-                RouteProjection.Candidate.InitialHeadDisposition.BEFORE_PROBE,
-                priority.initialHeadDisposition());
+                Candidate.InitialHeadDisposition.BEFORE_PROBE, priority.initialHeadDisposition());
     }
 
     @Test
     void batchProjectionStopsAtProbeCompletion() {
         List<GroupPlanner.Item> active = List.of(item(1L, 100, 1L, 10L), item(2L, 10, 2L, 100L));
 
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(true, constraints(3, 0L), active),
                         noCommittedWork(),
@@ -320,7 +318,7 @@ class RouteProjectionTest {
     void routeProjectionStopsAtProbeCompletion() {
         List<GroupPlanner.Item> active = List.of(item(1L, 100, 1L, 10L), item(2L, 10, 2L, 100L));
 
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(true, constraints(3, 0L), active),
                         noCommittedWork(),
@@ -333,21 +331,17 @@ class RouteProjectionTest {
 
     @Test
     void endpointCacheHitChangesServiceAndCandidateMetadata() {
-        RouteProjectionTestSupport.Probe coldProbe =
-                new RouteProjectionTestSupport.Probe(
-                        99L, 50, NOW_MS, Long.MAX_VALUE, 1_000L, 0L, 123L);
-        RouteProjectionTestSupport.Probe warmProbe =
-                new RouteProjectionTestSupport.Probe(
-                        100L, 50, NOW_MS, Long.MAX_VALUE, 1_000L, 800L, 900L);
+        Probe coldProbe = new Probe(99L, 50, NOW_MS, Long.MAX_VALUE, 1_000L, 0L, 123L);
+        Probe warmProbe = new Probe(100L, 50, NOW_MS, Long.MAX_VALUE, 1_000L, 800L, 900L);
 
-        RouteProjection.Candidate cold =
+        Candidate cold =
                 project(
                         queue(false, constraints(1, 0L), List.of()),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
                         coldProbe,
                         ROUTE);
-        RouteProjection.Candidate warm =
+        Candidate warm =
                 project(
                         queue(false, constraints(1, 0L), List.of()),
                         noCommittedWork(),
@@ -374,7 +368,7 @@ class RouteProjectionTest {
                         },
                         items -> 1.0);
 
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(true, constraints(1, 0L), List.of()),
                         noCommittedWork(),
@@ -382,9 +376,9 @@ class RouteProjectionTest {
                         probe(99L, 50, 20L, 0L),
                         ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, result.state());
+        assertEquals(Candidate.State.UNAVAILABLE, result.state());
         assertEquals("SINGLE_PREDICTION_FAILED", result.detail());
-        assertEquals(RouteProjection.Candidate.UNKNOWN, result.projectedTtftMsValue());
+        assertEquals(Candidate.UNKNOWN, result.projectedTtftMsValue());
     }
 
     @Test
@@ -394,7 +388,7 @@ class RouteProjectionTest {
                         (tokens, hits) -> tokens == 20L ? -1L : tokens,
                         items -> items.stream().mapToLong(PrefillBatchFeatures.Item::seqLen).sum());
 
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(true, constraints(1, 0L), List.of()),
                         noCommittedWork(),
@@ -412,7 +406,7 @@ class RouteProjectionTest {
             PrefillTimePredictor.Evaluator invalid =
                     evaluator((tokens, hits) -> tokens, ignored -> invalidValue);
 
-            RouteProjection.Candidate result =
+            Candidate result =
                     project(
                             queue(true, constraints(1, 0L), List.of()),
                             noCommittedWork(),
@@ -431,7 +425,7 @@ class RouteProjectionTest {
         PrefillTimePredictor.Evaluator invalid =
                 evaluator((tokens, hits) -> tokens, ignored -> Double.NaN);
 
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(true, predictionBounded, List.of()),
                         noCommittedWork(),
@@ -444,7 +438,7 @@ class RouteProjectionTest {
 
     @Test
     void unknownRequestWorkIsExplicitlyUnmodeled() {
-        RouteProjection.Candidate candidate =
+        Candidate candidate =
                 project(
                         queue(true, constraints(1, 0L), List.of()),
                         work(List.of(), List.of(), 1L),
@@ -452,7 +446,7 @@ class RouteProjectionTest {
                         probe(99L, 50, 20L, 0L),
                         ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK, candidate.state());
+        assertEquals(Candidate.State.UNMODELED_ENGINE_WORK, candidate.state());
         assertEquals("ENGINE_WORK_UNOBSERVABLE", candidate.detail());
         assertFalse(candidate.selectable());
         assertTrue(candidate.engineWorkUnmodeled());
@@ -471,7 +465,7 @@ class RouteProjectionTest {
                                         OptionalLong.empty())),
                         0L);
 
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(true, constraints(1, 0L), List.of()),
                         unknown,
@@ -479,14 +473,14 @@ class RouteProjectionTest {
                         probe(99L, 50, 20L, 0L),
                         ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK, result.state());
+        assertEquals(Candidate.State.UNMODELED_ENGINE_WORK, result.state());
         assertEquals("ENGINE_WORK_UNOBSERVABLE", result.detail());
         assertFalse(result.selectable());
     }
 
     @Test
     void nonPositiveExistingExpiryIsTerminalAndDoesNotBlockProbe() {
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(false, constraints(1, 0L), List.of(item(1L, 50, 1L, 100L, 0L))),
                         noCommittedWork(),
@@ -496,13 +490,12 @@ class RouteProjectionTest {
 
         assertModeled(result, 20L);
         assertEquals(
-                RouteProjection.Candidate.InitialHeadDisposition.TERMINAL_PRUNED,
-                result.initialHeadDisposition());
+                Candidate.InitialHeadDisposition.TERMINAL_PRUNED, result.initialHeadDisposition());
     }
 
     @Test
     void probeExpiringExactlyAtCollectionDeadlineIsNotDispatched() {
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(false, constraints(4, 30L), List.of()),
                         noCommittedWork(),
@@ -510,14 +503,14 @@ class RouteProjectionTest {
                         probe(99L, 50, NOW_MS, NOW_MS + 30L, 20L, 0L),
                         BATCH);
 
-        assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, result.state());
+        assertEquals(Candidate.State.UNAVAILABLE, result.state());
         assertEquals("INCOMING_EXPIRED_BEFORE_DISPATCH", result.detail());
         assertFalse(result.selectable());
     }
 
     @Test
     void existingMemberExpiringInsideWindowIsRemovedBeforeService() {
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(
                                 false,
@@ -530,27 +523,28 @@ class RouteProjectionTest {
 
         assertModeled(result, 50L);
         assertEquals(
-                RouteProjection.Candidate.InitialHeadDisposition.TERMINAL_PRUNED,
-                result.initialHeadDisposition());
+                Candidate.InitialHeadDisposition.TERMINAL_PRUNED, result.initialHeadDisposition());
     }
 
     @Test
     void collectionWaitReusesPredictionUntilExpiryOrBudgetChangesTheDecision() {
         AtomicInteger planningCalls = new AtomicInteger();
         AtomicInteger predictionCalls = new AtomicInteger();
-        RouteProjection.DeliveryProjection counted =
-                new RouteProjection.DeliveryProjection() {
+        RequestTimeEstimation.DeliveryProjection counted =
+                new RequestTimeEstimation.DeliveryProjection() {
                     @Override
                     public long singletonCompletionOffsetMs(
-                            long seqLen, long hitCache, RouteProjection.Predictions predictions) {
+                            long seqLen,
+                            long hitCache,
+                            RequestTimeEstimation.Predictions predictions) {
                         return ROUTE.singletonCompletionOffsetMs(seqLen, hitCache, predictions);
                     }
 
                     @Override
-                    public RouteProjection.GroupPlanning planning(
-                            RouteProjection.Predictions predictions) {
+                    public RequestTimeEstimation.GroupPlanning planning(
+                            RequestTimeEstimation.Predictions predictions) {
                         planningCalls.incrementAndGet();
-                        RouteProjection.GroupPlanning delegate = ROUTE.planning(predictions);
+                        RequestTimeEstimation.GroupPlanning delegate = ROUTE.planning(predictions);
                         return (items, index) -> {
                             predictionCalls.incrementAndGet();
                             return delegate.durationMs(items, index);
@@ -561,14 +555,14 @@ class RouteProjectionTest {
                     public long completionOffsetMs(
                             List<GroupPlanner.Item> items,
                             int memberIndex,
-                            RouteProjection.Predictions predictions,
-                            RouteProjection.GroupPlanning planning) {
+                            RequestTimeEstimation.Predictions predictions,
+                            RequestTimeEstimation.GroupPlanning planning) {
                         return ROUTE.completionOffsetMs(items, memberIndex, predictions, planning);
                     }
                 };
         List<GroupPlanner.Item> active = List.of(item(1L, 50, 1L, 10L));
 
-        RouteProjection.Candidate waited =
+        Candidate waited =
                 project(
                         queue(
                                 false,
@@ -585,7 +579,7 @@ class RouteProjectionTest {
 
         planningCalls.set(0);
         predictionCalls.set(0);
-        RouteProjection.Candidate expiredPrefix =
+        Candidate expiredPrefix =
                 project(
                         queue(
                                 false,
@@ -604,7 +598,7 @@ class RouteProjectionTest {
 
         planningCalls.set(0);
         predictionCalls.set(0);
-        RouteProjection.Candidate expired =
+        Candidate expired =
                 project(
                         queue(
                                 false,
@@ -614,12 +608,12 @@ class RouteProjectionTest {
                         TOKEN_EVALUATOR,
                         probe(99L, 50, NOW_MS, NOW_MS + 29L, 20L, 0L),
                         counted);
-        assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, expired.state());
+        assertEquals(Candidate.State.UNAVAILABLE, expired.state());
         assertEquals("INCOMING_EXPIRED_BEFORE_DISPATCH", expired.detail());
         assertEquals(1, planningCalls.get());
 
         planningCalls.set(0);
-        RouteProjection.Candidate budgetReady =
+        Candidate budgetReady =
                 project(
                         queue(
                                 false,
@@ -724,8 +718,8 @@ class RouteProjectionTest {
                                 item(7L, 50, 7L, 50L),
                                 item(8L, 50, 8L, 700L, NOW_MS + 5L)));
 
-        for (RouteProjection.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
-            RouteProjection.Candidate result =
+        for (RequestTimeEstimation.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+            Candidate result =
                     project(
                             snapshot,
                             noCommittedWork(),
@@ -737,8 +731,7 @@ class RouteProjectionTest {
             // 29 ms, drops requests 6 and 8, then executes requests 7 and 99.
             assertModeled(result, 159L);
             assertEquals(
-                    RouteProjection.Candidate.InitialHeadDisposition.BEFORE_PROBE,
-                    result.initialHeadDisposition());
+                    Candidate.InitialHeadDisposition.BEFORE_PROBE, result.initialHeadDisposition());
         }
     }
 
@@ -746,14 +739,14 @@ class RouteProjectionTest {
     void batchTokenCapacityDoesNotRejectIndivisibleRequests() {
         GroupPlanner.Constraints strict = new GroupPlanner.Constraints(1, 100L, 1_000_000L, 0L, 0L);
 
-        RouteProjection.Candidate afterInvalidHead =
+        Candidate afterInvalidHead =
                 project(
                         queue(false, strict, List.of(item(1L, 50, 1L, 100L))),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
                         probe(99L, 50, 20L, 0L),
                         ROUTE);
-        RouteProjection.Candidate invalidProbe =
+        Candidate invalidProbe =
                 project(
                         queue(false, strict, List.of()),
                         noCommittedWork(),
@@ -763,14 +756,14 @@ class RouteProjectionTest {
 
         assertModeled(afterInvalidHead, 120L);
         assertEquals(
-                RouteProjection.Candidate.InitialHeadDisposition.BEFORE_PROBE,
+                Candidate.InitialHeadDisposition.BEFORE_PROBE,
                 afterInvalidHead.initialHeadDisposition());
         assertModeled(invalidProbe, 100L);
     }
 
     @Test
     void projectionNeverTouchesRouteSuffixAfterProbeCompletion() {
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(
                                 true,
@@ -781,14 +774,14 @@ class RouteProjectionTest {
                         probe(99L, 90, 20L, 0L),
                         ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
+        assertEquals(Candidate.State.MODELED, result.state());
         assertEquals(30L, result.projectedTtftMsValue());
         assertEquals("SERIAL_FROZEN_QUEUE", result.detail());
     }
 
     @Test
     void projectionNeverTouchesLaterBatchGroup() {
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(true, constraints(1, 0L), List.of(item(1L, 10, 1L, 999L))),
                         noCommittedWork(),
@@ -796,7 +789,7 @@ class RouteProjectionTest {
                         probe(99L, 90, 20L, 0L),
                         BATCH);
 
-        assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
+        assertEquals(Candidate.State.MODELED, result.state());
         assertEquals(20L, result.projectedTtftMsValue());
     }
 
@@ -806,10 +799,8 @@ class RouteProjectionTest {
         GroupPlanner.Constraints splitByComputeShape =
                 new GroupPlanner.Constraints(2, 150L, 1_000_000L, 0L, 30L);
         QueueSnapshot snapshot = queue(true, splitByComputeShape, List.of(expiringSuffix));
-        RouteProjectionTestSupport.Probe probe =
-                probe(99L, 90, NOW_MS - 30L, Long.MAX_VALUE, 20L, 0L);
-        RouteProjection.Candidate result =
-                project(snapshot, noCommittedWork(), TOKEN_EVALUATOR, probe, ROUTE);
+        Probe probe = probe(99L, 90, NOW_MS - 30L, Long.MAX_VALUE, 20L, 0L);
+        Candidate result = project(snapshot, noCommittedWork(), TOKEN_EVALUATOR, probe, ROUTE);
 
         assertModeled(result, 20L);
     }
@@ -819,7 +810,7 @@ class RouteProjectionTest {
         GroupPlanner.Constraints kvLimited =
                 new GroupPlanner.Constraints(1, 1_000_000L, 50L, 0L, 30L);
 
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(true, kvLimited, List.of(item(1L, 10, 1L, 100L))),
                         noCommittedWork(),
@@ -827,23 +818,21 @@ class RouteProjectionTest {
                         probe(99L, 100, 20L, 0L),
                         ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
+        assertEquals(Candidate.State.MODELED, result.state());
         assertEquals(20L, result.projectedTtftMsValue());
-        assertEquals(
-                RouteProjection.Candidate.InitialHeadDisposition.AFTER_PROBE,
-                result.initialHeadDisposition());
+        assertEquals(Candidate.InitialHeadDisposition.AFTER_PROBE, result.initialHeadDisposition());
     }
 
     @Test
     void duplicateIncomingIdentityIsRejectedAtActiveAndCommittedBoundaries() {
-        RouteProjection.Candidate active =
+        Candidate active =
                 project(
                         queue(false, constraints(1, 0L), List.of(item(99L, 50, 1L, 20L))),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
                         probe(99L, 50, 20L, 0L),
                         ROUTE);
-        RouteProjection.Candidate committed =
+        Candidate committed =
                 project(
                         queue(false, constraints(1, 0L), List.of()),
                         work(
@@ -856,9 +845,9 @@ class RouteProjectionTest {
                         probe(99L, 50, 20L, 0L),
                         ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, active.state());
+        assertEquals(Candidate.State.UNAVAILABLE, active.state());
         assertEquals("INCOMING_ALREADY_ACTIVE", active.detail());
-        assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, committed.state());
+        assertEquals(Candidate.State.UNAVAILABLE, committed.state());
         assertEquals("INCOMING_ALREADY_COMMITTED", committed.detail());
     }
 
@@ -879,7 +868,7 @@ class RouteProjectionTest {
                                     .sum();
                         });
 
-        RouteProjection.Candidate result =
+        Candidate result =
                 project(
                         queue(
                                 false,
@@ -913,7 +902,7 @@ class RouteProjectionTest {
                         false,
                         new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 500L, 0L),
                         List.of());
-        RouteProjectionTestSupport.Probe probe = probe(100L, 50, 20L, 0L);
+        Probe probe = probe(100L, 50, 20L, 0L);
 
         assertTrue(project(empty, noCommittedWork(), first, probe, BATCH).selectable());
         assertTrue(project(empty, noCommittedWork(), second, probe, BATCH).selectable());
@@ -943,16 +932,16 @@ class RouteProjectionTest {
         };
     }
 
-    private static void assertModeled(RouteProjection.Candidate result, long ttftMs) {
-        assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
+    private static void assertModeled(Candidate result, long ttftMs) {
+        assertEquals(Candidate.State.MODELED, result.state());
         assertEquals(ttftMs, result.projectedTtftMsValue());
         assertTrue(result.selectable());
     }
 
-    private static void assertInvalidPrediction(RouteProjection.Candidate result) {
-        assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, result.state());
+    private static void assertInvalidPrediction(Candidate result) {
+        assertEquals(Candidate.State.UNAVAILABLE, result.state());
         assertEquals("PREDICTOR_RETURNED_INVALID_VALUE", result.detail());
-        assertEquals(RouteProjection.Candidate.UNKNOWN, result.projectedTtftMsValue());
+        assertEquals(Candidate.UNKNOWN, result.projectedTtftMsValue());
         assertFalse(result.selectable());
     }
 

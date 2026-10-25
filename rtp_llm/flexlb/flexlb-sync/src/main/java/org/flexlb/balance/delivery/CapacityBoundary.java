@@ -1,6 +1,6 @@
 package org.flexlb.balance.delivery;
 
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 
 import java.util.Objects;
 
@@ -14,7 +14,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 public record CapacityBoundary(
         Status status,
         Resource resource,
-        RouteProjection.AdmissionBlockSemantics projectionSemantics,
+        RequestTimeEstimation.AdmissionBlockSemantics projectionSemantics,
         Throwable cause) {
 
     public static final CapacityBoundary OWNERSHIP_LOST =
@@ -32,7 +32,7 @@ public record CapacityBoundary(
     }
 
     public static CapacityBoundary unavailable(
-            Resource resource, RouteProjection.AdmissionBlockSemantics projectionSemantics) {
+            Resource resource, RequestTimeEstimation.AdmissionBlockSemantics projectionSemantics) {
         return new CapacityBoundary(
                 Status.UNAVAILABLE,
                 Objects.requireNonNull(resource, "resource"),

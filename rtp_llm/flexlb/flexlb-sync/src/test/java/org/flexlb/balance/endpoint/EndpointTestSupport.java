@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.DeliveryClaim;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
@@ -553,9 +553,9 @@ public final class EndpointTestSupport {
     private static final CapacityBoundary PARKED_BOUNDARY =
             CapacityBoundary.unavailable(
                     CapacityBoundary.Resource.PREFILL_BATCH,
-                    new RouteProjection.AdmissionBlockSemantics(
+                    new RequestTimeEstimation.AdmissionBlockSemantics(
                             "test delivery parked",
-                            RouteProjection.AfterProbeAdmission.BLOCKED,
+                            RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
                             "test delivery parked",
                             RoleType.PREFILL));
 
