@@ -1277,7 +1277,11 @@ py_test(
         deps = ["//rtp_llm:torch"],
         env = {"CUDA_VISIBLE_DEVICES": ""},
     )
-    for name in ["test_compact_cp_contract_cpu", "test_compact_cp_runtime_cpu"]
+    for name in [
+        "test_compact_cp_contract_cpu",
+        "test_compact_cp_runtime_cpu",
+        "test_v41_compact_cp_fused_validation_cpu",
+    ]
 ]
 
 

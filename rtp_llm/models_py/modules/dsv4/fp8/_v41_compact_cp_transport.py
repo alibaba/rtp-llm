@@ -14,6 +14,20 @@ class PacketMetadata:
     tail_identity: torch.Tensor | None
 
 
+@dataclass(frozen=True)
+class ValidationStack:
+    """Pre-stacked per-sender expectations for one producer's four plans.
+
+    Stacking once at admission replaces the per-sender compare/reduce kernel
+    chain in unpack with one batched comparison per field.
+    """
+
+    header: torch.Tensor  # (4, 16) int64
+    positions: torch.Tensor  # (4, rows) int64
+    tail_identity: torch.Tensor | None  # (4, 2, 2) int64, ratio 2 only
+    tail_state_exempt: torch.Tensor | None  # (4,) bool, True for the tail owner
+
+
 def prepare_metadata(plan, device):
     tail = None
     if plan.ratio == 2:
@@ -57,6 +71,60 @@ def prepare_metadata_batch(plans, device):
                 storage[begin:positions],
                 storage[positions:end],
                 storage[end : end + 4].view(2, 2) if plan.ratio == 2 else None,
+            )
+        )
+    return tuple(result)
+
+
+def prepare_validation_stacks(plan_groups, device):
+    """Stack each producer's four sender expectations with one H2D copy.
+
+    ``plan_groups`` is one tuple of four rank-ordered plans per producer, in
+    the same order the runtime admits producers. The returned header/position/
+    tail tensors are views into a single storage, mirroring
+    prepare_metadata_batch lifetimes.
+    """
+    values, slices = [], []
+    for plans in plan_groups:
+        if len(plans) != 4 or any(p.rows != plans[0].rows for p in plans):
+            raise ValueError("A validation stack requires four same-row plans")
+        rows = plans[0].rows
+        header_begin = len(values)
+        for plan in plans:
+            values.extend(plan.header)
+        positions_begin = len(values)
+        for plan in plans:
+            values.extend(plan.boundary_positions)
+        tail_begin = None
+        if plans[0].ratio == 2:
+            tail_begin = len(values)
+            for plan in plans:
+                values.extend(
+                    (plan.start + 4094, 1, plan.start + 4095, 1)
+                    if plan.tail_count
+                    else (-1, 0, -1, 0)
+                )
+        slices.append((header_begin, positions_begin, tail_begin, rows))
+    storage = torch.tensor(values, dtype=torch.int64, device=device)
+    result = []
+    for plans, (header_begin, positions_begin, tail_begin, rows) in zip(
+        plan_groups, slices
+    ):
+        if tail_begin is not None:
+            tail_identity = storage[tail_begin : tail_begin + 16].view(4, 2, 2)
+            tail_state_exempt = torch.tensor(
+                [bool(plan.tail_count) for plan in plans],
+                dtype=torch.bool,
+                device=device,
+            )
+        else:
+            tail_identity = tail_state_exempt = None
+        result.append(
+            ValidationStack(
+                storage[header_begin : header_begin + 64].view(4, 16),
+                storage[positions_begin : positions_begin + 4 * rows].view(4, rows),
+                tail_identity,
+                tail_state_exempt,
             )
         )
     return tuple(result)
@@ -131,8 +199,37 @@ def pack(
     return out
 
 
-def unpack(plans, metadata, received):
+def _stack_from_metadata(plans, metadata, device):
+    """Build a ValidationStack from per-sender metadata (compatibility path)."""
+    ratio2 = plans[0].ratio == 2
+    return ValidationStack(
+        torch.stack([expected.header for expected in metadata]),
+        torch.stack([expected.positions for expected in metadata]),
+        (
+            torch.stack([expected.tail_identity for expected in metadata])
+            if ratio2
+            else None
+        ),
+        (
+            torch.tensor(
+                [bool(plan.tail_count) for plan in plans],
+                dtype=torch.bool,
+                device=device,
+            )
+            if ratio2
+            else None
+        ),
+    )
+
+
+def unpack(plans, metadata, received, validation=None):
     """Validate every sender before returning any rows for persistent scatter.
+
+    Validation is batched across all four senders: one comparison per field
+    plus a single trailing assertion, instead of a per-sender compare/reduce
+    chain. ``validation`` is the admission-time stack from
+    prepare_validation_stacks; when omitted it is rebuilt from ``metadata``
+    (compatibility path for direct callers).
 
     Device assertions execute on the caller's stream before subsequent cache
     writes. A failed CUDA assertion poisons the worker; callers must not retry.
@@ -154,22 +251,42 @@ def unpack(plans, metadata, received):
     rows = plans[0].rows
     end = HEADER_BYTES + rows * RECORD_BYTES
     records = received[:, HEADER_BYTES:end].reshape(4, rows, RECORD_BYTES)
-    for rank, (plan, expected) in enumerate(zip(plans, metadata)):
-        header = received[rank, :HEADER_BYTES].view(torch.int64)
-        positions = records[rank, :, :8].contiguous().view(torch.int64).flatten()
-        valid = (header == expected.header).all() & (
-            positions == expected.positions
-        ).all()
-        if plan.ratio == 2:
-            tail = received[rank, end:].view(2, TAIL_RECORD_BYTES)
-            identity = tail[:, :16].contiguous().view(torch.int64)
-            valid &= (identity == expected.tail_identity).all()
-            if not plan.tail_count:
-                valid &= (tail[:, 16:] == 0).all()
-        if received.is_cuda:
-            torch._assert_async(valid, "Invalid compact CP identity or row order")
-        elif not bool(valid):
-            raise ValueError("Invalid compact CP identity or row order")
+    if validation is None:
+        validation = _stack_from_metadata(plans, metadata, received.device)
+    if (
+        not isinstance(validation, ValidationStack)
+        or validation.header.shape != (4, 16)
+        or validation.header.dtype != torch.int64
+        or validation.positions.shape != (4, rows)
+        or validation.positions.dtype != torch.int64
+        or validation.header.device != received.device
+        or validation.positions.device != received.device
+    ):
+        raise ValueError("Invalid compact CP validation stack")
+    valid = (received[:, :HEADER_BYTES].view(torch.int64) == validation.header).all()
+    # The record stride (364 B) is not int64-aligned, so compare positions in
+    # byte space: the contiguous stacked expectation views to (4, rows, 8)
+    # natively, matching the little-endian bytes pack() wrote, with no copy.
+    position_bytes = validation.positions.view(torch.uint8).view(4, rows, 8)
+    valid &= (records[:, :, :8] == position_bytes).all()
+    if plans[0].ratio == 2:
+        if (
+            validation.tail_identity is None
+            or validation.tail_state_exempt is None
+            or validation.tail_identity.shape != (4, 2, 2)
+            or validation.tail_identity.dtype != torch.int64
+            or validation.tail_state_exempt.shape != (4,)
+            or validation.tail_state_exempt.dtype != torch.bool
+        ):
+            raise ValueError("Invalid compact CP tail validation stack")
+        tails = received[:, end:].view(4, 2, TAIL_RECORD_BYTES)
+        valid &= (tails[:, :, :16].view(torch.int64) == validation.tail_identity).all()
+        state_zero = (tails[:, :, 16:] == 0).all(dim=(1, 2))
+        valid &= (state_zero | validation.tail_state_exempt).all()
+    if received.is_cuda:
+        torch._assert_async(valid, "Invalid compact CP identity or row order")
+    elif not bool(valid):
+        raise ValueError("Invalid compact CP identity or row order")
     main = records[:, :, 8:296].reshape(4 * rows, 288).contiguous()
     index = records[:, :, 296:364].reshape(4 * rows, 68).contiguous()
     state = None

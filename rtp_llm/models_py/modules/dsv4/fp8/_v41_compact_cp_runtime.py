@@ -12,7 +12,12 @@ from ._v41_compact_cp_plan import (
     resolve_geometry,
 )
 from ._v41_compact_cp_producer import produce_owner_rows, project_owner
-from ._v41_compact_cp_transport import pack, prepare_metadata_batch, unpack
+from ._v41_compact_cp_transport import (
+    pack,
+    prepare_metadata_batch,
+    prepare_validation_stacks,
+    unpack,
+)
 
 SHARED_KEY = "v41_compact_cp_forward"
 
@@ -28,6 +33,7 @@ class Producer:
     index_slots: torch.Tensor
     state_pool: torch.Tensor | None
     state_slots: torch.Tensor | None
+    validation: object = None
 
 
 @dataclass
@@ -173,7 +179,10 @@ class CompactCPForward:
         else:
             size = producer.plans[0].send_bytes
             main, index, state = unpack(
-                producer.plans, producer.metadata, received.view(4, size)
+                producer.plans,
+                producer.metadata,
+                received.view(4, size),
+                producer.validation,
             )
             producer.main_cache.scatter(main, producer.main_slots)
             producer.index_cache.scatter(index, producer.index_slots)
@@ -257,6 +266,7 @@ def prepare(worker, dispatch, execution_round):
     all_metadata = prepare_metadata_batch(
         tuple(plan for group in plan_groups for plan in group), device
     )
+    all_validation = prepare_validation_stacks(plan_groups, device)
     state_end = all_metadata[0].tail_identity[-1, :1] + 1
     producers = []
     for index, ((layer_id, ratio), plans) in enumerate(zip(PRODUCERS, plan_groups)):
@@ -281,6 +291,7 @@ def prepare(worker, dispatch, execution_round):
         ):
             raise ValueError("Compact CP producer differs from the checkpoint contract")
         metadata = all_metadata[index * 4 : (index + 1) * 4]
+        validation = all_validation[index]
         positions = torch.cat([meta.positions for meta in metadata])
         requests = torch.zeros_like(positions)
         with bind_attn_cache(attention, worker.kv_cache, dispatch.tables, cp_ctx=cp):
@@ -316,6 +327,7 @@ def prepare(worker, dispatch, execution_round):
                     index_slots,
                     state_pool,
                     state_slots,
+                    validation,
                 )
             )
     return CompactCPForward(mode, reason, dispatch, projection, producers)
