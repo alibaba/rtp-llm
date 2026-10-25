@@ -160,6 +160,18 @@ protected:
                                       SamplerOutput&                                   draft_sampler_output,
                                       int64_t&                                         model_forward_us);
     GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
+    // DSpARK TP1 tail-commit side-stream overlap. The commit replay is
+    // launched on dspark_commit_stream_ as soon as the target-verify forward
+    // has been enqueued (its host prerequisites are final at that point),
+    // gated by a verify-completion event so its GPU work starts exactly when
+    // the verify graph finishes — concurrently with the sampler/rejection
+    // chain that serializes behind the same event on the engine stream. The
+    // engine stream joins the commit completion event before dispatch.
+    bool dsparkCommitSideStreamEnabled() const;
+    void launchDSparkCommitOnSideStream(GptModelInputs&      model_input,
+                                         const torch::Tensor& target_features,
+                                         size_t               batch_size);
+    void joinDSparkCommitSideStream();
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
                                              const torch::Tensor&                draft_tokens,
@@ -328,6 +340,15 @@ private:
     // Records the most recent forward so an early-return step can wait for it
     // before its buffers are released, without a device-wide sync.
     std::shared_ptr<torch::Event> last_forward_event_;
+    // Dedicated stream carrying the DSpARK TP1 tail-commit forward/replay so
+    // it overlaps the engine stream's sampler/rejection tail. The done event
+    // is only set while the side-stream commit is active for the current
+    // decode step.
+    torch::Stream                 dspark_commit_stream_ = cuda_graph::graphGetStreamFromPool(false);
+    std::shared_ptr<torch::Event> dspark_commit_done_event_;
+    // Commit forward result produced on the side stream; moved into
+    // draft_prefill_model_output at the join point before dispatch.
+    GptModelOutputs dspark_commit_model_output_;
 
     AsyncRunner target_verify_prepare_runner_;
     AsyncRunner draft_prefill_prepare_runner_;

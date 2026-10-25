@@ -1493,6 +1493,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     bool                          spec_logits_async_launched              = false;
     bool                          spec_logits_processor_present           = false;
     const bool                    alignment_only                          = enable_ffn_disaggregate_ && streams.empty();
+    // Side-stream commit state is per-step; a fresh decode step must never
+    // observe a leftover event/output (e.g. an exception unwound between the
+    // side-stream launch and the join).
+    dspark_commit_done_event_  = nullptr;
+    dspark_commit_model_output_ = GptModelOutputs();
 
     // StreamGroups snapshots scheduling metadata. Wait for any mutable
     // bookkeeping/KV-swap state that has not yet reached a safe snapshot.
@@ -1681,6 +1686,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    // DSpARK TP1: the tail commit has no dependency on rejection — its input
+    // is the explicit target-forward aux output, already final above. Launch
+    // it on the dedicated stream gated by a verify-completion event so its
+    // replay overlaps the sampler/rejection chain instead of serializing
+    // behind it. Other configurations keep the serial post-rejection call.
+    if (dsparkCommitSideStreamEnabled()) {
+        launchDSparkCommitOnSideStream(model_input, model_output.all_hidden_states, batch_size);
+    }
+
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(update_draft_sampler_output)");
@@ -1776,9 +1790,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // Target verify wrote its aux features into the shared MTP hidden
             // buffer inside the (possibly graphed) forward; replay does not
             // advance the Python-side row count, so pass the explicit verify
-            // geometry.
-            batch_stream_processor_->updateDecodePostDSparkCommitInput(
-                model_input, model_output.all_hidden_states, batch_size);
+            // geometry. The side-stream overlap path already bound this
+            // input before the sampler; rebinding is redundant there.
+            if (!dspark_commit_done_event_) {
+                batch_stream_processor_->updateDecodePostDSparkCommitInput(
+                    model_input, model_output.all_hidden_states, batch_size);
+            }
         } else {
             batch_stream_processor_->updateDecodePostDraftModelInput(
                 model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
@@ -1817,7 +1834,16 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
 
-    {
+    if (dspark_commit_done_event_) {
+        // Side-stream commit was launched right after the verify forward.
+        // Join its completion into the engine stream here (before the
+        // rejection/draft event records and dispatch) and adopt its output,
+        // preserving the serial path's downstream ordering exactly.
+        joinDSparkCommitSideStream();
+        draft_prefill_model_output = std::move(dspark_commit_model_output_);
+        dspark_commit_model_output_ = GptModelOutputs();
+        dspark_commit_done_event_ = nullptr;
+    } else {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         // DSpARK tail = commit only: dense verify rows into the draft
         // feature KV (incremental-prefill shape; output unused). The next
@@ -1828,6 +1854,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+        // A launched side-stream commit must join before buffer release: its
+        // replay still reads this step's input tensors.
+        if (dspark_commit_done_event_) {
+            joinDSparkCommitSideStream();
+            dspark_commit_model_output_ = GptModelOutputs();
+            dspark_commit_done_event_   = nullptr;
+        }
         fenceModelBufferRelease();
         releaseAllModelBuffers();
         return absl::OkStatus();
@@ -2365,6 +2398,58 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     // Ordinary MTP chains this output into the next autoregressive draft step.
     maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_prefill_model);
     return draft_prefill_model_output;
+}
+
+bool MtpExecutor::dsparkCommitSideStreamEnabled() const {
+    // The overlap only reorders the commit's execution stream; every other
+    // configuration keeps the byte-identical serial path. TP>1 excluded: the
+    // commit input binding and broadcast placement are collective-sensitive
+    // (tpSyncModelInputs order). Non-DSpark decodes chain draft outputs into
+    // the sampler tail and need the serial order. Warmup and the PREFILL
+    // commit-only worker keep the serial path so warmup/capture forwards stay
+    // stream-stable.
+    return is_dspark_ && !dspark_prefill_commit_only_ && parallelism_config_.tp_size == 1 && !warm_up_;
+}
+
+void MtpExecutor::launchDSparkCommitOnSideStream(GptModelInputs&      model_input,
+                                                 const torch::Tensor& target_features,
+                                                 size_t               batch_size) {
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_dspark_commit_side_stream)");
+    // The commit input is bound from the explicit target-forward output
+    // (all_hidden_states), which is final once runTargetVerifyForward has
+    // been enqueued; rejection does not participate. Record the verify
+    // completion so the side-stream commit starts its GPU work exactly when
+    // the verify graph drains, while the engine stream continues with the
+    // sampler/rejection chain queued behind the same event.
+    auto verify_done_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    verify_done_event->record(cuda_graph::graphGetCurrentStream());
+    batch_stream_processor_->updateDecodePostDSparkCommitInput(model_input, target_features, batch_size);
+    // Draft-cache stride mirrors broadcastPostRejectionInputs' application so
+    // the commit forward observes the exact same input state as the serial
+    // path (which strides before the forward; TP1 broadcasts nothing).
+    applyCacheStrideToModelInput(model_input, cache_manager_->getMTPModuleCacheConfig(0));
+
+    // The async draft-prefill prepare worker mutates the commit wrapper's
+    // attention inputs on its own stream. Join it (host + stream) before the
+    // commit forward reads that state, exactly where the serial path synced.
+    draft_prefill_prepare_runner_.sync(dspark_commit_stream_);
+
+    cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(dspark_commit_stream_));
+    verify_done_event->block(dspark_commit_stream_);
+    dspark_commit_done_event_ = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    dspark_commit_done_event_->record(dspark_commit_stream_);
+    dspark_commit_model_output_ = std::move(commit_output);
+}
+
+void MtpExecutor::joinDSparkCommitSideStream() {
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(join_dspark_commit_side_stream)");
+    // Join the commit completion back onto the engine stream before the
+    // rejection/draft event records and dispatch so every downstream consumer
+    // (bookkeeping worker, next round head) observes the committed draft KV
+    // with the same ordering as the serial path.
+    if (dspark_commit_done_event_) {
+        dspark_commit_done_event_->block(cuda_graph::graphGetCurrentStream());
+    }
 }
 
 void MtpExecutor::collectDecodeMetrics(const StreamGroups&                          stream_groups,
