@@ -1,5 +1,12 @@
 """DeepGEMM contract for the 132B indexer FP8 pool.
 
+Path coverage: the case executes on any CUDA device. ``supports_paged_mqa_logits``
+selects the kernel — DeepGEMM ``fp8_paged_mqa_logits`` on SM90/SM100 with a
+wheel that accepts the group-128 legacy call, the Triton fallback otherwise
+(e.g. pre-SM90 L20). The call counters below pin the selected path
+(DeepGEMM == 1 when the predicate is true, fallback == 1 when it is false), so
+the numeric comparison is honest about which kernel produced the logits.
+
 Verifies end-to-end that the 132B/slot UE8M0 layout we just locked in
 (``test_indexer_fp8_writer.py``) is consumed correctly by DeepGEMM's
 ``fp8_paged_mqa_logits``. This pins the data path:
@@ -17,6 +24,8 @@ error <1.0 on the smaller ones.
 """
 
 from __future__ import annotations
+
+import logging
 
 import torch
 
@@ -46,14 +55,50 @@ except ImportError:
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
 )
+from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score as _indexer_score_mod
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     fp8_paged_indexer_score,
-    has_fp8_paged_mqa_logits,
+    supports_paged_mqa_logits,
+)
+from rtp_llm.models_py.triton_kernels import (
+    legacy_fp8_indexer_score as _legacy_fallback_mod,
 )
 
 INDEXER_HEAD_DIM = 128
 INDEXER_ENTRY_BYTES = 132
 _FP8_MAX = 448.0
+
+
+class _CountingDeepGemm:
+    """Delegate to DeepGEMM while counting the paged entry point."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.paged = 0
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def fp8_paged_mqa_logits(self, *args, **kwargs):
+        self.paged += 1
+        return self._inner.fp8_paged_mqa_logits(*args, **kwargs)
+
+
+class _CountingFallback:
+    """Count calls to the group-128 Triton fallback entry point."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.calls = 0
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        return self._inner(*args, **kwargs)
+
+
+class _NullMonkeypatch:
+    def setattr(self, obj, name, value):
+        setattr(obj, name, value)
 
 
 def _ue8m0_quantize_k(K_bf16):
@@ -116,14 +161,32 @@ def _ref_indexer_score(Q_bf16, K_dequant_bf16, weights_fp32):
 # DeepGEMM ``get_paged_mqa_logits_metadata`` accepts ``block_kv == 64``
 # on SM90/SM100 and ``block_kv == 32`` on SM100 only.
 @pytest.mark.parametrize("block_size", [32, 64])
-def test_fp8_paged_indexer_score_via_deepgemm(block_size):
+def test_fp8_paged_indexer_score_via_deepgemm(block_size, monkeypatch):
     """rtp-llm 132B pool → DeepGEMM ``fp8_paged_mqa_logits`` ≈ bf16 reference."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
-    if block_size == 32 and torch.cuda.get_device_capability()[0] != 10:
-        pytest.skip("DeepGEMM block_kv=32 requires SM100")
-    if not has_fp8_paged_mqa_logits():
-        pytest.skip("deep_gemm.fp8_paged_mqa_logits unavailable")
+    # Run on every device: when the predicate is False the wrapper must serve
+    # the case through the Triton fallback, and the numerics below still have
+    # to match the reference — only the path assertion changes (see the end).
+    expects_deepgemm = supports_paged_mqa_logits(torch.device("cuda"), block_size)
+    if not expects_deepgemm:
+        logging.info(
+            "block_kv=%s not served by DeepGEMM on capability %s; "
+            "validating the Triton fallback instead",
+            block_size,
+            torch.cuda.get_device_capability(),
+        )
+    # Count the DeepGEMM call: the predicate above claims this case runs on
+    # the DeepGEMM path, and a silent fall back to Triton would otherwise
+    # keep the test green without exercising DeepGEMM at all. The fallback
+    # counter proves the opposite branch really ran when the predicate is
+    # false, so neither path can silently disappear.
+    deepgemm = _CountingDeepGemm(_indexer_score_mod._deep_gemm)
+    monkeypatch.setattr(_indexer_score_mod, "_deep_gemm", deepgemm)
+    fallback = _CountingFallback(_legacy_fallback_mod.legacy_fp8_paged_mqa_logits)
+    monkeypatch.setattr(
+        _legacy_fallback_mod, "legacy_fp8_paged_mqa_logits", fallback
+    )
 
     torch.manual_seed(0xDEAD)
     device = torch.device("cuda")
@@ -167,7 +230,7 @@ def test_fp8_paged_indexer_score_via_deepgemm(block_size):
     Q = torch.randn(B, next_n, H, D, dtype=torch.bfloat16, device=device) * 0.5
     weights = torch.randn(B, next_n, H, dtype=torch.bfloat16, device=device) * 0.1
 
-    # ── DeepGEMM path ──
+    # ── FP8 paged path (DeepGEMM, or the Triton fallback off-contract) ──
     q_fp8, w_fold = indexer_q_fp8_quant_fold(Q, weights)
     logits_dg = fp8_paged_indexer_score(
         q_fp8,
@@ -215,10 +278,26 @@ def test_fp8_paged_indexer_score_via_deepgemm(block_size):
         f"DeepGEMM logits diverge from bf16 reference: max_abs={max_abs:.3f}, "
         f"max_rel={rel:.3%}, mean_abs={mean_abs:.3f}"
     )
+    expected_deepgemm = 1 if expects_deepgemm else 0
+    expected_fallback = 0 if expects_deepgemm else 1
+    assert deepgemm.paged == expected_deepgemm, (
+        f"expected {expected_deepgemm} deep_gemm.fp8_paged_mqa_logits call(s) "
+        f"(predicate says DeepGEMM={expects_deepgemm}), got {deepgemm.paged} — "
+        "the capability predicate and the dispatch drifted"
+    )
+    assert fallback.calls == expected_fallback, (
+        f"expected {expected_fallback} Triton fallback call(s) "
+        f"(predicate says DeepGEMM={expects_deepgemm}), got {fallback.calls} — "
+        "the case did not run on either kernel path"
+    )
 
 
 if __name__ == "__main__":
-    if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 10:
-        test_fp8_paged_indexer_score_via_deepgemm(32)
-    test_fp8_paged_indexer_score_via_deepgemm(64)
+    if not torch.cuda.is_available():
+        print("SKIP: CUDA required")
+    else:
+        # Runs on any CUDA device: the in-test counters assert the DeepGEMM
+        # path when the predicate is true and the fallback path otherwise.
+        for _block_size in (32, 64):
+            test_fp8_paged_indexer_score_via_deepgemm(_block_size, _NullMonkeypatch())
     print("OK")
