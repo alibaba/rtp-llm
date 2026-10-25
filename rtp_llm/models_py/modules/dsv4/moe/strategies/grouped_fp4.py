@@ -66,6 +66,8 @@ _MOE_ACTIVE_SCALE_FUSION_REQUIRED = (
 # Optional SM120 grouped-GEMM N tile. Keep FlashInfer's default of 128;
 # alternative values are validated by the selected FlashInfer backend.
 _MOE_TILE_N = int(os.environ.get("DSV4_MOE_TILE_N", "128"))
+_SM120_MOE_AUTOTUNE = os.environ.get("DSV4_SM120_MOE_AUTOTUNE", "1") == "1"
+_SM120_MOE_AUTOTUNE_CACHE = os.environ.get("DSV4_SM120_MOE_AUTOTUNE_CACHE") or None
 # Base layout -> stable-address power-of-two generations. Older generations
 # stay alive because already-captured CUDA graphs may still reference them.
 _SM120_FUSED_MOE_WORKSPACES: dict[tuple, list[tuple[int, torch.Tensor]]] = {}
@@ -743,7 +745,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         # TRT-LLM NVFP4 weight shuffle is a block-16 format and must not be
         # applied to these DSv4 MXFP4 weights.
         routed_ids = torch.where(weights != 0, indices, torch.full_like(indices, -1))
-        cutlass_fused_moe(
+        moe_kwargs = dict(
             input=kernel_input,
             token_selected_experts=routed_ids.to(torch.int32).contiguous(),
             token_final_scales=weights.float().contiguous(),
@@ -768,6 +770,16 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             tune_max_num_tokens=actual_tokens,
             activation_type=ActivationType.Swiglu,
         )
+        if _SM120_MOE_AUTOTUNE and not torch.cuda.is_current_stream_capturing():
+            # The warm-up forward that precedes each graph capture profiles the
+            # CUTLASS tactics for this token count; capture then replays the
+            # cached choice. Default tactics are 25-50% slower on SM120 decode.
+            from flashinfer.autotuner import autotune
+
+            with autotune(True, cache=_SM120_MOE_AUTOTUNE_CACHE):
+                cutlass_fused_moe(**moe_kwargs)
+        else:
+            cutlass_fused_moe(**moe_kwargs)
         return output.float()
 
     def _forward_capture_topk(

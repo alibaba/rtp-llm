@@ -58,6 +58,69 @@ def _get_symm_mem():
     return _symm_mem
 
 
+# Optional PCIe one-shot all-reduce (b12x pcie_oneshot) for small TP all-reduces
+# on PCIe-only boxes (no NVLink). Enabled with DSV4_PCIE_ONESHOT_AR=1; messages
+# up to DSV4_PCIE_ONESHOT_MAX_BYTES use it, larger ones fall back to NCCL.
+_pcie_oneshot = None
+_pcie_oneshot_max_bytes = 0
+# Group recorded at distributed init; the pool is built lazily on the first
+# eager TP all-reduce (all ranks reach it in lockstep during warm-up, before any
+# CUDA-graph capture) so it does not interleave with the C++ comm setup.
+_pcie_oneshot_pending_group: list = [None]
+
+
+def _init_pcie_oneshot(group: torch.distributed.ProcessGroup) -> None:
+    global _pcie_oneshot, _pcie_oneshot_max_bytes
+    if os.environ.get("DSV4_PCIE_ONESHOT_AR", "0") != "1":
+        return
+    try:
+        from b12x_pcie import PCIeOneshotAllReducePool
+
+        _pcie_oneshot_max_bytes = int(
+            os.environ.get("DSV4_PCIE_ONESHOT_MAX_BYTES", str(512 * 1024))
+        )
+        pool = PCIeOneshotAllReducePool.from_process_group(
+            process_group=group,
+            device=torch.device("cuda", torch.cuda.current_device()),
+            max_input_bytes=max(_pcie_oneshot_max_bytes, 1 << 20),
+            single_channel=True,
+        )
+        # Allocate the channel eagerly so CUDA-graph capture can reuse it.
+        warm = torch.zeros(4096, dtype=torch.bfloat16, device="cuda")
+        pool.all_reduce(warm, out=torch.empty_like(warm))
+        torch.cuda.synchronize()
+        _pcie_oneshot = pool
+        logging.info(
+            "PCIe one-shot all-reduce enabled for <= %d bytes", _pcie_oneshot_max_bytes
+        )
+    except Exception as e:
+        logging.warning("PCIe one-shot all-reduce unavailable: %s", e)
+        _pcie_oneshot = None
+
+
+def pcie_oneshot_all_reduce(tensor: torch.Tensor) -> Optional[torch.Tensor]:
+    """In-place small-message all-reduce over the PCIe one-shot pool, or None."""
+    pool = _pcie_oneshot
+    if pool is None:
+        group = _pcie_oneshot_pending_group[0]
+        if group is None or torch.cuda.is_current_stream_capturing():
+            return None
+        _pcie_oneshot_pending_group[0] = None
+        _init_pcie_oneshot(group)
+        pool = _pcie_oneshot
+        if pool is None:
+            return None
+    nbytes = tensor.numel() * tensor.element_size()
+    if nbytes > _pcie_oneshot_max_bytes or nbytes % 16 != 0 or not tensor.is_contiguous():
+        return None
+    if tensor.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+        return None
+    out = torch.empty_like(tensor)
+    pool.all_reduce(tensor, out=out)
+    tensor.copy_(out)
+    return tensor
+
+
 def _make_cpu_tp_broadcaster_base_path(
     parallelism_config: ParallelismConfig,
     nccl_init_port: int,
@@ -295,6 +358,7 @@ def _create_process_groups(
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
         _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
+        _pcie_oneshot_pending_group[0] = torch.distributed.group.WORLD
 
     if pp_size > 1:
         # A distinct STAGE communicator is only needed when a stage spans more
@@ -900,6 +964,8 @@ def all_reduce(
             return rocm_rccl.capture_all_reduce(tensor, _get_group(group))
 
     if group == Group.TP:
+        if pcie_oneshot_all_reduce(tensor) is not None:
+            return tensor
         symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
             tensor

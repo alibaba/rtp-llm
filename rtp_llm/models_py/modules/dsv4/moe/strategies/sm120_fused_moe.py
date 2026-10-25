@@ -225,7 +225,12 @@ class Sm120FusedMoeStrategy(RoutedExpertsStrategy):
                 # Expert partial sums are combined with the bf16 shared-expert
                 # output anyway; reducing in bf16 halves PCIe traffic.
                 partial_bf16 = partial.to(torch.bfloat16)
-                dist.all_reduce(partial_bf16, op=dist.ReduceOp.SUM, group=group)
+                from rtp_llm.models_py.distributed.collective_torch import (
+                    pcie_oneshot_all_reduce,
+                )
+
+                if pcie_oneshot_all_reduce(partial_bf16) is None:
+                    dist.all_reduce(partial_bf16, op=dist.ReduceOp.SUM, group=group)
                 return partial_bf16
             dist.all_reduce(partial, op=dist.ReduceOp.SUM, group=group)
             return partial
