@@ -70,7 +70,7 @@ public final class DeliverySettlementTestSupport {
         response.setFinishedTaskInfo(Map.of(item.requestId(), finished));
         var observation = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
                 .freezeStatusResponse(response);
-        var result = prefill.reconcileWorkerStatus(observation, ignored -> 100L, () -> { }, () -> { });
+        var result = prefill.updateFromWorkerStatus(observation, ignored -> 100L, () -> {}, () -> {});
         assertNull(result.publicationFailure());
         return result.schedulerFacts();
     }

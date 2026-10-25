@@ -3,11 +3,11 @@ package org.flexlb.balance.endpoint;
 import lombok.Getter;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.endpoint.prefill.HeartbeatReconciliation;
+import org.flexlb.balance.endpoint.prefill.HeartbeatResult;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
-import org.flexlb.balance.endpoint.prefill.StatusReconciliation;
 import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
+import org.flexlb.balance.endpoint.prefill.WorkerStatusResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.batch.FinishedBatch;
 import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
@@ -376,11 +376,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
         WorkerStatus.StatusObservation observation = prepared.observation();
-        StatusReconciliation reconciliation =
-                prefillState.reconcileWorkerStatus(
-                        observation,
-                        this::predictRepackedBatchMs,
-                        () -> {
+        WorkerStatusResult result =
+                prefillState.updateFromWorkerStatus(observation, this::predictRepackedBatchMs, () -> {
                             if (!observation.alive()) {
                                 beginRetirement();
                             }
@@ -388,10 +385,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
                             ws.publishPreparedStatus(prepared);
                         },
                         this::beginRetirement);
-        reportFinishedBatchesNoFail(reconciliation.finishedBatches());
-        rethrowPublicationFailure(reconciliation.publicationFailure());
-        List<WorkerStatusFact> facts =
-                reconciliation.schedulerFacts();
+        reportFinishedBatchesNoFail(result.finishedBatches());
+        rethrowPublicationFailure(result.publicationFailure());
+        List<WorkerStatusFact> facts = result.schedulerFacts();
         return () -> endpointEvents.onPrefillStatus(
                 this, observation.role(), facts);
     }
@@ -399,36 +395,28 @@ public class PrefillEndpoint extends WorkerEndpoint {
     @Override
     public Runnable initializeFromPreparedStatus(WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
-        StatusReconciliation reconciliation =
-                prefillState.reconcileWorkerStatus(
-                        observation,
-                        this::predictRepackedBatchMs,
-                        prefillQueue::signalSchedulingInputsChanged,
-                        this::beginRetirement);
-        if (!reconciliation.schedulerFacts().isEmpty() || !reconciliation.finishedBatches().isEmpty()) {
+        WorkerStatusResult result = prefillState.updateFromWorkerStatus(observation, this::predictRepackedBatchMs,
+                prefillQueue::signalSchedulingInputsChanged, this::beginRetirement);
+        if (!result.schedulerFacts().isEmpty() || !result.finishedBatches().isEmpty()) {
             throw new IllegalStateException(
                     "Private Prefill candidate produced locally-owned status facts");
         }
-        rethrowPublicationFailure(reconciliation.publicationFailure());
+        rethrowPublicationFailure(result.publicationFailure());
         return () -> { };
     }
 
     @Override
-    public Runnable observeStatusHeartbeat(
-            WorkerStatus ws,
-            WorkerStatus.StatusObservation observation) {
+    public Runnable observeStatusHeartbeat(WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         if (observation.owner() != ws) {
             throw new IllegalArgumentException(
                     "Status observation belongs to another Prefill generation");
         }
-        HeartbeatReconciliation reconciliation =
-                prefillState.reconcileHeartbeat(observation);
-        if (reconciliation.schedulingInputsChanged()) {
+        HeartbeatResult result = prefillState.updateFromHeartbeat(observation);
+        if (result.schedulingInputsChanged()) {
             prefillQueue.signalSchedulingInputsChanged();
         }
-        return () -> endpointEvents.onPrefillStatus(
-                this, observation.role(), reconciliation.schedulerFacts());
+        return () -> endpointEvents.onPrefillStatus(this, observation.role(), result.schedulerFacts());
     }
 
     private static void rethrowPublicationFailure(Throwable failure) {

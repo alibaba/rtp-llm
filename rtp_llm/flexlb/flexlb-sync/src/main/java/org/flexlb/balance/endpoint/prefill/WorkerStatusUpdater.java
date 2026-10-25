@@ -36,20 +36,15 @@ public final class WorkerStatusUpdater {
      * canonical queue lock is released. Load view readers therefore observe
      * either the previous pair or the fully reduced new pair.
      */
-    public StatusReconciliation reconcileWorkerStatus(
-            WorkerStatus.StatusObservation observation,
-            ToLongFunction<List<ScheduledRequest>> repredictor,
-            Runnable committedPublication,
-            Runnable failedReduction) {
-        return reconcileEngineStatus(
-                observation.engine(),
-                observation.finishedTasks(),
-                repredictor,
-                committedPublication,
-                failedReduction);
+    public WorkerStatusResult updateFromWorkerStatus(WorkerStatus.StatusObservation observation,
+                                                     ToLongFunction<List<ScheduledRequest>> predictBatchTime,
+                                                     Runnable publishStatus,
+                                                     Runnable onPublishFailure) {
+        return reconcileEngineStatus(observation.engine(), observation.finishedTasks(), predictBatchTime, publishStatus,
+                onPublishFailure);
     }
 
-    public HeartbeatReconciliation reconcileHeartbeat(WorkerStatus.StatusObservation observation) {
+    public HeartbeatResult updateFromHeartbeat(WorkerStatus.StatusObservation observation) {
         List<WorkerStatusFact> facts = new ArrayList<>(
                 observation.activeTasks().size());
         boolean capacityReleased = false;
@@ -61,16 +56,9 @@ public final class WorkerStatusUpdater {
             IdentityHashMap<RequestEntry, Phase> individualPhases =
                     new IdentityHashMap<>();
             IdentityHashMap<BatchProgress, Phase> batchPhases = new IdentityHashMap<>();
-            long nextUnknown =
-                    prepareActiveObservationsUnderLock(
-                            engine.runningTaskList(),
-                            Map.of(),
-                            PrefillState.saturatedAdd(
-                                    Math.max(0L, engine.waitingQueryLen()),
-                                    Math.max(0L, engine.runningQueryLen())),
-                            individualPhases,
-                            batchPhases,
-                            facts);
+            long nextUnknown = collectRunningTasks(engine.runningTaskList(), Map.of(), PrefillState
+                    .saturatedAdd(Math.max(0L, engine.waitingQueryLen()), Math.max(0L, engine.runningQueryLen())),
+                    individualPhases, batchPhases, facts);
             schedulingInputsChanged = nextUnknown != prefillState.unknownEngineRequestCount;
             for (var observed : individualPhases.entrySet()) {
                 schedulingInputsChanged |= observed.getKey().singleRequestProgress.phase() != observed.getValue();
@@ -90,24 +78,23 @@ public final class WorkerStatusUpdater {
             prefillState.lock.unlock();
             prefillState.notifyCapacityAvailable(capacityReleased);
         }
-        return new HeartbeatReconciliation(facts, schedulingInputsChanged);
+        return new HeartbeatResult(facts, schedulingInputsChanged);
     }
 
-    private StatusReconciliation reconcileEngineStatus(WorkerStatus.EngineObservation engine,
-                                                       Map<String, WorkerStatus.TaskObservation> finishedTasks,
-                                                       ToLongFunction<List<ScheduledRequest>> repredictor,
-                                                       Runnable committedPublication,
-                                                       Runnable failedReduction) {
+    private WorkerStatusResult reconcileEngineStatus(WorkerStatus.EngineObservation engine,
+                                                     Map<String, WorkerStatus.TaskObservation> finishedTasks,
+                                                     ToLongFunction<List<ScheduledRequest>> predictBatchTime,
+                                                     Runnable publishStatus,
+                                                     Runnable onPublishFailure) {
         boolean capacityReleased = false;
         boolean canonicalMutationStarted = false;
-        StatusReconciliation outcome = null;
+        WorkerStatusResult outcome = null;
         prefillState.lock.lock();
         try {
             long nowMs = prefillState.clock.getAsLong();
             IdentityHashMap<BatchProgress, LiveBatchMembers> membersByBatch =
                     prefillState.batchPrefill.liveBatchMembersUnderLock();
-            Map<String, TerminalObservation> terminals = terminalObservationsUnderLock(
-                    finishedTasks);
+            Map<String, TerminalObservation> terminals = collectFinishedTasks(finishedTasks);
             Map<String, WorkerStatus.TaskObservation> activeTasks =
                     engine.runningTaskList();
             IdentityHashMap<RequestEntry, TerminalObservation> settlements =
@@ -129,13 +116,11 @@ public final class WorkerStatusUpdater {
             IdentityHashMap<RequestEntry, Phase> individualPhases =
                     new IdentityHashMap<>();
             long nextUnknown =
-                    prepareActiveObservationsUnderLock(
-                            activeTasks, terminals, reportedActive,
-                            individualPhases, batchPhases, null);
+                    collectRunningTasks(activeTasks, terminals, reportedActive, individualPhases, batchPhases, null);
             IdentityHashMap<BatchProgress, Long> predictions = new IdentityHashMap<>();
             prefillState.batchPrefill.prepareBatchPredictionsUnderLock(changedBatches, terminals, batchPhases,
-                    repredictor, predictions);
-            outcome = prepareStatusReconciliationUnderLock(terminals, activeTasks, membersByBatch);
+                    predictBatchTime, predictions);
+            outcome = buildResult(terminals, activeTasks, membersByBatch);
 
             // Everything below this boundary is assignment/removal against
             // exact prevalidated identities. Any invariant failure is captured
@@ -146,7 +131,7 @@ public final class WorkerStatusUpdater {
             for (Map.Entry<RequestEntry, TerminalObservation> settlement
                     : settlements.entrySet()) {
                 RequestEntry entry = settlement.getKey();
-                capacityReleased |= prefillState.settleUnderLock(entry, settlement.getValue(),
+                capacityReleased |= prefillState.removeCommittedEntry(entry, settlement.getValue(),
                         entry.batchProgress == null ? null : membersByBatch.get(entry.batchProgress), null, nowMs);
             }
             individualPhases.forEach(
@@ -158,11 +143,11 @@ public final class WorkerStatusUpdater {
             // Status reduction changes counts after invalidating the old work revision.
             prefillState.publishRequestCountUnderLock();
             try {
-                committedPublication.run();
+                publishStatus.run();
             } catch (Throwable failure) {
                 outcome = withPublicationFailure(outcome, failure);
                 try {
-                    failedReduction.run();
+                    onPublishFailure.run();
                 } catch (Throwable failClosedFailure) {
                     // The first publication failure is the canonical outcome.
                 }
@@ -171,13 +156,13 @@ public final class WorkerStatusUpdater {
             if (canonicalMutationStarted && outcome != null) {
                 outcome = withPublicationFailure(outcome, failure);
                 try {
-                    failedReduction.run();
+                    onPublishFailure.run();
                 } catch (Throwable failClosedFailure) {
                     // The first reduction failure is the canonical outcome.
                 }
             } else {
                 try {
-                    failedReduction.run();
+                    onPublishFailure.run();
                 } catch (Throwable failClosedFailure) {
                     failure.addSuppressed(failClosedFailure);
                 }
@@ -190,18 +175,18 @@ public final class WorkerStatusUpdater {
         return outcome;
     }
 
-    private static StatusReconciliation withPublicationFailure(StatusReconciliation outcome, Throwable failure) {
+    private static WorkerStatusResult withPublicationFailure(WorkerStatusResult outcome, Throwable failure) {
         return outcome.publicationFailure() != null
                 ? outcome
-                : new StatusReconciliation(outcome.schedulerFacts(), outcome.finishedBatches(), failure);
+                : new WorkerStatusResult(outcome.schedulerFacts(), outcome.finishedBatches(), failure);
     }
 
-    private long prepareActiveObservationsUnderLock(Map<String, WorkerStatus.TaskObservation> activeTasks,
-                                                    Map<String, TerminalObservation> terminals,
-                                                    long reportedActive,
-                                                    IdentityHashMap<RequestEntry, Phase> individualPhases,
-                                                    IdentityHashMap<BatchProgress, Phase> batchPhases,
-                                                    List<WorkerStatusFact> activeFacts) {
+    private long collectRunningTasks(Map<String, WorkerStatus.TaskObservation> activeTasks,
+                                     Map<String, TerminalObservation> terminals,
+                                     long reportedActive,
+                                     IdentityHashMap<RequestEntry, Phase> individualPhases,
+                                     IdentityHashMap<BatchProgress, Phase> batchPhases,
+                                     List<WorkerStatusFact> activeFacts) {
         prefillState.requireLock();
         Set<String> unknownDetailed = new HashSet<>();
         Set<String> knownObserved = new HashSet<>();
@@ -238,7 +223,7 @@ public final class WorkerStatusUpdater {
         return Math.max(unknownDetailed.size(), scalarUnknown);
     }
 
-    private Map<String, TerminalObservation> terminalObservationsUnderLock(
+    private Map<String, TerminalObservation> collectFinishedTasks(
             Map<String, WorkerStatus.TaskObservation> finishedTasks) {
         prefillState.requireLock();
         Map<String, TerminalObservation> terminals = new HashMap<>();
@@ -259,15 +244,14 @@ public final class WorkerStatusUpdater {
      * canonical entry is settled. The returned object is the exact outcome
      * later published by the endpoint; reduction only binds a callback failure.
      */
-    private StatusReconciliation prepareStatusReconciliationUnderLock(
-            Map<String, TerminalObservation> terminals,
-            Map<String, WorkerStatus.TaskObservation> activeTasks,
-            IdentityHashMap<BatchProgress, LiveBatchMembers> membersByBatch) {
+    private WorkerStatusResult buildResult(Map<String, TerminalObservation> terminals,
+                                           Map<String, WorkerStatus.TaskObservation> activeTasks,
+                                           IdentityHashMap<BatchProgress, LiveBatchMembers> membersByBatch) {
         prefillState.requireLock();
         List<WorkerStatusFact> schedulerFacts = new ArrayList<>(
                 terminals.size() + activeTasks.size());
         for (TerminalObservation terminal : terminals.values()) {
-            WorkerStatusFact fact = terminalFact(prefillState.requests.get(terminal.requestId()), terminal);
+            WorkerStatusFact fact = finishedFact(prefillState.requests.get(terminal.requestId()), terminal);
             if (fact != null) {
                 schedulerFacts.add(fact);
             }
@@ -276,18 +260,18 @@ public final class WorkerStatusUpdater {
             if (terminals.containsKey(task.requestId())) {
                 continue;
             }
-            WorkerStatusFact fact = activeStatusFactUnderLock(task);
+            WorkerStatusFact fact = runningFact(task);
             if (fact != null) {
                 schedulerFacts.add(fact);
             }
         }
 
         List<FinishedBatch> finishedBatches = BatchPrefill.collectFinishedBatches(membersByBatch, terminals);
-        return new StatusReconciliation(schedulerFacts, finishedBatches, null);
+        return new WorkerStatusResult(schedulerFacts, finishedBatches, null);
     }
 
     /** Resolve activity only through the exact committed ledger identity. */
-    private WorkerStatusFact activeStatusFactUnderLock(WorkerStatus.TaskObservation task) {
+    private WorkerStatusFact runningFact(WorkerStatus.TaskObservation task) {
         prefillState.requireLock();
         RequestEntry entry = prefillState.requests.get(task.requestId());
         if (entry == null || entry.isActive() || !BatchPrefill.matchesObservedBatch(entry, task.batchId())
@@ -297,7 +281,7 @@ public final class WorkerStatusUpdater {
         return WorkerStatusFact.active(entry.committedItem);
     }
 
-    private static WorkerStatusFact terminalFact(RequestEntry entry, TerminalObservation terminal) {
+    private static WorkerStatusFact finishedFact(RequestEntry entry, TerminalObservation terminal) {
         if (entry == null || entry.committedItem == null || !terminal.workerObserved()) {
             return null;
         }

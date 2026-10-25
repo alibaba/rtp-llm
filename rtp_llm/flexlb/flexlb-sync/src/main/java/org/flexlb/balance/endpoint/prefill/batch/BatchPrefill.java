@@ -180,10 +180,10 @@ public final class BatchPrefill {
     }
 
     public void prepareBatchPredictionsUnderLock(Set<LiveBatchMembers> changedBatches,
-                                          Map<String, TerminalObservation> terminals,
-                                          IdentityHashMap<BatchProgress, Phase> batchPhases,
-                                          ToLongFunction<List<ScheduledRequest>> repredictor,
-                                          IdentityHashMap<BatchProgress, Long> predictions) {
+                                                 Map<String, TerminalObservation> terminals,
+                                                 IdentityHashMap<BatchProgress, Phase> batchPhases,
+                                                 ToLongFunction<List<ScheduledRequest>> predictBatchTime,
+                                                 IdentityHashMap<BatchProgress, Long> predictions) {
         prefillState.requireLock();
         for (LiveBatchMembers liveMembers : changedBatches) {
             BatchProgress batch = liveMembers.batch();
@@ -206,7 +206,7 @@ public final class BatchPrefill {
             }
             survivors.sort(
                     Comparator.comparingLong(ScheduledRequest::enqueueSeq).thenComparing(ScheduledRequest::requestId));
-            long prediction = repredictor.applyAsLong(survivors);
+            long prediction = predictBatchTime.applyAsLong(survivors);
             predictions.put(batch, prediction);
         }
     }
@@ -226,7 +226,7 @@ public final class BatchPrefill {
                     continue;
                 }
                 for (RequestEntry entry : List.copyOf(liveMembers.members())) {
-                    capacityReleased |= prefillState.settleUnderLock(entry,
+                    capacityReleased |= prefillState.removeCommittedEntry(entry,
                             TerminalObservation.external(entry.requestId), liveMembers, new ArrayList<>(0));
                 }
                 evicted++;

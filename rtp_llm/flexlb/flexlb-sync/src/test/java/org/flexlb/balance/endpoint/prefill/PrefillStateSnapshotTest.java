@@ -376,16 +376,16 @@ class PrefillStateSnapshotTest {
         }
     }
 
-    private void reconcile(Map<String, TaskInfo> finished, Map<String, TaskInfo> active,
-                           ToLongFunction<List<ScheduledRequest>> repredictor) {
+    private void reconcile(Map<String, TaskInfo> finished,
+                           Map<String, TaskInfo> active,
+                           ToLongFunction<List<ScheduledRequest>> predictBatchTime) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setFinishedTaskInfo(finished);
         response.setRunningTaskInfo(active);
         var observation = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
                 .freezeStatusResponse(response);
-        var outcome = state.reconcileWorkerStatus(observation,
-                repredictor, () -> { }, () -> { });
+        var outcome = state.updateFromWorkerStatus(observation, predictBatchTime, () -> {}, () -> {});
         assertNull(outcome.publicationFailure());
     }
 

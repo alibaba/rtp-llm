@@ -224,7 +224,7 @@ class PrefillRequestCapacityTest {
         when(engine.waitingQueryLen()).thenReturn(2L);
         when(observation.engine()).thenReturn(engine);
         when(observation.finishedTasks()).thenReturn(Map.of());
-        var result = state.reconcileWorkerStatus(observation, unused -> 0L, () -> {
+        var result = state.updateFromWorkerStatus(observation, unused -> 0L, () -> {
             assertFalse(state.canAcceptRequest(2L));
             assertTrue(state.canAcceptRequest(3L));
         }, () -> { });
@@ -268,7 +268,7 @@ class PrefillRequestCapacityTest {
         when(engine.waitingQueryLen()).thenReturn(reportedActive);
         when(observation.engine()).thenReturn(engine);
         when(observation.activeTasks()).thenReturn(tasks);
-        state.reconcileHeartbeat(observation);
+        state.updateFromHeartbeat(observation);
     }
 
     private static WorkerStatus.TaskObservation observed(long id) {

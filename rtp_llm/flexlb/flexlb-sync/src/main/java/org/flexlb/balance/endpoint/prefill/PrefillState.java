@@ -467,7 +467,8 @@ public final class PrefillState {
             LiveBatchMembers liveMembers =
                     entry.batchProgress == null ? null : batchPrefill.liveBatchMembersUnderLock(entry.batchProgress);
             // Local cleanup does not prove that Engine omitted this member's work.
-            capacityReleased = settleUnderLock(entry, TerminalObservation.external(entry.requestId), liveMembers, null);
+            capacityReleased =
+                    removeCommittedEntry(entry, TerminalObservation.external(entry.requestId), liveMembers, null);
             return true;
         } finally {
             lock.unlock();
@@ -475,16 +476,16 @@ public final class PrefillState {
         }
     }
 
-    public StatusReconciliation reconcileWorkerStatus(WorkerStatus.StatusObservation observation,
-                                                      ToLongFunction<List<ScheduledRequest>> repredictor,
-                                                      Runnable committedPublication,
-                                                      Runnable failedReduction) {
-        return workerStatusUpdater.reconcileWorkerStatus(observation, repredictor, committedPublication,
-                failedReduction);
+    public WorkerStatusResult updateFromWorkerStatus(WorkerStatus.StatusObservation observation,
+                                                     ToLongFunction<List<ScheduledRequest>> predictBatchTime,
+                                                     Runnable publishStatus,
+                                                     Runnable onPublishFailure) {
+        return workerStatusUpdater.updateFromWorkerStatus(observation, predictBatchTime, publishStatus,
+                onPublishFailure);
     }
 
-    public HeartbeatReconciliation reconcileHeartbeat(WorkerStatus.StatusObservation observation) {
-        return workerStatusUpdater.reconcileHeartbeat(observation);
+    public HeartbeatResult updateFromHeartbeat(WorkerStatus.StatusObservation observation) {
+        return workerStatusUpdater.updateFromHeartbeat(observation);
     }
 
     /**
@@ -671,10 +672,7 @@ public final class PrefillState {
                 }
             }
             for (RequestEntry entry : candidates) {
-                capacityReleased |= settleUnderLock(
-                        entry,
-                        TerminalObservation.external(entry.requestId),
-                        null,
+                capacityReleased |= removeCommittedEntry(entry, TerminalObservation.external(entry.requestId), null,
                         new ArrayList<>(0));
             }
             evicted = candidates.size();
@@ -822,18 +820,18 @@ public final class PrefillState {
                 unknownEngineRequestCount);
     }
 
-    public boolean settleUnderLock(RequestEntry entry,
-                            TerminalObservation terminal,
-                            LiveBatchMembers liveMembers,
-                            List<FinishedBatch> finishedBatches) {
-        return settleUnderLock(entry, terminal, liveMembers, finishedBatches, clock.getAsLong());
+    public boolean removeCommittedEntry(RequestEntry entry,
+                                        TerminalObservation terminal,
+                                        LiveBatchMembers liveMembers,
+                                        List<FinishedBatch> finishedBatches) {
+        return removeCommittedEntry(entry, terminal, liveMembers, finishedBatches, clock.getAsLong());
     }
 
-    public boolean settleUnderLock(RequestEntry entry,
-                                   TerminalObservation terminal,
-                                   LiveBatchMembers liveMembers,
-                                   List<FinishedBatch> finishedBatches,
-                                   long nowMs) {
+    public boolean removeCommittedEntry(RequestEntry entry,
+                                        TerminalObservation terminal,
+                                        LiveBatchMembers liveMembers,
+                                        List<FinishedBatch> finishedBatches,
+                                        long nowMs) {
         requireLock();
         BatchProgress batch = entry.batchProgress;
         boolean lastBatchMember = false;
