@@ -130,7 +130,10 @@ final class MockRemoteDecodeStream implements AutoCloseable {
         }
         boolean errorOutput = value.hasErrorInfo() && value.getErrorInfo().getErrorCodeValue() != 0;
         if (errorOutput && stage != Stage.GENERATE) {
-            fail(Status.INTERNAL.withDescription(value.getErrorInfo().toString()).asRuntimeException());
+            var error = value.getErrorInfo();
+            var details = EngineRpcService.ErrorDetailsPB.newBuilder().setErrorCode(error.getErrorCodeValue())
+                    .setErrorMessage(error.getErrorMessage()).build();
+            fail(MockRpcErrors.error(MockRpcErrors.status(details), details.getErrorCode(), details.getErrorMessage()));
             return;
         }
         if (stage == Stage.ALLOCATE) {

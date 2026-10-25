@@ -30,6 +30,7 @@ class MockRemoteDecodeProtocolTest {
     private final CountDownLatch started = new CountDownLatch(1);
     private volatile LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> outputs;
     private volatile EngineRpcService.GenerateInputPB allocatedInput;
+    private EngineRpcService.RpcErrorPB allocationError;
     private Server server;
     private ManagedChannel channel;
 
@@ -41,6 +42,8 @@ class MockRemoteDecodeProtocolTest {
                     StreamObserver<EngineRpcService.GenerateOutputsPB> response) {
                 return new MockRemoteDecodeCall((input, clientId, stopped) -> {
                     allocatedInput = input;
+                    if (allocationError != null) response.onNext(EngineRpcService.GenerateOutputsPB.newBuilder()
+                            .setRequestId(input.getRequestId()).setErrorInfo(allocationError).build());
                     return new MockRemoteDecodeCall.Lease() {
                     @Override
                     public boolean start(LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue) {
@@ -114,6 +117,21 @@ class MockRemoteDecodeProtocolTest {
             assertEquals(1, completions.get());
             assertFalse(failure.isDone());
             assertEquals(1, cancelled.getCount());
+        }
+    }
+
+    @Test
+    void allocationErrorPayloadPreservesItsDomainDetails() throws Exception {
+        allocationError = EngineRpcService.RpcErrorPB.newBuilder().setErrorCodeValue(602)
+                .setErrorMessage("KV capacity unavailable").build();
+        var failure = new CompletableFuture<Throwable>();
+        try (var stream = connect(new CompletableFuture<>(), failure)) {
+            var details = MockRpcErrors.downstream(failure.get(3, TimeUnit.SECONDS));
+            assertEquals(602, details.getErrorCode());
+            assertEquals("KV capacity unavailable", details.getErrorMessage());
+            assertTrue(stream.allocated().isCompletedExceptionally());
+            assertTrue(cancelled.await(3, TimeUnit.SECONDS));
+            assertEquals(0, starts.get());
         }
     }
 
