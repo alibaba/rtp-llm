@@ -257,7 +257,7 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         return List.copyOf(matching);
     }
 
-    /** Capture one exact currently published endpoint generation by address. */
+    /** Pin one exact currently published endpoint generation by address. */
     public WorkerEndpoint.GenerationPin pinEndpoint(RoleType role, String ipPort) {
         return endpointRegistry.pin(role, ipPort);
     }
@@ -299,7 +299,7 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         return endpointRegistry.pinDecodeEndpoint(expected);
     }
 
-    /** Capture exact endpoint generations for one routing decision. */
+    /** Pin exact endpoint generations for one routing decision. */
     public List<WorkerEndpoint.GenerationPin> pinEndpoints(RoleType role, String group) {
         List<WorkerEndpoint.GenerationPin> pinned = endpointRegistry.pin(role);
         List<WorkerEndpoint.GenerationPin> matching = new ArrayList<>(pinned.size());

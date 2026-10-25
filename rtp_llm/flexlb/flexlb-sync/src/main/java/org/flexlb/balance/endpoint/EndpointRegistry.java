@@ -177,10 +177,10 @@ public class EndpointRegistry {
     }
 
     /**
-     * Capture one exact currently published endpoint generation.
+     * Pin one exact currently published endpoint generation.
      *
      * <p>The pin is acquired inside the address key's CHM remapping critical
-     * section. Capture therefore linearizes either before exact detach (and
+     * section. Pinning therefore linearizes either before exact detach (and
      * retirement waits for the pin) or after detach (and returns {@code null}).
      * The returned route capability is thread-confined.</p>
      */
@@ -191,7 +191,7 @@ public class EndpointRegistry {
     }
 
     /**
-     * Capture the currently addressable generations without exposing a live
+     * Pin the currently addressable generations without exposing a live
      * registry map. Addresses are snapshotted first; every exact pin is then
      * acquired through {@link #pin(RoleType, String)}.
      */
