@@ -5,22 +5,22 @@ import org.flexlb.enums.PriorityPreemptionProgress;
 
 import java.util.Objects;
 
-record TerminalObservation(String requestId,
+public record TerminalObservation(String requestId,
                            long batchId,
                            long executionTimeMs,
                            long errorCode,
                            PriorityPreemptionProgress preemptionProgress,
                            boolean workerObserved) {
-    static TerminalObservation from(WorkerStatus.TaskObservation task, boolean preserveBatchId) {
+    public static TerminalObservation from(WorkerStatus.TaskObservation task, boolean preserveBatchId) {
         return new TerminalObservation(task.requestId(), preserveBatchId ? task.batchId() : -1L, task.executionTimeMs(),
                 task.errorCode(), task.priorityPreemptionProgress(), true);
     }
 
-    static TerminalObservation external(String requestId) {
+    public static TerminalObservation external(String requestId) {
         return new TerminalObservation(requestId, -1L, -1L, 0L, PriorityPreemptionProgress.NONE, false);
     }
 
-    TerminalObservation merge(TerminalObservation other) {
+    public TerminalObservation merge(TerminalObservation other) {
         if (!Objects.equals(requestId, other.requestId)) {
             throw new IllegalArgumentException("cannot merge different terminal requests");
         }

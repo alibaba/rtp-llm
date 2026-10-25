@@ -1,17 +1,20 @@
-package org.flexlb.balance.endpoint.prefill;
+package org.flexlb.balance.endpoint.prefill.batch;
 
 import org.flexlb.balance.endpoint.EndpointGenerationLifecycle;
+import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.RequestEntry;
+import org.flexlb.balance.endpoint.prefill.Reservation;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.List;
 
 public final class BatchReservation extends Reservation {
-    final String headRequestId;
-    final long batchId;
+    public final String headRequestId;
+    public final long batchId;
     /* guarded by PrefillState.lock; non-null only while OPEN */
-    EndpointGenerationLifecycle.HandoffPermit generationHandoff;
+    public EndpointGenerationLifecycle.HandoffPermit generationHandoff;
 
-    BatchReservation(PrefillState owner,
+    public BatchReservation(PrefillState owner,
                      RequestEntry originalOwner,
                      String headRequestId,
                      long batchId,

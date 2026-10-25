@@ -2,6 +2,11 @@ package org.flexlb.balance.endpoint.prefill;
 
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.endpoint.EndpointGenerationLifecycle;
+import org.flexlb.balance.endpoint.prefill.batch.BatchPrefill;
+import org.flexlb.balance.endpoint.prefill.batch.BatchProgress;
+import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
+import org.flexlb.balance.endpoint.prefill.batch.FinishedBatch;
+import org.flexlb.balance.endpoint.prefill.batch.LiveBatchMembers;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.estimate.WorkView.Phase;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -108,10 +113,10 @@ public final class PrefillState {
 
     /** One-shot capability returned when an OPEN admission commits. */
     public static final class CommittedHandoff implements AutoCloseable {
-        EndpointGenerationLifecycle.HandoffPermit generationHandoff;
+        public EndpointGenerationLifecycle.HandoffPermit generationHandoff;
         private final WorkView precedingWork;
 
-        CommittedHandoff(EndpointGenerationLifecycle.HandoffPermit generationHandoff, WorkView precedingWork) {
+        public CommittedHandoff(EndpointGenerationLifecycle.HandoffPermit generationHandoff, WorkView precedingWork) {
             this.generationHandoff = generationHandoff;
             this.precedingWork = precedingWork;
         }
@@ -219,13 +224,13 @@ public final class PrefillState {
         }
     }
 
-    final ReentrantLock lock;
+    public final ReentrantLock lock;
     /** Non-owning index containing only ACTIVE ScheduledRequest identities. */
     private final PrefillActiveIndex activeIndex;
     /** Canonical request ownership, changed only under the endpoint lock. */
-    final Map<String, RequestEntry> requests = new HashMap<>();
-    final LongSupplier clock;
-    final Runnable capacityAvailable;
+    public final Map<String, RequestEntry> requests = new HashMap<>();
+    public final LongSupplier clock;
+    public final Runnable capacityAvailable;
     /** Monotonic ownership/work revision used by load views. */
     private volatile long mutationVersion;
     /** Published at ownership mutation boundaries; admission still checks under the lock. */
@@ -235,12 +240,12 @@ public final class PrefillState {
     private long requestCountsVersion = -1;
     private long[] requestCountsByPriority;
     /** Derived immutable work; ACTIVE queue mutations leave committed work unchanged. */
-    WorkCapture committedWorkCapture;
+    public WorkCapture committedWorkCapture;
     private long unknownEngineRequestCount;
-    final BatchPrefill batchPrefill = new BatchPrefill(this);
+    public final BatchPrefill batchPrefill = new BatchPrefill(this);
 
     /** Publish the capacity summary before readers observe a new ownership revision. */
-    void recordMutationUnderLock() {
+    public void recordMutationUnderLock() {
         publishRequestCountUnderLock();
         mutationVersion++;
     }
@@ -679,7 +684,7 @@ public final class PrefillState {
         return committedHandoff;
     }
 
-    List<ScheduledRequest> validateActiveGroup(List<ScheduledRequest> items) {
+    public List<ScheduledRequest> validateActiveGroup(List<ScheduledRequest> items) {
         requireState(!items.isEmpty(), "committed group requires members");
         for (ScheduledRequest item : items) {
             RequestEntry entry = requests.get(item.requestId());
@@ -693,7 +698,7 @@ public final class PrefillState {
         return items;
     }
 
-    void removeValidatedActiveIndex(ScheduledRequest item) {
+    public void removeValidatedActiveIndex(ScheduledRequest item) {
         boolean removed = activeIndex.remove(item);
         requireState(removed,
                 "validated ACTIVE queue index disappeared request_id="
@@ -1308,7 +1313,7 @@ public final class PrefillState {
         return committedWorkCapture;
     }
 
-    WorkView capturePrecedingWorkUnderLock(List<ScheduledRequest> members, long nowMs) {
+    public WorkView capturePrecedingWorkUnderLock(List<ScheduledRequest> members, long nowMs) {
         requireLock();
         Set<RequestEntry> excluded = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         for (ScheduledRequest member : members) {
@@ -1353,14 +1358,14 @@ public final class PrefillState {
                 unknownEngineRequestCount);
     }
 
-    boolean settleUnderLock(RequestEntry entry,
+    public boolean settleUnderLock(RequestEntry entry,
                             TerminalObservation terminal,
                             LiveBatchMembers liveMembers,
                             List<FinishedBatch> finishedBatches) {
         return settleUnderLock(entry, terminal, liveMembers, finishedBatches, clock.getAsLong());
     }
 
-    boolean settleUnderLock(RequestEntry entry,
+    public boolean settleUnderLock(RequestEntry entry,
                             TerminalObservation terminal,
                             LiveBatchMembers liveMembers,
                             List<FinishedBatch> finishedBatches,
@@ -1469,7 +1474,7 @@ public final class PrefillState {
         rethrowCleanupFailure(failure);
     }
 
-    void notifyCapacityAvailable(boolean capacityReleased) {
+    public void notifyCapacityAvailable(boolean capacityReleased) {
         if (!capacityReleased) {
             return;
         }
@@ -1575,12 +1580,12 @@ public final class PrefillState {
         return null;
     }
 
-    void requireLock() {
+    public void requireLock() {
         requireState(lock.isHeldByCurrentThread(),
                 "Prefill ownership requires queueLock");
     }
 
-    static void requireState(boolean condition, String message) {
+    public static void requireState(boolean condition, String message) {
         if (!condition) {
             throw new IllegalStateException(message);
         }

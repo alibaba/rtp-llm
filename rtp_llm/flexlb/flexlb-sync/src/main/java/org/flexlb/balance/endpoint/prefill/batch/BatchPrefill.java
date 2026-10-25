@@ -1,7 +1,13 @@
-package org.flexlb.balance.endpoint.prefill;
+package org.flexlb.balance.endpoint.prefill.batch;
 
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.endpoint.EndpointGenerationLifecycle;
+import org.flexlb.balance.endpoint.prefill.LeaseState;
+import org.flexlb.balance.endpoint.prefill.PrefillState;
+import org.flexlb.balance.endpoint.prefill.RequestEntry;
+import org.flexlb.balance.endpoint.prefill.Reservation;
+import org.flexlb.balance.endpoint.prefill.ReservationResult;
+import org.flexlb.balance.endpoint.prefill.TerminalObservation;
 import org.flexlb.balance.estimate.WorkView.Phase;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -23,7 +29,7 @@ public final class BatchPrefill {
     private final PrefillState prefillState;
     private int batchLeasesInUse;
 
-    BatchPrefill(PrefillState prefillState) {
+    public BatchPrefill(PrefillState prefillState) {
         this.prefillState = prefillState;
     }
 
@@ -120,7 +126,10 @@ public final class BatchPrefill {
         }
     }
 
-    PrefillState.CommittedHandoff commitBatch(BatchReservation lease, List<ScheduledRequest> items, long predictedMs) {
+    public PrefillState.CommittedHandoff commitBatch(
+            BatchReservation lease,
+            List<ScheduledRequest> items,
+            long predictedMs) {
         prefillState.lock.lock();
         try {
             return commitBatchUnderLock(lease, items, predictedMs);
@@ -168,7 +177,7 @@ public final class BatchPrefill {
         return committedHandoff;
     }
 
-    void prepareBatchPredictionsUnderLock(Set<LiveBatchMembers> changedBatches,
+    public void prepareBatchPredictionsUnderLock(Set<LiveBatchMembers> changedBatches,
                                           Map<String, TerminalObservation> terminals,
                                           IdentityHashMap<BatchProgress, Phase> batchPhases,
                                           ToLongFunction<List<ScheduledRequest>> repredictor,
@@ -227,20 +236,20 @@ public final class BatchPrefill {
         return evicted;
     }
 
-    static boolean matchesObservedBatch(RequestEntry entry, long observedBatchId) {
+    public static boolean matchesObservedBatch(RequestEntry entry, long observedBatchId) {
         if (entry.batchProgress == null) {
             return true;
         }
         return observedBatchId > 0L && entry.batchProgress.batchId() == observedBatchId;
     }
 
-    static Phase strongerEnginePhase(Phase left, Phase right) {
+    public static Phase strongerEnginePhase(Phase left, Phase right) {
         return left == Phase.ENGINE_RUNNING || right == Phase.ENGINE_RUNNING
                 ? Phase.ENGINE_RUNNING
                 : Phase.ENGINE_QUEUED;
     }
 
-    IdentityHashMap<BatchProgress, LiveBatchMembers> liveBatchMembersUnderLock() {
+    public IdentityHashMap<BatchProgress, LiveBatchMembers> liveBatchMembersUnderLock() {
         prefillState.requireLock();
         IdentityHashMap<BatchProgress, LiveBatchMembers> membersByBatch = new IdentityHashMap<>();
         for (RequestEntry entry : prefillState.requests.values()) {
@@ -254,7 +263,7 @@ public final class BatchPrefill {
     /**
      * Build only the exact batch needed by a single-item terminal path.
      */
-    LiveBatchMembers liveBatchMembersUnderLock(BatchProgress exactBatch) {
+    public LiveBatchMembers liveBatchMembersUnderLock(BatchProgress exactBatch) {
         prefillState.requireLock();
         LiveBatchMembers liveMembers = new LiveBatchMembers(exactBatch);
         for (RequestEntry entry : prefillState.requests.values()) {
@@ -305,7 +314,7 @@ public final class BatchPrefill {
         return null;
     }
 
-    void releaseBatchSlotUnderLock() {
+    public void releaseBatchSlotUnderLock() {
         prefillState.requireLock();
         if (batchLeasesInUse <= 0) {
             throw new IllegalStateException("Prefill batch capacity accounting underflow");
@@ -313,7 +322,7 @@ public final class BatchPrefill {
         batchLeasesInUse--;
     }
 
-    void resetBatchLeasesInUseUnderLock() {
+    public void resetBatchLeasesInUseUnderLock() {
         prefillState.requireLock();
         batchLeasesInUse = 0;
     }

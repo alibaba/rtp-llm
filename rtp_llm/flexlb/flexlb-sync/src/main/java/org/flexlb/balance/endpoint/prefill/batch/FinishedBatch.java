@@ -1,4 +1,4 @@
-package org.flexlb.balance.endpoint.prefill;
+package org.flexlb.balance.endpoint.prefill.batch;
 
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 

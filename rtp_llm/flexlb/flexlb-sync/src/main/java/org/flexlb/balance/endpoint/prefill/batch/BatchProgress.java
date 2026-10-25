@@ -1,4 +1,4 @@
-package org.flexlb.balance.endpoint.prefill;
+package org.flexlb.balance.endpoint.prefill.batch;
 
 import org.flexlb.balance.estimate.WorkView.Phase;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
@@ -6,7 +6,7 @@ import org.flexlb.balance.prediction.PrefillBatchFeatures;
 /**
  * BATCH 提交给 Prefill 之后整批共享的执行进度。同一批的成员引用同一份，由 PrefillState 的锁保护。
  */
-final class BatchProgress {
+public final class BatchProgress {
     private final BatchReservation lease;
     private final long predictedWorkMs;
     private final PrefillBatchFeatures featuresAtCommit;
@@ -40,7 +40,11 @@ final class BatchProgress {
      */
     private boolean usableForLearning = true;
 
-    BatchProgress(BatchReservation lease, long predictedWorkMs, PrefillBatchFeatures featuresAtCommit, long nowMs) {
+    public BatchProgress(
+            BatchReservation lease,
+            long predictedWorkMs,
+            PrefillBatchFeatures featuresAtCommit,
+            long nowMs) {
         if (lease.batchId() < 0L) {
             throw new IllegalArgumentException("batchId must be non-negative");
         }
@@ -55,47 +59,47 @@ final class BatchProgress {
         this.lastObservedAtMs = nowMs;
     }
 
-    BatchReservation lease() {
+    public BatchReservation lease() {
         return lease;
     }
 
-    long batchId() {
+    public long batchId() {
         return lease.batchId();
     }
 
-    long predictedWorkMs() {
+    public long predictedWorkMs() {
         return predictedWorkMs;
     }
 
-    PrefillBatchFeatures featuresAtCommit() {
+    public PrefillBatchFeatures featuresAtCommit() {
         return featuresAtCommit;
     }
 
-    Phase phase() {
+    public Phase phase() {
         return phase;
     }
 
-    long lastObservedAtMs() {
+    public long lastObservedAtMs() {
         return lastObservedAtMs;
     }
 
-    boolean engineStarted() {
+    public boolean engineStarted() {
         return engineStarted;
     }
 
-    long maxExecutionTimeMs() {
+    public long maxExecutionTimeMs() {
         return maxExecutionTimeMs;
     }
 
-    boolean anyMemberSucceeded() {
+    public boolean anyMemberSucceeded() {
         return anyMemberSucceeded;
     }
 
-    boolean usableForLearning() {
+    public boolean usableForLearning() {
         return usableForLearning;
     }
 
-    long remainingWorkMsAt(long nowMs) {
+    public long remainingWorkMsAt(long nowMs) {
         if (phase != Phase.ENGINE_RUNNING) {
             return remainingWorkMs;
         }
@@ -105,7 +109,7 @@ final class BatchProgress {
     /**
      * 按 WorkerStatus 上报的阶段更新进度。离开 ENGINE_RUNNING 时先扣掉已经跑过的耗时。
      */
-    void updateProgressFromWorkerStatus(Phase next, long nowMs) {
+    public void updateProgressFromWorkerStatus(Phase next, long nowMs) {
         remainingWorkMs = remainingWorkMsAt(nowMs);
         remainingWorkSinceMs = Math.max(remainingWorkSinceMs, nowMs);
         lastObservedAtMs = Math.max(lastObservedAtMs, nowMs);
@@ -116,7 +120,11 @@ final class BatchProgress {
     /**
      * 按一个成员的结束上报更新进度。workerObserved 为 false 表示本地清理，不是引擎上报。
      */
-    void updateProgressFromFinishedTask(boolean workerObserved, long errorCode, long executionTimeMs, long nowMs) {
+    public void updateProgressFromFinishedTask(
+            boolean workerObserved,
+            long errorCode,
+            long executionTimeMs,
+            long nowMs) {
         lastObservedAtMs = Math.max(lastObservedAtMs, nowMs);
         engineStarted |= workerObserved && (errorCode == 0L || executionTimeMs > 0L);
         if (executionTimeMs >= 0L) {
@@ -129,13 +137,13 @@ final class BatchProgress {
     /**
      * 用剩下成员重新预测出的耗时替换剩余耗时，从 nowMs 起重新计时。
      */
-    void resetRemainingWork(long remainingWorkMs, long nowMs) {
+    public void resetRemainingWork(long remainingWorkMs, long nowMs) {
         this.remainingWorkMs = remainingWorkMs;
         this.remainingWorkSinceMs = nowMs;
         lastObservedAtMs = Math.max(lastObservedAtMs, nowMs);
     }
 
-    FinishedBatch finishedBatch() {
+    public FinishedBatch finishedBatch() {
         return new FinishedBatch(batchId(), featuresAtCommit, predictedWorkMs, maxExecutionTimeMs, anyMemberSucceeded,
                 usableForLearning);
     }
@@ -143,7 +151,7 @@ final class BatchProgress {
     /**
      * 节点退役是外部终止，这时的汇总不能拿去校准预测。
      */
-    FinishedBatch finishedBatchOnRetirement() {
+    public FinishedBatch finishedBatchOnRetirement() {
         return new FinishedBatch(batchId(), featuresAtCommit, predictedWorkMs, maxExecutionTimeMs, anyMemberSucceeded,
                 false);
     }

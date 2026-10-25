@@ -1,4 +1,4 @@
-package org.flexlb.balance.endpoint.prefill;
+package org.flexlb.balance.endpoint.prefill.single;
 
 import org.flexlb.balance.estimate.WorkView.Phase;
 
@@ -6,7 +6,7 @@ import org.flexlb.balance.estimate.WorkView.Phase;
  * NON_BATCH 请求提交给 Prefill 之后的执行进度：处在哪个阶段、还剩多少预测耗时、最近一次被引擎上报的时间。
  * 每个请求一份，由 PrefillState 的锁保护。
  */
-final class SingleRequestProgress {
+public final class SingleRequestProgress {
     private Phase phase = Phase.COMMITTED;
     /**
      * 在 remainingWorkSinceMs 时刻还剩的预测耗时。
@@ -21,21 +21,21 @@ final class SingleRequestProgress {
      */
     private long lastObservedAtMs;
 
-    SingleRequestProgress(long predictedWorkMs, long nowMs) {
+    public SingleRequestProgress(long predictedWorkMs, long nowMs) {
         this.remainingWorkMs = predictedWorkMs;
         this.remainingWorkSinceMs = nowMs;
         this.lastObservedAtMs = nowMs;
     }
 
-    Phase phase() {
+    public Phase phase() {
         return phase;
     }
 
-    long lastObservedAtMs() {
+    public long lastObservedAtMs() {
         return lastObservedAtMs;
     }
 
-    long remainingWorkMsAt(long nowMs) {
+    public long remainingWorkMsAt(long nowMs) {
         if (phase != Phase.ENGINE_RUNNING) {
             return remainingWorkMs;
         }
@@ -45,7 +45,7 @@ final class SingleRequestProgress {
     /**
      * 按 WorkerStatus 上报的阶段更新进度。离开 ENGINE_RUNNING 时先扣掉已经跑过的耗时。
      */
-    void updateProgressFromWorkerStatus(Phase next, long nowMs) {
+    public void updateProgressFromWorkerStatus(Phase next, long nowMs) {
         if (next != Phase.ENGINE_QUEUED && next != Phase.ENGINE_RUNNING) {
             throw new IllegalArgumentException("invalid Engine phase " + next);
         }

@@ -4,11 +4,11 @@ package org.flexlb.balance.endpoint.prefill;
  * Exact request or batch ownership passed through admission and callback.
  */
 public abstract class Reservation implements AutoCloseable {
-    final PrefillState owner;
-    /* guarded by PrefillState.lock */ LeaseState state = LeaseState.OPEN;
-    final RequestEntry originalOwner;
+    public final PrefillState owner;
+    /* guarded by PrefillState.lock */ public LeaseState state = LeaseState.OPEN;
+    public final RequestEntry originalOwner;
 
-    Reservation(PrefillState owner, RequestEntry originalOwner) {
+    public Reservation(PrefillState owner, RequestEntry originalOwner) {
         this.owner = owner;
         this.originalOwner = originalOwner;
     }
