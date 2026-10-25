@@ -30,12 +30,27 @@ struct StorageBackendMatchMeta {
     virtual ~StorageBackendMatchMeta() = default;
 };
 
+enum class StorageQuarantineReason {
+    SDK_TIMEOUT,
+    RPC_TIMEOUT,
+    RPC_ERROR,
+    INVALID_RESPONSE,
+};
+
 // The backend accepted an operation but cannot prove that DMA/RDMA has
 // stopped touching its buffers. StorageBackend replaces request pins with
 // permanent FROZEN references for the lifetime of the block pool.
 class StorageOperationCompletionUnknown: public std::runtime_error {
 public:
-    using std::runtime_error::runtime_error;
+    StorageOperationCompletionUnknown(const std::string& message, StorageQuarantineReason reason):
+        std::runtime_error(message), reason_(reason) {}
+
+    StorageQuarantineReason reason() const noexcept {
+        return reason_;
+    }
+
+private:
+    StorageQuarantineReason reason_;
 };
 
 // The transport reported an explicit timeout. Buffer ownership is still
@@ -134,6 +149,7 @@ protected:
                                         const std::shared_ptr<StorageBackendMatchMeta>& match_meta) = 0;
     virtual void               writeImpl(const StorageRequest& request)                             = 0;
     virtual void               shutdownImpl() noexcept {}
+    virtual void               onQuarantined(bool, StorageQuarantineReason, size_t) noexcept {}
     virtual void               onQuarantineChanged(uint64_t, size_t, size_t) noexcept {}
 
 private:
@@ -150,7 +166,9 @@ private:
     void                                 validateRequest(const StorageRequest& request, bool allow_null_blocks) const;
     bool                                 dispatch(Operation operation);
     void                                 taskFinished();
-    void quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state);
+    void quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state,
+                        bool                                                             is_write,
+                        StorageQuarantineReason                                          reason);
     std::shared_ptr<const CacheTopology> topology_;
     PoolsByTag                           pools_by_tag_;
     BufferResolver                       buffer_resolver_;
