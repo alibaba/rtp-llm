@@ -3,7 +3,7 @@ package org.flexlb.balance.endpoint;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
+import org.flexlb.balance.endpoint.prefill.CommitResult;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.estimate.WorkView;
@@ -1632,8 +1632,8 @@ class PrefillEndpointTest {
         // offered into the ACTIVE queue; reserveSingle rejects a non-active
         // identity with REQUEST_LEFT_QUEUE.
         assertTrue(EndpointTestSupport.offer(endpoint, route));
-        List<CommittedHandoff> handoffs = EndpointTestSupport.commitRoutes(endpoint, 200L, List.of(route));
-        handoffs.forEach(CommittedHandoff::close);
+        List<CommitResult> handoffs = EndpointTestSupport.commitRoutes(endpoint, 200L, List.of(route));
+        handoffs.forEach(CommitResult::close);
         assertEquals(2, endpoint.getIndividuallyTrackedRequestCount());
 
         endpoint.close();
@@ -1892,7 +1892,7 @@ class PrefillEndpointTest {
                         "test item could not be offered to the endpoint queue");
             }
         }
-        try (CommittedHandoff ignored = EndpointTestSupport.commitBatch(target, batchId, predictedMs, items)) {
+        try (CommitResult ignored = EndpointTestSupport.commitBatch(target, batchId, predictedMs, items)) {
             // Keep canonical ledger ownership; release only the generation pin.
         }
     }

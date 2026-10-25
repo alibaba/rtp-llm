@@ -10,7 +10,7 @@ import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.delivery.NonBatchTransaction;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
+import org.flexlb.balance.endpoint.prefill.CommitResult;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
@@ -171,7 +171,7 @@ public final class DeliveryStrategyTestSupport {
                 permits = new IdentityHashMap<>();
         private final Map<String, ScheduledRequest> itemsByRequestId =
                 new HashMap<>();
-        private final List<CommittedHandoff> handoffs = new ArrayList<>();
+        private final List<CommitResult> handoffs = new ArrayList<>();
         private BatchReservation batchReservation;
         private int permitAttempt;
         private int rejectPermitAt = -1;
@@ -246,7 +246,7 @@ public final class DeliveryStrategyTestSupport {
             return batchReservation;
         }
 
-        List<CommittedHandoff> handoffs() {
+        List<CommitResult> handoffs() {
             return List.copyOf(handoffs);
         }
 
@@ -278,10 +278,10 @@ public final class DeliveryStrategyTestSupport {
                     permit);
         }
 
-        private List<CommittedHandoff> committedHandoffs(int count) {
-            List<CommittedHandoff> committed = new ArrayList<>(count);
+        private List<CommitResult> committedHandoffs(int count) {
+            List<CommitResult> committed = new ArrayList<>(count);
             for (int index = 0; index < count; index++) {
-                CommittedHandoff handoff = Mockito.mock(CommittedHandoff.class);
+                CommitResult handoff = Mockito.mock(CommitResult.class);
                 Mockito.when(handoff.precedingWork()).thenReturn(precedingWork);
                 handoffs.add(handoff);
                 committed.add(handoff);

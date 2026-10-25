@@ -9,7 +9,7 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
 import org.flexlb.balance.delivery.NonBatchDeliveryStrategy;
-import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
+import org.flexlb.balance.endpoint.prefill.CommitResult;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
@@ -252,10 +252,10 @@ public final class EndpointTestSupport {
         return reservation;
     }
 
-    static CommittedHandoff commitBatch(PrefillEndpoint endpoint,
-                                        long batchId,
-                                        long predictedMs,
-                                        List<? extends ScheduledRequest> exactItems) {
+    static CommitResult commitBatch(PrefillEndpoint endpoint,
+                                    long batchId,
+                                    long predictedMs,
+                                    List<? extends ScheduledRequest> exactItems) {
         if (exactItems.isEmpty()) {
             throw new IllegalArgumentException("batch requires at least one item");
         }
@@ -270,9 +270,9 @@ public final class EndpointTestSupport {
         }
     }
 
-    static List<CommittedHandoff> commitRoutes(PrefillEndpoint endpoint,
-                                               long predictedMs,
-                                               List<? extends ScheduledRequest> exactItems) {
+    static List<CommitResult> commitRoutes(PrefillEndpoint endpoint,
+                                           long predictedMs,
+                                           List<? extends ScheduledRequest> exactItems) {
         if (exactItems.isEmpty()) {
             throw new IllegalArgumentException("route group requires an item");
         }
@@ -295,7 +295,7 @@ public final class EndpointTestSupport {
             if (admission == null) {
                 throw new IllegalStateException("route endpoint retired");
             }
-            CommittedHandoff handoff;
+            CommitResult handoff;
             try (admission) {
                 handoff = admission.commit(items, reservations);
             }

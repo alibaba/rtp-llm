@@ -6,7 +6,7 @@ import org.flexlb.balance.delivery.DeliveryGroup;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTransaction;
-import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
+import org.flexlb.balance.endpoint.prefill.CommitResult;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.endpoint.prefill.batch.BatchReservation;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
@@ -578,7 +578,7 @@ class PrefillQueueRequestCapacityTest {
     /**
      * 把请求放进队列再提交，和真实交付一样，提交后归还它占用的共享排队名额。
      */
-    private static CommittedHandoff commitQueuedRoute(Fixture fixture, ScheduledRequest item) {
+    private static CommitResult commitQueuedRoute(Fixture fixture, ScheduledRequest item) {
         var reservation = EndpointTestSupport.offerAndTakeSingleReservation(fixture.endpoint, item, 100L);
         try (var commit = fixture.endpoint.tryBeginRouteCommitAdmission()) {
             var handoff = commit.commit(List.of(item), List.of(reservation));

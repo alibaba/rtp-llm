@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint.prefill.batch;
 
 import org.flexlb.balance.endpoint.EndpointGenerationLifecycle;
-import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
+import org.flexlb.balance.endpoint.prefill.CommitResult;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.RequestEntry;
 import org.flexlb.balance.endpoint.prefill.Reservation;
@@ -33,7 +33,7 @@ public final class BatchReservation extends Reservation {
     /**
      * Atomically commit this exact batch lease.
      */
-    public CommittedHandoff commit(List<ScheduledRequest> items, long predictedMs) {
+    public CommitResult commit(List<ScheduledRequest> items, long predictedMs) {
         return owner.batchPrefill.commitBatch(this, items, predictedMs);
     }
 }

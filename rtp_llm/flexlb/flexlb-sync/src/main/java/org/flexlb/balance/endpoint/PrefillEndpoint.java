@@ -3,7 +3,7 @@ package org.flexlb.balance.endpoint;
 import lombok.Getter;
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
+import org.flexlb.balance.endpoint.prefill.CommitResult;
 import org.flexlb.balance.endpoint.prefill.HeartbeatResult;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.PrefillStats;
@@ -59,13 +59,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
             this.generationHandoff = generationHandoff;
         }
 
-        public CommittedHandoff commit(List<ScheduledRequest> exactItems, List<SingleReservation> exactReservations) {
+        public CommitResult commit(List<ScheduledRequest> exactItems, List<SingleReservation> exactReservations) {
             EndpointGenerationLifecycle.HandoffPermit exact = generationHandoff;
             if (exact == null) {
                 throw new IllegalStateException(
                         "route commit no longer owns its generation handoff");
             }
-            CommittedHandoff committed = prefillState.commitSingleGroup(exactItems, exactReservations, exact);
+            CommitResult committed = prefillState.commitSingleGroup(exactItems, exactReservations, exact);
             generationHandoff = null;
             return committed;
         }

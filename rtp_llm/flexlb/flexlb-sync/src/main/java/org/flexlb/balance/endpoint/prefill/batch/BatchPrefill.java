@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint.prefill.batch;
 
 import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.endpoint.EndpointGenerationLifecycle;
-import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
+import org.flexlb.balance.endpoint.prefill.CommitResult;
 import org.flexlb.balance.endpoint.prefill.FinishReport;
 import org.flexlb.balance.endpoint.prefill.LeaseState;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
@@ -131,7 +131,7 @@ public final class BatchPrefill {
         }
     }
 
-    public CommittedHandoff commitBatch(BatchReservation lease, List<ScheduledRequest> items, long predictedMs) {
+    public CommitResult commitBatch(BatchReservation lease, List<ScheduledRequest> items, long predictedMs) {
         prefillState.lock.lock();
         try {
             List<ScheduledRequest> members = prefillState.validateActiveGroup(items);
@@ -155,8 +155,8 @@ public final class BatchPrefill {
             long nowMs = prefillState.clock.getAsLong();
             BatchProgress work = new BatchProgress(lease, predictedMs,
                     PrefillBatchFeatures.from(members, ScheduledRequest::seqLen, ScheduledRequest::hitCache), nowMs);
-            CommittedHandoff committedHandoff = new CommittedHandoff(openGenerationHandoff(lease),
-                    prefillState.capturePrecedingWork(members, nowMs));
+            CommitResult committedHandoff =
+                    new CommitResult(openGenerationHandoff(lease), prefillState.capturePrecedingWork(members, nowMs));
             for (ScheduledRequest item : members) {
                 prefillState.removeValidatedActiveIndex(item);
             }
@@ -392,10 +392,10 @@ public final class BatchPrefill {
     /**
      * Move the exact handoff out of the OPEN admission before commit publishes.
      */
-    private void moveGenerationHandoffToOwned(BatchReservation lease, CommittedHandoff committedHandoff) {
+    private void moveGenerationHandoffToOwned(BatchReservation lease, CommitResult committedHandoff) {
         prefillState.requireLock();
         if (lease.state != LeaseState.OPEN || lease.generationHandoff == null
-                || committedHandoff.generationHandoff != lease.generationHandoff) {
+                || committedHandoff.workerKeepAlive != lease.generationHandoff) {
             throw new IllegalStateException("Prefill commit requires an exact OPEN generation handoff");
         }
         lease.generationHandoff = null;

@@ -284,10 +284,9 @@ public final class PrefillState {
         return singlePrefill.reserveSingle(exactItem, predictedMs);
     }
 
-    public CommittedHandoff commitSingleGroup(
-            List<ScheduledRequest> items,
-            List<SingleReservation> exactReservations,
-            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+    public CommitResult commitSingleGroup(List<ScheduledRequest> items,
+                                          List<SingleReservation> exactReservations,
+                                          EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
         return singlePrefill.commitSingleGroup(items, exactReservations, generationHandoff);
     }
 

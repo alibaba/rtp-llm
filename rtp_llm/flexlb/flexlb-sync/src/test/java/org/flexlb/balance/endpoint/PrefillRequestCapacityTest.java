@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.endpoint.prefill.CommittedHandoff;
+import org.flexlb.balance.endpoint.prefill.CommitResult;
 import org.flexlb.balance.endpoint.prefill.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.prefill.PrefillState;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
@@ -251,7 +251,7 @@ class PrefillRequestCapacityTest {
         reservation.close();
     }
 
-    private CommittedHandoff commit(ScheduledRequest item, SingleReservation registration) {
+    private CommitResult commit(ScheduledRequest item, SingleReservation registration) {
         return state.commitSingleGroup(List.of(item), List.of(registration),
                 new EndpointGenerationLifecycle(() -> { }).tryAcquireHandoff());
     }
