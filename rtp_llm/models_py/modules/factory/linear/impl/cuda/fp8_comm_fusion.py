@@ -158,7 +158,7 @@ class Fp8CollectiveProjection:
                 or not local_input.is_contiguous()
             ):
                 raise ValueError("FP8 AG/GEMM requires BF16 or prequantized E4M3")
-            values, scales = projection.quantize_input(local_input)
+            values, scales = projection.quantize_collective_input(local_input)
             aligned_m = (local_m + 3) // 4 * 4
             scale_wire = scales.as_strided(
                 ((k + 511) // 512, aligned_m), (aligned_m, 1)
