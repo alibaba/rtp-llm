@@ -1,0 +1,81 @@
+package org.flexlb.balance.schedulev2;
+
+import org.flexlb.balance.scheduler.CancelReason;
+import org.flexlb.balance.scheduler.DeliveryClaimKind;
+import org.flexlb.balance.scheduler.RequestState;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.junit.jupiter.api.Test;
+
+import java.util.concurrent.CompletableFuture;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class RequestTest {
+
+    @Test
+    void moveToAdvancesOnlyFromTheExpectedStage() {
+        Request request = request("1");
+
+        assertTrue(request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING));
+        assertFalse(request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING));
+        assertEquals(Stage.PREFILL_WAITING, request.stage());
+        assertThrows(IllegalArgumentException.class, () -> request.moveTo(Stage.PREFILL_WAITING, Stage.PUBLISHED));
+    }
+
+    @Test
+    void failCompletesTheFutureOnce() {
+        Request request = request("2");
+
+        assertTrue(request.fail(StrategyErrorType.DISPATCH_FAILED, "first"));
+        assertFalse(request.fail(StrategyErrorType.QUEUE_FULL, "second"));
+        assertFalse(request.cancel(CancelReason.CLIENT_CANCELLED));
+
+        Response response = request.future().join();
+        assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getCode());
+        assertEquals(Stage.FAILED, request.stage());
+        assertEquals(RequestState.Phase.FAILED, request.toRequestState().state());
+        assertEquals("first", request.toRequestState().detail());
+    }
+
+    @Test
+    void deadlineCancelIsReportedAsTimedOut() {
+        Request request = request("3");
+
+        assertTrue(request.cancel(CancelReason.DEADLINE_EXCEEDED));
+
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), request.future().join().getCode());
+        assertEquals(RequestState.Phase.TIMED_OUT, request.toRequestState().state());
+    }
+
+    @Test
+    void publishedRequestCannotFailOrCancel() {
+        Request request = request("4");
+        assertTrue(request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING));
+        assertTrue(request.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING));
+        assertTrue(request.moveTo(Stage.DECODE_WAITING, Stage.DECODE_RESERVED));
+        assertTrue(request.moveTo(Stage.DECODE_RESERVED, Stage.PUBLISHED));
+
+        assertFalse(request.fail(StrategyErrorType.DISPATCH_FAILED, "late"));
+        assertFalse(request.cancel(CancelReason.CLIENT_CANCELLED));
+
+        RequestState state = request.toRequestState();
+        assertEquals(RequestState.Phase.ACKNOWLEDGED, state.state());
+        assertEquals(DeliveryClaimKind.ROUTE_DECISION, state.deliveryClaimKind());
+        assertFalse(request.future().isDone());
+    }
+
+    static Request request(String requestId) {
+        org.flexlb.dao.loadbalance.Request body = new org.flexlb.dao.loadbalance.Request();
+        body.setRequestId(requestId);
+        body.setSeqLen(16L);
+        BalanceContext context = new BalanceContext(new FlexlbConfig());
+        context.setRequest(body);
+        return new Request(context, new CompletableFuture<>(), System.currentTimeMillis());
+    }
+}

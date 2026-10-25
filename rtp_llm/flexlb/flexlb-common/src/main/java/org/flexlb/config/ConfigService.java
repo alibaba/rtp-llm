@@ -258,7 +258,7 @@ public class ConfigService {
         }
         if (document.get("dispatcher") instanceof ObjectNode dispatcher) {
             changed |= preserveStartupMode(dispatcher, "dispatcher.type",
-                    startupDecisionTopology.dispatcherType().name(), Set.of("BATCH", "NON_BATCH"));
+                    startupDecisionTopology.dispatcherType().name(), Set.of("BATCH", "NON_BATCH", "NON_BATCH_V2"));
         }
         return changed ? JsonUtils.toStrictString(document) : content;
     }

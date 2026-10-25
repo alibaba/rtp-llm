@@ -16,8 +16,11 @@ public final class DispatcherConfig {
     public static final int DEFAULT_FETCH_ATTACH_TIMEOUT_MS = 3_000;
 
     public enum Type {
-        BATCH,
-        NON_BATCH
+        BATCH, NON_BATCH,
+        /**
+         * 新的非 batch 链路：先选 Prefill，Prefill 出队后再选 Decode。
+         */
+        NON_BATCH_V2
     }
 
     private Type type = Type.BATCH;

@@ -39,7 +39,8 @@ public class DeliveryConfiguration {
                                                 requests,
                                                 metrics);
             }
-            case NON_BATCH -> new NonBatchDeliveryStrategy(requests, metrics);
+            // NON_BATCH_V2 不经过老的投递流程，这里只是让老组件能正常创建
+            case NON_BATCH, NON_BATCH_V2 -> new NonBatchDeliveryStrategy(requests, metrics);
         };
     }
 
@@ -47,14 +48,14 @@ public class DeliveryConfiguration {
     public PrefillTtftEstimator prefillTtftEstimator(ConfigService configService) {
         return switch (dispatcherType(configService)) {
             case BATCH -> new BatchTtftEstimator();
-            case NON_BATCH -> new NonBatchTtftEstimator();
+            case NON_BATCH, NON_BATCH_V2 -> new NonBatchTtftEstimator();
         };
     }
 
     @Bean
     public PrefillLoadProvider prefillLoadProvider(ConfigService configService) {
         return switch (dispatcherType(configService)) {
-            case BATCH, NON_BATCH -> new EndpointPrefillLoadProvider();
+            case BATCH, NON_BATCH, NON_BATCH_V2 -> new EndpointPrefillLoadProvider();
         };
     }
 
