@@ -85,7 +85,7 @@ class PrefillCompletionEventTest {
             try (var mutation = requests.claimAdmissionHandle("101", future)) {
                 assertNotNull(mutation);
                 assertTrue(requests.commitItemForPublication(item, () -> {
-                    singleReservation.set(EndpointTestSupport.offerAndTakeRoute(prefill, item, 30_000L));
+                    singleReservation.set(EndpointTestSupport.offerAndTakeSingleReservation(prefill, item, 30_000L));
                     return true;
                 }));
             }

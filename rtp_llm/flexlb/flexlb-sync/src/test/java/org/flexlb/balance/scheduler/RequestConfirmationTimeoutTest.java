@@ -99,7 +99,7 @@ class RequestConfirmationTimeoutTest {
             try (var mutation = requests.claimAdmissionHandle(Long.toString(REQUEST_ID), future)) {
                 assertNotNull(mutation);
                 assertTrue(requests.commitItemForPublication(item, () -> {
-                    singleReservation.set(EndpointTestSupport.offerAndTakeRoute(prefill, item, 30_000L));
+                    singleReservation.set(EndpointTestSupport.offerAndTakeSingleReservation(prefill, item, 30_000L));
                     return true;
                 }));
             }

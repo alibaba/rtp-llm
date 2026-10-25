@@ -1128,7 +1128,7 @@ class PrefillEndpointTest {
             Map<String, TaskInfo> running = new HashMap<>();
             for (long requestId = 1; requestId <= 4; requestId++) {
                 ScheduledRequest item = createScheduledRequest(metricsEndpoint, requestConfig, requestId, 500, 0);
-                try (var reservation = EndpointTestSupport.offerAndTakeRoute(metricsEndpoint, item, 100L);
+                try (var reservation = EndpointTestSupport.offerAndTakeSingleReservation(metricsEndpoint, item, 100L);
                         var admission = metricsEndpoint.tryBeginRouteCommitAdmission();
                         var handoff = admission.commit(List.of(item), List.of(reservation))) {
                     running.put(item.requestId(), taskInfo(requestId, 0L, TaskPhase.RUNNING, 0, 0));
@@ -1163,7 +1163,7 @@ class PrefillEndpointTest {
             BatchSchedulerReporter reporter = new BatchSchedulerReporter(new MicrometerFlexMonitor(registry));
             reporter.init();
             ScheduledRequest item = createScheduledRequest(metricsEndpoint, requestConfig, 1L, 500, 0);
-            try (var reservation = EndpointTestSupport.offerAndTakeRoute(metricsEndpoint, item, 100L);
+            try (var reservation = EndpointTestSupport.offerAndTakeSingleReservation(metricsEndpoint, item, 100L);
                     var admission = metricsEndpoint.tryBeginRouteCommitAdmission();
                     var handoff = admission.commit(List.of(item), List.of(reservation))) {
                 metricsEndpoint.reportBatchMetrics(reporter);
@@ -1272,7 +1272,7 @@ class PrefillEndpointTest {
             reporter.init();
             for (PrefillEndpoint target : List.of(first, sibling)) {
                 ScheduledRequest item = createScheduledRequest(target, requestConfig, 1L, 500, 0);
-                try (var reservation = EndpointTestSupport.offerAndTakeRoute(target, item, 100L);
+                try (var reservation = EndpointTestSupport.offerAndTakeSingleReservation(target, item, 100L);
                         var admission = target.tryBeginRouteCommitAdmission();
                         var handoff = admission.commit(List.of(item), List.of(reservation))) {
                     target.reportBatchMetrics(reporter);
@@ -1906,7 +1906,7 @@ class PrefillEndpointTest {
         FlexlbConfig routeConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         routeConfig.setDispatcher(DispatcherConfig.nonBatch());
         ScheduledRequest item = createScheduledRequest(target, routeConfig, requestId, 500, 0);
-        try (var reservation = EndpointTestSupport.offerAndTakeRoute(target, item, predictedMs);
+        try (var reservation = EndpointTestSupport.offerAndTakeSingleReservation(target, item, predictedMs);
                 var admission = target.tryBeginRouteCommitAdmission();
                 var handoff = admission.commit(List.of(item), List.of(reservation))) {
             // 提交后 Prefill 一直记着这个请求，直到引擎上报它结束。

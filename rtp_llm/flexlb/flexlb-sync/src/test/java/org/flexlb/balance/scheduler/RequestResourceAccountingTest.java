@@ -287,7 +287,7 @@ class RequestResourceAccountingTest {
             admission = requests.claimAdmissionHandle(ID, future);
             assertNotNull(admission);
             assertTrue(requests.commitItemForPublication(item, () -> {
-                held.set(EndpointTestSupport.offerAndTakeRoute(prefill, item, 30_000));
+                held.set(EndpointTestSupport.offerAndTakeSingleReservation(prefill, item, 30_000));
                 return true;
             }));
             singleReservation = held.get();

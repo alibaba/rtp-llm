@@ -241,7 +241,7 @@ public final class EndpointTestSupport {
      * 把 NON_BATCH 请求放进 Prefill 等待队列，取出入队时预留的 Prefill 资源，并换上给定的耗时预测。
      * 调用方随后自己提交这份预留。
      */
-    public static SingleReservation offerAndTakeRoute(PrefillEndpoint endpoint,
+    public static SingleReservation offerAndTakeSingleReservation(PrefillEndpoint endpoint,
                                                                   ScheduledRequest item,
                                                                   long predictedMs) {
         if (!offer(endpoint, item)) {
