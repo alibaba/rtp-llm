@@ -898,6 +898,8 @@ bool RtpLLMRemoteCacheQuarantineMetrics::init(kmonitor::MetricsGroupManager* man
                                   "rtp_llm_remote_cache_quarantined_block_count");
     REGISTER_GAUGE_MUTABLE_METRIC(quarantined_block_ratio_metric,
                                   "rtp_llm_remote_cache_quarantined_block_ratio");
+    REGISTER_QPS_MUTABLE_METRIC(quarantine_qps_metric, "rtp_llm_remote_cache_quarantine_qps");
+    REGISTER_QPS_MUTABLE_METRIC(quarantine_block_qps_metric, "rtp_llm_remote_cache_quarantine_block_qps");
     return true;
 }
 
@@ -906,6 +908,15 @@ void RtpLLMRemoteCacheQuarantineMetrics::report(
     REPORT_MUTABLE_METRIC(quarantined_lease_count_metric, collector->quarantined_lease_count);
     REPORT_MUTABLE_METRIC(quarantined_block_count_metric, collector->quarantined_block_count);
     REPORT_MUTABLE_METRIC(quarantined_block_ratio_metric, collector->quarantined_block_ratio);
+}
+
+void RtpLLMRemoteCacheQuarantineMetrics::report(
+    const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheQuarantineEventMetricsCollector* collector) {
+    kmonitor::MetricsTags event_tags = tags ? *tags : kmonitor::MetricsTags{};
+    event_tags.AddTag("op", collector->op);
+    event_tags.AddTag("reason", collector->reason);
+    quarantine_qps_metric->Report(&event_tags, 1);
+    quarantine_block_qps_metric->Report(&event_tags, collector->block_count);
 }
 
 bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
