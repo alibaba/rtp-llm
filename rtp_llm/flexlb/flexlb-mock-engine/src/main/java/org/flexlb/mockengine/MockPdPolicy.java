@@ -9,7 +9,8 @@ import java.util.function.LongSupplier;
 record MockPdPolicy(long prefillRetryTimes, long prefillRetryTimeoutMs, long prefillMaxWaitTimeoutMs,
                     long decodeRetryIntervalMs, long loadCacheTimeoutMs, long maxRpcTimeoutMs,
                     int prepareThreads, long stopWaitTimeoutMs) {
-    static final MockPdPolicy DEFAULT = new MockPdPolicy(0, 20, 600000, 1, 5000, 7200000, 128, 2000);
+    // server_args/pd_separation_group_args.py overrides the C++ initializer (20) with 0.
+    static final MockPdPolicy DEFAULT = new MockPdPolicy(0, 0, 600000, 1, 5000, 7200000, 128, 2000);
     static final String[] FIELDS = {"prefill_retry_times", "prefill_retry_timeout_ms", "prefill_max_wait_timeout_ms",
             "decode_retry_interval_ms", "load_cache_timeout_ms", "max_rpc_timeout_ms",
             "prefill_prepare_resource_pool_size", "prefill_stop_stream_wait_timeout_ms",

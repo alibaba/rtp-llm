@@ -17,6 +17,21 @@ Mock 的行为配置消费 real 完成解析和推导后的值，不再维护另
 `/set_perf` 仅接受 `prefill_fixed_ms`、`decode_scale` 和引擎定位字段，不能修改行为门禁。
 故障仍由显式故障接口配置。
 
+## 默认值与推导
+
+代码默认值以 real 正常启动后的生效值为准：先处理 CLI/env 与 server args 默认值，再应用模型及平台推导。
+C++ 结构体初值可能被 server args 覆盖，例如 `prefill_retry_timeout_ms` 的 C++ 初值为 20，
+但 server args 默认 0；Mock 的代码默认使用 0。没有覆盖时的 `concurrency_limit` 为 32，
+ViT async concurrency 为 64，CPU embedding/Hash 字节预算分别为 2 GiB/256 MiB，图片上限为 100 MiB，KV reuse 默认关闭。
+显式 engine-config 档案继续优先于代码默认值；synthetic 实验档案不因代码默认修正而改写。
+GPU cache、模型长度、block size 和 allocator 容量仍从必填 engine-config 读取，不补造平台或模型观测值。
+
+`max_context_batch_size` 与 `max_batch_tokens_size` 是 real 中的两个不同配置。
+real 在 token 上限为 0 时执行 `max_batch_tokens_size = max_context_batch_size * max_seq_len`；
+显式 token 上限非 0 时不使用这个推导。例如 context=4、序列长度=8192、token 上限=0，
+最终 token 预算为 32768；显式指定 token 上限=16384 则最终仍为 16384。
+Mock 只导入最终的同名 `max_batch_tokens_size`，没有把 context 参数换名，也不额外增加一个 context 请求数门禁。
+
 ## 获取 real 配置
 
 配置采集由独立 Mock 工具完成，不向 real 引擎启动流程添加自动导出配置的环境变量。

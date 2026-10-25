@@ -8,6 +8,13 @@ class MockPdPolicyTest {
     private MockPdPolicy policy(int retries, long budget) {
         return new MockPdPolicy(retries, budget, 1000, 1, 0, 50, 128, 2000);
     }
+    @Test void defaultServerRetryBudgetDoesNotCapChannelReadinessAtCppInitializer() throws Exception {
+        assertTrue(MockPdPolicy.DEFAULT.prepare(() -> {
+            assertEquals(15000, MockPdPolicy.DEFAULT.readyMs(60000),
+                    "real server args default retry_timeout to 0, leaving the native 15s readiness cap");
+            return true;
+        }, () -> false, () -> 60000));
+    }
     @Test void retriesOnlyPrepareUntilSuccess() throws Exception {
         var attempts = new AtomicInteger();
         assertTrue(policy(3, 1000).prepare(() -> attempts.incrementAndGet() == 3, () -> false, () -> 5000));

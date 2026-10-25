@@ -31,7 +31,8 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
                 throw new IllegalArgumentException("invalid Mock ViT limits");
         }
         public static Config defaults() {
-            return new Config(64, 4, 64, 64L << 20, 8L << 20, 16 << 20, 64L << 20, 1);
+            // Resolved server defaults from VitConfig; width, output guard and delay are Mock calibration.
+            return new Config(64, 64, 64, 2L << 30, 256L << 20, 100 << 20, 64L << 20, 1);
         }
     }
     final Config config;

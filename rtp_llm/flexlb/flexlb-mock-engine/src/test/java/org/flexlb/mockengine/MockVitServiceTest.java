@@ -94,7 +94,7 @@ class MockVitServiceTest {
     @Test void directoryUsesRecentHashesAndOneUnionLimitAcrossEmbeddingTiers() throws Exception {
         var document = (com.fasterxml.jackson.databind.node.ObjectNode)MockEngineConfigFixture.load().snapshot();
         ((com.fasterxml.jackson.databind.node.ObjectNode)document.path("roles").path("vit")).put("mm_cache_gpu_max_bytes", 1024);
-        service = new MockVitService(MockVitService.Config.defaults(), null, document);
+        service = new MockVitService(MockVitTestSupport.config(document), null, document);
         var cacheField = MockVitService.class.getDeclaredField("embeddingCache"); cacheField.setAccessible(true);
         var hashField = MockVitService.class.getDeclaredField("hashCache"); hashField.setAccessible(true);
         @SuppressWarnings("unchecked") var cache = (MockVitEmbeddingCache<MockVitImage.Result>)cacheField.get(service);

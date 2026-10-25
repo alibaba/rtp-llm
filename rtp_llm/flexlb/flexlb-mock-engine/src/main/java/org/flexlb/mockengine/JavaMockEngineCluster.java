@@ -85,8 +85,8 @@ public final class JavaMockEngineCluster {
      * DefaultBatchDispatcher raises EngineRejectedException on the dispatch path.
      */
     static final long LACK_MEM_ERROR_CODE = 602L;
-    /** Default decode available_concurrency reported to the master (CONCURRENCY_LIMIT-aligned, previously 132). */
-    static final int DEFAULT_DECODE_MAX_CONCURRENCY = 128;
+    /** Resolved concurrency_limit default from server_args/concurrent_group_args.py. */
+    static final int DEFAULT_DECODE_MAX_CONCURRENCY = 32;
     /** CLI flag for unique per-engine loopback advertisement IPs (default on). */
     static final String UNIQUE_ENGINE_IPS_FLAG = "--unique-engine-ips";
     /**

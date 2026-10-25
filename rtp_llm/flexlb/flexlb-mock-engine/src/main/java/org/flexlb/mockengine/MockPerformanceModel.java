@@ -66,7 +66,7 @@ final class MockPerformanceModel {
     private final java.util.concurrent.atomic.AtomicLong configGeneration = new java.util.concurrent.atomic.AtomicLong();
     private MockEosModel eosModel;
     boolean nativeTokenCacheKeys;
-    boolean prefillReuseCache = true;
+    boolean prefillReuseCache = false;
     boolean prefillDeviceCache = true;
     boolean decodeDeviceCache = true;
     long hostLoadMs;
@@ -103,7 +103,7 @@ final class MockPerformanceModel {
     private int decodeReserveStep;
     boolean disableDecodeFirstReuse;
     Integer observedReserveBlocks;
-    boolean decodeReuseCache = true;
+    boolean decodeReuseCache = false;
     boolean prefillGpuPrefixTree = true;
     boolean decodeGpuPrefixTree = true;
     Double decodeReserveBlockRatio; // Explicit percentage; null preserves legacy case rounding.

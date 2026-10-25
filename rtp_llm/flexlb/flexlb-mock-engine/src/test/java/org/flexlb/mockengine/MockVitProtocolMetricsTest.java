@@ -81,8 +81,8 @@ class MockVitProtocolMetricsTest {
     @Test void hashMetadataRowLimitIsCheckedOnPureCacheProbes() throws Exception {
         var document = (ObjectNode)MockEngineConfigFixture.load().snapshot();
         ((ObjectNode)document.path("roles").path("vit")).put("mm_hash_key_cache_max_bytes", 8 << 20);
-        var defaults = MockVitService.Config.defaults();
-        try (var service = new MockVitService(defaults, null, document)) {
+        var config = MockVitTestSupport.config(document);
+        try (var service = new MockVitService(config, null, document)) {
             var cache = field(service, "hashCache", MockVitHashCache.class);
             var tensor = EngineRpcService.TensorPB.newBuilder().setInt32Data(com.google.protobuf.ByteString.copyFrom(new byte[1048577 * 4])).build();
             cache.put("big", new MockVitImage.Result(EngineRpcService.TensorPB.getDefaultInstance(), tensor, 1048577), "g");
