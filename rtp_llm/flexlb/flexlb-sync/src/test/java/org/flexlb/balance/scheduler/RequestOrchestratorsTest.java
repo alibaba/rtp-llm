@@ -3,9 +3,11 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.schedulev2.decode.DecodeReservations;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -21,6 +23,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -120,6 +124,45 @@ class RequestOrchestratorsTest {
         verify(registry).evictExpiredOrphans(anyLong(), any());
         org.junit.jupiter.api.Assertions.assertTrue(
                 exactOwnershipPredicateObserved.get());
+    }
+
+    @Test
+    void orphanSweepRetainsBothLegacyAndV2Reservations() {
+        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        DecodeReservations v2 = new DecodeReservations();
+        DecodeEndpoint endpoint =
+                new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"),
+                        mock(EndpointEventHandler.class));
+        try (var hold = endpoint.tryHold()) {
+            endpoint.reserve(hold, "legacy", 16L, 16L, 50);
+            endpoint.reserve(hold, "v2", 16L, 16L, 50);
+            endpoint.reserve(hold, "orphan", 16L, 16L, 50);
+            v2.add("v2");
+            doAnswer(call -> {
+                endpoint.evictExpiredRequests(call.getArgument(0), call.getArgument(1));
+                return null;
+            }).when(registry).evictExpiredOrphans(anyLong(), any());
+            doAnswer(call -> {
+                java.util.function.BiConsumer<Long, java.util.function.Predicate<String>> sweep = call.getArgument(0);
+                sweep.accept(-1L, "legacy"::equals);
+                return null;
+            }).when(lifecycle).maintainExpiration(any());
+            SchedulerRuntime runtime = runtime(lifecycle, registry);
+            runtime.setDecodeReservations(v2);
+
+            runtime.maintainExpiration();
+            assertNotNull(endpoint.reservationHandle("legacy"));
+            assertNotNull(endpoint.reservationHandle("v2"));
+            assertNull(endpoint.reservationHandle("orphan"));
+
+            v2.remove("v2");
+            runtime.maintainExpiration();
+            assertNotNull(endpoint.reservationHandle("legacy"));
+            assertNull(endpoint.reservationHandle("v2"));
+        } finally {
+            endpoint.close();
+        }
     }
 
     @Test
