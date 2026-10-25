@@ -30,6 +30,6 @@ public final class BatchReservation extends Reservation {
      * Atomically commit this exact batch lease.
      */
     public PrefillState.CommittedHandoff commit(List<ScheduledRequest> items, long predictedMs) {
-        return owner.commitBatch(this, items, predictedMs);
+        return owner.batchPrefill.commitBatch(this, items, predictedMs);
     }
 }

@@ -4,7 +4,6 @@ import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.endpoint.EndpointGenerationLifecycle;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.estimate.WorkView.Phase;
-import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -109,11 +108,10 @@ public final class PrefillState {
 
     /** One-shot capability returned when an OPEN admission commits. */
     public static final class CommittedHandoff implements AutoCloseable {
-        private EndpointGenerationLifecycle.HandoffPermit generationHandoff;
+        EndpointGenerationLifecycle.HandoffPermit generationHandoff;
         private final WorkView precedingWork;
 
-        private CommittedHandoff(EndpointGenerationLifecycle.HandoffPermit generationHandoff,
-                                 WorkView precedingWork) {
+        CommittedHandoff(EndpointGenerationLifecycle.HandoffPermit generationHandoff, WorkView precedingWork) {
             this.generationHandoff = generationHandoff;
             this.precedingWork = precedingWork;
         }
@@ -221,13 +219,13 @@ public final class PrefillState {
         }
     }
 
-    private final ReentrantLock lock;
+    final ReentrantLock lock;
     /** Non-owning index containing only ACTIVE ScheduledRequest identities. */
     private final PrefillActiveIndex activeIndex;
     /** Canonical request ownership, changed only under the endpoint lock. */
-    private Map<String, RequestEntry> requests = new HashMap<>();
-    private final LongSupplier clock;
-    private final Runnable capacityAvailable;
+    final Map<String, RequestEntry> requests = new HashMap<>();
+    final LongSupplier clock;
+    final Runnable capacityAvailable;
     /** Monotonic ownership/work revision used by load views. */
     private volatile long mutationVersion;
     /** Published at ownership mutation boundaries; admission still checks under the lock. */
@@ -237,12 +235,12 @@ public final class PrefillState {
     private long requestCountsVersion = -1;
     private long[] requestCountsByPriority;
     /** Derived immutable work; ACTIVE queue mutations leave committed work unchanged. */
-    private WorkCapture committedWorkCapture;
+    WorkCapture committedWorkCapture;
     private long unknownEngineRequestCount;
-    private int batchLeasesInUse;
+    final BatchPrefill batchPrefill = new BatchPrefill(this);
 
     /** Publish the capacity summary before readers observe a new ownership revision. */
-    private void recordMutationUnderLock() {
+    void recordMutationUnderLock() {
         publishRequestCountUnderLock();
         mutationVersion++;
     }
@@ -587,50 +585,19 @@ public final class PrefillState {
             long batchId,
             int maximum,
             EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
-        requirePositiveBatchLimit(maximum);
-        ScheduledRequest head = exactHead;
-        lock.lock();
-        try {
-            RequestEntry entry = requests.get(head.requestId());
-            if (entry == null || !entry.activeIdentity(head)) {
-                return ReservationResult.fail(ReservationResult.Status.REQUEST_LEFT_QUEUE);
-            }
-            if (entry.reservation != null) {
-                return ReservationResult.fail(ReservationResult.Status.REQUEST_ALREADY_RESERVED);
-            }
-            if (findBatchReservationUnderLock(batchId) != null) {
-                return ReservationResult.fail(ReservationResult.Status.BATCH_ID_ALREADY_RESERVED);
-            }
-            if (batchLeasesInUse >= maximum) {
-                return ReservationResult.fail(ReservationResult.Status.CAPACITY_FULL);
-            }
-            BatchReservation lease = new BatchReservation(this, entry, head.requestId(), batchId, generationHandoff);
-            entry.reservation = lease;
-            batchLeasesInUse++;
-            recordMutationUnderLock();
-            return ReservationResult.success(lease);
-        } finally {
-            lock.unlock();
-        }
+        return batchPrefill.reserveBatch(exactHead, batchId, maximum, generationHandoff);
     }
 
     public int batchLeasesInUseUnderLock() {
-        requireLock();
-        return batchLeasesInUse;
-    }
-
-    private boolean batchCapacityAvailable(int maximum) {
-        lock.lock();
-        try {
-            return batchLeasesInUse < maximum;
-        } finally {
-            lock.unlock();
-        }
+        return batchPrefill.batchLeasesInUseUnderLock();
     }
 
     public DeliveryBlockReason.Availability batchAvailability(int maximum) {
-        requirePositiveBatchLimit(maximum);
-        return new CapacityAvailability(maximum);
+        return batchPrefill.batchAvailability(maximum);
+    }
+
+    public int evictExpiredBatches(long ttlMs, java.util.function.Predicate<String> retainForSchedulerCleanup) {
+        return batchPrefill.evictExpiredBatches(ttlMs, retainForSchedulerCleanup);
     }
 
     public boolean canDeliver(long maxDispatchLimit, int newReqNum) {
@@ -644,48 +611,6 @@ public final class PrefillState {
 
     public DeliveryBlockReason.Availability routeAvailability(long maximum) {
         return new DeliveryAvailability(this, maximum);
-    }
-
-    private static void requirePositiveBatchLimit(int maximum) {
-        if (maximum <= 0) {
-            throw new IllegalArgumentException("maximumInflightBatches must be positive");
-        }
-    }
-
-    /** Exact wake capability permanently paired with this worker runtime. */
-    private final class CapacityAvailability
-            implements DeliveryBlockReason.Availability {
-        private final int maximum;
-        private Runnable subscribed;
-
-        private CapacityAvailability(int maximum) {
-            this.maximum = maximum;
-        }
-
-        @Override
-        public boolean isAvailable() {
-            return batchCapacityAvailable(maximum);
-        }
-
-        @Override
-        public synchronized void addListener(Runnable listener) {
-            if (listener != capacityAvailable) {
-                throw new IllegalArgumentException(
-                        "Prefill availability requires its exact worker wake callback");
-            }
-            if (subscribed != null && subscribed != listener) {
-                throw new IllegalStateException(
-                        "Prefill availability already has a listener");
-            }
-            subscribed = listener;
-        }
-
-        @Override
-        public synchronized void removeListener(Runnable listener) {
-            if (subscribed == listener) {
-                subscribed = null;
-            }
-        }
     }
 
     public CommittedHandoff commitRouteGroup(
@@ -754,61 +679,7 @@ public final class PrefillState {
         return committedHandoff;
     }
 
-    CommittedHandoff commitBatch(BatchReservation lease, List<ScheduledRequest> items, long predictedMs) {
-        lock.lock();
-        try {
-            return commitBatchUnderLock(lease, items, predictedMs);
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    private CommittedHandoff commitBatchUnderLock(BatchReservation lease,
-                                                  List<ScheduledRequest> items,
-                                                  long predictedMs) {
-        requireLock();
-        List<ScheduledRequest> members = validateActiveGroup(items);
-        RequestEntry head = requests.get(lease.headRequestId);
-        ScheduledRequest headItem = head == null ? null : head.activeItem;
-        if (lease.state != LeaseState.OPEN || head == null
-                || head.reservation != lease
-                || !members.contains(headItem)
-                || openGenerationHandoff(lease) == null) {
-            throw new IllegalStateException(
-                    "batch commit does not own exact OPEN lease batch_id="
-                            + lease.batchId);
-        }
-        if (findBatchProgressUnderLock(lease.batchId) != null) {
-            throw new IllegalStateException(
-                    "batch id already committed batch_id=" + lease.batchId);
-        }
-        for (ScheduledRequest item : members) {
-            RequestEntry member = requests.get(item.requestId());
-            Reservation expected = item == headItem ? lease : null;
-            if (member.reservation != expected) {
-                throw new IllegalStateException(
-                        "batch member owns another exact reservation request_id="
-                                + item.requestId());
-            }
-        }
-        long nowMs = clock.getAsLong();
-        BatchProgress work = new BatchProgress(lease, predictedMs,
-                PrefillBatchFeatures.from(members, ScheduledRequest::seqLen, ScheduledRequest::hitCache), nowMs);
-        CommittedHandoff committedHandoff = new CommittedHandoff(openGenerationHandoff(lease),
-                capturePrecedingWorkUnderLock(members, nowMs));
-        for (ScheduledRequest item : members) {
-            removeValidatedActiveIndex(item);
-        }
-        moveGenerationHandoffToOwnedUnderLock(lease, committedHandoff);
-        for (ScheduledRequest item : members) {
-            requests.get(item.requestId()).commitBatch(work);
-        }
-        committedWorkCapture = null;
-        recordMutationUnderLock();
-        return committedHandoff;
-    }
-
-    private List<ScheduledRequest> validateActiveGroup(List<ScheduledRequest> items) {
+    List<ScheduledRequest> validateActiveGroup(List<ScheduledRequest> items) {
         requireState(!items.isEmpty(), "committed group requires members");
         for (ScheduledRequest item : items) {
             RequestEntry entry = requests.get(item.requestId());
@@ -822,7 +693,7 @@ public final class PrefillState {
         return items;
     }
 
-    private void removeValidatedActiveIndex(ScheduledRequest item) {
+    void removeValidatedActiveIndex(ScheduledRequest item) {
         boolean removed = activeIndex.remove(item);
         requireState(removed,
                 "validated ACTIVE queue index disappeared request_id="
@@ -871,7 +742,7 @@ public final class PrefillState {
                 return false;
             }
             LiveBatchMembers liveMembers =
-                    entry.batchProgress == null ? null : liveBatchMembersUnderLock(entry.batchProgress);
+                    entry.batchProgress == null ? null : batchPrefill.liveBatchMembersUnderLock(entry.batchProgress);
             // Local cleanup does not prove that Engine omitted this member's work.
             capacityReleased = settleUnderLock(entry, TerminalObservation.external(entry.requestId), liveMembers, null);
             return true;
@@ -989,50 +860,14 @@ public final class PrefillState {
     }
 
     /** Resolve activity only through the exact committed ledger identity. */
-    private WorkerStatusFact activeStatusFactUnderLock(
-            WorkerStatus.TaskObservation task) {
+    private WorkerStatusFact activeStatusFactUnderLock(WorkerStatus.TaskObservation task) {
         requireLock();
         RequestEntry entry = requests.get(task.requestId());
-        if (entry == null
-                || entry.isActive()
-                || !matchesObservedBatch(entry, task.batchId())
-                || entry.committedItem == null
-                || task.isPriorityCancelOverlayOnly()) {
+        if (entry == null || entry.isActive() || !BatchPrefill.matchesObservedBatch(entry, task.batchId())
+                || entry.committedItem == null || task.isPriorityCancelOverlayOnly()) {
             return null;
         }
         return WorkerStatusFact.active(entry.committedItem);
-    }
-
-    private void prepareBatchPredictionsUnderLock(Set<LiveBatchMembers> changedBatches,
-                                                  Map<String, TerminalObservation> terminals,
-                                                  IdentityHashMap<BatchProgress, Phase> batchPhases,
-                                                  ToLongFunction<List<ScheduledRequest>> repredictor,
-                                                  IdentityHashMap<BatchProgress, Long> predictions) {
-        requireLock();
-        for (LiveBatchMembers liveMembers : changedBatches) {
-            BatchProgress batch = liveMembers.batch();
-            if (batch.engineStarted() || batchPhases.get(batch) == Phase.ENGINE_RUNNING) {
-                continue;
-            }
-            List<ScheduledRequest> survivors = new ArrayList<>(liveMembers.members().size());
-            boolean executionObserved = false;
-            for (RequestEntry member : liveMembers.members()) {
-                TerminalObservation terminal = terminals.get(member.requestId);
-                if (terminal == null) {
-                    survivors.add(member.committedItem);
-                } else {
-                    // Completion can arrive before the first RUNNING observation.
-                    executionObserved |= terminal.errorCode() == 0L || terminal.executionTimeMs() > 0L;
-                }
-            }
-            if (executionObserved || survivors.isEmpty()) {
-                continue;
-            }
-            survivors.sort(Comparator.comparingLong(ScheduledRequest::enqueueSeq)
-                    .thenComparing(ScheduledRequest::requestId));
-            long prediction = repredictor.applyAsLong(survivors);
-            predictions.put(batch, prediction);
-        }
     }
 
     private long prepareActiveObservationsUnderLock(Map<String, WorkerStatus.TaskObservation> activeTasks,
@@ -1049,7 +884,7 @@ public final class PrefillState {
                 continue;
             }
             RequestEntry entry = requests.get(task.requestId());
-            if (entry == null || !matchesObservedBatch(entry, task.batchId())) {
+            if (entry == null || !BatchPrefill.matchesObservedBatch(entry, task.batchId())) {
                 if (!task.isPriorityCancelOverlayOnly()) {
                     unknownDetailed.add(task.requestId());
                 }
@@ -1069,7 +904,7 @@ public final class PrefillState {
             if (entry.batchProgress == null) {
                 individualPhases.put(entry, observed);
             } else {
-                batchPhases.merge(entry.batchProgress, observed, PrefillState::strongerEnginePhase);
+                batchPhases.merge(entry.batchProgress, observed, BatchPrefill::strongerEnginePhase);
             }
         }
         long scalarUnknown = Math.max(
@@ -1088,7 +923,7 @@ public final class PrefillState {
         lock.lock();
         try {
             long nowMs = clock.getAsLong();
-            IdentityHashMap<BatchProgress, LiveBatchMembers> membersByBatch = liveBatchMembersUnderLock();
+            IdentityHashMap<BatchProgress, LiveBatchMembers> membersByBatch = batchPrefill.liveBatchMembersUnderLock();
             Map<String, TerminalObservation> terminals = terminalObservationsUnderLock(
                     finishedTasks);
             Map<String, WorkerStatus.TaskObservation> activeTasks =
@@ -1120,8 +955,8 @@ public final class PrefillState {
                             activeTasks, terminals, reportedActive,
                             individualPhases, batchPhases, null);
             IdentityHashMap<BatchProgress, Long> predictions = new IdentityHashMap<>();
-            prepareBatchPredictionsUnderLock(
-                    changedBatches, terminals, batchPhases, repredictor, predictions);
+            batchPrefill.prepareBatchPredictionsUnderLock(changedBatches, terminals, batchPhases, repredictor,
+                    predictions);
             outcome = prepareStatusReconciliationUnderLock(terminals, activeTasks, membersByBatch);
 
             // Everything below this boundary is assignment/removal against
@@ -1287,7 +1122,7 @@ public final class PrefillState {
                             "retirement found an unknown Prefill lease type");
                 }
             }
-            if (batchLeasesInUse != observedBatchLeases) {
+            if (batchPrefill.batchLeasesInUseUnderLock() != observedBatchLeases) {
                 invariantFailure = appendRetirementInvariant(
                         invariantFailure,
                         "batch capacity does not match canonical retirement leases");
@@ -1319,7 +1154,7 @@ public final class PrefillState {
             }
             requests.clear();
             activeIndex.clear();
-            batchLeasesInUse = 0;
+            batchPrefill.resetBatchLeasesInUseUnderLock();
             unknownEngineRequestCount = 0L;
             committedWorkCapture = null;
             recordMutationUnderLock();
@@ -1374,33 +1209,6 @@ public final class PrefillState {
                         new ArrayList<>(0));
             }
             evicted = candidates.size();
-        } finally {
-            lock.unlock();
-            notifyCapacityAvailable(capacityReleased);
-        }
-        return evicted;
-    }
-
-    public int evictExpiredBatches(long ttlMs, java.util.function.Predicate<String> retainForSchedulerCleanup) {
-        int evicted = 0;
-        boolean capacityReleased = false;
-        lock.lock();
-        try {
-            long nowMs = clock.getAsLong();
-            for (LiveBatchMembers liveMembers : liveBatchMembersUnderLock().values()) {
-                boolean retained = nowMs - liveMembers.batch().lastObservedAtMs() < Math.max(0L, ttlMs);
-                for (RequestEntry entry : liveMembers.members()) {
-                    retained |= retainForSchedulerCleanup.test(entry.requestId);
-                }
-                if (retained) {
-                    continue;
-                }
-                for (RequestEntry entry : List.copyOf(liveMembers.members())) {
-                    capacityReleased |= settleUnderLock(entry, TerminalObservation.external(entry.requestId),
-                            liveMembers, new ArrayList<>(0));
-                }
-                evicted++;
-            }
         } finally {
             lock.unlock();
             notifyCapacityAvailable(capacityReleased);
@@ -1500,7 +1308,7 @@ public final class PrefillState {
         return committedWorkCapture;
     }
 
-    private WorkView capturePrecedingWorkUnderLock(List<ScheduledRequest> members, long nowMs) {
+    WorkView capturePrecedingWorkUnderLock(List<ScheduledRequest> members, long nowMs) {
         requireLock();
         Set<RequestEntry> excluded = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         for (ScheduledRequest member : members) {
@@ -1545,18 +1353,18 @@ public final class PrefillState {
                 unknownEngineRequestCount);
     }
 
-    private boolean settleUnderLock(RequestEntry entry,
-                                    TerminalObservation terminal,
-                                    LiveBatchMembers liveMembers,
-                                    List<FinishedBatch> finishedBatches) {
+    boolean settleUnderLock(RequestEntry entry,
+                            TerminalObservation terminal,
+                            LiveBatchMembers liveMembers,
+                            List<FinishedBatch> finishedBatches) {
         return settleUnderLock(entry, terminal, liveMembers, finishedBatches, clock.getAsLong());
     }
 
-    private boolean settleUnderLock(RequestEntry entry,
-                                    TerminalObservation terminal,
-                                    LiveBatchMembers liveMembers,
-                                    List<FinishedBatch> finishedBatches,
-                                    long nowMs) {
+    boolean settleUnderLock(RequestEntry entry,
+                            TerminalObservation terminal,
+                            LiveBatchMembers liveMembers,
+                            List<FinishedBatch> finishedBatches,
+                            long nowMs) {
         requireLock();
         BatchProgress batch = entry.batchProgress;
         boolean lastBatchMember = false;
@@ -1602,7 +1410,7 @@ public final class PrefillState {
         Map<String, TerminalObservation> terminals = new HashMap<>();
         for (WorkerStatus.TaskObservation task : finishedTasks.values()) {
             RequestEntry entry = requests.get(task.requestId());
-            if (entry == null || !matchesObservedBatch(entry, task.batchId())) {
+            if (entry == null || !BatchPrefill.matchesObservedBatch(entry, task.batchId())) {
                 continue;
             }
             TerminalObservation terminal = TerminalObservation.from(task, entry.batchProgress != null);
@@ -1623,54 +1431,6 @@ public final class PrefillState {
                                 ? WorkerStatusFact.Kind.PRIORITY_CANCELED
                                 : WorkerStatusFact.Kind.FAILED;
         return WorkerStatusFact.terminal(entry.committedItem, kind, terminal.errorCode());
-    }
-
-    private static boolean matchesObservedBatch(RequestEntry entry, long observedBatchId) {
-        if (entry.batchProgress == null) {
-            return true;
-        }
-        return observedBatchId > 0L && entry.batchProgress.batchId() == observedBatchId;
-    }
-
-    private static Phase strongerEnginePhase(Phase left, Phase right) {
-        return left == Phase.ENGINE_RUNNING || right == Phase.ENGINE_RUNNING
-                ? Phase.ENGINE_RUNNING : Phase.ENGINE_QUEUED;
-    }
-
-    private IdentityHashMap<BatchProgress, LiveBatchMembers> liveBatchMembersUnderLock() {
-        requireLock();
-        IdentityHashMap<BatchProgress, LiveBatchMembers> membersByBatch = new IdentityHashMap<>();
-        for (RequestEntry entry : requests.values()) {
-            if (entry.batchProgress != null) {
-                membersByBatch.computeIfAbsent(entry.batchProgress, LiveBatchMembers::new).add(entry);
-            }
-        }
-        return membersByBatch;
-    }
-
-    /** Build only the exact batch needed by a single-item terminal path. */
-    private LiveBatchMembers liveBatchMembersUnderLock(BatchProgress exactBatch) {
-        requireLock();
-        LiveBatchMembers liveMembers = new LiveBatchMembers(exactBatch);
-        for (RequestEntry entry : requests.values()) {
-            if (entry.batchProgress == exactBatch) {
-                liveMembers.add(entry);
-            }
-        }
-        return liveMembers;
-    }
-
-    private BatchReservation findBatchReservationUnderLock(long batchId) {
-        for (RequestEntry entry : requests.values()) {
-            if (entry.reservation instanceof BatchReservation reservation
-                    && reservation.batchId == batchId) {
-                return reservation;
-            }
-            if (entry.batchProgress != null && entry.batchProgress.batchId() == batchId) {
-                return entry.batchProgress.lease();
-            }
-        }
-        return null;
     }
 
     /**
@@ -1709,7 +1469,7 @@ public final class PrefillState {
         rethrowCleanupFailure(failure);
     }
 
-    private void notifyCapacityAvailable(boolean capacityReleased) {
+    void notifyCapacityAvailable(boolean capacityReleased) {
         if (!capacityReleased) {
             return;
         }
@@ -1725,28 +1485,6 @@ public final class PrefillState {
                 // make the caller lose its prebuilt terminal facts.
             }
         }
-    }
-
-    private EndpointGenerationLifecycle.HandoffPermit openGenerationHandoff(
-            BatchReservation lease) {
-        requireLock();
-        return lease.generationHandoff;
-    }
-
-    /** Move the exact handoff out of the OPEN admission before commit publishes. */
-    private void moveGenerationHandoffToOwnedUnderLock(
-            BatchReservation lease,
-            CommittedHandoff committedHandoff) {
-        requireLock();
-        if (lease.state != LeaseState.OPEN
-                || lease.generationHandoff == null
-                || committedHandoff.generationHandoff
-                    != lease.generationHandoff) {
-            throw new IllegalStateException(
-                    "Prefill commit requires an exact OPEN generation handoff");
-        }
-        lease.generationHandoff = null;
-        lease.state = LeaseState.OWNED;
     }
 
     /** OPEN rollback closes quota and any batch-owned generation handoff. */
@@ -1798,11 +1536,7 @@ public final class PrefillState {
     private void releaseBatchSlotUnderLock(Reservation lease) {
         requireLock();
         if (lease instanceof BatchReservation) {
-            if (batchLeasesInUse <= 0) {
-                throw new IllegalStateException(
-                        "Prefill batch capacity accounting underflow");
-            }
-            batchLeasesInUse--;
+            batchPrefill.releaseBatchSlotUnderLock();
         } else if (!(lease instanceof RouteReservation)) {
             throw new IllegalStateException("unknown Prefill reservation type");
         }
@@ -1841,21 +1575,12 @@ public final class PrefillState {
         return null;
     }
 
-    private BatchProgress findBatchProgressUnderLock(long batchId) {
-        for (RequestEntry entry : requests.values()) {
-            if (entry.batchProgress != null && entry.batchProgress.batchId() == batchId) {
-                return entry.batchProgress;
-            }
-        }
-        return null;
-    }
-
-    private void requireLock() {
+    void requireLock() {
         requireState(lock.isHeldByCurrentThread(),
                 "Prefill ownership requires queueLock");
     }
 
-    private static void requireState(boolean condition, String message) {
+    static void requireState(boolean condition, String message) {
         if (!condition) {
             throw new IllegalStateException(message);
         }
