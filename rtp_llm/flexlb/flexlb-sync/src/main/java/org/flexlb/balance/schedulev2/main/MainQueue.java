@@ -17,8 +17,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * 主队列：还没选 Prefill 的请求在这里排队。
  * <p>
  * 开启优先级排序时按优先级从高到低、同优先级先进先出；否则只按先进先出。
- * 入队时检查排队总数（主队列 + 各 Prefill 队列里还没 dispatch 的请求），
- * 总数用 {@link QueueCapacity} 记账，请求从 Prefill 队列 dispatch 或结束时减掉。
+ * 入队时检查排队总数（主队列、Prefill 队列和 Decode 队列里尚未发布的请求），
+ * 总数用 {@link QueueCapacity} 记账，请求发布、失败或取消时减掉。
  */
 public final class MainQueue {
 
@@ -80,7 +80,8 @@ public final class MainQueue {
                 return StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED;
             }
             // 挤掉的请求结束时会同步减掉它占的排队总数，下一轮重试就能计入
-            victim.fail(StrategyErrorType.queueRejectionFor(victim.priority(), threshold), QUEUE_FULL_MESSAGE);
+            victim.fail(Stage.MAIN_WAITING, StrategyErrorType.queueRejectionFor(victim.priority(), threshold),
+                    QUEUE_FULL_MESSAGE);
         }
         return StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED;
     }

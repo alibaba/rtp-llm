@@ -31,8 +31,8 @@ public final class Request {
     private final int priority;
     private final AtomicReference<Stage> stage = new AtomicReference<>(Stage.MAIN_WAITING);
     /**
-     * 主队列名额占用的角色（PREFILL 或 PDFUSION）。主队列出队时设置，
-     * 请求从 Prefill 队列 dispatch 或结束时取走并归还名额；为 null 表示没占名额。
+     * 子队列名额占用的角色（PREFILL 或 PDFUSION）。主队列出队时设置，
+     * 请求发布、失败、取消或退回主队列时取走并归还名额；为 null 表示没占名额。
      */
     private final AtomicReference<RoleType> queueSlotRole = new AtomicReference<>();
     /**
@@ -120,7 +120,7 @@ public final class Request {
     }
 
     /**
-     * 记下这个请求占用了 role 的一个主队列名额。
+     * 记下这个请求占用了 role 的一个子队列名额。
      */
     public void holdQueueSlot(RoleType role) {
         queueSlotRole.set(role);
@@ -209,6 +209,18 @@ public final class Request {
      */
     public boolean fail(StrategyErrorType errorType, String failureDetail) {
         return fail(Response.buildErrorResponse(errorType, failureDetail));
+    }
+
+    /**
+     * 只在指定排队阶段挤掉请求。和出队竞争同一次 CAS，已经出队的请求不受影响。
+     */
+    public boolean fail(Stage expected, StrategyErrorType errorType, String failureDetail) {
+        if (!moveTo(expected, Stage.FAILED)) {
+            return false;
+        }
+        detail = failureDetail;
+        future.complete(Response.buildErrorResponse(errorType, failureDetail));
+        return true;
     }
 
     /**

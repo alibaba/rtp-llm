@@ -49,10 +49,9 @@ class MainQueueLoopTest {
     private final QueueCapacity queueCapacity = new QueueCapacity();
     private final LoopSignal loopSignal = new LoopSignal();
     private final RequestTable requestTable = new RequestTable();
-    private final MainQueue mainQueue = new MainQueue(queueCapacity, loopSignal, false);
-    private final RequestCleanup cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, loopSignal,
-            new PrefillQueueRegistry(mock(ConfigService.class)), new LoopSignal(), new DecodeQueue(false),
-            new LoopSignal());
+    private final MainQueue mainQueue = new MainQueue(queueCapacity, loopSignal, true);
+    private final PrefillQueueRegistry prefillQueues;
+    private final RequestCleanup cleanup;
     private final PrefillEndpoint endpoint = V2TestSupport.prefillEndpoint("p1:8000");
     private final EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
     private final PrefillPicker picker = mock(PrefillPicker.class);
@@ -62,9 +61,15 @@ class MainQueueLoopTest {
     MainQueueLoopTest() {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
+        prefillQueues = new PrefillQueueRegistry(configService);
+        cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, loopSignal, prefillQueues,
+                new LoopSignal(), new DecodeQueue(false), new LoopSignal());
         when(endpointRegistry.getEndpointCount(RoleType.PREFILL)).thenReturn(1);
         loop = new MainQueueLoop(mainQueue, loopSignal, cleanup, queueCapacity, endpointRegistry,
-                new PlacementAvailability(), configService, picker, RoleType.PREFILL, sent::add);
+                new PlacementAvailability(), configService, picker, prefillQueues, RoleType.PREFILL, request -> {
+                    prefillQueues.addWaiting(request);
+                    sent.add(request);
+                });
     }
 
     @Test
@@ -149,12 +154,64 @@ class MainQueueLoopTest {
     }
 
     private Request add(String requestId, String group) {
-        Request request = V2TestSupport.request(config, requestId, 50, 16L);
-        request.future().whenComplete((response, failure) -> cleanup.releaseEnded(request));
+        return add(requestId, group, 50);
+    }
+
+    private Request add(String requestId, String group, int priority) {
+        Request request = V2TestSupport.request(config, requestId, priority, 16L);
+        request.future().whenComplete((response, failure) -> {
+            if (request.stage().isEnded()) {
+                cleanup.releaseEnded(request);
+            }
+        });
         requestTable.add(request);
         when(picker.groupOf(request.ctx())).thenReturn(group);
         assertNull(mainQueue.add(request, config));
         return request;
+    }
+
+    @Test
+    void fullSubqueuesPreemptNewestLowestPriorityOnSelectedPrefillOnly() {
+        SchedulingTestConfig.usePriorityQueue(config);
+        config.priorityOrdering().setHighPriorityThreshold(60);
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(2);
+        doAnswer(call -> PlacementResult.success(V2TestSupport.selected(endpoint, 0L, 10L))).when(picker)
+                .pick(any(), any(), any());
+        Request older = add("1", "g", 10);
+        Request newer = add("2", "g", 10);
+        loop.runOnce();
+        Request high = add("3", "g", 80);
+        assertTrue(loop.runOnce());
+        assertEquals(Stage.PREFILL_WAITING, older.stage());
+        assertEquals(Stage.FAILED, newer.stage());
+        assertEquals(Stage.PREFILL_WAITING, high.stage());
+        assertEquals(2, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
+        assertEquals(2L, queueCapacity.globalQueueAndEngineSubQueueCount());
+        assertEquals(2, prefillQueues.find(endpoint).waitingCount());
+    }
+
+    @Test
+    void fullSubqueuesDoNotPreemptAnotherPrefillOrDecodeWaiting() {
+        SchedulingTestConfig.usePriorityQueue(config);
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        config.getDispatcher().setPrefillSubqueueLimitMultiplier(1);
+        Request low = add("1", "g", 10);
+        doAnswer(call -> PlacementResult.success(V2TestSupport.selected(endpoint, 0L, 10L))).when(picker)
+                .pick(low.ctx(), RoleType.PREFILL, "g");
+        loop.runOnce();
+        Request high = add("2", "g", 80);
+        PrefillEndpoint other = V2TestSupport.prefillEndpoint("p2:8000");
+        doAnswer(call -> PlacementResult.success(V2TestSupport.selected(other, 0L, 10L))).when(picker)
+                .pick(high.ctx(), RoleType.PREFILL, "g");
+        assertFalse(loop.runOnce());
+        assertEquals(Stage.PREFILL_WAITING, low.stage());
+        low.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING);
+        doAnswer(call -> PlacementResult.success(V2TestSupport.selected(endpoint, 0L, 10L))).when(picker)
+                .pick(high.ctx(), RoleType.PREFILL, "g");
+        assertFalse(loop.runOnce());
+        assertEquals(Stage.DECODE_WAITING, low.stage());
+        assertEquals(Stage.MAIN_WAITING, high.stage());
     }
 
     @Test

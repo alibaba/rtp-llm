@@ -103,11 +103,16 @@ class DecodeQueueLoopTest {
     @Test
     void requestIsReservedThenPublishedWithPrefillAndDecode() {
         Request request = addWaiting("1");
+        queueCapacity.increaseTotalQueueCount(request.future());
+        assertTrue(queueCapacity.tryReserveEngineSubQueueSlot(config, RoleType.PREFILL, 1));
+        request.holdQueueSlot(RoleType.PREFILL);
 
         assertTrue(loop.runOnce());
         assertEquals(Stage.DECODE_RESERVED, request.stage());
         assertSame(decode, request.decodeChoice().endpoint());
         assertEquals(1, decodeQueue.reservedCount());
+        assertEquals(1L, queueCapacity.globalQueueAndEngineSubQueueCount());
+        assertEquals(1, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
 
         assertTrue(loop.runOnce());
         assertEquals(Stage.PUBLISHED, request.stage());
@@ -116,6 +121,8 @@ class DecodeQueueLoopTest {
         assertEquals(List.of(request.prefillChoice().serverStatus(), decodeStatus), response.getServerStatus());
         assertEquals(0, decodeQueue.reservedCount());
         assertEquals(0, requestTable.size());
+        assertEquals(0L, queueCapacity.globalQueueAndEngineSubQueueCount());
+        assertEquals(0, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
     }
 
     @Test

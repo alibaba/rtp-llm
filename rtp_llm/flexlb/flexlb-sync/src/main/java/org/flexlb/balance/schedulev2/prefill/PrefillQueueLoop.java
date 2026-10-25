@@ -26,7 +26,7 @@ import java.util.function.Consumer;
  * <li>有新的引擎上报时更新已 dispatch 记录，并移除发布后超时还没被引擎上报的记录；</li>
  * <li>按顺序 dispatch 等待的请求，队首放不下时这台机器停在队首，等记录减少或下一次上报。</li>
  * </ol>
- * dispatch 出去的请求进入 DECODE_WAITING，归还主队列名额和排队总数，交给 Decode 队列。
+ * dispatch 出去的请求进入 DECODE_WAITING，带着名额交给 Decode 队列，发布后才归还名额和排队总数。
  */
 public final class PrefillQueueLoop {
 
@@ -162,7 +162,6 @@ public final class PrefillQueueLoop {
         }
         queue.removeWaiting(request);
         request.setPrefillDecidedAtMs(System.currentTimeMillis());
-        cleanup.releaseAtPrefillDispatch(request);
         reportSelection(choice);
         sendToDecodeQueue.accept(request);
     }

@@ -6,8 +6,11 @@ import org.flexlb.balance.estimate.QueueView;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
+import org.flexlb.balance.schedulev2.main.MainQueue;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.schedulev2.request.RequestOrder;
+import org.flexlb.balance.schedulev2.request.Stage;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.TaskPhase;
 
@@ -73,6 +76,27 @@ public final class PrefillQueue {
         if (waiting.add(request)) {
             changeVersion.incrementAndGet();
         }
+        if (request.stage() != Stage.PREFILL_WAITING) {
+            removeWaiting(request);
+        }
+    }
+
+    /**
+     * 子队列总名额满时，挤掉这台 Prefill 上最低优先级里最晚入队的请求。
+     * 只挤仍在等 Prefill dispatch 且优先级更低的请求，已经出队的请求不受影响。
+     */
+    public boolean preemptWaiting(int priority, int highPriorityThreshold) {
+        for (Request request : waiting.descendingSet()) {
+            if (request.priority() >= priority) {
+                return false;
+            }
+            if (request.fail(Stage.PREFILL_WAITING,
+                    StrategyErrorType.queueRejectionFor(request.priority(), highPriorityThreshold),
+                    MainQueue.QUEUE_FULL_MESSAGE)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void removeWaiting(Request request) {

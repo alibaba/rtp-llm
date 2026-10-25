@@ -15,6 +15,7 @@ import org.flexlb.balance.schedulev2.request.RequestTable;
 import org.flexlb.balance.schedulev2.request.Stage;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -84,7 +85,7 @@ class PrefillQueueLoopTest {
     }
 
     @Test
-    void headIsDispatchedAndReleasesQueueSlotAndCount() {
+    void dispatchKeepsQueueSlotAndCountUntilPublish() {
         Request request = addWaiting("1");
 
         assertFalse(loop.runOnce());
@@ -92,9 +93,16 @@ class PrefillQueueLoopTest {
         assertEquals(List.of(request), sentToDecode);
         assertEquals(Stage.DECODE_WAITING, request.stage());
         assertTrue(request.prefillDecidedAtMs() > 0L);
-        assertEquals(0, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
-        assertEquals(0L, queueCapacity.globalQueueAndEngineSubQueueCount());
+        assertEquals(1, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
+        assertEquals(1L, queueCapacity.globalQueueAndEngineSubQueueCount());
         assertEquals(1, queues.find(endpoint).dispatchedCount());
+        Request other = addWaiting("2");
+        assertTrue(request.publish(Stage.DECODE_WAITING, List.of()));
+        cleanup.releasePublished(request);
+        cleanup.releasePublished(request);
+        assertEquals(1, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
+        assertEquals(1L, queueCapacity.globalQueueAndEngineSubQueueCount());
+        assertEquals(Stage.PREFILL_WAITING, other.stage());
     }
 
     @Test
@@ -106,7 +114,7 @@ class PrefillQueueLoopTest {
 
         assertEquals(List.of(first), sentToDecode);
         assertEquals(Stage.PREFILL_WAITING, second.stage());
-        assertEquals(1, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
+        assertEquals(2, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
 
         V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of("1", TaskPhase.RUNNING));
         assertTrue(loop.runOnce());
@@ -189,6 +197,19 @@ class PrefillQueueLoopTest {
         mainQueue.remove(request);
         queues.addWaiting(request);
         return request;
+    }
+
+    @Test
+    void decodeWaitingStillCountsTowardTotalQueueLimit() {
+        config.getScheduler().setMaxQueuedRequests(1);
+        Request request = addWaiting("1");
+        loop.runOnce();
+        Request next = V2TestSupport.request(config, "2", 50, 16L);
+        assertEquals(StrategyErrorType.QUEUE_FULL, mainQueue.add(next, config));
+        assertEquals(Stage.DECODE_WAITING, request.stage());
+        request.publish(Stage.DECODE_WAITING, List.of());
+        cleanup.releasePublished(request);
+        assertNull(mainQueue.add(next, config));
     }
 
     @Test

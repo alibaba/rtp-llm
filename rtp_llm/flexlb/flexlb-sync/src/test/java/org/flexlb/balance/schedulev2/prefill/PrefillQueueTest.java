@@ -112,6 +112,7 @@ class PrefillQueueTest {
     void loadViewHasWaitingItemsDispatchedWorkAndUnknownCount() {
         Request waiting = request("w");
         V2TestSupport.choose(waiting, endpoint, 4L, 20L);
+        waiting.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
         queue.addWaiting(waiting);
         Request dispatched = request("d");
         queue.addDispatched(new DispatchedRequest(dispatched, 10L, 30L));

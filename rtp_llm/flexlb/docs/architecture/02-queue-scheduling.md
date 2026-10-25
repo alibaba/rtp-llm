@@ -29,6 +29,31 @@ Encoder 请求；队列超时和取消按 Encoder 阶段独立清理。Generatio
 
 ## 提交与准入
 
+### NON_BATCH_V2
+
+`dispatcher.type = NON_BATCH_V2` 时，Generation 使用 `balance.schedulev2` 的三段队列：
+
+```text
+MainQueue -> 每台机器一个 PrefillQueue -> 共用 DecodeQueue -> publish(Prefill 地址, Decode 地址)
+  主线程           Prefill 线程              Decode 线程          调用方再向引擎发请求
+```
+
+- 三段都按 `RequestOrder` 排序：PRIORITY 先按优先级降序，同优先级按进入主队列的顺序号升序；
+  FIFO 只按顺序号。底层用有序集合，抢占时倒序遍历，从最低优先级中最晚入队的请求开始找。
+- `maxQueuedRequests` 统计三段里所有尚未发布的请求，包括已经 reserve、正在等待 Decode permit 的请求。
+  进入 Prefill 队列时还占一个共享子队列名额，上限为
+  `min(maxQueuedRequests, Prefill 机器数 × maxInflightPerPrefillWorker × prefillSubqueueLimitMultiplier)`。
+  两种计数都保留到 publish，失败或取消时也归还。Prefill 下线退回主队列时，只归还子队列名额。
+- 总排队数满时，新来的高优先级请求只从主队列挤掉更低优先级的请求。
+  选中 Prefill 后若共享子队列名额满了，则只在这台 Prefill 的等待队列里挤掉更低优先级的请求。
+  两处都要求新请求达到高优先级阈值，并且用阶段 CAS 保证已经出队的请求不会被误踢。
+- Decode 没有单独的队长上限，沿用总排队数和子队列名额。高优先级请求按排序先执行，
+  不通过队长触发踢掉 Decode 等待请求。容量不足时的 RETURN 抢占仍由 Decode 线程执行。
+- 每个循环最外层捕获 `Throwable`，记录异常后继续下一轮。主队列和 Decode waiting 每轮最多尝试 256 次选点；
+  已结束或因 group 被阻塞而直接跳过的请求不占尝试次数。Decode 的 published 和 reserved 每轮遍历全部记录。
+
+以下描述为原有 BATCH / NON_BATCH 链路。
+
 `RouteService.route()` 先将当前不可变的 `FlexlbConfig` 快照绑定到
 `BalanceContext`，再提交给 QUEUE 调度器。QUEUE 路径的关键边界是：
 

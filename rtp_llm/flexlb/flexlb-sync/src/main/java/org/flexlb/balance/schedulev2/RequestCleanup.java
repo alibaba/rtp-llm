@@ -43,7 +43,7 @@ public final class RequestCleanup {
 
     /**
      * 请求失败或取消后调用：取消超时任务，移出主队列、Prefill 队列和 Decode 队列的 waiting，删掉 Prefill 的 dispatch 记录，
-     * 归还主队列名额和排队总数，最后从请求表移除。
+     * 归还子队列名额和排队总数，最后从请求表移除。
      * 在 Decode 上 reserve 了的请求留在 Decode 队列的 reserved 里，由 Decode 队列线程归还 reserve，这里只唤醒它。
      */
     public void releaseEnded(Request request) {
@@ -66,24 +66,18 @@ public final class RequestCleanup {
     }
 
     /**
-     * 请求发布后调用：取消超时任务，从请求表移除。
+     * 请求发布后调用：归还子队列名额和排队总数，取消超时任务，从请求表移除。
      * Prefill 的 dispatch 记录和 Decode 的 reserve 保留，引擎做完后由各自的上报清掉。
      */
     public void releasePublished(Request request) {
+        releaseQueueSlot(request);
+        queueCapacity.decreaseTotalQueueCount(request.future());
         request.cancelDeadlineTask();
         requestTable.remove(request);
     }
 
     /**
-     * 请求从 Prefill 队列 dispatch 出去后调用：不再算排队，归还主队列名额和排队总数。
-     */
-    public void releaseAtPrefillDispatch(Request request) {
-        releaseQueueSlot(request);
-        queueCapacity.decreaseTotalQueueCount(request.future());
-    }
-
-    /**
-     * 归还请求占用的主队列名额，并唤醒主队列循环去出队下一个请求。没占名额时什么也不做。
+     * 归还请求占用的子队列名额，并唤醒主队列循环去出队下一个请求。没占名额时什么也不做。
      */
     public void releaseQueueSlot(Request request) {
         RoleType role = request.takeQueueSlot();
