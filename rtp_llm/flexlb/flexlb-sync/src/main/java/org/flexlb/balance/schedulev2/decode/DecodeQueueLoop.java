@@ -376,7 +376,6 @@ public final class DecodeQueueLoop {
         Iterator<Request> iterator = decodeQueue.waitingIterator();
         while (iterator.hasNext() && scanned < MAX_SCAN_PER_ROUND) {
             Request request = iterator.next();
-            scanned++;
             if (request.stage() != Stage.DECODE_WAITING) {
                 decodeQueue.removeWaiting(request);
                 continue;
@@ -385,6 +384,7 @@ public final class DecodeQueueLoop {
             if (blockedGroups.contains(group)) {
                 continue;
             }
+            scanned++;
             if (pickDecode(request, group)) {
                 moved = true;
                 continue;

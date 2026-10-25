@@ -65,6 +65,7 @@ class DecodeQueueLoopTest {
     private final DecodeQueue decodeQueue = new DecodeQueue(false);
     private final RequestCleanup cleanup;
     private final DecodeSelector selector = mock(DecodeSelector.class);
+    private final DefaultRouter router = mock(DefaultRouter.class);
     private final DecodeEndpoint decode =
             new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"),
                     mock(EndpointEventHandler.class));
@@ -88,8 +89,8 @@ class DecodeQueueLoopTest {
                 decodeLoopSignal);
         when(selector.select(any(), any(), any())).thenAnswer(invocation -> success());
         loop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, new PlacementAvailability(), selector,
-                mock(DefaultRouter.class), new DecodePreemptionCoordinator(mock(EngineCancelChannel.class),
-                        mock(RequestRegistry.class), mock(RequestSchedulerReporter.class)),
+                router, new DecodePreemptionCoordinator(mock(EngineCancelChannel.class), mock(RequestRegistry.class),
+                        mock(RequestSchedulerReporter.class)),
                 emptyDecodeFinder, configService(), reporter);
     }
 
@@ -421,6 +422,23 @@ class DecodeQueueLoopTest {
     private ConfigService configService() {
         when(configService.loadBalanceConfig()).thenReturn(config);
         return configService;
+    }
+
+    @Test
+    void skippedRequestsDoNotHideAnotherGroupBeyondScanLimit() {
+        config.getDispatcher().setDecodeStarvationThresholdMs(0L);
+        for (int i = 1; i <= 300; i++) {
+            Request request = addWaiting(Integer.toString(i));
+            when(router.resolvePolicyGroup(request.ctx())).thenReturn("a");
+        }
+        Request other = addWaiting("301");
+        when(router.resolvePolicyGroup(other.ctx())).thenReturn("b");
+        doAnswer(call -> "a".equals(call.getArgument(2)) ? PlacementResult.blocked(RoleType.DECODE) : success())
+                .when(selector)
+                .select(any(), any(), any());
+        assertTrue(loop.runOnce());
+        assertEquals(Stage.DECODE_RESERVED, other.stage());
+        assertEquals(300, decodeQueue.waitingCount());
     }
 
     @Test

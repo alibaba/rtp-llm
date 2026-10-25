@@ -134,7 +134,6 @@ public final class MainQueueLoop {
         Iterator<Request> iterator = mainQueue.iterator();
         while (iterator.hasNext() && scanned < MAX_SCAN_PER_ROUND) {
             Request request = iterator.next();
-            scanned++;
             if (request.stage() != Stage.MAIN_WAITING) {
                 mainQueue.remove(request);
                 continue;
@@ -143,6 +142,7 @@ public final class MainQueueLoop {
             if (blockedGroups.contains(group)) {
                 continue;
             }
+            scanned++;
             int endpointCount = endpointRegistry.getEndpointCount(prefillRole);
             if (!queueCapacity.tryReserveEngineSubQueueSlot(config, prefillRole, endpointCount)) {
                 return moved;

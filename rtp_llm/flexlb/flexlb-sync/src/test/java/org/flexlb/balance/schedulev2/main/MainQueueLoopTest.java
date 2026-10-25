@@ -158,6 +158,21 @@ class MainQueueLoopTest {
     }
 
     @Test
+    void skippedRequestsDoNotHideAnotherGroupBeyondScanLimit() {
+        config.getScheduler().setMaxQueuedRequests(1_000);
+        Request first = add("1", "a");
+        when(picker.pick(first.ctx(), RoleType.PREFILL, "a")).thenReturn(PlacementResult.blocked(RoleType.PREFILL));
+        for (int i = 2; i <= 300; i++) {
+            add(Integer.toString(i), "a");
+        }
+        Request other = add("301", "b");
+        doAnswer(call -> PlacementResult.success(V2TestSupport.selected(endpoint, 0L, 10L))).when(picker)
+                .pick(other.ctx(), RoleType.PREFILL, "b");
+        assertTrue(loop.runOnce());
+        assertEquals(List.of(other), sent);
+    }
+
+    @Test
     void loopContinuesAfterError() throws InterruptedException {
         add("1", "g");
         CountDownLatch nextRound = new CountDownLatch(1);
