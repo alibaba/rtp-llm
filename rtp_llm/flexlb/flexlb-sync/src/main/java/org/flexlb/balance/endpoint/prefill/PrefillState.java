@@ -211,12 +211,6 @@ public final class PrefillState {
         return true;
     }
 
-    /** Caller must hold the ownership lock. */
-    public long mutationVersionUnderLock() {
-        requireLock();
-        return mutationVersion;
-    }
-
     /** Advisory revision read for the lock-free load-view cache fast path. */
     public long mutationVersion() {
         return mutationVersion;
@@ -225,7 +219,7 @@ public final class PrefillState {
     public boolean enqueueActiveUnderLock(ScheduledRequest item, long maxOutstandingRequests) {
         requireLock();
         if (requests.containsKey(item.requestId())
-                || (maxOutstandingRequests > 0L && !canAcceptRequestUnderLock(maxOutstandingRequests))) {
+                || (maxOutstandingRequests > 0L && !hasRequestCapacity(maxOutstandingRequests))) {
             return false;
         }
         RequestEntry entry = new RequestEntry(item);
@@ -683,7 +677,7 @@ public final class PrefillState {
         return outstandingRequestCount < requestLimit;
     }
 
-    private boolean canAcceptRequestUnderLock(long maxOutstandingRequests) {
+    private boolean hasRequestCapacity(long maxOutstandingRequests) {
         requireLock();
         return requests.size() < maxOutstandingRequests
                 && unknownEngineRequestCount < maxOutstandingRequests - requests.size();

@@ -130,55 +130,47 @@ public final class BatchPrefill {
         }
     }
 
-    public PrefillState.CommittedHandoff commitBatch(
-            BatchReservation lease,
-            List<ScheduledRequest> items,
-            long predictedMs) {
+    public PrefillState.CommittedHandoff commitBatch(BatchReservation lease,
+                                                     List<ScheduledRequest> items,
+                                                     long predictedMs) {
         prefillState.lock.lock();
         try {
-            return commitBatchUnderLock(lease, items, predictedMs);
+            List<ScheduledRequest> members = prefillState.validateActiveGroup(items);
+            RequestEntry head = prefillState.requests.get(lease.headRequestId);
+            ScheduledRequest headItem = head == null ? null : head.activeItem;
+            if (lease.state != LeaseState.OPEN || head == null || head.reservation != lease
+                    || !members.contains(headItem) || openGenerationHandoff(lease) == null) {
+                throw new IllegalStateException("batch commit does not own exact OPEN lease batch_id=" + lease.batchId);
+            }
+            if (findBatchProgressUnderLock(lease.batchId) != null) {
+                throw new IllegalStateException("batch id already committed batch_id=" + lease.batchId);
+            }
+            for (ScheduledRequest item : members) {
+                RequestEntry member = prefillState.requests.get(item.requestId());
+                Reservation expected = item == headItem ? lease : null;
+                if (member.reservation != expected) {
+                    throw new IllegalStateException(
+                            "batch member owns another exact reservation request_id=" + item.requestId());
+                }
+            }
+            long nowMs = prefillState.clock.getAsLong();
+            BatchProgress work = new BatchProgress(lease, predictedMs,
+                    PrefillBatchFeatures.from(members, ScheduledRequest::seqLen, ScheduledRequest::hitCache), nowMs);
+            PrefillState.CommittedHandoff committedHandoff = new PrefillState.CommittedHandoff(
+                    openGenerationHandoff(lease), prefillState.capturePrecedingWorkUnderLock(members, nowMs));
+            for (ScheduledRequest item : members) {
+                prefillState.removeValidatedActiveIndex(item);
+            }
+            moveGenerationHandoffToOwnedUnderLock(lease, committedHandoff);
+            for (ScheduledRequest item : members) {
+                prefillState.requests.get(item.requestId()).commitBatch(work);
+            }
+            prefillState.committedWorkCapture = null;
+            prefillState.recordMutationUnderLock();
+            return committedHandoff;
         } finally {
             prefillState.lock.unlock();
         }
-    }
-
-    private PrefillState.CommittedHandoff commitBatchUnderLock(BatchReservation lease,
-                                                               List<ScheduledRequest> items,
-                                                               long predictedMs) {
-        prefillState.requireLock();
-        List<ScheduledRequest> members = prefillState.validateActiveGroup(items);
-        RequestEntry head = prefillState.requests.get(lease.headRequestId);
-        ScheduledRequest headItem = head == null ? null : head.activeItem;
-        if (lease.state != LeaseState.OPEN || head == null || head.reservation != lease || !members.contains(headItem)
-                || openGenerationHandoff(lease) == null) {
-            throw new IllegalStateException("batch commit does not own exact OPEN lease batch_id=" + lease.batchId);
-        }
-        if (findBatchProgressUnderLock(lease.batchId) != null) {
-            throw new IllegalStateException("batch id already committed batch_id=" + lease.batchId);
-        }
-        for (ScheduledRequest item : members) {
-            RequestEntry member = prefillState.requests.get(item.requestId());
-            Reservation expected = item == headItem ? lease : null;
-            if (member.reservation != expected) {
-                throw new IllegalStateException(
-                        "batch member owns another exact reservation request_id=" + item.requestId());
-            }
-        }
-        long nowMs = prefillState.clock.getAsLong();
-        BatchProgress work = new BatchProgress(lease, predictedMs,
-                PrefillBatchFeatures.from(members, ScheduledRequest::seqLen, ScheduledRequest::hitCache), nowMs);
-        PrefillState.CommittedHandoff committedHandoff = new PrefillState.CommittedHandoff(openGenerationHandoff(lease),
-                prefillState.capturePrecedingWorkUnderLock(members, nowMs));
-        for (ScheduledRequest item : members) {
-            prefillState.removeValidatedActiveIndex(item);
-        }
-        moveGenerationHandoffToOwnedUnderLock(lease, committedHandoff);
-        for (ScheduledRequest item : members) {
-            prefillState.requests.get(item.requestId()).commitBatch(work);
-        }
-        prefillState.committedWorkCapture = null;
-        prefillState.recordMutationUnderLock();
-        return committedHandoff;
     }
 
     public void prepareBatchPredictionsUnderLock(Set<LiveBatchMembers> changedBatches,

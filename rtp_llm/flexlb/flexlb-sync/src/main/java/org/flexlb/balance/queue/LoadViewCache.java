@@ -79,9 +79,8 @@ public final class LoadViewCache {
      */
     private CapturedLoadView captureUnderLock() {
         long fixedWaitMs = groupingLimits.collectionWindowMs();
-        Version version = new Version(
-                queueState.queueVersion(), queueState.schedulingInputVersion(),
-                prefillState.mutationVersionUnderLock(), fixedWaitMs);
+        Version version = new Version(queueState.queueVersion(), queueState.schedulingInputVersion(),
+                prefillState.mutationVersion(), fixedWaitMs);
         BatchCapacityView capacity = BatchCapacityView.of(prefillEndpoint, config);
         PrefillState.Snapshot ownership = prefillState.snapshotUnderLock();
         return new CapturedLoadView(
