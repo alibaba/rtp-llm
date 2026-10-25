@@ -244,7 +244,7 @@ public final class PrefillState {
         return requests.put(requestId, entry);
     }
 
-    private boolean removeRequestUnderLock(String requestId, RequestEntry entry) {
+    public boolean removeRequestUnderLock(String requestId, RequestEntry entry) {
         requireLock();
         if (!requests.remove(requestId, entry)) {
             return false;
@@ -449,35 +449,8 @@ public final class PrefillState {
         return incomingReservation;
     }
 
-    /**
-     * Remove one NON_BATCH ACTIVE owner and its item-owned OPEN route reservation
-     * in the same ownership transaction.
-     */
-    public boolean terminalizeActiveRouteUnderLock(
-            ScheduledRequest item,
-            SingleReservation exactReservation) {
-        requireLock();
-        RequestEntry entry = requests.get(item.requestId());
-        if (entry == null || !entry.activeIdentity(item)) {
-            return false;
-        }
-        if (exactReservation == null
-                || exactReservation.owner != this
-                || entry.reservation != exactReservation
-                || exactReservation.state != LeaseState.OPEN) {
-            throw new IllegalStateException(
-                    "ACTIVE single request lost its exact Prefill reservation request_id="
-                            + item.requestId());
-        }
-        validateAdmissionIndexUnderLock(entry, item);
-
-        // Every operation below is allocation-free and runs under the same
-        // lock used by generation retirement.
-        detachAdmissionIndexUnderLock(entry, item);
-        closeOpenLeaseUnderLock(exactReservation);
-        removeRequestUnderLock(item.requestId(), entry);
-        recordMutationUnderLock();
-        return true;
+    public boolean terminalizeActiveRouteUnderLock(ScheduledRequest item, SingleReservation exactReservation) {
+        return singlePrefill.terminalizeActiveRouteUnderLock(item, exactReservation);
     }
 
     /**
@@ -1370,7 +1343,7 @@ public final class PrefillState {
     }
 
     /** OPEN rollback closes quota and any batch-owned generation handoff. */
-    private EndpointGenerationLifecycle.HandoffPermit
+    public EndpointGenerationLifecycle.HandoffPermit
             closeOpenLeaseUnderLock(Reservation lease) {
         requireLock();
         if (lease.state != LeaseState.OPEN) {

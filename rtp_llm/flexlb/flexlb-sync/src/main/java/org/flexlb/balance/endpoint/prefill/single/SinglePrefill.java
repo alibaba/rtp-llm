@@ -121,4 +121,35 @@ public final class SinglePrefill {
         }
         return items;
     }
+
+    /**
+     * Remove one NON_BATCH ACTIVE owner and its item-owned OPEN single reservation
+     * in the same ownership transaction.
+     */
+    public boolean terminalizeActiveRouteUnderLock(
+            ScheduledRequest item,
+            SingleReservation exactReservation) {
+        prefillState.requireLock();
+        RequestEntry entry = prefillState.requests.get(item.requestId());
+        if (entry == null || !entry.activeIdentity(item)) {
+            return false;
+        }
+        if (exactReservation == null
+                || exactReservation.owner != prefillState
+                || entry.reservation != exactReservation
+                || exactReservation.state != LeaseState.OPEN) {
+            throw new IllegalStateException(
+                    "ACTIVE single request lost its exact Prefill reservation request_id="
+                            + item.requestId());
+        }
+        prefillState.validateAdmissionIndexUnderLock(entry, item);
+
+        // Every operation below is allocation-free and runs under the same
+        // lock used by generation retirement.
+        prefillState.detachAdmissionIndexUnderLock(entry, item);
+        prefillState.closeOpenLeaseUnderLock(exactReservation);
+        prefillState.removeRequestUnderLock(item.requestId(), entry);
+        prefillState.recordMutationUnderLock();
+        return true;
+    }
 }
