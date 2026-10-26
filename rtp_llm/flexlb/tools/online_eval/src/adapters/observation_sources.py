@@ -1,11 +1,11 @@
 """Epoch-pinned Master, Mock HTTP and client-record observation sources."""
 
+import copy
 import json
 import time
 import urllib.request
 
 from adapters.debug_client import DebugUnavailable
-from runtime.observation import FrozenSnapshot
 
 SOURCES = frozenset({"engine_snapshot", "engine_requests", "client_records"})
 MAX_SOURCE_BYTES = 8 * 1024 * 1024
@@ -101,4 +101,4 @@ class Sources:
         encoded = json.dumps(payload, allow_nan=False)
         if len(encoded.encode()) > MAX_DATASET_BYTES:
             raise DebugUnavailable("snapshot exceeds dataset byte budget")
-        return FrozenSnapshot(encoded)
+        return copy.deepcopy(payload)

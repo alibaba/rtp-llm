@@ -308,7 +308,7 @@ def test_invalid_publication_evidence_is_rejected_before_mutation(tmp_path):
 
 def test_save_revalidates_mutated_document_before_replacing_artifact(tmp_path):
     from metric_fixtures import publish
-    from monitoring.metric_store import frozen_metric_reads
+    from monitoring.metric_store import metric_read_cache
 
     store, spec = publication_store(tmp_path)
     publish(
@@ -321,7 +321,7 @@ def test_save_revalidates_mutated_document_before_replacing_artifact(tmp_path):
     )
     store.save(tmp_path)
     previous = (tmp_path / "metrics.json").read_bytes()
-    with frozen_metric_reads():
+    with metric_read_cache():
         frozen = MetricStore.read(tmp_path)
         store.document["metrics"]["ha/scheduler_inflight"][0]["source"] = ""
         with pytest.raises(MetricContractError, match="identity"):

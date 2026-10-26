@@ -119,7 +119,7 @@ def finish(ctx, params, deadline):
         try:
             # Query only the contract metrics; fetching all 240 engines' series
             # and discarding most of them after JSON decoding is unbounded work.
-            from monitoring.windows import capture_window
+            from monitoring.windows import capture_window, field_rows
 
             engine_roles(evidence["gate_input"], evidence["criteria"]["engine_tps"])
             raw = capture_window(
@@ -132,7 +132,7 @@ def finish(ctx, params, deadline):
                 limits=evidence["capture_limits"],
                 directory=ctx.artifact_dir / "performance-measurement",
             )
-            evidence["engine_tps_samples"] = [row for rows in raw.field_rows().values() for row in rows]
+            evidence["engine_tps_samples"] = [row for rows in field_rows(raw).values() for row in rows]
             evidence["raw_evidence"] = dict(
                 path="performance-measurement/manifest.json", sha256=sha256_file(ctx.artifact_dir / "performance-measurement/manifest.json")
             )

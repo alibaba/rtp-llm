@@ -82,13 +82,3 @@ def poll_samples(deadline, interval_s, sample, *, until=None, immediate=False, b
         # Skip elapsed ticks instead of issuing catch-up bursts. Consumer work
         # also counts toward the period; the last boundary sample is retained.
         schedule.advance(deadline.clock())
-
-
-@dataclass(frozen=True)
-class FrozenSnapshot:
-    """Serialized canonical payload makes returned dictionaries independent deep copies."""
-
-    encoded: str
-
-    def to_dict(self):
-        return json.loads(self.encoded)

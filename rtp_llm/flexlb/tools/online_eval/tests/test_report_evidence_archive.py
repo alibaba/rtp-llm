@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from file_digest import sha256_file
-from monitoring.metric_store import MetricStore, frozen_metric_reads
+from monitoring.metric_store import MetricStore, metric_read_cache
 from reporting import load_analysis, read_bundle, write_bundle
 from reporting.evidence_archive import EvidenceReference, archive_session, restore
 
@@ -129,7 +129,7 @@ def metric_document(value):
 def test_metric_reads_scoped_to_publication_and_invalidated_by_atomic_save(tmp_path):
     MetricStore(metric_document(1)).save(tmp_path)
     with patch("monitoring.metric_store.json.load", wraps=json.load) as decoder:
-        with frozen_metric_reads():
+        with metric_read_cache():
             first = MetricStore.read(tmp_path)
             assert MetricStore.read(tmp_path) is first
             assert decoder.call_count == 1
@@ -137,7 +137,7 @@ def test_metric_reads_scoped_to_publication_and_invalidated_by_atomic_save(tmp_p
             second = MetricStore.read(tmp_path)
             assert second is not first and second.document["run"]["value"] == 2
             assert decoder.call_count == 2
-            with frozen_metric_reads():
+            with metric_read_cache():
                 assert MetricStore.read(tmp_path) is not second
             assert MetricStore.read(tmp_path) is second
         assert MetricStore.read(tmp_path) is not second
@@ -149,7 +149,7 @@ def test_metric_scope_resets_on_exception_and_separates_directories(tmp_path):
     for name, value in [("a", 1), ("b", 2)]:
         MetricStore(metric_document(value)).save(tmp_path / name)
     with pytest.raises(RuntimeError):
-        with frozen_metric_reads():
+        with metric_read_cache():
             first = MetricStore.read(tmp_path / "a")
             assert MetricStore.read(tmp_path / "b").document["run"]["value"] == 2
             raise RuntimeError("renderer failed")

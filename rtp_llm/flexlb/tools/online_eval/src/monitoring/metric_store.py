@@ -12,11 +12,11 @@ from file_io import write_json
 from monitoring.contracts import MetricContractError, MetricUnavailable, validate_definition, validate_observation
 from schema_contract import matches_schema
 
-_READ_SESSION = ContextVar("frozen_metric_reads", default=None)
+_READ_SESSION = ContextVar("metric_read_cache", default=None)
 
 
 @contextmanager
-def frozen_metric_reads():
+def metric_read_cache():
     """Reuse only unchanged artifacts within a report publication, never across runs."""
     token = _READ_SESSION.set({})
     try:

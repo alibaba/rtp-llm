@@ -35,7 +35,7 @@ def engine_metric_snapshot(monitor, fields, timeout=5):
 
 def measurement_samples(monitor, evidence, deadline, limits, *, directory=None, windows=None):
     """Project a public frozen window into the existing cache analyzer vocabulary."""
-    from monitoring.windows import capture_window
+    from monitoring.windows import capture_window, field_rows
     from runtime.observation import SampleBudget
 
     clock = evidence["clock"]
@@ -43,7 +43,7 @@ def measurement_samples(monitor, evidence, deadline, limits, *, directory=None, 
     if windows is None:
         windows = [(evidence[start], evidence[end]) for start, end in (("baseline_start", "baseline_end"), ("post_start", "post_end"))]
     windows = [(origin + start, origin + end) for start, end in windows]
-    frozen = capture_window(
+    store = capture_window(
         monitor.client,
         evidence["gate_input"]["fields"],
         source="mock",
@@ -54,7 +54,7 @@ def measurement_samples(monitor, evidence, deadline, limits, *, directory=None, 
         directory=directory,
     )
     samples = {}
-    for field, rows in frozen.field_rows().items():
+    for field, rows in field_rows(store).items():
         for row in rows:
             labels = row["metric"]
             name = labels.get("engine_name")

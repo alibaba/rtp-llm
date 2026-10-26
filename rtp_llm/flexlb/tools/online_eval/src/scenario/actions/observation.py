@@ -124,9 +124,8 @@ def _coverage(required, data, artifact=None):
 
 
 def execute_snapshot(ctx, params, deadline):
-    frozen = Sources(ctx, params).capture(deadline)
-    handle = ctx.register_resource("snapshot", frozen, historical=True)
-    data = frozen.to_dict()
+    data = Sources(ctx, params).capture(deadline)
+    handle = ctx.register_resource("snapshot", data, historical=True)
     artifact = _artifact(ctx, "snapshot", data)
     checks = _coverage(params["required"], data, artifact)
     return StageOutput(output={"snapshot": handle}, checks=checks, artifacts=[artifact])
@@ -137,20 +136,19 @@ def execute_observe(ctx, params, deadline):
         observer = ctx.resource(params["observation"], "observation", allow_stale=True)
         if not isinstance(observer, Observer):
             raise DebugUnavailable("observation handle does not belong to this adapter")
-        frozen = observer.stop(deadline)
+        data = observer.stop(deadline)
     else:
         observer = Observer(ctx, params)
         observer.handle = ctx.register_resource("observation", observer, cleanup=observer.stop, historical=True)
         observer.start(deadline)
         if params["mode"] == "start":
-            initial = json.loads(observer.samples[0]) if observer.samples else {"status": "partial"}
+            initial = observer.samples[0] if observer.samples else {"status": "partial"}
             checks = _coverage(params["required"], initial)
             return StageOutput(output={"observation": observer.handle}, checks=checks)
         while not observer.done_event.is_set():
             deadline.check()
             observer.done_event.wait(timeout=min(0.1, deadline.remaining()))
-        frozen = observer.stop(deadline)
-    data = frozen.to_dict()
+        data = observer.stop(deadline)
     if observer.artifact is None:
         observer.artifact = _artifact(ctx, "observation", data)
     artifact = observer.artifact

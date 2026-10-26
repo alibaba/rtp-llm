@@ -7,14 +7,16 @@ cases/<case>/program.py   步骤、分支、检查与能力声明
         ↓
 scenario compiler        校验并生成有类型的执行计划
         ↓
-parallel runner          冻结候选执行计划，固定 lane 租约，动态领取实例
+parallel runner          保存候选执行计划，固定 lane 租约，动态领取实例
         ↓
 stage executor           执行固定步骤并清理 Master / Mock
         ↓
-frozen evidence/metrics  原始证据、指标定义与完整序列
+evidence/metrics         原始证据、指标定义与完整序列
         ↓
 case analysis/report     明确判定后装配 HTML bundle
 ```
+
+业务数据分为执行计划、采集数据和判定结果。“冻结”表示某一阶段的数据已经确定，后续按该份数据执行或展示，不是独立的业务层或包装模型。采集字典在交付时复制，指标使用 `MetricStore`；JSON 用于文件、协议和字节预算核算，不作为进程内快照容器。文件摘要、完整性校验以及采样退出后的最终请求集合仍在各自边界检查。
 
 ## 格式版本
 

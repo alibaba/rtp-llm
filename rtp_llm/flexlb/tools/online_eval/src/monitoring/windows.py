@@ -1,9 +1,8 @@
-"""Bounded raw window capture; consumers read the same frozen MetricStore."""
+"""Bounded raw window capture; consumers use the existing MetricStore."""
 
 import copy
 import json
 import math
-from dataclasses import dataclass
 from pathlib import Path
 
 from file_digest import sha256_file
@@ -13,43 +12,37 @@ from monitoring.metric_store import MetricStore
 from runtime.observation import capture_limits
 
 
-@dataclass(frozen=True)
-class FrozenMetricWindow:
-    encoded: str
+def field_rows(store: MetricStore) -> dict:
+    """Project independent field rows from a complete captured metric store."""
+    capture = store.document["capture"]
+    if capture["status"] != "COMPLETE":
+        raise MetricUnavailable("raw window capture is incomplete")
+    return {
+        field: [
+            dict(metric_id=binding["metric"], metric=copy.deepcopy(row["labels"]), values=copy.deepcopy(row["points"]))
+            for row in store.document["metrics"].get(binding["metric"], [])
+            if all(row["labels"].get(key) == value for key, value in binding["labels"].items())
+        ]
+        for field, binding in capture["fields"].items()
+    }
 
-    def store(self):
-        document = json.loads(self.encoded)
-        if document["capture"]["status"] != "COMPLETE":
-            raise MetricUnavailable("raw window capture is incomplete")
-        return MetricStore(document)
 
-    def field_rows(self):
-        """Project declared fields without I/O, filling or cross-source joins."""
-        store = self.store()
-        return {
-            field: [
-                dict(metric_id=binding["metric"], metric=row["labels"], values=row["points"])
-                for row in store.document["metrics"].get(binding["metric"], [])
-                if all(row["labels"].get(k) == v for k, v in binding["labels"].items())
-            ]
-            for field, binding in store.document["capture"]["fields"].items()
-        }
-
-    @classmethod
-    def read(cls, directory):
-        directory = Path(directory)
-        manifest = read_json(directory / "manifest.json")
-        if manifest.get("metric_window_schema_version") != 1 or set(manifest.get("files", {})) != {"metrics.json"}:
-            raise ValueError("invalid raw window manifest")
-        if sha256_file(directory / "metrics.json") != manifest["files"]["metrics.json"]:
-            raise ValueError("raw window evidence digest mismatch")
-        result = cls((directory / "metrics.json").read_text())
-        result.store()
-        return result
+def read_window(directory) -> MetricStore:
+    """Read the existing metric format after checking the window manifest and completion."""
+    directory = Path(directory)
+    manifest = read_json(directory / "manifest.json")
+    if manifest.get("metric_window_schema_version") != 1 or set(manifest.get("files", {})) != {"metrics.json"}:
+        raise ValueError("invalid raw window manifest")
+    if sha256_file(directory / "metrics.json") != manifest["files"]["metrics.json"]:
+        raise ValueError("raw window evidence digest mismatch")
+    store = MetricStore.read(directory)
+    if store.document["capture"]["status"] != "COMPLETE":
+        raise MetricUnavailable("raw window capture is incomplete")
+    return store
 
 
 def capture_window(client, fields, *, source, windows, epoch, deadline, limits, directory=None):
-    """Freeze declared (start, end] windows under one caller-owned deadline.
+    """Capture declared (start, end] windows under one caller-owned deadline.
 
     max_samples counts distinct raw timestamps across the selected series;
     max_bytes bounds the retained encoded artifact, including identities.
@@ -108,21 +101,19 @@ def capture_window(client, fields, *, source, windows, epoch, deadline, limits, 
             raise ValueError("raw window byte budget exceeded")
         retained += size
 
-    def freeze():
-        encoded = json.dumps(document, separators=(",", ":"), allow_nan=False)
+    def save():
         if directory is not None:
             write_json(directory / "metrics.json", document)
             write_json(
                 directory / "manifest.json",
                 dict(metric_window_schema_version=1, files={"metrics.json": sha256_file(directory / "metrics.json")}),
             )
-        return FrozenMetricWindow(encoded)
 
     try:
         reserve(0)
-        requests = {(b["metric"], json.dumps(b["labels"], sort_keys=True)) for b in fields.values()}
-        for identity, selector in sorted(requests):
-            labels = json.loads(selector)
+        requests = {(binding["metric"], json.dumps(binding["labels"], sort_keys=True)): binding["labels"] for binding in fields.values()}
+        for (identity, _), selected_labels in sorted(requests.items()):
+            labels = copy.deepcopy(selected_labels)
             for start, end in windows:
                 for chunk in client.metric_chunks(identity, source=source, start=start, end=end, deadline=deadline, labels=labels):
                     deadline.check()
@@ -172,11 +163,13 @@ def capture_window(client, fields, *, source, windows, epoch, deadline, limits, 
             row["points"].sort()
         deadline.check()
         document["capture"]["status"] = "COMPLETE"
-        return freeze()
+        store = MetricStore(document)
+        save()
+        return store
     except BaseException as error:
         document["capture"]["status"] = "INCOMPLETE"
         document["errors"].append(dict(source=source, error=str(error)))
         for row in series.values():
             row["status"] = "ERROR"
-        freeze()
+        save()
         raise

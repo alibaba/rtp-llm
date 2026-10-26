@@ -1,4 +1,4 @@
-"""Raw evidence windows are bounded, immutable and independent of case vocabulary."""
+"""Raw evidence windows are bounded, detached and independent of case vocabulary."""
 
 import json
 from types import SimpleNamespace
@@ -6,7 +6,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from monitoring.windows import FrozenMetricWindow, capture_window
+from monitoring.metric_store import MetricStore
+from monitoring.windows import capture_window, field_rows, read_window
 from runtime.deadline import Deadline
 
 FIELDS = {"temperature": dict(metric="sensor/temperature", labels={"rack": "west"})}
@@ -37,16 +38,19 @@ def capture(c, **kwargs):
 def test_freeze_and_replay_use_existing_metric_store_without_requery(tmp_path):
     c = client()
     frozen = capture(c, directory=tmp_path / "window")
-    assert frozen.store().select("sensor/temperature", source="rack-probe", epoch=7, labels={"host": "a"}, start=0, end=2, max_gap_s=1)[0][
+    assert isinstance(frozen, MetricStore)
+    assert frozen.select("sensor/temperature", source="rack-probe", epoch=7, labels={"host": "a"}, start=0, end=2, max_gap_s=1)[0][
         "points"
     ] == [[1, 10], [2, 11]]
     calls = c.metric_chunks.call_count
-    read = FrozenMetricWindow.read(tmp_path / "window")
-    assert read.field_rows() == frozen.field_rows()
+    read = read_window(tmp_path / "window")
+    assert field_rows(read) == field_rows(frozen)
     assert c.metric_chunks.call_count == calls
-    projected = frozen.field_rows()
+    projected = field_rows(frozen)
     projected["temperature"][0]["values"].clear()
-    assert len(frozen.field_rows()["temperature"][0]["values"]) == 2
+    projected["temperature"][0]["metric"].clear()
+    assert len(field_rows(frozen)["temperature"][0]["values"]) == 2
+    assert field_rows(frozen)["temperature"][0]["metric"]["host"] == "a"
     args = c.metric_chunks.call_args.kwargs
     assert args["labels"] == {"rack": "west"} and args["deadline"] is not None
 
@@ -85,7 +89,7 @@ def test_partial_capture_retains_completed_points_but_cannot_be_read_as_complete
     if failure != "bytes":
         assert raw["metrics"]["sensor/temperature"][0]["points"] == [[1, 10]]
     with pytest.raises(ValueError, match="incomplete"):
-        FrozenMetricWindow.read(tmp_path / "window")
+        read_window(tmp_path / "window")
 
 
 def test_real_gaps_and_counter_resets_are_preserved_and_duplicate_chunks_are_deduplicated():
@@ -93,9 +97,9 @@ def test_real_gaps_and_counter_resets_are_preserved_and_duplicate_chunks_are_ded
     frozen = capture_window(
         c, FIELDS, source="rack-probe", windows=[(0, 10), (0, 10)], epoch=7, deadline=Deadline(float("inf")), limits=LIMITS
     )
-    assert frozen.field_rows()["temperature"][0]["values"] == [[1, 10], [8, 2]]
+    assert field_rows(frozen)["temperature"][0]["values"] == [[1, 10], [8, 2]]
     with pytest.raises(ValueError, match="coverage"):
-        frozen.store().select("sensor/temperature", start=0, end=10, max_gap_s=2)
+        frozen.select("sensor/temperature", start=0, end=10, max_gap_s=2)
 
 
 def test_manifest_corruption_and_overwriting_a_frozen_window_are_rejected(tmp_path):
@@ -105,7 +109,7 @@ def test_manifest_corruption_and_overwriting_a_frozen_window_are_rejected(tmp_pa
     path = tmp_path / "window/metrics.json"
     path.write_text(path.read_text() + " ")
     with pytest.raises(ValueError, match="digest"):
-        FrozenMetricWindow.read(tmp_path / "window")
+        read_window(tmp_path / "window")
 
 
 def test_new_metric_and_new_target_require_only_declarations():
@@ -117,8 +121,8 @@ def test_new_metric_and_new_target_require_only_declarations():
 
     c.metric_chunks.side_effect = chunks
     result = capture_window(c, fields, source="new-target", windows=[(1, 2)], epoch=8, deadline=Deadline(float("inf")), limits=LIMITS)
-    assert set(result.field_rows()) == {"temperature", "voltage"}
-    assert all(row["source"] == "new-target" for rows in result.store().document["metrics"].values() for row in rows)
+    assert set(field_rows(result)) == {"temperature", "voltage"}
+    assert all(row["source"] == "new-target" for rows in result.document["metrics"].values() for row in rows)
 
 
 def test_missing_declared_series_remains_unavailable_even_after_successful_acquisition():
@@ -126,9 +130,9 @@ def test_missing_declared_series_remains_unavailable_even_after_successful_acqui
     c = client()
     c.metric_chunks.side_effect = lambda identity, **kw: [[]] if identity.endswith("voltage") else client().metric_chunks()
     result = capture_window(c, fields, source="rack-probe", windows=[(0, 2)], epoch=7, deadline=Deadline(float("inf")), limits=LIMITS)
-    assert result.field_rows()["voltage"] == []
+    assert field_rows(result)["voltage"] == []
     with pytest.raises(ValueError, match="no matching series"):
-        result.store().select("sensor/voltage")
+        result.select("sensor/voltage")
 
 
 def test_existing_case_adds_a_registered_diagnostic_metric_in_one_binding():

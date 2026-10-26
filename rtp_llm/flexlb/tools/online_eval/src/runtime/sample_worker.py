@@ -1,5 +1,7 @@
 """Bounded background sampling with cancellation and joined shutdown."""
 
+import copy
+import json
 import threading
 
 from runtime.observation import SampleBudget, SampleSchedule
@@ -39,12 +41,12 @@ class SampleWorker:
 
     def append(self, sample):
         try:
-            self.budget.append_encoded(sample.encoded)
+            self.budget.append_encoded(json.dumps(sample, allow_nan=False))
         except ValueError:
             self.error = "observation sample/byte budget exhausted"
             self.stop_event.set()
             return False
-        self.samples.append(sample.encoded)
+        self.samples.append(copy.deepcopy(sample))
         self.bytes = self.budget.bytes
         return True
 

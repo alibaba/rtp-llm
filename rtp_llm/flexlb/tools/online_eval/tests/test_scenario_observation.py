@@ -95,7 +95,7 @@ class ObservationTest(unittest.TestCase):
             p = validate_snapshot({"sources": ["engine_snapshot"], "required": required}, Plan())
             with patch("adapters.observation_sources._read_json", side_effect=OSError("offline")):
                 result = execute_snapshot(self.ctx, p, deadline())
-            frozen = self.ctx.resource(result.output["snapshot"], "snapshot").to_dict()
+            frozen = self.ctx.resource(result.output["snapshot"], "snapshot")
             self.assertEqual("partial", frozen["status"])
             self.assertEqual("error", frozen["sources"]["engine_snapshot"]["status"])
             self.assertEqual(["ERROR"] if required else ["PASS"], [c.status for c in result.checks])
@@ -108,7 +108,7 @@ class ObservationTest(unittest.TestCase):
         source = Sources(self.ctx, validate_snapshot({"sources": ["engine_snapshot"]}, Plan()))
         self.ctx.env_epoch += 1
         with patch("adapters.observation_sources._read_json") as read:
-            result = source.capture(deadline()).to_dict()
+            result = source.capture(deadline())
         read.assert_not_called()
         self.assertEqual("epoch_changed", result["sources"]["engine_snapshot"]["status"])
 
@@ -116,11 +116,23 @@ class ObservationTest(unittest.TestCase):
         source = Sources(self.ctx, validate_snapshot({"sources": ["engine_snapshot"], "targets": ["p1"]}, Plan()))
         with patch("adapters.observation_sources._read_json", side_effect=[{"engines": [{"name": "p1"}]}, {"engines": [{"name": "p2"}]}]):
             source.capture(deadline())
-            result = source.capture(deadline()).to_dict()["sources"]["engine_snapshot"]
+            result = source.capture(deadline())["sources"]["engine_snapshot"]
         self.assertEqual("partial", result["status"])
         self.assertEqual(["p1"], result["membership"]["removed"])
         self.assertEqual(["p2"], result["membership"]["added"])
         self.assertIsNone(result["engine_generation"])
+
+    def test_snapshot_does_not_share_mutable_data_with_the_source_or_parameters(self):
+        configuration = validate_snapshot({"sources": ["engine_snapshot"], "targets": ["p1"]}, Plan())
+        payload = {"engines": [{"name": "p1"}]}
+        source = Sources(self.ctx, configuration)
+        with patch("adapters.observation_sources._read_json", return_value=payload):
+            snapshot = source.capture(deadline())
+        payload["engines"].clear()
+        configuration["targets"].clear()
+        captured = snapshot["sources"]["engine_snapshot"]
+        self.assertEqual({"engines": [{"name": "p1"}]}, captured["data"])
+        self.assertEqual(["p1"], captured["targets"])
 
     def test_final_cohort_includes_late_unfinished_attempt_and_is_immutable(self):
         result = execute_observe(self.ctx, params(), deadline())
@@ -137,11 +149,11 @@ class ObservationTest(unittest.TestCase):
             )
         )
         stopped = execute_observe(self.ctx, {"mode": "stop", "observation": observer.handle}, deadline())
-        data = observer.frozen.to_dict()
+        data = observer.stop(deadline())
         self.assertEqual(1, len(data["cohort_records"]))
         self.assertIsNone(data["cohort_records"][0]["transport_terminal_s"])
         data["cohort_records"].clear()
-        self.assertEqual(1, len(observer.frozen.to_dict()["cohort_records"]))
+        self.assertEqual(1, len(observer.stop(deadline())["cohort_records"]))
         repeated = execute_observe(self.ctx, {"mode": "stop", "observation": observer.handle}, deadline())
         self.assertEqual(stopped.output, repeated.output)
         self.assertEqual(stopped.artifacts, repeated.artifacts)
@@ -161,7 +173,7 @@ class ObservationTest(unittest.TestCase):
         observer = Observer(self.ctx, params(max_samples=1))
         observer.append(observer.sources.capture(deadline()))
         self.assertFalse(observer.append(observer.sources.capture(deadline())))
-        self.assertEqual("partial", observer.stop(deadline()).to_dict()["status"])
+        self.assertEqual("partial", observer.stop(deadline())["status"])
 
     def test_live_thread_cannot_be_reported_clean(self):
         observer = Observer(self.ctx, params())
@@ -179,7 +191,6 @@ class ObservationTest(unittest.TestCase):
         try:
             with self.assertRaises(TimeoutError):
                 observer.stop(deadline(0.01))
-            self.assertIsNone(observer.frozen)
         finally:
             release.set()
             observer.thread.join(1)
@@ -191,7 +202,6 @@ class ObservationTest(unittest.TestCase):
         observer.thread = SimpleNamespace(join=lambda timeout: None, is_alive=lambda: False)
         with self.assertRaises(TimeoutError):
             observer.stop(deadline(0.01))
-        self.assertIsNone(observer.frozen)
         observer.done_event.set()
         with self.assertRaises(DebugUnavailable):
             observer.stop(deadline())
@@ -205,7 +215,7 @@ class ObservationTest(unittest.TestCase):
             observer.thread = threading.Thread(target=observer._run)
             observer.thread.start()
             self.assertTrue(observer.done_event.wait(1))
-            frozen = observer.stop(deadline()).to_dict()
+            frozen = observer.stop(deadline())
         self.assertIsNotNone(frozen["worker_exit_mono"])
         self.assertTrue(frozen["background_done"])
         self.assertEqual("partial", frozen["status"])

@@ -91,9 +91,9 @@ def _write_views(directory, analysis, names=None, *, deadline=None, selected=Non
 
 
 def write_views(directory, analysis, names=None, *, deadline=None, selected=None):
-    from monitoring.metric_store import frozen_metric_reads
+    from monitoring.metric_store import metric_read_cache
 
-    with frozen_metric_reads(), archive_session():
+    with metric_read_cache(), archive_session():
         return _write_views(directory, analysis, names, deadline=deadline, selected=selected)
 
 

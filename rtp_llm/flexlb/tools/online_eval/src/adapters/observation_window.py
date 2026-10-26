@@ -1,11 +1,11 @@
-"""Freeze scenario cohorts after the background sampler has joined."""
+"""Collect final scenario evidence after the background sampler has joined."""
 
+import copy
 import json
 import threading
 
 from adapters.debug_client import DebugUnavailable
 from adapters.observation_sources import MAX_DATASET_BYTES, Sources
-from runtime.observation import FrozenSnapshot
 from runtime.sample_worker import SampleWorker, SamplingError
 from schema_contract import matches_schema
 
@@ -15,7 +15,7 @@ class Observer(SampleWorker):
         self.ctx = ctx
         self.sources = Sources(ctx, params)
         super().__init__(self.sources.capture, ctx.clock, params)
-        self.frozen = None
+        self._result = None
         self.handle = None
         self.stop_lock = threading.Lock()
         self.artifact = None
@@ -29,13 +29,13 @@ class Observer(SampleWorker):
             self.stop_lock.release()
 
     def _stop(self, deadline):
-        if self.frozen is not None:
-            return self.frozen
+        if self._result is not None:
+            return copy.deepcopy(self._result)
         try:
             self.stop_sampling(deadline)
         except SamplingError as exc:
             raise DebugUnavailable(str(exc)) from exc
-        samples = [json.loads(s) for s in self.samples]
+        samples = self.samples
         records = []
         for sample in samples:
             source = sample["sources"].get("client_records")
@@ -87,5 +87,5 @@ class Observer(SampleWorker):
         encoded = json.dumps(data, allow_nan=False)
         if len(encoded.encode()) > MAX_DATASET_BYTES:
             raise DebugUnavailable("frozen cohort exceeds dataset byte budget")
-        self.frozen = FrozenSnapshot(encoded)
-        return self.frozen
+        self._result = copy.deepcopy(data)
+        return copy.deepcopy(self._result)

@@ -9,7 +9,7 @@ import pytest
 
 from monitoring.client import PrometheusClient
 from runtime.deadline import Deadline
-from runtime.observation import FrozenSnapshot, SampleSchedule
+from runtime.observation import SampleSchedule
 from runtime.sample_worker import SampleWorker, SamplingError
 
 
@@ -20,7 +20,7 @@ def test_background_sampling_skips_overruns_without_drift_or_catchup():
         deadline.check()
         stamp = now[0]
         now[0] += 1.3
-        return FrozenSnapshot(json.dumps(stamp))
+        return stamp
 
     worker = SampleWorker(capture, lambda: now[0], dict(duration_s=6.8, interval_s=1, max_samples=20, max_bytes=1000))
 
@@ -30,7 +30,7 @@ def test_background_sampling_skips_overruns_without_drift_or_catchup():
 
     worker.stop_event = SimpleNamespace(wait=wait, is_set=lambda: False, set=lambda: None)
     worker._run()
-    assert [json.loads(v) for v in worker.samples] == [1, 3, 5]
+    assert worker.samples == [1, 3, 5]
     assert worker.worker_exit_mono == 6.8
     assert worker.done_event.is_set()
 
@@ -80,3 +80,17 @@ def test_query_response_budget_and_expired_deadline(monkeypatch):
     with pytest.raises(TimeoutError):
         client().query("up", deadline=Deadline(0))
     open_url.assert_not_called()
+
+
+def test_retained_samples_are_detached_and_keep_the_existing_byte_budget():
+    sample = dict(sources={"client": {"values": [1]}})
+    size = len(json.dumps(sample, allow_nan=False).encode()) + 1
+    worker = SampleWorker(None, lambda: 0, dict(duration_s=10, interval_s=1, max_samples=10, max_bytes=size))
+    assert worker.append(sample)
+    assert worker.bytes == size
+    sample["sources"]["client"]["values"].append(2)
+    assert worker.samples == [dict(sources={"client": {"values": [1]}})]
+    assert not worker.append(sample)
+    assert worker.bytes == size
+    assert worker.stop_event.is_set()
+    assert "budget exhausted" in worker.error

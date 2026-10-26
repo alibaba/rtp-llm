@@ -137,7 +137,7 @@ ZIP 使用 Deflate level 3，已压缩文件直接存储；请求流水、日志
 
 压缩证据在 `reports/evidence/` 按内容摘要存储，并硬链接到各 bundle；不支持硬链接的文件系统使用复制。每份 bundle 的 manifest 校验其本地证据文件，单独复制 bundle 后仍可离线读取，不依赖原目录的共享池。`load_analysis` 校验引用并还原完整分析结构；直接读取 `analysis.json` 得到的是归档结构。HTML 和报告 spec 各自保留交互统计所需的数据，可独立打开和重绘。冻结对照通过公共读取接口取得完整结果，不把压缩方式解释为测量口径差异。
 
-一次多视图发布通过 `frozen_metric_reads` 复用已解析的 `metrics.json`。缓存使用绝对路径与文件设备、inode、大小和修改时间识别工件，原子替换后重新读取；发布结束或异常退出时释放缓存。该范围从报告生成开始，不覆盖采集、指标生产或门禁阶段。视图只读冻结指标，不修改共享的 `MetricStore`；原始归档与门禁判定保持独立。
+一次多视图发布通过 `metric_read_cache` 复用已解析的 `metrics.json`。缓存使用绝对路径与文件设备、inode、大小和修改时间识别工件，原子替换后重新读取；发布结束或异常退出时释放缓存。该范围从报告生成开始，不覆盖采集、指标生产或门禁阶段。视图只读冻结指标，不修改共享的 `MetricStore`；原始归档与门禁判定保持独立。
 
 `RunPresentation` 在运行分析进入展示层时解析 identity、validity、检查树和 provenance；内部通过属性访问。公共 `ExperimentConditions` 和 `MeasurementIdentity` 位于 `report_model.py`，发布层不依赖对照模块；测量身份包含指标、标签、单位、缩放、计算口径和来源，计算身份不访问点数组。`RunSnapshot` 持有一次核验后读取的唯一 spec 数据树与独立原判定；配对修改自己的面板和曲线，不平行保存另一份点数组模型。外部 YAML/JSON 在入口严格校验，序列化保持 JSON 工件格式。
 
