@@ -14,7 +14,10 @@ import org.springframework.context.annotation.Configuration;
  */
 @Configuration
 @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
-@ConditionalOnProperty(name = "flexlb.monitor.per-engine-tags", havingValue = "false", matchIfMissing = false)
+@ConditionalOnProperty(
+        name = "flexlb.monitor.per-engine-tags",
+        havingValue = "false",
+        matchIfMissing = false)
 public class MetricsCardinalityConfig {
 
     @Bean

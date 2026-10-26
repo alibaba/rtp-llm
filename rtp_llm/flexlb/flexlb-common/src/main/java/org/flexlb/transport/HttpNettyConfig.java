@@ -36,32 +36,43 @@ public class HttpNettyConfig {
     @Bean(name = "nettyClient")
     public HttpNettyClientHandler createNettyClientHandler() {
         Bootstrap bootstrap = new Bootstrap();
-        EventLoopGroup group = new NioEventLoopGroup(
-                config.getInternalRuntime().getHttpNettyEventLoopThreads());
+        EventLoopGroup group =
+                new NioEventLoopGroup(config.getInternalRuntime().getHttpNettyEventLoopThreads());
         HttpNettyClientHandler handler = new HttpNettyClientHandler(bootstrap);
-        EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(
-                config.getInternalRuntime().getHttpNettyEventExecutorThreads(),
-                new DefaultThreadFactory("default-custom-executor"),
-                // Use bounded queue with configurable capacity
-                config.getInternalRuntime().getHttpNettyEventExecutorQueueCapacity(),
-                RejectedExecutionHandlers.reject());
+        EventExecutorGroup defaultEventExecutorGroup =
+                new DefaultEventExecutorGroup(
+                        config.getInternalRuntime().getHttpNettyEventExecutorThreads(),
+                        new DefaultThreadFactory("default-custom-executor"),
+                        // Use bounded queue with configurable capacity
+                        config.getInternalRuntime().getHttpNettyEventExecutorQueueCapacity(),
+                        RejectedExecutionHandlers.reject());
         int requestTimeoutMillis = 500;
-        bootstrap.group(group)
+        bootstrap
+                .group(group)
                 .channel(NioSocketChannel.class)
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, requestTimeoutMillis)
                 .option(ChannelOption.TCP_NODELAY, true)
                 .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
-                .handler(new ChannelInitializer<SocketChannel>() {
-                    @Override
-                    protected void initChannel(SocketChannel ch) {
-                        // ChannelHandler order in pipeline is important
-                        ch.pipeline()
-                                .addLast(CommonConstants.CODEC, new HttpClientCodec(8192, 8192, nettyMaxChunkSize))
-                                .addLast("timeoutHandler", new ReadTimeoutHandler(responseTimeoutMs, TimeUnit.MILLISECONDS))
-                                .addLast(defaultEventExecutorGroup, "inboundHandler", handler);
-                        handler.channelEnhance(ch);
-                    }
-                });
+                .handler(
+                        new ChannelInitializer<SocketChannel>() {
+                            @Override
+                            protected void initChannel(SocketChannel ch) {
+                                // ChannelHandler order in pipeline is important
+                                ch.pipeline()
+                                        .addLast(
+                                                CommonConstants.CODEC,
+                                                new HttpClientCodec(8192, 8192, nettyMaxChunkSize))
+                                        .addLast(
+                                                "timeoutHandler",
+                                                new ReadTimeoutHandler(
+                                                        responseTimeoutMs, TimeUnit.MILLISECONDS))
+                                        .addLast(
+                                                defaultEventExecutorGroup,
+                                                "inboundHandler",
+                                                handler);
+                                handler.channelEnhance(ch);
+                            }
+                        });
         return handler;
     }
 
@@ -72,31 +83,41 @@ public class HttpNettyConfig {
     @Bean(name = "syncNettyClient")
     public HttpNettyClientHandler createSyncNettyClientHandler() {
         Bootstrap bootstrap = new Bootstrap();
-        EventLoopGroup group = new NioEventLoopGroup(
-                config.getInternalRuntime().getHttpNettyEventLoopThreads());
+        EventLoopGroup group =
+                new NioEventLoopGroup(config.getInternalRuntime().getHttpNettyEventLoopThreads());
         HttpNettyClientHandler handler = new HttpNettyClientHandler(bootstrap);
-        EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(
-                config.getInternalRuntime().getHttpNettyEventExecutorThreads(),
-                new DefaultThreadFactory("default-custom-executor-sync"),
-                // Use bounded queue with configurable capacity
-                config.getInternalRuntime().getHttpNettyEventExecutorQueueCapacity(),
-                RejectedExecutionHandlers.reject());
-        bootstrap.group(group)
+        EventExecutorGroup defaultEventExecutorGroup =
+                new DefaultEventExecutorGroup(
+                        config.getInternalRuntime().getHttpNettyEventExecutorThreads(),
+                        new DefaultThreadFactory("default-custom-executor-sync"),
+                        // Use bounded queue with configurable capacity
+                        config.getInternalRuntime().getHttpNettyEventExecutorQueueCapacity(),
+                        RejectedExecutionHandlers.reject());
+        bootstrap
+                .group(group)
                 .channel(NioSocketChannel.class)
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 1000)
                 .option(ChannelOption.TCP_NODELAY, true)
                 .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
-                .handler(new ChannelInitializer<SocketChannel>() {
-                    @Override
-                    protected void initChannel(SocketChannel ch) {
-                        // ChannelHandler order in pipeline is important
-                        ch.pipeline()
-                                .addLast(CommonConstants.CODEC, new HttpClientCodec(8192, 8192, nettyMaxChunkSize))
-                                .addLast(CommonConstants.TIMEOUT_HANDLER, new ReadTimeoutHandler(3, TimeUnit.SECONDS))
-                                .addLast(defaultEventExecutorGroup, "inboundHandler", handler);
-                        handler.channelEnhance(ch);
-                    }
-                });
+                .handler(
+                        new ChannelInitializer<SocketChannel>() {
+                            @Override
+                            protected void initChannel(SocketChannel ch) {
+                                // ChannelHandler order in pipeline is important
+                                ch.pipeline()
+                                        .addLast(
+                                                CommonConstants.CODEC,
+                                                new HttpClientCodec(8192, 8192, nettyMaxChunkSize))
+                                        .addLast(
+                                                CommonConstants.TIMEOUT_HANDLER,
+                                                new ReadTimeoutHandler(3, TimeUnit.SECONDS))
+                                        .addLast(
+                                                defaultEventExecutorGroup,
+                                                "inboundHandler",
+                                                handler);
+                                handler.channelEnhance(ch);
+                            }
+                        });
         return handler;
     }
 }

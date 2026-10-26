@@ -36,11 +36,9 @@ public class DeliveryBindingConfiguration {
     private static final int TIMESTAMP_SHIFT = MASTER_ID_BITS + SEQUENCE_BITS;
     private static final int LOW_MASTER_ID_BYTE_INDEX_FROM_END = 1;
     private static final int HIGH_MASTER_ID_BYTE_INDEX_FROM_END = 2;
-    private static final long MASTER_ID_HIGH_BYTE_MASK =
-            (1L << (MASTER_ID_BITS - Byte.SIZE)) - 1L;
+    private static final long MASTER_ID_HIGH_BYTE_MASK = (1L << (MASTER_ID_BITS - Byte.SIZE)) - 1L;
     private static final long BATCH_EPOCH_SECONDS = 1_577_836_800L;
-    private static final long BATCH_SEQUENCE_MASK =
-            (1L << SEQUENCE_BITS) - 1L;
+    private static final long BATCH_SEQUENCE_MASK = (1L << SEQUENCE_BITS) - 1L;
     private static final String HASH_ALGORITHM = "SHA-256";
     private static final String LOOPBACK_ADDRESS = "127.0.0.1";
     private static final int DEFAULT_SERVER_PORT = 7001;
@@ -53,36 +51,32 @@ public class DeliveryBindingConfiguration {
             DefaultBatchDispatcher batchSubmission,
             BatchSchedulerReporter reporter,
             Environment environment) {
-        DispatcherConfig dispatcher = Objects.requireNonNull(
-                configService.loadBalanceConfig().getDispatcher(),
-                "dispatcher");
+        DispatcherConfig dispatcher =
+                Objects.requireNonNull(
+                        configService.loadBalanceConfig().getDispatcher(), "dispatcher");
         DeliveryMetrics telemetry = new DeliveryMetrics(reporter);
         return switch (dispatcher.getType()) {
             case BATCH -> {
-                LongSupplier ids = batchIds(
-                        detectLocalIp(), detectPort(environment));
+                LongSupplier ids = batchIds(detectLocalIp(), detectPort(environment));
                 yield new BatchDeliveryStrategy(
-                        batchSubmission::tryPrepareSubmission,
-                        ids,
-                        requests,
-                        telemetry);
+                        batchSubmission::tryPrepareSubmission, ids, requests, telemetry);
             }
-            case NON_BATCH ->
-                    new RouteDeliveryStrategy(
-                            requests,
-                            telemetry);
+            case NON_BATCH -> new RouteDeliveryStrategy(requests, telemetry);
         };
     }
 
     /** Snowflake-compatible 31-bit timestamp, 12-bit master, 21-bit sequence. */
     private static LongSupplier batchIds(String localIp, int port) {
-        long masterId = computeMasterId(
-                localIp, port, ProcessHandle.current().pid(),
-                ManagementFactory.getRuntimeMXBean().getStartTime());
+        long masterId =
+                computeMasterId(
+                        localIp,
+                        port,
+                        ProcessHandle.current().pid(),
+                        ManagementFactory.getRuntimeMXBean().getStartTime());
         return () -> {
-            long timestamp = TimeUnit.MILLISECONDS.toSeconds(
-                    System.currentTimeMillis())
-                    - BATCH_EPOCH_SECONDS;
+            long timestamp =
+                    TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis())
+                            - BATCH_EPOCH_SECONDS;
             if (timestamp < 0L || (timestamp >>> TIMESTAMP_BITS) != 0L) {
                 throw new IllegalStateException(
                         timestamp < 0L
@@ -91,28 +85,23 @@ public class DeliveryBindingConfiguration {
             }
             return (timestamp << TIMESTAMP_SHIFT)
                     | (masterId << MASTER_ID_SHIFT)
-                    | (BATCH_SEQUENCE.getAndIncrement()
-                    & BATCH_SEQUENCE_MASK);
+                    | (BATCH_SEQUENCE.getAndIncrement() & BATCH_SEQUENCE_MASK);
         };
     }
 
     private static long computeMasterId(
-            String localIp, int port, long processId,
-            long processStartTimeMs) {
+            String localIp, int port, long processId, long processStartTimeMs) {
         try {
-            String input = localIp + ":" + port + ":" + processId
-                    + ":" + processStartTimeMs;
-            byte[] hash = MessageDigest.getInstance(HASH_ALGORITHM)
-                    .digest(input.getBytes(StandardCharsets.UTF_8));
-            return Byte.toUnsignedInt(
-                    hash[hash.length - LOW_MASTER_ID_BYTE_INDEX_FROM_END])
-                    | ((Byte.toUnsignedInt(
-                            hash[hash.length
-                                    - HIGH_MASTER_ID_BYTE_INDEX_FROM_END])
-                            & MASTER_ID_HIGH_BYTE_MASK) << Byte.SIZE);
+            String input = localIp + ":" + port + ":" + processId + ":" + processStartTimeMs;
+            byte[] hash =
+                    MessageDigest.getInstance(HASH_ALGORITHM)
+                            .digest(input.getBytes(StandardCharsets.UTF_8));
+            return Byte.toUnsignedInt(hash[hash.length - LOW_MASTER_ID_BYTE_INDEX_FROM_END])
+                    | ((Byte.toUnsignedInt(hash[hash.length - HIGH_MASTER_ID_BYTE_INDEX_FROM_END])
+                                    & MASTER_ID_HIGH_BYTE_MASK)
+                            << Byte.SIZE);
         } catch (NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException(
-                    HASH_ALGORITHM + " not available", impossible);
+            throw new IllegalStateException(HASH_ALGORITHM + " not available", impossible);
         }
     }
 
@@ -120,19 +109,15 @@ public class DeliveryBindingConfiguration {
         try {
             return InetAddress.getLocalHost().getHostAddress();
         } catch (UnknownHostException failure) {
-            Logger.warn(
-                    "Failed to detect local IP for batch ids; using loopback",
-                    failure);
+            Logger.warn("Failed to detect local IP for batch ids; using loopback", failure);
             return LOOPBACK_ADDRESS;
         }
     }
 
     private static int detectPort(Environment environment) {
-        String configured = environment == null
-                ? null : environment.getProperty("server.port");
+        String configured = environment == null ? null : environment.getProperty("server.port");
         if (configured == null) {
-            configured = System.getProperty(
-                    "server.port", String.valueOf(DEFAULT_SERVER_PORT));
+            configured = System.getProperty("server.port", String.valueOf(DEFAULT_SERVER_PORT));
         }
         try {
             return Integer.parseInt(configured);

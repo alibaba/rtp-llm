@@ -5,12 +5,13 @@ import java.util.Map;
 /** Immutable Decode cost expression evaluated against one routing snapshot. */
 public final class DecodeCostFormula {
 
-    private static final Map<String, Integer> VARIABLES = Map.of(
-            "running_size", 0,
-            "max_running_size", 1,
-            "kvcache_used", 2,
-            "kvcache_capacity", 3,
-            "kvcache_used_ratio", 4);
+    private static final Map<String, Integer> VARIABLES =
+            Map.of(
+                    "running_size", 0,
+                    "max_running_size", 1,
+                    "kvcache_used", 2,
+                    "kvcache_capacity", 3,
+                    "kvcache_used_ratio", 4);
     private static final ThreadLocal<double[]> EVALUATION_VARIABLES =
             ThreadLocal.withInitial(() -> new double[VARIABLES.size()]);
 

@@ -32,14 +32,15 @@ public class PvLogData {
     private String realMasterHost;
     private Map<String, Object> schedulingDiagnostics;
 
-    public PvLogData(BalanceContext ctx,
-                     int code,
-                     String admissionRejectReason,
-                     String scheduleOrigin,
-                     long batchId,
-                     String requestState,
-                     String realMasterHost,
-                     long completedAtMs) {
+    public PvLogData(
+            BalanceContext ctx,
+            int code,
+            String admissionRejectReason,
+            String scheduleOrigin,
+            long batchId,
+            String requestState,
+            String realMasterHost,
+            long completedAtMs) {
         this.requestId = ctx.getRequestId();
         this.seqLen = ctx.getRequest().getSeqLen();
         this.response = ctx.getResponse();

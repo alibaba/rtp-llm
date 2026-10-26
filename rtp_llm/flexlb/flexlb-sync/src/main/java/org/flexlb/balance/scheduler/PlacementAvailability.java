@@ -39,10 +39,8 @@ public final class PlacementAvailability {
     }
 
     private final AtomicLong sequence = new AtomicLong();
-    private final ConcurrentMap<PlacementKey, Long> lastChanged =
-            new ConcurrentHashMap<>();
-    private final ConcurrentMap<Listener, Boolean> listeners =
-            new ConcurrentHashMap<>();
+    private final ConcurrentMap<PlacementKey, Long> lastChanged = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Listener, Boolean> listeners = new ConcurrentHashMap<>();
 
     void addListener(Listener candidate) {
         Objects.requireNonNull(candidate, "listener");
@@ -73,7 +71,8 @@ public final class PlacementAvailability {
         lastChanged.merge(key, next, Math::max);
         if (key.endpoint() != null) {
             // Exact waiters follow role/address across topology group changes.
-            lastChanged.merge(PlacementKey.exact(key.role(), null, key.endpoint()), next, Math::max);
+            lastChanged.merge(
+                    PlacementKey.exact(key.role(), null, key.endpoint()), next, Math::max);
             lastChanged.merge(new PlacementKey(key.role(), key.group()), next, Math::max);
         }
         if (key.group() != null) {
@@ -87,23 +86,16 @@ public final class PlacementAvailability {
             try {
                 listener.onAvailabilityChanged(event);
             } catch (Throwable failure) {
-                Logger.warn(
-                        "Placement availability listener failed", failure);
+                Logger.warn("Placement availability listener failed", failure);
             }
         }
     }
 
-    public void capacityChanged(
-            RoleType role,
-            String group,
-            String endpoint) {
+    public void capacityChanged(RoleType role, String group, String endpoint) {
         capacityChanged(PlacementKey.exact(role, group, endpoint));
     }
 
-    public void topologyChanged(
-            RoleType role,
-            String group,
-            String endpoint) {
+    public void topologyChanged(RoleType role, String group, String endpoint) {
         topologyChanged(PlacementKey.exact(role, group, endpoint));
     }
 
@@ -114,5 +106,4 @@ public final class PlacementAvailability {
     long lastChangedSequence(PlacementKey key) {
         return lastChanged.getOrDefault(key, 0L);
     }
-
 }

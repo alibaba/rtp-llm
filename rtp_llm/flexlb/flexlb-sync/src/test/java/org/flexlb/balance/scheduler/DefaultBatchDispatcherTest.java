@@ -37,9 +37,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -89,35 +89,52 @@ class DefaultBatchDispatcherTest {
         assertDispatchedTraceContexts(false, true);
     }
 
-    private void assertDispatchedTraceContexts(boolean enabled, boolean validScheduleContext) throws Exception {
-        org.flexlb.telemetry.FlexlbTrace.configure(enabled ? io.opentelemetry.api.OpenTelemetry.noop() : null, "");
+    private void assertDispatchedTraceContexts(boolean enabled, boolean validScheduleContext)
+            throws Exception {
+        org.flexlb.telemetry.FlexlbTrace.configure(
+                enabled ? io.opentelemetry.api.OpenTelemetry.noop() : null, "");
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest first = createScheduledRequest(501L, 500, 200, prefillEp);
         ScheduledRequest second = createScheduledRequest(502L, 500, 200, prefillEp);
-        first.ctx().setGenerateInputPb(generateInputWithTraceContext(
-                501L,
-                "00-11111111111111111111111111111111-1111111111111111-01",
-                "vendor=one").toByteString());
-        second.ctx().setGenerateInputPb(generateInputWithTraceContext(
-                502L,
-                "00-22222222222222222222222222222222-2222222222222222-01",
-                "vendor=two").toByteString());
+        first.ctx()
+                .setGenerateInputPb(
+                        generateInputWithTraceContext(
+                                        501L,
+                                        "00-11111111111111111111111111111111-1111111111111111-01",
+                                        "vendor=one")
+                                .toByteString());
+        second.ctx()
+                .setGenerateInputPb(
+                        generateInputWithTraceContext(
+                                        502L,
+                                        "00-22222222222222222222222222222222-2222222222222222-01",
+                                        "vendor=two")
+                                .toByteString());
         if (validScheduleContext) {
-            first.ctx().setTraceContext(scheduleContext(
-                    "11111111111111111111111111111111", "aaaaaaaaaaaaaaaa", "schedule"));
-            second.ctx().setTraceContext(scheduleContext(
-                    "22222222222222222222222222222222", "bbbbbbbbbbbbbbbb", ""));
+            first.ctx()
+                    .setTraceContext(
+                            scheduleContext(
+                                    "11111111111111111111111111111111",
+                                    "aaaaaaaaaaaaaaaa",
+                                    "schedule"));
+            second.ctx()
+                    .setTraceContext(
+                            scheduleContext(
+                                    "22222222222222222222222222222222", "bbbbbbbbbbbbbbbb", ""));
         } else {
             first.ctx().setTraceContext(io.opentelemetry.context.Context.root());
             second.ctx().setTraceContext(null);
         }
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
-                .thenAnswer(inv -> {
-                    sent.add(inv.getArgument(2));
-                    return CompletableFuture.completedFuture(ackResponse(92L, List.of(501L, 502L)));
-                });
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                .thenAnswer(
+                        inv -> {
+                            sent.add(inv.getArgument(2));
+                            return CompletableFuture.completedFuture(
+                                    ackResponse(92L, List.of(501L, 502L)));
+                        });
 
         submit(List.of(first, second), 92L, 100, "trace_context", callback);
 
@@ -126,59 +143,83 @@ class DefaultBatchDispatcherTest {
         List<EngineRpcService.EnqueueBatchExternalInputPB> requests =
                 sent.getFirst().getDpSlots(0).getRequestsList();
         assertEquals(2, requests.size());
-        EngineRpcService.GenerateInputPB firstSent = requests.stream()
-                .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
-                .filter(input -> input.getRequestId() == 501L)
-                .findFirst().orElseThrow();
-        EngineRpcService.GenerateInputPB secondSent = requests.stream()
-                .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
-                .filter(input -> input.getRequestId() == 502L)
-                .findFirst().orElseThrow();
+        EngineRpcService.GenerateInputPB firstSent =
+                requests.stream()
+                        .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
+                        .filter(input -> input.getRequestId() == 501L)
+                        .findFirst()
+                        .orElseThrow();
+        EngineRpcService.GenerateInputPB secondSent =
+                requests.stream()
+                        .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
+                        .filter(input -> input.getRequestId() == 502L)
+                        .findFirst()
+                        .orElseThrow();
         boolean replaced = enabled && validScheduleContext;
-        assertEquals("00-11111111111111111111111111111111-"
-                        + (replaced ? "aaaaaaaaaaaaaaaa" : "1111111111111111") + "-01",
+        assertEquals(
+                "00-11111111111111111111111111111111-"
+                        + (replaced ? "aaaaaaaaaaaaaaaa" : "1111111111111111")
+                        + "-01",
                 firstSent.getRequestInfo().getTraceContext().getTraceparent());
-        assertEquals(replaced ? "vendor=schedule" : "vendor=one",
+        assertEquals(
+                replaced ? "vendor=schedule" : "vendor=one",
                 firstSent.getRequestInfo().getTraceContext().getTracestate());
-        assertEquals("00-22222222222222222222222222222222-"
-                        + (replaced ? "bbbbbbbbbbbbbbbb" : "2222222222222222") + "-01",
+        assertEquals(
+                "00-22222222222222222222222222222222-"
+                        + (replaced ? "bbbbbbbbbbbbbbbb" : "2222222222222222")
+                        + "-01",
                 secondSent.getRequestInfo().getTraceContext().getTraceparent());
-        assertEquals(replaced ? "" : "vendor=two", secondSent.getRequestInfo().getTraceContext().getTracestate());
-        assertEquals("vendor=one", EngineRpcService.GenerateInputPB.parseFrom(first.ctx().getGenerateInputPb())
-                .getRequestInfo().getTraceContext().getTracestate(), "dispatch must not mutate the queued payload");
+        assertEquals(
+                replaced ? "" : "vendor=two",
+                secondSent.getRequestInfo().getTraceContext().getTracestate());
+        assertEquals(
+                "vendor=one",
+                EngineRpcService.GenerateInputPB.parseFrom(first.ctx().getGenerateInputPb())
+                        .getRequestInfo()
+                        .getTraceContext()
+                        .getTracestate(),
+                "dispatch must not mutate the queued payload");
     }
 
-    private static io.opentelemetry.context.Context scheduleContext(String traceId, String spanId, String vendor) {
+    private static io.opentelemetry.context.Context scheduleContext(
+            String traceId, String spanId, String vendor) {
         var state = io.opentelemetry.api.trace.TraceState.builder();
         if (!vendor.isEmpty()) {
             state.put("vendor", vendor);
         }
-        return io.opentelemetry.context.Context.root().with(io.opentelemetry.api.trace.Span.wrap(
-                io.opentelemetry.api.trace.SpanContext.create(traceId, spanId,
-                        io.opentelemetry.api.trace.TraceFlags.getSampled(), state.build())));
+        return io.opentelemetry.context.Context.root()
+                .with(
+                        io.opentelemetry.api.trace.Span.wrap(
+                                io.opentelemetry.api.trace.SpanContext.create(
+                                        traceId,
+                                        spanId,
+                                        io.opentelemetry.api.trace.TraceFlags.getSampled(),
+                                        state.build())));
     }
 
     @Test
     void oldDescriptorRoundTripPreservesNestedTraceContextUnknownField() throws Exception {
-        EngineRpcService.GenerateInputPB payload = generateInputWithTraceContext(
-                503L,
-                "00-33333333333333333333333333333333-3333333333333333-01",
-                "vendor=legacy");
+        EngineRpcService.GenerateInputPB payload =
+                generateInputWithTraceContext(
+                        503L,
+                        "00-33333333333333333333333333333333-3333333333333333-01",
+                        "vendor=legacy");
         Descriptors.Descriptor legacy = legacyGenerateInputDescriptor();
 
         DynamicMessage oldReader = DynamicMessage.parseFrom(legacy, payload.toByteArray());
         Descriptors.FieldDescriptor requestInfoField = legacy.findFieldByNumber(9);
         DynamicMessage oldRequestInfo = (DynamicMessage) oldReader.getField(requestInfoField);
-        assertTrue(!oldRequestInfo.getUnknownFields().getField(6).getLengthDelimitedList().isEmpty());
+        assertTrue(
+                !oldRequestInfo.getUnknownFields().getField(6).getLengthDelimitedList().isEmpty());
 
-        DynamicMessage oldWriter = oldReader.toBuilder()
-                .setField(legacy.findFieldByNumber(10), 73)
-                .build();
+        DynamicMessage oldWriter =
+                oldReader.toBuilder().setField(legacy.findFieldByNumber(10), 73).build();
         EngineRpcService.GenerateInputPB reparsed =
                 EngineRpcService.GenerateInputPB.parseFrom(oldWriter.toByteArray());
 
         assertEquals(73, reparsed.getPriority());
-        assertEquals(payload.getRequestInfo().getTraceContext(),
+        assertEquals(
+                payload.getRequestInfo().getTraceContext(),
                 reparsed.getRequestInfo().getTraceContext());
     }
 
@@ -187,53 +228,91 @@ class DefaultBatchDispatcherTest {
         return EngineRpcService.GenerateInputPB.newBuilder()
                 .setRequestId(requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
-                .setRequestInfo(EngineRpcService.RequestInfoPB.newBuilder()
-                        .setTraceContext(EngineRpcService.TraceContextPB.newBuilder()
-                                .setTraceparent(traceparent)
-                                .setTracestate(tracestate)
+                .setRequestInfo(
+                        EngineRpcService.RequestInfoPB.newBuilder()
+                                .setTraceContext(
+                                        EngineRpcService.TraceContextPB.newBuilder()
+                                                .setTraceparent(traceparent)
+                                                .setTracestate(tracestate)
+                                                .build())
                                 .build())
-                        .build())
                 .build();
     }
 
     private static Descriptors.Descriptor legacyGenerateInputDescriptor() throws Exception {
-        DescriptorProtos.DescriptorProto requestInfo = DescriptorProtos.DescriptorProto.newBuilder()
-                .setName("RequestInfoPB")
-                .addField(optionalField("frontend_ip", 1,
-                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING, null))
-                .addField(optionalField("dash_ip", 2,
-                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING, null))
-                .addField(optionalField("trace_id", 3,
-                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING, null))
-                .addField(optionalField("request_id", 4,
-                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING, null))
-                .addField(optionalField("source_role", 5,
-                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING, null))
-                .build();
-        DescriptorProtos.DescriptorProto generateConfig = DescriptorProtos.DescriptorProto.newBuilder()
-                .setName("GenerateConfigPB")
-                .build();
-        DescriptorProtos.DescriptorProto generateInput = DescriptorProtos.DescriptorProto.newBuilder()
-                .setName("GenerateInputPB")
-                .addField(optionalField("request_id", 1,
-                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64, null))
-                .addField(optionalField("generate_config", 4,
-                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_MESSAGE,
-                        ".legacy_trace.GenerateConfigPB"))
-                .addField(optionalField("request_info", 9,
-                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_MESSAGE,
-                        ".legacy_trace.RequestInfoPB"))
-                .addField(optionalField("priority", 10,
-                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT32, null))
-                .build();
-        DescriptorProtos.FileDescriptorProto file = DescriptorProtos.FileDescriptorProto.newBuilder()
-                .setName("legacy_trace_generate_input.proto")
-                .setPackage("legacy_trace")
-                .setSyntax("proto3")
-                .addMessageType(requestInfo)
-                .addMessageType(generateConfig)
-                .addMessageType(generateInput)
-                .build();
+        DescriptorProtos.DescriptorProto requestInfo =
+                DescriptorProtos.DescriptorProto.newBuilder()
+                        .setName("RequestInfoPB")
+                        .addField(
+                                optionalField(
+                                        "frontend_ip",
+                                        1,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "dash_ip",
+                                        2,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "trace_id",
+                                        3,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "request_id",
+                                        4,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "source_role",
+                                        5,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .build();
+        DescriptorProtos.DescriptorProto generateConfig =
+                DescriptorProtos.DescriptorProto.newBuilder().setName("GenerateConfigPB").build();
+        DescriptorProtos.DescriptorProto generateInput =
+                DescriptorProtos.DescriptorProto.newBuilder()
+                        .setName("GenerateInputPB")
+                        .addField(
+                                optionalField(
+                                        "request_id",
+                                        1,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "generate_config",
+                                        4,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_MESSAGE,
+                                        ".legacy_trace.GenerateConfigPB"))
+                        .addField(
+                                optionalField(
+                                        "request_info",
+                                        9,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_MESSAGE,
+                                        ".legacy_trace.RequestInfoPB"))
+                        .addField(
+                                optionalField(
+                                        "priority",
+                                        10,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT32,
+                                        null))
+                        .build();
+        DescriptorProtos.FileDescriptorProto file =
+                DescriptorProtos.FileDescriptorProto.newBuilder()
+                        .setName("legacy_trace_generate_input.proto")
+                        .setPackage("legacy_trace")
+                        .setSyntax("proto3")
+                        .addMessageType(requestInfo)
+                        .addMessageType(generateConfig)
+                        .addMessageType(generateInput)
+                        .build();
         return Descriptors.FileDescriptor.buildFrom(file, new Descriptors.FileDescriptor[0])
                 .findMessageTypeByName("GenerateInputPB");
     }
@@ -261,7 +340,8 @@ class DefaultBatchDispatcherTest {
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response = ackResponse(1L, List.of(1L));
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         submit(List.of(item), 1L, 100, "test_reason", callback);
@@ -282,7 +362,8 @@ class DefaultBatchDispatcherTest {
     void dispatchPassesConfiguredFetchAttachTimeoutToEngine() throws Exception {
         config.getDispatcher().setFetchAttachTimeoutMs(1500);
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, createPrefillEndpoint());
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(ackResponse(1L, List.of(1L))));
 
         submit(List.of(item), 1L, 100, "test_reason", callback);
@@ -301,30 +382,45 @@ class DefaultBatchDispatcherTest {
         ScheduledRequest second = createScheduledRequest(602L, 20, 0, endpoint);
         var firstSpan = mock(io.opentelemetry.api.trace.Span.class);
         var secondSpan = mock(io.opentelemetry.api.trace.Span.class);
-        when(firstSpan.storeInContext(any(io.opentelemetry.context.Context.class))).thenCallRealMethod();
-        when(secondSpan.storeInContext(any(io.opentelemetry.context.Context.class))).thenCallRealMethod();
+        when(firstSpan.storeInContext(any(io.opentelemetry.context.Context.class)))
+                .thenCallRealMethod();
+        when(secondSpan.storeInContext(any(io.opentelemetry.context.Context.class)))
+                .thenCallRealMethod();
         first.ctx().setTraceContext(io.opentelemetry.context.Context.root().with(firstSpan));
         second.ctx().setTraceContext(io.opentelemetry.context.Context.root().with(secondSpan));
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
-                .thenReturn(CompletableFuture.completedFuture(ackResponse(93L, List.of(601L, 602L))));
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(ackResponse(93L, List.of(601L, 602L))));
         CompletableFuture<Void> verified = new CompletableFuture<>();
         AtomicInteger remaining = new AtomicInteger(2);
-        submit(List.of(first, second), 93L, 100, "trace_timing", (item, result) -> {
-            try {
-                var span = item == first ? firstSpan : secondSpan;
-                verify(span).setAttribute(org.flexlb.telemetry.FlexlbTrace.BATCH_ID, 93L);
-                verify(span).setAttribute(org.flexlb.telemetry.FlexlbTrace.BATCH_SIZE, 2L);
-                verify(span).setAttribute(org.flexlb.telemetry.FlexlbTrace.DISPATCH_REASON, "trace_timing");
-                verify(span).setAttribute(org.mockito.ArgumentMatchers.eq(
-                        org.flexlb.telemetry.FlexlbTrace.ENQUEUE_BATCH_MS), anyLong());
-                assertEquals(DeliveryResult.Status.DELIVERED, result.status());
-                if (remaining.decrementAndGet() == 0) {
-                    verified.complete(null);
-                }
-            } catch (Throwable error) {
-                verified.completeExceptionally(error);
-            }
-        });
+        submit(
+                List.of(first, second),
+                93L,
+                100,
+                "trace_timing",
+                (item, result) -> {
+                    try {
+                        var span = item == first ? firstSpan : secondSpan;
+                        verify(span).setAttribute(org.flexlb.telemetry.FlexlbTrace.BATCH_ID, 93L);
+                        verify(span).setAttribute(org.flexlb.telemetry.FlexlbTrace.BATCH_SIZE, 2L);
+                        verify(span)
+                                .setAttribute(
+                                        org.flexlb.telemetry.FlexlbTrace.DISPATCH_REASON,
+                                        "trace_timing");
+                        verify(span)
+                                .setAttribute(
+                                        org.mockito.ArgumentMatchers.eq(
+                                                org.flexlb.telemetry.FlexlbTrace.ENQUEUE_BATCH_MS),
+                                        anyLong());
+                        assertEquals(DeliveryResult.Status.DELIVERED, result.status());
+                        if (remaining.decrementAndGet() == 0) {
+                            verified.complete(null);
+                        }
+                    } catch (Throwable error) {
+                        verified.completeExceptionally(error);
+                    }
+                });
         verified.get(5, TimeUnit.SECONDS);
     }
 
@@ -334,12 +430,16 @@ class DefaultBatchDispatcherTest {
         var span = mock(io.opentelemetry.api.trace.Span.class);
         when(span.storeInContext(any(io.opentelemetry.context.Context.class))).thenCallRealMethod();
         item.ctx().setTraceContext(io.opentelemetry.context.Context.root().with(span));
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(ackResponse(94L, List.of(999L))));
         submit(List.of(item), 94L, 100, "malformed", callback);
         assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS));
-        verify(span, never()).setAttribute(org.mockito.ArgumentMatchers.eq(
-                org.flexlb.telemetry.FlexlbTrace.ENQUEUE_BATCH_MS), anyLong());
+        verify(span, never())
+                .setAttribute(
+                        org.mockito.ArgumentMatchers.eq(
+                                org.flexlb.telemetry.FlexlbTrace.ENQUEUE_BATCH_MS),
+                        anyLong());
     }
 
     @Test
@@ -347,12 +447,16 @@ class DefaultBatchDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
 
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
-                .thenReturn(CompletableFuture.failedFuture(new RuntimeException("gRPC connection refused")));
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                .thenReturn(
+                        CompletableFuture.failedFuture(
+                                new RuntimeException("gRPC connection refused")));
 
         submit(List.of(item), 1L, 100, "test_reason", callback);
 
-        assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS),
+        assertTrue(
+                callback.uncertainLatch.await(5, TimeUnit.SECONDS),
                 "post-send transport error must be reconciled");
         assertEquals(1, callback.uncertainCount.get());
         assertEquals(0, callback.failureCount.get());
@@ -364,7 +468,8 @@ class DefaultBatchDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
 
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(null));
 
         submit(List.of(item), 1L, 100, "test_reason", callback);
@@ -377,8 +482,7 @@ class DefaultBatchDispatcherTest {
     void dispatchHandlesNullGrpcFutureAsUncertain() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
-                .thenReturn(null);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any())).thenReturn(null);
 
         submit(List.of(item), 1L, 100, "test", callback);
 
@@ -391,14 +495,17 @@ class DefaultBatchDispatcherTest {
     void dispatchRejectsAckWithDifferentBatchId() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(8L, 500, 200, prefillEp);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any())).thenReturn(
-                CompletableFuture.completedFuture(EngineRpcService.EnqueueBatchResponsePB.newBuilder()
-                        .setBatchId(87L)
-                        .addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder().setRequestId(8L))
-                        .build()));
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                EngineRpcService.EnqueueBatchResponsePB.newBuilder()
+                                        .setBatchId(87L)
+                                        .addSuccesses(
+                                                EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
+                                                        .setRequestId(8L))
+                                        .build()));
 
-        submit(List.of(item), 88L,
-                100, "batch_id_mismatch", callback);
+        submit(List.of(item), 88L, 100, "batch_id_mismatch", callback);
 
         assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS));
         assertEquals(0, callback.successCount.get());
@@ -411,16 +518,14 @@ class DefaultBatchDispatcherTest {
 
         CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
-        assertEquals(CapacityBoundary.Status.FAILED,
-                rejected.boundary().status());
+        assertEquals(CapacityBoundary.Status.FAILED, rejected.boundary().status());
         assertEquals(0, callback.failureCount.get());
         assertEquals(0, callback.successCount.get());
         assertEquals(0, callback.uncertainCount.get());
     }
 
     @Test
-    void shutdownWakesCapacityWaiterAndNextReservationReturnsAdmissionFailure()
-            throws Exception {
+    void shutdownWakesCapacityWaiterAndNextReservationReturnsAdmissionFailure() throws Exception {
         dispatcher.shutdown();
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
         PreparedSubmission running = reservePermit();
@@ -428,21 +533,24 @@ class DefaultBatchDispatcherTest {
         CapacityBoundary unavailable = unavailableBoundary();
         assertFalse(unavailable.availability().isAvailable());
         CountDownLatch capacityChanged = new CountDownLatch(1);
-        unavailable.availability().addListener(() -> {
-            if (unavailable.availability().isAvailable()) {
-                capacityChanged.countDown();
-            }
-        });
+        unavailable
+                .availability()
+                .addListener(
+                        () -> {
+                            if (unavailable.availability().isAvailable()) {
+                                capacityChanged.countDown();
+                            }
+                        });
 
         dispatcher.shutdown();
 
         assertTrue(capacityChanged.await(5, TimeUnit.SECONDS));
-        assertTrue(unavailable.availability().isAvailable(),
+        assertTrue(
+                unavailable.availability().isAvailable(),
                 "shutdown is a state transition which wakes admission waiters");
         CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
-        assertEquals(CapacityBoundary.Status.FAILED,
-                rejected.boundary().status());
+        assertEquals(CapacityBoundary.Status.FAILED, rejected.boundary().status());
         running.close();
         queued.close();
     }
@@ -459,20 +567,19 @@ class DefaultBatchDispatcherTest {
         AtomicInteger uncertain = new AtomicInteger();
         BiConsumer<ScheduledRequest, DeliveryResult> throwingCallback =
                 (exactItem, completion) -> {
-                ScheduledRequest item = assertInstanceOf(ScheduledRequest.class, exactItem);
-                if (completion.status() == DeliveryResult.Status.NOT_SENT) {
-                    failures.incrementAndGet();
-                    attempted.countDown();
-                    if (item.requestId() == 1L) {
-                        throw new IllegalStateException("first callback failed");
+                    ScheduledRequest item = assertInstanceOf(ScheduledRequest.class, exactItem);
+                    if (completion.status() == DeliveryResult.Status.NOT_SENT) {
+                        failures.incrementAndGet();
+                        attempted.countDown();
+                        if (item.requestId() == 1L) {
+                            throw new IllegalStateException("first callback failed");
+                        }
+                    } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
+                        uncertain.incrementAndGet();
                     }
-                } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
-                    uncertain.incrementAndGet();
-                }
-            };
+                };
 
-        submit(List.of(first, second),
-                2L, 100, "pre_send_failure", throwingCallback);
+        submit(List.of(first, second), 2L, 100, "pre_send_failure", throwingCallback);
 
         assertTrue(attempted.await(5, TimeUnit.SECONDS));
         assertEquals(2, failures.get());
@@ -492,20 +599,19 @@ class DefaultBatchDispatcherTest {
         AtomicInteger uncertain = new AtomicInteger();
         BiConsumer<ScheduledRequest, DeliveryResult> throwingCallback =
                 (exactItem, completion) -> {
-                ScheduledRequest item = assertInstanceOf(ScheduledRequest.class, exactItem);
-                if (completion.status() == DeliveryResult.Status.NOT_SENT) {
-                    failures.incrementAndGet();
-                } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
-                    uncertain.incrementAndGet();
-                    attempted.countDown();
-                    if (item.requestId() == 1L) {
-                        throw new IllegalStateException("first callback failed");
+                    ScheduledRequest item = assertInstanceOf(ScheduledRequest.class, exactItem);
+                    if (completion.status() == DeliveryResult.Status.NOT_SENT) {
+                        failures.incrementAndGet();
+                    } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
+                        uncertain.incrementAndGet();
+                        attempted.countDown();
+                        if (item.requestId() == 1L) {
+                            throw new IllegalStateException("first callback failed");
+                        }
                     }
-                }
-            };
+                };
 
-        submit(List.of(first, second),
-                3L, 100, "post_boundary_throw", throwingCallback);
+        submit(List.of(first, second), 3L, 100, "post_boundary_throw", throwingCallback);
 
         assertTrue(attempted.await(5, TimeUnit.SECONDS));
         assertEquals(0, failures.get());
@@ -518,29 +624,34 @@ class DefaultBatchDispatcherTest {
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
-        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture = new CompletableFuture<>();
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture =
+                new CompletableFuture<>();
         CountDownLatch invoked = new CountDownLatch(1);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
-                .thenAnswer(invocation -> {
-                    invoked.countDown();
-                    return rpcFuture;
-                });
+                .thenAnswer(
+                        invocation -> {
+                            invoked.countDown();
+                            return rpcFuture;
+                        });
 
         PreparedSubmission reservation = reservePermit();
         CapacityBoundary unavailable = unavailableBoundary();
         CountDownLatch capacityChanged = new CountDownLatch(1);
-        unavailable.availability().addListener(() -> {
-            if (unavailable.availability().isAvailable()) {
-                capacityChanged.countDown();
-            }
-        });
-        submit(reservation, List.of(item), 4L, 100,
-                "shutdown_drain", callback);
+        unavailable
+                .availability()
+                .addListener(
+                        () -> {
+                            if (unavailable.availability().isAvailable()) {
+                                capacityChanged.countDown();
+                            }
+                        });
+        submit(reservation, List.of(item), 4L, 100, "shutdown_drain", callback);
         assertTrue(invoked.await(5, TimeUnit.SECONDS));
         // New contract (in-flight bounding, 2475756fe5): the admission
         // permit is held until the EnqueueBatch RPC COMPLETES, so capacity
         // is NOT released merely by the RPC handoff.
-        assertFalse(capacityChanged.await(500, TimeUnit.MILLISECONDS),
+        assertFalse(
+                capacityChanged.await(500, TimeUnit.MILLISECONDS),
                 "capacity must stay held while the RPC is pending");
         assertFalse(rpcFuture.isDone());
 
@@ -560,21 +671,29 @@ class DefaultBatchDispatcherTest {
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(1L)
-                        .addErrors(EngineRpcService.EnqueueBatchErrorPB.newBuilder()
-                                .setRequestId(1L)
-                                .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                                        .setErrorCode(500)
-                                        .setErrorMessage("engine busy")
+                        .addErrors(
+                                EngineRpcService.EnqueueBatchErrorPB.newBuilder()
+                                        .setRequestId(1L)
+                                        .setErrorInfo(
+                                                EngineRpcService.ErrorDetailsPB.newBuilder()
+                                                        .setErrorCode(500)
+                                                        .setErrorMessage("engine busy")
+                                                        .build())
                                         .build())
-                                .build())
                         .build();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
-        submit(List.of(item), 1L, 100, "test", (exact, result) -> {
-            assertEquals(DeliveryResult.Status.PREFILL_REJECTED, result.status());
-            callback.accept(exact, result);
-        });
+        submit(
+                List.of(item),
+                1L,
+                100,
+                "test",
+                (exact, result) -> {
+                    assertEquals(DeliveryResult.Status.PREFILL_REJECTED, result.status());
+                    callback.accept(exact, result);
+                });
 
         assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.failureCount.get());
@@ -590,7 +709,8 @@ class DefaultBatchDispatcherTest {
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(1L)
                         .build(); // no success, no error
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         submit(List.of(item), 1L, 100, "test", callback);
@@ -608,15 +728,19 @@ class DefaultBatchDispatcherTest {
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(91L)
-                        .addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                                .setRequestId(11L).build())
-                        .addErrors(EngineRpcService.EnqueueBatchErrorPB.newBuilder()
-                                .setRequestId(12L)
-                                .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                                        .setErrorCode(500L)
-                                        .setErrorMessage("rejected")
+                        .addSuccesses(
+                                EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
+                                        .setRequestId(11L)
                                         .build())
-                                .build())
+                        .addErrors(
+                                EngineRpcService.EnqueueBatchErrorPB.newBuilder()
+                                        .setRequestId(12L)
+                                        .setErrorInfo(
+                                                EngineRpcService.ErrorDetailsPB.newBuilder()
+                                                        .setErrorCode(500L)
+                                                        .setErrorMessage("rejected")
+                                                        .build())
+                                        .build())
                         .build();
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response));
@@ -627,61 +751,59 @@ class DefaultBatchDispatcherTest {
         AtomicInteger uncertain = new AtomicInteger();
         BiConsumer<ScheduledRequest, DeliveryResult> throwingCallback =
                 (exactItem, completion) -> {
-                if (completion.status() == DeliveryResult.Status.DELIVERED) {
-                    successes.incrementAndGet();
-                    callbacksAttempted.countDown();
-                } else if (completion.status() == DeliveryResult.Status.PREFILL_REJECTED) {
-                    failures.incrementAndGet();
-                    callbacksAttempted.countDown();
-                    throw new IllegalStateException(
-                            "callback failed after committing failure");
-                } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
-                    uncertain.incrementAndGet();
-                }
-            };
+                    if (completion.status() == DeliveryResult.Status.DELIVERED) {
+                        successes.incrementAndGet();
+                        callbacksAttempted.countDown();
+                    } else if (completion.status() == DeliveryResult.Status.PREFILL_REJECTED) {
+                        failures.incrementAndGet();
+                        callbacksAttempted.countDown();
+                        throw new IllegalStateException("callback failed after committing failure");
+                    } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
+                        uncertain.incrementAndGet();
+                    }
+                };
 
-        submit(List.of(succeeded, rejected),
-                91L, 100, "callback_isolation", throwingCallback);
+        submit(List.of(succeeded, rejected), 91L, 100, "callback_isolation", throwingCallback);
 
         assertTrue(callbacksAttempted.await(5, TimeUnit.SECONDS));
         assertEquals(1, successes.get());
         assertEquals(1, failures.get());
-        assertEquals(0, uncertain.get(),
-                "a later callback exception must not reclassify any item");
+        assertEquals(0, uncertain.get(), "a later callback exception must not reclassify any item");
     }
 
     @Test
     void permitReservedBeforeShutdownCanStillBeSubmitted() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         CountDownLatch rpcInvoked = new CountDownLatch(1);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
-                .thenAnswer(invocation -> {
-                    rpcInvoked.countDown();
-                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
-                });
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                .thenAnswer(
+                        invocation -> {
+                            rpcInvoked.countDown();
+                            return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
+                        });
 
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
         PreparedSubmission permit = reservePermit();
 
         dispatcher.shutdown();
-        assertDoesNotThrow(() -> submit(
-                permit, List.of(item), 1L, 100,
-                "accepted_before_shutdown", callback));
+        assertDoesNotThrow(
+                () -> submit(permit, List.of(item), 1L, 100, "accepted_before_shutdown", callback));
 
-        assertTrue(rpcInvoked.await(5, TimeUnit.SECONDS),
+        assertTrue(
+                rpcInvoked.await(5, TimeUnit.SECONDS),
                 "the task accepted before shutdown must still invoke the RPC");
-        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS),
+        assertTrue(
+                callback.successLatch.await(5, TimeUnit.SECONDS),
                 "shutdown must drain the accepted task and its completion callback");
         assertEquals(0, callback.failureCount.get());
         CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
-        assertEquals(CapacityBoundary.Status.FAILED,
-                rejected.boundary().status());
+        assertEquals(CapacityBoundary.Status.FAILED, rejected.boundary().status());
     }
 
     @Test
-    void logicalCapacityRejectsAndUnusedReservationRestoresCapacity()
-            throws Exception {
+    void logicalCapacityRejectsAndUnusedReservationRestoresCapacity() throws Exception {
         dispatcher.shutdown();
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
         PreparedSubmission running = reservePermit();
@@ -689,11 +811,14 @@ class DefaultBatchDispatcherTest {
         CapacityBoundary unavailable = unavailableBoundary();
         assertFalse(unavailable.availability().isAvailable());
         CountDownLatch capacityChanged = new CountDownLatch(1);
-        unavailable.availability().addListener(() -> {
-            if (unavailable.availability().isAvailable()) {
-                capacityChanged.countDown();
-            }
-        });
+        unavailable
+                .availability()
+                .addListener(
+                        () -> {
+                            if (unavailable.availability().isAvailable()) {
+                                capacityChanged.countDown();
+                            }
+                        });
 
         queued.close();
 
@@ -713,11 +838,14 @@ class DefaultBatchDispatcherTest {
         CapacityBoundary unavailable = unavailableBoundary();
         assertFalse(unavailable.availability().isAvailable());
         Object capacityMonitor = new Object();
-        unavailable.availability().addListener(() -> {
-            synchronized (capacityMonitor) {
-                capacityMonitor.notifyAll();
-            }
-        });
+        unavailable
+                .availability()
+                .addListener(
+                        () -> {
+                            synchronized (capacityMonitor) {
+                                capacityMonitor.notifyAll();
+                            }
+                        });
 
         running.close();
 
@@ -739,15 +867,12 @@ class DefaultBatchDispatcherTest {
         PreparedSubmission queued = reservePermit();
         CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
-        assertEquals(CapacityBoundary.Status.UNAVAILABLE,
-                rejected.boundary().status());
+        assertEquals(CapacityBoundary.Status.UNAVAILABLE, rejected.boundary().status());
 
-        assertDoesNotThrow(() -> submit(
-                running, List.of(firstItem), 1L, 100,
-                "already_accepted", callback));
-        assertDoesNotThrow(() -> submit(
-                queued, List.of(secondItem), 2L, 100,
-                "already_accepted", callback));
+        assertDoesNotThrow(
+                () -> submit(running, List.of(firstItem), 1L, 100, "already_accepted", callback));
+        assertDoesNotThrow(
+                () -> submit(queued, List.of(secondItem), 2L, 100, "already_accepted", callback));
     }
 
     @Test
@@ -762,21 +887,39 @@ class DefaultBatchDispatcherTest {
     void invalidFinalBatchFailsBeforeRpcOnTheDeliveryThread() throws Exception {
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, createPrefillEndpoint());
         CompletableFuture<Void> checked = new CompletableFuture<>();
-        reservePermit().submit(sender -> {
-            try {
-                assertThrows(IllegalArgumentException.class,
-                        () -> sender.sendBatch(List.of(), 1L, 100, "empty", callback));
-                assertThrows(IllegalArgumentException.class,
-                        () -> sender.sendBatch(List.of(item), 0L, 100, "id", callback));
-                assertThrows(IllegalArgumentException.class,
-                        () -> sender.sendBatch(List.of(item), 1L, -1, "prediction", callback));
-                assertThrows(NullPointerException.class,
-                        () -> sender.sendBatch(List.of(item), 1L, 100, null, callback));
-                checked.complete(null);
-            } catch (Throwable failure) {
-                checked.completeExceptionally(failure);
-            }
-        });
+        reservePermit()
+                .submit(
+                        sender -> {
+                            try {
+                                assertThrows(
+                                        IllegalArgumentException.class,
+                                        () ->
+                                                sender.sendBatch(
+                                                        List.of(), 1L, 100, "empty", callback));
+                                assertThrows(
+                                        IllegalArgumentException.class,
+                                        () ->
+                                                sender.sendBatch(
+                                                        List.of(item), 0L, 100, "id", callback));
+                                assertThrows(
+                                        IllegalArgumentException.class,
+                                        () ->
+                                                sender.sendBatch(
+                                                        List.of(item),
+                                                        1L,
+                                                        -1,
+                                                        "prediction",
+                                                        callback));
+                                assertThrows(
+                                        NullPointerException.class,
+                                        () ->
+                                                sender.sendBatch(
+                                                        List.of(item), 1L, 100, null, callback));
+                                checked.complete(null);
+                            } catch (Throwable failure) {
+                                checked.completeExceptionally(failure);
+                            }
+                        });
         checked.get(5, TimeUnit.SECONDS);
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
     }
@@ -792,43 +935,56 @@ class DefaultBatchDispatcherTest {
         CountDownLatch rpcInvoked = new CountDownLatch(1);
         CountDownLatch allowHandoff = new CountDownLatch(1);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
-                .thenAnswer(invocation -> {
-                    rpcInvoked.countDown();
-                    assertTrue(allowHandoff.await(5, TimeUnit.SECONDS));
-                    return rpcFuture;
-                });
+                .thenAnswer(
+                        invocation -> {
+                            rpcInvoked.countDown();
+                            assertTrue(allowHandoff.await(5, TimeUnit.SECONDS));
+                            return rpcFuture;
+                        });
 
         PreparedSubmission reservation = reservePermit();
         CapacityBoundary unavailable = unavailableBoundary();
         CountDownLatch capacityChanged = new CountDownLatch(1);
-        unavailable.availability().addListener(() -> {
-            if (unavailable.availability().isAvailable()) {
-                capacityChanged.countDown();
-            }
-        });
+        unavailable
+                .availability()
+                .addListener(
+                        () -> {
+                            if (unavailable.availability().isAvailable()) {
+                                capacityChanged.countDown();
+                            }
+                        });
         List<ScheduledRequest> exactItems = List.of(item);
-        submit(reservation, exactItems, 1L, 100,
-                "dispatch_handoff_capacity", callback);
+        submit(reservation, exactItems, 1L, 100, "dispatch_handoff_capacity", callback);
         assertTrue(rpcInvoked.await(5, TimeUnit.SECONDS));
 
         reservation.close();
         reservation.close();
-        assertFalse(unavailable.availability().isAvailable(),
+        assertFalse(
+                unavailable.availability().isAvailable(),
                 "close after submit must not release a dispatch still handing off");
-        assertThrows(IllegalStateException.class,
-                () -> submit(reservation, exactItems, 1L, 100,
-                        "dispatch_handoff_capacity", callback));
+        assertThrows(
+                IllegalStateException.class,
+                () ->
+                        submit(
+                                reservation,
+                                exactItems,
+                                1L,
+                                100,
+                                "dispatch_handoff_capacity",
+                                callback));
 
         allowHandoff.countDown();
         // New contract (in-flight bounding, 2475756fe5): the permit is held
         // until the RPC completes, not until the handoff returns.
-        assertFalse(capacityChanged.await(500, TimeUnit.MILLISECONDS),
+        assertFalse(
+                capacityChanged.await(500, TimeUnit.MILLISECONDS),
                 "capacity must stay held while the RPC is pending");
         assertFalse(unavailable.availability().isAvailable());
         assertFalse(rpcFuture.isDone());
         assertEquals(0, callback.successCount.get());
         rpcFuture.complete(ackResponse(1L, List.of(1L)));
-        assertTrue(capacityChanged.await(5, TimeUnit.SECONDS),
+        assertTrue(
+                capacityChanged.await(5, TimeUnit.SECONDS),
                 "capacity must be released after the RPC completes");
         assertTrue(unavailable.availability().isAvailable());
         PreparedSubmission replacement = reservePermit();
@@ -848,11 +1004,13 @@ class DefaultBatchDispatcherTest {
         item.ctx().getRequest().setPriority(60);
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
-                .thenAnswer(inv -> {
-                    sent.add(inv.getArgument(2));
-                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
-                });
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                .thenAnswer(
+                        inv -> {
+                            sent.add(inv.getArgument(2));
+                            return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
+                        });
 
         submit(List.of(item), 1L, 100, "test", callback);
 
@@ -867,11 +1025,13 @@ class DefaultBatchDispatcherTest {
         // default Request priority is the no-priority sentinel (0)
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
-                .thenAnswer(inv -> {
-                    sent.add(inv.getArgument(2));
-                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
-                });
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                .thenAnswer(
+                        inv -> {
+                            sent.add(inv.getArgument(2));
+                            return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
+                        });
 
         submit(List.of(item), 1L, 100, "test", callback);
 
@@ -886,22 +1046,24 @@ class DefaultBatchDispatcherTest {
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
-                .thenAnswer(inv -> {
-                    sent.add(inv.getArgument(2));
-                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
-                });
+                .thenAnswer(
+                        inv -> {
+                            sent.add(inv.getArgument(2));
+                            return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
+                        });
 
         submit(List.of(item), 1L, 100, "role_compat", callback);
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
-        EngineRpcService.RoleAddrPB addr = sentInput(sent.getFirst())
-                .getGenerateConfig().getRoleAddrs(0);
+        EngineRpcService.RoleAddrPB addr =
+                sentInput(sent.getFirst()).getGenerateConfig().getRoleAddrs(0);
         assertEquals(EngineRpcService.RoleAddrPB.RoleType.PREFILL, addr.getRole());
         assertEquals("PREFILL", addr.getRoleStr());
         assertEquals(RoleType.PREFILL, RoleTypeProtoConverter.fromRoleAddr(addr));
     }
 
-    private static EngineRpcService.GenerateInputPB sentInput(EngineRpcService.EnqueueBatchRequestPB request) {
+    private static EngineRpcService.GenerateInputPB sentInput(
+            EngineRpcService.EnqueueBatchRequestPB request) {
         return request.getDpSlotsList().getFirst().getRequestsList().getFirst().getInput();
     }
 
@@ -910,26 +1072,24 @@ class DefaultBatchDispatcherTest {
     private PreparedSubmission reservePermit() {
         CapacityBoundary.Attempt<?> accepted = dispatcher.tryPrepareSubmission();
         assertTrue(accepted.accepted());
-        return assertInstanceOf(
-                PreparedSubmission.class, accepted.value());
+        return assertInstanceOf(PreparedSubmission.class, accepted.value());
     }
 
     private CapacityBoundary unavailableBoundary() {
         CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
         assertFalse(rejected.accepted());
-        assertEquals(CapacityBoundary.Status.UNAVAILABLE,
-                rejected.boundary().status());
+        assertEquals(CapacityBoundary.Status.UNAVAILABLE, rejected.boundary().status());
         return rejected.boundary();
     }
 
-    private void submit(List<ScheduledRequest> items,
-                        long batchId,
-                        long predictedMs,
-                        String reason,
-                        BiConsumer<ScheduledRequest,
-                                DeliveryResult> observer) {
-        reservePermit().submit(sender -> sender.sendBatch(
-                items, batchId, predictedMs, reason, observer));
+    private void submit(
+            List<ScheduledRequest> items,
+            long batchId,
+            long predictedMs,
+            String reason,
+            BiConsumer<ScheduledRequest, DeliveryResult> observer) {
+        reservePermit()
+                .submit(sender -> sender.sendBatch(items, batchId, predictedMs, reason, observer));
     }
 
     private static void submit(
@@ -939,13 +1099,13 @@ class DefaultBatchDispatcherTest {
             long predictedMs,
             String reason,
             BiConsumer<ScheduledRequest, DeliveryResult> observer) {
-        submission.submit(sender -> sender.sendBatch(
-                items, batchId, predictedMs, reason, observer));
+        submission.submit(
+                sender -> sender.sendBatch(items, batchId, predictedMs, reason, observer));
     }
 
     private static void awaitAvailable(
-            CapacityBoundary.Availability availability,
-            Object capacityMonitor) throws InterruptedException {
+            CapacityBoundary.Availability availability, Object capacityMonitor)
+            throws InterruptedException {
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         synchronized (capacityMonitor) {
             while (!availability.isAvailable()) {
@@ -966,7 +1126,8 @@ class DefaultBatchDispatcherTest {
         return endpoint;
     }
 
-    private ScheduledRequest createScheduledRequest(long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
+    private ScheduledRequest createScheduledRequest(
+            long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -975,10 +1136,11 @@ class DefaultBatchDispatcherTest {
         ctx.setRequest(request);
 
         // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
-                .build();
+        EngineRpcService.GenerateInputPB input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
+                        .build();
         ctx.setGenerateInputPb(input.toByteString());
 
         ServerStatus prefill = new ServerStatus();
@@ -991,26 +1153,32 @@ class DefaultBatchDispatcherTest {
         debugInfo.setHitCacheLen(hitCacheLen);
         prefill.setDebugInfo(debugInfo);
 
-        return new ScheduledRequest(ctx, new CompletableFuture<>(), null, prefill, null,
-                prefillEp, null, null, System.currentTimeMillis());
+        return new ScheduledRequest(
+                ctx,
+                new CompletableFuture<>(),
+                null,
+                prefill,
+                null,
+                prefillEp,
+                null,
+                null,
+                System.currentTimeMillis());
     }
 
-    private EngineRpcService.EnqueueBatchResponsePB ackResponse(long batchId, List<Long> successIds) {
+    private EngineRpcService.EnqueueBatchResponsePB ackResponse(
+            long batchId, List<Long> successIds) {
         EngineRpcService.EnqueueBatchResponsePB.Builder builder =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(batchId);
         for (long id : successIds) {
-            builder.addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                    .setRequestId(id)
-                    .build());
+            builder.addSuccesses(
+                    EngineRpcService.EnqueueBatchSuccessPB.newBuilder().setRequestId(id).build());
         }
         return builder.build();
     }
 
     // ---- Test callback ----
 
-    private static class TestCallback
-            implements BiConsumer<ScheduledRequest,
-                    DeliveryResult> {
+    private static class TestCallback implements BiConsumer<ScheduledRequest, DeliveryResult> {
         final AtomicInteger successCount = new AtomicInteger(0);
         final AtomicInteger failureCount = new AtomicInteger(0);
         final AtomicInteger uncertainCount = new AtomicInteger(0);
@@ -1020,9 +1188,7 @@ class DefaultBatchDispatcherTest {
         volatile Throwable lastError;
 
         @Override
-        public void accept(
-                ScheduledRequest exactItem,
-                DeliveryResult completion) {
+        public void accept(ScheduledRequest exactItem, DeliveryResult completion) {
             if (completion.status() == DeliveryResult.Status.DELIVERED) {
                 successCount.incrementAndGet();
                 successLatch.countDown();
@@ -1043,29 +1209,45 @@ class DefaultBatchDispatcherTest {
     void completionBeforeRegistrationReturnsReleasesCountAndBytes() throws Exception {
         dispatcher.shutdown();
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
-        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> immediate = new CompletableFuture<>() {
-            @Override
-            public <U> CompletableFuture<U> handleAsync(
-                    java.util.function.BiFunction<? super EngineRpcService.EnqueueBatchResponsePB,
-                            Throwable, ? extends U> fn,
-                    java.util.concurrent.Executor executor) {
-                // Deterministically exercise the legal interleaving in which the
-                // completion thread finishes before registration returns.
-                return CompletableFuture.completedFuture(fn.apply(ackResponse(1L, List.of(1L)), null));
-            }
-        };
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> immediate =
+                new CompletableFuture<>() {
+                    @Override
+                    public <U> CompletableFuture<U> handleAsync(
+                            java.util.function.BiFunction<
+                                            ? super EngineRpcService.EnqueueBatchResponsePB,
+                                            Throwable,
+                                            ? extends U>
+                                    fn,
+                            java.util.concurrent.Executor executor) {
+                        // Deterministically exercise the legal interleaving in which the
+                        // completion thread finishes before registration returns.
+                        return CompletableFuture.completedFuture(
+                                fn.apply(ackResponse(1L, List.of(1L)), null));
+                    }
+                };
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any())).thenReturn(immediate);
-        submit(List.of(createScheduledRequest(1L, 500, 200, createPrefillEndpoint())),
-                1L, 100, "immediate_completion", callback);
+        submit(
+                List.of(createScheduledRequest(1L, 500, 200, createPrefillEndpoint())),
+                1L,
+                100,
+                "immediate_completion",
+                callback);
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
         CapacityBoundary.Attempt<?> next = dispatcher.tryPrepareSubmission();
         assertTrue(next.accepted(), "an early callback must not strand AWAITING_RPC ownership");
         assertInstanceOf(PreparedSubmission.class, next.value()).close();
-        assertEquals(0L, ((java.util.concurrent.atomic.AtomicLong)
-                org.springframework.test.util.ReflectionTestUtils.getField(
-                        dispatcher, "inflightPayloadBytes")).get());
-        assertEquals(0, ((AtomicInteger) org.springframework.test.util.ReflectionTestUtils.getField(
-                dispatcher, "pendingCompletions")).get());
+        assertEquals(
+                0L,
+                ((java.util.concurrent.atomic.AtomicLong)
+                                org.springframework.test.util.ReflectionTestUtils.getField(
+                                        dispatcher, "inflightPayloadBytes"))
+                        .get());
+        assertEquals(
+                0,
+                ((AtomicInteger)
+                                org.springframework.test.util.ReflectionTestUtils.getField(
+                                        dispatcher, "pendingCompletions"))
+                        .get());
         dispatcher.shutdown();
         assertTrue(dispatcherIsTerminatedWithin(5));
     }
@@ -1074,27 +1256,43 @@ class DefaultBatchDispatcherTest {
     void completionRegistrationFailureReturnsOwnedPermitAndBytes() throws Exception {
         dispatcher.shutdown();
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
-        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> broken = new CompletableFuture<>() {
-            @Override
-            public <U> CompletableFuture<U> handleAsync(
-                    java.util.function.BiFunction<? super EngineRpcService.EnqueueBatchResponsePB,
-                            Throwable, ? extends U> fn,
-                    java.util.concurrent.Executor executor) {
-                throw new java.util.concurrent.RejectedExecutionException("registration failed");
-            }
-        };
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> broken =
+                new CompletableFuture<>() {
+                    @Override
+                    public <U> CompletableFuture<U> handleAsync(
+                            java.util.function.BiFunction<
+                                            ? super EngineRpcService.EnqueueBatchResponsePB,
+                                            Throwable,
+                                            ? extends U>
+                                    fn,
+                            java.util.concurrent.Executor executor) {
+                        throw new java.util.concurrent.RejectedExecutionException(
+                                "registration failed");
+                    }
+                };
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any())).thenReturn(broken);
-        submit(List.of(createScheduledRequest(1L, 500, 200, createPrefillEndpoint())),
-                1L, 100, "registration_failure", callback);
+        submit(
+                List.of(createScheduledRequest(1L, 500, 200, createPrefillEndpoint())),
+                1L,
+                100,
+                "registration_failure",
+                callback);
         assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS));
         CapacityBoundary.Attempt<?> next = dispatcher.tryPrepareSubmission();
         assertTrue(next.accepted());
         assertInstanceOf(PreparedSubmission.class, next.value()).close();
-        assertEquals(0L, ((java.util.concurrent.atomic.AtomicLong)
-                org.springframework.test.util.ReflectionTestUtils.getField(
-                        dispatcher, "inflightPayloadBytes")).get());
-        assertEquals(0, ((AtomicInteger) org.springframework.test.util.ReflectionTestUtils.getField(
-                dispatcher, "pendingCompletions")).get());
+        assertEquals(
+                0L,
+                ((java.util.concurrent.atomic.AtomicLong)
+                                org.springframework.test.util.ReflectionTestUtils.getField(
+                                        dispatcher, "inflightPayloadBytes"))
+                        .get());
+        assertEquals(
+                0,
+                ((AtomicInteger)
+                                org.springframework.test.util.ReflectionTestUtils.getField(
+                                        dispatcher, "pendingCompletions"))
+                        .get());
         dispatcher.shutdown();
         assertTrue(dispatcherIsTerminatedWithin(5));
     }
@@ -1109,8 +1307,8 @@ class DefaultBatchDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> pending =
                 new CompletableFuture<>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
-                any(EngineRpcService.EnqueueBatchRequestPB.class)))
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenAnswer(invocation -> pending);
 
         dispatcher.shutdown();
@@ -1118,22 +1316,20 @@ class DefaultBatchDispatcherTest {
         // Exhaust the single admission permit with one in-flight batch.
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
         PreparedSubmission permit = reservePermit();
-        assertDoesNotThrow(() -> submit(
-                permit, List.of(item), 1L, 100,
-                "inflight_hold", callback));
+        assertDoesNotThrow(() -> submit(permit, List.of(item), 1L, 100, "inflight_hold", callback));
 
         // The RPC is invoked but not completed: no new admission is possible.
         CapacityBoundary.Attempt<?> rejected = dispatcher.tryPrepareSubmission();
-        assertFalse(rejected.accepted(),
-                "permit must stay held while the EnqueueBatch RPC is pending");
+        assertFalse(
+                rejected.accepted(), "permit must stay held while the EnqueueBatch RPC is pending");
 
         // Completing the RPC (success) releases the permit.
         pending.complete(ackResponse(1L, List.of(1L)));
-        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS),
+        assertTrue(
+                callback.successLatch.await(5, TimeUnit.SECONDS),
                 "the completed RPC must deliver its callback");
         CapacityBoundary.Attempt<?> readmitted = dispatcher.tryPrepareSubmission();
-        assertTrue(readmitted.accepted(),
-                "permit must be released after the RPC completes");
+        assertTrue(readmitted.accepted(), "permit must be released after the RPC completes");
     }
 
     /**
@@ -1162,7 +1358,8 @@ class DefaultBatchDispatcherTest {
                     }
                 };
         submit(List.of(item), 1L, 100, "capacity_one_presend", failureCallback);
-        assertTrue(failed.await(5, TimeUnit.SECONDS),
+        assertTrue(
+                failed.await(5, TimeUnit.SECONDS),
                 "pre-send failure must reach the request callback");
         // doReturn (not when(...)): when() invokes the method during
         // stubbing, which would trigger the throwing stub on this thread.
@@ -1171,7 +1368,8 @@ class DefaultBatchDispatcherTest {
         // The permit leaked by the failed dispatch must be back: the next
         // admission must succeed (capacity is 1 and only one batch ran).
         CapacityBoundary.Attempt<?> next = dispatcher.tryPrepareSubmission();
-        assertTrue(next.accepted(),
+        assertTrue(
+                next.accepted(),
                 "permit must return after a pre-send failure with capacity=1; "
                         + "a rejection means the permit leaked");
         assertInstanceOf(PreparedSubmission.class, next.value()).close();
@@ -1179,7 +1377,8 @@ class DefaultBatchDispatcherTest {
         // shutdown() must be able to complete: permits all returned, no
         // pending completions.
         dispatcher.shutdown();
-        assertTrue(dispatcherIsTerminatedWithin(5),
+        assertTrue(
+                dispatcherIsTerminatedWithin(5),
                 "dispatch executor must terminate after shutdown when no "
                         + "completion is outstanding");
     }
@@ -1198,13 +1397,14 @@ class DefaultBatchDispatcherTest {
         PreparedSubmission permit = reservePermit();
         CountDownLatch taskDone = new CountDownLatch(1);
         // Delivery that never calls the sender — returns normally.
-        permit.submit(sender -> {
-            try {
-                TimeUnit.MILLISECONDS.sleep(50);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        });
+        permit.submit(
+                sender -> {
+                    try {
+                        TimeUnit.MILLISECONDS.sleep(50);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
         // Submit is async on the dispatch executor; wait for the task to run
         // by watching admission come back (the permit release IS the signal).
         // Release the polled reservation immediately so the poll itself
@@ -1220,11 +1420,11 @@ class DefaultBatchDispatcherTest {
             }
             TimeUnit.MILLISECONDS.sleep(20);
         }
-        assertTrue(available,
-                "sender-less delivery must return its admission permit");
+        assertTrue(available, "sender-less delivery must return its admission permit");
         // Nothing outstanding: shutdown must terminate the executors.
         dispatcher.shutdown();
-        assertTrue(dispatcherIsTerminatedWithin(5),
+        assertTrue(
+                dispatcherIsTerminatedWithin(5),
                 "shutdown must complete after a sender-less delivery");
         taskDone.countDown();
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
@@ -1270,7 +1470,8 @@ class DefaultBatchDispatcherTest {
 
         // Exceptional completion releases it and marks the batch UNCERTAIN.
         pending.completeExceptionally(new RuntimeException("connection reset"));
-        assertTrue(uncertain.await(5, TimeUnit.SECONDS),
+        assertTrue(
+                uncertain.await(5, TimeUnit.SECONDS),
                 "exceptional RPC completion must deliver UNCERTAIN");
         long releaseDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         boolean released = false;
@@ -1298,8 +1499,7 @@ class DefaultBatchDispatcherTest {
         dispatcher.shutdown();
         // Budget smaller than the single item's wire size: any dispatch
         // must be rejected pre-serialization.
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null,
-                1, 0, 64L);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0, 64L);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
         CountDownLatch failed = new CountDownLatch(1);
@@ -1310,7 +1510,8 @@ class DefaultBatchDispatcherTest {
                     }
                 };
         submit(List.of(item), 1L, 100, "byte_budget", failureCallback);
-        assertTrue(failed.await(5, TimeUnit.SECONDS),
+        assertTrue(
+                failed.await(5, TimeUnit.SECONDS),
                 "oversize-batch dispatch must fail NOT_SENT without serialization");
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
 
@@ -1319,12 +1520,12 @@ class DefaultBatchDispatcherTest {
         // assert the COUNT permit returned — the reservation must be
         // obtainable again).
         CapacityBoundary.Attempt<?> next = dispatcher.tryPrepareSubmission();
-        assertTrue(next.accepted(),
-                "count permit must return after a byte-budget rejection");
+        assertTrue(next.accepted(), "count permit must return after a byte-budget rejection");
         assertInstanceOf(PreparedSubmission.class, next.value()).close();
 
         dispatcher.shutdown();
-        assertTrue(dispatcherIsTerminatedWithin(5),
+        assertTrue(
+                dispatcherIsTerminatedWithin(5),
                 "shutdown must complete after a byte-budget rejection");
     }
 
@@ -1337,9 +1538,10 @@ class DefaultBatchDispatcherTest {
      * isShutdown state plus empty queue plus no active dispatch tasks.
      */
     private boolean dispatcherIsTerminatedWithin(int seconds) throws InterruptedException {
-        ThreadPoolExecutor dispatchExecutor = (ThreadPoolExecutor)
-                org.springframework.test.util.ReflectionTestUtils.getField(
-                        dispatcher, "dispatchExecutor");
+        ThreadPoolExecutor dispatchExecutor =
+                (ThreadPoolExecutor)
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                dispatcher, "dispatchExecutor");
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
         while (System.nanoTime() < deadline) {
             if (dispatchExecutor.isShutdown()
@@ -1353,6 +1555,4 @@ class DefaultBatchDispatcherTest {
                 && dispatchExecutor.getQueue().isEmpty()
                 && dispatchExecutor.getActiveCount() == 0;
     }
-
-
 }

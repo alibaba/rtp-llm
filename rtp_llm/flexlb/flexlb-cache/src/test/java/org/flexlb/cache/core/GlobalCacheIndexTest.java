@@ -45,8 +45,11 @@ class GlobalCacheIndexTest {
         globalCacheIndex.clear();
         assertEquals(0L, globalCacheIndex.totalBlocks());
         assertEquals(0L, globalCacheIndex.totalMappings());
-        assertTrue(globalCacheIndex.batchCalculatePrefixMatchLength(
-                List.of("engine1", "engine2"), List.of(1L, 2L)).isEmpty());
+        assertTrue(
+                globalCacheIndex
+                        .batchCalculatePrefixMatchLength(
+                                List.of("engine1", "engine2"), List.of(1L, 2L))
+                        .isEmpty());
 
         globalCacheIndex.addCacheBlock(3L, "engine1");
         assertEquals(1L, globalCacheIndex.totalBlocks());
@@ -56,12 +59,14 @@ class GlobalCacheIndexTest {
     @Test
     void testEmptyInput() {
         // Test empty input cases
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(
-                Collections.emptyList(), Arrays.asList(1L, 2L, 3L));
+        Map<String, Integer> result =
+                globalCacheIndex.batchCalculatePrefixMatchLength(
+                        Collections.emptyList(), Arrays.asList(1L, 2L, 3L));
         assertTrue(result.isEmpty(), "Empty engines should return empty result");
 
-        result = globalCacheIndex.batchCalculatePrefixMatchLength(
-                Arrays.asList("engine1", "engine2"), Collections.emptyList());
+        result =
+                globalCacheIndex.batchCalculatePrefixMatchLength(
+                        Arrays.asList("engine1", "engine2"), Collections.emptyList());
         assertTrue(result.isEmpty(), "Empty blocks should return empty result");
 
         result = globalCacheIndex.batchCalculatePrefixMatchLength(null, null);
@@ -72,7 +77,7 @@ class GlobalCacheIndexTest {
     void testBasicPrefixMatching() {
         // Set up test data
         // Block 1L: engine1, engine2, engine3
-        // Block 2L: engine1, engine3  
+        // Block 2L: engine1, engine3
         // Block 3L: engine1
         globalCacheIndex.addCacheBlock(1L, "engine1");
         globalCacheIndex.addCacheBlock(1L, "engine2");
@@ -84,7 +89,8 @@ class GlobalCacheIndexTest {
         List<String> engines = Arrays.asList("engine1", "engine2", "engine3");
         List<Long> blocks = Arrays.asList(1L, 2L, 3L);
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result =
+                globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
         // Verify results
         assertEquals(3, result.get("engine1").intValue(), "Engine1 should match all 3 blocks");
@@ -101,9 +107,11 @@ class GlobalCacheIndexTest {
         List<String> engines = Arrays.asList("engine1", "engine2");
         List<Long> blocks = Arrays.asList(1L, 2L);
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result =
+                globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
-        assertTrue(result.isEmpty(),
+        assertTrue(
+                result.isEmpty(),
                 "engines with zero prefix match are omitted from the sparse result");
     }
 
@@ -120,7 +128,8 @@ class GlobalCacheIndexTest {
             }
         }
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result =
+                globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
         for (String engine : engines) {
             assertEquals(4, result.get(engine).intValue(), "All engines should match all 4 blocks");
@@ -139,10 +148,17 @@ class GlobalCacheIndexTest {
         List<String> engines = Arrays.asList("engine1", "engine2");
         List<Long> blocks = Arrays.asList(1L, 2L, 3L, 4L);
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result =
+                globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
-        assertEquals(2, result.get("engine1").intValue(), "Engine1 should match 2 blocks before termination");
-        assertEquals(1, result.get("engine2").intValue(), "Engine2 should match 1 block before termination");
+        assertEquals(
+                2,
+                result.get("engine1").intValue(),
+                "Engine1 should match 2 blocks before termination");
+        assertEquals(
+                1,
+                result.get("engine2").intValue(),
+                "Engine2 should match 1 block before termination");
     }
 
     @Test
@@ -165,7 +181,8 @@ class GlobalCacheIndexTest {
         List<String> engines = Arrays.asList("engine1", "engine2", "engine3", "engine4");
         List<Long> blocks = Arrays.asList(1L, 2L, 3L, 4L);
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result =
+                globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
         assertEquals(4, result.get("engine1").intValue(), "Engine1 should match all blocks");
         assertEquals(3, result.get("engine2").intValue(), "Engine2 should match first 3 blocks");
@@ -178,10 +195,11 @@ class GlobalCacheIndexTest {
         // Test single block single engine case
         globalCacheIndex.addCacheBlock(1L, "engine1");
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(
-                List.of("engine1"), List.of(1L));
+        Map<String, Integer> result =
+                globalCacheIndex.batchCalculatePrefixMatchLength(List.of("engine1"), List.of(1L));
 
-        assertEquals(1, result.get("engine1").intValue(), "Single engine should match single block");
+        assertEquals(
+                1, result.get("engine1").intValue(), "Single engine should match single block");
     }
 
     @Test
@@ -195,8 +213,7 @@ class GlobalCacheIndexTest {
                         List.of("engine1", "engine2"), List.of(1L)));
         assertEquals(
                 Map.of("engine1", 1),
-                globalCacheIndex.batchCalculatePrefixMatchLength(
-                        List.of("engine1"), List.of(1L)));
+                globalCacheIndex.batchCalculatePrefixMatchLength(List.of("engine1"), List.of(1L)));
     }
 
     @Test
@@ -207,11 +224,12 @@ class GlobalCacheIndexTest {
         List<String> engines = Arrays.asList("engine1", "engine2");
         List<Long> blocks = Arrays.asList(1L, 999L); // 999L does not exist
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result =
+                globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
         assertEquals(1, result.get("engine1").intValue(), "Engine1 should match first block only");
-        assertTrue(!result.containsKey("engine2"),
-                "zero-prefix engines are represented by absence");
+        assertTrue(
+                !result.containsKey("engine2"), "zero-prefix engines are represented by absence");
     }
 
     @Test
@@ -228,10 +246,14 @@ class GlobalCacheIndexTest {
         List<String> engines = Arrays.asList("engine1", "engine2");
         List<Long> blocks = Arrays.asList(1L, 2L);
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result =
+                globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
         assertEquals(2, result.get("engine1").intValue(), "Engine1 should still match both blocks");
-        assertEquals(1, result.get("engine2").intValue(), "Engine2 should match only first block after removal");
+        assertEquals(
+                1,
+                result.get("engine2").intValue(),
+                "Engine2 should match only first block after removal");
     }
 
     @Test
@@ -248,7 +270,8 @@ class GlobalCacheIndexTest {
             }
         }
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result =
+                globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
 
         assertEquals(10, result.get("engine1").intValue(), "Engine1 should match 10 blocks");
         assertEquals(9, result.get("engine2").intValue(), "Engine2 should match 9 blocks");

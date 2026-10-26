@@ -39,11 +39,14 @@ public class ServerScheduleLatencyRecorder {
         Window current = window;
         current.completions.record(responseCompletedNanos);
 
-        long grpcEntryNanos = context.getGrpcEntryNanos() > 0
-                ? context.getGrpcEntryNanos() : context.getServiceStartNanos();
+        long grpcEntryNanos =
+                context.getGrpcEntryNanos() > 0
+                        ? context.getGrpcEntryNanos()
+                        : context.getServiceStartNanos();
         current.serverTotal.recordBetween(grpcEntryNanos, responseCompletedNanos);
         current.grpcQueue.recordBetween(grpcEntryNanos, context.getServiceStartNanos());
-        current.routeSubmit.recordBetween(context.getServiceStartNanos(), context.getRouteSubmittedNanos());
+        current.routeSubmit.recordBetween(
+                context.getServiceStartNanos(), context.getRouteSubmittedNanos());
         long routeSubmittedNanos = context.getRouteSubmittedNanos();
         long batchDispatchedNanos = context.getBatchDispatchedNanos();
         current.batchWait.recordBetween(routeSubmittedNanos, batchDispatchedNanos);
@@ -52,7 +55,8 @@ public class ServerScheduleLatencyRecorder {
                     .computeIfAbsent(resolvePriority(context), priority -> new LatencyHistogram())
                     .recordBetween(routeSubmittedNanos, batchDispatchedNanos);
         }
-        current.dispatchAck.recordBetween(context.getBatchDispatchedNanos(), context.getAckAtNanos());
+        current.dispatchAck.recordBetween(
+                context.getBatchDispatchedNanos(), context.getAckAtNanos());
         current.ackResponse.recordBetween(context.getAckAtNanos(), responseCompletedNanos);
     }
 
@@ -68,8 +72,8 @@ public class ServerScheduleLatencyRecorder {
         result.put("route_submit_ms", current.routeSubmit.snapshot());
         result.put("batch_wait_ms", current.batchWait.snapshot());
         Map<Integer, Map<String, Object>> batchWaitByPriority = new TreeMap<>();
-        current.batchWaitByPriority.forEach((priority, histogram) ->
-                batchWaitByPriority.put(priority, histogram.snapshot()));
+        current.batchWaitByPriority.forEach(
+                (priority, histogram) -> batchWaitByPriority.put(priority, histogram.snapshot()));
         result.put("batch_wait_ms_by_priority", batchWaitByPriority);
         result.put("dispatch_ack_ms", current.dispatchAck.snapshot());
         result.put("ack_response_ms", current.ackResponse.snapshot());
@@ -87,12 +91,17 @@ public class ServerScheduleLatencyRecorder {
         if (total.count() == 0) {
             return;
         }
-        log.info("flexlb_server_schedule_latency count={} arrival_qps={} completion_qps={} "
+        log.info(
+                "flexlb_server_schedule_latency count={} arrival_qps={} completion_qps={} "
                         + "server_p50_ms={} server_p95_ms={} server_p99_ms={} "
                         + "grpc_queue_p95_ms={} route_submit_p95_ms={} batch_wait_p95_ms={} "
                         + "dispatch_ack_p95_ms={} ack_response_p95_ms={}{}",
-                total.count(), current.arrivals.qps(), current.completions.qps(),
-                total.p50(), total.p95(), total.p99(),
+                total.count(),
+                current.arrivals.qps(),
+                current.completions.qps(),
+                total.p50(),
+                total.p95(),
+                total.p99(),
                 current.grpcQueue.snapshotValue().p95(),
                 current.routeSubmit.snapshotValue().p95(),
                 current.batchWait.snapshotValue().p95(),
@@ -112,9 +121,13 @@ public class ServerScheduleLatencyRecorder {
             return "";
         }
         StringBuilder suffix = new StringBuilder();
-        new TreeMap<>(current.batchWaitByPriority).forEach((priority, histogram) ->
-                suffix.append(" batch_wait_p95_prio").append(priority)
-                        .append("_ms=").append(histogram.snapshotValue().p95()));
+        new TreeMap<>(current.batchWaitByPriority)
+                .forEach(
+                        (priority, histogram) ->
+                                suffix.append(" batch_wait_p95_prio")
+                                        .append(priority)
+                                        .append("_ms=")
+                                        .append(histogram.snapshotValue().p95()));
         return suffix.toString();
     }
 
@@ -138,7 +151,8 @@ public class ServerScheduleLatencyRecorder {
         private final LatencyHistogram grpcQueue = new LatencyHistogram();
         private final LatencyHistogram routeSubmit = new LatencyHistogram();
         private final LatencyHistogram batchWait = new LatencyHistogram();
-        private final ConcurrentHashMap<Integer, LatencyHistogram> batchWaitByPriority = new ConcurrentHashMap<>();
+        private final ConcurrentHashMap<Integer, LatencyHistogram> batchWaitByPriority =
+                new ConcurrentHashMap<>();
         private final LatencyHistogram dispatchAck = new LatencyHistogram();
         private final LatencyHistogram ackResponse = new LatencyHistogram();
     }
@@ -228,10 +242,9 @@ public class ServerScheduleLatencyRecorder {
         }
     }
 
-    private record LatencySnapshot(long count, long p50, long p90, long p95,
-                                   long p99, long max, double mean) {
-        private static final LatencySnapshot EMPTY =
-                new LatencySnapshot(0, 0, 0, 0, 0, 0, 0.0);
+    private record LatencySnapshot(
+            long count, long p50, long p90, long p95, long p99, long max, double mean) {
+        private static final LatencySnapshot EMPTY = new LatencySnapshot(0, 0, 0, 0, 0, 0, 0.0);
     }
 
     private static double round3(double value) {

@@ -25,9 +25,7 @@ public enum DecodeTaskPhase {
 
     /** Whether eviction must go through the original Prefill Cancel owner. */
     public boolean requiresEngineCancel() {
-        return this == ENGINE_MAY_HAVE_SEEN
-                || this == ACCEPTED_NOT_RUNNING
-                || this == RUNNING;
+        return this == ENGINE_MAY_HAVE_SEEN || this == ACCEPTED_NOT_RUNNING || this == RUNNING;
     }
 
     /** Whether the phase is represented by Engine WorkerStatus. */

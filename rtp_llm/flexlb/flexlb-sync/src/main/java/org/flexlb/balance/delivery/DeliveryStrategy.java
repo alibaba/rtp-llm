@@ -1,7 +1,7 @@
 package org.flexlb.balance.delivery;
 
-import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.ScheduledRequest;
@@ -27,8 +27,7 @@ public interface DeliveryStrategy {
      * fractional milliseconds so GroupPlanner can compare exact boundaries.
      */
     double projectGroupDurationMs(
-            List<ScheduledRequest> items,
-            PrefillTimePredictor.Evaluator evaluator);
+            List<ScheduledRequest> items, PrefillTimePredictor.Evaluator evaluator);
 
     /** Fresh callback for GroupPlanner's strictly growing prefixes in one select call. */
     default GroupPlanner.PrefixPrediction<ScheduledRequest> newGroupPredictor(
@@ -53,8 +52,7 @@ public interface DeliveryStrategy {
         WorkSnapshot commitUnderLock();
 
         /** Transfer committed ownership to the configured delivery mode. */
-        void handoff(String decisionReason, int remainingQueueDepth,
-                     WorkSnapshot precedingWork);
+        void handoff(String decisionReason, int remainingQueueDepth, WorkSnapshot precedingWork);
 
         /** Resolve any committed ownership that handoff did not transfer. */
         void abort(Throwable cause);

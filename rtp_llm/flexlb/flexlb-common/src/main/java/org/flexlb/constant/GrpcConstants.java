@@ -19,6 +19,5 @@ public final class GrpcConstants {
         }
     }
 
-    private GrpcConstants() {
-    }
+    private GrpcConstants() {}
 }

@@ -50,17 +50,17 @@ public class EvictionManager {
     private volatile boolean shutdown;
 
     @Autowired
-    public EvictionManager(RequestSchedulerReporter reporter,
-                           EngineCancelChannel cancelChannel,
-                           DecodePreemptionCoordinator preemptionCoordinator,
-                           RequestRegistry requests,
-                           BatchSchedulerReporter deliveryReporter) {
+    public EvictionManager(
+            RequestSchedulerReporter reporter,
+            EngineCancelChannel cancelChannel,
+            DecodePreemptionCoordinator preemptionCoordinator,
+            RequestRegistry requests,
+            BatchSchedulerReporter deliveryReporter) {
         this.reporter = reporter;
         this.cancelChannel = cancelChannel;
         this.preemptionCoordinator = preemptionCoordinator;
         this.requests = Objects.requireNonNull(requests, "requests");
-        this.deliveryReporter = Objects.requireNonNull(
-                deliveryReporter, "deliveryReporter");
+        this.deliveryReporter = Objects.requireNonNull(deliveryReporter, "deliveryReporter");
     }
 
     @PreDestroy
@@ -81,33 +81,31 @@ public class EvictionManager {
             WorkerEndpoint blockedEndpoint) {
         Objects.requireNonNull(admission, "admission");
         DecodeBinding request = admission.decodeBinding();
-        if (shutdown || future.isDone()
+        if (shutdown
+                || future.isDone()
                 || ctx.requestExpired(System.currentTimeMillis())
                 || !PriorityNormalizer.hasPriority(request.priority())
                 || request.mode() != DecodeMode.PREEMPT_AT_PLACEMENT) {
             return false;
         }
 
-        PreemptionConfig preemption = ctx.getConfig().queueScheduler().getOrdering()
-                .preemptionPolicy().orElse(null);
+        PreemptionConfig preemption =
+                ctx.getConfig().queueScheduler().getOrdering().preemptionPolicy().orElse(null);
         if (preemption == null) {
             return false;
         }
         if (!(blockedEndpoint instanceof DecodeEndpoint decodeEndpoint)
                 || (!preemption.allows(VictimStage.DECODE_RESERVED)
-                && !preemption.allows(VictimStage.DECODE_ENGINE_OWNED))) {
+                        && !preemption.allows(VictimStage.DECODE_ENGINE_OWNED))) {
             return false;
         }
-        PlannedDecodeEviction planned =
-                planDecodeEviction(
-                        request, preemption, decodeEndpoint);
+        PlannedDecodeEviction planned = planDecodeEviction(request, preemption, decodeEndpoint);
         if (planned == null) {
             return false;
         }
 
         try {
-            return commitDecodeEviction(
-                    ctx, future, planned, preemption, admission);
+            return commitDecodeEviction(ctx, future, planned, preemption, admission);
         } catch (RuntimeException | Error failure) {
             admission.close();
             throw failure;
@@ -115,31 +113,33 @@ public class EvictionManager {
     }
 
     /** Eviction metrics are observers; they never own a committed transaction. */
-    private void reportEvictionCommit(int priority,
-                                      long requestId,
-                                      String evictionCase,
-                                      String outcome) {
+    private void reportEvictionCommit(
+            int priority, long requestId, String evictionCase, String outcome) {
         try {
-            reporter.reportEvictionCommit(
-                    priority, evictionCase, outcome);
+            reporter.reportEvictionCommit(priority, evictionCase, outcome);
         } catch (RuntimeException telemetryFailure) {
-            Logger.warn("[eviction-manager] failed to report eviction commit: "
+            Logger.warn(
+                    "[eviction-manager] failed to report eviction commit: "
                             + "request_id={} case={} outcome={}",
-                    requestId, evictionCase, outcome,
+                    requestId,
+                    evictionCase,
+                    outcome,
                     telemetryFailure);
         }
     }
 
-    private void reportEvictionPlan(int priority,
-                                    long requestId,
-                                    String evictionCase,
-                                    String outcome) {
+    private void reportEvictionPlan(
+            int priority, long requestId, String evictionCase, String outcome) {
         try {
             reporter.reportEvictionPlan(priority, evictionCase, outcome);
         } catch (RuntimeException telemetryFailure) {
-            Logger.warn("[eviction-manager] failed to report eviction plan: "
+            Logger.warn(
+                    "[eviction-manager] failed to report eviction plan: "
                             + "request_id={} case={} outcome={}",
-                    requestId, evictionCase, outcome, telemetryFailure);
+                    requestId,
+                    evictionCase,
+                    outcome,
+                    telemetryFailure);
         }
     }
 
@@ -148,41 +148,47 @@ public class EvictionManager {
     private record PlannedDecodeEviction(
             DecodeEndpointSnapshot target,
             DecodeEvictionProposal proposal,
-            DecodeBinding request) {
-    }
+            DecodeBinding request) {}
 
     /** Build one side-effect-free plan from one exact cluster snapshot. */
     private PlannedDecodeEviction planDecodeEviction(
-            DecodeBinding request,
-            PreemptionConfig preemption,
-            DecodeEndpoint selectedEndpoint) {
-        DecodeEndpointSnapshot selected = DecodeEndpointSnapshot.capture(
-                selectedEndpoint, request.capacity());
+            DecodeBinding request, PreemptionConfig preemption, DecodeEndpoint selectedEndpoint) {
+        DecodeEndpointSnapshot selected =
+                DecodeEndpointSnapshot.capture(selectedEndpoint, request.capacity());
         if (selected.endpoint().isRetired()) {
             return null;
         }
-        String evictionCase = EvictionPlanner.decodeEvictionCase(
-                request.hardKvTokens(), request.expectedKvTokens(), selected);
+        String evictionCase =
+                EvictionPlanner.decodeEvictionCase(
+                        request.hardKvTokens(), request.expectedKvTokens(), selected);
         List<DecodeEndpointSnapshot> decodes = List.of(selected);
         if (evictionCase == null) {
             return null;
         }
 
         Map<String, String> failures = new HashMap<>();
-        DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                request.priority(), request.hardKvTokens(), request.expectedKvTokens(),
-                decodes, preemption, cancelChannel, failures);
+        DecodeEvictionProposal proposal =
+                EvictionPlanner.planDecode(
+                        request.priority(),
+                        request.hardKvTokens(),
+                        request.expectedKvTokens(),
+                        decodes,
+                        preemption,
+                        cancelChannel,
+                        failures);
         if (proposal == null) {
-            reportEvictionPlan(request.priority(), request.requestId(),
-                    evictionCase, "infeasible");
+            reportEvictionPlan(request.priority(), request.requestId(), evictionCase, "infeasible");
             Logger.debug(
                     "[eviction-manager] Decode eviction infeasible:"
                             + " request_id={} priority={} candidates={} reasons={}",
-                    request.requestId(), request.priority(), decodes.size(), failures);
+                    request.requestId(),
+                    request.priority(),
+                    decodes.size(),
+                    failures);
             return null;
         }
-        reportEvictionPlan(request.priority(), request.requestId(),
-                proposal.evictionCase(), "feasible");
+        reportEvictionPlan(
+                request.priority(), request.requestId(), proposal.evictionCase(), "feasible");
         if (!selected.endpointId().equals(proposal.endpointId())) {
             throw new IllegalStateException(
                     "eviction planner changed the selected Decode endpoint");
@@ -207,26 +213,25 @@ public class EvictionManager {
         // use a local transaction; Engine-may-have-seen/accepted/running
         // victims use the tokenized Cancel coordinator.
         if (proposal.requiresEngineCancel()) {
-            startEngineCancelPreemption(ctx, future, preemption, proposal,
-                    decodeEp, request, admission);
+            startEngineCancelPreemption(
+                    ctx, future, preemption, proposal, decodeEp, request, admission);
             return true;
         }
 
         List<DecodeEndpoint.ReservationHandle> reservedVictims =
                 new ArrayList<>(proposal.victims().size());
         for (DecodeRequestView victim : proposal.victims()) {
-            reservedVictims.add(new DecodeEndpoint.ReservationHandle(
-                    decodeEp.getStatus().getGenerationId(),
-                    victim.requestId(),
-                    victim.reservationToken()));
+            reservedVictims.add(
+                    new DecodeEndpoint.ReservationHandle(
+                            decodeEp.getStatus().getGenerationId(),
+                            victim.requestId(),
+                            victim.reservationToken()));
         }
 
         // The victim eviction and incoming placement form one generation
         // commit. Cancel/deadline either close before any victim is touched,
         // or observe the incoming request after the complete handoff.
-        AdmissionHandle handle =
-                requests.claimAdmissionHandle(
-                        request.requestId(), future);
+        AdmissionHandle handle = requests.claimAdmissionHandle(request.requestId(), future);
         if (handle == null) {
             admission.close();
             return true;
@@ -243,8 +248,8 @@ public class EvictionManager {
                             request.priority(),
                             request.capacity());
             if (!evictionCommitted) {
-                reportEvictionCommit(ctx.getPriority(), ctx.getRequestId(),
-                        proposal.evictionCase(), "conflict");
+                reportEvictionCommit(
+                        ctx.getPriority(), ctx.getRequestId(), proposal.evictionCase(), "conflict");
                 Logger.debug(
                         "[eviction-manager] Decode eviction conflict: request_id={} "
                                 + "planned={} worker={}",
@@ -267,21 +272,24 @@ public class EvictionManager {
             DecodeEndpoint.ReservationHandle incoming =
                     decodeEp.reservationHandle(request.requestId());
             if (incoming == null) {
-                handle.terminate(admissionError(
-                        StrategyErrorType.RESOURCE_EXHAUSTED,
-                        AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                        "Decode reservation disappeared before canonical placement"));
+                handle.terminate(
+                        admissionError(
+                                StrategyErrorType.RESOURCE_EXHAUSTED,
+                                AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                                "Decode reservation disappeared before canonical placement"));
                 return true;
             }
-            Response placementFailure = placeReservedDecode(
-                    ctx, future, decodeEp, incoming, admission);
+            Response placementFailure =
+                    placeReservedDecode(ctx, future, decodeEp, incoming, admission);
             if (placementFailure != null) {
                 handle.terminate(placementFailure);
                 return true;
             }
             return true;
         } finally {
-            if (transferred) { admission.close(); }
+            if (transferred) {
+                admission.close();
+            }
         }
     }
 
@@ -298,8 +306,8 @@ public class EvictionManager {
                     AdmissionRejectReason.RESOURCE_EXHAUSTED,
                     "Decode generation retired before canonical placement");
         }
-        ScheduledRequest item = admission.createScheduledRequest(
-                context, future, System.currentTimeMillis());
+        ScheduledRequest item =
+                admission.createScheduledRequest(context, future, System.currentTimeMillis());
         context.setRouteSubmittedNanos(System.nanoTime());
         if (!admission.commitQueuedRequest(requests, item)) {
             return admissionError(
@@ -311,10 +319,7 @@ public class EvictionManager {
         return null;
     }
 
-    private void reportPlacement(
-            BalanceContext context,
-            ScheduledRequest item,
-            String kind) {
+    private void reportPlacement(BalanceContext context, ScheduledRequest item, String kind) {
         try {
             deliveryReporter.reportRouteSubmitTimeMs(
                     org.flexlb.dao.route.RoleType.PREFILL.name(),
@@ -330,24 +335,26 @@ public class EvictionManager {
     }
 
     /** Observability only: the registry owns non-terminal withdrawal and requeue. */
-    private void reportRequeuedVictim(BalanceContext ctx, DecodeRequestView victim,
-                                     DecodeEvictionProposal proposal) {
+    private void reportRequeuedVictim(
+            BalanceContext ctx, DecodeRequestView victim, DecodeEvictionProposal proposal) {
         String stage = "decode_reserved";
         try {
-            reporter.reportVictim(victim.priority(), ctx.getPriority(),
-                    stage, proposal.evictionCase());
+            reporter.reportVictim(
+                    victim.priority(), ctx.getPriority(), stage, proposal.evictionCase());
             reporter.reportPriorityPreempt(stage);
-            reporter.reportVictimKvTokens(
-                    victim.priority(), stage, victim.kvTokens());
+            reporter.reportVictimKvTokens(victim.priority(), stage, victim.kvTokens());
         } catch (RuntimeException telemetryFailure) {
-            Logger.warn("[eviction-manager] failed to report decode victim settlement: "
+            Logger.warn(
+                    "[eviction-manager] failed to report decode victim settlement: "
                             + "victim_id={} incoming_id={}",
-                    victim.requestId(), ctx.getRequestId(), telemetryFailure);
+                    victim.requestId(),
+                    ctx.getRequestId(),
+                    telemetryFailure);
         }
         Logger.debug(
                 "[eviction-manager] decode victim preempted: victim_id={} victim_priority={}"
-                    + " stage={} outcome={} kv_tokens={} incoming_id={} incoming_priority={}"
-                    + " worker={}",
+                        + " stage={} outcome={} kv_tokens={} incoming_id={} incoming_priority={}"
+                        + " worker={}",
                 victim.requestId(),
                 victim.priority(),
                 stage,
@@ -359,8 +366,8 @@ public class EvictionManager {
     }
 
     /** Record the single committed Decode-eviction plan. */
-    private static void recordDecodePlanObservability(BalanceContext ctx,
-                                                      DecodeEvictionProposal proposal) {
+    private static void recordDecodePlanObservability(
+            BalanceContext ctx, DecodeEvictionProposal proposal) {
         ctx.setPlanType("decode_evict");
         ctx.setPlanCost(proposal.totalCost());
         ctx.setVictimCount(proposal.victims().size());
@@ -376,30 +383,31 @@ public class EvictionManager {
                 proposal.endpointId());
     }
 
-    private void startEngineCancelPreemption(BalanceContext ctx,
-                                             CompletableFuture<Response> future,
-                                             PreemptionConfig preemption,
-                                             DecodeEvictionProposal proposal,
-                                             DecodeEndpoint decodeEp,
-                                             DecodeBinding request,
-                                             RouteAdmission admission) {
+    private void startEngineCancelPreemption(
+            BalanceContext ctx,
+            CompletableFuture<Response> future,
+            PreemptionConfig preemption,
+            DecodeEvictionProposal proposal,
+            DecodeEndpoint decodeEp,
+            DecodeBinding request,
+            RouteAdmission admission) {
         String detail = "preempted by higher-priority request " + ctx.getRequestId();
         DecodePreemptionCoordinator.PreemptionCommand command =
                 new DecodePreemptionCoordinator.PreemptionCommand(
                         decodeEp,
-                        request.requestId(), request.hardKvTokens(),
-                        request.expectedKvTokens(), request.priority(),
+                        request.requestId(),
+                        request.hardKvTokens(),
+                        request.expectedKvTokens(),
+                        request.priority(),
                         request.capacity(),
-                        proposal.victims(), 50L,
+                        proposal.victims(),
+                        50L,
                         preemption.getTimeoutMs(),
-                        () -> requests.isAdmissionOpen(
-                                request.requestId(), future), detail);
+                        () -> requests.isAdmissionOpen(request.requestId(), future),
+                        detail);
 
-        CompletableFuture<DecodePreemptionCoordinator.PreemptionResult>
-                execution;
-        AdmissionHandle handle =
-                requests.claimAdmissionHandle(
-                        request.requestId(), future);
+        CompletableFuture<DecodePreemptionCoordinator.PreemptionResult> execution;
+        AdmissionHandle handle = requests.claimAdmissionHandle(request.requestId(), future);
         if (handle == null) {
             admission.close();
             return;
@@ -417,23 +425,27 @@ public class EvictionManager {
 
         execution.whenComplete(
                 (result, error) -> {
-                    try (handle; admission) {
+                    try (handle;
+                            admission) {
                         Response terminal;
                         try {
-                            terminal = enginePreemptionTerminal(
-                                    ctx, future, proposal,
-                                    decodeEp, result, error, admission);
+                            terminal =
+                                    enginePreemptionTerminal(
+                                            ctx, future, proposal, decodeEp, result, error,
+                                            admission);
                         } catch (RuntimeException | Error callbackError) {
                             Logger.error(
                                     "[eviction-manager] cancel completion failed:"
                                             + " request_id={} error={}",
-                                    ctx.getRequestId(), callbackError.getMessage(),
+                                    ctx.getRequestId(),
+                                    callbackError.getMessage(),
                                     callbackError);
-                            terminal = admissionError(
-                                    StrategyErrorType.RESOURCE_EXHAUSTED,
-                                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                                    "Decode eviction placement failed: "
-                                            + callbackError.getMessage());
+                            terminal =
+                                    admissionError(
+                                            StrategyErrorType.RESOURCE_EXHAUSTED,
+                                            AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                                            "Decode eviction placement failed: "
+                                                    + callbackError.getMessage());
                         }
                         if (terminal != null) {
                             handle.terminate(terminal);
@@ -456,7 +468,9 @@ public class EvictionManager {
             Logger.error(
                     "[eviction-manager] cancel coordinator returned no typed result:"
                             + " request_id={} worker={}",
-                    ctx.getRequestId(), proposal.endpointId(), error);
+                    ctx.getRequestId(),
+                    proposal.endpointId(),
+                    error);
             return admissionError(
                     StrategyErrorType.RESOURCE_EXHAUSTED,
                     AdmissionRejectReason.RESOURCE_EXHAUSTED,
@@ -473,8 +487,7 @@ public class EvictionManager {
             }
             reportCommittedEnginePreemption(ctx, proposal);
             recordDecodePlanObservability(ctx, proposal);
-            return placeReservedDecode(
-                    ctx, future, decodeEp, reservation, admission);
+            return placeReservedDecode(ctx, future, decodeEp, reservation, admission);
         }
         if (result.controlFailure()) {
             reportCancelTimeout(ctx, proposal.endpointId());
@@ -490,38 +503,40 @@ public class EvictionManager {
             BalanceContext ctx, DecodeEvictionProposal proposal) {
         try {
             for (DecodeRequestView victim : proposal.victims()) {
-                String stage = victim.phase() == DecodeTaskPhase.RUNNING
-                        ? "decode_running" : "decode_cancel";
-                reporter.reportVictim(victim.priority(), ctx.getPriority(),
-                        stage, proposal.evictionCase());
+                String stage =
+                        victim.phase() == DecodeTaskPhase.RUNNING
+                                ? "decode_running"
+                                : "decode_cancel";
+                reporter.reportVictim(
+                        victim.priority(), ctx.getPriority(), stage, proposal.evictionCase());
                 reporter.reportPriorityPreempt(stage);
-                reporter.reportVictimKvTokens(
-                        victim.priority(), stage, victim.kvTokens());
-                reporter.reportCancelConfirm(
-                        proposal.endpointId(), victim.priority());
+                reporter.reportVictimKvTokens(victim.priority(), stage, victim.kvTokens());
+                reporter.reportCancelConfirm(proposal.endpointId(), victim.priority());
             }
-            reporter.reportEvictionCommit(ctx.getPriority(),
-                    proposal.evictionCase(), "success");
+            reporter.reportEvictionCommit(ctx.getPriority(), proposal.evictionCase(), "success");
         } catch (RuntimeException telemetryFailure) {
-            Logger.warn("[eviction-manager] failed to report committed decode preemption: "
+            Logger.warn(
+                    "[eviction-manager] failed to report committed decode preemption: "
                             + "request_id={} worker={}",
-                    ctx.getRequestId(), proposal.endpointId(), telemetryFailure);
+                    ctx.getRequestId(),
+                    proposal.endpointId(),
+                    telemetryFailure);
         }
     }
 
-    private void reportCancelRequests(BalanceContext ctx,
-                                      DecodeEvictionProposal proposal) {
+    private void reportCancelRequests(BalanceContext ctx, DecodeEvictionProposal proposal) {
         try {
             for (DecodeRequestView victim : proposal.victims()) {
-                reporter.reportCancelRequest(
-                        proposal.endpointId(), victim.priority());
-                reporter.reportCancel(
-                        victim.priority(), "PRIORITY_PREEMPTED");
+                reporter.reportCancelRequest(proposal.endpointId(), victim.priority());
+                reporter.reportCancel(victim.priority(), "PRIORITY_PREEMPTED");
             }
         } catch (RuntimeException telemetryFailure) {
-            Logger.warn("[eviction-manager] failed to report priority cancel requests: "
+            Logger.warn(
+                    "[eviction-manager] failed to report priority cancel requests: "
                             + "request_id={} worker={}",
-                    ctx.getRequestId(), proposal.endpointId(), telemetryFailure);
+                    ctx.getRequestId(),
+                    proposal.endpointId(),
+                    telemetryFailure);
         }
     }
 
@@ -529,9 +544,12 @@ public class EvictionManager {
         try {
             reporter.reportCancelTimeout(endpointId, ctx.getPriority());
         } catch (RuntimeException telemetryFailure) {
-            Logger.warn("[eviction-manager] failed to report priority cancel timeout: "
+            Logger.warn(
+                    "[eviction-manager] failed to report priority cancel timeout: "
                             + "request_id={} worker={}",
-                    ctx.getRequestId(), endpointId, telemetryFailure);
+                    ctx.getRequestId(),
+                    endpointId,
+                    telemetryFailure);
         }
     }
 
@@ -539,19 +557,19 @@ public class EvictionManager {
     private void reportCommittedLocalDecodeEviction(
             BalanceContext ctx, DecodeEvictionProposal proposal) {
         try {
-            reporter.reportEvictionCommit(
-                    ctx.getPriority(), proposal.evictionCase(), "success");
+            reporter.reportEvictionCommit(ctx.getPriority(), proposal.evictionCase(), "success");
         } catch (RuntimeException telemetryFailure) {
-            Logger.warn("[eviction-manager] failed to report committed local decode eviction: "
+            Logger.warn(
+                    "[eviction-manager] failed to report committed local decode eviction: "
                             + "request_id={} worker={}",
-                    ctx.getRequestId(), proposal.endpointId(), telemetryFailure);
+                    ctx.getRequestId(),
+                    proposal.endpointId(),
+                    telemetryFailure);
         }
     }
 
-    private static Response admissionError(StrategyErrorType errorType,
-                                           AdmissionRejectReason reason,
-                                           String message) {
+    private static Response admissionError(
+            StrategyErrorType errorType, AdmissionRejectReason reason, String message) {
         return Response.error(errorType, reason, message);
     }
-
 }

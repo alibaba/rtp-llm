@@ -252,8 +252,13 @@ def _prefill_names(ops) -> list[str]:
 
 
 def _cache_checked_request(
-    ops, rid: int, *, input_len: int, block_keys: list,
-    expected_hit_blocks: int, expected_holders=None,
+    ops,
+    rid: int,
+    *,
+    input_len: int,
+    block_keys: list,
+    expected_hit_blocks: int,
+    expected_holders=None,
 ):
     """Compare one completed request with Master and Engine cache facts.
 
@@ -280,8 +285,11 @@ def _cache_checked_request(
         )
 
     def engine_hits():
-        rows = [row for row in ops.snapshot_by_name().values()
-                if row.get("role") == "prefill"]
+        rows = [
+            row
+            for row in ops.snapshot_by_name().values()
+            if row.get("role") == "prefill"
+        ]
         if not rows or any("cache_key_hits" not in row for row in rows):
             raise RuntimeError("Engine cache_key_hits counters unavailable")
         return sum(int(row["cache_key_hits"]) for row in rows)
@@ -289,7 +297,10 @@ def _cache_checked_request(
     before_max, before_total = master_counters()
     before_hits = engine_hits()
     addr, err = ops.run_one_request(
-        rid, input_len=input_len, output_len=2, block_keys=block_keys,
+        rid,
+        input_len=input_len,
+        output_len=2,
+        block_keys=block_keys,
         stream_timeout_s=STREAM_TIMEOUT_S,
     )
     if err:
@@ -300,12 +311,19 @@ def _cache_checked_request(
     hit_delta = engine_hits() - before_hits
     expected_tokens = min(input_len, expected_hit_blocks * BLOCK_TOKENS)
     selections = total_delta / input_len
-    matched = (selections >= 1 and selections.is_integer()
-               and max_delta == expected_tokens * selections)
+    matched = (
+        selections >= 1
+        and selections.is_integer()
+        and max_delta == expected_tokens * selections
+    )
     name = ops.addr_to_name().get(addr, addr)
-    if (not matched or total_delta < input_len
-            or hit_delta != expected_hit_blocks
-            or expected_holders is not None and name not in expected_holders):
+    if (
+        not matched
+        or total_delta < input_len
+        or hit_delta != expected_hit_blocks
+        or expected_holders is not None
+        and name not in expected_holders
+    ):
         return addr, (
             f"cache evidence mismatch: engine={name}, "
             f"Master max_hit_delta={max_delta}, input_delta={total_delta}, "
@@ -772,11 +790,18 @@ def kv_pe_evict_zero_match(ctx: CaseContext):
 
         rid = ops.next_request_id(base)
         addr, err = _cache_checked_request(
-            ops, rid, input_len=PREFIX_INPUT_LEN, block_keys=fam0,
+            ops,
+            rid,
+            input_len=PREFIX_INPUT_LEN,
+            block_keys=fam0,
             expected_hit_blocks=0,
         )
-        report.invariant("P6", evicted_ok and err is None,
-                         context="post_evict", detail=f"evicted={evicted_ok}, replay={addr}, error={err}")
+        report.invariant(
+            "P6",
+            evicted_ok and err is None,
+            context="post_evict",
+            detail=f"evicted={evicted_ok}, replay={addr}, error={err}",
+        )
         return report.finish(f"evicted_holder={x_name}, grades: {report.summary()}")
     except Exception as exc:
         return False, f"exception: {exc!r}"
@@ -898,16 +923,28 @@ def kv_g_shared_block_both_match(ctx: CaseContext):
             fam0
         ) <= _engine_cache_keys(ops, e2)
 
-        report.invariant("P6", shared_ok, context="shared_keys",
-                         detail=f"both holders contain the complete prefix: {shared_ok}")
+        report.invariant(
+            "P6",
+            shared_ok,
+            context="shared_keys",
+            detail=f"both holders contain the complete prefix: {shared_ok}",
+        )
         for _ in range(4):
             rid = ops.next_request_id(base)
             addr, err = _cache_checked_request(
-                ops, rid, input_len=PREFIX_INPUT_LEN, block_keys=fam0,
-                expected_hit_blocks=len(fam0), expected_holders={e1, e2},
+                ops,
+                rid,
+                input_len=PREFIX_INPUT_LEN,
+                block_keys=fam0,
+                expected_hit_blocks=len(fam0),
+                expected_holders={e1, e2},
             )
-            report.invariant("P6", err is None, context="shared_cache_hit",
-                             detail=f"replay={addr}, error={err}")
+            report.invariant(
+                "P6",
+                err is None,
+                context="shared_cache_hit",
+                detail=f"replay={addr}, error={err}",
+            )
             if err:
                 break
         passed, detail, rep = report.finish(
@@ -1027,11 +1064,18 @@ def kv_g_full_release_no_ghost(ctx: CaseContext):
 
         rid = ops.next_request_id(base)
         addr, err = _cache_checked_request(
-            ops, rid, input_len=PREFIX_INPUT_LEN, block_keys=fam0,
+            ops,
+            rid,
+            input_len=PREFIX_INPUT_LEN,
+            block_keys=fam0,
             expected_hit_blocks=0,
         )
-        report.invariant("P6", released_ok and err is None,
-                         context="full_release", detail=f"released={released_ok}, replay={addr}, error={err}")
+        report.invariant(
+            "P6",
+            released_ok and err is None,
+            context="full_release",
+            detail=f"released={released_ok}, replay={addr}, error={err}",
+        )
         return report.finish(f"holders={{{e1}, {e2}}}, grades: {report.summary()}")
     except Exception as exc:
         return False, f"exception: {exc!r}"
@@ -1102,11 +1146,18 @@ def kv_g_sync_convergence(ctx: CaseContext):
 
         rid = ops.next_request_id(base)
         addr, err = _cache_checked_request(
-            ops, rid, input_len=PREFIX_INPUT_LEN, block_keys=fam0,
+            ops,
+            rid,
+            input_len=PREFIX_INPUT_LEN,
+            block_keys=fam0,
             expected_hit_blocks=0,
         )
-        report.invariant("P6", err is None, context="fam0_no_holder",
-                         detail=f"replay={addr}, error={err}")
+        report.invariant(
+            "P6",
+            err is None,
+            context="fam0_no_holder",
+            detail=f"replay={addr}, error={err}",
+        )
 
         # -- fam1/fam2 (sole holders): continuations stick (P9 x2).
         for label, keys, holder in (
@@ -1776,7 +1827,10 @@ def kv_prefix_stickiness(ctx: CaseContext):
             else:
                 keys = [rid * 100 + j for j in range(8)]
                 addr, err = _cache_checked_request(
-                    ops, rid, input_len=8192, block_keys=keys,
+                    ops,
+                    rid,
+                    input_len=8192,
+                    block_keys=keys,
                     expected_hit_blocks=0,
                 )
                 if err:
@@ -1888,7 +1942,10 @@ def kv_hot_prefix_tension(ctx: CaseContext):
             else:
                 keys = [rid * 100 + j for j in range(16)]
                 addr, err = _cache_checked_request(
-                    ops, rid, input_len=input_len, block_keys=keys,
+                    ops,
+                    rid,
+                    input_len=input_len,
+                    block_keys=keys,
                     expected_hit_blocks=0,
                 )
                 if err:
@@ -1947,7 +2004,10 @@ def kv_match_mixed(ctx: CaseContext):
             for i in range(n):
                 rid = ops.next_request_id(base)
                 addr, err = _cache_checked_request(
-                    ops, rid, input_len=8192, block_keys=keys_fn(rid, i),
+                    ops,
+                    rid,
+                    input_len=8192,
+                    block_keys=keys_fn(rid, i),
                     expected_hit_blocks={"full": 8, "half": 4, "zero": 0}[label],
                 )
                 if err:
@@ -2020,9 +2080,7 @@ def kv_match_mixed(ctx: CaseContext):
             "M3",
             full_conc,
             context="full_hit",
-            detail=(
-                f"concentration on full-hit seed engine={full_conc:.2f}"
-            ),
+            detail=(f"concentration on full-hit seed engine={full_conc:.2f}"),
         )
         report.check(
             "M3",

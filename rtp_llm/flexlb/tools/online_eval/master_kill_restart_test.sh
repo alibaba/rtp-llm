@@ -38,15 +38,15 @@ export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@21}"
 export PATH="${JAVA_HOME}/bin:${PATH}"
 
 JAVA_MODULE_OPTS=(
-  --add-modules ALL-SYSTEM
-  --add-opens java.base/java.lang=ALL-UNNAMED
-  --add-opens java.base/java.lang.invoke=ALL-UNNAMED
-  --add-opens java.base/java.util=ALL-UNNAMED
-  --add-opens java.base/java.util.concurrent=ALL-UNNAMED
-  --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
-  --add-opens java.base/java.nio=ALL-UNNAMED
-  --add-opens java.base/sun.nio.ch=ALL-UNNAMED
-  --add-opens java.instrument/sun.instrument=ALL-UNNAMED
+    --add-modules ALL-SYSTEM
+    --add-opens java.base/java.lang=ALL-UNNAMED
+    --add-opens java.base/java.lang.invoke=ALL-UNNAMED
+    --add-opens java.base/java.util=ALL-UNNAMED
+    --add-opens java.base/java.util.concurrent=ALL-UNNAMED
+    --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
+    --add-opens java.base/java.nio=ALL-UNNAMED
+    --add-opens java.base/sun.nio.ch=ALL-UNNAMED
+    --add-opens java.instrument/sun.instrument=ALL-UNNAMED
 )
 
 # -- Configurable parameters -----------------------------------------------
@@ -94,10 +94,10 @@ RESTART_TS=""
 # -- Helpers --------------------------------------------------------------
 
 wait_for_port() {
-  local host="$1"
-  local port="$2"
-  local timeout_s="$3"
-  python3 - "$host" "$port" "$timeout_s" <<'PY'
+    local host="$1"
+    local port="$2"
+    local timeout_s="$3"
+    python3 - "$host" "$port" "$timeout_s" <<'PY'
 import socket, sys, time
 host, port, timeout_s = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
 deadline = time.time() + timeout_s
@@ -115,24 +115,24 @@ PY
 }
 
 cleanup() {
-  echo ""
-  echo "[cleanup] stopping processes ..."
-  if [[ -n "${FLEXLB_PID}" ]]; then
-    kill "${FLEXLB_PID}" >/dev/null 2>&1 || true
-    wait "${FLEXLB_PID}" 2>/dev/null || true
-    FLEXLB_PID=""
-  fi
-  if [[ -n "${MOCK_PID}" ]]; then
-    kill "${MOCK_PID}" >/dev/null 2>&1 || true
-    wait "${MOCK_PID}" 2>/dev/null || true
-    MOCK_PID=""
-  fi
-  if [[ -n "${LOAD_CLIENT_PID}" ]]; then
-    kill "${LOAD_CLIENT_PID}" >/dev/null 2>&1 || true
-    wait "${LOAD_CLIENT_PID}" 2>/dev/null || true
-    LOAD_CLIENT_PID=""
-  fi
-  echo "[cleanup] done."
+    echo ""
+    echo "[cleanup] stopping processes ..."
+    if [[ -n "${FLEXLB_PID}" ]]; then
+        kill "${FLEXLB_PID}" >/dev/null 2>&1 || true
+        wait "${FLEXLB_PID}" 2>/dev/null || true
+        FLEXLB_PID=""
+    fi
+    if [[ -n "${MOCK_PID}" ]]; then
+        kill "${MOCK_PID}" >/dev/null 2>&1 || true
+        wait "${MOCK_PID}" 2>/dev/null || true
+        MOCK_PID=""
+    fi
+    if [[ -n "${LOAD_CLIENT_PID}" ]]; then
+        kill "${LOAD_CLIENT_PID}" >/dev/null 2>&1 || true
+        wait "${LOAD_CLIENT_PID}" 2>/dev/null || true
+        LOAD_CLIENT_PID=""
+    fi
+    echo "[cleanup] done."
 }
 trap cleanup EXIT
 
@@ -141,22 +141,22 @@ trap cleanup EXIT
 echo ""
 echo "=== Prerequisites Check ==="
 if [[ ! -f "${FLEXLB_JAR}" ]]; then
-  echo "ERROR: FlexLB JAR not found: ${FLEXLB_JAR}" >&2
-  exit 1
+    echo "ERROR: FlexLB JAR not found: ${FLEXLB_JAR}" >&2
+    exit 1
 fi
 if [[ ! -f "${TRACE_FILE}" ]]; then
-  echo "ERROR: Trace file not found: ${TRACE_FILE}" >&2
-  exit 1
+    echo "ERROR: Trace file not found: ${TRACE_FILE}" >&2
+    exit 1
 fi
 java -version 2>&1 | head -1
 echo "  JAR: ${FLEXLB_JAR}"
-echo "  Trace: ${TRACE_FILE} ($(wc -l < "${TRACE_FILE}") lines)"
+echo "  Trace: ${TRACE_FILE} ($(wc -l <"${TRACE_FILE}") lines)"
 echo "  All prerequisites OK."
 
 # -- Write perf config -----------------------------------------------------
 
 PERF_CONFIG_FILE="${RUN_DIR}/perf.json"
-cat > "${PERF_CONFIG_FILE}" <<'JSON'
+cat >"${PERF_CONFIG_FILE}" <<'JSON'
 {
   "block_size": 1024,
   "sleep_scale": 1.0,
@@ -174,21 +174,21 @@ JSON
 # -- Start master function ------------------------------------------------
 
 start_master() {
-  local log_file="$1"
-  local default_flexlb_config='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550}},"dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":4},"router":{"roles":{"prefill":{},"decode":{"availability":{"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
-  local flexlb_config="${FLEXLB_CONFIG:-${default_flexlb_config}}"
-  echo "  starting master ..."
-  env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \
-    "FLEXLB_CONFIG=${flexlb_config}" \
-    "HIPPO_ROLE=flexlb_kill_restart_test" \
-    java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
-    --server.port="${FLEXLB_HTTP_PORT}" \
-    --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
-    --logging.level.org.flexlb=DEBUG \
-    >"${log_file}" 2>&1 &
-  FLEXLB_PID="$!"
-  wait_for_port "127.0.0.1" "${FLEXLB_HTTP_PORT}" 60
-  echo "  master started (pid=${FLEXLB_PID})"
+    local log_file="$1"
+    local default_flexlb_config='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550}},"dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":4},"router":{"roles":{"prefill":{},"decode":{"availability":{"maxEngineRequests":132}}}},"requestLifecycle":{"request":{"timeoutMs":300000},"decision":{"lifetime":2.0}}}'
+    local flexlb_config="${FLEXLB_CONFIG:-${default_flexlb_config}}"
+    echo "  starting master ..."
+    env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \
+        "FLEXLB_CONFIG=${flexlb_config}" \
+        "HIPPO_ROLE=flexlb_kill_restart_test" \
+        java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
+        --server.port="${FLEXLB_HTTP_PORT}" \
+        --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
+        --logging.level.org.flexlb=DEBUG \
+        >"${log_file}" 2>&1 &
+    FLEXLB_PID="$!"
+    wait_for_port "127.0.0.1" "${FLEXLB_HTTP_PORT}" 60
+    echo "  master started (pid=${FLEXLB_PID})"
 }
 
 # ===========================================================================
@@ -199,15 +199,15 @@ echo ""
 echo "=== Step 1: Start mock engine cluster (${N_PREFILL}P + ${N_DECODE}D) ==="
 ENDPOINT_FILE="${RUN_DIR}/endpoints.json"
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/mock_engine_cluster.py" \
-  --n-prefill "${N_PREFILL}" \
-  --n-decode "${N_DECODE}" \
-  --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
-  --performance "${PERF_CONFIG_FILE}" \
-  --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
-  --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
-  --endpoint-file "${ENDPOINT_FILE}" \
-  --env-file "${RUN_DIR}/flexlb_env.txt" \
-  >"${RUN_DIR}/mock_engine.log" 2>&1 &
+    --n-prefill "${N_PREFILL}" \
+    --n-decode "${N_DECODE}" \
+    --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
+    --performance "${PERF_CONFIG_FILE}" \
+    --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
+    --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
+    --endpoint-file "${ENDPOINT_FILE}" \
+    --env-file "${RUN_DIR}/flexlb_env.txt" \
+    >"${RUN_DIR}/mock_engine.log" 2>&1 &
 MOCK_PID="$!"
 wait_for_port "127.0.0.1" "${MOCK_BASE_GRPC_PORT}" 20
 echo "  mock cluster started (pid=${MOCK_PID}, http=${MOCK_HTTP_PORT})"
@@ -217,8 +217,9 @@ echo "  mock cluster started (pid=${MOCK_PID}, http=${MOCK_HTTP_PORT})"
 # ===========================================================================
 
 while IFS= read -r line; do
-  FLEXLB_ENV_ARGS+=("${line}")
-done < <(python3 - "${ENDPOINT_FILE}" <<'PY'
+    FLEXLB_ENV_ARGS+=("${line}")
+done < <(
+    python3 - "${ENDPOINT_FILE}" <<'PY'
 import json, sys
 payload = json.load(open(sys.argv[1], "r", encoding="utf-8"))
 for key, value in payload["env"].items():
@@ -245,14 +246,14 @@ echo "=== Step 4: Start load client ==="
 LOAD_CLIENT_DIR="${RUN_DIR}/load_client"
 mkdir -p "${LOAD_CLIENT_DIR}"
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
-  "${TRACE_FILE}" \
-  --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-  --replay-speed "${LOAD_CLIENT_REPLAY_SPEED}" \
-  --limit "${LOAD_CLIENT_LIMIT}" \
-  --max-concurrency "${LOAD_CLIENT_CONCURRENCY}" \
-  --timeout-ms "${LOAD_CLIENT_TIMEOUT_MS}" \
-  --output-dir "${LOAD_CLIENT_DIR}" \
-  >"${RUN_DIR}/load_client.log" 2>&1 &
+    "${TRACE_FILE}" \
+    --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
+    --replay-speed "${LOAD_CLIENT_REPLAY_SPEED}" \
+    --limit "${LOAD_CLIENT_LIMIT}" \
+    --max-concurrency "${LOAD_CLIENT_CONCURRENCY}" \
+    --timeout-ms "${LOAD_CLIENT_TIMEOUT_MS}" \
+    --output-dir "${LOAD_CLIENT_DIR}" \
+    >"${RUN_DIR}/load_client.log" 2>&1 &
 LOAD_CLIENT_PID="$!"
 echo "  load client started (pid=${LOAD_CLIENT_PID})"
 
@@ -262,12 +263,12 @@ echo "  load client started (pid=${LOAD_CLIENT_PID})"
 
 echo ""
 if [[ "${KILL_TIMING}" == "decode" ]]; then
-  echo "=== Step 5: Waiting for requests to reach decode phase ==="
-  DECODE_WAIT_TIMEOUT=30
-  DECODE_WAIT_ELAPSED=0
-  while [[ ${DECODE_WAIT_ELAPSED} -lt ${DECODE_WAIT_TIMEOUT} ]]; do
-    DECODE_RUNNING=$(curl -s "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" 2>/dev/null | \
-      python3 -c "
+    echo "=== Step 5: Waiting for requests to reach decode phase ==="
+    DECODE_WAIT_TIMEOUT=30
+    DECODE_WAIT_ELAPSED=0
+    while [[ ${DECODE_WAIT_ELAPSED} -lt ${DECODE_WAIT_TIMEOUT} ]]; do
+        DECODE_RUNNING=$(curl -s "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" 2>/dev/null |
+            python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -276,24 +277,24 @@ try:
 except:
     print(0)
 " 2>/dev/null || echo 0)
-    if [[ "${DECODE_RUNNING}" -gt 0 ]]; then
-      echo "  decode running: ${DECODE_RUNNING}, proceeding to kill"
-      break
+        if [[ "${DECODE_RUNNING}" -gt 0 ]]; then
+            echo "  decode running: ${DECODE_RUNNING}, proceeding to kill"
+            break
+        fi
+        sleep 1
+        DECODE_WAIT_ELAPSED=$((DECODE_WAIT_ELAPSED + 1))
+    done
+    if [[ ${DECODE_WAIT_ELAPSED} -ge ${DECODE_WAIT_TIMEOUT} ]]; then
+        echo "  WARNING: timeout waiting for decode phase, proceeding anyway"
     fi
-    sleep 1
-    DECODE_WAIT_ELAPSED=$((DECODE_WAIT_ELAPSED + 1))
-  done
-  if [[ ${DECODE_WAIT_ELAPSED} -ge ${DECODE_WAIT_TIMEOUT} ]]; then
-    echo "  WARNING: timeout waiting for decode phase, proceeding anyway"
-  fi
 else
-  echo "=== Step 5: Steady state wait (${STEADY_STATE_WAIT}s) ==="
-  sleep "${STEADY_STATE_WAIT}"
+    echo "=== Step 5: Steady state wait (${STEADY_STATE_WAIT}s) ==="
+    sleep "${STEADY_STATE_WAIT}"
 fi
 if kill -0 "${LOAD_CLIENT_PID}" 2>/dev/null; then
-  echo "  load client is running"
+    echo "  load client is running"
 else
-  echo "  WARNING: load client has already exited"
+    echo "  WARNING: load client has already exited"
 fi
 
 # ===========================================================================
@@ -304,23 +305,23 @@ echo ""
 echo "=== Step 6: Collect baseline data ==="
 echo "  - inflight_status ..."
 curl -s -o "${RUN_DIR}/baseline_inflight.json" \
-  "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" \
-  || echo "  WARNING: inflight_status request failed"
+    "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" ||
+    echo "  WARNING: inflight_status request failed"
 echo "  - mock snapshot ..."
 curl -s -o "${RUN_DIR}/baseline_snapshot.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" \
-  || echo "  WARNING: snapshot request failed"
+    "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" ||
+    echo "  WARNING: snapshot request failed"
 echo "  - mock requests ..."
 curl -s -o "${RUN_DIR}/baseline_requests.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/requests" \
-  || echo "  WARNING: requests request failed"
-cp "${RUN_DIR}/baseline_requests.json" "${RUN_DIR}/pre_kill_requests.json" 2>/dev/null \
-  || echo "  NOTE: baseline_requests.json not available for pre_kill copy"
+    "http://127.0.0.1:${MOCK_HTTP_PORT}/requests" ||
+    echo "  WARNING: requests request failed"
+cp "${RUN_DIR}/baseline_requests.json" "${RUN_DIR}/pre_kill_requests.json" 2>/dev/null ||
+    echo "  NOTE: baseline_requests.json not available for pre_kill copy"
 echo "  - load client per_request.jsonl ..."
-cp "${LOAD_CLIENT_DIR}/per_request.jsonl" "${RUN_DIR}/pre_kill_per_request.jsonl" 2>/dev/null \
-  || echo "  NOTE: per_request.jsonl not available yet"
-cp "${LOAD_CLIENT_DIR}/summary.json" "${RUN_DIR}/pre_kill_summary.json" 2>/dev/null \
-  || echo "  NOTE: summary.json not available (client still running)"
+cp "${LOAD_CLIENT_DIR}/per_request.jsonl" "${RUN_DIR}/pre_kill_per_request.jsonl" 2>/dev/null ||
+    echo "  NOTE: per_request.jsonl not available yet"
+cp "${LOAD_CLIENT_DIR}/summary.json" "${RUN_DIR}/pre_kill_summary.json" 2>/dev/null ||
+    echo "  NOTE: summary.json not available (client still running)"
 
 # ===========================================================================
 # Step 7: KILL Master (kill -9)
@@ -343,9 +344,9 @@ echo ""
 echo "=== Step 8: Wait ${KILL_WAIT}s (kill period, observe failures) ==="
 sleep "${KILL_WAIT}"
 if kill -0 "${LOAD_CLIENT_PID}" 2>/dev/null; then
-  echo "  load client is still running"
+    echo "  load client is still running"
 else
-  echo "  load client has exited"
+    echo "  load client has exited"
 fi
 
 # ===========================================================================
@@ -356,16 +357,16 @@ echo ""
 echo "=== Step 9: Collect kill-period data ==="
 echo "  - mock snapshot ..."
 curl -s -o "${RUN_DIR}/kill_snapshot.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" \
-  || echo "  WARNING: snapshot request failed"
+    "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" ||
+    echo "  WARNING: snapshot request failed"
 echo "  - mock requests ..."
 curl -s -o "${RUN_DIR}/kill_requests.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/requests" \
-  || echo "  WARNING: requests request failed"
+    "http://127.0.0.1:${MOCK_HTTP_PORT}/requests" ||
+    echo "  WARNING: requests request failed"
 echo "  - master inflight_status (expected to fail) ..."
 curl -s -o "${RUN_DIR}/kill_inflight_attempt.json" \
-  "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" 2>/dev/null \
-  || echo "  master HTTP down (expected)"
+    "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" 2>/dev/null ||
+    echo "  master HTTP down (expected)"
 
 # ===========================================================================
 # Step 10: Restart Master
@@ -386,9 +387,9 @@ echo ""
 echo "=== Step 11: Wait ${RECOVERY_WAIT}s (recovery period) ==="
 sleep "${RECOVERY_WAIT}"
 if kill -0 "${LOAD_CLIENT_PID}" 2>/dev/null; then
-  echo "  load client is still running"
+    echo "  load client is still running"
 else
-  echo "  load client has exited"
+    echo "  load client has exited"
 fi
 
 # ===========================================================================
@@ -398,15 +399,15 @@ fi
 echo ""
 echo "=== Step 12: Stop load client ==="
 if kill -0 "${LOAD_CLIENT_PID}" 2>/dev/null; then
-  echo "  stopping load client (pid=${LOAD_CLIENT_PID}) ..."
-  kill "${LOAD_CLIENT_PID}" 2>/dev/null || true
-  wait "${LOAD_CLIENT_PID}" 2>/dev/null || true
+    echo "  stopping load client (pid=${LOAD_CLIENT_PID}) ..."
+    kill "${LOAD_CLIENT_PID}" 2>/dev/null || true
+    wait "${LOAD_CLIENT_PID}" 2>/dev/null || true
 else
-  echo "  load client already exited"
+    echo "  load client already exited"
 fi
 LOAD_CLIENT_PID=""
-sleep 1  # Allow file flush
-sleep 5  # drain wait for in-flight to settle
+sleep 1 # Allow file flush
+sleep 5 # drain wait for in-flight to settle
 
 # ===========================================================================
 # Step 12.5: Recovery Verification
@@ -424,24 +425,24 @@ with open('${TRACE_FILE}') as f:
         req = json.loads(line)
         if req.get('ol', 0) <= 200:
             print(line, end='')
-" > "${RECOVERY_TRACE}" 2>/dev/null
-RECOVERY_TRACE_LINES=$(wc -l < "${RECOVERY_TRACE}" 2>/dev/null || echo 0)
+" >"${RECOVERY_TRACE}" 2>/dev/null
+RECOVERY_TRACE_LINES=$(wc -l <"${RECOVERY_TRACE}" 2>/dev/null || echo 0)
 echo "  recovery trace: ${RECOVERY_TRACE_LINES} short-output requests (ol <= 200)"
 
 RECOVERY_VERIFY_DIR="${RUN_DIR}/recovery_verify"
 mkdir -p "${RECOVERY_VERIFY_DIR}"
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
-  "${RECOVERY_TRACE}" \
-  --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-  --replay-speed 0 \
-  --limit 100 \
-  --max-concurrency 10 \
-  --timeout-ms 10000 \
-  --output-dir "${RECOVERY_VERIFY_DIR}" \
-  >"${RUN_DIR}/recovery_verify.log" 2>&1
+    "${RECOVERY_TRACE}" \
+    --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
+    --replay-speed 0 \
+    --limit 100 \
+    --max-concurrency 10 \
+    --timeout-ms 10000 \
+    --output-dir "${RECOVERY_VERIFY_DIR}" \
+    >"${RUN_DIR}/recovery_verify.log" 2>&1
 echo "  recovery verification completed"
 cat "${RECOVERY_VERIFY_DIR}/summary.json" 2>/dev/null || echo "  NOTE: recovery summary not available"
-sleep 5  # drain wait for recovery verification in-flight to settle
+sleep 5 # drain wait for recovery verification in-flight to settle
 
 # ===========================================================================
 # Step 13: Collect post-restart data
@@ -451,21 +452,21 @@ echo ""
 echo "=== Step 13: Collect post-restart data ==="
 echo "  - inflight_status ..."
 curl -s -o "${RUN_DIR}/post_restart_inflight.json" \
-  "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" \
-  || echo "  WARNING: inflight_status request failed"
+    "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" ||
+    echo "  WARNING: inflight_status request failed"
 echo "  - mock snapshot ..."
 curl -s -o "${RUN_DIR}/post_restart_snapshot.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" \
-  || echo "  WARNING: snapshot request failed"
+    "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" ||
+    echo "  WARNING: snapshot request failed"
 echo "  - mock requests ..."
 curl -s -o "${RUN_DIR}/post_restart_requests.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/requests" \
-  || echo "  WARNING: requests request failed"
+    "http://127.0.0.1:${MOCK_HTTP_PORT}/requests" ||
+    echo "  WARNING: requests request failed"
 echo "  - load client outputs ..."
-cp "${LOAD_CLIENT_DIR}/summary.json" "${RUN_DIR}/final_summary.json" 2>/dev/null \
-  || echo "  NOTE: summary.json not available (client was killed before completion)"
-cp "${LOAD_CLIENT_DIR}/per_request.jsonl" "${RUN_DIR}/final_per_request.jsonl" 2>/dev/null \
-  || echo "  WARNING: per_request.jsonl not available"
+cp "${LOAD_CLIENT_DIR}/summary.json" "${RUN_DIR}/final_summary.json" 2>/dev/null ||
+    echo "  NOTE: summary.json not available (client was killed before completion)"
+cp "${LOAD_CLIENT_DIR}/per_request.jsonl" "${RUN_DIR}/final_per_request.jsonl" 2>/dev/null ||
+    echo "  WARNING: per_request.jsonl not available"
 cp "${LOAD_CLIENT_DIR}/report.md" "${RUN_DIR}/load_client_report.md" 2>/dev/null || true
 
 # ===========================================================================
@@ -475,13 +476,13 @@ cp "${LOAD_CLIENT_DIR}/report.md" "${RUN_DIR}/load_client_report.md" 2>/dev/null
 echo ""
 echo "=== Step 14: Generate test report ==="
 KILL_TS="${KILL_TS}" \
-RESTART_TS="${RESTART_TS}" \
-MASTER_PID_INITIAL="${MASTER_PID_INITIAL}" \
-MASTER_PID_RESTART="${MASTER_PID_RESTART}" \
-MOCK_PID="${MOCK_PID}" \
-LOAD_CLIENT_PID="${LOAD_CLIENT_PID:-exited}" \
-KILL_TIMING="${KILL_TIMING}" \
-python3 - "${RUN_DIR}" <<'PYEOF'
+    RESTART_TS="${RESTART_TS}" \
+    MASTER_PID_INITIAL="${MASTER_PID_INITIAL}" \
+    MASTER_PID_RESTART="${MASTER_PID_RESTART}" \
+    MOCK_PID="${MOCK_PID}" \
+    LOAD_CLIENT_PID="${LOAD_CLIENT_PID:-exited}" \
+    KILL_TIMING="${KILL_TIMING}" \
+    python3 - "${RUN_DIR}" <<'PYEOF'
 import json
 import os
 import sys

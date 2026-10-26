@@ -17,14 +17,10 @@ import java.util.Set;
 @Component
 public class ModelMetaConfig {
 
-    private static final List<RoleType> ROUTING_ORDER = List.of(
-            RoleType.PDFUSION,
-            RoleType.DECODE,
-            RoleType.PREFILL,
-            RoleType.VIT);
+    private static final List<RoleType> ROUTING_ORDER =
+            List.of(RoleType.PDFUSION, RoleType.DECODE, RoleType.PREFILL, RoleType.VIT);
 
-    @Getter
-    private final ServiceRoute serviceRoute;
+    @Getter private final ServiceRoute serviceRoute;
     private final String modelName;
     private final List<RoleType> requiredRoles;
 
@@ -39,8 +35,7 @@ public class ModelMetaConfig {
         }
         ServiceRoute parsed = JsonUtils.toObject(document, ServiceRoute.class);
         if (parsed.getServiceId() == null || parsed.getServiceId().isBlank()) {
-            throw new IllegalStateException(
-                    "MODEL_SERVICE_CONFIG must declare service_id");
+            throw new IllegalStateException("MODEL_SERVICE_CONFIG must declare service_id");
         }
         String servicePrefix = CommonConstants.FUNCTION + ".";
         if (!parsed.getServiceId().startsWith(servicePrefix)
@@ -49,12 +44,11 @@ public class ModelMetaConfig {
                     "MODEL_SERVICE_CONFIG service_id must identify one model");
         }
         List<RoleType> parsedRoles = parsed.getAllRoleTypes();
-        Set<RoleType> configured = parsedRoles.isEmpty()
-                ? EnumSet.noneOf(RoleType.class)
-                : EnumSet.copyOf(parsedRoles);
-        List<RoleType> roles = ROUTING_ORDER.stream()
-                .filter(configured::contains)
-                .toList();
+        Set<RoleType> configured =
+                parsedRoles.isEmpty()
+                        ? EnumSet.noneOf(RoleType.class)
+                        : EnumSet.copyOf(parsedRoles);
+        List<RoleType> roles = ROUTING_ORDER.stream().filter(configured::contains).toList();
         if (roles.isEmpty()) {
             throw new IllegalStateException(
                     "MODEL_SERVICE_CONFIG must declare at least one routable role");
@@ -75,10 +69,8 @@ public class ModelMetaConfig {
 
     /** Return a fresh structural list for the single configured service. */
     public List<Pair<String, Endpoint>> endpointsWithGroup(
-            String requestedModelName,
-            RoleType role) {
-        if (!modelName.equals(requestedModelName)
-                || !requiredRoles.contains(role)) {
+            String requestedModelName, RoleType role) {
+        if (!modelName.equals(requestedModelName) || !requiredRoles.contains(role)) {
             return List.of();
         }
         return serviceRoute.getAllEndpointsWithGroup(role);

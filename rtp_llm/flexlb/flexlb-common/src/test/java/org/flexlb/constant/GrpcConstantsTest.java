@@ -20,8 +20,10 @@ class GrpcConstantsTest {
 
     @Test
     void invalidLimitsFailFast() {
-        for (String value : new String[]{"0", "-1", "2048", "2147483648", "1.5", "512MiB", "1_024", "+512"}) {
-            assertThrows(IllegalArgumentException.class, () -> GrpcConstants.parseMaxMessageSize(value));
+        for (String value :
+                new String[] {"0", "-1", "2048", "2147483648", "1.5", "512MiB", "1_024", "+512"}) {
+            assertThrows(
+                    IllegalArgumentException.class, () -> GrpcConstants.parseMaxMessageSize(value));
         }
     }
 }

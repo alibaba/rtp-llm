@@ -57,8 +57,7 @@ class DecodeReuseAdmissionTest {
     private static final int BASE_PORT = 63600;
     private static final int SPB = 1024;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -66,11 +65,14 @@ class DecodeReuseAdmissionTest {
 
     @BeforeEach
     void setUp() {
-        scheduler = Executors.newScheduledThreadPool(4, runnable -> {
-            Thread thread = new Thread(runnable, "decode-reuse-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        4,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "decode-reuse-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         services = new ConcurrentHashMap<>();
         nextPortOffset = 0;
     }
@@ -96,13 +98,14 @@ class DecodeReuseAdmissionTest {
         // prefix — the trace's hash-channel coverage gap). Reuse hits 3,
         // net-new 2: hits are REFERENCED in the LRU layer, net-new goes to
         // the RUNNING layer.
-        MockLruBlockCache.BlockLease lease =
-                cache.acquireWithReuse(5, List.of(1L, 2L, 3L, 4L, 5L));
+        MockLruBlockCache.BlockLease lease = cache.acquireWithReuse(5, List.of(1L, 2L, 3L, 4L, 5L));
         assertNotNull(lease, "5-block demand against a 10-block pool must admit");
         assertEquals(3, lease.hitKeys.size(), "3 LRU hits are referenced, not re-allocated");
         assertEquals(2, lease.nakedBlocks, "net new allocation = total − hit_blocks");
         assertEquals(2, cache.heldBlocks(), "only the NET part enters the running layer");
-        assertEquals(3, cache.referencedKeyBlocks(),
+        assertEquals(
+                3,
+                cache.referencedKeyBlocks(),
                 "hit blocks are pinned as LRU references, not running allocations");
         assertEquals(5, lease.totalBlocks(), "the lease still spans the full demand");
         assertEquals(5, cache.availableBlocks(), "10 − (2 held + 3 referenced)");
@@ -112,21 +115,20 @@ class DecodeReuseAdmissionTest {
     void acquireWithReuseGatesOnNetDemandAfterPinningHits() {
         MockLruBlockCache cache = new MockLruBlockCache(10, 0.0);
         assertTrue(cache.admit(List.of(1L, 2L, 3L, 4L, 5L)));
-        MockLruBlockCache.BlockLease owner =
-                cache.acquireWithReuse(5, List.of(1L, 2L, 3L, 4L, 5L));
+        MockLruBlockCache.BlockLease owner = cache.acquireWithReuse(5, List.of(1L, 2L, 3L, 4L, 5L));
         assertNotNull(owner);
         assertEquals(5, cache.availableBlocks());
 
         MockLruBlockCache.BlockLease lease =
                 cache.acquireWithReuse(6, List.of(1L, 2L, 3L, 4L, 5L, 6L));
-        assertNotNull(lease,
-                "already-referenced hits consume no additional availability");
+        assertNotNull(lease, "already-referenced hits consume no additional availability");
         assertEquals(5, lease.hitKeys.size());
         assertEquals(1, lease.nakedBlocks);
         assertEquals(4, cache.availableBlocks());
         assertEquals(4, cache.freeBlocks());
 
-        assertNull(cache.acquire(6, List.of(1L, 2L, 3L, 4L, 5L, 6L)),
+        assertNull(
+                cache.acquire(6, List.of(1L, 2L, 3L, 4L, 5L, 6L)),
                 "prefill-side acquire keeps its total-demand gate");
     }
 
@@ -168,8 +170,7 @@ class DecodeReuseAdmissionTest {
         assertTrue(cache.admit(List.of(1L, 2L, 3L, 4L)));
         // Demand 3 fully covered by a longer parked prefix: reuse is clamped
         // to the demand, net allocation floors at 0.
-        MockLruBlockCache.BlockLease lease =
-                cache.acquireWithReuse(3, List.of(1L, 2L, 3L, 4L, 5L));
+        MockLruBlockCache.BlockLease lease = cache.acquireWithReuse(3, List.of(1L, 2L, 3L, 4L, 5L));
         assertNotNull(lease);
         assertEquals(3, lease.hitKeys.size(), "reuse is clamped to the demand");
         assertEquals(0, lease.nakedBlocks, "net allocation floors at zero");
@@ -177,8 +178,7 @@ class DecodeReuseAdmissionTest {
         assertEquals(3, cache.referencedKeyBlocks());
 
         // Empty keys (empty-bh traffic): no reuse possible, full net demand.
-        MockLruBlockCache.BlockLease keyless =
-                cache.acquireWithReuse(4, List.of());
+        MockLruBlockCache.BlockLease keyless = cache.acquireWithReuse(4, List.of());
         assertNotNull(keyless);
         assertEquals(0, keyless.hitKeys.size());
         assertEquals(4, keyless.nakedBlocks);
@@ -198,9 +198,11 @@ class DecodeReuseAdmissionTest {
         // A fresh allocation must evict the ELDEST pure-LRU block, which is
         // now key 2: without the read refresh, key 1 would be the victim.
         assertNotNull(cache.acquire(1, List.of(9L)));
-        assertFalse(cache.snapshotKeys().contains(2L),
+        assertFalse(
+                cache.snapshotKeys().contains(2L),
                 "key 2 must be the eviction victim (eldest after the read)");
-        assertTrue(cache.snapshotKeys().contains(1L),
+        assertTrue(
+                cache.snapshotKeys().contains(1L),
                 "key 1 must survive — the match read refreshed its recency");
         assertTrue(cache.snapshotKeys().contains(3L));
     }
@@ -218,13 +220,14 @@ class DecodeReuseAdmissionTest {
         // Keys (2) exceed the token demand (ceil(10/1024) = 1): admission
         // nets 1 block, but completion must park BOTH keys — the pool has room.
         MockLruBlockCache cache = new MockLruBlockCache(10, 0.0);
-        MockLruBlockCache.BlockLease lease =
-                cache.acquireWithReuse(1, List.of(401L, 402L));
+        MockLruBlockCache.BlockLease lease = cache.acquireWithReuse(1, List.of(401L, 402L));
         assertNotNull(lease);
         assertEquals(1, lease.nakedBlocks);
         assertEquals(0, lease.hitKeys.size());
         assertTrue(cache.admit(lease, List.of(401L, 402L)));
-        assertEquals(Set.of(401L, 402L), cache.snapshotKeys(),
+        assertEquals(
+                Set.of(401L, 402L),
+                cache.snapshotKeys(),
                 "hash keys beyond the token demand still park when the pool has room");
 
         // Genuine over-subscription: a 3-block pool with 2 parked keys and 1
@@ -237,9 +240,9 @@ class DecodeReuseAdmissionTest {
         assertNotNull(over);
         assertEquals(1, tiny.heldBlocks());
         assertTrue(tiny.admit(over, List.of(7L, 8L, 9L, 10L)));
-        assertEquals(3, tiny.snapshotKeys().size(),
-                "the pool must stay at capacity, never above");
-        assertTrue(tiny.snapshotKeys().containsAll(List.of(8L, 9L, 10L)),
+        assertEquals(3, tiny.snapshotKeys().size(), "the pool must stay at capacity, never above");
+        assertTrue(
+                tiny.snapshotKeys().containsAll(List.of(8L, 9L, 10L)),
                 "the eldest entries (1, 2, then 7) are the eviction victims");
         assertFalse(tiny.snapshotKeys().contains(1L));
         assertFalse(tiny.snapshotKeys().contains(2L));
@@ -265,29 +268,34 @@ class DecodeReuseAdmissionTest {
         List<Long> keys = List.of(1L, 2L, 3L);
 
         // Round 1 (cold): inputLen 4096 → T=4, keys cover 3, hits 0 → net 4.
-        assertTrue(scheduleDecodeCompletion(decode,
-                shapeWithKeys(model, 101L, 4096, 26, keys), -1, null));
+        assertTrue(
+                scheduleDecodeCompletion(
+                        decode, shapeWithKeys(model, 101L, 4096, 26, keys), -1, null));
         awaitRunningStreams(decode, 1);
         MockLruBlockCache cache = cacheOf(decode);
-        assertEquals(4, cache.heldBlocks(),
+        assertEquals(
+                4,
+                cache.heldBlocks(),
                 "cold admission allocates the FULL token demand "
                         + "(ceil(inputLen/spb)), suffix included");
         assertEquals(0, cache.referencedKeyBlocks());
         assertEquals(4 * SPB, decode.getActiveKvTokens());
         awaitDecodeQuiescence(decode, 30_000);
         // Completion handed the 3 hash keys to the decode LRU.
-        assertTrue(cache.snapshotKeys().containsAll(keys),
+        assertTrue(
+                cache.snapshotKeys().containsAll(keys),
                 "completion must park the request's keys in the decode LRU");
 
         // Round 2 (warm): same keys → 3 hits referenced, net new = 4 − 3 = 1.
-        assertTrue(scheduleDecodeCompletion(decode,
-                shapeWithKeys(model, 102L, 4096, 26, keys), -1, null));
+        assertTrue(
+                scheduleDecodeCompletion(
+                        decode, shapeWithKeys(model, 102L, 4096, 26, keys), -1, null));
         awaitRunningStreams(decode, 1);
-        assertEquals(3, cache.referencedKeyBlocks(),
-                "the 3 LRU hits must be pinned as references");
-        assertEquals(1, cache.heldBlocks(),
-                "net new allocation = total(4) − hit_blocks(3)");
-        assertEquals(4 * SPB, decode.getActiveKvTokens(),
+        assertEquals(3, cache.referencedKeyBlocks(), "the 3 LRU hits must be pinned as references");
+        assertEquals(1, cache.heldBlocks(), "net new allocation = total(4) − hit_blocks(3)");
+        assertEquals(
+                4 * SPB,
+                decode.getActiveKvTokens(),
                 "occupied = (held + referenced) × spb — full demand either way");
 
         awaitDecodeQuiescence(decode, 30_000);
@@ -310,31 +318,45 @@ class DecodeReuseAdmissionTest {
         MockLruBlockCache cache = cacheOf(decode);
 
         // Round 1: prefix [1] parked by completion.
-        assertTrue(scheduleDecodeCompletion(decode,
-                shapeWithKeys(model, 201L, 1024, 26, List.of(1L)), -1, null));
+        assertTrue(
+                scheduleDecodeCompletion(
+                        decode, shapeWithKeys(model, 201L, 1024, 26, List.of(1L)), -1, null));
         awaitDecodeQuiescence(decode, 30_000);
         int hitsRound1 = cache.prefixHitBlocks(List.of(1L, 2L, 3L));
 
         // Round 2: longer prefix [1, 2] — matches ≥ round 1's matches.
-        assertTrue(scheduleDecodeCompletion(decode,
-                shapeWithKeys(model, 202L, 2048, 26, List.of(1L, 2L)), -1, null));
+        assertTrue(
+                scheduleDecodeCompletion(
+                        decode, shapeWithKeys(model, 202L, 2048, 26, List.of(1L, 2L)), -1, null));
         awaitRunningStreams(decode, 1);
         int hitsRound2 = cache.referencedKeyBlocks();
         awaitDecodeQuiescence(decode, 30_000);
 
         // Round 3: longest prefix [1, 2, 3] — matches ≥ round 2's matches.
-        assertTrue(scheduleDecodeCompletion(decode,
-                shapeWithKeys(model, 203L, 3072, 26, List.of(1L, 2L, 3L)), -1, null));
+        assertTrue(
+                scheduleDecodeCompletion(
+                        decode,
+                        shapeWithKeys(model, 203L, 3072, 26, List.of(1L, 2L, 3L)),
+                        -1,
+                        null));
         awaitRunningStreams(decode, 1);
         int hitsRound3 = cache.referencedKeyBlocks();
         awaitDecodeQuiescence(decode, 30_000);
 
-        assertTrue(hitsRound2 >= hitsRound1,
+        assertTrue(
+                hitsRound2 >= hitsRound1,
                 "same-prefix second request must hit at least the first ("
-                        + hitsRound1 + " → " + hitsRound2 + ")");
-        assertTrue(hitsRound3 >= hitsRound2,
+                        + hitsRound1
+                        + " → "
+                        + hitsRound2
+                        + ")");
+        assertTrue(
+                hitsRound3 >= hitsRound2,
                 "the growing prefix must hit monotonically more ("
-                        + hitsRound2 + " → " + hitsRound3 + ")");
+                        + hitsRound2
+                        + " → "
+                        + hitsRound3
+                        + ")");
         assertEquals(0, decode.getActiveKvTokens());
         decode.checkLeakDrain(0L);
         assertFalse(decode.isLeakDetected());
@@ -353,8 +375,9 @@ class DecodeReuseAdmissionTest {
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 8);
         List<Long> keys = List.of(1L, 2L, 3L);
 
-        assertTrue(scheduleDecodeCompletion(decode,
-                shapeWithKeys(model, 301L, 4096, 260, keys), -1, null));
+        assertTrue(
+                scheduleDecodeCompletion(
+                        decode, shapeWithKeys(model, 301L, 4096, 260, keys), -1, null));
         awaitRunningStreams(decode, 1);
         MockLruBlockCache cache = cacheOf(decode);
         assertEquals(4, cache.heldBlocks());
@@ -363,7 +386,8 @@ class DecodeReuseAdmissionTest {
         assertNotNull(phase, "the running stream must be found and cancelled");
         awaitDecodeQuiescence(decode, 60_000);
 
-        assertTrue(cache.snapshotKeys().isEmpty(),
+        assertTrue(
+                cache.snapshotKeys().isEmpty(),
                 "a cancelled stream must leave no LRU entries (free(), no handover)");
         assertEquals(0, decode.getActiveKvTokens());
         assertEquals(0, cache.heldBlocks());
@@ -398,8 +422,9 @@ class DecodeReuseAdmissionTest {
             long rid = 1_000L + i;
             List<Long> keys = List.of(rid * 10, rid * 10 + 1, rid * 10 + 2);
             long completedBefore = decode.getCompletedCount();
-            assertTrue(scheduleDecodeCompletion(decode,
-                    shapeWithKeys(model, rid, 4096, 26, keys), -1, null));
+            assertTrue(
+                    scheduleDecodeCompletion(
+                            decode, shapeWithKeys(model, rid, 4096, 26, keys), -1, null));
             // Late cancel: 400-540 ms — inside the last steps, sometimes in
             // the claim/publish window, occasionally past it.
             Thread.sleep(400 + (i % 8) * 20);
@@ -412,17 +437,21 @@ class DecodeReuseAdmissionTest {
                 // and B): the round's keys must NOT be in the LRU.
                 landedCancels++;
                 for (Long key : keys) {
-                    assertFalse(cache.snapshotKeys().contains(key),
-                            "cancel-landed round " + rid
-                                    + " must not admit key " + key + " to the LRU");
+                    assertFalse(
+                            cache.snapshotKeys().contains(key),
+                            "cancel-landed round "
+                                    + rid
+                                    + " must not admit key "
+                                    + key
+                                    + " to the LRU");
                 }
             }
         }
         // Sanity: the offsets must actually land cancels (otherwise the test
         // would be vacuously green). With 500 ms requests and cancels at
         // 400-540 ms, most rounds land.
-        assertTrue(landedCancels >= 10,
-                "expected at least 10 landed cancels, got " + landedCancels);
+        assertTrue(
+                landedCancels >= 10, "expected at least 10 landed cancels, got " + landedCancels);
         assertEquals(0, decode.getActiveKvTokens());
         decode.checkLeakDrain(0L);
         assertFalse(decode.isLeakDetected());
@@ -443,20 +472,25 @@ class DecodeReuseAdmissionTest {
      * multi-step streams).
      */
     private static MockPerformanceModel.RequestShape shapeWithKeys(
-            MockPerformanceModel model, long requestId, int inputTokens,
-            int outputTokens, List<Long> blockKeys) {
+            MockPerformanceModel model,
+            long requestId,
+            int inputTokens,
+            int outputTokens,
+            List<Long> blockKeys) {
         EngineRpcService.GenerateInputPB input =
                 MockEngineTestSupport.inputWithBlockKeys(requestId, inputTokens, blockKeys);
-        EngineRpcService.GenerateInputPB withOutput = input.toBuilder()
-                .setGenerateConfig(input.getGenerateConfig().toBuilder()
-                        .setMaxNewTokens(outputTokens)
-                        .build())
-                .build();
+        EngineRpcService.GenerateInputPB withOutput =
+                input.toBuilder()
+                        .setGenerateConfig(
+                                input.getGenerateConfig().toBuilder()
+                                        .setMaxNewTokens(outputTokens)
+                                        .build())
+                        .build();
         return model.shape(withOutput, new MockLruBlockCache(100));
     }
 
-    private static MockLruBlockCache cacheOf(
-            JavaMockEngineCluster.FastRpcService service) throws Exception {
+    private static MockLruBlockCache cacheOf(JavaMockEngineCluster.FastRpcService service)
+            throws Exception {
         Field field = JavaMockEngineCluster.FastRpcService.class.getDeclaredField("cache");
         field.setAccessible(true);
         return (MockLruBlockCache) field.get(service);
@@ -464,8 +498,7 @@ class DecodeReuseAdmissionTest {
 
     /** Waits until the engine reports {@code expected} running decode streams. */
     private static void awaitRunningStreams(
-            JavaMockEngineCluster.FastRpcService service, int expected)
-            throws Exception {
+            JavaMockEngineCluster.FastRpcService service, int expected) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         int seen = -1;
         while (System.nanoTime() < deadline) {
@@ -475,7 +508,7 @@ class DecodeReuseAdmissionTest {
             }
             Thread.sleep(5);
         }
-        throw new AssertionError("expected " + expected
-                + " running decode streams, last observed " + seen);
+        throw new AssertionError(
+                "expected " + expected + " running decode streams, last observed " + seen);
     }
 }

@@ -49,8 +49,7 @@ class CompletionRetainWindowTest {
 
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(63500);
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -58,17 +57,26 @@ class CompletionRetainWindowTest {
 
     @BeforeEach
     void setUp() throws IOException {
-        scheduler = Executors.newScheduledThreadPool(4, r -> {
-            Thread t = new Thread(r, "completion-window-test-scheduler");
-            t.setDaemon(true);
-            return t;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        4,
+                        r -> {
+                            Thread t = new Thread(r, "completion-window-test-scheduler");
+                            t.setDaemon(true);
+                            return t;
+                        });
         services = new ConcurrentHashMap<>();
         int port = PORT_ALLOCATOR.getAndAdd(10);
-        prefill = new JavaMockEngineCluster.FastRpcService(
-                "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                port, services, scheduler, performanceModel(tempDir, "10"), 100,
-                new JavaMockEngineCluster.ClusterStats());
+        prefill =
+                new JavaMockEngineCluster.FastRpcService(
+                        "prefill",
+                        EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                        port,
+                        services,
+                        scheduler,
+                        performanceModel(tempDir, "10"),
+                        100,
+                        new JavaMockEngineCluster.ClusterStats());
         services.put(port, prefill);
     }
 
@@ -106,10 +114,14 @@ class CompletionRetainWindowTest {
         // backlog must survive A's read (the old head-trim protocol consumed
         // it here, leaking B's inflight entries forever).
         EngineRpcService.WorkerStatusPB second = workerStatus(prefill, 0);
-        assertEquals(2, second.getFinishedTaskListCount(),
+        assertEquals(
+                2,
+                second.getFinishedTaskListCount(),
                 "A's poll must not consume B's unconsumed backlog");
         assertEquals(2, second.getLatestFinishedVersion());
-        assertEquals(finishedRids(first), finishedRids(second),
+        assertEquals(
+                finishedRids(first),
+                finishedRids(second),
                 "both consumers with the same cursor see the same increment list");
 
         // B advances its own cursor to 2 → B's next poll is empty (its own
@@ -187,11 +199,15 @@ class CompletionRetainWindowTest {
         prefill.periodicCleanup();
 
         EngineRpcService.WorkerStatusPB afterTrim = workerStatus(prefill, 0);
-        assertEquals(2, afterTrim.getFinishedTaskListCount(),
-                "backlog is capped at the retain window");
-        assertEquals(List.of(3L, 4L), finishedRids(afterTrim),
+        assertEquals(
+                2, afterTrim.getFinishedTaskListCount(), "backlog is capped at the retain window");
+        assertEquals(
+                List.of(3L, 4L),
+                finishedRids(afterTrim),
                 "the most recent records are retained, oldest trimmed first");
-        assertEquals(4, afterTrim.getLatestFinishedVersion(),
+        assertEquals(
+                4,
+                afterTrim.getLatestFinishedVersion(),
                 "latestFinishedVersion never regresses on trim");
 
         // A slow consumer whose cursor is still inside the retained window
@@ -208,7 +224,9 @@ class CompletionRetainWindowTest {
         prefill.periodicCleanup();
 
         EngineRpcService.WorkerStatusPB afterCleanup = workerStatus(prefill, 0);
-        assertEquals(3, afterCleanup.getFinishedTaskListCount(),
+        assertEquals(
+                3,
+                afterCleanup.getFinishedTaskListCount(),
                 "cleanup must not trim inside the retain window");
         assertEquals(List.of(1L, 2L, 3L), finishedRids(afterCleanup));
     }
@@ -226,7 +244,8 @@ class CompletionRetainWindowTest {
         }
 
         EngineRpcService.WorkerStatusPB bounded = workerStatus(prefill, 0);
-        assertTrue(bounded.getFinishedTaskListCount() <= 3,
+        assertTrue(
+                bounded.getFinishedTaskListCount() <= 3,
                 "backlog never exceeds the retain window across rounds");
         assertEquals(6, bounded.getLatestFinishedVersion());
         // The last round's records (rid 5, 6) plus one older (rid 4) — the
@@ -262,12 +281,13 @@ class CompletionRetainWindowTest {
     private void awaitVersion(long expectedVersion) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(5_000);
         EngineRpcService.WorkerStatusPB last = workerStatus(prefill, 0);
-        while (last.getLatestFinishedVersion() < expectedVersion
-                && System.nanoTime() < deadline) {
+        while (last.getLatestFinishedVersion() < expectedVersion && System.nanoTime() < deadline) {
             Thread.sleep(10);
             last = workerStatus(prefill, 0);
         }
-        assertEquals(expectedVersion, last.getLatestFinishedVersion(),
+        assertEquals(
+                expectedVersion,
+                last.getLatestFinishedVersion(),
                 "completions did not publish within the timeout");
     }
 

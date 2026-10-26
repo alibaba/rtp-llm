@@ -39,16 +39,21 @@ public class DefaultDynamicCacheIntervalService implements DynamicCacheIntervalS
     private double rollingAverage = 0.0;
 
     public DefaultDynamicCacheIntervalService(ConfigService configService) {
-        WorkerRegistryConfig.CacheStatusConfig config = configService
-                .loadBalanceConfig().getWorkerRegistry().getCacheStatus();
+        WorkerRegistryConfig.CacheStatusConfig config =
+                configService.loadBalanceConfig().getWorkerRegistry().getCacheStatus();
         this.targetDiffSize = config.getTargetDiffSize();
         this.minIntervalMs = config.getMinRefreshIntervalMs();
         this.maxIntervalMs = config.getMaxRefreshIntervalMs();
-        this.currentIntervalMs = new AtomicLong(
-                Math.max(minIntervalMs, Math.min(maxIntervalMs, DEFAULT_INTERVAL_MS)));
+        this.currentIntervalMs =
+                new AtomicLong(
+                        Math.max(minIntervalMs, Math.min(maxIntervalMs, DEFAULT_INTERVAL_MS)));
 
-        log.info("DefaultDynamicIntervalManager initialized - target:{}, min:{}ms, max:{}ms, current:{}ms",
-                targetDiffSize, minIntervalMs, maxIntervalMs, currentIntervalMs.get());
+        log.info(
+                "DefaultDynamicIntervalManager initialized - target:{}, min:{}ms, max:{}ms, current:{}ms",
+                targetDiffSize,
+                minIntervalMs,
+                maxIntervalMs,
+                currentIntervalMs.get());
     }
 
     @Override

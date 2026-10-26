@@ -54,8 +54,7 @@ class ConcurrentDoubleSchedulingTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 62800;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private MockEngineTestCluster cluster;
     private ExecutorService workerPool;
@@ -65,11 +64,14 @@ class ConcurrentDoubleSchedulingTest {
 
     @BeforeEach
     void setUp() {
-        workerPool = Executors.newFixedThreadPool(200, runnable -> {
-            Thread thread = new Thread(runnable, "concurrent-test-worker");
-            thread.setDaemon(true);
-            return thread;
-        });
+        workerPool =
+                Executors.newFixedThreadPool(
+                        200,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "concurrent-test-worker");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
     }
 
     @AfterEach
@@ -112,18 +114,19 @@ class ConcurrentDoubleSchedulingTest {
 
             // Path A: enqueueBatch → schedulePrefillCompletion → prefill done
             //         → startDecode → decode.scheduleDecodeCompletion
-            workerPool.submit(() -> {
-                try {
-                    startGate.await();
-                    EngineRpcService.GenerateInputPB input =
-                            inputWithDecode(requestId, 10, decodePort);
-                    enqueue(prefill, batch(batchId, slot(0, input)));
-                } catch (Throwable t) {
-                    errors.incrementAndGet();
-                } finally {
-                    allDone.countDown();
-                }
-            });
+            workerPool.submit(
+                    () -> {
+                        try {
+                            startGate.await();
+                            EngineRpcService.GenerateInputPB input =
+                                    inputWithDecode(requestId, 10, decodePort);
+                            enqueue(prefill, batch(batchId, slot(0, input)));
+                        } catch (Throwable t) {
+                            errors.incrementAndGet();
+                        } finally {
+                            allDone.countDown();
+                        }
+                    });
 
             // Path B: generateStreamCall on decode engine with the SAME requestId
             //         → decode.scheduleDecodeCompletion (immediate)
@@ -135,33 +138,38 @@ class ConcurrentDoubleSchedulingTest {
             // The test's goal is to verify no inflight leak, not response
             // delivery. The poller threads are cleaned up in tearDown via
             // service.shutdown() → responseExecutor.shutdownNow().
-            workerPool.submit(() -> {
-                try {
-                    startGate.await();
-                    EngineRpcService.GenerateInputPB input = input(requestId, 10);
-                    decode.generateStreamCall(input, new StreamObserver<>() {
-                        @Override
-                        public void onNext(EngineRpcService.GenerateOutputsPB value) { }
+            workerPool.submit(
+                    () -> {
+                        try {
+                            startGate.await();
+                            EngineRpcService.GenerateInputPB input = input(requestId, 10);
+                            decode.generateStreamCall(
+                                    input,
+                                    new StreamObserver<>() {
+                                        @Override
+                                        public void onNext(
+                                                EngineRpcService.GenerateOutputsPB value) {}
 
-                        @Override
-                        public void onError(Throwable throwable) { }
+                                        @Override
+                                        public void onError(Throwable throwable) {}
 
-                        @Override
-                        public void onCompleted() { }
+                                        @Override
+                                        public void onCompleted() {}
+                                    });
+                        } catch (Throwable t) {
+                            errors.incrementAndGet();
+                        } finally {
+                            allDone.countDown();
+                        }
                     });
-                } catch (Throwable t) {
-                    errors.incrementAndGet();
-                } finally {
-                    allDone.countDown();
-                }
-            });
         }
 
         // Release all 200 tasks simultaneously to maximise scheduling overlap
         startGate.countDown();
 
         // Wait for all tasks (100 enqueue + 100 generateStream) to return
-        assertTrue(allDone.await(15, TimeUnit.SECONDS),
+        assertTrue(
+                allDone.await(15, TimeUnit.SECONDS),
                 "all tasks should complete within 15s, remaining: " + allDone.getCount());
 
         // Wait for all inflight to drain (prefill + decode completions)
@@ -172,9 +180,12 @@ class ConcurrentDoubleSchedulingTest {
 
         // Verify runningTasks is empty on all engines
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            assertEquals(0, service.getRunningCount(),
+            assertEquals(
+                    0,
+                    service.getRunningCount(),
                     "runningTasks should be empty for engine on port " + service.getGrpcPort());
-            assertFalse(service.isLeakDetected(),
+            assertFalse(
+                    service.isLeakDetected(),
                     "no leak should be detected on engine on port " + service.getGrpcPort());
         }
 
@@ -204,23 +215,25 @@ class ConcurrentDoubleSchedulingTest {
             final int decodePort = decodeServices.get(decodeIdx).getGrpcPort();
             final long batchId = 40000L + i;
 
-            workerPool.submit(() -> {
-                try {
-                    startGate.await();
-                    EngineRpcService.GenerateInputPB input =
-                            inputWithDecode(requestId, 10, decodePort);
-                    enqueue(prefill, batch(batchId, slot(0, input)));
-                } catch (Throwable t) {
-                    errors.incrementAndGet();
-                } finally {
-                    allDone.countDown();
-                }
-            });
+            workerPool.submit(
+                    () -> {
+                        try {
+                            startGate.await();
+                            EngineRpcService.GenerateInputPB input =
+                                    inputWithDecode(requestId, 10, decodePort);
+                            enqueue(prefill, batch(batchId, slot(0, input)));
+                        } catch (Throwable t) {
+                            errors.incrementAndGet();
+                        } finally {
+                            allDone.countDown();
+                        }
+                    });
         }
 
         startGate.countDown();
 
-        assertTrue(allDone.await(10, TimeUnit.SECONDS),
+        assertTrue(
+                allDone.await(10, TimeUnit.SECONDS),
                 "all tasks should complete within 10s, remaining: " + allDone.getCount());
 
         awaitAllInflightZero(5_000);
@@ -228,9 +241,12 @@ class ConcurrentDoubleSchedulingTest {
         assertAllInflightZero();
 
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            assertEquals(0, service.getRunningCount(),
+            assertEquals(
+                    0,
+                    service.getRunningCount(),
                     "runningTasks should be empty for engine on port " + service.getGrpcPort());
-            assertFalse(service.isLeakDetected(),
+            assertFalse(
+                    service.isLeakDetected(),
                     "no leak should be detected on engine on port " + service.getGrpcPort());
         }
 
@@ -259,9 +275,8 @@ class ConcurrentDoubleSchedulingTest {
 
     // ──────────── Model helper ────────────
 
-    private MockPerformanceModel model(String prefillFormula, double decodeStepMs) throws Exception {
-        return MockEngineTestSupport.performanceModel(
-                tempDir, prefillFormula, 0.1, decodeStepMs);
+    private MockPerformanceModel model(String prefillFormula, double decodeStepMs)
+            throws Exception {
+        return MockEngineTestSupport.performanceModel(tempDir, prefillFormula, 0.1, decodeStepMs);
     }
-
 }

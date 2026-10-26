@@ -26,8 +26,7 @@ class CacheHitTheoryStatsTest {
     void should_keep_exact_sums_after_concurrent_updates() {
         CacheHitTheoryStats stats = new CacheHitTheoryStats(() -> 0L);
 
-        IntStream.range(0, 100_000).parallel()
-                .forEach(ignored -> stats.record(1L, 4L, 0L));
+        IntStream.range(0, 100_000).parallel().forEach(ignored -> stats.record(1L, 4L, 0L));
         CacheHitTheoryStats.Snapshot snapshot = stats.record(0L, 0L, 0L);
 
         assertEquals(100_000L, snapshot.getAllHitCount());

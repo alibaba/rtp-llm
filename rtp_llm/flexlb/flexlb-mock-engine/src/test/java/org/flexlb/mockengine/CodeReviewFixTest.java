@@ -54,8 +54,7 @@ class CodeReviewFixTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 62900;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private ExecutorService workerPool;
@@ -66,16 +65,21 @@ class CodeReviewFixTest {
 
     @BeforeEach
     void setUp() {
-        scheduler = Executors.newScheduledThreadPool(8, runnable -> {
-            Thread thread = new Thread(runnable, "codereview-fix-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
-        workerPool = Executors.newCachedThreadPool(r -> {
-            Thread thread = new Thread(r, "codereview-fix-worker");
-            thread.setDaemon(true);
-            return thread;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        8,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "codereview-fix-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
+        workerPool =
+                Executors.newCachedThreadPool(
+                        r -> {
+                            Thread thread = new Thread(r, "codereview-fix-worker");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         services = new ConcurrentHashMap<>();
         prefillServices = new ArrayList<>();
         decodeServices = new ArrayList<>();
@@ -130,29 +134,32 @@ class CodeReviewFixTest {
         invokeScheduleDecodeCompletion(decode, shape, -1, null);
 
         // After scheduling, all three counters must reflect the single request.
-        assertEquals(1, getActiveDecodeRequests(decode),
+        assertEquals(
+                1,
+                getActiveDecodeRequests(decode),
                 "activeDecodeRequests should be 1 after scheduling");
-        assertEquals(expectedKvTokens, decode.getActiveKvTokens(),
+        assertEquals(
+                expectedKvTokens,
+                decode.getActiveKvTokens(),
                 "activeKvTokens should be " + expectedKvTokens + " after scheduling");
-        assertEquals(1, decode.getInflightCount(),
-                "pendingRequests should be 1 after scheduling");
-        assertEquals(1, decode.getRunningCount(),
+        assertEquals(1, decode.getInflightCount(), "pendingRequests should be 1 after scheduling");
+        assertEquals(
+                1,
+                decode.getRunningCount(),
                 "runningTasks should contain 1 entry after scheduling");
 
         // Cancel the request mid-flight.
         decode.cancel(requestId);
 
         // All counters must now be zero — this is the core of the fix.
-        assertEquals(0, getActiveDecodeRequests(decode),
+        assertEquals(
+                0,
+                getActiveDecodeRequests(decode),
                 "activeDecodeRequests should be 0 after cancel");
-        assertEquals(0, decode.getActiveKvTokens(),
-                "activeKvTokens should be 0 after cancel");
-        assertEquals(0, decode.getInflightCount(),
-                "pendingRequests should be 0 after cancel");
-        assertEquals(0, decode.getRunningCount(),
-                "runningTasks should be empty after cancel");
-        assertFalse(decode.isLeakDetected(),
-                "no leak should be detected after cancel");
+        assertEquals(0, decode.getActiveKvTokens(), "activeKvTokens should be 0 after cancel");
+        assertEquals(0, decode.getInflightCount(), "pendingRequests should be 0 after cancel");
+        assertEquals(0, decode.getRunningCount(), "runningTasks should be empty after cancel");
+        assertFalse(decode.isLeakDetected(), "no leak should be detected after cancel");
     }
 
     // ──────────── Test 2: cancelled request not forwarded to decode ────────────
@@ -191,24 +198,34 @@ class CodeReviewFixTest {
         awaitAllInflightZero(5_000);
 
         // The decode engine must not have received the request.
-        assertEquals(0, decode.getInflightCount(),
+        assertEquals(
+                0,
+                decode.getInflightCount(),
                 "decode pendingRequests should be 0 — request must not be forwarded");
-        assertEquals(0, decode.getRunningCount(),
+        assertEquals(
+                0,
+                decode.getRunningCount(),
                 "decode runningTasks should be empty — request must not be forwarded");
-        assertEquals(0, decode.getActiveKvTokens(),
+        assertEquals(
+                0,
+                decode.getActiveKvTokens(),
                 "decode activeKvTokens should be 0 — request must not be forwarded");
-        assertEquals(0, decode.getAcceptedCount(),
+        assertEquals(
+                0,
+                decode.getAcceptedCount(),
                 "decode acceptedCount should be 0 — request must not be forwarded");
 
         // Prefill engine should also be clean.
-        assertEquals(0, prefill.getInflightCount(),
+        assertEquals(
+                0,
+                prefill.getInflightCount(),
                 "prefill pendingRequests should be 0 after completion");
-        assertEquals(0, prefill.getRunningCount(),
+        assertEquals(
+                0,
+                prefill.getRunningCount(),
                 "prefill runningTasks should be empty after completion");
-        assertFalse(prefill.isLeakDetected(),
-                "no leak should be detected on prefill engine");
-        assertFalse(decode.isLeakDetected(),
-                "no leak should be detected on decode engine");
+        assertFalse(prefill.isLeakDetected(), "no leak should be detected on prefill engine");
+        assertFalse(decode.isLeakDetected(), "no leak should be detected on decode engine");
     }
 
     // ──────────── Test 3: putIfAbsent atomic under concurrency ────────────
@@ -244,50 +261,64 @@ class CodeReviewFixTest {
 
         // All threads attempt to schedule the SAME requestId concurrently.
         for (int i = 0; i < nThreads; i++) {
-            workerPool.submit(() -> {
-                try {
-                    startGate.await();
-                    invokeScheduleDecodeCompletion(decode, shape, -1, null);
-                } catch (Throwable t) {
-                    errors.incrementAndGet();
-                } finally {
-                    allDone.countDown();
-                }
-            });
+            workerPool.submit(
+                    () -> {
+                        try {
+                            startGate.await();
+                            invokeScheduleDecodeCompletion(decode, shape, -1, null);
+                        } catch (Throwable t) {
+                            errors.incrementAndGet();
+                        } finally {
+                            allDone.countDown();
+                        }
+                    });
         }
 
         // Release all threads simultaneously to maximise scheduling overlap.
         startGate.countDown();
-        assertTrue(allDone.await(10, TimeUnit.SECONDS),
+        assertTrue(
+                allDone.await(10, TimeUnit.SECONDS),
                 "all threads should complete within 10s, remaining: " + allDone.getCount());
         assertEquals(0, errors.get(), "no errors expected from concurrent scheduling");
 
         // Only the first thread should have incremented the counters.
-        assertEquals(1, getActiveDecodeRequests(decode),
-                "activeDecodeRequests should be 1, not " + nThreads
+        assertEquals(
+                1,
+                getActiveDecodeRequests(decode),
+                "activeDecodeRequests should be 1, not "
+                        + nThreads
                         + " (putIfAbsent must reject duplicates)");
-        assertEquals(expectedKvTokens, decode.getActiveKvTokens(),
-                "activeKvTokens should be " + expectedKvTokens + ", not " + (nThreads * expectedKvTokens)
+        assertEquals(
+                expectedKvTokens,
+                decode.getActiveKvTokens(),
+                "activeKvTokens should be "
+                        + expectedKvTokens
+                        + ", not "
+                        + (nThreads * expectedKvTokens)
                         + " (putIfAbsent must reject duplicates)");
-        assertEquals(1, decode.getInflightCount(),
-                "pendingRequests should be 1, not " + nThreads
+        assertEquals(
+                1,
+                decode.getInflightCount(),
+                "pendingRequests should be 1, not "
+                        + nThreads
                         + " (putIfAbsent must reject duplicates)");
-        assertEquals(1, decode.getRunningCount(),
+        assertEquals(
+                1,
+                decode.getRunningCount(),
                 "runningTasks should contain 1 entry, not " + nThreads);
 
         // Wait for the single scheduled completion to drain all counters.
         awaitAllInflightZero(5_000);
 
-        assertEquals(0, getActiveDecodeRequests(decode),
+        assertEquals(
+                0,
+                getActiveDecodeRequests(decode),
                 "activeDecodeRequests should be 0 after completion");
-        assertEquals(0, decode.getActiveKvTokens(),
-                "activeKvTokens should be 0 after completion");
-        assertEquals(0, decode.getInflightCount(),
-                "pendingRequests should be 0 after completion");
-        assertEquals(0, decode.getRunningCount(),
-                "runningTasks should be empty after completion");
-        assertFalse(decode.isLeakDetected(),
-                "no leak should be detected after concurrent scheduling");
+        assertEquals(0, decode.getActiveKvTokens(), "activeKvTokens should be 0 after completion");
+        assertEquals(0, decode.getInflightCount(), "pendingRequests should be 0 after completion");
+        assertEquals(0, decode.getRunningCount(), "runningTasks should be empty after completion");
+        assertFalse(
+                decode.isLeakDetected(), "no leak should be detected after concurrent scheduling");
     }
 
     // ──────────── Cluster setup ────────────
@@ -296,26 +327,39 @@ class CodeReviewFixTest {
             throws IOException {
         for (int i = 0; i < nPrefill; i++) {
             int port = BASE_PORT + i;
-            JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                    "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                    port, services, scheduler, model, 100,
-                    new JavaMockEngineCluster.ClusterStats());
+            JavaMockEngineCluster.FastRpcService service =
+                    new JavaMockEngineCluster.FastRpcService(
+                            "prefill",
+                            EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                            port,
+                            services,
+                            scheduler,
+                            model,
+                            100,
+                            new JavaMockEngineCluster.ClusterStats());
             services.put(port, service);
             prefillServices.add(service);
         }
 
         for (int i = 0; i < nDecode; i++) {
             int port = BASE_PORT + nPrefill + i;
-            JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                    "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                    port, services, scheduler, model, 100,
-                    new JavaMockEngineCluster.ClusterStats());
+            JavaMockEngineCluster.FastRpcService service =
+                    new JavaMockEngineCluster.FastRpcService(
+                            "decode",
+                            EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
+                            port,
+                            services,
+                            scheduler,
+                            model,
+                            100,
+                            new JavaMockEngineCluster.ClusterStats());
             services.put(port, service);
             decodeServices.add(service);
         }
 
-        controlServer = new MockControlServer(
-                services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
+        controlServer =
+                new MockControlServer(
+                        services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
         controlServer.start();
     }
 
@@ -324,17 +368,19 @@ class CodeReviewFixTest {
     private void awaitAllInflightZero(long timeoutMs) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
-            if (services.values().stream()
-                    .allMatch(s -> s.getInflightCount() == 0)) {
+            if (services.values().stream().allMatch(s -> s.getInflightCount() == 0)) {
                 return;
             }
             Thread.sleep(10);
         }
         StringBuilder sb = new StringBuilder("inflight not zero: ");
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            sb.append("port=").append(service.getGrpcPort())
-                    .append(" inflight=").append(service.getInflightCount())
-                    .append(" running=").append(service.getRunningCount())
+            sb.append("port=")
+                    .append(service.getGrpcPort())
+                    .append(" inflight=")
+                    .append(service.getInflightCount())
+                    .append(" running=")
+                    .append(service.getRunningCount())
                     .append(" ");
         }
         fail(sb.toString());
@@ -369,8 +415,7 @@ class CodeReviewFixTest {
 
     private MockPerformanceModel model(String prefillFormula, double decodeStepMs)
             throws Exception {
-        return MockEngineTestSupport.performanceModel(
-                tempDir, prefillFormula, 0.1, decodeStepMs);
+        return MockEngineTestSupport.performanceModel(tempDir, prefillFormula, 0.1, decodeStepMs);
     }
 
     // ──────────── Shape helper ────────────
@@ -383,5 +428,4 @@ class CodeReviewFixTest {
             MockPerformanceModel model, long requestId, int inputTokens) {
         return MockEngineTestSupport.requestShape(model, requestId, inputTokens);
     }
-
 }

@@ -13,7 +13,6 @@ from online_eval.rt_model import (  # noqa: E402
     extract_prefill_expression_from_master_config,
 )
 
-
 EXPRESSION = (
     "max(10, 1 + 2*log(batchSize + 1) "
     "+ 0.5*sum(hitCacheTokens) "
