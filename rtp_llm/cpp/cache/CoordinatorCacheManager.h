@@ -5,6 +5,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -250,7 +251,8 @@ protected:
                                                      const std::shared_ptr<CPSlotMapper>& cp_mapper,
                                                      PreparedKVCache&                     prepared,
                                                      const std::function<bool(size_t)>&   valid_prefix = {},
-                                                     bool enable_storage_backend                       = true);
+                                                     bool                                 enable_storage_backend = true,
+                                                     std::optional<int64_t>               request_id             = {});
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,
                                                                LoadAsyncContext* context,

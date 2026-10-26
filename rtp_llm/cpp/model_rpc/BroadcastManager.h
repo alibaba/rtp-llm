@@ -1,12 +1,15 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -16,6 +19,17 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
+
+inline bool isGrpcConnectFailure(const grpc::Status& status) {
+    if (status.error_code() != grpc::StatusCode::UNAVAILABLE) {
+        return false;
+    }
+    auto message = status.error_message();
+    std::transform(message.begin(), message.end(), message.begin(), [](unsigned char c) { return std::tolower(c); });
+    return message.find("connect failed") != std::string::npos
+           || message.find("failed to connect to all addresses") != std::string::npos
+           || message.find("failed to connect to remote host") != std::string::npos;
+}
 
 template<typename RequestPB, typename ResponsePB>
 class BroadcastResult {
@@ -29,14 +43,20 @@ public:
         ResponsePB                           response;
         grpc::Status                         status;
         std::string                          server_addr;
-        int                                  timeout_ms;
+        int                                  timeout_ms{0};
     };
 
 public:
-    explicit BroadcastResult(const std::vector<std::shared_ptr<WorkerRpcContext>>& worker_rpc_contexts):
+    explicit BroadcastResult(const std::vector<std::shared_ptr<WorkerRpcContext>>& worker_rpc_contexts,
+                             std::optional<int64_t>                                request_id = std::nullopt,
+                             std::string                                           direction  = "unknown",
+                             std::function<void(const std::string&)>               connect_failure_reporter = {}):
         worker_contexts_(worker_rpc_contexts),
         finished_(worker_rpc_contexts.size(), false),
-        rpc_succeeded_(worker_rpc_contexts.size(), false) {}
+        rpc_succeeded_(worker_rpc_contexts.size(), false),
+        direction_(std::move(direction)),
+        rpc_tag_("request_id=" + (request_id ? std::to_string(*request_id) : "none") + " direction=" + direction_),
+        connect_failure_reporter_(std::move(connect_failure_reporter)) {}
     ~BroadcastResult() = default;
 
 public:
@@ -54,7 +74,7 @@ public:
         } else {
             wait_done_cv_.wait(lock, completed);
         }
-        const std::string fatal_error = fatal_error_;
+        const std::string fatal_error = fatal_error_.empty() ? std::string{} : failureSummaryNoLock();
         lock.unlock();
         if (!fatal_error.empty()) {
             RTP_LLM_FAIL("%s", fatal_error.c_str());
@@ -77,6 +97,11 @@ public:
 
     bool deadlineExceeded() const {
         return deadline_exceeded_.load(std::memory_order_acquire);
+    }
+
+    std::string failureSummary() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        return failureSummaryNoLock();
     }
 
     void onDone(DoneCallback callback) {
@@ -109,13 +134,14 @@ public:
 
     void finishRank(size_t rank, bool cq_event_ok) {
         std::vector<DoneCallback> callbacks;
+        bool                      report_connect_failure = false;
         {
             std::lock_guard<std::mutex> lock(wait_done_mutex_);
             if (already_done_.load(std::memory_order_relaxed)) {
                 return;
             }
             if (rank >= worker_contexts_.size()) {
-                fatal_error_ = "broadcast rpc cq tag rank out of range: rank=" + std::to_string(rank);
+                fatal_error_ = "broadcast rpc cq tag rank out of range: rank=" + std::to_string(rank) + " " + rpc_tag_;
                 finishLocked(callbacks);
             } else if (finished_[rank]) {
                 return;
@@ -124,31 +150,51 @@ public:
                 ++finished_count_;
                 const auto& ctx = worker_contexts_[rank];
                 rpc_succeeded_[rank] = cq_event_ok && ctx->status.ok();
+                if (!rpc_succeeded_[rank]) {
+                    const auto summary = rpc_tag_ + " target_rank=" + std::to_string(rank) + " addr=" + ctx->server_addr
+                                         + " grpc_code=" + std::to_string(ctx->status.error_code())
+                                         + " error=" + ctx->status.error_message();
+                    if (rpc_failure_summary_.empty()) {
+                        rpc_failure_summary_ = summary;
+                    }
+                    report_connect_failure = cq_event_ok && isGrpcConnectFailure(ctx->status);
+                    if (report_connect_failure && connect_failure_summary_.empty()) {
+                        connect_failure_summary_ = summary;
+                    }
+                }
                 if (!cq_event_ok) {
                     // A deadline reported by any rank is the aggregate error.
                     // Do not let a later CQ failure replace its message while
                     // deadlineExceeded() continues to report true.
                     if (!deadline_exceeded_.load(std::memory_order_acquire) && fatal_error_.empty()) {
-                        fatal_error_ =
-                            "broadcast rpc cq event failed, rank=" + std::to_string(rank) + " addr=" + ctx->server_addr;
+                        fatal_error_ = "broadcast rpc cq event failed, rank=" + std::to_string(rank)
+                                       + " addr=" + ctx->server_addr + " " + rpc_tag_;
                     }
                 } else if (ctx->status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
                     if (!deadline_exceeded_.exchange(true, std::memory_order_acq_rel)) {
                         fatal_error_ = "broadcast rpc timeout, timeout_ms=" + std::to_string(ctx->timeout_ms) + " rank="
                                        + std::to_string(rank) + " err=" + std::to_string(ctx->status.error_code()) + "("
-                                       + ctx->status.error_message() + ") addr=" + ctx->server_addr;
+                                       + ctx->status.error_message() + ") addr=" + ctx->server_addr + " " + rpc_tag_;
                     }
                 } else if (!ctx->status.ok()) {
-                    RTP_LLM_LOG_WARNING("broadcast rpc failed, rank=%zu err=%d(%s) addr=%s",
+                    RTP_LLM_LOG_WARNING("broadcast rpc failed, rank=%zu err=%d(%s) addr=%s %s",
                                         rank,
                                         ctx->status.error_code(),
                                         ctx->status.error_message().c_str(),
-                                        ctx->server_addr.c_str());
+                                        ctx->server_addr.c_str(),
+                                        rpc_tag_.c_str());
                     grpc_status_failure_seen_ = true;
                 }
                 if (finished_count_ == static_cast<int>(worker_contexts_.size())) {
                     finishLocked(callbacks);
                 }
+            }
+        }
+        if (report_connect_failure && connect_failure_reporter_) {
+            try {
+                connect_failure_reporter_(direction_);
+            } catch (...) {
+                RTP_LLM_LOG_WARNING("connect failure reporter threw: %s", rpc_tag_.c_str());
             }
         }
         wait_done_cv_.notify_all();
@@ -160,6 +206,11 @@ public:
 private:
     friend class BroadcastManager;
 
+    std::string failureSummaryNoLock() const {
+        const auto& rpc_error = connect_failure_summary_.empty() ? rpc_failure_summary_ : connect_failure_summary_;
+        return fatal_error_.empty() ? rpc_error : fatal_error_ + (rpc_error.empty() ? "" : "; " + rpc_error);
+    }
+
     void finishLocked(std::vector<DoneCallback>& callbacks) {
         finished_count_ = static_cast<int>(worker_contexts_.size());
         all_request_success_.store(fatal_error_.empty() && !grpc_status_failure_seen_, std::memory_order_release);
@@ -170,6 +221,11 @@ private:
     std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts_;
     std::vector<bool>                              finished_;
     std::vector<bool>                              rpc_succeeded_;
+    const std::string                              direction_;
+    const std::string                              rpc_tag_;
+    const std::function<void(const std::string&)>  connect_failure_reporter_;
+    std::string                                    rpc_failure_summary_;
+    std::string                                    connect_failure_summary_;
     int                                            finished_count_{0};
     std::atomic<bool>                              already_done_{false};
     std::atomic<bool>                              all_request_success_{false};
@@ -183,7 +239,9 @@ private:
 
 class BroadcastManager {
 public:
-    explicit BroadcastManager(const std::vector<std::string>& worker_addrs): worker_addrs_(worker_addrs) {}
+    explicit BroadcastManager(const std::vector<std::string>&         worker_addrs,
+                              std::function<void(const std::string&)> connect_failure_reporter = {}):
+        worker_addrs_(worker_addrs), connect_failure_reporter_(std::move(connect_failure_reporter)) {}
     ~BroadcastManager() {
         if (completion_queue_) {
             completion_queue_->Shutdown();
@@ -208,8 +266,13 @@ public:
     }
 
     template<typename RequestPB, typename ResponsePB, typename RpcCall>
-    std::shared_ptr<BroadcastResult<RequestPB, ResponsePB>>
-    broadcast(const std::vector<RequestPB>& requests, int timeout_ms, const RpcCall& rpc_call) const {
+    std::shared_ptr<BroadcastResult<RequestPB, ResponsePB>> broadcast(const std::vector<RequestPB>& requests,
+                                                                      int                           timeout_ms,
+                                                                      const RpcCall&                rpc_call,
+                                                                      std::optional<int64_t> request_id = std::nullopt,
+                                                                      std::string direction = "unknown") const {
+        const auto rpc_tag =
+            "request_id=" + (request_id ? std::to_string(*request_id) : "none") + " direction=" + direction;
         const auto worker_size = worker_addrs_.size();
         if (requests.size() != worker_size) {
             RTP_LLM_LOG_WARNING(
@@ -230,7 +293,11 @@ public:
             const auto& addr        = worker_addrs_[rank];
             auto        conn_status = rpc_pool_->getConnection(addr);
             if (!conn_status.ok()) {
-                RTP_LLM_LOG_WARNING("broadcast: getConnection failed rank=%d addr=%s", rank, addr.c_str());
+                RTP_LLM_LOG_WARNING("broadcast: getConnection failed rank=%d addr=%s error=%s %s",
+                                    rank,
+                                    addr.c_str(),
+                                    conn_status.status().ToString().c_str(),
+                                    rpc_tag.c_str());
                 return nullptr;
             }
 
@@ -244,7 +311,7 @@ public:
             ctx->client_context->set_deadline(deadline);
         }
 
-        auto result = std::make_shared<ResultT>(std::move(contexts));
+        auto result = std::make_shared<ResultT>(contexts, request_id, std::move(direction), connect_failure_reporter_);
         for (int rank = 0; rank < worker_size; ++rank) {
             auto& ctx = result->worker_contexts_.at(rank);
             try {
@@ -254,9 +321,9 @@ public:
                 reader->Finish(&ctx->response, &ctx->status, tag.get());
                 (void)tag.release();
             } catch (const std::exception& error) {
-                RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d err=%s", rank, error.what());
+                RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d err=%s %s", rank, error.what(), rpc_tag.c_str());
             } catch (...) {
-                RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d unknown error", rank);
+                RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d unknown error %s", rank, rpc_tag.c_str());
             }
         }
 
@@ -301,6 +368,7 @@ private:
     }
 
     std::vector<std::string> worker_addrs_;
+    const std::function<void(const std::string&)> connect_failure_reporter_;
     std::shared_ptr<RPCPool>                  rpc_pool_;
     std::unique_ptr<grpc::CompletionQueue>    completion_queue_;
     std::thread                               completion_thread_;

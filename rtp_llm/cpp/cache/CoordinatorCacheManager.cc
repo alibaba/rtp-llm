@@ -471,12 +471,14 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
                                         const std::shared_ptr<CPSlotMapper>& cp_mapper,
                                         PreparedKVCache&                     prepared,
                                         const std::function<bool(size_t)>&   valid_prefix,
-                                        bool                                 enable_storage_backend) {
+                                        bool                                 enable_storage_backend,
+                                        std::optional<int64_t>               request_id) {
     if (!block_tree_cache_ || cache_keys.empty()) {
         return nullptr;
     }
     const int                         cp_scale     = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
-    BlockTreeMatchResult match_result = block_tree_cache_->match(cache_keys, valid_prefix, enable_storage_backend);
+    BlockTreeMatchResult match_result =
+        block_tree_cache_->match(cache_keys, valid_prefix, enable_storage_backend, request_id);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
@@ -561,7 +563,8 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
             [tokens = malloc_info.complete_token_ids, reuse_unit_tokens](size_t count) {
                 return tokens->isValidReuseLength(static_cast<int>(count) * reuse_unit_tokens);
             },
-            malloc_info.enable_storage_backend);
+            malloc_info.enable_storage_backend,
+            malloc_info.request_id);
         match_end_time_us  = currentTimeUs();
         match_cost_time_us = match_end_time_us - begin_us;
         load_attempted     = load_context != nullptr;
@@ -991,13 +994,8 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         }
         insert_keys.resize(publish_prefix);
         resources.resize(publish_prefix);
-        if (insert_info.is_resident) {
-            const size_t batch_resident_prefix_length =
-                block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, true);
-            resident_prefix_length += batch_resident_prefix_length;
-        } else {
-            block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier);
-        }
+        resident_prefix_length += block_tree_cache_->insert(
+            insert_keys, resources, insert_info.target_tier, insert_info.is_resident, insert_info.request_id);
     }
 }
 

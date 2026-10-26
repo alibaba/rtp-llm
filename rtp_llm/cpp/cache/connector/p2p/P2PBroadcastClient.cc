@@ -10,12 +10,15 @@
 namespace rtp_llm {
 
 P2PBroadcastClient::P2PBroadcastClient(const std::vector<std::string>& worker_addrs,
-                                       int64_t                         cancel_broadcast_timeout_ms):
-    worker_addrs_(worker_addrs), cancel_broadcast_timeout_ms_(cancel_broadcast_timeout_ms) {}
+                                       int64_t                                 cancel_broadcast_timeout_ms,
+                                       std::function<void(const std::string&)> connect_failure_reporter):
+    worker_addrs_(worker_addrs),
+    cancel_broadcast_timeout_ms_(cancel_broadcast_timeout_ms),
+    connect_failure_reporter_(std::move(connect_failure_reporter)) {}
 
 bool P2PBroadcastClient::init() {
     rpc_pool_             = std::make_shared<RPCPool>();
-    tp_broadcast_manager_ = std::make_shared<BroadcastManager>(worker_addrs_);
+    tp_broadcast_manager_ = std::make_shared<BroadcastManager>(worker_addrs_, connect_failure_reporter_);
     if (!tp_broadcast_manager_->init()) {
         RTP_LLM_LOG_ERROR("P2PBroadcastClient init failed: tp_broadcast_manager_ init failed");
         return false;
@@ -70,13 +73,17 @@ P2PBroadcastClient::broadcast(int64_t                                           
     };
 
     auto result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests, static_cast<int>(timeout_ms), rpc_call);
+        requests,
+        static_cast<int>(timeout_ms),
+        rpc_call,
+        request_id,
+        type == P2PConnectorBroadcastType::READ ? "PEER2D" : "D2PEER");
     if (!result) {
         RTP_LLM_LOG_WARNING("broadcast failed, cannot create broadcast result");
         return nullptr;
     }
 
-    return std::make_shared<Result>(unique_key, result);
+    return std::make_shared<Result>(unique_key, result, request_id);
 }
 
 void P2PBroadcastClient::genBroadcastRequest(
@@ -144,7 +151,8 @@ void P2PBroadcastClient::Result::checkDone() {
 }
 
 std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std::string&        unique_key,
-                                                                       P2PConnectorBroadcastType type) {
+                                                                       P2PConnectorBroadcastType type,
+                                                                       std::optional<int64_t>    request_id) {
     RTP_LLM_LOG_DEBUG("P2PBroadcastClient cancel: unique_key: %s", unique_key.c_str());
 
     // 构建 FunctionRequestPB
@@ -157,6 +165,9 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
         auto              p2p_request = request.mutable_p2p_request();
         p2p_request->set_unique_key(unique_key);
         p2p_request->set_type(type);
+        if (request_id) {
+            p2p_request->set_request_id(*request_id);
+        }
         requests.push_back(std::move(request));
     }
 
@@ -171,7 +182,11 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
     };
 
     auto result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests, static_cast<int>(timeout_ms), rpc_call);
+        requests,
+        static_cast<int>(timeout_ms),
+        rpc_call,
+        request_id,
+        type == P2PConnectorBroadcastType::CANCEL_READ ? "CANCEL_PEER2D" : "CANCEL_D2PEER");
     if (!result) {
         RTP_LLM_LOG_WARNING("P2PBroadcastClient cancel: broadcast failed, unique_key: %s", unique_key.c_str());
         return nullptr;
@@ -179,7 +194,7 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
 
     // 不等待结果，异步发送取消请求即可
     RTP_LLM_LOG_DEBUG("P2PBroadcastClient cancel: broadcast sent, unique_key: %s", unique_key.c_str());
-    return std::make_shared<Result>(unique_key, result);
+    return std::make_shared<Result>(unique_key, result, request_id);
 }
 
 ErrorCode P2PBroadcastClient::Result::errorCode() const {
@@ -206,17 +221,19 @@ std::string P2PBroadcastClient::Result::errorMessage() const {
         return "P2PBroadcastClient::Result not done yet";
     }
     auto responses = tp_broadcast_result_->responses();
+    const auto rpc_failure = tp_broadcast_result_->failureSummary();
     for (size_t rank = 0; rank < responses.size(); ++rank) {
         const auto& response = responses[rank];
         if (response.has_p2p_response()) {
             const auto& p2p_response = response.p2p_response();
             if (p2p_response.error_code() != ErrorCodePB::NONE_ERROR && !p2p_response.error_message().empty()) {
-                return "RANK " + std::to_string(rank) + ": " + p2p_response.error_message();
+                return "RANK " + std::to_string(rank) + ": " + p2p_response.error_message()
+                       + (rpc_failure.empty() ? "" : "; " + rpc_failure);
             }
         }
     }
     if (!tp_broadcast_result_->success()) {
-        return "P2PBroadcastClient broadcast failed";
+        return "P2PBroadcastClient broadcast failed: " + tp_broadcast_result_->failureSummary();
     }
     return "";
 }

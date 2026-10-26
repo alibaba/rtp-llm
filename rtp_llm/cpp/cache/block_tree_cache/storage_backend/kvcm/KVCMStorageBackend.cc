@@ -425,7 +425,7 @@ public:
                 remote->add_uris(std::string(location_spec.uri));
             }
         }
-        (void)dispatchRequests(requests, kv_cache_config_.kvcm_get_broadcast_timeout);
+        (void)dispatchRequests(requests, kv_cache_config_.kvcm_get_broadcast_timeout, request.request_id);
         // A canonical CP key already covers every shard. Do not multiply this
         // logical token count by the number of TP ranks or payload groups.
         collector.remote_read_token_num =
@@ -523,10 +523,9 @@ public:
 
             const auto responses = [&] {
                 const auto stage_start = Clock::now();
-                block_tree_cache_detail::ScopeRollback timer([&] {
-                    collector.remote_write_broadcast_time_us = elapsedTimeUs(stage_start);
-                });
-                return dispatchRequests(requests, kv_cache_config_.kvcm_put_broadcast_timeout);
+                block_tree_cache_detail::ScopeRollback timer(
+                    [&] { collector.remote_write_broadcast_time_us = elapsedTimeUs(stage_start); });
+                return dispatchRequests(requests, kv_cache_config_.kvcm_put_broadcast_timeout, request.request_id);
             }();
             bool       has_actual_uri = false;
             for (size_t rank = 0; rank < responses.size(); ++rank) {
@@ -1143,7 +1142,11 @@ private:
         return result;
     }
 
-    std::vector<FunctionResponsePB> dispatchRequests(const std::vector<FunctionRequestPB>& requests, int timeout_ms) {
+    std::vector<FunctionResponsePB> dispatchRequests(const std::vector<FunctionRequestPB>& requests,
+                                                     int                                   timeout_ms,
+                                                     std::optional<int64_t>                request_id) {
+        const auto&                     remote    = requests.front().remote_request();
+        const std::string               direction = remote.op() == REMOTE_OPERATION_READ ? "REMOTE2D" : "D2REMOTE";
         std::vector<FunctionResponsePB> responses;
         if (!broadcast_manager_) {
             RTP_LLM_CHECK_WITH_INFO(
@@ -1158,8 +1161,8 @@ private:
                                grpc::CompletionQueue*                      queue) {
                 return stub->AsyncExecuteFunction(context.get(), request, queue);
             };
-            auto result =
-                broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, timeout_ms, rpc_call);
+            auto result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+                requests, timeout_ms, rpc_call, request_id, direction);
             if (result == nullptr) {
                 throw StorageOperationCompletionUnknown("KVCM broadcast dispatch failed",
                                                         StorageQuarantineReason::RPC_ERROR);
@@ -1175,11 +1178,13 @@ private:
                     std::string("KVCM broadcast completion is unknown: ") + exception.what(),
                     StorageQuarantineReason::RPC_ERROR);
             } catch (...) {
-                throw StorageOperationCompletionUnknown("KVCM broadcast completion is unknown",
+                throw StorageOperationCompletionUnknown("KVCM broadcast completion is unknown: "
+                                                            + result->failureSummary(),
                                                         StorageQuarantineReason::RPC_ERROR);
             }
             if (!result->success()) {
-                throw StorageOperationCompletionUnknown("KVCM broadcast completion is unknown",
+                throw StorageOperationCompletionUnknown("KVCM broadcast completion is unknown: "
+                                                            + result->failureSummary(),
                                                         StorageQuarantineReason::RPC_ERROR);
             }
             responses = result->responses();

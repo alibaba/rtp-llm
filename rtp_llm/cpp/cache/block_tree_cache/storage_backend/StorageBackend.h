@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -73,6 +74,7 @@ struct StorageRequest {
     // Match requests expose the complete key sequence. Keys before this
     // boundary are already available from Device/Host/Disk.
     size_t local_matched_blocks_num{0};
+    std::optional<int64_t> request_id;
 
     bool empty() const {
         for (const auto& key_handles : handles) {
