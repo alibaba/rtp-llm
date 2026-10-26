@@ -9,6 +9,15 @@ repos:
       - id: trailing-whitespace
 
     # Formatters
+  - repo: local
+    hooks:
+      - id: flexlb-java-format
+        name: Format FlexLB Java (Spotless / google-java-format)
+        entry: rtp_llm/flexlb/mvnw -f rtp_llm/flexlb/pom.xml --batch-mode --quiet spotless:apply -Pspotless-check
+        language: system
+        files: ^rtp_llm/flexlb/.*\.java$
+        pass_filenames: false
+
   - repo: https://github.com/psf/black-pre-commit-mirror
     rev: 24.8.0
     hooks:
@@ -27,5 +36,31 @@ repos:
       - id: clang-format
         types_or: [c++, c, cuda]
         exclude: ^rtp_llm/cpp/cutlass/
+      - id: clang-format
+        alias: flexlb-proto-format
+        name: Format FlexLB Protocol Buffers
+        files: ^rtp_llm/flexlb/.*\.proto$
+        types_or: [proto]
+        args: ["--style=Google"]
+
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.12.0-2
+    hooks:
+      - id: shfmt
+        files: ^rtp_llm/flexlb/(.*\.(sh|bash)|mvnw|.*/nginxctl)$
+        types: [text]
+        args: ["-w", "-i", "4", "-ci"]
+
+  - repo: https://github.com/rbubley/mirrors-prettier
+    rev: v3.6.2
+    hooks:
+      - id: prettier
+        name: Format FlexLB web files, configs and Markdown
+        entry: bash -c 'prettier --write --ignore-unknown --plugin "$NODE_PATH/@prettier/plugin-xml/src/plugin.js" "$@"' --
+        files: ^rtp_llm/flexlb/.*\.(m?js|html|json|xml|ya?ml|md)$
+        additional_dependencies:
+          - prettier@3.6.2
+          - "@prettier/plugin-xml@3.4.2"
+        args: ["--xml-whitespace-sensitivity=preserve"]
 
 exclude: ^rtp_llm/ops|^3rdparty
