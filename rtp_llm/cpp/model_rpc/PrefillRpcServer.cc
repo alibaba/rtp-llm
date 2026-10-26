@@ -840,6 +840,19 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                          static_cast<int64_t>(request->generate_config().timeout_ms()));
     }
     if (!pd_separation) {
+        const auto& model_type  = maga_init_params_.model_config_.model_type;
+        const auto& parallelism = maga_init_params_.parallelism_config;
+        const auto& cp_config   = parallelism.prefill_cp_config;
+        const bool  cp_kv_cache_sharded =
+            cp_config.kv_cache_sharded && cp_config.is_enabled() && parallelism.tp_size > 1;
+        if (resolved_max_new_tokens > 1 && (parallelism.dp_size > 1 || cp_kv_cache_sharded)
+            && (model_type == "minimax_m31" || model_type == "minimax_m31_vl")) {
+            return serializeErrorMsg(
+                std::to_string(request->request_id()),
+                ErrorInfo(ErrorCode::INVALID_PARAMS,
+                          "MiniMax-M3.1 PREFILL with DP>1 or sharded CP KV cache requires PD-separable generation "
+                          "for multi-token requests"));
+        }
         if (prefillTraceLogEnabled()) {
             RTP_LLM_LOG_INFO("Prefill request trace: event=bypass_local request_id=%ld token_ids=%d",
                              request->request_id(),

@@ -488,6 +488,7 @@ class GenerateEnvConfig:
         self.think_end_token_id: int = -1
         self.max_thinking_tokens: Optional[int] = None
         self.think_mode: str = "disabled"
+        self.think_mode_explicit: bool = False
         self.force_stop_words: bool = False
         self.stop_words_list: Optional[str] = None
         self.stop_words_str: Optional[str] = None

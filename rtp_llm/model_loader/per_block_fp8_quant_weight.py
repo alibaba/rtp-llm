@@ -4,7 +4,11 @@ from typing import Any, Dict, List, Optional, Union
 
 import torch
 
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, QuantizationConfig
+from rtp_llm.config.quant_config import (
+    Fp8BlockWiseQuantConfig,
+    Fp8MxBlockWiseQuantConfig,
+    QuantizationConfig,
+)
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.linear_attn_weight import (
@@ -324,6 +328,8 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             quant_config, Fp8BlockWiseQuantConfig
         ):
             return False
+        if isinstance(quant_config, Fp8MxBlockWiseQuantConfig):
+            return False
         name = src_weight_info.name
         if name not in cls.w8a8_weight_list:
             return False
@@ -344,6 +350,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         kernel: WeightModule
         scale: WeightModule
         self.group_size = quant_config.group_size()
+        self._mx_scale = isinstance(quant_config, Fp8MxBlockWiseQuantConfig)
         if src_weight_info.name == W.attn_qkv_w:
             kernel, scale = self._get_qkv_quant_weight(src_weight_info, self.group_size)
         elif src_weight_info.name == W.attn_o_w:
@@ -674,6 +681,16 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
 
     def _get_ffn_quant_weight(self, src_weight_info: FfnAtomicWeight, group_size: int):
         assert src_weight_info.name in [W.ffn_w1, W.ffn_w2, W.ffn_w3, W.ffn_w13]
+        # MX scales cover one weight row by 32 columns; block FP8 scales
+        # cover group_size rows and columns.
+        row_scale_align = (
+            src_weight_info.config.align_size
+            if self._mx_scale
+            else src_weight_info.config.align_size // group_size
+        )
+        col_scale_align = src_weight_info.config.align_size // (
+            32 if self._mx_scale else group_size
+        )
         weights = src_weight_info.weights
         w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
         if src_weight_info.name == W.ffn_w13:
@@ -706,7 +723,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                     ],
                     functools.partial(
                         pad_w13,
-                        align_size=src_weight_info.config.align_size // group_size,
+                        align_size=row_scale_align,
                         dim=0,
                     ),
                     data_type=torch.float32,
@@ -737,7 +754,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                 functools.partial(
                     pad,
-                    align_size=src_weight_info.config.align_size // group_size,
+                    align_size=row_scale_align,
                     dim=0,
                 ),
                 data_type=torch.float32,
@@ -763,7 +780,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
                 functools.partial(
                     pad,
-                    align_size=src_weight_info.config.align_size // group_size,
+                    align_size=col_scale_align,
                     dim=1,
                 ),
                 data_type=torch.float32,

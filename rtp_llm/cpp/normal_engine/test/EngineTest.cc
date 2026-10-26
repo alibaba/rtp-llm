@@ -255,7 +255,7 @@ TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
-    auto params                    = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    auto          params           = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
     params.pd_sep_config.role_type = RoleType::DECODE;
 
     bool saw_decode_warmup             = false;
@@ -285,14 +285,14 @@ TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
 
 TEST_F(NormalEngineTest, testCacheManagerInitFailureDoesNotPublishPartialState) {
     ModelConfig model;
-    model.num_layers                   = 1;
-    model.attn_config.head_num         = 1;
-    model.attn_config.kv_head_num      = 1;
-    model.attn_config.size_per_head    = 1;
+    model.num_layers                          = 1;
+    model.attn_config.head_num                = 1;
+    model.attn_config.kv_head_num             = 1;
+    model.attn_config.size_per_head           = 1;
     model.attn_config.tokens_per_block        = 1;
     model.attn_config.kernel_tokens_per_block = 1;
-    model.kv_cache_spec_descs          = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
-    const auto config                  = CacheConfigCreator::createWarmupConfig(model, {});
+    model.kv_cache_spec_descs                 = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
+    const auto config                         = CacheConfigCreator::createWarmupConfig(model, {});
 
     auto            previous  = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
     auto            candidate = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
@@ -410,7 +410,7 @@ TEST_F(NormalEngineTest, testPrefillWarmUpUsesCachelessSingleInput) {
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
-    auto params            = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    auto          params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
 
     const KVCacheSpecDesc default_desc{"default", KVCacheSpecType::MultiHeadAttention};
     KVCacheSpecDesc       indexer_desc{"indexer_kv", KVCacheSpecType::OpaqueKV};
@@ -520,6 +520,37 @@ TEST_F(NormalEngineTest, testDecodeRoleRejectsPrefillOnlyBeforeScheduling) {
     ASSERT_NE(positive_stream, nullptr);
     EXPECT_FALSE(positive_stream->hasError());
     EXPECT_EQ(positive_stream->curBlocksNum(), 0);
+}
+
+TEST_F(NormalEngineTest, testM31PrefillDpRejectsLocalMultiTokenAtEngineIngress) {
+    auto engine                          = createMockEngine(CustomConfig{});
+    engine->parallelism_config.role_type = RoleType::PREFILL;
+    engine->parallelism_config.dp_size   = 2;
+    engine->model_config_.model_type     = "minimax_m31";
+
+    auto make_query = [](bool pd_separation) {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 8;
+        query->generate_config->pd_separation  = pd_separation;
+        return query;
+    };
+    auto local = engine->makeStream(make_query(false));
+    EXPECT_TRUE(local->hasError());
+    EXPECT_EQ(local->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_FALSE(engine->makeStream(make_query(true))->hasError());
+
+    engine->parallelism_config.dp_size                            = 1;
+    engine->parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+    EXPECT_FALSE(engine->makeStream(make_query(false))->hasError());
+
+    engine->parallelism_config.tp_size                  = 2;
+    engine->parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    auto sharded_local                                  = engine->makeStream(make_query(false));
+    EXPECT_TRUE(sharded_local->hasError());
+    EXPECT_EQ(sharded_local->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
 }
 
 TEST_F(NormalEngineTest, testDirectEngineEntriesConvertPrefillValidationErrorsToStreamErrors) {
@@ -874,14 +905,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
     // whole-segment shape runs once during warmup and once while constructing the system prompt.
     ASSERT_EQ(*config.forward_shapes,
               (std::vector<ForwardShape>{
-                  {4, 0, 1},
-                  {4, 4, 1},
-                  {4, 8, 1},
-                  {4, 12, 1},
-                  {3, 16, 1},
-                  {16, 14, 4},
-                  {7, 0, 1},
-                  {7, 0, 1}}));
+                  {4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {16, 14, 4}, {7, 0, 1}, {7, 0, 1}}));
     const auto& cache_config = engine->resourceContext().cache_manager->cacheConfig();
     ASSERT_EQ(cache_config.groups().size(), 1u);
     ASSERT_EQ(cache_config.groups().front().block_num, 100u);
@@ -931,12 +955,12 @@ TEST_F(NormalEngineTest, testChunkedPrefillGenerationGraphWarmupUsesChunkShapes)
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
-    auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
-    params.parallelism_config.role_type                             = RoleType::PDFUSION;
-    params.hw_kernel_config.enable_cuda_graph                       = true;
+    auto          params                = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.parallelism_config.role_type = RoleType::PDFUSION;
+    params.hw_kernel_config.enable_cuda_graph                        = true;
     params.hw_kernel_config.generation_prefill_capture_token_buckets = {4, 8};
 
-    auto forward_shapes = std::make_shared<std::vector<ForwardShape>>();
+    auto forward_shapes                = std::make_shared<std::vector<ForwardShape>>();
     NormalExecutor::test_model_factory = [vocab = model_config.vocab_size, forward_shapes](const GptModelInitParams&) {
         return std::make_unique<MockModel>(vocab, forward_shapes);
     };
@@ -961,10 +985,10 @@ TEST_F(NormalEngineTest, testChunkedPrefillGenerationGraphWarmupUsesChunkShapes)
 
 TEST_F(NormalEngineTest, testChunkedPrefillLossWarmupUsesWholeSegment) {
     CustomConfig config;
-    config.warm_up             = true;
-    config.warm_up_with_loss   = true;
-    config.prefill_chunk_size  = 4;
-    config.forward_shapes      = std::make_shared<std::vector<ForwardShape>>();
+    config.warm_up            = true;
+    config.warm_up_with_loss  = true;
+    config.prefill_chunk_size = 4;
+    config.forward_shapes     = std::make_shared<std::vector<ForwardShape>>();
     (void)createMockEngine(config);
 
     ASSERT_EQ(*config.forward_shapes, (std::vector<ForwardShape>{{19 * 128, 0, 128}}));

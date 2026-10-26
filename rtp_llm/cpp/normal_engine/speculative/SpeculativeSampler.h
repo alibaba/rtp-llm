@@ -60,7 +60,8 @@ public:
                                     const torch::Tensor& temperature,
                                     const torch::Tensor& markov_w1,
                                     const torch::Tensor& markov_w2,
-                                    size_t               draft_vocab_size) const;
+                                    size_t               draft_vocab_size,
+                                    size_t               sampled_prefix_steps = 0) const;
 
 private:
     void batchSample(SpeculativeSamplerOutput&           sample_output,

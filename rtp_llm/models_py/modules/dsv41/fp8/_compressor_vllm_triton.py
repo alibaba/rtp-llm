@@ -62,6 +62,7 @@ import triton.language as tl
 from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
     trap_invalid_kv_access_enabled,
 )
+from rtp_llm.models_py.modules.indexer_mx_abi import use_mx_indexer_cache
 
 
 @triton.jit
@@ -202,6 +203,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
+    MX_INDEXER: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
 
@@ -476,6 +478,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
+    MX_INDEXER: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
 
@@ -663,8 +666,15 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
 
     tl.store(fp8_ptr + block, x_uint8, mask=mask)
 
-    scale_val = tl.exp2(exponent)
-    tl.store(scale_ptr.to(tl.pointer_type(tl.float32)), scale_val)
+    if MX_INDEXER:
+        # Four group-32 UE8M0 scale bytes share this token's power-of-two
+        # scale. The FP8 payload stays byte-identical to the old writer.
+        sf = tl.minimum(tl.maximum(exponent.to(tl.int32) + 127, 0), 254)
+        packed = sf | (sf << 8) | (sf << 16) | (sf << 24)
+        tl.store(scale_ptr.to(tl.pointer_type(tl.int32)), packed)
+    else:
+        scale_val = tl.exp2(exponent)
+        tl.store(scale_ptr.to(tl.pointer_type(tl.float32)), scale_val)
 
 
 # =============================================================================
@@ -863,6 +873,7 @@ def run_fused_compress_kv_write(
         BATCHED=batched,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         STATE_RING_ENTRIES=state_ring_entries,
+        MX_INDEXER=head_dim == 128 and use_mx_indexer_cache(kv_cache.device),
         num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),
     )
 

@@ -440,6 +440,13 @@ class ModelFactory:
             int(scheduler_config.max_batch_tokens_size),
         )
 
+        # M3.1 always uses its MegaMoE executor. Resolve the default before
+        # BackendManager decides whether to initialize an unused DeepEP wrapper.
+        if model_config.model_type in ("minimax_m31", "minimax_m31_vl"):
+            if engine_config.moe_config.moe_strategy not in ("auto", "mega_moe"):
+                raise ValueError("MiniMax-M3.1 requires moe_strategy=mega_moe")
+            engine_config.moe_config.moe_strategy = "mega_moe"
+
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
         engine_config.runtime_config.model_name = model_config.model_name
 
@@ -468,6 +475,12 @@ class ModelFactory:
 
         if not sp_config.checkpoint_path:
             return None
+
+        if (
+            sp_config.model_type == "minimax_m31_dspark"
+            and sp_config.type != SpeculativeType.DSPARK
+        ):
+            raise ValueError("MiniMax-M3.1 DSpARK requires SP_TYPE=dspark")
 
         # Current learned-draft SP engine supports MTP, EAGLE and DSpARK.
         if sp_config.type not in [

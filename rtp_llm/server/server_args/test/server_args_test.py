@@ -16,6 +16,19 @@ from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
 
+class ThinkingModeArgumentsTest(TestCase):
+    def test_explicit_cli_and_environment_disabled_are_preserved(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            default = server_args.setup_args([])
+            cli = server_args.setup_args(["--think_mode", "disabled"])
+        with patch.dict(os.environ, {"THINK_MODE": "disabled"}, clear=True):
+            env = server_args.setup_args([])
+
+        self.assertFalse(default.generate_env_config.think_mode_explicit)
+        self.assertTrue(cli.generate_env_config.think_mode_explicit)
+        self.assertTrue(env.generate_env_config.think_mode_explicit)
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {

@@ -20,6 +20,7 @@ public:
                             bool                               warm_up):
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
         propose_step_(sp_config.gen_num_per_cycle),
+        verify_step_(sp_config.verifySteps()),
         vocab_size_(model_config.vocab_size),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
@@ -189,6 +190,7 @@ protected:
     }
 
     int     propose_step_;
+    int     verify_step_;
     size_t  vocab_size_                = 0;
     bool    is_dspark_                 = false;
     int32_t dspark_mask_token_id_      = -1;

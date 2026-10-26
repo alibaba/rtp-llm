@@ -5,7 +5,7 @@ opentelemetry-exporter-otlp-proto-http==1.15.0
 # CUDA 13.2 / torch 2.11+cu130 / triton 3.6.0 dep set.
 # Includes official DeepEP main@a56d6156 built against NCCL 2.30.4 and
 # NVSHMEM 3.5.19, plus the RTP FlashInfer 0.6.9 CUDA 13.2 wheels.
-# FlashAttention 3 and nvidia_cutlass_dsl remain deferred.
+# FlashAttention 3 remains deferred.
 
 # Core torch stack — wheels mirrored to OSS by us; upstream is
 # https://download.pytorch.org/whl/cu130/.
@@ -27,14 +27,19 @@ triton==3.6.0
 flashinfer-python==0.6.9+8c4f4dcf
 flashinfer-cubin==0.6.9+8c4f4dcf
 
+# MiniMax M3.1 CP Prefill FMHA; universal Python/JIT source wheel.
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/fmha_sm100-0.1.1-py3-none-any.whl
+quack-kernels==0.4.1
+nvidia-cutlass-dsl==4.4.2
+
 # Upstream v1.1.0.post2@e7706faf, rebuilt for torch 2.11+cu130.
 fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue
 # Upstream v2.8.3.post1@a8aa52b1 with CUTLASS dc481792, rebuilt for CUDA 13.2.
 flash-attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1
 
 # Wheels built against torch 2.11+cu130.
-# DeepGEMM 122e18b is CI-built with gcc-toolset-13: opt_glm5 plus SM12x GEMMs.
-deep-gemm==2.8.0+122e18b.cu132
+# DeepGEMM 522942a provides MX FP8 MQA and NVFP4 MegaMoE on SM100.
+deep-gemm==2.8.2+522942a.cu132
 flash-mla==1.0.0+9241ae3
 
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.

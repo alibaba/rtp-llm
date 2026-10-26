@@ -169,6 +169,18 @@ public:
         engine_ = std::make_shared<TestEngineBase>(is_mtp_eagle);
     }
 
+    void setModelParallelismForTest(std::string    model_type,
+                                    int            dp_size,
+                                    bool           kv_cache_sharded = false,
+                                    int            tp_size          = 1,
+                                    CPRotateMethod cp_method        = CPRotateMethod::DISABLED) {
+        maga_init_params_.model_config_.model_type                              = model_type;
+        maga_init_params_.parallelism_config.dp_size                            = dp_size;
+        maga_init_params_.parallelism_config.tp_size                            = tp_size;
+        maga_init_params_.parallelism_config.prefill_cp_config.method           = cp_method;
+        maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded = kv_cache_sharded;
+    }
+
     void prepareGenerateInputForTest(PrefillGenerateContext& context) {
         prepareGenerateInput(context);
     }
@@ -355,6 +367,50 @@ TEST_F(PrefillRpcServerTest, GenerateStreamCallRejectsNullRequestBeforeDereferen
     ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
     EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
     EXPECT_NE(error_details.error_message().find("prefill generate request must not be null"), std::string::npos);
+}
+
+TEST(PrefillRpcServerRoutingTest, M31PrefillRejectsUnsafeLocalMultiTokenDecode) {
+    for (const auto& model_type : {"minimax_m31", "minimax_m31_vl"}) {
+        for (const bool sharded_cp : {false, true}) {
+            GenerateInputPB request;
+            request.set_request_id(1);
+            request.add_token_ids(0);
+            auto* config = request.mutable_generate_config();
+            config->set_max_new_tokens(8);
+            config->set_num_beams(2);
+            config->set_can_use_pd_separation(true);
+
+            TestPrefillRpcServer server;
+            server.setModelParallelismForTest(model_type,
+                                              sharded_cp ? 1 : 2,
+                                              sharded_cp,
+                                              sharded_cp ? 2 : 1,
+                                              sharded_cp ? CPRotateMethod::ALL_GATHER : CPRotateMethod::DISABLED);
+            grpc::ServerContext context;
+            const auto          status = server.GenerateStreamCall(&context, &request, nullptr);
+
+            EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+            ErrorDetailsPB error_details;
+            ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+            EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+            EXPECT_NE(error_details.error_message().find("requires PD-separable generation"), std::string::npos);
+        }
+
+        TestPrefillRpcServer flag_only_server;
+        flag_only_server.setModelParallelismForTest(model_type, 1, true);
+        GenerateInputPB flag_only_request;
+        flag_only_request.set_request_id(2);
+        flag_only_request.add_token_ids(0);
+        flag_only_request.mutable_generate_config()->set_max_new_tokens(8);
+        grpc::ServerContext flag_only_context;
+        const auto          flag_only_status =
+            flag_only_server.GenerateStreamCall(&flag_only_context, &flag_only_request, nullptr);
+        EXPECT_EQ(flag_only_status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+        ErrorDetailsPB flag_only_details;
+        ASSERT_TRUE(flag_only_details.ParseFromString(flag_only_status.error_details()));
+        EXPECT_EQ(flag_only_details.error_message().find("requires PD-separable generation"), std::string::npos);
+        EXPECT_NE(flag_only_details.error_message().find("writer"), std::string::npos);
+    }
 }
 
 TEST_F(PrefillRpcServerTest, explicitPrefillOnlyRejectsPositiveMaxNewTokensBeforeRouting) {

@@ -141,7 +141,9 @@ def _load_cache_grid_cases(path: str) -> List[Dict[str, int]]:
         ]
         block = int(config.get("cache_block_size", 4096))
         if block <= 0 or any(ratio < 0.0 or ratio >= 1.0 for ratio in ratios):
-            raise ValueError("cache_ratios must be in [0, 1) and block must be positive")
+            raise ValueError(
+                "cache_ratios must be in [0, 1) and block must be positive"
+            )
         raw_cases = []
         case_id = 0
         for seq_len in seq_lens:
@@ -679,7 +681,6 @@ def main() -> str:
             decode_test_length=args.decode_test_length,
             generate_config=generate_config,
             num_measures=args.num_measures,
-            log_path=server.log_file_path or "",
         )
 
         if args.partial == 2:

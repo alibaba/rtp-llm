@@ -7,10 +7,10 @@ when the cache is FP8 packed (132B/slot).
 End-to-end shape contract:
 
   q_fp8       [B, next_n, H, D]            float8_e4m3fn  (per-(t,h) quant)
-  w_fold      [B*next_n, H]                fp32           (per-token Q
-                                                            scale folded in)
+  w_fold      [B*next_n, H]                fp32 or bf16   (legacy folded or
+                                                            MX raw weights)
   kv_cache    [num_blocks, block_size, 1, D+4]  uint8     (132B per slot:
-                                                            128 FP8 K + 4B fp32 scale)
+                                                            128 FP8 K + 4B scale)
   context_lens[B, next_n]                  int32          (live K length per row)
   block_table [B, max_blocks]              int32          (logical→physical block id)
 
@@ -39,10 +39,14 @@ try:
 
     # DeepGEMM 2.8 renamed the group-128 MQA logits entry points to the
     # fp8_fp4_* family and switched q to a (tensor, sf|None) tuple.
-    _HAS_DEEP_GEMM = hasattr(_deep_gemm, "fp8_paged_mqa_logits") and hasattr(
+    _HAS_DEEP_GEMM_LEGACY = hasattr(_deep_gemm, "fp8_paged_mqa_logits")
+    _HAS_DEEP_GEMM_NEW = hasattr(_deep_gemm, "fp8_fp4_paged_mqa_logits")
+    _HAS_DEEP_GEMM = (_HAS_DEEP_GEMM_LEGACY or _HAS_DEEP_GEMM_NEW) and hasattr(
         _deep_gemm, "get_paged_mqa_logits_metadata"
     )
-    _HAS_DEEP_GEMM_MQA = hasattr(_deep_gemm, "fp8_mqa_logits")
+    _HAS_DEEP_GEMM_MQA = hasattr(_deep_gemm, "fp8_mqa_logits") or hasattr(
+        _deep_gemm, "fp8_fp4_mqa_logits"
+    )
     # DeepGEMM 2.8.1 tightens the SM100 logits contracts: paged MQA requires
     # varlen indices and non-paged MQA requires per-element MX q scale
     # factors, so the group-128 legacy calls (q without SF) are rejected on
@@ -54,8 +58,12 @@ try:
     _DEEP_GEMM_SM100_LEGACY_OK = bool(_match) and tuple(
         int(x) for x in _match.groups()
     ) < (2, 8, 1)
-except ImportError:
+except (ImportError, RuntimeError) as error:
+    if isinstance(error, RuntimeError) and torch.cuda.is_available():
+        raise
     _deep_gemm = None
+    _HAS_DEEP_GEMM_LEGACY = False
+    _HAS_DEEP_GEMM_NEW = False
     _HAS_DEEP_GEMM = False
     _HAS_DEEP_GEMM_MQA = False
     _DEEP_GEMM_SM100_LEGACY_OK = False
@@ -136,18 +144,19 @@ def fp8_paged_indexer_score(
     context_lens: torch.Tensor,  # [B, next_n] int32 — live K length per row
     block_size: int,  # tokens per cache block
     max_ctx_len: int,  # output T dim
+    *,
+    q_sf: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """One-shot FP8 paged indexer logits via DeepGEMM.
 
     Returns ``[B*next_n, max_ctx_len] fp32`` — feed straight to topk.
-    Padded columns past per-row ``context_lens[b, n]`` are left as
-    whatever DeepGEMM writes (use ``clean_logits=True`` if the
-    downstream topk needs ``-inf`` there; default False to save the
-    extra mask).
+    Padded columns past per-row ``context_lens[b, n]`` are ignored by the
+    downstream TopK, which masks each row to its live context length.
     """
     assert q_fp8.dtype == torch.float8_e4m3fn, f"q_fp8 dtype={q_fp8.dtype}"
     assert q_fp8.dim() == 4 and q_fp8.shape[-1] == INDEXER_HEAD_DIM
-    assert w_fold.dtype == torch.float32 and w_fold.dim() == 2
+    assert w_fold.dtype == (torch.bfloat16 if q_sf is not None else torch.float32)
+    assert w_fold.dim() == 2
     assert kv_pool_uint8.dtype == torch.uint8
     assert kv_pool_uint8.shape[-1] == INDEXER_ENTRY_BYTES
     assert block_table.dtype == torch.int32 and block_table.dim() == 2
@@ -162,6 +171,38 @@ def fp8_paged_indexer_score(
     num_blocks = total_slots // block_size
     kv_4d = kv_pool_uint8.view(num_blocks, block_size, 1, INDEXER_ENTRY_BYTES)
 
+    if q_sf is not None:
+        if not _HAS_DEEP_GEMM_NEW:
+            raise RuntimeError(
+                "MX FP8 indexer cache requires DeepGEMM's fp8_fp4_paged_mqa_logits"
+            )
+        batch, next_n, heads, dim = q_fp8.shape
+        rows = batch * next_n
+        request_ids = (
+            torch.arange(rows, dtype=torch.int32, device=q_fp8.device) // next_n
+        )
+        q_rows = q_fp8.reshape(rows, 1, heads, dim).contiguous()
+        sf_rows = q_sf.reshape(rows, 1, heads).contiguous()
+        lengths = context_lens.reshape(rows, 1).contiguous()
+        tables = (
+            block_table if next_n == 1 else block_table.repeat_interleave(next_n, dim=0)
+        ).contiguous()
+        schedule = _deep_gemm.get_paged_mqa_logits_metadata(
+            lengths, block_size, _get_num_sms(q_fp8.device), indices=request_ids
+        )
+        logits = _deep_gemm.fp8_fp4_paged_mqa_logits(
+            (q_rows, sf_rows),
+            kv_4d,
+            w_fold.contiguous(),
+            lengths,
+            tables,
+            schedule,
+            max_ctx_len,
+            indices=request_ids,
+        )
+        # Decode TopK already masks columns beyond each context length.
+        return logits.float()
+
     if not supports_paged_mqa_logits(q_fp8.device, block_size):
         from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
             legacy_fp8_paged_mqa_logits,
@@ -174,8 +215,21 @@ def fp8_paged_indexer_score(
     schedule = _deep_gemm.get_paged_mqa_logits_metadata(
         context_lens, block_size, num_sms
     )
-    return _deep_gemm.fp8_paged_mqa_logits(
-        q_fp8.contiguous(),
+    if _HAS_DEEP_GEMM_LEGACY:
+        return _deep_gemm.fp8_paged_mqa_logits(
+            q_fp8.contiguous(),
+            kv_4d,
+            w_fold.contiguous(),
+            context_lens,
+            block_table,
+            schedule,
+            max_ctx_len,
+        )
+    # On SM90 the renamed API retains FP8 K and FP32 per-token scales.
+    # SM100 requires MX scales/BF16 weights and is routed to the existing
+    # group-128 Triton implementation by supports_paged_mqa_logits.
+    return _deep_gemm.fp8_fp4_paged_mqa_logits(
+        (q_fp8.contiguous(), None),
         kv_4d,
         w_fold.contiguous(),
         context_lens,
@@ -213,6 +267,7 @@ def fp8_mqa_indexer_score(
     *,
     clean_logits: bool = False,
     max_seqlen_k: int = 0,
+    q_sf: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """One-shot non-paged FP8 indexer logits via DeepGEMM.
 
@@ -225,16 +280,42 @@ def fp8_mqa_indexer_score(
     """
     assert q_fp8.dtype == torch.float8_e4m3fn and q_fp8.dim() == 3
     assert q_fp8.shape[-1] == INDEXER_HEAD_DIM
-    assert w_fold.dtype == torch.float32 and w_fold.dim() == 2
+    assert w_fold.dtype == (torch.bfloat16 if q_sf is not None else torch.float32)
+    assert w_fold.dim() == 2
     assert w_fold.shape[0] == q_fp8.shape[0]
     assert k_quant.dtype == torch.float8_e4m3fn and k_quant.dim() == 2
     assert k_quant.shape[-1] == INDEXER_HEAD_DIM
-    assert k_scale.dtype == torch.float32 and k_scale.dim() == 1
+    assert k_scale.dtype == (torch.int32 if q_sf is not None else torch.float32)
+    assert k_scale.dim() == 1
     assert k_scale.shape[0] == k_quant.shape[0]
     assert cu_seqlen_ks.dtype == torch.int32 and cu_seqlen_ks.dim() == 1
     assert cu_seqlen_ke.dtype == torch.int32 and cu_seqlen_ke.dim() == 1
     assert cu_seqlen_ks.shape[0] == q_fp8.shape[0]
     assert cu_seqlen_ke.shape[0] == q_fp8.shape[0]
+
+    if q_sf is not None:
+        if not hasattr(_deep_gemm, "fp8_fp4_mqa_logits"):
+            raise RuntimeError(
+                "MX FP8 indexer cache requires DeepGEMM's fp8_fp4_mqa_logits"
+            )
+        from ._mqa_layout import normalize_mqa_logits
+
+        width = max_seqlen_k if max_seqlen_k > 0 else k_quant.shape[0]
+        logits = _deep_gemm.fp8_fp4_mqa_logits(
+            (q_fp8.contiguous(), q_sf.contiguous()),
+            (k_quant.contiguous(), k_scale.contiguous()),
+            w_fold.contiguous(),
+            cu_seqlen_ks.contiguous(),
+            cu_seqlen_ke.contiguous(),
+            width,
+        )
+        return normalize_mqa_logits(
+            logits,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            width,
+            relative=max_seqlen_k > 0,
+        )
 
     if not supports_mqa_logits(q_fp8.device):
         from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
@@ -251,12 +332,33 @@ def fp8_mqa_indexer_score(
             max_seqlen_k=max_seqlen_k,
         )
 
-    return _deep_gemm.fp8_mqa_logits(
-        q_fp8.contiguous(),
+    if hasattr(_deep_gemm, "fp8_mqa_logits"):
+        return _deep_gemm.fp8_mqa_logits(
+            q_fp8.contiguous(),
+            (k_quant.contiguous(), k_scale.contiguous()),
+            w_fold.contiguous(),
+            cu_seqlen_ks.contiguous(),
+            cu_seqlen_ke.contiguous(),
+            clean_logits,
+            max_seqlen_k,
+        )
+    # The renamed API takes a Q tuple and an explicit output width.
+    # SM100's MX-only contract is handled by the group-128 Triton path.
+    from ._mqa_layout import normalize_mqa_logits
+
+    width = max_seqlen_k if max_seqlen_k > 0 else k_quant.shape[0]
+    logits = _deep_gemm.fp8_fp4_mqa_logits(
+        (q_fp8.contiguous(), None),
         (k_quant.contiguous(), k_scale.contiguous()),
         w_fold.contiguous(),
         cu_seqlen_ks.contiguous(),
         cu_seqlen_ke.contiguous(),
-        clean_logits,
-        max_seqlen_k,
+        width,
+    )
+    return normalize_mqa_logits(
+        logits,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        width,
+        relative=max_seqlen_k > 0,
     )
