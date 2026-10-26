@@ -9,6 +9,15 @@
 namespace rtp_llm {
 namespace {
 
+TEST(TransferTaskTest, SubtasksPreserveQueryIdAndDeadline) {
+    TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
+    auto         child      = task.subtask(task.descriptors());
+    auto         grandchild = child.subtask(child.descriptors());
+    EXPECT_EQ(child.deadline(), task.deadline());
+    EXPECT_EQ(grandchild.deadline(), task.deadline());
+    EXPECT_EQ(grandchild.requestId(), 73);
+}
+
 TEST(TransferResultTest, MergePreservesMessagesAndHighestPriorityCode) {
     for (bool crc_first : {false, true}) {
         TransferResult crc(TransferStatus::CRC_MISMATCH);

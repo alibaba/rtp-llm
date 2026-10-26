@@ -53,12 +53,15 @@ public:
                      StorageRequest                                 storage_request = {});
     ~LoadAsyncContext() override;
 
-    bool     empty() const;
-    uint64_t contextId() const;
-    size_t   localMatchedBlocks() const;
-    size_t   matchedBlocks() const;
-    size_t   matchedBlocks(Tier tier) const;
-    bool     needBackendMatch() const;
+    bool                   empty() const;
+    uint64_t               contextId() const;
+    std::optional<int64_t> requestId() const {
+        return request_id_;
+    }
+    size_t localMatchedBlocks() const;
+    size_t matchedBlocks() const;
+    size_t matchedBlocks(Tier tier) const;
+    bool   needBackendMatch() const;
 
     void setValidPrefix(std::function<bool(size_t)> valid_prefix) {
         valid_prefix_ = std::move(valid_prefix);
@@ -115,6 +118,7 @@ private:
     std::array<size_t, 3>                   matched_blocks_by_tier_{};
 
     std::shared_ptr<StorageBackend> storage_backend_;
+    const std::optional<int64_t>    request_id_;
     StorageRequest                  storage_request_;
     std::function<bool(size_t)>     valid_prefix_;
     MatchCallback                   match_callback_;

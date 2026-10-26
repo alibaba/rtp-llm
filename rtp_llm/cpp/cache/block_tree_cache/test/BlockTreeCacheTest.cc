@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/metrics/RpcFailureMetrics.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
@@ -892,6 +893,25 @@ TEST(BlockTreeCacheMetricsTest, QueueBacklogReportsLoadBackgroundAndCompletion) 
     EXPECT_DOUBLE_EQ(backlog("load"), 2);
     EXPECT_DOUBLE_EQ(backlog("background"), 3);
     EXPECT_DOUBLE_EQ(backlog("completion"), 4);
+}
+
+TEST(BlockTreeCacheMetricsTest, ConnectFailureQpsUsesOnlyDirectionAndPreservesCommonTags) {
+    auto  reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags("hippo_app", "test"));
+    auto  report   = makeConnectFailureReporter(reporter);
+    auto* metric   = reporter->getMetricsGroup<RtpLLMGrpcConnectFailureMetrics>()->connect_failed_qps_metric;
+    report("H2D");
+    report("H2D");
+    report("D2H");
+    EXPECT_EQ(metricSeriesCount(metric), 2u);
+    kmonitor::MetricsTags tags("hippo_app", "test");
+    tags.AddTag("direction", "H2D");
+    EXPECT_DOUBLE_EQ(snapshotQps(metric, tags, "rtp_llm_rank_broadcast_grpc_connect_failed_qps"), 2);
+    kmonitor::MetricsTags d2h_tags("hippo_app", "test");
+    d2h_tags.AddTag("direction", "D2H");
+    EXPECT_DOUBLE_EQ(snapshotQps(metric, d2h_tags, "rtp_llm_rank_broadcast_grpc_connect_failed_qps"), 1);
+    EXPECT_EQ(reporter->getTags().FindTag("hippo_app"), "test");
+    EXPECT_TRUE(reporter->getTags().FindTag("direction").empty());
+    EXPECT_FALSE(makeConnectFailureReporter(nullptr));
 }
 
 TEST(BlockTreeCacheMetricsTest, LoadJoinMetricsKeepRequestAndDependencyGranularity) {
@@ -2947,6 +2967,20 @@ static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadCache(std::vector<DeviceB
     resource.evictFromTier(Tier::DEVICE);
     full->unreferenceBlocks(device_resource, BlockTreeRefType::CACHE);
     return cache;
+}
+
+TEST_F(BlockTreeCacheTest, QueryContextSurvivesMatchAndLocalLoadTaskCreation) {
+    auto cache  = makeHostOnlyLoadCache();
+    auto result = cache->match({200}, {}, false, 73);
+    auto load   = takeLoadContext(result);
+    ASSERT_NE(load, nullptr);
+    EXPECT_EQ(load->requestId(), 73);
+    LoadTaskRunner runner(cache->groupSets(), 1000, 1000);
+    auto           task = runner.createTask(load);
+    ASSERT_NE(task, nullptr);
+    EXPECT_EQ(task->host_to_device_task.requestId(), 73);
+    EXPECT_EQ(task->disk_to_device_task.requestId(), 73);
+    EXPECT_TRUE(load->abortPending());
 }
 
 TEST_F(BlockTreeCacheTest, PendingLoadContextHardStopsSecondMatchUntilAbort) {
