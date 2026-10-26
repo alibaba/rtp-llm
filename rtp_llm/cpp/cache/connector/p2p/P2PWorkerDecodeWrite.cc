@@ -73,6 +73,7 @@ ErrorInfo P2PWorkerDecodeWrite::write(int64_t,
                              "duplicate or cancelled write task");
         }
         group->deadline_ms = std::min(group->deadline_ms, deadline_ms);
+        group->stop_at_ms = std::min(group->stop_at_ms, writebackSteadyDeadline(deadline_ms));
         group->started     = true;
         for (auto& unit : units) {
             auto task = std::make_shared<transfer::TransferTask>(unit.blocks, deadline_ms);
@@ -99,7 +100,11 @@ ErrorInfo P2PWorkerDecodeWrite::write(int64_t,
         // Keep the source alive through send(), including its synchronous copy.
         auto source = group->sourceResource();
         for (auto& [send_request, task] : pending) {
-            const int64_t remaining_ms = send_request.deadline_ms - currentTimeMs();
+            int64_t remaining_ms;
+            {
+                std::lock_guard<std::mutex> lock(group->mutex);
+                remaining_ms = group->stop_at_ms - P2PNotification::nowMs();
+            }
             if (remaining_ms <= 0) {
                 group->cancel();
             }
@@ -108,6 +113,7 @@ ErrorInfo P2PWorkerDecodeWrite::write(int64_t,
                 continue;
             }
             send_request.timeout_ms = std::min<int64_t>(remaining_ms, std::numeric_limits<int32_t>::max());
+            send_request.deadline_ms = currentTimeMs() + std::max<int64_t>(0, remaining_ms);
             try {
                 // All copies of a retained backend callback share one releasable source reference.
                 auto source_hold = std::make_shared<KVCacheResourcePtr>(source);
@@ -177,13 +183,13 @@ bool P2PWorkerDecodeWrite::cancelWrite(const std::string& unique_key, int64_t de
 
 void P2PWorkerDecodeWrite::cleanup() {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto                  now_ms = currentTimeMs();
+    const auto                  now_ms = P2PNotification::nowMs();
     for (auto it = groups_.begin(); it != groups_.end();) {
         auto& group = it->second;
         int64_t deadline_ms;
         {
             std::lock_guard<std::mutex> group_lock(group->mutex);
-            deadline_ms = group->deadline_ms;
+            deadline_ms = group->stop_at_ms;
         }
         bool stopped = group->lease->isStopped();
         if (!stopped && now_ms >= deadline_ms) {

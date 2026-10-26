@@ -83,6 +83,7 @@ bool P2PSchedulerPrefillWrite::init() {
         || config_.p2p_writeback_timeout_ms <= 0 || config_.load_cache_timeout_ms <= 0
         || config_.p2p_lease_query_timeout_ms <= 0
         || !validWritebackKvReserveRatio(config_.p2p_writeback_kv_reserve_ratio)
+        || !retained_kv_.init(config_.topology, config_.p2p_kv_leak_exit_threshold_percent, true)
         || config_.worker_addrs.size() != static_cast<size_t>(config_.parallelism_config.tp_size)
         || config_.worker_grpc_addrs.size() != config_.worker_addrs.size()) {
         return false;
@@ -223,9 +224,21 @@ bool P2PSchedulerPrefillWrite::PrefillWriteRequest::resourceHoldPending() const 
 }
 
 int64_t P2PSchedulerPrefillWrite::holdUntilMs(int64_t deadline_ms) const {
-    return config_.p2p_lease_query_timeout_ms > std::numeric_limits<int64_t>::max() - deadline_ms ?
+    const auto ttl_ms = std::max<int64_t>(1, config_.p2p_cancelled_keys_ttl_ms);
+    return ttl_ms > std::numeric_limits<int64_t>::max() - deadline_ms ?
                std::numeric_limits<int64_t>::max() :
-               deadline_ms + config_.p2p_lease_query_timeout_ms;
+               deadline_ms + ttl_ms;
+}
+
+void P2PSchedulerPrefillWrite::checkRetainedResources() {
+    std::vector<KVCacheResourcePtr> retained;
+    {
+        std::lock_guard<std::mutex> lock(requests_mutex_);
+        for (const auto& [key, resource] : retained_resources_) {
+            retained.push_back(resource);
+        }
+    }
+    retained_kv_.check(retained);
 }
 
 void P2PSchedulerPrefillWrite::pruneRequestsLocked(int64_t now_ms) {
@@ -253,7 +266,7 @@ ErrorInfo P2PSchedulerPrefillWrite::workerRegistered(const P2PConnectorBroadcast
     if (!state)
         return ErrorInfo(ErrorCode::CANCELLED, "unknown write registration key");
     std::lock_guard<std::mutex> lock(state->mutex);
-    if (state->cancelled || state->stopped || currentTimeMs() >= state->deadline_ms)
+    if (state->cancelled || state->stopped || P2PNotification::nowMs() >= state->stop_at_ms)
         return ErrorInfo(ErrorCode::CANCELLED, "write registration is no longer accepted");
     if (request.worker_rank() < 0 || static_cast<size_t>(request.worker_rank()) >= state->registered_workers.size()
         || request.plan_digest() != state->plan_digest)
@@ -274,15 +287,15 @@ void P2PSchedulerPrefillWrite::cancelWrite(const P2PConnectorCancelWriteBackRequ
     std::shared_ptr<PrefillWriteRequest> state;
     {
         std::lock_guard<std::mutex> lock(requests_mutex_);
-        pruneRequestsLocked(currentTimeMs());
+        pruneRequestsLocked(P2PNotification::nowMs());
         auto it = requests_.find(request.unique_key());
         if (it == requests_.end() && !stopping_) {
-            state            = std::make_shared<PrefillWriteRequest>(request.deadline_ms());
+            state = std::make_shared<PrefillWriteRequest>(currentTimeMs() + config_.p2p_writeback_timeout_ms);
             state->error     = ErrorInfo(ErrorCode::CANCELLED, "writeback cancelled before StartWriteBack");
             state->cancelled = true;
             state->stopped   = true;
             requests_.emplace(request.unique_key(), state);
-            request_expirations_.emplace(holdUntilMs(state->deadline_ms), request.unique_key());
+            request_expirations_.emplace(holdUntilMs(state->stop_at_ms), request.unique_key());
         } else if (it != requests_.end()) {
             state = it->second;
         }
@@ -389,10 +402,9 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
         || request.timeout_ms() > std::numeric_limits<int>::max()) {
         return invalid("invalid writeback request or timeout");
     }
-    const int64_t local_deadline =
-        now_ms + std::min({request.timeout_ms(), config_.p2p_writeback_timeout_ms, config_.load_cache_timeout_ms});
     const int64_t deadline_ms =
-        request.deadline_ms() > 0 ? std::min(local_deadline, request.deadline_ms()) : local_deadline;
+        now_ms + std::min({request.timeout_ms(), config_.p2p_writeback_timeout_ms, config_.load_cache_timeout_ms});
+    const auto stop_at_ms = p2p_internal::writebackSteadyDeadline(deadline_ms);
     if (findRequest(request.unique_key())) {
         return reject(ErrorInfo(ErrorCode::CANCELLED, "duplicate or cancelled StartWriteBack key"));
     }
@@ -433,7 +445,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
         || calculateCacheKeys(request.token_ids().data(), blocks * block_size, block_size, config_.cache_key_hash_seed) != keys) {
         return invalid("writeback cache key hash mismatch");
     }
-    if (currentTimeMs() >= deadline_ms) {
+    if (P2PNotification::nowMs() >= stop_at_ms) {
         return reject(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback expired during admission"));
     }
     if (is_cancelled && is_cancelled()) {
@@ -441,13 +453,13 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
     }
 
     const auto& unique_key = request.unique_key();
-    auto        state      = std::make_shared<PrefillWriteRequest>(deadline_ms);
+    auto        state      = std::make_shared<PrefillWriteRequest>(deadline_ms, stop_at_ms);
     bool        inserted   = false;
     {
         std::lock_guard<std::mutex> lock(requests_mutex_);
-        pruneRequestsLocked(currentTimeMs());
+        pruneRequestsLocked(P2PNotification::nowMs());
         if (!stopping_ && requests_.emplace(unique_key, state).second) {
-            request_expirations_.emplace(holdUntilMs(deadline_ms), unique_key);
+            request_expirations_.emplace(holdUntilMs(state->stop_at_ms), unique_key);
             inserted = true;
         }
     }
@@ -463,6 +475,9 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
     const auto pause = [&] {
         std::unique_lock<std::mutex> lock(state->mutex);
         state->cv.wait_for(lock, std::chrono::milliseconds(kControlInitialIntervalMs));
+    };
+    const auto transferDeadline = [&] {
+        return currentTimeMs() + std::max<int64_t>(0, stop_at_ms - P2PNotification::nowMs());
     };
     KVCacheResourcePtr                                       resource;
     std::shared_ptr<LoadAsyncContext>                        load_context;
@@ -518,7 +533,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
             state->fail(ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "writeback local load failed"));
         if (is_cancelled && is_cancelled())
             state->fail(ErrorInfo(ErrorCode::CANCELLED, "StartWriteBack cancelled"));
-        if (currentTimeMs() >= deadline_ms)
+        if (P2PNotification::nowMs() >= stop_at_ms)
             state->fail(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback transfer deadline exceeded"));
     };
     const auto waitFor = [&](const auto& ready) {
@@ -566,8 +581,8 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
             P2PBroadcastClient::BroadcastParams params;
             params.request_id          = request.request_id();
             params.unique_key          = unique_key;
-            params.deadline_ms         = deadline_ms;
-            params.request_deadline_ms = deadline_ms;
+            params.deadline_ms         = transferDeadline();
+            params.request_deadline_ms = params.deadline_ms;
             params.type                = HANDLE_WRITE;
             params.routes              = std::move(routes);
             params.plan_digest         = planned->plan.digest();
@@ -599,8 +614,8 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
             P2PBroadcastClient::BroadcastParams send;
             send.request_id          = request.request_id();
             send.unique_key          = unique_key;
-            send.deadline_ms         = deadline_ms;
-            send.request_deadline_ms = deadline_ms;
+            send.deadline_ms         = transferDeadline();
+            send.request_deadline_ms = send.deadline_ms;
             send.type                = WRITE;
             send.plan_digest         = planned->plan.digest();
             for (const auto& address : transfer_addrs_) {
@@ -628,7 +643,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
         std::lock_guard<std::mutex> lock(state->mutex);
         if (state->cancelled)
             return state->error;
-        return coordinator_manager_->commitWriteBackDecodeCache(*resource, start, deadline_ms);
+        return coordinator_manager_->commitWriteBackDecodeCache(*resource, start, transferDeadline());
     };
     try {
         const auto error = run();
@@ -646,7 +661,10 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
     bool                                                                cancel_confirmed = false;
     int64_t                                                             next_control_ms  = 0;
     int64_t                                                             interval_ms      = kControlInitialIntervalMs;
-    const auto                                                          hold_until       = holdUntilMs(deadline_ms);
+    if (resource && (!receive_stopped || (load_context && !load_context->done()))) {
+        std::lock_guard<std::mutex> lock(requests_mutex_);
+        retained_resources_.emplace(unique_key, resource);
+    }
     try {
         while (!receive_stopped || (load_context && !load_context->done())) {
             observe();
@@ -662,7 +680,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
                     RTP_LLM_LOG_WARNING("writeback receive stop control failed, unique_key=%s: %s",
                                         unique_key.c_str(),
                                         failure.c_str());
-                    next_control_ms = currentTimeMs() + interval_ms;
+                    next_control_ms = P2PNotification::nowMs() + interval_ms;
                     interval_ms = std::min(interval_ms * 2, kControlMaxIntervalMs);
                 }
             }
@@ -673,33 +691,27 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
                     receive_stopped  = receive_stopped || status.allStopped();
                 }
                 control_result.reset();
-                next_control_ms = currentTimeMs() + interval_ms;
+                next_control_ms = P2PNotification::nowMs() + interval_ms;
                 interval_ms     = std::min(interval_ms * 2, kControlMaxIntervalMs);
             }
             if (receive_stopped && (!load_context || load_context->done()))
                 break;
-            if (currentTimeMs() >= hold_until) {
-                RTP_LLM_LOG_ERROR("writeback receive stop unconfirmed at D+query timeout, unique_key=%s",
-                                  unique_key.c_str());
-                std::abort();
-            }
+            checkRetainedResources();
             if (receive_started && !receive_stopped && !control_submission.valid() && !control_result
-                && currentTimeMs() >= next_control_ms) {
+                && P2PNotification::nowMs() >= next_control_ms) {
                 const auto timeout_limit =
-                    cancel_confirmed ? kLeaseQueryTimeoutMs : config_.p2p_cancel_broadcast_timeout_ms;
+                    std::min(config_.p2p_lease_query_timeout_ms,
+                             cancel_confirmed ? kLeaseQueryTimeoutMs : config_.p2p_cancel_broadcast_timeout_ms);
                 control_submission = submitWriteRpc(
                     control_pool_,
-                    [client = client_, key = unique_key, deadline_ms, hold_until, timeout_limit, cancel_confirmed] {
-                        const auto timeout = std::min(hold_until - currentTimeMs(), timeout_limit);
-                        if (timeout <= 0)
-                            return std::shared_ptr<P2PBroadcastClient::TpBroadcastResult>{};
+                    [client = client_, key = unique_key, deadline_ms, timeout_limit, cancel_confirmed] {
                         return cancel_confirmed ?
-                                   client->queryLeaseStatusAsync(key, HANDLE_WRITE, timeout) :
-                                   client->controlWriteAsync(key, CANCEL_HANDLE_WRITE, deadline_ms, timeout);
+                                   client->queryLeaseStatusAsync(key, HANDLE_WRITE, timeout_limit) :
+                                   client->controlWriteAsync(key, CANCEL_HANDLE_WRITE, deadline_ms, timeout_limit);
                     },
                     notify);
                 if (!control_submission.valid()) {
-                    next_control_ms = currentTimeMs() + interval_ms;
+                    next_control_ms = P2PNotification::nowMs() + interval_ms;
                     interval_ms = std::min(interval_ms * 2, kControlMaxIntervalMs);
                 }
             }
@@ -715,14 +727,16 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
     {
         std::lock_guard<std::mutex> requests_lock(requests_mutex_);
         std::lock_guard<std::mutex> lock(state->mutex);
+        retained_resources_.erase(unique_key);
         resource.reset();
         state->stopped = true;
         error          = state->error;
         state->cv.notify_all();
     }
     requests_cv_.notify_all();
+    checkRetainedResources();
     response.set_accepted_start_block(start);
-    response.set_accepted_block_count(count);
+    response.set_accepted_block_count(error.ok() ? count : 0);
     response.set_plan_digest(planned->plan.digest());
     response.set_stopped(true);
     response.set_error_code(transErrorCodeToRPC(error.code()));

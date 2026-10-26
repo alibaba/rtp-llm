@@ -60,8 +60,7 @@ private:
                               const std::vector<int>&                               token_ids,
                               int                                                   input_length,
                               size_t                                                kv_ready_token_count,
-                              const Meta::P2PRoutingContext&                        routing,
-                              int64_t                                               deadline_ms);
+                              const Meta::P2PRoutingContext&                        routing);
 
     const P2PConnectorSchedulerConfig    config_;
     std::mutex                            plan_cache_mutex_;

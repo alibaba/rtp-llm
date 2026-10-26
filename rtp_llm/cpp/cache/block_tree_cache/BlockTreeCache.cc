@@ -207,6 +207,7 @@ ErrorInfo BlockTreeCache::insertExternalBlocks(const CacheKeysType&             
                                                const std::vector<std::vector<GroupSetResource>>& resources,
                                                int64_t                                           deadline_ms) {
     StorageWriteTask storage_write;
+    ErrorInfo publication_error;
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -221,17 +222,18 @@ ErrorInfo BlockTreeCache::insertExternalBlocks(const CacheKeysType&             
             return prefix_error;
         }
 
-        // Let the normal BlockTree insert reuse concurrent hits and adopt only missing blocks.
-        // Assume that any returned KV blocks already inserted into the BlockTree remain on DEVICE during this short
-        // settle window; immediate demotion to HOST is unlikely, so writeback does not handle it specially.
         size_t resident_prefix_length = 0;
         storage_write = storer_.storeLocked(cache_keys, resources, Tier::DEVICE, false, resident_prefix_length, true);
+        if (validateDevicePrefixLocked(cache_keys, cache_keys.size()).hasError()) {
+            publication_error = ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED,
+                                           "writeback publication incomplete: final reuse endpoint unavailable");
+        }
     }
     // Persist the published blocks when a storage backend is configured.
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));
     }
-    return ErrorInfo::OkStatus();
+    return publication_error;
 }
 
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
