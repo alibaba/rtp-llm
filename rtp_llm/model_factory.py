@@ -84,7 +84,11 @@ class ModelFactory:
             engine_config.runtime_config.model_warm_up,
         )
         model_type = model_config.model_type
-        model_cls = ModelFactory.get_model_cls(model_type)
+        from rtp_llm.platforms.model_dispatch import resolve_model_class
+
+        model_cls = resolve_model_class(
+            model_type, ModelFactory.get_model_cls(model_type), model_config
+        )
 
         # Get model_name from model_config (default to model class name if not set)
         model_name = model_config.model_name or model_cls.__name__
@@ -165,7 +169,13 @@ class ModelFactory:
                 sp_type = SpeculativeType.EAGLE3
 
             # Need to create GPT model for propose model
-            model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
+            from rtp_llm.platforms.model_dispatch import resolve_model_class
+
+            model_cls = resolve_model_class(
+                propose_model_config.model_type,
+                ModelFactory.get_model_cls(propose_model_config.model_type),
+                propose_model_config,
+            )
             # propose model's max seq len must be equal to score model's max seq len
             propose_model_config.max_seq_len = model_config.max_seq_len
             propose_model_config.gen_num_per_cycle = model_config.gen_num_per_cycle
