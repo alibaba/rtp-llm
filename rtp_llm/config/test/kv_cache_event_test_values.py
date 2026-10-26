@@ -39,6 +39,12 @@ KV_CACHE_EVENT_ENV_CASES = (
         "127.0.0.1:18000",
         "127.0.0.1:18000",
     ),
+    KVCacheEventEnvCase(
+        "KV_CACHE_EVENT_SNAPSHOT_INTERVAL_MS",
+        "kv_cache_event_snapshot_interval_ms",
+        "45000",
+        45000,
+    ),
 )
 
 KV_CACHE_EVENT_FIELD_VALUES = {
