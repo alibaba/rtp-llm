@@ -643,7 +643,7 @@ TEST(BlockTreeStorerTest, UnsupportedInsertTargetsRejectWithoutPublishingOrPinni
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[1]);
 }
 
-TEST(BlockTreeStorerTest, WatermarkDropKeepsPendingRemoteWritePayloadAlive) {
+TEST(BlockTreeStorerTest, WatermarkPreservesPendingRemoteWriteUntilReferencesRelease) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -676,19 +676,30 @@ TEST(BlockTreeStorerTest, WatermarkDropKeepsPendingRemoteWritePayloadAlive) {
     resources[1][0].device_blocks = holders[1];
     env.cache->insert({100, 101}, resources, Tier::DEVICE, false, 214);
     EXPECT_EQ(backend->submittedCount(), 1u);
-    EXPECT_EQ(env.cache->getStats().tree_node_count, 0u);
-    EXPECT_EQ(env.cache->match({100, 101}).matched_device_blocks, 0u);
+    EXPECT_EQ(env.cache->getStats().tree_node_count, 2u);
+    BlockTreeMatchResult match = env.cache->match({100, 101});
+    EXPECT_EQ(match.matched_device_blocks, 2u);
+    block_tree_cache_test::releaseRequestRefsForTest(*env.cache, match.matched_device_resources);
+    match.matched_device_resources.clear();
     for (const auto& holder : holders) {
-        EXPECT_EQ(pool->treeRefCount(holder[0]), 0u);
-        EXPECT_EQ(pool->refCount(holder[0]), 2u);  // REQUEST and pending storage write.
+        EXPECT_EQ(pool->treeRefCount(holder[0]), 1u);
+        EXPECT_EQ(pool->refCount(holder[0]), 3u);  // CACHE, REQUEST and pending storage write.
         unreferenceDeviceBlocksForTest(*env.groups[0], {holder});
         EXPECT_TRUE(pool->isAllocated(holder[0]));
-        EXPECT_EQ(pool->refCount(holder[0]), 1u);
+        EXPECT_EQ(pool->refCount(holder[0]), 2u);
     }
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*env.cache);
+    EXPECT_EQ(env.cache->getStats().tree_node_count, 2u);
     backend->finishWrite();
     EXPECT_EQ(uploaded_bytes, (std::vector<int>{17, 18}));
     EXPECT_EQ(backend->keys(), (CacheKeysType{100, 101}));
     EXPECT_TRUE(backend->submittedOutsideTreeLock());
+    for (const auto& holder : holders) {
+        EXPECT_EQ(pool->refCount(holder[0]), 1u);
+        EXPECT_EQ(pool->treeRefCount(holder[0]), 1u);
+    }
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*env.cache);
+    EXPECT_EQ(env.cache->getStats().tree_node_count, 0u);
     for (const auto& holder : holders) {
         EXPECT_FALSE(pool->isAllocated(holder[0]));
     }
