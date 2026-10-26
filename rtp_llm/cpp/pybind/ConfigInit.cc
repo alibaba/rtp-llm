@@ -577,10 +577,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kv_cache_event_instance_group", &KVCacheConfig::kv_cache_event_instance_group)
         .def_readwrite("kv_cache_event_instance_id", &KVCacheConfig::kv_cache_event_instance_id)
         .def_readwrite("kv_cache_event_host_ip_port", &KVCacheConfig::kv_cache_event_host_ip_port)
+        .def_readwrite("kv_cache_event_snapshot_interval_ms", &KVCacheConfig::kv_cache_event_snapshot_interval_ms)
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      10,
+                                      11,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -652,11 +653,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.dsv41_decoder_swa_pool_blocks,
                                       self.enable_crc,
                                       self.kvcm_read_backend_type,
-                                      self.kvcm_min_replica_count);
+                                      self.kvcm_min_replica_count,
+                                      self.kv_cache_event_snapshot_interval_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 74 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
-                    || t[0].cast<std::string>() != "KVCacheConfig" || t[1].cast<int>() != 10) {
+                if (t.size() != 75 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
+                    || t[0].cast<std::string>() != "KVCacheConfig" || t[1].cast<int>() != 11) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
@@ -734,6 +736,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.enable_crc                                      = t[71].cast<bool>();
                 c.kvcm_read_backend_type                          = t[72].cast<int32_t>();
                 c.kvcm_min_replica_count                          = t[73].cast<int32_t>();
+                c.kv_cache_event_snapshot_interval_ms              = t[74].cast<int>();
                 return c;
             }));
 

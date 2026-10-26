@@ -21,7 +21,7 @@ struct KVCacheEvent {
     // Publisher-local transport metadata assigned after an ingress slot is
     // reserved. Accepted events are strictly increasing in committed queue
     // publication order, not producer call-start or cache-version order.
-    // Consumers must tolerate gaps after discard/reconciliation and resets
+    // Consumers must tolerate gaps after drops and registration recovery, and resets
     // when a publisher instance is recreated.
     uint64_t sequence = 0;
 };
