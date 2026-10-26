@@ -359,6 +359,10 @@ struct PyModelInputs {
     PyAttentionInputs    attention_inputs;
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
+    // Empty selects every row; otherwise logits follows these output rows.
+    torch::Tensor lm_output_indexes      = {};
+    bool          need_all_logits        = false;
+    bool          need_all_hidden_states = false;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
@@ -367,6 +371,10 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
+    torch::Tensor local_logits;
+    torch::Tensor logits;
+    torch::Tensor last_hidden_states;
+    torch::Tensor all_logits;
 
     PyModelOutputs() = default;
 

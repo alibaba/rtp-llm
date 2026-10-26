@@ -273,6 +273,7 @@ class LinearFactory:
         fp4_methods = [
             "FP4",
             "modelopt_fp4",
+            "modelopt_mixed",
         ]
         if quant_method not in fp4_methods:
             return False

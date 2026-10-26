@@ -265,12 +265,19 @@ void registerPyOpDefs(pybind11::module& m) {
             },
             "A PyAttentionInputs value or a tag-to-PyAttentionInputs mapping")
         .def_readwrite(
-            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
+        .def_readwrite("lm_output_indexes", &PyModelInputs::lm_output_indexes)
+        .def_readwrite("need_all_logits", &PyModelInputs::need_all_logits)
+        .def_readwrite("need_all_hidden_states", &PyModelInputs::need_all_hidden_states);
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
         .def(pybind11::init<torch::Tensor>(), pybind11::arg("hidden_states"), "Initialize with hidden states tensor")
-        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor");
+        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite("local_logits", &PyModelOutputs::local_logits, "Logits for this TP vocabulary shard")
+        .def_readwrite("logits", &PyModelOutputs::logits, "Final FP32 logits for output rows")
+        .def_readwrite("last_hidden_states", &PyModelOutputs::last_hidden_states, "Hidden states used by the LM head")
+        .def_readwrite("all_logits", &PyModelOutputs::all_logits, "Final FP32 logits for all requested tokens");
 }
 
 }  // namespace torch_ext

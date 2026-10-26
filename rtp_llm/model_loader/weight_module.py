@@ -76,6 +76,11 @@ class WeightModule(ABC):
                 if c.support(quant_config, weight_info)
             ]
             if not valid_classes:
+                # Keep unmatched mixed descriptors in BF16, but reject packed
+                # checkpoint tensors before a dtype conversion loses codes.
+                weight_info.reject_quantized_raw = (
+                    quant_config.get_method() == "modelopt_mixed"
+                )
                 return weight_info
             if len(valid_classes) > 1:
                 raise ValueError(
@@ -329,6 +334,7 @@ class AtomicWeight(WeightModule):
     weights: List[CkptWeightInfo]
     process_fun: Callable[[List[torch.Tensor]], torch.Tensor]
     data_type: Optional[torch.dtype] = None
+    reject_quantized_raw: bool = False
     split_func = None
     config = None
 
@@ -360,6 +366,24 @@ class AtomicWeight(WeightModule):
         else:
             return False
 
+    def _check_raw_dtype(self, tensor: torch.Tensor, name: str) -> None:
+        if self.reject_quantized_raw and (
+            tensor.dtype in (torch.uint8, torch.int8)
+            or str(tensor.dtype).startswith("torch.float8")
+        ):
+            raise ValueError(
+                f"Missing mixed ModelOpt recipe for quantized tensor {name} "
+                f"({tensor.dtype})"
+            )
+
+    def _load_tensor(self, tensor_source: TensorSource, name: str, data_type):
+        if not self.reject_quantized_raw:
+            return tensor_source.load_tensor(name, data_type)
+        tensors = tensor_source.load_tensor(name, None)
+        for tensor in tensors:
+            self._check_raw_dtype(tensor, name)
+        return [tensor.to(data_type) for tensor in tensors]
+
     def _load_raw_tensor(
         self,
         tensor_source: TensorSource,
@@ -388,7 +412,9 @@ class AtomicWeight(WeightModule):
                         )
                     source_tensors = [t.to(convert_type) for t in source_tensors]
                 else:
-                    source_tensors = tensor_source.load_tensor(name, convert_type)
+                    source_tensors = self._load_tensor(
+                        tensor_source, name, convert_type
+                    )
                 before_merge_tensors.append(
                     ckpt_weight.merge_fun(
                         [

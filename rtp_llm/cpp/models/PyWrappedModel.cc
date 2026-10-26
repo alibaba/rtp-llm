@@ -842,8 +842,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                         attention_inputs_,
                                                         attention_inputs_by_tag_,
                                                         bert_embedding_inputs});
+        py_model_inputs.need_all_logits        = inputs.need_all_logits;
+        py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;
+        if (has_context_request || inputs.need_all_logits) {
+            py_model_inputs.lm_output_indexes = inputs.lm_output_indexes;
+        }
         PyModelOutputs py_model_outputs;
-        torch::Tensor  hidden_states;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
         if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
@@ -860,7 +864,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
-            hidden_states = py_model_outputs.hidden_states.clone();
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
@@ -873,11 +876,24 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
-            hidden_states    = py_model_outputs.hidden_states.clone();
         }
 
         cache_store_write_cycle.finish();
 
+        if (py_model_outputs.logits.defined()) {
+            if (check_nan_) {
+                const auto& logits =
+                    py_model_outputs.all_logits.defined() ? py_model_outputs.all_logits : py_model_outputs.logits;
+                RTP_LLM_CHECK_WITH_INFO(!torch::isnan(py_model_outputs.last_hidden_states).any().item<bool>(),
+                                        "NAN detected in last_hidden");
+                RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
+            }
+            return {py_model_outputs.logits,
+                    py_model_outputs.last_hidden_states,
+                    py_model_outputs.hidden_states,
+                    py_model_outputs.all_logits};
+        }
+        auto hidden_states = py_model_outputs.hidden_states.clone();
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
         if (dspark_model_role_ != DSparkModelRole::NONE) {
             if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
@@ -1058,6 +1074,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         torch::Tensor logits;
         {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head_mm)");
+            RTP_LLM_CHECK_WITH_INFO(lm_head->kernel.dtype() != torch::kUInt8,
+                                    "Packed LM head requires final logits from model.forward");
 #if USING_CUDA
             if (lm_head->kernel.dtype() == torch::kBFloat16) {
                 logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
@@ -1119,6 +1137,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     torch::Tensor logits;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(lm_head_mm)");
+        RTP_LLM_CHECK_WITH_INFO(lm_head->kernel.dtype() != torch::kUInt8,
+                                "Packed LM head requires final logits from model.forward");
 #if USING_CUDA
         if (lm_head->kernel.dtype() == torch::kBFloat16) {
             logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);

@@ -51,6 +51,11 @@ public:
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
+        if (std::string(forward_method_name) == "forward" && py::hasattr(py_instance_, "forward_for_cuda_graph")
+            && py::hasattr(py_instance_, "postprocess_outputs")) {
+            py_forward_method_     = py_instance_.attr("forward_for_cuda_graph");
+            py_postprocess_method_ = py_instance_.attr("postprocess_outputs");
+        }
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
@@ -143,6 +148,7 @@ private:
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                    initCaptureAttentionInputsPost();
     py::object              py_forward_method_;
+    py::object              py_postprocess_method_;
     py::object              py_attn_pyobj_method_;
     bool                    enable_cuda_graph_{false};
     bool                    device_metadata_replay_{false};

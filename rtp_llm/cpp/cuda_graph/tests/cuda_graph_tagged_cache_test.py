@@ -1,9 +1,11 @@
 import copy
 import unittest
+from types import SimpleNamespace
 
 import torch
 
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     PyModelInputs,
@@ -28,6 +30,31 @@ class TaggedBlockTableModel:
         aux_id = attention_inputs["aux"].kv_cache_kernel_block_id_device[0, 0]
         signature = (full_id + 16 * aux_id).to(inputs.input_hiddens.dtype)
         return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class LocalLogitsModel(TaggedBlockTableModel):
+    def __init__(self):
+        self.parallelism_config = SimpleNamespace(tp_size=1)
+        self.config = SimpleNamespace(output_vocab_ids=[], output_vocab_padded_size=0)
+        self.finalized_rows = []
+
+    def forward_for_cuda_graph(
+        self, inputs: PyModelInputs, fmha_impl=None
+    ) -> PyModelOutputs:
+        hidden = super().forward(inputs, fmha_impl).hidden_states
+        outputs = PyModelOutputs(hidden)
+        outputs.local_logits = torch.cat((hidden, hidden * 2), dim=-1)
+        return outputs
+
+    def postprocess_outputs(self, inputs, outputs):
+        assert not torch.cuda.is_current_stream_capturing()
+        self.finalized_rows.append(outputs.hidden_states.shape[0])
+        return GptModelBase._postprocess_quantized_outputs(self, inputs, outputs)
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        return self.postprocess_outputs(
+            inputs, self.forward_for_cuda_graph(inputs, fmha_impl)
+        )
 
 
 class TaggedSequenceLengthModel:
@@ -250,6 +277,106 @@ def _build_target_verify_inputs(
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_local_logits_decode_replay_and_padding(self):
+        runner = CudaGraphRunner()
+        model = LocalLogitsModel()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [1, 4],
+            GROUP_TAGS,
+        )
+        self.assertEqual(model.finalized_rows, [])
+        for batch_size, value in ((4, 7), (2, 3), (1, 9)):
+            inputs = _build_decode_inputs(
+                GROUP_TAGS, {"full": value, "aux": 2}, batch_size=batch_size
+            )
+            self.assertTrue(runner.canRun(inputs))
+            actual = runner.forward(inputs)
+            expected = model.forward(inputs)
+            torch.cuda.synchronize()
+            self.assertEqual(actual.local_logits.dtype, torch.bfloat16)
+            self.assertEqual(actual.local_logits.shape, (batch_size, HIDDEN_SIZE * 2))
+            self.assertEqual(actual.logits.dtype, torch.float32)
+            self.assertEqual(model.finalized_rows[-2:], [batch_size, batch_size])
+            torch.testing.assert_close(actual.hidden_states, expected.hidden_states)
+            torch.testing.assert_close(actual.local_logits, expected.local_logits)
+            torch.testing.assert_close(actual.logits, expected.logits)
+            # A later replay must not overwrite output retained by a consumer.
+            saved_hidden = actual.hidden_states.clone()
+            inputs.input_hiddens.add_(1)
+            runner.forward(inputs)
+            torch.testing.assert_close(actual.hidden_states, saved_hidden)
+
+    def test_local_logits_verify_replay_selects_output_rows(self):
+        runner = CudaGraphRunner()
+        model = LocalLogitsModel()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [1, 4],
+            GROUP_TAGS,
+            True,
+            5,
+        )
+        for need_all in (False, True):
+            inputs = _build_target_verify_inputs(
+                GROUP_TAGS, {"full": 3, "aux": 2}, batch_size=2
+            )
+            inputs.input_hiddens.copy_(
+                torch.arange(40, device="cuda").reshape(10, 4).to(torch.bfloat16)
+            )
+            inputs.lm_output_indexes = torch.tensor(
+                [9, 4], dtype=torch.int32, pin_memory=True
+            )
+            inputs.need_all_logits = need_all
+            self.assertTrue(runner.canRun(inputs))
+            actual = runner.forward(inputs)
+            expected = model.forward(inputs)
+            torch.cuda.synchronize()
+            torch.testing.assert_close(actual.hidden_states, expected.hidden_states)
+            torch.testing.assert_close(actual.logits, expected.logits)
+            torch.testing.assert_close(
+                actual.last_hidden_states, expected.last_hidden_states
+            )
+            self.assertEqual(model.finalized_rows[-2:], [10, 10])
+            if need_all:
+                torch.testing.assert_close(actual.all_logits, expected.all_logits)
+                self.assertEqual(actual.all_logits.shape[0], 10)
+
+    def test_local_logits_prefill_replay(self):
+        runner = CudaGraphRunner()
+        model = LocalLogitsModel()
+        runner.init_prefill(
+            model,
+            1,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4, 8],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+        )
+        for seq_len in (4, 8, 3):
+            inputs = _build_prefill_inputs(
+                GROUP_TAGS, {"full": seq_len, "aux": 2}, seq_len=seq_len
+            )
+            inputs.lm_output_indexes = torch.tensor([seq_len - 1], device="cuda")
+            self.assertTrue(runner.canRun(inputs))
+            actual = runner.forward(inputs)
+            expected = model.forward(inputs)
+            torch.cuda.synchronize()
+            torch.testing.assert_close(actual.hidden_states, expected.hidden_states)
+            torch.testing.assert_close(actual.logits, expected.logits)
+            self.assertEqual(actual.logits.shape[0], 1)
+            self.assertEqual(model.finalized_rows[-2:], [seq_len, seq_len])
+
     def _assert_decode_replay_with_padding(
         self, capture_batch_size: int, actual_batch_size: int
     ) -> None:

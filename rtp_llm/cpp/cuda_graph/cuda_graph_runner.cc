@@ -798,6 +798,10 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.current_seq_len);
+        const auto& logits = graph_instances_[state.current_real_graph_seq_len].mem_hold_.local_logits_;
+        if (logits.defined()) {
+            outputs.local_logits = logits.slice(0, 0, state.current_seq_len);
+        }
     } else {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
@@ -806,6 +810,16 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.seq_len_sum);
+        const auto& logits = graph_instances_[state.current_real_graph_bs].mem_hold_.local_logits_;
+        if (logits.defined()) {
+            outputs.local_logits = logits.slice(0, 0, state.seq_len_sum);
+        }
+    }
+    // Apply the model's dynamic output processing only after removing bucket
+    // padding, using the same Python path as eager forward.
+    if (py_postprocess_method_) {
+        py::gil_scoped_acquire gil;
+        outputs = py_postprocess_method_(inputs, outputs).cast<PyModelOutputs>();
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
@@ -1268,7 +1282,17 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         // materialized before graphCaptureBegin rather than during capture.
         ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
         py_forward_method_(inputs, attn_pyobj);
-        py_forward_method_(inputs, attn_pyobj);
+        auto warmup_outputs = py_forward_method_(inputs, attn_pyobj).cast<PyModelOutputs>();
+        if (warmup_outputs.local_logits.defined()) {
+            // Share one output buffer across graph buckets, as for hidden states.
+            // Retaining a separate [tokens, vocab] tensor per bucket is expensive.
+            if (!capture_mem_hold_.local_logits_.defined()) {
+                capture_mem_hold_.local_logits_ = torch::empty({max_num_token_, warmup_outputs.local_logits.size(1)},
+                                                               warmup_outputs.local_logits.options());
+            }
+            graph_instances_[key].mem_hold_.local_logits_ =
+                capture_mem_hold_.local_logits_.slice(0, 0, warmup_outputs.local_logits.size(0));
+        }
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
         throw;
@@ -1304,6 +1328,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 throw;
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+            if (outputs.local_logits.defined()) {
+                graph_instances_[key].mem_hold_.local_logits_.copy_(outputs.local_logits);
+            }
             graph.capture_end();
         }
 
