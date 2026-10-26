@@ -28,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -52,6 +53,274 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class DeliveryClaimTest {
+    @Test
+    void ownershipDeliveredAckUpdatesDeadlineOnce() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var original = f.owner.runtime.deadlines();
+            var timer = org.mockito.Mockito.spy(original);
+            ReflectionTestUtils.setField(f.owner.runtime, "timer", timer);
+            try {
+                f.owner.onDeliveryEvidence(
+                        f.claim,
+                        new ContextResult.TransportResult(
+                                f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+                f.context.data().getFuture().get(2, TimeUnit.SECONDS);
+                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+                verify(timer, times(1)).update(eq(f.context), any());
+            } finally {
+                ReflectionTestUtils.setField(f.owner.runtime, "timer", original);
+                finishOwnershipRequest(f);
+            }
+        }
+    }
+
+    @Test
+    void ownershipCompletedDeliveryReplayDoesNotUpdateDeadline() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var delivered =
+                    new ContextResult.TransportResult(
+                            f.claim, DeliveryResult.delivered(), System.currentTimeMillis());
+            f.owner.onDeliveryEvidence(f.claim, delivered);
+            f.context.data().getFuture().get(2, TimeUnit.SECONDS);
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            var original = f.owner.runtime.deadlines();
+            var timer = org.mockito.Mockito.spy(original);
+            ReflectionTestUtils.setField(f.owner.runtime, "timer", timer);
+            try {
+                var before = f.context.snapshot();
+                f.owner.onDeliveryEvidence(f.claim, delivered);
+                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+                assertSame(before, f.context.snapshot());
+                verify(timer, never()).update(eq(f.context), any());
+            } finally {
+                ReflectionTestUtils.setField(f.owner.runtime, "timer", original);
+                finishOwnershipRequest(f);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void ownershipTerminalEvidenceSubmitsCleanupOnce(boolean failedDelivery) throws Exception {
+        try (var f = new Fixture()) {
+            if (!failedDelivery) {
+                assertTrue(f.owner.tryStartSend(f.claim));
+                f.owner.onDeliveryEvidence(
+                        f.claim,
+                        new ContextResult.TransportResult(
+                                f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+                f.context.data().getFuture().get(2, TimeUnit.SECONDS);
+                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            }
+            org.mockito.Mockito.doNothing().when(f.owner).requestCleanup(f.context);
+            org.mockito.Mockito.clearInvocations(f.owner);
+            try {
+                if (failedDelivery) {
+                    f.owner.onDeliveryEvidence(
+                            f.claim,
+                            new ContextResult.TransportResult(
+                                    f.claim,
+                                    DeliveryResult.notSent(
+                                            new IllegalStateException("send failed")),
+                                    System.currentTimeMillis()));
+                } else {
+                    f.applyDecodeTerminal();
+                }
+                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+                assertEquals(ContextResult.Phase.ENDING, f.context.snapshot().phase());
+                verify(f.owner, times(1)).requestCleanup(f.context);
+            } finally {
+                org.mockito.Mockito.doCallRealMethod().when(f.owner).requestCleanup(f.context);
+                f.owner.requestCleanup(f.context);
+                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            }
+        }
+    }
+
+    @Test
+    void ownershipAckRestoresDeadlineAfterOneInstallationFailure() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var original = f.owner.runtime.deadlines();
+            var timer = org.mockito.Mockito.spy(original);
+            var failure = new IllegalStateException("deadline installation failed");
+            doThrow(failure).doCallRealMethod().when(timer).update(eq(f.context), any());
+            ReflectionTestUtils.setField(f.owner.runtime, "timer", timer);
+            var delivered =
+                    new ContextResult.TransportResult(
+                            f.claim, DeliveryResult.delivered(), System.currentTimeMillis());
+            try {
+                assertSame(
+                        failure,
+                        assertThrows(
+                                IllegalStateException.class,
+                                () -> f.owner.onDeliveryEvidence(f.claim, delivered)));
+                f.context
+                        .data()
+                        .getFuture()
+                        .handle((value, error) -> null)
+                        .get(2, TimeUnit.SECONDS);
+                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+                verify(timer, times(2)).update(eq(f.context), any());
+                assertFalse(
+                        timer.needsUpdate(f.context, f.context.snapshot().deadlines()),
+                        "the ACK owner must finish deadline installation before returning");
+                org.mockito.Mockito.clearInvocations(timer);
+                f.owner.onDeliveryEvidence(f.claim, delivered);
+                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+                verify(timer, never()).update(eq(f.context), any());
+            } finally {
+                org.mockito.Mockito.doCallRealMethod().when(timer).update(any(), any());
+                ReflectionTestUtils.setField(f.owner.runtime, "timer", original);
+                finishOwnershipRequest(f);
+            }
+        }
+    }
+
+    @Test
+    void ownershipTerminalOwnerRecoversCleanupSubmissionWithoutAnotherFact() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            f.owner.onDeliveryEvidence(
+                    f.claim,
+                    new ContextResult.TransportResult(
+                            f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+            f.context.data().getFuture().get(2, TimeUnit.SECONDS);
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            var failure = new IllegalStateException("cleanup submission failed");
+            var originalQueue =
+                    (RequestWorkQueue)
+                            ReflectionTestUtils.getField(f.owner.runtime, "requestWorkQueue");
+            var queue = org.mockito.Mockito.spy(originalQueue);
+            doThrow(failure)
+                    .doCallRealMethod()
+                    .when(queue)
+                    .execute(eq(f.context), any(), any(), any());
+            ReflectionTestUtils.setField(f.owner.runtime, "requestWorkQueue", queue);
+            org.mockito.Mockito.clearInvocations(f.owner);
+            try {
+                f.applyDecodeTerminal();
+                f.settlement().get(2, TimeUnit.SECONDS);
+                f.awaitArchive();
+                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+                verify(f.owner, times(1)).requestCleanup(f.context);
+                verify(queue, times(2)).execute(eq(f.context), any(), any(), any());
+                assertFalse(f.prefillOwned.get());
+                assertFalse(f.decodeOwned.get());
+                assertSame(failure, SchedulerTestSupport.failure(f.owner));
+            } finally {
+                ReflectionTestUtils.setField(f.owner.runtime, "requestWorkQueue", originalQueue);
+                if (f.owner.requests.isCurrent(f.context)) {
+                    f.owner.requestCleanup(f.context);
+                    f.settlement().get(2, TimeUnit.SECONDS);
+                    f.awaitArchive();
+                }
+                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+                assertSame(
+                        failure,
+                        assertThrows(IllegalStateException.class, f.owner.runtime::shutdown));
+            }
+        }
+    }
+
+    @Test
+    void ownershipNewTerminalRestoresDeadlineWhileWaitingForSenderProof() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var original = f.owner.runtime.deadlines();
+            var timer = org.mockito.Mockito.spy(original);
+            var failure = new IllegalStateException("terminal deadline installation failed");
+            doThrow(failure).doCallRealMethod().when(timer).update(eq(f.context), any());
+            ReflectionTestUtils.setField(f.owner.runtime, "timer", timer);
+            try {
+                assertSame(
+                        failure,
+                        assertThrows(
+                                IllegalStateException.class,
+                                () ->
+                                        f.owner.cancel(
+                                                f.context, 0L, CancelReason.CLIENT_CANCELLED)));
+                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+                verify(timer, times(2)).update(eq(f.context), any());
+                var state = f.context.snapshot();
+                assertFalse(timer.needsUpdate(f.context, state.deadlines()));
+                assertTrue(state.close().timersDone());
+                assertEquals(ContextResult.Phase.ENDING, state.phase());
+                assertEquals(ContextResult.SendState.SENDING, state.delivery().send());
+                assertFalse(state.delivery().prefillProof());
+                assertFalse(state.delivery().decodeProof());
+                assertFalse(f.settlement().isDone());
+                assertTrue(f.prefillOwned.get());
+                assertTrue(f.decodeOwned.get());
+                assertSame(failure, SchedulerTestSupport.failure(f.owner));
+            } finally {
+                org.mockito.Mockito.doCallRealMethod().when(timer).update(any(), any());
+                ReflectionTestUtils.setField(f.owner.runtime, "timer", original);
+                finishOwnershipRequest(f);
+                assertSame(
+                        failure,
+                        assertThrows(IllegalStateException.class, f.owner.runtime::shutdown));
+            }
+        }
+    }
+
+    @Test
+    void ownershipEndingMixedReceiptDoesNotResubmitCancellation() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var granted =
+                    f.context.beginPreemption(
+                            f.reservation,
+                            91L,
+                            new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
+            var attempt = ((ContextResult.Granted<PreemptionRegistration>) granted).value();
+            f.owner.onPreemption(
+                    attempt,
+                    new AbstractRequestScheduler.PreemptionEvent(
+                            org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT,
+                            false,
+                            null,
+                            null,
+                            null));
+            f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            assertEquals(ContextResult.Phase.ENDING, f.context.snapshot().phase());
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            org.mockito.Mockito.clearInvocations(f.owner);
+            try {
+                f.owner.onPreemption(
+                        attempt,
+                        AbstractRequestScheduler.PreemptionEvent.receipt(
+                                attempt,
+                                f.decode,
+                                EngineGrpcClient.CancelReply.REQUEST_FENCED,
+                                "mixed cancellation receipt",
+                                f.claim));
+                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+                assertTrue(f.context.snapshot().delivery().prefillProof());
+                assertFalse(f.context.snapshot().delivery().decodeProof());
+                verify(f.owner, never()).cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            } finally {
+                finishOwnershipRequest(f);
+            }
+        }
+    }
+
+    private static void finishOwnershipRequest(Fixture f) throws Exception {
+        f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+        f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+        if (f.context.snapshot().delivery().send() == ContextResult.SendState.SENDING) {
+            f.owner.onDeliveryEvidence(
+                    f.claim,
+                    new ContextResult.TransportResult(
+                            f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+        }
+        f.settlement().get(2, TimeUnit.SECONDS);
+        f.awaitArchive();
+        SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+    }
+
     @Test
     @org.junit.jupiter.api.Timeout(15)
     void alreadyCompletedCancelReplySettlesOutsideTaskAndContextMonitors() throws Exception {
@@ -225,7 +494,8 @@ class DeliveryClaimTest {
                                 f.owner.requestCleanup(f.context);
                                 assertTrue(
                                         f.prefillOwned.get(),
-                                        "a synchronous event cannot consume an unaccepted queue claim");
+                                        "a synchronous event cannot consume an unaccepted queue"
+                                                + " claim");
                                 throw rejected;
                             })
                     .when(executor)
@@ -665,7 +935,8 @@ class DeliveryClaimTest {
                             call -> {
                                 assertFalse(
                                         f.settlement().isDone(),
-                                        "cleanup must be accepted before the settlement barrier opens");
+                                        "cleanup must be accepted before the settlement barrier"
+                                                + " opens");
                                 accepted.add(call.getArgument(0));
                                 return null;
                             })
@@ -1710,7 +1981,7 @@ class DeliveryClaimTest {
                                 return call.callRealMethod();
                             })
                     .when(timer)
-                    .update(eq(f.context), any());
+                    .needsUpdate(eq(f.context), any());
             try {
                 var response =
                         SchedulerTestSupport.dispatcher(f.owner.runtime)
@@ -1720,27 +1991,28 @@ class DeliveryClaimTest {
                 assertEquals(
                         PreemptionRegistration.Reply.WAITING, response.get(2, TimeUnit.SECONDS));
                 SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
-                verify(timer, times(1)).update(eq(f.context), any());
+                verify(timer, times(1)).needsUpdate(eq(f.context), any());
+                verify(timer, never()).update(eq(f.context), any());
                 verify(f.owner, never())
                         .onDeliveryEvidence(
                                 eq(f.claim), isA(ContextResult.CleanupAcknowledgement.class));
                 assertFalse(f.context.data().getFuture().isDone());
                 assertTrue(f.decodeOwned.get());
             } finally {
-                org.mockito.Mockito.doCallRealMethod().when(timer).update(any(), any());
+                org.mockito.Mockito.doCallRealMethod().when(timer).needsUpdate(any(), any());
+                f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+                f.owner.onDeliveryEvidence(
+                        f.claim,
+                        new ContextResult.TransportResult(
+                                f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+                f.owner.onDeliveryEvidence(
+                        f.claim,
+                        new ContextResult.CleanupAcknowledgement(
+                                f.claim,
+                                ContextResult.CancelEvidenceKind.CLEANED,
+                                System.currentTimeMillis()));
+                f.assertArchivedAfterCleanup();
             }
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
-            f.owner.onDeliveryEvidence(
-                    f.claim,
-                    new ContextResult.TransportResult(
-                            f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
-            f.owner.onDeliveryEvidence(
-                    f.claim,
-                    new ContextResult.CleanupAcknowledgement(
-                            f.claim,
-                            ContextResult.CancelEvidenceKind.CLEANED,
-                            System.currentTimeMillis()));
-            f.assertArchivedAfterCleanup();
         }
     }
 
@@ -2163,7 +2435,10 @@ class DeliveryClaimTest {
                     System.currentTimeMillis());
         }
 
-        /** Deliberately pause the real notification owner while independently testing resource settlement. */
+        /**
+         * Deliberately pause the real notification owner while independently testing resource
+         * settlement.
+         */
         Runnable prepareTerminalEffects() {
             recordDecodeStatus(
                     decode, DecodeResources.DecodeRequestStatus.terminal(reservation, 0L));
