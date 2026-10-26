@@ -334,7 +334,7 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
         }
 
         // STARTWRITE RPC
-        P2PConnectorStartWriteRequestPB request;
+        P2PConnectorStartWriteBackRequestPB request;
         request.set_request_id(routing.request_id);
         request.set_unique_key(routing.unique_key);
         request.set_input_length(input_length);

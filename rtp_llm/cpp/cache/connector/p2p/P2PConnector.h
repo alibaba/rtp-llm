@@ -83,11 +83,11 @@ public:
 
     void cancelWrite(const std::shared_ptr<AsyncContext>& context);
 
-    void handleWrite(const P2PConnectorStartWriteRequestPB& request,
-                     P2PConnectorStartWriteResponsePB&      response,
+    void handleWrite(const P2PConnectorStartWriteBackRequestPB& request,
+                     P2PConnectorStartWriteBackResponsePB&      response,
                      std::function<bool()>                  is_cancelled = nullptr);
 
-    void handleCancelWrite(const P2PConnectorCancelWriteRequestPB& request, P2PConnectorStartWriteResponsePB& response);
+    void handleCancelWrite(const P2PConnectorCancelWriteBackRequestPB& request, P2PConnectorStartWriteBackResponsePB& response);
 
     void stopWriteback();
 

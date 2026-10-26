@@ -874,7 +874,7 @@ message P2PConnectorWriteSourcePB {
     repeated TransferRoutePB routes = 2;
 }
 
-message P2PConnectorStartWriteRequestPB {
+message P2PConnectorStartWriteBackRequestPB {
     int64 request_id = 1;
     string unique_key = 2;
     int64 timeout_ms = 3;
@@ -889,7 +889,7 @@ message P2PConnectorStartWriteRequestPB {
     uint64 plan_digest = 14;
 }
 
-message P2PConnectorStartWriteResponsePB {
+message P2PConnectorStartWriteBackResponsePB {
     int32 error_code = 1;
     string error_message = 2;
     int32 accepted_start_block = 3;
@@ -901,7 +901,7 @@ message P2PConnectorStartWriteResponsePB {
 
 
 
-message P2PConnectorCancelWriteRequestPB {
+message P2PConnectorCancelWriteBackRequestPB {
     string unique_key = 1;
     int64 deadline_ms = 2;
 }
@@ -1198,8 +1198,8 @@ service RpcService {
 
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
-    rpc StartWrite(P2PConnectorStartWriteRequestPB) returns (P2PConnectorStartWriteResponsePB);
-    rpc CancelWrite(P2PConnectorCancelWriteRequestPB) returns (P2PConnectorStartWriteResponsePB);
+    rpc StartWriteBack(P2PConnectorStartWriteBackRequestPB) returns (P2PConnectorStartWriteBackResponsePB);
+    rpc CancelWriteBack(P2PConnectorCancelWriteBackRequestPB) returns (P2PConnectorStartWriteBackResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
     rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
     // AutoTPM priority-preemption Cancel targets the selected Decode role.

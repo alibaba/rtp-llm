@@ -248,8 +248,8 @@ void P2PConnector::cancelWrite(const std::shared_ptr<AsyncContext>& context) {
     }
 }
 
-void P2PConnector::handleWrite(const P2PConnectorStartWriteRequestPB& request,
-                               P2PConnectorStartWriteResponsePB&      response,
+void P2PConnector::handleWrite(const P2PConnectorStartWriteBackRequestPB& request,
+                               P2PConnectorStartWriteBackResponsePB&      response,
                                std::function<bool()>                  is_cancelled) {
     if (prefill_) {
         prefill_->processWrite(request, response, std::move(is_cancelled));
@@ -261,8 +261,8 @@ void P2PConnector::handleWrite(const P2PConnectorStartWriteRequestPB& request,
     }
 }
 
-void P2PConnector::handleCancelWrite(const P2PConnectorCancelWriteRequestPB& request,
-                                     P2PConnectorStartWriteResponsePB&       response) {
+void P2PConnector::handleCancelWrite(const P2PConnectorCancelWriteBackRequestPB& request,
+                                     P2PConnectorStartWriteBackResponsePB&       response) {
     if (prefill_) {
         prefill_->cancelWrite(request, response);
     } else {

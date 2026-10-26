@@ -516,8 +516,8 @@ void P2PConnectorPrefill::stopWriteback() {
     }
 }
 
-void P2PConnectorPrefill::processWrite(const P2PConnectorStartWriteRequestPB& request,
-                                       P2PConnectorStartWriteResponsePB&      response,
+void P2PConnectorPrefill::processWrite(const P2PConnectorStartWriteBackRequestPB& request,
+                                       P2PConnectorStartWriteBackResponsePB&      response,
                                        std::function<bool()>                  is_cancelled) {
     if (write_scheduler_) {
         write_scheduler_->handleWrite(request, response, std::move(is_cancelled));
@@ -654,8 +654,8 @@ bool P2PConnectorPrefill::queryLeaseStatusPerRank(const std::string& unique_key,
     return true;
 }
 
-void P2PConnectorPrefill::cancelWrite(const P2PConnectorCancelWriteRequestPB& request,
-                                      P2PConnectorStartWriteResponsePB&       response) {
+void P2PConnectorPrefill::cancelWrite(const P2PConnectorCancelWriteBackRequestPB& request,
+                                      P2PConnectorStartWriteBackResponsePB&       response) {
     if (write_scheduler_) {
         write_scheduler_->cancelWrite(request, response);
     } else {

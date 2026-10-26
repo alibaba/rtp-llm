@@ -1187,7 +1187,7 @@ void P2PConnectorAsyncWriteContext::setPeerCallResult(std::shared_ptr<DecodeWrit
     std::lock_guard<std::mutex> lock(mutex_);
     peer_result_ = std::move(result);
     if (!peer_result_) {
-        failLocked(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "StartWrite submission failed"));
+        failLocked(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "StartWriteBack submission failed"));
     }
     registerWriteCompletionCallbacksLocked();
 }
@@ -1214,13 +1214,13 @@ void P2PConnectorAsyncWriteContext::checkPeerResultLocked() {
                                  response.error_message()));
         } else if (!peer_stopped_) {
             failLocked(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
-                                 "StartWrite returned before receive stopped"));
+                                 "StartWriteBack returned before receive stopped"));
         } else {
             transfer_stopped_    = true;
             metrics_.no_transfer = response.accepted_block_count() == 0;
         }
     } else {
-        failLocked(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "StartWrite RPC failed"));
+        failLocked(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "StartWriteBack RPC failed"));
     }
     peer_result_.reset();
 }
