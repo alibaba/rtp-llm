@@ -83,8 +83,6 @@ def make_ready_plan(attn, mega, metadata, rows, swa_pool, swa_indices):
     ):
         return None
     ops = producer._ops()
-    if not getattr(ops, "dsv41_qb_kv_available", lambda: False)() or not callable(
-        getattr(ops, "dsv41_qb_kv_index_out", None)
-    ):
+    if not callable(getattr(ops, "dsv41_qb_kv_index_out", None)):
         return None
     return plan

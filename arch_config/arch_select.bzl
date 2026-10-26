@@ -112,7 +112,6 @@ def whl_deps():
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             # Keep wheel metadata aligned with the CUDA13 dependency lock.
-            "deep_gemm@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2%2Bad62a90.cu132-cp310-cp310-linux_x86_64.whl",
             "flash-mla@https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261013/x86-cuda132/flash_mla-1.0.0%2B2e5429f-cp310-cp310-linux_x86_64.whl",
             "deep-ep@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-cp310-cp310-linux_x86_64.whl",
             "fast-hadamard-transform@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/fast-hadamard-transform/fast_hadamard_transform-1.1.0%2Be7706fa.cu132.torch2.11.cxx11abitrue-cp310-cp310-linux_x86_64.whl",
@@ -133,7 +132,6 @@ def whl_deps():
             "torch-c-dlpack-ext==0.1.5",
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
-            "deep_gemm@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2%2Bad62a90.cu132-cp310-cp310-linux_aarch64.whl",
             "flash-mla@https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla-1.0.0%2B2e5429f-cp310-cp310-linux_aarch64.whl",
             "flash-mla-legacy@https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla_legacy-1.0.0%2B92fd68b.rtp1-cp310-cp310-linux_aarch64.whl",
             "deep-ep@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-2-cp310-cp310-linux_aarch64.whl",
@@ -175,16 +173,6 @@ def cuda13_x86_test_gpu():
     label; the default value names the SM103 machine class only.
     """
     return "SM103_TEST"
-
-def v41_front_gemm_deps():
-    # These optional decode fusions require the device-entry patch exported by
-    # deps/pip.bzl. Dependency overlays without it retain the Python fallback.
-    return select({
-        "@rtp_llm//:using_cuda13_x86": [
-            "@rtp_llm//rtp_llm/models_py/bindings/cuda:v41_front_gemm_op",
-        ],
-        "//conditions:default": [],
-    })
 
 def torch_deps():
     deps = select({

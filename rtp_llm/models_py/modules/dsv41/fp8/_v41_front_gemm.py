@@ -1,6 +1,7 @@
-"""Default-on Reindex Q-A/KV + BF16 index-head projection on B300.
+"""Default-on DeepGEMM Reindex Q-A/KV + BF16 index-head projection on B300.
 
-No JIT, weight duplication, pointer cache or forward-time validation kernels.
+Warm up admitted shapes before CUDA Graph capture. No weight duplication or
+forward-time validation kernels.
 Unsupported configurations use the original projections. Reload is performed
 at init_rope_cache with inference quiesced, like the other graph-owned weights.
 Set DSV41_FUSED_FRONT_PROJECTION=0 to retain the original projections.
@@ -70,9 +71,9 @@ def prepare(attn):
     props = torch.cuda.get_device_properties(head.device)
     if (props.major, props.minor, props.multi_processor_count) != (10, 3, 148):
         return
-    from rtp_llm.ops.compute_ops import rtp_llm_ops
+    import deep_gemm
 
-    op = getattr(rtp_llm_ops, "v41_front_gemm", None)
+    op = getattr(deep_gemm, "dsv41_front_gemm", None)
     if op is not None:
         attn._front_weights = FrontWeights(attn, op)
 
