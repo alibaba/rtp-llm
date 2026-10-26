@@ -8,7 +8,7 @@ namespace rtp_llm {
 std::shared_ptr<DecodeWriteHelper::Result>
 DecodeWriteHelper::write(const std::string& prefill_ip,
                         uint32_t prefill_port,
-                        P2PConnectorStartWriteRequestPB request,
+                        P2PConnectorStartWriteBackRequestPB request,
                         int64_t deadline_ms) {
     const auto address      = formatGrpcHostPort(prefill_ip, prefill_port);
     const auto remaining_ms = deadline_ms - currentTimeMs();
@@ -26,15 +26,15 @@ DecodeWriteHelper::write(const std::string& prefill_ip,
     }
     request.set_timeout_ms(timeout_ms);
     request.set_deadline_ms(deadline_ms);
-    return peer->broadcast<P2PConnectorStartWriteRequestPB, P2PConnectorStartWriteResponsePB>(
+    return peer->broadcast<P2PConnectorStartWriteBackRequestPB, P2PConnectorStartWriteBackResponsePB>(
         {request},
         static_cast<int>(timeout_ms),
         [deadline_ms](std::shared_ptr<RpcService::Stub>&     stub,
                       std::shared_ptr<grpc::ClientContext>&  context,
-                      const P2PConnectorStartWriteRequestPB& request,
+                      const P2PConnectorStartWriteBackRequestPB& request,
                       grpc::CompletionQueue*                 queue) {
             context->set_deadline(std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms)));
-            return stub->AsyncStartWrite(context.get(), request, queue);
+            return stub->AsyncStartWriteBack(context.get(), request, queue);
         });
 }
 
@@ -61,12 +61,12 @@ std::shared_ptr<DecodeWriteHelper::CancelResult> DecodeWriteHelper::cancel(const
     if (!peer) {
         return nullptr;
     }
-    P2PConnectorCancelWriteRequestPB request;
+    P2PConnectorCancelWriteBackRequestPB request;
     request.set_unique_key(unique_key);
     request.set_deadline_ms(deadline_ms);
-    return peer->broadcast<P2PConnectorCancelWriteRequestPB, P2PConnectorStartWriteResponsePB>(
+    return peer->broadcast<P2PConnectorCancelWriteBackRequestPB, P2PConnectorStartWriteBackResponsePB>(
         {request}, static_cast<int>(timeout_ms), [](auto& stub, auto& context, const auto& request, auto* queue) {
-            return stub->AsyncCancelWrite(context.get(), request, queue);
+            return stub->AsyncCancelWriteBack(context.get(), request, queue);
         });
 }
 

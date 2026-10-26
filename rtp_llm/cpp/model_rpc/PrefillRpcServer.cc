@@ -1093,9 +1093,9 @@ void PrefillRpcServer::cancelCleanupTick() {
     return grpc::Status::OK;
 }
 
-grpc::Status PrefillRpcServer::StartWrite(grpc::ServerContext*                   context,
-                                              const P2PConnectorStartWriteRequestPB* request,
-                                              P2PConnectorStartWriteResponsePB*      response) {
+grpc::Status PrefillRpcServer::StartWriteBack(grpc::ServerContext*                   context,
+                                              const P2PConnectorStartWriteBackRequestPB* request,
+                                              P2PConnectorStartWriteBackResponsePB*      response) {
     if (context->IsCancelled()) {
         return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
     }
@@ -1109,9 +1109,9 @@ grpc::Status PrefillRpcServer::StartWrite(grpc::ServerContext*                  
     return grpc::Status::OK;
 }
 
-grpc::Status PrefillRpcServer::CancelWrite(grpc::ServerContext*                    context,
-                                           const P2PConnectorCancelWriteRequestPB* request,
-                                           P2PConnectorStartWriteResponsePB*       response) {
+grpc::Status PrefillRpcServer::CancelWriteBack(grpc::ServerContext*                    context,
+                                           const P2PConnectorCancelWriteBackRequestPB* request,
+                                           P2PConnectorStartWriteBackResponsePB*       response) {
     if (context->IsCancelled()) {
         return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
     }

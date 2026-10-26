@@ -77,11 +77,11 @@ public:
     }
 
 public:
-    void processWrite(const P2PConnectorStartWriteRequestPB& request,
-                      P2PConnectorStartWriteResponsePB&      response,
+    void processWrite(const P2PConnectorStartWriteBackRequestPB& request,
+                      P2PConnectorStartWriteBackResponsePB&      response,
                       std::function<bool()>                  is_cancelled = nullptr);
 
-    void cancelWrite(const P2PConnectorCancelWriteRequestPB& request, P2PConnectorStartWriteResponsePB& response);
+    void cancelWrite(const P2PConnectorCancelWriteBackRequestPB& request, P2PConnectorStartWriteBackResponsePB& response);
 
     bool processWritePerRank(const P2PConnectorBroadcastTpRequestPB& request, FunctionResponsePB& response);
 

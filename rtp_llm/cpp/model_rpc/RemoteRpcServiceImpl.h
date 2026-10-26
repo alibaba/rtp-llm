@@ -91,22 +91,22 @@ public:
     }
 
 public:
-    grpc::Status StartWrite(grpc::ServerContext*                   context,
-                            const P2PConnectorStartWriteRequestPB* request,
-                            P2PConnectorStartWriteResponsePB*      response) override {
+    grpc::Status StartWriteBack(grpc::ServerContext*                   context,
+                            const P2PConnectorStartWriteBackRequestPB* request,
+                            P2PConnectorStartWriteBackResponsePB*      response) override {
         if (prefill_server_) {
-            return prefill_server_->StartWrite(context, request, response);
+            return prefill_server_->StartWriteBack(context, request, response);
         }
-        return grpc::Status(grpc::StatusCode::INTERNAL, "server does not implement StartWrite");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "server does not implement StartWriteBack");
     }
 
-    grpc::Status CancelWrite(grpc::ServerContext*                    context,
-                             const P2PConnectorCancelWriteRequestPB* request,
-                             P2PConnectorStartWriteResponsePB*       response) override {
+    grpc::Status CancelWriteBack(grpc::ServerContext*                    context,
+                             const P2PConnectorCancelWriteBackRequestPB* request,
+                             P2PConnectorStartWriteBackResponsePB*       response) override {
         if (prefill_server_) {
-            return prefill_server_->CancelWrite(context, request, response);
+            return prefill_server_->CancelWriteBack(context, request, response);
         }
-        return grpc::Status(grpc::StatusCode::INTERNAL, "server does not implement CancelWrite");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "server does not implement CancelWriteBack");
     }
 
 private:

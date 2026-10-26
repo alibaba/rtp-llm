@@ -263,12 +263,12 @@ ErrorInfo P2PSchedulerPrefillWrite::workerRegistered(const P2PConnectorBroadcast
     return ErrorInfo::OkStatus();
 }
 
-void P2PSchedulerPrefillWrite::cancelWrite(const P2PConnectorCancelWriteRequestPB& request,
-                                           P2PConnectorStartWriteResponsePB&       response) {
+void P2PSchedulerPrefillWrite::cancelWrite(const P2PConnectorCancelWriteBackRequestPB& request,
+                                           P2PConnectorStartWriteBackResponsePB&       response) {
     response.Clear();
     if (request.unique_key().empty() || request.deadline_ms() <= 0) {
         response.set_error_code(transErrorCodeToRPC(ErrorCode::INVALID_PARAMS));
-        response.set_error_message("invalid CancelWrite key or deadline");
+        response.set_error_message("invalid CancelWriteBack key or deadline");
         return;
     }
     std::shared_ptr<PrefillWriteRequest> state;
@@ -278,7 +278,7 @@ void P2PSchedulerPrefillWrite::cancelWrite(const P2PConnectorCancelWriteRequestP
         auto it = requests_.find(request.unique_key());
         if (it == requests_.end() && !stopping_) {
             state            = std::make_shared<PrefillWriteRequest>(request.deadline_ms());
-            state->error     = ErrorInfo(ErrorCode::CANCELLED, "writeback cancelled before StartWrite");
+            state->error     = ErrorInfo(ErrorCode::CANCELLED, "writeback cancelled before StartWriteBack");
             state->cancelled = true;
             state->stopped   = true;
             requests_.emplace(request.unique_key(), state);
@@ -305,7 +305,7 @@ size_t P2PSchedulerPrefillWrite::inflightContextCount() const {
         requests_.begin(), requests_.end(), [](const auto& item) { return item.second->resourceHoldPending(); });
 }
 
-ErrorInfo P2PSchedulerPrefillWrite::selectSendRoutes(const P2PConnectorStartWriteRequestPB& request,
+ErrorInfo P2PSchedulerPrefillWrite::selectSendRoutes(const P2PConnectorStartWriteBackRequestPB& request,
                                                      const P2PBroadcastClient::RankRoutes&  receive_routes,
                                                      P2PBroadcastClient::RankRoutes&        send_routes) const {
     using RouteLayerKey = std::tuple<int32_t, uint32_t, int64_t>;
@@ -356,8 +356,8 @@ ErrorInfo P2PSchedulerPrefillWrite::selectSendRoutes(const P2PConnectorStartWrit
     return ErrorInfo::OkStatus();
 }
 
-void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB& request,
-                                           P2PConnectorStartWriteResponsePB&      response,
+void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackRequestPB& request,
+                                           P2PConnectorStartWriteBackResponsePB&      response,
                                            std::function<bool()>                  is_cancelled) {
     response.Clear();
     const auto start_us                 = currentTimeUs();
@@ -394,10 +394,10 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
     const int64_t deadline_ms =
         request.deadline_ms() > 0 ? std::min(local_deadline, request.deadline_ms()) : local_deadline;
     if (findRequest(request.unique_key())) {
-        return reject(ErrorInfo(ErrorCode::CANCELLED, "duplicate or cancelled StartWrite key"));
+        return reject(ErrorInfo(ErrorCode::CANCELLED, "duplicate or cancelled StartWriteBack key"));
     }
     if (is_cancelled && is_cancelled()) {
-        return reject(ErrorInfo(ErrorCode::CANCELLED, "StartWrite cancelled"));
+        return reject(ErrorInfo(ErrorCode::CANCELLED, "StartWriteBack cancelled"));
     }
     const auto planned = planFor(request.decode_tp_size());
     if (!planned->ok()) {
@@ -437,7 +437,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
         return reject(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback expired during admission"));
     }
     if (is_cancelled && is_cancelled()) {
-        return reject(ErrorInfo(ErrorCode::CANCELLED, "StartWrite cancelled"));
+        return reject(ErrorInfo(ErrorCode::CANCELLED, "StartWriteBack cancelled"));
     }
 
     const auto& unique_key = request.unique_key();
@@ -452,7 +452,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
         }
     }
     if (!inserted)
-        return reject(ErrorInfo(ErrorCode::CANCELLED, "duplicate, cancelled or stopped StartWrite key"));
+        return reject(ErrorInfo(ErrorCode::CANCELLED, "duplicate, cancelled or stopped StartWriteBack key"));
 
     WriteSchedulerMetricsCollector metrics;
     metrics.prefill   = true;
@@ -517,7 +517,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteRequestPB
         if (load_context && load_context->done() && !load_context->success())
             state->fail(ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "writeback local load failed"));
         if (is_cancelled && is_cancelled())
-            state->fail(ErrorInfo(ErrorCode::CANCELLED, "StartWrite cancelled"));
+            state->fail(ErrorInfo(ErrorCode::CANCELLED, "StartWriteBack cancelled"));
         if (currentTimeMs() >= deadline_ms)
             state->fail(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback transfer deadline exceeded"));
     };

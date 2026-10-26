@@ -969,14 +969,16 @@ TEST(PrefillRpcServerTest, ExpiredPreparedInputIsReleasedBeforeAdmission) {
     EXPECT_TRUE(server.prepared_inputs_.empty());
 }
 
-TEST(PrefillRpcServerTest, StartWriteRejectsMissingEngine) {
-    PrefillRpcServer             server;
-    grpc::ServerContext              context;
-    P2PConnectorStartWriteRequestPB  request;
-    P2PConnectorStartWriteResponsePB response;
-    const auto                       status = server.StartWrite(&context, &request, &response);
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
-    EXPECT_EQ(status.error_message(), "cache manager is unavailable");
+TEST(PrefillRpcServerTest, StartWriteBackRejectsMissingEngine) {
+    PrefillRpcServer                    server;
+    grpc::ServerContext                context;
+    P2PConnectorStartWriteBackRequestPB  request;
+    P2PConnectorStartWriteBackResponsePB response;
+    const auto status = server.StartWriteBack(&context, &request, &response);
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(response.error_code(), ErrorCodePB::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    EXPECT_EQ(response.error_message(), "cache manager is unavailable");
+    EXPECT_TRUE(response.stopped());
 }
 
 }  // namespace rtp_llm

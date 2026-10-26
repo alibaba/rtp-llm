@@ -93,18 +93,18 @@ class WriteSchedulerService: public RpcService::Service {
 public:
     std::function<ErrorInfo(const P2PConnectorBroadcastTpRequestPB&)> registered;
     using Handler = std::function<void(
-        const P2PConnectorStartWriteRequestPB&, P2PConnectorStartWriteResponsePB&, std::function<bool()>)>;
+        const P2PConnectorStartWriteBackRequestPB&, P2PConnectorStartWriteBackResponsePB&, std::function<bool()>)>;
     Handler           handshake;
-    std::function<void(const P2PConnectorCancelWriteRequestPB&, P2PConnectorStartWriteResponsePB&)> cancel_write;
+    std::function<void(const P2PConnectorCancelWriteBackRequestPB&, P2PConnectorStartWriteBackResponsePB&)> cancel_write;
     std::atomic<int>                                                                                peer_cancels{0};
     std::atomic<bool>    fail_start{false}, lose_handshake{false}, omit_status{false};
     std::atomic<int>     start_delay_ms{0};
     std::atomic<int>     starts{0}, cancels{0}, handshakes{0}, lease_queries{0};
     std::atomic<int64_t> control_deadline_ms{0};
 
-    grpc::Status StartWrite(grpc::ServerContext*                   context,
-                            const P2PConnectorStartWriteRequestPB* request,
-                            P2PConnectorStartWriteResponsePB*      response) override {
+    grpc::Status StartWriteBack(grpc::ServerContext*                   context,
+                            const P2PConnectorStartWriteBackRequestPB* request,
+                            P2PConnectorStartWriteBackResponsePB*      response) override {
         ++handshakes;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -114,9 +114,9 @@ public:
         return lose_handshake ? grpc::Status(grpc::StatusCode::INTERNAL, "lost handshake") : grpc::Status::OK;
     }
 
-    grpc::Status CancelWrite(grpc::ServerContext*,
-                             const P2PConnectorCancelWriteRequestPB* request,
-                             P2PConnectorStartWriteResponsePB*       response) override {
+    grpc::Status CancelWriteBack(grpc::ServerContext*,
+                             const P2PConnectorCancelWriteBackRequestPB* request,
+                             P2PConnectorStartWriteBackResponsePB*       response) override {
         ++peer_cancels;
         cancel_write(*request, *response);
         return grpc::Status::OK;
@@ -217,7 +217,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return last_start_;
     }
-    P2PConnectorStartWriteRequestPB lastHandshake() const {
+    P2PConnectorStartWriteBackRequestPB lastHandshake() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return last_handshake_;
     }
@@ -234,7 +234,7 @@ private:
     std::map<std::string, State>     states_;
     bool                             draining_{false};
     P2PConnectorBroadcastTpRequestPB last_start_;
-    P2PConnectorStartWriteRequestPB  last_handshake_;
+    P2PConnectorStartWriteBackRequestPB  last_handshake_;
 };
 
 class P2PConnectorWriteSchedulerTest: public ::testing::Test {
@@ -361,8 +361,8 @@ protected:
         return decode_->asyncWrite(std::move(resource), token_ids_, input_length_, kv_ready_token_count_, routing_);
     }
 
-    P2PConnectorStartWriteRequestPB request() {
-        P2PConnectorStartWriteRequestPB request;
+    P2PConnectorStartWriteBackRequestPB request() {
+        P2PConnectorStartWriteBackRequestPB request;
         request.set_unique_key(routing_.unique_key);
         request.set_request_id(17);
         request.set_timeout_ms(4000);
@@ -396,12 +396,12 @@ protected:
         }
     }
 
-    P2PConnectorStartWriteResponsePB handleWriteWhileAdmissionBlocked(bool expire) {
+    P2PConnectorStartWriteBackResponsePB handleWriteWhileAdmissionBlocked(bool expire) {
         auto input = request();
         if (expire) {
             input.set_timeout_ms(1000);
         }
-        P2PConnectorStartWriteResponsePB response;
+        P2PConnectorStartWriteBackResponsePB response;
         std::atomic<bool>               cancelled{false};
         std::promise<void>              before_admission;
         auto                            reached_admission = before_admission.get_future();
@@ -685,7 +685,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, SenderRouteSelectionRejectsIncompleteKeyB
     EXPECT_TRUE(prefill_->selectSendRoutes(input, receive_routes, send_routes).hasError());
 }
 
-TEST_F(P2PConnectorWriteSchedulerTest, StartWriteSendsRemainingBudgetInsteadOfAnAbsoluteDeadline) {
+TEST_F(P2PConnectorWriteSchedulerTest, StartWriteBackSendsRemainingBudgetInsteadOfAnAbsoluteDeadline) {
     DecodeWriteHelper helper;
     auto input = request();
     const auto deadline_ms = currentTimeMs() + 2000;
@@ -717,7 +717,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, ReceiverBuildsLocalDeadlineFromRemainingB
     prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator_, nullptr, prefill_client_);
     ASSERT_TRUE(prefill_->init());
     const auto input = request();
-    P2PConnectorStartWriteResponsePB response;
+    P2PConnectorStartWriteBackResponsePB response;
     const auto before_ms = currentTimeMs();
     auto handling = std::async(std::launch::async, [&]() { prefill_->handleWrite(input, response); });
     EXPECT_TRUE(await([&]() { return decode_workers_[0].starts == 1; }));
@@ -741,7 +741,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, ReceiverRejectsWritebackThatWouldEatKvRes
     prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator_, nullptr, prefill_client_);
     ASSERT_TRUE(prefill_->init());
     const auto                       prefix_blocks = allocator_->devicePrefixBlocksForTest(keys_);
-    P2PConnectorStartWriteResponsePB response;
+    P2PConnectorStartWriteBackResponsePB response;
     prefill_->handleWrite(request(), response);
     EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::MALLOC_FAILED)) << response.error_message();
     EXPECT_TRUE(response.stopped());
@@ -785,7 +785,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, ReceiverChecksEachIndependentPoolAndRelea
     ASSERT_LT(full_available - keys_.size(), 6u);
     ASSERT_GE(full_available + swa_available - 2 * keys_.size(), 29u);
 
-    P2PConnectorStartWriteResponsePB response;
+    P2PConnectorStartWriteBackResponsePB response;
     prefill_->handleWrite(request(), response);
 
     EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::MALLOC_FAILED)) << response.error_message();
@@ -846,7 +846,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, FullyCachedHandshakeNeedsNoKvReserve) {
     prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator_, nullptr, prefill_client_);
     ASSERT_TRUE(prefill_->init());
     ASSERT_TRUE(test::seedCompleteBlockTreePath(allocator_, keys_).success);
-    P2PConnectorStartWriteResponsePB response;
+    P2PConnectorStartWriteBackResponsePB response;
     prefill_->handleWrite(request(), response);
     EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR) << response.error_message();
     EXPECT_EQ(response.accepted_block_count(), 0);
@@ -896,17 +896,17 @@ TEST_F(P2PConnectorWriteSchedulerTest, CancelBeforeReceiveSubmissionWaitsForLoca
     const auto coordinator        = allocator_->blockTreeCacheOwner()->loader_.load_context_coordinator_;
     const auto commit             = coordinator->commit_callback_;
     coordinator->commit_callback_ = [&](const auto& load) {
-        P2PConnectorCancelWriteRequestPB cancel;
+        P2PConnectorCancelWriteBackRequestPB cancel;
         cancel.set_unique_key(routing_.unique_key);
         cancel.set_deadline_ms(currentTimeMs() + 4000);
-        P2PConnectorStartWriteResponsePB response;
+        P2PConnectorStartWriteBackResponsePB response;
         prefill_->cancelWrite(cancel, response);
         EXPECT_FALSE(response.stopped());
         return commit(load);
     };
     const auto                       free_before = allocator_->freeBlocksNum();
     const auto                       input = request();
-    P2PConnectorStartWriteResponsePB response;
+    P2PConnectorStartWriteBackResponsePB response;
     auto handling = std::async(std::launch::async, [&]() { prefill_->handleWrite(input, response); });
     auto cleanup  = std::shared_ptr<void>(nullptr, [&](void*) {
         load_barrier_->release();
@@ -1102,7 +1102,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, ConcurrentWritesJoinLocalLoadAndPublishId
 
 TEST_F(P2PConnectorWriteSchedulerTest, InvalidPrefillAdmissionDoesNotAllocateOrRegister) {
     const auto                                                               free      = allocator_->freeBlocksNum();
-    const std::vector<std::function<void(P2PConnectorStartWriteRequestPB&)>> mutations = {
+    const std::vector<std::function<void(P2PConnectorStartWriteBackRequestPB&)>> mutations = {
         [](auto& r) { r.set_plan_digest(r.plan_digest() + 1); },
         [](auto& r) { r.set_decode_tp_size(1); },
         [](auto& r) { r.set_cache_keys(2, 999); },
@@ -1115,7 +1115,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, InvalidPrefillAdmissionDoesNotAllocateOrR
     for (const auto& mutate : mutations) {
         auto input = request();
         mutate(input);
-        P2PConnectorStartWriteResponsePB response;
+        P2PConnectorStartWriteBackResponsePB response;
         prefill_->handleWrite(input, response);
         EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR) << input.DebugString();
     }
@@ -1364,7 +1364,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, InvalidWriteInputAndCancellationSkipHands
     EXPECT_FALSE(context->success());
     EXPECT_EQ(prefill_workers_[0].handshakes, 0);
     auto                             req = request();
-    P2PConnectorStartWriteResponsePB response;
+    P2PConnectorStartWriteBackResponsePB response;
     prefill_->handleWrite(req, response, []() { return true; });
     EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_EQ(prefill_workers_[0].starts, 0);
@@ -1397,7 +1397,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, MultipleFullGroupsRollBackEarlierAllocati
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, InvalidSourceWorkersAndPlanNeverReachWorkers) {
-    const std::vector<std::function<void(P2PConnectorStartWriteRequestPB&)>> mutations = {
+    const std::vector<std::function<void(P2PConnectorStartWriteBackRequestPB&)>> mutations = {
         [](auto& r) { r.set_plan_digest(0); },
         [](auto& r) { r.clear_decode_workers(); },
         [](auto& r) { r.set_decode_tp_size(1); },
@@ -1406,7 +1406,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, InvalidSourceWorkersAndPlanNeverReachWork
     for (const auto& mutate : mutations) {
         auto input = request();
         mutate(input);
-        P2PConnectorStartWriteResponsePB response;
+        P2PConnectorStartWriteBackResponsePB response;
         prefill_->handleWrite(input, response);
         EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
         EXPECT_TRUE(response.stopped());
@@ -1546,10 +1546,10 @@ TEST_F(P2PConnectorWriteSchedulerTest, WorkerStartRpcTimeoutStillConfirmsBothSid
     ASSERT_TRUE(await([&]() { return !context->resourceHoldPending() && weak.expired(); }));
 }
 
-TEST_F(P2PConnectorWriteSchedulerTest, DuplicateStartWriteDoesNotStartWorkersAgain) {
+TEST_F(P2PConnectorWriteSchedulerTest, DuplicateStartWriteBackDoesNotStartWorkersAgain) {
     auto context = asyncWrite(source());
     ASSERT_TRUE(await([&] { return decode_workers_[0].starts == 1 && decode_workers_[1].starts == 1; }));
-    P2PConnectorStartWriteResponsePB response;
+    P2PConnectorStartWriteBackResponsePB response;
     prefill_->handleWrite(prefill_workers_[0].lastHandshake(), response);
     EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_FALSE(response.stopped());
@@ -1560,12 +1560,12 @@ TEST_F(P2PConnectorWriteSchedulerTest, DuplicateStartWriteDoesNotStartWorkersAga
     EXPECT_TRUE(context->success());
 }
 
-TEST_F(P2PConnectorWriteSchedulerTest, CancelBeforeStartWriteFencesLateStartWithoutAllocation) {
+TEST_F(P2PConnectorWriteSchedulerTest, CancelBeforeStartWriteBackFencesLateStartWithoutAllocation) {
     const auto                       free = allocator_->freeBlocksNum();
-    P2PConnectorCancelWriteRequestPB cancel;
+    P2PConnectorCancelWriteBackRequestPB cancel;
     cancel.set_unique_key(routing_.unique_key);
     cancel.set_deadline_ms(currentTimeMs() + 4000);
-    P2PConnectorStartWriteResponsePB response;
+    P2PConnectorStartWriteBackResponsePB response;
     prefill_->cancelWrite(cancel, response);
     EXPECT_TRUE(response.stopped());
     prefill_->handleWrite(request(), response);
@@ -1579,7 +1579,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, CancelBeforeStartWriteFencesLateStartWith
 TEST_F(P2PConnectorWriteSchedulerTest, RegistrationBarrierChecksEveryRankAndRejectsLateReady) {
     prefill_workers_[1].registered = [](const auto&) { return ErrorInfo::OkStatus(); };
     auto                             input = request();
-    P2PConnectorStartWriteResponsePB response;
+    P2PConnectorStartWriteBackResponsePB response;
     auto handling = std::async(std::launch::async, [&] { prefill_->handleWrite(input, response); });
     EXPECT_TRUE(await([&] { return prefill_workers_[0].starts == 1 && prefill_workers_[1].starts == 1; }));
     const auto state = receiveContext();
@@ -1688,7 +1688,7 @@ TEST(P2PConnectorAsyncWriteContextTest, CancelPreservesAggregatedTransferErrorUn
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_STORE_STORE_FAILED);
 }
 
-TEST(P2PConnectorAsyncWriteContextTest, CancelPreservesCompletedStartWriteResult) {
+TEST(P2PConnectorAsyncWriteContextTest, CancelPreservesCompletedStartWriteBackResult) {
     for (const auto expected : {ErrorCode::NONE_ERROR, ErrorCode::CACHE_STORE_STORE_FAILED}) {
         auto context =
             makeWriteContext(nullptr, "cancel-after-peer-result", currentTimeMs() + 4000, nullptr, 100, 1000);
@@ -1743,7 +1743,7 @@ TEST(P2PConnectorAsyncWriteContextTest, CompletedBeforeDeadlineObservationRemain
     }
 }
 
-TEST(P2PConnectorAsyncWriteContextTest, PendingStartWriteTimesOutWithoutReleasingSource) {
+TEST(P2PConnectorAsyncWriteContextTest, PendingStartWriteBackTimesOutWithoutReleasingSource) {
     auto                           resource = std::make_shared<KVCacheResource>();
     std::weak_ptr<KVCacheResource> owner    = resource;
     auto context = makeWriteContext(std::move(resource), "pending-peer", currentTimeMs() + 4000, nullptr, 100, 1000);
@@ -1764,7 +1764,7 @@ TEST(P2PConnectorAsyncWriteContextTest, PendingStartWriteTimesOutWithoutReleasin
     EXPECT_TRUE(owner.expired());
 }
 
-TEST(P2PConnectorAsyncWriteContextTest, StartWriteBusinessErrorSurvivesCancellationAndSourceCleanup) {
+TEST(P2PConnectorAsyncWriteContextTest, StartWriteBackBusinessErrorSurvivesCancellationAndSourceCleanup) {
     auto                           resource = std::make_shared<KVCacheResource>();
     std::weak_ptr<KVCacheResource> owner    = resource;
     auto                           context =
@@ -1799,7 +1799,7 @@ TEST(P2PConnectorAsyncWriteContextTest, ExpiredQueuedWriteReleasesWithoutFailSto
 
 TEST_F(P2PConnectorWriteSchedulerTest, RejectedReceiveSubmissionNeedsNoWorkerCancellation) {
     prefill_->control_pool_->stop();
-    P2PConnectorStartWriteResponsePB response;
+    P2PConnectorStartWriteBackResponsePB response;
     prefill_->handleWrite(request(), response);
     EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::OUTPUT_QUEUE_FULL));
     EXPECT_TRUE(response.stopped());
@@ -1830,7 +1830,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, MissingWorkerLeaseStatusTriggersFailStopW
             auto input = request();
             input.set_timeout_ms(100);
             input.set_deadline_ms(currentTimeMs() + 100);
-            P2PConnectorStartWriteResponsePB response;
+            P2PConnectorStartWriteBackResponsePB response;
             prefill_->handleWrite(input, response);
             std::_Exit(42);
         },
@@ -1892,7 +1892,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, SlowControlConnectionDoesNotBlockAdmissio
     auto first               = request();
     first.set_timeout_ms(200);
     first.set_deadline_ms(currentTimeMs() + 200);
-    P2PConnectorStartWriteResponsePB first_response, second_response;
+    P2PConnectorStartWriteBackResponsePB first_response, second_response;
     auto first_call = std::async(std::launch::async, [&] { prefill_->handleWrite(first, first_response); });
     EXPECT_TRUE(await([&] { return prefill_workers_[0].starts == 1 && prefill_workers_[1].starts == 1; }));
     const auto state = receiveContext();
@@ -1921,7 +1921,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, QueuedReceiveControlRecomputesRemainingBu
     auto input               = request();
     input.set_deadline_ms(currentTimeMs() + 2000);
     const auto                       hold_until = prefill_->holdUntilMs(input.deadline_ms());
-    P2PConnectorStartWriteResponsePB response;
+    P2PConnectorStartWriteBackResponsePB response;
     auto               call = std::async(std::launch::async, [&] { prefill_->handleWrite(input, response); });
     std::promise<void> resume;
     auto               gate    = resume.get_future().share();
@@ -1945,10 +1945,10 @@ TEST_F(P2PConnectorWriteSchedulerTest, QueuedReceiveControlRecomputesRemainingBu
                   autil::ThreadPoolBase::ERROR_NONE);
     }
     ASSERT_TRUE(await([&] { return blocked->load() == pool->getThreadNum(); }, 1000));
-    P2PConnectorCancelWriteRequestPB cancel;
+    P2PConnectorCancelWriteBackRequestPB cancel;
     cancel.set_unique_key(input.unique_key());
     cancel.set_deadline_ms(input.deadline_ms());
-    P2PConnectorStartWriteResponsePB cancel_response;
+    P2PConnectorStartWriteBackResponsePB cancel_response;
     prefill_->cancelWrite(cancel, cancel_response);
     ASSERT_TRUE(await([&] { return pool->getItemCount() != 0; }, 1000));
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -2026,7 +2026,7 @@ TEST(P2PConnectorAsyncWriteContextTest, RpcProgressNotifiesInEitherRegistrationO
     }
 }
 
-TEST(P2PConnectorAsyncWriteContextTest, StaleCancelMustNotEraseStoppedStartWriteProof) {
+TEST(P2PConnectorAsyncWriteContextTest, StaleCancelMustNotEraseStoppedStartWriteBackProof) {
     auto context = std::make_shared<P2PConnectorAsyncWriteContext>(
         "stopped-proof-race", currentTimeMs() + 4000, nullptr, 100, 1000);
     ASSERT_TRUE(context->beginKickoff());
@@ -2127,7 +2127,7 @@ TEST(P2PConnectorAsyncWriteContextTest, CheckerWakesAtDeadlineWithoutRpcCompleti
     EXPECT_FALSE(context->resourceHoldPending());
 }
 
-TEST(P2PConnectorAsyncWriteContextTest, StartWriteCompletionWakesCheckerAndReleasesSource) {
+TEST(P2PConnectorAsyncWriteContextTest, StartWriteBackCompletionWakesCheckerAndReleasesSource) {
     P2PConnectorAsyncWriteContextChecker checker;
     ASSERT_TRUE(checker.init());
     auto context = makeWriteContext(nullptr, "peer-completion", currentTimeMs() + 4000, nullptr, 100, 1000);
