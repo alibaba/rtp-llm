@@ -36,7 +36,7 @@ classDiagram
     class GlobalQueueCoordinator
     class RequestRegistry
     class EvictionManager
-    class PrefillQueue {
+    class WorkerBatcher {
         -processSingleRequest()
         -processFixedWindow()
     }
@@ -53,10 +53,10 @@ classDiagram
     GlobalQueueCoordinator --> RequestRegistry : lifecycle/admission
     GlobalQueueCoordinator --> DefaultRouter : ordinary placement
     GlobalQueueCoordinator --> EvictionManager : priority rescue
-    GlobalQueueCoordinator --> PrefillQueue : committed endpoint work
-    PrefillQueue --> PrefillQueue : endpoint-local delivery grouping
-    PrefillQueue --> NonBatchDeliveryStrategy : NON_BATCH
-    PrefillQueue --> BatchDeliveryStrategy : BATCH
+    GlobalQueueCoordinator --> WorkerBatcher : committed endpoint work
+    WorkerBatcher --> WorkerBatcher : endpoint-local delivery grouping
+    WorkerBatcher --> NonBatchDeliveryStrategy : NON_BATCH
+    WorkerBatcher --> BatchDeliveryStrategy : BATCH
     BatchDeliveryStrategy --> DefaultBatchDispatcher : prepared EnqueueBatch
     RequestRegistry --> PrefillEndpoint : exact accounting
     RequestRegistry --> DecodeEndpoint : exact reservation/accounting
@@ -74,7 +74,7 @@ sequenceDiagram
     participant F as Frontend
     participant R as RouteService
     participant S as QUEUE scheduler
-    participant W as PrefillQueue
+    participant W as WorkerBatcher
     participant E as Prefill / Decode engine
 
     F->>R: Schedule(request)

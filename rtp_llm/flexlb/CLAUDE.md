@@ -52,7 +52,7 @@ Core load balancing logic, scheduling strategies, and worker status synchronizat
 
 Key concepts:
 - **Routing**: `DefaultRouter` composes the Prefill and Decode cost selectors and the VIT random selector for multi-role requests
-- **Queue-based scheduling**: `RequestScheduler` facade + `GlobalQueueCoordinator` ordered placement owner + per-generation `PrefillQueue` delivery runtime
+- **Queue-based scheduling**: `RequestScheduler` facade + `GlobalQueueCoordinator` ordered placement owner + per-generation `WorkerBatcher` delivery runtime
 - **Resource measurement**: Endpoint resource views used by routing strategies
 - **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)
 - **Master election**: ZooKeeper-based leader election (`ZookeeperMasterElectService`)
@@ -62,7 +62,7 @@ Queue scheduling components:
 - `RequestScheduler`: Public QUEUE submission/cancellation/query facade with no request-state ownership
 - `GlobalQueueCoordinator`: One ordered placement owner per model; bounded planning and endpoint-conflict-aware commit
 - `RequestRegistry`: Canonical owner of request generations, deadlines, cancellation, delivery claims, and publication
-- `PrefillQueue`: Endpoint-facing decision-window and delivery runtime after placement
+- `WorkerBatcher`: Endpoint-facing decision-window and delivery runtime after placement
 - `RouteService`: High-level service that delegates queued work to `RequestScheduler`
 
 Capacity management components:
@@ -192,7 +192,7 @@ Scheduling and dispatch are independent tagged choices in `FLEXLB_CONFIG`:
 
 Every QUEUE combination follows the same lifecycle: `RouteService` submits to
 `RequestScheduler`, `GlobalQueueCoordinator` selects and commits all required
-endpoints once, and the selected Prefill `PrefillQueue` performs the configured
+endpoints once, and the selected Prefill `WorkerBatcher` performs the configured
   decision-window and delivery. There is no secondary routing queue, earlier-entry
   scan, or multi-stage placement retry loop. The global decision thread waits only
 on an exact capacity event or queue mutation; endpoint workers independently wait

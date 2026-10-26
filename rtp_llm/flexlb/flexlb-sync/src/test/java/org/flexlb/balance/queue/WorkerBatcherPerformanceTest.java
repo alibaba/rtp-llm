@@ -41,7 +41,7 @@ import static org.mockito.Mockito.when;
 
 /** Route-time queue capture regression on the final Prefill runtime boundary. */
 @Tag("performance-regression")
-class PrefillQueuePerformanceTest {
+class WorkerBatcherPerformanceTest {
 
     private static final int[] QUEUE_DEPTHS = {0, 1, 32, 128, 512};
     private static final int MEASUREMENT_ROUNDS = 5;
@@ -49,8 +49,8 @@ class PrefillQueuePerformanceTest {
     @Test
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
     void waitDiagnosticsCaptureDoesNotScaleWithRequestCount() throws Throwable {
-        var capture = MethodHandles.privateLookupIn(PrefillQueue.class, MethodHandles.lookup())
-                .findVirtual(PrefillQueue.class, "recordQueueWait",
+        var capture = MethodHandles.privateLookupIn(WorkerBatcher.class, MethodHandles.lookup())
+                .findVirtual(WorkerBatcher.class, "recordQueueWait",
                         MethodType.methodType(void.class, ScheduledRequest.class, String.class));
         var allocationBean = ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean
                 && bean.isThreadAllocatedMemorySupported() ? bean : null;
@@ -60,7 +60,7 @@ class PrefillQueuePerformanceTest {
         int operations = 2_000;
         // Both depths populate every priority bucket. Additional requests must not add capture work.
         for (int depth : new int[]{128, 512, 4096}) {
-            PrefillQueue runtime = runtimeWithDepth(depth);
+            WorkerBatcher runtime = runtimeWithDepth(depth);
             try {
                 ScheduledRequest head = runtime.captureQueueSnapshot().items().getFirst();
                 for (int i = 0; i < operations; i++) {
@@ -99,7 +99,7 @@ class PrefillQueuePerformanceTest {
         long threadId = Thread.currentThread().threadId();
         int operations = 100_000;
         for (int depth : QUEUE_DEPTHS) {
-            PrefillQueue runtime = runtimeWithDepth(depth);
+            WorkerBatcher runtime = runtimeWithDepth(depth);
             try {
                 long checksum = 0;
                 for (int warmup = 0; warmup < operations; warmup++) {
@@ -152,7 +152,7 @@ class PrefillQueuePerformanceTest {
         long threadId = Thread.currentThread().threadId();
 
         for (int depth : QUEUE_DEPTHS) {
-            PrefillQueue runtime = runtimeWithDepth(depth);
+            WorkerBatcher runtime = runtimeWithDepth(depth);
             try {
                 for (int warmup = 0; warmup < 100; warmup++) {
                     assertEquals(depth, runtime.captureLoadView()
@@ -218,14 +218,14 @@ class PrefillQueuePerformanceTest {
         }
     }
 
-    private static PrefillQueue runtimeWithDepth(int depth)
+    private static WorkerBatcher runtimeWithDepth(int depth)
             throws InterruptedException {
         FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         SchedulingTestConfig.usePriorityQueue(config);
         SchedulingTestConfig.useSingleDecision(config);
         PrefillEndpoint endpoint = stablePrefillEndpoint();
         BlockingDeliveryStrategy delivery = new BlockingDeliveryStrategy();
-        PrefillQueue runtime = new PrefillQueue(
+        WorkerBatcher runtime = new WorkerBatcher(
                 "perf-worker-" + depth,
                 endpoint,
                 config,

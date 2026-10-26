@@ -41,7 +41,7 @@ import java.util.function.Supplier;
  * 排队请求只保存在 PrefillState 的排队索引里。PRIORITY 模式按 {@link #PRIORITY_QUEUE_ORDER} 排序，
  * FIFO 模式按入队序号排序。队列每次变化都会推进队列版本，快照和诊断信息用它判断队列有没有变。
  */
-public final class PrefillQueue {
+public final class WorkerBatcher {
 
     /**
      * PRIORITY 模式的排队顺序：按 {@link PriorityOrdering#STRICT} 比较，优先级高的在前，
@@ -88,18 +88,17 @@ public final class PrefillQueue {
     private final QueuedRequestRemover queuedRequestRemover;
     private final PrefillQueueLoop loop;
 
-    public PrefillQueue(
-            String key,
-            PrefillEndpoint prefillEp,
-            FlexlbConfig config,
-            DeliveryStrategy deliveryStrategy,
-            PrefillTtftEstimator ttftEstimator,
-            EndpointEventHandler endpointEvents,
-            QueueCapacity queueCapacity) {
+    public WorkerBatcher(String key,
+                         PrefillEndpoint prefillEp,
+                         FlexlbConfig config,
+                         DeliveryStrategy deliveryStrategy,
+                         PrefillTtftEstimator ttftEstimator,
+                         EndpointEventHandler endpointEvents,
+                         QueueCapacity queueCapacity) {
         this(key, prefillEp, () -> config, deliveryStrategy, ttftEstimator, endpointEvents, queueCapacity);
     }
 
-    public PrefillQueue(String key,
+    public WorkerBatcher(String key,
                          PrefillEndpoint prefillEp,
                          Supplier<FlexlbConfig> configSupplier,
                          DeliveryStrategy deliveryStrategy,

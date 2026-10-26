@@ -21,8 +21,8 @@ import org.flexlb.balance.prediction.LearningPredictor;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.queue.PrefillQueue;
 import org.flexlb.balance.queue.QueuedRequestsSnapshot;
+import org.flexlb.balance.queue.WorkerBatcher;
 import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
@@ -87,7 +87,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final Supplier<FlexlbConfig> configSupplier;
     @Getter
     private final boolean engineSubQueueMode;
-    private final PrefillQueue prefillQueue;
+    private final WorkerBatcher workerBatcher;
     private final PrefillState prefillState;
     private final EndpointEventHandler endpointEvents;
     private final BatchSchedulerReporter reporter;
@@ -114,25 +114,25 @@ public class PrefillEndpoint extends WorkerEndpoint {
         FlexlbConfig startupConfig = configSupplier.get();
         this.engineSubQueueMode = QueueCapacity.isEngineSubQueueMode(startupConfig);
         this.predictor = createPredictor(startupConfig);
-        this.prefillQueue = new PrefillQueue(
+        this.workerBatcher = new WorkerBatcher(
                 status.getLogicalIpPort(), this, configSupplier.get(),
                 deliveryStrategy, ttftEstimator, endpointEvents, queueCapacity);
-        this.prefillState = prefillQueue.ownedState();
+        this.prefillState = workerBatcher.ownedState();
     }
 
     /** Start the attached generation exactly once before routing publication. */
     void startGeneration() {
-        prefillQueue.start();
+        workerBatcher.start();
     }
 
     /** Capture the canonical queue/work inputs for one pure route estimate. */
     public PrefillTtftEstimate.LoadView captureLoadView() {
-        return prefillQueue.captureLoadView();
+        return workerBatcher.captureLoadView();
     }
 
     /** Stable delivery semantics selected once for this endpoint generation. */
     public PrefillTtftEstimate.TtftEstimationRule ttftEstimationRule() {
-        return prefillQueue.ttftEstimationRule();
+        return workerBatcher.ttftEstimationRule();
     }
 
     /**
@@ -140,7 +140,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public PrefillQueueEnqueueResult offerHeldResult(EndpointHold exactHold, ScheduledRequest exactItem) {
         checkHold(exactHold);
-        return prefillQueue.offerWithResult(exactItem);
+        return workerBatcher.offerWithResult(exactItem);
     }
 
     /** Publish a role/group-scoped edge after real queue or status progress. */
@@ -155,21 +155,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public boolean removeQueued(
             ScheduledRequest exactItem,
             String reason) {
-        return prefillQueue.removeQueued(exactItem, reason);
+        return workerBatcher.removeQueued(exactItem, reason);
     }
 
     /** Read the last scheduling decision without traversing or locking the queue. */
     public Map<String, Object> queueWaitDiagnostics() {
-        return prefillQueue.waitDiagnostics();
+        return workerBatcher.waitDiagnostics();
     }
 
     /** Capture exact queued identities for eviction planning. */
     public QueuedRequestsSnapshot captureQueueSnapshot() {
-        return prefillQueue.captureQueueSnapshot();
+        return workerBatcher.captureQueueSnapshot();
     }
 
     public int queuedRequestCount() {
-        return prefillQueue.queueSize();
+        return workerBatcher.queueSize();
     }
 
     /**
@@ -180,7 +180,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // A self-await invariant escapes here before ledger mutation/event
         // publication. Ordinary stop cleanup failures are returned only after
         // the exact worker has exited, and are aggregated below.
-        Throwable retirementFailure = prefillQueue.stopAndAwait();
+        Throwable retirementFailure = workerBatcher.stopAndAwait();
         try {
             ShutdownResult shutdownResult = prefillState.shutdown();
             if (!shutdownResult.removedItems().isEmpty()) {
@@ -379,7 +379,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                             if (!observation.alive()) {
                                 beginRetirement();
                             }
-                            prefillQueue.signalSchedulingInputsChanged();
+                            workerBatcher.signalSchedulingInputsChanged();
                             ws.publishPreparedStatus(prepared);
                         },
                         this::beginRetirement);
@@ -394,7 +394,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public Runnable initializeFromPreparedStatus(WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         WorkerStatusResult result = prefillState.updateFromWorkerStatus(observation, this::predictRepackedBatchMs,
-                prefillQueue::signalSchedulingInputsChanged, this::beginRetirement);
+                workerBatcher::signalSchedulingInputsChanged, this::beginRetirement);
         if (!result.schedulerFacts().isEmpty() || !result.finishedBatches().isEmpty()) {
             throw new IllegalStateException(
                     "Private Prefill candidate produced locally-owned status facts");
@@ -412,7 +412,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
         HeartbeatResult result = prefillState.updateFromHeartbeat(observation);
         if (result.schedulingInputsChanged()) {
-            prefillQueue.signalSchedulingInputsChanged();
+            workerBatcher.signalSchedulingInputsChanged();
         }
         return () -> endpointEvents.onPrefillStatus(this, observation.role(), result.schedulerFacts());
     }
@@ -521,12 +521,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         String engineIp = getStatus().getMetricIpPort();
         String role = getStatus().getRole().name();
-        int queueSize = prefillQueue.queueSize();
+        int queueSize = workerBatcher.queueSize();
         reporter.reportBatcherQueueSize(role, engineIp, queueSize);
         // Priority-bucketed batch queue length — single-report with priority tag.
         // Empty queue fallback: report priority=0 depth=0 so tagged panels don't gap.
         Map<Integer, Integer> sizeByPriority =
-                prefillQueue.queueSizeByPriority();
+                workerBatcher.queueSizeByPriority();
         if (sizeByPriority.isEmpty()) {
             reporter.reportBatcherQueueDepthByPriority(role, engineIp, 0, 0);
         } else {
@@ -545,7 +545,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         reporter.reportInflightMaxAgeMs(role, engineIp, stats.maxStatusAgeMs());
         if (engineSubQueueMode) {
             reportQueueMetricSafely("oldest endpoint queue wait", () ->
-                    reporter.reportEngineSubQueueOldestWaitMs(role, engineIp, prefillQueue.oldestSubQueueWaitMs()));
+                    reporter.reportEngineSubQueueOldestWaitMs(role, engineIp, workerBatcher.oldestSubQueueWaitMs()));
         }
     }
 
@@ -613,7 +613,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         predictor.learn(finishedBatch.featuresAtCommit(), predictedMs, actualMs);
                 if (learningResult
                         == PrefillTimePredictor.LearningResult.MODEL_UPDATED) {
-                    prefillQueue.signalSchedulingInputsChanged();
+                    workerBatcher.signalSchedulingInputsChanged();
                 }
             } catch (RuntimeException learningFailure) {
                 logger.warn("batch predictor learning failed after settlement: batchId={} engine={}",

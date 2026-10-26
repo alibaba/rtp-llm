@@ -36,7 +36,7 @@ WorkerStatus 的 `dp_master_address` 分组，没有该地址的 worker 独立�
 `router.roles.prefill.availability.maxPendingRequests`（默认 64）。上下线切换使用
 `router.availabilityHysteresisPercent`（默认 15）做滞回，避免在阈值附近抖动。
 
-QUEUE scheduler 选中 Prefill 后，请求进入该 endpoint 的 `PrefillQueue`。
+QUEUE scheduler 选中 Prefill 后，请求进入该 endpoint 的 `WorkerBatcher`。
 `BatchDispatcherConfig.maxWaitingRequestsPerPrefillWorker`（默认 1024）是 batcher 等待队列的
 硬上限，与路由层的 worker 可用性阈值是不同责任。
 

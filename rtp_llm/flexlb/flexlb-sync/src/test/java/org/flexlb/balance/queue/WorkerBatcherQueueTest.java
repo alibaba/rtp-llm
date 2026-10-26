@@ -38,10 +38,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Canonical endpoint-queue contract exposed by {@link PrefillQueue}. */
-class PrefillQueueQueueTest {
+/**
+ * Canonical endpoint-queue contract exposed by {@link WorkerBatcher}.
+ */
+class WorkerBatcherQueueTest {
 
-    private final List<PrefillQueue> runtimes = new ArrayList<>();
+    private final List<WorkerBatcher> runtimes = new ArrayList<>();
     private FlexlbConfig config;
     private PrefillEndpoint prefillEndpoint;
     private BlockingDeliveryStrategy deliveryStrategy;
@@ -57,7 +59,7 @@ class PrefillQueueQueueTest {
 
     @AfterEach
     void stopRuntimes() {
-        for (PrefillQueue runtime : runtimes) {
+        for (WorkerBatcher runtime : runtimes) {
             assertNull(runtime.stopAndAwait());
         }
     }
@@ -65,7 +67,7 @@ class PrefillQueueQueueTest {
     @Test
     void batchModeKeepsPriorityQueueWithoutAnExtraRequestCountLimit() {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
-        PrefillQueue runtime = runningRuntime();
+        WorkerBatcher runtime = runningRuntime();
         ScheduledRequest low = item(901L, 10, Long.MAX_VALUE, 1, 128);
         ScheduledRequest high = item(902L, 90, Long.MAX_VALUE, 2, 128);
         assertEquals(ACCEPTED, runtime.offerWithResult(low));
@@ -75,7 +77,7 @@ class PrefillQueueQueueTest {
 
     @Test
     void priorityOrderIsPriorityDescendingThenActualOfferFifo() {
-        PrefillQueue runtime = runningRuntime();
+        WorkerBatcher runtime = runningRuntime();
         long now = System.currentTimeMillis();
 
         assertEquals(ACCEPTED, runtime.offerWithResult(item(1, 50, now + 5_000, now, 128)));
@@ -92,7 +94,7 @@ class PrefillQueueQueueTest {
 
     @Test
     void priorityOrderUsesUniqueOfferSequenceBeforeRequestIdOrCallerTimestamp() {
-        PrefillQueue runtime = runningRuntime();
+        WorkerBatcher runtime = runningRuntime();
         long now = System.currentTimeMillis();
 
         assertEquals(ACCEPTED, runtime.offerWithResult(item(1, 50, now + 9_000, now, 128)));
@@ -107,7 +109,7 @@ class PrefillQueueQueueTest {
     @Test
     void fifoOrderIgnoresPriorityAndCallerTimestamp() {
         SchedulingTestConfig.useFifoQueue(config);
-        PrefillQueue runtime = runningRuntime();
+        WorkerBatcher runtime = runningRuntime();
         long now = System.currentTimeMillis();
 
         assertEquals(ACCEPTED, runtime.offerWithResult(item(1, 30, now + 1_000, now, 128)));
@@ -120,7 +122,7 @@ class PrefillQueueQueueTest {
 
     @Test
     void snapshotsExposeExactCanonicalIdentitiesAndMonotonicMutationVersion() {
-        PrefillQueue runtime = runningRuntime();
+        WorkerBatcher runtime = runningRuntime();
         ScheduledRequest first = item(11, 70, Long.MAX_VALUE, 1, 128);
         ScheduledRequest second = item(12, 50, Long.MAX_VALUE, 2, 128);
 
@@ -147,7 +149,7 @@ class PrefillQueueQueueTest {
 
     @Test
     void removalRequiresTheExactQueuedIdentityEvenForSameRequestId() {
-        PrefillQueue runtime = runningRuntime();
+        WorkerBatcher runtime = runningRuntime();
         ScheduledRequest canonical = item(21, 50, Long.MAX_VALUE, 1, 128);
         ScheduledRequest lookalike = item(21, 50, Long.MAX_VALUE, 1, 128);
         assertEquals(ACCEPTED, runtime.offerWithResult(canonical));
@@ -160,7 +162,7 @@ class PrefillQueueQueueTest {
 
     @Test
     void activeQueueMutationsReuseImmutableCommittedWork() {
-        PrefillQueue runtime = runningRuntime();
+        WorkerBatcher runtime = runningRuntime();
         var before = runtime.captureLoadView();
         ScheduledRequest queued = item(905L, 50, Long.MAX_VALUE, 1L, 128L);
         assertEquals(ACCEPTED, runtime.offerWithResult(queued));
@@ -174,8 +176,8 @@ class PrefillQueueQueueTest {
     @Test
     void stoppingQueueReturnsUndispatchedItemsForRequeueExactlyOnce() {
         EndpointEventHandler events = mock(EndpointEventHandler.class);
-        PrefillQueue runtime = new PrefillQueue("test-worker", prefillEndpoint, config, deliveryStrategy, deliveryStrategy, events,
-                new QueueCapacity());
+        WorkerBatcher runtime = new WorkerBatcher("test-worker", prefillEndpoint, config, deliveryStrategy,
+                deliveryStrategy, events, new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
         ScheduledRequest request = item(906L, 50, Long.MAX_VALUE, 1L, 128L);
@@ -188,8 +190,8 @@ class PrefillQueueQueueTest {
                 .onQueueOfferFailure(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
     }
 
-    private PrefillQueue runningRuntime() {
-        PrefillQueue runtime = new PrefillQueue(
+    private WorkerBatcher runningRuntime() {
+        WorkerBatcher runtime = new WorkerBatcher(
                 "test-worker",
                 prefillEndpoint,
                 () -> config,

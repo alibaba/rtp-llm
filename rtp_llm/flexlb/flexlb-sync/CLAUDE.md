@@ -16,7 +16,7 @@ flexlb-sync is the core load balancing module of FlexLB. It handles:
 ### Routing and scheduling
 - `DefaultRouter` performs one multi-role selection and returns exact endpoint-generation capabilities
 - `RequestScheduler` and `GlobalQueueCoordinator` own model-wide QUEUE ordering and commit
-- `PrefillQueue` is the sole endpoint-local SINGLE/FIXED_WINDOW group owner
+- `WorkerBatcher` is the sole endpoint-local SINGLE/FIXED_WINDOW group owner
 - `DeliveryStrategy` implementations choose NON_BATCH or BATCH delivery without reselecting endpoints
 
 ### Role-Based Routing
@@ -87,7 +87,7 @@ flexlb-sync/
 │   │   ├── DefaultRouter.java       # one-pass multi-role routing
 │   │   ├── GlobalQueueCoordinator.java # model-wide ordering/commit
 │   │   ├── RequestRegistry.java     # canonical request lifecycle
-│   │   └── PrefillQueue.java       # endpoint decision/delivery runtime
+│   │   └── WorkerBatcher.java      # endpoint decision/delivery runtime
 │   └── strategy/
 │       ├── RandomStrategy.java             # VIT selection
 │       ├── CostBasedPrefillStrategy.java   # Predicted Prefill cost strategy

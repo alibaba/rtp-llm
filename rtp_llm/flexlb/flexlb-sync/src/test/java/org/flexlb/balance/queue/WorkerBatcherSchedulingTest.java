@@ -59,13 +59,13 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 /** Concurrency contracts at the final, threaded Prefill scheduling boundary. */
-class PrefillQueueSchedulingTest {
+class WorkerBatcherSchedulingTest {
 
-    private final List<PrefillQueue> runtimes = new ArrayList<>();
+    private final List<WorkerBatcher> runtimes = new ArrayList<>();
 
     @AfterEach
     void stopRuntimes() {
-        for (PrefillQueue runtime : runtimes) {
+        for (WorkerBatcher runtime : runtimes) {
             assertNull(runtime.stopAndAwait());
         }
     }
@@ -77,7 +77,7 @@ class PrefillQueueSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
-        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         ScheduledRequest head = item(
                 config, endpoint, 1L, 50, System.currentTimeMillis());
 
@@ -122,7 +122,7 @@ class PrefillQueueSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
-        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         assertEquals(ACCEPTED, runtime.offerWithResult(item(
                 config, endpoint, 12L, 50, System.currentTimeMillis())));
         await(delivery.firstCapacity.subscribed);
@@ -144,7 +144,7 @@ class PrefillQueueSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EstimateCacheBlock delivery = new EstimateCacheBlock();
-        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         ScheduledRequest head = item(
                 config, endpoint, 11L, 50, System.currentTimeMillis());
 
@@ -183,7 +183,7 @@ class PrefillQueueSchedulingTest {
         when(endpoint.reserveSingle(any(), anyLong()))
                 .thenReturn(ReservationResult.success(mock(SingleReservation.class)));
         EventDrivenBlock delivery = new EventDrivenBlock();
-        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         long now = System.currentTimeMillis();
 
         assertEquals(ACCEPTED, runtime.offerWithResult(item(config, endpoint, 31L, 50, now)));
@@ -216,7 +216,7 @@ class PrefillQueueSchedulingTest {
                 0L, 0L, 0L, 0L, 1_000_000L, 1_000_000L, running, waiting));
         PrefillEndpoint endpoint = stableEndpoint(status);
         EventDrivenBlock delivery = new EventDrivenBlock();
-        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         assertEquals(ACCEPTED, runtime.offerWithResult(
                 item(config, endpoint, 91L, 50, System.currentTimeMillis())));
         if (available < 10 && (running != 0 || waiting != 0)) {
@@ -243,7 +243,7 @@ class PrefillQueueSchedulingTest {
                 RoleType.PREFILL, null, 0L, 100L, Map.of(), 0.0,
                 0L, 0L, 0L, 0L, 1_000_000L, 1_000_000L, 0L, 0L));
         PrefillEndpoint endpoint = stableEndpoint(status);
-        PrefillQueue runtime = runningRuntime(config, endpoint, new EventDrivenBlock());
+        WorkerBatcher runtime = runningRuntime(config, endpoint, new EventDrivenBlock());
 
         assertEquals(Long.MAX_VALUE, runtime.captureLoadView()
                 .queue().constraints().batchKvCapacity());
@@ -255,7 +255,7 @@ class PrefillQueueSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock(true);
-        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         long now = System.currentTimeMillis();
         ScheduledRequest head = item(config, endpoint, 21L, 50, now);
 
@@ -286,7 +286,7 @@ class PrefillQueueSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EstimateCacheBlock delivery = new EstimateCacheBlock();
-        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         ScheduledRequest head = spy(item(config, endpoint, 13L, 50, System.currentTimeMillis()));
         CountDownLatch materializing = new CountDownLatch(1);
         CountDownLatch finish = new CountDownLatch(1);
@@ -332,7 +332,7 @@ class PrefillQueueSchedulingTest {
         FlexlbConfig config = singleConfig();
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EstimateCacheBlock delivery = new EstimateCacheBlock();
-        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         ScheduledRequest head = spy(item(
                 config, endpoint, 12L, 50, System.currentTimeMillis()));
         AtomicReference<Thread> capturingThread = new AtomicReference<>();
@@ -380,7 +380,7 @@ class PrefillQueueSchedulingTest {
                 firstStatusRead, allowFirstStatusRead);
         PrefillEndpoint endpoint = stableEndpoint(status);
         PredictionGate delivery = new PredictionGate();
-        PrefillQueue runtime = runningRuntime(config, endpoint, delivery);
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         long now = System.currentTimeMillis();
         ScheduledRequest first = item(config, endpoint, 1L, 50, now);
         ScheduledRequest revoked = item(config, endpoint, 2L, 50, now + 1L);
@@ -451,7 +451,7 @@ class PrefillQueueSchedulingTest {
                     org.mockito.ArgumentMatchers.any());
             return transaction;
         });
-        PrefillQueue runtime = runningRuntime(config, endpoint, delivery, mock(PrefillTtftEstimator.class));
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery, mock(PrefillTtftEstimator.class));
         List<ScheduledRequest> requests = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             ScheduledRequest request = item(config, endpoint, 100L + i, 50, System.currentTimeMillis());
@@ -503,7 +503,7 @@ class PrefillQueueSchedulingTest {
             return transaction;
         });
         EndpointEventHandler eventHandler = mock(EndpointEventHandler.class);
-        PrefillQueue runtime = new PrefillQueue(
+        WorkerBatcher runtime = new WorkerBatcher(
                 "retired-commit", endpoint, () -> config, delivery, mock(PrefillTtftEstimator.class), eventHandler, new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
@@ -522,7 +522,7 @@ class PrefillQueueSchedulingTest {
         FlexlbConfig initial = fixedConfig();
         initial.decisionPolicy().setMaxCollectionWaitMs(100L);
         AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
-        PrefillQueue runtime = new PrefillQueue("hot-window-estimate", stableEndpoint(stableStatus()),
+        WorkerBatcher runtime = new WorkerBatcher("hot-window-estimate", stableEndpoint(stableStatus()),
                 current::get, mock(DeliveryStrategy.class), mock(PrefillTtftEstimator.class),
                 mock(EndpointEventHandler.class), new QueueCapacity());
         runtimes.add(runtime);
@@ -554,7 +554,7 @@ class PrefillQueueSchedulingTest {
         AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
-        PrefillQueue runtime = new PrefillQueue("hot-window-delivery", endpoint, current::get, delivery, delivery,
+        WorkerBatcher runtime = new WorkerBatcher("hot-window-delivery", endpoint, current::get, delivery, delivery,
                 mock(EndpointEventHandler.class), new QueueCapacity());
         runtimes.add(runtime);
         runtime.start();
@@ -575,13 +575,15 @@ class PrefillQueueSchedulingTest {
         await(delivery.firstAttempt);
     }
 
-    private PrefillQueue runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, BoundaryDelivery delivery) {
+    private WorkerBatcher runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, BoundaryDelivery delivery) {
         return runningRuntime(config, endpoint, delivery, delivery);
     }
 
-    private PrefillQueue runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, DeliveryStrategy delivery,
+    private WorkerBatcher runningRuntime(FlexlbConfig config,
+                                         PrefillEndpoint endpoint,
+                                         DeliveryStrategy delivery,
                                          PrefillTtftEstimator estimator) {
-        PrefillQueue runtime = new PrefillQueue(
+        WorkerBatcher runtime = new WorkerBatcher(
                 "scheduling-test", endpoint, () -> config, delivery, estimator,
                 mock(EndpointEventHandler.class), new QueueCapacity());
         runtimes.add(runtime);

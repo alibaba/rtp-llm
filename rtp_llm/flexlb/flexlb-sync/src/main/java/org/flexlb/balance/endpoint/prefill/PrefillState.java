@@ -400,7 +400,7 @@ public final class PrefillState {
      * 先把回调要用的数据和结果都准备好，再清空请求表、等待队列索引和容量计数。
      * 开始清空之后只剩改字段，不会再分配内存，所以不会出现只清了一半的情况。
      *
-     * <p>正常情况下 {@link PrefillQueue#stopAndAwait()} 已经处理完所有 ACTIVE 请求。
+     * <p>正常情况下 {@link org.flexlb.balance.queue.WorkerBatcher#stopAndAwait()} 已经处理完所有 ACTIVE 请求。
      * 这里还是把剩下的 ACTIVE 请求一起清掉，万一前面的检查失败了，关闭 worker 也能清干净。</p>
      */
     public ShutdownResult shutdown() {
