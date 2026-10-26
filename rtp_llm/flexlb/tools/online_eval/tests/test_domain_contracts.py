@@ -80,7 +80,7 @@ def test_final_effective_mock_settings_are_frozen_before_backend_projection():
     assert role["capacity"]["memory_blocks"] == 42
     assert role["capacity"]["enable_memory_prefix_tree"] is True
     assert role["scheduler"]["max_generate_batch_size"] == 2
-    assert snapshot.performance["prefill"] == {"fixed_ms": 10, "scale": 1}
+    assert snapshot.performance["mock"]["forward"]["prefill"] == {"fixed_ms": 10, "scale": 1}
     # Live declaration patches cannot silently reinterpret the frozen effective configuration.
     plan["prefill_perf"]["fixed_ms"] = 999
     plan["prefill_cache_policy"]["memory_blocks"] = 99

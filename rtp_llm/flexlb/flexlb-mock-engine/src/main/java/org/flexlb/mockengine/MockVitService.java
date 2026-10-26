@@ -24,10 +24,10 @@ import java.util.concurrent.atomic.AtomicLong;
 /** Main ViT wire contract with deterministic forward, byte-bounded caches and shared computation. */
 public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase implements AutoCloseable {
     public record Config(int hiddenSize, int concurrency, int queueCapacity, long embeddingCacheBytes,
-                         long hashCacheBytes, int maxInputBytes, long maxOutputBytes, long computeDelayMs) {
+                         long hashCacheBytes, int maxInputBytes, long maxOutputBytes, double computeDelayMs) {
         public Config {
             if (hiddenSize <= 0 || concurrency <= 0 || queueCapacity < 0 || embeddingCacheBytes < 0
-                    || hashCacheBytes < 0 || maxInputBytes <= 0 || maxOutputBytes <= 0 || computeDelayMs < 0)
+                    || hashCacheBytes < 0 || maxInputBytes <= 0 || maxOutputBytes <= 0 || !Double.isFinite(computeDelayMs) || computeDelayMs < 0)
                 throw new IllegalArgumentException("invalid Mock ViT limits");
         }
         public static Config defaults() {
@@ -103,6 +103,11 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
                 limits.path("gpu_batch_wait_ms").longValue(), config.computeDelayMs(), MockEngineConfig.vitWorkBudget(limits));
     }
 
+    void timing(MockTiming timing) { gpuScheduler.timing(timing); }
+
+    void reportTiming(Map<String, Number> values) {
+        try { metrics.accept(values); } catch (RuntimeException ignored) { /* telemetry owns no work */ }
+    }
     private void report(String name, Number value) {
         try { metrics.accept(Map.of(name, value)); } catch (RuntimeException ignored) { /* telemetry owns no work */ }
     }

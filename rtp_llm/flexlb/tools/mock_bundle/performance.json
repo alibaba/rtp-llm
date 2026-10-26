@@ -1,16 +1,24 @@
 {
-  "sleep_scale": 1,
-  "jitter_pct": 0,
-  "prefill": {
-    "scale": 1
-  },
-  "decode": {
-    "scale": 1
-  },
   "calibration": "../online_eval/data/performance/dsv4_l20_mock_calibration.json",
-  "vit": {
-    "hidden_size": 128,
-    "max_output_bytes": 67108864,
-    "compute_delay_ms": 1
+  "mock": {
+    "timing": {
+      "seed": 0,
+      "time_scale": 1
+    },
+    "forward": {
+      "prefill": {
+        "scale": 1
+      },
+      "decode": {
+        "scale": 1
+      },
+      "vit": {
+        "fixed_ms": 1
+      }
+    },
+    "vit": {
+      "hidden_size": 128,
+      "max_output_bytes": 67108864
+    }
   }
 }

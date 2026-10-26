@@ -65,7 +65,7 @@ class MockMetricOwnershipTest {
         assertEquals(4, reports.size(), "closed monitor does not publish callbacks");
     }
 
-    @Test void prefillExecutionStallBelongsToStepButNotModelForwardOrQueueWait() throws Exception {
+    @Test void prefillForwardPauseBelongsToForwardAndStepButNotQueueWait() throws Exception {
         var model = MockEngineTestSupport.performanceModel(directory, "10");
         try (var cluster = MockEngineTestCluster.create(model, 63185, 1, 0)) {
             var service = cluster.prefill(0);
@@ -73,13 +73,13 @@ class MockMetricOwnershipTest {
             var reporter = service.getClass().getDeclaredField("eventMetricReporter");
             reporter.setAccessible(true);
             reporter.set(service, (java.util.function.Consumer<Map<String, Number>>) events::add);
-            service.setFaultConfig(FaultInjectionConfig.builder().generateDelayMs(30).build());
+            service.getPerformance().timing().configure(new com.fasterxml.jackson.databind.ObjectMapper().readTree("{\"forward\":{\"prefill\":{\"pause\":{\"probability\":1,\"duration_ms\":30}}}}"));
             MockEngineTestSupport.enqueueAndFetch(service, MockEngineTestSupport.batch(40,
                     MockEngineTestSupport.slot(0, MockEngineTestSupport.input(42, 10))));
             cluster.awaitCompleted(1, 3000);
             var forward = events.stream().filter(row -> row.containsKey("rtp_llm_model_forward_us")).toList();
             assertEquals(1, forward.size());
-            assertEquals(10000.0, forward.get(0).get("rtp_llm_model_forward_us"));
+            assertEquals(40000.0, forward.get(0).get("rtp_llm_model_forward_us"));
             assertEquals(40000.0, forward.get(0).get("rtp_llm_sp_step_latency_us"));
         }
     }

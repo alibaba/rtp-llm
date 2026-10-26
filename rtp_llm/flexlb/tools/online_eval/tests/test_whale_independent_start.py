@@ -38,13 +38,13 @@ class WhaleIndependentStartTest(unittest.TestCase):
         result = self.launch()
         self.assertEqual(result.returncode, 0, result.stderr)
         argv = result.stdout.splitlines()
-        self.assertNotIn("--events-file", argv)
-        self.assertEqual(argv[argv.index("--host") + 1], "10.0.0.5")
-        self.assertEqual(argv[argv.index("--kmonitor") + 1], "false")
-        self.assertEqual(argv[argv.index("--unique-engine-ips") + 1], "false")
+        self.assertNotIn("--mock.events_file", argv)
+        self.assertEqual(argv[argv.index("--mock.host") + 1], "10.0.0.5")
+        self.assertEqual(argv[argv.index("--mock.kmonitor") + 1], "false")
+        self.assertEqual(argv[argv.index("--mock.unique_engine_ips") + 1], "false")
 
     def test_cli_cannot_override_placement_contract(self):
-        for arguments in (("--whale-bundle", "true"), ("--n-prefill", "2"), ("--discovery-file", "/tmp/unused")):
+        for arguments in (("--mock.whale_bundle", "true"), ("--mock.n_prefill", "2"), ("--mock.discovery_file", "/tmp/unused")):
             with self.subTest(arguments=arguments):
                 result = self.launch(arguments=arguments)
                 self.assertNotEqual(result.returncode, 0)
@@ -54,9 +54,9 @@ class WhaleIndependentStartTest(unittest.TestCase):
         result = self.launch({"MOCK_DEPLOYMENT_MODE": "per_engine", "ROLE_TYPE": "DECODE"})
         self.assertEqual(result.returncode, 0, result.stderr)
         argv = result.stdout.splitlines()
-        self.assertEqual(argv[argv.index("--n-prefill") + 1], "0")
-        self.assertEqual(argv[argv.index("--n-decode") + 1], "1")
-        self.assertEqual(argv[argv.index("--base-grpc-port") + 1], "7002")
+        self.assertEqual(argv[argv.index("--mock.n_prefill") + 1], "0")
+        self.assertEqual(argv[argv.index("--mock.n_decode") + 1], "1")
+        self.assertEqual(argv[argv.index("--mock.base_grpc_port") + 1], "7002")
 
     def test_other_placements_and_conflicts_cannot_reach_java(self):
         for extra in (
@@ -79,7 +79,7 @@ class WhaleIndependentStartTest(unittest.TestCase):
     def test_jsonl_can_be_opted_in(self):
         result = self.launch({"MOCK_EVENT_LOG_ENABLED": "1"})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--events-file", result.stdout.splitlines())
+        self.assertIn("--mock.events_file", result.stdout.splitlines())
 
 
 if __name__ == "__main__":

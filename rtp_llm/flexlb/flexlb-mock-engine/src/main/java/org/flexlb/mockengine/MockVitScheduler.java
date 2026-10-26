@@ -59,7 +59,8 @@ final class MockVitScheduler implements AutoCloseable {
     // sole consumer must never block while enqueueing its next chunk.
     private final LinkedBlockingQueue<Chunk> waiting = new LinkedBlockingQueue<>();
     private final int queueSize, batchSize;
-    private final long maxImages, waitMs, forwardMs;
+    private final long maxImages, waitMs;
+    private final double forwardMs;
     private final MockVitWorkEstimate budget;
     private final Thread worker;
     private volatile boolean closed;
@@ -67,11 +68,11 @@ final class MockVitScheduler implements AutoCloseable {
     private volatile Consumer<Map<String, Number>> metrics = values -> {};
     private long batches;
 
-    MockVitScheduler(int queueSize, int batchSize, long maxImages, long waitMs, long forwardMs) {
+    MockVitScheduler(int queueSize, int batchSize, long maxImages, long waitMs, double forwardMs) {
         this(queueSize, batchSize, maxImages, waitMs, forwardMs, null);
     }
-    MockVitScheduler(int queueSize, int batchSize, long maxImages, long waitMs, long forwardMs, MockVitWorkEstimate budget) {
-        if (queueSize < 1 || batchSize < 1 || maxImages < 1 || waitMs < 0 || forwardMs < 0)
+    MockVitScheduler(int queueSize, int batchSize, long maxImages, long waitMs, double forwardMs, MockVitWorkEstimate budget) {
+        if (queueSize < 1 || batchSize < 1 || maxImages < 1 || waitMs < 0 || !Double.isFinite(forwardMs) || forwardMs < 0)
             throw new IllegalArgumentException("invalid ViT scheduler limits");
         this.queueSize = queueSize; this.batchSize = batchSize; this.maxImages = maxImages;
         this.waitMs = waitMs; this.forwardMs = forwardMs; this.budget = budget;
@@ -159,6 +160,9 @@ final class MockVitScheduler implements AutoCloseable {
         }
         return batch;
     }
+    private MockTiming timing = MockTiming.defaults();
+    void timing(MockTiming value) { timing = value; }
+
     private void run() {
         List<Chunk> batch = List.of();
         try {
@@ -173,7 +177,9 @@ final class MockVitScheduler implements AutoCloseable {
                 long started = System.nanoTime();
                 for (var chunk : batch) report("py_rtp_vit_embedding_queue_wait_rt", (started - chunk.enqueuedAt) / 1e6);
                 try {
-                    if (forwardMs > 0) Thread.sleep(forwardMs);
+                    var sampled = timing.sample("forward.vit", forwardMs);
+                    if (sampled.nanos() > 0) TimeUnit.NANOSECONDS.sleep(sampled.nanos());
+                    timing.metrics("forward.vit", sampled, System.nanoTime() - started).forEach(this::report);
                     synchronized (this) { batches++; }
                     List<List<MockVitImage.Result>> results = new ArrayList<>();
                     for (var chunk : batch) {

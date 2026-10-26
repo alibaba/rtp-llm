@@ -32,39 +32,39 @@ def test_launch_preserves_explicit_zero_false_and_empty_values_and_jvm_options()
     assert argv[:5] == ["java", "-Xmx1g", "-XX:+ExitOnOutOfMemoryError", "-jar", "mock.jar"]
     flags = dict(zip(argv[5::2], argv[6::2]))
     assert flags == {
-        "--n-prefill": "1",
-        "--n-decode": "0",
-        "--base-grpc-port": "28001",
-        "--whale": "false",
-        "--auto-fetch": "false",
-        "--events-file": "",
-        "--rpc-threads": "0",
-        "--calibration": "calibration.json",
-        "--engine-config": "engine-config.json",
+        "--mock.n_prefill": "1",
+        "--mock.n_decode": "0",
+        "--mock.base_grpc_port": "28001",
+        "--mock.whale": "false",
+        "--mock.auto_fetch": "false",
+        "--mock.events_file": "",
+        "--mock.rpc_threads": "0",
+        "--mock.calibration": "calibration.json",
+        "--mock.engine_config": "engine-config.json",
     }
     argv.append("unrelated")
     assert "unrelated" not in spec.argv()
 
 
 def test_optional_flags_preserve_java_defaults_and_discovery_follows_explicit_overrides():
-    spec = MockLaunchSpec("java", "mock.jar", 1, 1, 28001, discovery_file="owned.json", extra_args=("--auto-fetch", "false"))
+    spec = MockLaunchSpec("java", "mock.jar", 1, 1, 28001, discovery_file="owned.json", extra_args=("--mock.auto_fetch", "false"))
     assert spec.argv()[3:] == [
-        "--n-prefill",
+        "--mock.n_prefill",
         "1",
-        "--n-decode",
+        "--mock.n_decode",
         "1",
-        "--base-grpc-port",
+        "--mock.base_grpc_port",
         "28001",
-        "--auto-fetch",
+        "--mock.auto_fetch",
         "false",
-        "--discovery-file",
+        "--mock.discovery_file",
         "owned.json",
     ]
-    assert "--discovery-file" not in replace(spec, discovery_file=None).argv()
+    assert "--mock.discovery_file" not in replace(spec, discovery_file=None).argv()
 
 
 @pytest.mark.parametrize(
-    "action,fields", [("inject", {"config": {"delay_ms": 10}}), ("clear_inject", {}), ("start_engine", {}), ("stop_engine", {})]
+    "action,fields", [("inject", {"config": {"enqueue_error": True}}), ("clear_inject", {}), ("start_engine", {}), ("stop_engine", {})]
 )
 def test_engine_commands_keep_wire_body_and_error_contract(action, fields):
     control = MockEngineControl()
@@ -72,7 +72,7 @@ def test_engine_commands_keep_wire_body_and_error_contract(action, fields):
     args = ("prefill-0", fields["config"]) if action == "inject" else ("prefill-0",)
     with patch("adapters.mock_engine.http_post_json", return_value=(200, None)) as send:
         assert getattr(control, action)(*args) == {}
-    send.assert_called_once_with(f"http://127.0.0.1:29000/{action}", {"engine": "prefill-0", **fields})
+    send.assert_called_once_with(f"http://127.0.0.1:29000/{action}", {"engine": "prefill-0", **({"mock": {"fault": fields["config"]}} if action == "inject" else fields)})
     with patch("adapters.mock_engine.http_post_json", return_value=(404, {"error": "gone"})):
         with pytest.raises(RuntimeError, match=action + r"\(prefill-0\) failed: 404"):
             getattr(control, action)(*args)
@@ -83,8 +83,8 @@ def test_perf_commands_keep_boolean_results_and_do_not_confuse_body_fields_with_
     control = MockEngineControl()
     control.mock_http_port = 29000
     with patch("adapters.mock_engine.http_post_json", return_value=(status, {})) as send:
-        assert control.set_perf("prefill-0", engine="decode-0", action="body-field", decode_step_ms=2) is expected
-    send.assert_called_once_with("http://127.0.0.1:29000/set_perf", dict(engine="decode-0", action="body-field", decode_step_ms=2))
+        assert control.set_perf("prefill-0", forward={"decode": {"scale": 2}}) is expected
+    send.assert_called_once_with("http://127.0.0.1:29000/set_perf", dict(engine="prefill-0", mock={"forward": {"decode": {"scale": 2}}}))
 
 
 @pytest.mark.parametrize("mode,timeout", [("graceful", 95.0), ("abrupt", 5.0)])

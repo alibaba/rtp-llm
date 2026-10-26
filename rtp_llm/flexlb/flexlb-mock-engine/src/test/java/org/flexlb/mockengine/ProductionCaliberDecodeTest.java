@@ -97,7 +97,8 @@ class ProductionCaliberDecodeTest {
     @Test
     void perTokenMsIsRemovedAndFailsFast() {
         var decode = MAPPER.createObjectNode().put("per_token_ms", 45.0);
-        var calibration = MAPPER.createObjectNode().set("decode", decode);
+        var calibration = MAPPER.createObjectNode();
+        calibration.putObject("mock").putObject("forward").set("decode", decode);
         var ex = assertThrows(IllegalArgumentException.class, () -> MockPerformanceModel.loadCalibration(calibration));
         assertTrue(ex.getMessage().contains("per_token_ms"));
     }

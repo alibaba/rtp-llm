@@ -25,7 +25,7 @@ final class MockHostTransfer implements AutoCloseable {
         background = new MockCacheTaskPool(policy.workers(), policy.transferQueue());
     }
     private boolean stopped;
-    synchronized CompletableFuture<Void> submit(boolean loading, int blocks, long delayMs) {
+    synchronized CompletableFuture<Void> submit(boolean loading, int blocks, double delayMs) {
         if (stopped) return CompletableFuture.failedFuture(new java.util.concurrent.RejectedExecutionException("host transfer stopped"));
         var result = new CompletableFuture<Void>();
         active.add(result); result.whenComplete((ignored, error) -> active.remove(result));
@@ -40,7 +40,7 @@ final class MockHostTransfer implements AutoCloseable {
                     if (result.isDone()) { copied.cancel(false); return; }
                     try {
                         if (delayMs > 0) java.util.concurrent.TimeUnit.NANOSECONDS.sleep(Math.min(
-                                java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(delayMs), Math.max(0, deadline - System.nanoTime())));
+                                Math.round(delayMs * 1e6), Math.max(0, deadline - System.nanoTime())));
                         if (System.nanoTime() >= deadline) copied.completeExceptionally(new java.util.concurrent.TimeoutException("host transfer timeout"));
                         else copied.complete(null);
                     } catch (InterruptedException error) { Thread.currentThread().interrupt(); copied.completeExceptionally(error); }

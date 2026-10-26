@@ -86,7 +86,7 @@ public final class JavaMockEngineCluster {
     /** Resolved concurrency_limit default from server_args/concurrent_group_args.py. */
     static final int DEFAULT_DECODE_MAX_CONCURRENCY = 32;
     /** CLI flag for unique per-engine loopback advertisement IPs (default on). */
-    static final String UNIQUE_ENGINE_IPS_FLAG = "--unique-engine-ips";
+    static final String UNIQUE_ENGINE_IPS_FLAG = "--mock.unique_engine_ips";
     /**
      * Default per-frame poll timeout for the client-facing response pump
      * (generate_stream / fetch_response). Must cover the LONGEST possible
@@ -134,7 +134,7 @@ public final class JavaMockEngineCluster {
                 service.setEngineEventLog(engineEventLog);
             }
             if (!config.whale || config.whaleBundle) writeDiscoveryFiles(config);
-            // File-based discovery mode (--discovery-file): maintain the dynamic
+            // File-based discovery mode (--mock.discovery_file): maintain the dynamic
             // domain→hosts mapping consumed by LocalServiceDiscovery on the master,
             // kept in sync by /add_engine + /remove_engine at runtime.
             DiscoveryFileStore discoveryFileStore = config.discoveryFile != null
@@ -161,7 +161,7 @@ public final class JavaMockEngineCluster {
             // Debug surface (default OFF): consolidate_run_outputs.py parses
             // the java_mock_stats lines out of mock_engine.log to build the
             // mock.json stats timeline, so run_online_eval.sh passes
-            // --stats-stdout explicitly to keep that chain alive; ad-hoc
+            // --mock.stats_stdout explicitly to keep that chain alive; ad-hoc
             // launches get a quiet stdout.
             scheduler.scheduleAtFixedRate(() -> System.out.print(buildStatsLine(services.values(), stats)),
                     config.statsIntervalMs, config.statsIntervalMs, TimeUnit.MILLISECONDS);
@@ -272,7 +272,7 @@ public final class JavaMockEngineCluster {
      * prefill first, decode after; dynamic engines get freshly allocated
      * indices from {@link DynamicEngineManager}). It feeds
      * {@link #declaredHost} so unique advertisement IPs
-     * ({@code --unique-engine-ips}) stay unique across initial and dynamically
+     * ({@code --mock.unique_engine_ips}) stay unique across initial and dynamically
      * added engines — the gRPC server bind below stays wildcard (forPort),
      * only the advertised address changes.
      *
@@ -318,6 +318,7 @@ public final class JavaMockEngineCluster {
             MockRpcExecutors runtime = config.rpcExecutors(workerGroup);
             MockRpcExecutors.Engine rpcEngine = runtime.engine();
             service.rpcEngine = rpcEngine;
+            rpcEngine.timing(service.performance.timing(), service::reportMetricEvent);
             Server server = NettyServerBuilder.forAddress(new java.net.InetSocketAddress(config.bindHost, grpcPort))
                     .bossEventLoopGroup(bossGroup)
                     .workerEventLoopGroup(workerGroup)
@@ -510,7 +511,7 @@ public final class JavaMockEngineCluster {
     /**
      * Declared host for engine {@code engineIndex} (global index: prefill
      * engines first, then decode): a unique 127.x.y.z loopback address when
-     * {@code --unique-engine-ips} is on (default), else {@link Config#host}.
+     * {@code --mock.unique_engine_ips} is on (default), else {@link Config#host}.
      *
      * <p>Motivation: when every engine advertises host 127.0.0.1, the master's
      * Prometheus {@code engineIp} label has a single variant and per-engine
@@ -686,10 +687,10 @@ public final class JavaMockEngineCluster {
             if (hostTransfer != null) {
                 var read = memoryReads.get(id);
                 return read == null ? java.util.concurrent.CompletableFuture.failedFuture(new java.util.concurrent.CancellationException("host load ownership ended"))
-                        : hostTransfer.submit(true, read.blocks(), performance.hostLoadMs);
+                        : hostTransfer.submit(true, read.blocks(), performance.timing().scaledMilliseconds(performance.hostLoadMs));
             }
             var done = new java.util.concurrent.CompletableFuture<Void>();
-            scheduler.schedule(() -> done.complete(null), performance.hostLoadMs, TimeUnit.MILLISECONDS);
+            scheduler.schedule(() -> done.complete(null), Math.round(performance.timing().scaledMilliseconds(performance.hostLoadMs) * 1e6), TimeUnit.NANOSECONDS);
             return done;
         }
         void setHostLoadBackend(java.util.function.LongFunction<java.util.concurrent.CompletableFuture<Void>> backend) { hostLoadBackend = backend; }
@@ -1182,7 +1183,7 @@ public final class JavaMockEngineCluster {
         /**
          * Cluster-shared JSONL event log (engine_events.jsonl), injected via
          * {@link #setEngineEventLog} after construction (main wires the file
-         * opened from {@code --events-file}; tests inject per-service logs).
+         * opened from {@code --mock.events_file}; tests inject per-service logs).
          * Null = event streaming disabled — the per-request terminal rows
          * (prefill_done / decode_done) are then simply not written, exactly
          * like the stdout trace lines they replaced.
@@ -1867,7 +1868,7 @@ public final class JavaMockEngineCluster {
             this.grpcPort = grpcPort;
             this.services = services;
             this.scheduler = scheduler;
-            this.performance = performance.forEngine();
+            this.performance = performance.forEngine(engineName + ":" + grpcPort);
             if (performance.hostTransferPolicy != null && roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
                 hostTransfer = new MockHostTransfer(performance.hostTransferPolicy);
             int prepareThreads = performance.pdPolicy.prepareThreads();
@@ -1991,20 +1992,7 @@ public final class JavaMockEngineCluster {
 
             lastEnqueueTime.set(System.nanoTime());
 
-            if (faultConfig.getEnqueueDelayMs() > 0) {
-                // Crash fence on the delayed-process path (enqueue_delay and
-                // crash_after can be co-injected): if the engine crashed while
-                // this process sat in the scheduler queue, it must not admit
-                // anything into the wiped state.
-                final long epoch = crashEpoch.get();
-                scheduler.schedule(() -> {
-                    if (crashEpoch.get() == epoch) {
-                        process.run();
-                    }
-                }, faultConfig.getEnqueueDelayMs(), TimeUnit.MILLISECONDS);
-            } else {
-                process.run();
-            }
+            process.run();
         }
 
         @Override
@@ -3654,11 +3642,10 @@ public final class JavaMockEngineCluster {
         private void runPrefillBatch(List<BatchMember> originalMembers) {
             List<BatchMember> members = originalMembers;
             List<MockPerformanceModel.RequestShape> shapes = shapesOf(members);
-            long executionMs = performance.prefillMs(shapes);
-
-            long generateDelayMs = faultConfig.getGenerateDelayMs();
+            var forward = performance.prefillDuration(shapes);
+            long executionMs = Math.round(forward.milliseconds());
             long now = System.nanoTime();
-            long executionNanos = TimeUnit.MILLISECONDS.toNanos(executionMs + generateDelayMs);
+            long executionNanos = forward.nanos();
             // Each rank has one forward execution timeline.
             AtomicLong nextAvailable = pickPrefillLane(members.get(0).dpRank());
             long startNanos;
@@ -3728,6 +3715,7 @@ public final class JavaMockEngineCluster {
                 }
             }
 
+            long forwardStarted = startNanos;
             long delayNanos = Math.max(0, finishNanos - now);
             scheduler.schedule(() -> {
                 if (crashEpoch.get() != epoch) {
@@ -3744,8 +3732,9 @@ public final class JavaMockEngineCluster {
                 }
                 // MtpExecutor times the execution step after prepareStreams; queue/lane waiting is excluded.
                 // Model compute and execution stalls are separate observations; native bookkeeping is not simulated.
+                reportMetricEvent(performance.timing().metrics("forward.prefill", forward, System.nanoTime() - forwardStarted));
                 reportMetricEvent(Map.of("rtp_llm_model_forward_us", executionMs * 1000.0,
-                        "rtp_llm_sp_step_latency_us", (executionMs + generateDelayMs) * 1000.0));
+                        "rtp_llm_sp_step_latency_us", executionMs * 1000.0));
                 int activeCount = 0;
                 // ── prefill_async_partial_fail (execution-phase partial
                 // failure): snapshot the volatile config ONCE for the whole
@@ -4657,17 +4646,19 @@ public final class JavaMockEngineCluster {
                 return;
             }
             reportSchedulerStep(0, decodeRunning.size());
-            long delayMs = performance.decodeStepDelayMs(decodeRunning.size());
-            pendingStepDelayMs = delayMs; // lock in this step's price at arm time
+            var forward = performance.decodeStepDuration(decodeRunning.size());
+            long armedAt = System.nanoTime();
+            pendingStepDelayMs = Math.round(forward.milliseconds()); // lock in this step's price at arm time
             decodeStepScheduled = true;
             // Crash fence: a tick armed before a crash_after must not advance
             // the wiped engine — the late callback drops out on epoch mismatch.
             final long epoch = crashEpoch.get();
             scheduler.schedule(() -> {
                 if (crashEpoch.get() == epoch) {
+                    reportMetricEvent(performance.timing().metrics("forward.decode", forward, System.nanoTime() - armedAt));
                     runDecodeStep();
                 }
-            }, delayMs, TimeUnit.MILLISECONDS);
+            }, forward.nanos(), TimeUnit.NANOSECONDS);
         }
 
         /**
@@ -6907,7 +6898,7 @@ public final class JavaMockEngineCluster {
      * <p>Writes are synchronized (every engine in the cluster shares one file)
      * and autoflush per line — the same durability the per-line stdout printf
      * had: a killed JVM keeps every row a completion callback already wrote.
-     * Opened (appending) from {@code --events-file}; a null/blank path
+     * Opened (appending) from {@code --mock.events_file}; a null/blank path
      * disables the stream entirely.
      */
     static final class EngineEventLog implements AutoCloseable {
@@ -6995,7 +6986,7 @@ public final class JavaMockEngineCluster {
          * Emit the java_mock_stats line on stdout every statsIntervalMs.
          * Default OFF: the stats timeline is a debug surface, and a quiet
          * stdout keeps mock_engine.log small. run_online_eval.sh passes
-         * --stats-stdout explicitly because consolidate_run_outputs.py still
+         * --mock.stats_stdout explicitly because consolidate_run_outputs.py still
          * builds mock.json's stats timeline by parsing those lines from
          * mock_engine.log.
          */
@@ -7005,7 +6996,7 @@ public final class JavaMockEngineCluster {
         /**
          * Unique per-engine loopback advertisement IPs (127.x.y.z), default on:
          * keeps the master-side engineIp Prometheus label distinct per engine.
-         * Disable with --unique-engine-ips=false for the legacy single-host
+         * Disable with --mock.unique_engine_ips=false for the legacy single-host
          * behavior (every engine declares Config.host).
          */
         boolean uniqueEngineIps = true;
@@ -7014,7 +7005,7 @@ public final class JavaMockEngineCluster {
             Config config = new Config();
             for (int i = 0; i < args.length; i++) {
                 String key = args[i];
-                // Boolean flag glued form (--unique-engine-ips=false): the
+                // Boolean flag glued form (--mock.unique_engine_ips=false): the
                 // value travels with the key, so no separate value is consumed.
                 if (key.startsWith(UNIQUE_ENGINE_IPS_FLAG + "=")) {
                     config.uniqueEngineIps = parseBooleanFlag(
@@ -7026,39 +7017,39 @@ public final class JavaMockEngineCluster {
                 }
                 String value = args[++i];
                 switch (key) {
-                    case "--n-prefill" -> config.nPrefill = Integer.parseInt(value);
-                    case "--n-decode" -> config.nDecode = Integer.parseInt(value);
-                    case "--base-grpc-port" -> config.baseGrpcPort = Integer.parseInt(value);
-                    case "--event-loop-threads" -> config.eventLoopThreads = Integer.parseInt(value);
-                    case "--cache-status-compact-encoding" -> config.cacheStatusCompactEncoding = parseBooleanFlag(value, key);
-                    case "--rpc-threads" -> config.rpcThreads = Integer.parseInt(value);
-                    case "--rpc-max-calls" -> config.rpcMaxCalls = Integer.parseInt(value);
-                    case "--completion-threads" -> config.completionThreads = Integer.parseInt(value);
-                    case "--grpc-max-inbound-message-bytes" -> config.grpcMaxInboundMessageBytes = Integer.parseInt(value);
-                    case "--auto-fetch" -> config.autoFetch = parseBooleanFlag(value, key);
-                    case "--fetch-attach-timeout-ms" -> config.fetchAttachTimeoutMs = Long.parseLong(value);
-                    case "--host" -> config.host = value;
-                    case "--bind-host" -> config.bindHost = value;
-                    case "--whale" -> config.whale = parseBooleanFlag(value, key);
-                    case "--whale-bundle" -> config.whaleBundle = parseBooleanFlag(value, key);
-                    case "--kmonitor" -> config.kmonitor = parseBooleanFlag(value, key);
-                    case "--prefill-domain" -> config.prefillDomain = value;
-                    case "--decode-domain" -> config.decodeDomain = value;
-                    case "--endpoint-file" -> config.endpointFile = value;
-                    case "--env-file" -> config.envFile = value;
-                    case "--discovery-file" -> config.discoveryFile = value;
-                    case "--calibration" -> {
+                    case "--mock.n_prefill" -> config.nPrefill = Integer.parseInt(value);
+                    case "--mock.n_decode" -> config.nDecode = Integer.parseInt(value);
+                    case "--mock.base_grpc_port" -> config.baseGrpcPort = Integer.parseInt(value);
+                    case "--mock.event_loop_threads" -> config.eventLoopThreads = Integer.parseInt(value);
+                    case "--mock.cache_status_compact_encoding" -> config.cacheStatusCompactEncoding = parseBooleanFlag(value, key);
+                    case "--mock.rpc_threads" -> config.rpcThreads = Integer.parseInt(value);
+                    case "--mock.rpc_max_calls" -> config.rpcMaxCalls = Integer.parseInt(value);
+                    case "--mock.completion_threads" -> config.completionThreads = Integer.parseInt(value);
+                    case "--mock.grpc_max_inbound_message_bytes" -> config.grpcMaxInboundMessageBytes = Integer.parseInt(value);
+                    case "--mock.auto_fetch" -> config.autoFetch = parseBooleanFlag(value, key);
+                    case "--mock.fetch_attach_timeout_ms" -> config.fetchAttachTimeoutMs = Long.parseLong(value);
+                    case "--mock.host" -> config.host = value;
+                    case "--mock.bind_host" -> config.bindHost = value;
+                    case "--mock.whale" -> config.whale = parseBooleanFlag(value, key);
+                    case "--mock.whale_bundle" -> config.whaleBundle = parseBooleanFlag(value, key);
+                    case "--mock.kmonitor" -> config.kmonitor = parseBooleanFlag(value, key);
+                    case "--mock.prefill_domain" -> config.prefillDomain = value;
+                    case "--mock.decode_domain" -> config.decodeDomain = value;
+                    case "--mock.endpoint_file" -> config.endpointFile = value;
+                    case "--mock.env_file" -> config.envFile = value;
+                    case "--mock.discovery_file" -> config.discoveryFile = value;
+                    case "--mock.calibration" -> {
                         if (config.calibrationFile != null) throw new IllegalArgumentException("duplicate calibration input");
                         config.calibrationFile = value;
                     }
-                    case "--engine-config" -> {
+                    case "--mock.engine_config" -> {
                         if (config.engineConfig != null) throw new IllegalArgumentException("duplicate engine config input");
                         try { config.engineConfig = MockEngineConfig.load(value); }
                         catch (IOException error) { throw new IllegalArgumentException("cannot read engine config", error); }
                     }
-                    case "--stats-interval-ms" -> config.statsIntervalMs = Integer.parseInt(value);
-                    case "--events-file" -> config.eventsFile = value;
-                    case "--stats-stdout" -> config.statsStdout = parseBooleanFlag(value, "--stats-stdout");
+                    case "--mock.stats_interval_ms" -> config.statsIntervalMs = Integer.parseInt(value);
+                    case "--mock.events_file" -> config.eventsFile = value;
+                    case "--mock.stats_stdout" -> config.statsStdout = parseBooleanFlag(value, "--mock.stats_stdout");
                     case UNIQUE_ENGINE_IPS_FLAG -> config.uniqueEngineIps =
                             parseBooleanFlag(value, UNIQUE_ENGINE_IPS_FLAG);
                     default -> throw new IllegalArgumentException("Unknown argument: " + key);
@@ -7066,10 +7057,10 @@ public final class JavaMockEngineCluster {
             }
             if (config.engineConfig == null || config.endpointFile == null || config.calibrationFile == null) {
                 throw new IllegalArgumentException(
-                        "--engine-config, --endpoint-file, and --calibration are required");
+                        "--mock.engine_config, --mock.endpoint_file, and --mock.calibration are required");
             }
             if (config.whaleBundle && !config.whale) {
-                throw new IllegalArgumentException("--whale-bundle requires --whale true");
+                throw new IllegalArgumentException("--mock.whale_bundle requires --mock.whale true");
             }
             if (config.whale) {
                 if ((!config.whaleBundle && config.nPrefill + config.nDecode != 1)
@@ -7078,11 +7069,11 @@ public final class JavaMockEngineCluster {
                     throw new IllegalArgumentException("Whale requires exactly one engine and an advertised Pod IP");
                 }
                 if (config.discoveryFile != null && !config.whaleBundle) {
-                    throw new IllegalArgumentException("Whale uses platform discovery, not --discovery-file");
+                    throw new IllegalArgumentException("Whale uses platform discovery, not --mock.discovery_file");
                 }
             }
             if (config.kmonitor && !config.whale) {
-                throw new IllegalArgumentException("--kmonitor requires --whale true");
+                throw new IllegalArgumentException("--mock.kmonitor requires --mock.whale true");
             }
             if (config.discoveryFile == null && (!config.whale || config.whaleBundle)) {
                 config.discoveryFile = Path.of(config.endpointFile).toAbsolutePath()
@@ -7099,13 +7090,13 @@ public final class JavaMockEngineCluster {
                 throw new IllegalArgumentException("thread counts must be positive");
             }
             if (config.grpcMaxInboundMessageBytes < 1) {
-                throw new IllegalArgumentException("--grpc-max-inbound-message-bytes must be >= 1");
+                throw new IllegalArgumentException("--mock.grpc_max_inbound_message_bytes must be >= 1");
             }
             if (config.fetchAttachTimeoutMs < 1) {
-                throw new IllegalArgumentException("--fetch-attach-timeout-ms must be >= 1");
+                throw new IllegalArgumentException("--mock.fetch_attach_timeout_ms must be >= 1");
             }
             if (config.statsIntervalMs < 1) {
-                throw new IllegalArgumentException("--stats-interval-ms must be >= 1");
+                throw new IllegalArgumentException("--mock.stats_interval_ms must be >= 1");
             }
             if (config.nPrefill > 0) config.engineConfig.role("prefill");
             if (config.nDecode > 0) config.engineConfig.role("decode");

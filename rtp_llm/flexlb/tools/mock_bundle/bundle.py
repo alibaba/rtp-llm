@@ -125,7 +125,7 @@ def run():
         eos = json.loads(eos_json)
         if not isinstance(eos, dict):
             raise ValueError("MOCK_EOS_CONFIG_JSON must be a JSON object")
-        performance.setdefault("decode", {})["eos"] = eos
+        performance.setdefault("mock", {}).setdefault("forward", {}).setdefault("decode", {})["eos"] = eos
     performance_path = runtime / "performance.json"
     performance_path.write_text(json.dumps(performance))
     children, logs = [], []
@@ -214,12 +214,12 @@ def run():
                     "-cp",
                     str(jars / "mock.jar"),
                     "org.flexlb.mockengine.MockVitServer",
-                    "--engine-config",
+                    "--mock.engine_config",
                     str(runtime / "engine-config.json"),
-                    "--calibration",
+                    "--mock.calibration",
                     str(performance_path),
-                    *[part for key, value in vit_cfg.items() for part in ("--" + key.replace("_", "-"), str(value))],
-                    *(["--model-path", os.environ["MOCK_VIT_MODEL_PATH"]] if os.environ.get("MOCK_VIT_MODEL_PATH") else []),
+                    *[part for key, value in vit_cfg.items() for part in ("--mock." + key, str(value))],
+                    *(["--mock.model_path", os.environ["MOCK_VIT_MODEL_PATH"]] if os.environ.get("MOCK_VIT_MODEL_PATH") else []),
                 ],
                 env,
             )

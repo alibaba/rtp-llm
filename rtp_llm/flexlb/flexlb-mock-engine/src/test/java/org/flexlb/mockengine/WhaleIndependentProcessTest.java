@@ -67,11 +67,11 @@ class WhaleIndependentProcessTest {
         Path log = directory.resolve(ip + ".log");
         Process process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                 "-cp", System.getProperty("java.class.path"), JavaMockEngineCluster.class.getName(),
-                "--whale", "true", "--n-prefill", prefill ? "1" : "0", "--n-decode", prefill ? "0" : "1",
-                "--host", ip, "--bind-host", ip, "--base-grpc-port", String.valueOf(grpcPort),
-                "--engine-config", engine.toString(), "--calibration", perf.toString(),
-                "--endpoint-file", directory.resolve(ip + "-unused-endpoint.json").toString(),
-                "--auto-fetch", String.valueOf(automatic))
+                "--mock.whale", "true", "--mock.n_prefill", prefill ? "1" : "0", "--mock.n_decode", prefill ? "0" : "1",
+                "--mock.host", ip, "--mock.bind_host", ip, "--mock.base_grpc_port", String.valueOf(grpcPort),
+                "--mock.engine_config", engine.toString(), "--mock.calibration", perf.toString(),
+                "--mock.endpoint_file", directory.resolve(ip + "-unused-endpoint.json").toString(),
+                "--mock.auto_fetch", String.valueOf(automatic))
                 .redirectErrorStream(true).redirectOutput(log.toFile()).start();
         children.add(process);
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);

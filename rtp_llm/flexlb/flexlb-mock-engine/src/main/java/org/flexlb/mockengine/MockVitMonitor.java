@@ -51,6 +51,7 @@ final class MockVitMonitor implements ServerInterceptor, AutoCloseable {
         service.setSchedulerMetrics(values -> values.forEach((name, value) -> {
             var tags = new HashMap<>(labels);
             if (name.equals("py_rtp_vit_qps")) tags.put("source", "mm_embedding");
+            if (name.startsWith("mock_timing_")) register(name, FlexMetricType.GAUGE);
             report(name, tags, value.doubleValue());
         }));
         sampler.scheduleAtFixedRate(() -> {
@@ -74,7 +75,7 @@ final class MockVitMonitor implements ServerInterceptor, AutoCloseable {
         });
     }
 
-    private void register(String name, FlexMetricType type) {
+    private synchronized void register(String name, FlexMetricType type) {
         if (registered.add(name)) sink.register(name, type);
     }
 

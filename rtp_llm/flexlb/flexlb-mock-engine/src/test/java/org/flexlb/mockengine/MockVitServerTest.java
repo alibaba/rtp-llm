@@ -20,10 +20,12 @@ class MockVitServerTest {
 
     @Test void independentVitPublishesHealthAndActualGrpcStatus() throws Exception {
         int grpc = freePort(), http = freePort();
+        var calibration = java.nio.file.Files.createTempFile("vit-calibration", ".json");
+        java.nio.file.Files.writeString(calibration, "{\"mock\":{\"vit\":{\"hidden_size\":128,\"max_output_bytes\":16777216},\"forward\":{\"vit\":{\"fixed_ms\":1}}}}");
         var child = new ProcessBuilder(System.getProperty("java.home") + "/bin/java", "-cp",
                 System.getProperty("java.class.path"), MockVitServer.class.getName(),
-                "--engine-config", "../tools/mock_bundle/engine-config.json", "--calibration", "../tools/mock_bundle/performance.json",
-                "--port", Integer.toString(grpc), "--http-port", Integer.toString(http))
+                "--mock.engine_config", "../tools/mock_bundle/engine-config.json", "--mock.calibration", calibration.toString(),
+                "--mock.port", Integer.toString(grpc), "--mock.http_port", Integer.toString(http))
                 .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start();
         var channel = ManagedChannelBuilder.forAddress("127.0.0.1", grpc).usePlaintext().build();
         try {
@@ -45,6 +47,7 @@ class MockVitServerTest {
             assertTrue(status.getAlive());
             assertEquals("VIT", status.getRole());
         } finally {
+            java.nio.file.Files.deleteIfExists(calibration);
             channel.shutdownNow();
             child.destroy();
             if (!child.waitFor(5, TimeUnit.SECONDS)) child.destroyForcibly().waitFor();

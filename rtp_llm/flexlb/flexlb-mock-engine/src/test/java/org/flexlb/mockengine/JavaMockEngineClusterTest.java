@@ -92,7 +92,8 @@ class JavaMockEngineClusterTest {
                         && status.getFinishedTaskListCount() == 5,
                 2_000);
         assertTrue(finished.getFinishedTaskListList().stream()
-                .allMatch(task -> task.getExecutionTimeMs() == 180));
+                .allMatch(task -> task.getExecutionTimeMs() >= 180),
+                "runtime completion includes forward plus time until LOAD/Fetch continuation settles");
     }
 
     @Test
@@ -110,7 +111,7 @@ class JavaMockEngineClusterTest {
                 status -> status.getFinishedTaskListCount() == 1,
                 2_000);
         assertTrue(finished.getFinishedTaskListList().stream()
-                .allMatch(task -> task.getExecutionTimeMs() == 100));
+                .allMatch(task -> task.getExecutionTimeMs() >= 100));
         assertEquals(List.of(0L), finished.getFinishedTaskListList().stream()
                 .map(EngineRpcService.TaskInfoPB::getDpRank)
                 .sorted()

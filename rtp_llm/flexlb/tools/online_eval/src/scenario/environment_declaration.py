@@ -229,7 +229,7 @@ class EnvironmentDeclaration:
         if self.prefill_perf is not None:
             if role["capacity"]["kind"] != "synthetic":
                 raise ValueError("synthetic batch budgets cannot override a real effective config")
-            performance.setdefault("prefill", {}).update(fixed_ms=self.prefill_perf.fixed_ms, scale=self.prefill_perf.scale)
+            performance.setdefault("mock", {}).setdefault("forward", {}).setdefault("prefill", {}).update(fixed_ms=self.prefill_perf.fixed_ms, scale=self.prefill_perf.scale)
             role["scheduler"].update(
                 max_batch_tokens_size=self.prefill_perf.max_batch_tokens, max_generate_batch_size=self.prefill_perf.max_batch_requests
             )

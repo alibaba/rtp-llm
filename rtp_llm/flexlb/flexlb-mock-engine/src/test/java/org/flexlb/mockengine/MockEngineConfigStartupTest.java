@@ -34,13 +34,13 @@ class MockEngineConfigStartupTest {
             }
         }
         Path calibration = directory.resolve("calibration.json"), log = directory.resolve("engine.log");
-        Files.writeString(calibration, "{\"prefill\":{\"fixed_ms\":1},\"decode\":{\"step_base_ms\":1,\"step_per_running_ms\":0,\"tokens_per_step\":1}}");
+        Files.writeString(calibration, "{\"mock\":{\"forward\":{\"prefill\":{\"fixed_ms\":1},\"decode\":{\"step_base_ms\":1,\"step_per_running_ms\":0,\"tokens_per_step\":1}}}}");
         var child = new ProcessBuilder(System.getProperty("java.home") + "/bin/java", "-cp",
                 System.getProperty("java.class.path"), JavaMockEngineCluster.class.getName(),
-                "--engine-config", "../tools/mock_bundle/engine-config.json", "--calibration", calibration.toString(),
-                "--endpoint-file", directory.resolve("endpoints.json").toString(),
-                "--base-grpc-port", Integer.toString(base), "--n-prefill", "1", "--n-decode", "1",
-                "--unique-engine-ips", "false").redirectErrorStream(true).redirectOutput(log.toFile()).start();
+                "--mock.engine_config", "../tools/mock_bundle/engine-config.json", "--mock.calibration", calibration.toString(),
+                "--mock.endpoint_file", directory.resolve("endpoints.json").toString(),
+                "--mock.base_grpc_port", Integer.toString(base), "--mock.n_prefill", "1", "--mock.n_decode", "1",
+                "--mock.unique_engine_ips", "false").redirectErrorStream(true).redirectOutput(log.toFile()).start();
         var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(1)).build();
         var url = "http://127.0.0.1:" + (base - 1);
         var channel = ManagedChannelBuilder.forAddress("127.0.0.1", base).usePlaintext().build();
@@ -72,7 +72,7 @@ class MockEngineConfigStartupTest {
             assertTrue(responses.hasNext());
             while (responses.hasNext()) assertFalse(responses.next().hasErrorInfo());
             var post = HttpRequest.newBuilder(URI.create(url + "/set_perf")).POST(HttpRequest.BodyPublishers.ofString(
-                    "{\"engine\":\"prefill-0\",\"prefill_fixed_ms\":2}")).build();
+                    "{\"engine\":\"prefill-0\",\"mock\":{\"forward\":{\"prefill\":{\"fixed_ms\":2}}}}")).build();
             assertEquals(200, client.send(post, HttpResponse.BodyHandlers.ofString()).statusCode());
             state = client.send(HttpRequest.newBuilder(URI.create(url + "/effective_config")).GET().build(),
                     HttpResponse.BodyHandlers.ofString()).body();

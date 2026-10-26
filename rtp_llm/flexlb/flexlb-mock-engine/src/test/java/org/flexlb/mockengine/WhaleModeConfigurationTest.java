@@ -183,8 +183,8 @@ class WhaleModeConfigurationTest {
         assertEquals(0, process.exitValue(), args);
         assertEquals(literal, Files.readString(directory.resolve("calibration.json")));
         assertEquals("{}", Files.readString(directory.resolve("engine-config.json")));
-        assertTrue(args.contains("--host\n10.1.2.3\n"), args);
-        assertTrue(args.contains("--auto-fetch\nfalse\n"), args);
+        assertTrue(args.contains("--mock.host\n10.1.2.3\n"), args);
+        assertTrue(args.contains("--mock.auto_fetch\nfalse\n"), args);
 
         env.put("MOCK_CALIBRATION_CONFIG", "ambiguous.json");
         Process refused = builder.start();
@@ -193,8 +193,8 @@ class WhaleModeConfigurationTest {
     }
 
     private JavaMockEngineCluster.Config config(String... options) {
-        List<String> args = new ArrayList<>(List.of("--endpoint-file", "endpoints.json",
-                "--engine-config", "../tools/mock_bundle/engine-config.json", "--calibration", "performance.json"));
+        List<String> args = new ArrayList<>(List.of("--mock.endpoint_file", "endpoints.json",
+                "--mock.engine_config", "../tools/mock_bundle/engine-config.json", "--mock.calibration", "performance.json"));
         args.addAll(List.of(options));
         return JavaMockEngineCluster.Config.parse(args.toArray(String[]::new));
     }
@@ -209,20 +209,20 @@ class WhaleModeConfigurationTest {
 
     @Test
     void whaleRequiresOneEngineAndNeverGeneratesLocalDiscovery() {
-        assertThrows(IllegalArgumentException.class, () -> config("--whale", "true"));
-        var config = config("--whale", "true", "--n-prefill", "1", "--n-decode", "0",
-                "--host", "10.1.2.3");
+        assertThrows(IllegalArgumentException.class, () -> config("--mock.whale", "true"));
+        var config = config("--mock.whale", "true", "--mock.n_prefill", "1", "--mock.n_decode", "0",
+                "--mock.host", "10.1.2.3");
         assertNull(config.discoveryFile);
         assertEquals("10.1.2.3", JavaMockEngineCluster.declaredHost(config, 0));
-        assertThrows(IllegalArgumentException.class, () -> config("--kmonitor", "true"));
+        assertThrows(IllegalArgumentException.class, () -> config("--mock.kmonitor", "true"));
     }
 
     @Test
     void bundleIsExplicitAndRetainsFileDiscoveryForAllLogicalEngines() {
-        assertThrows(IllegalArgumentException.class, () -> config("--whale-bundle", "true"));
-        var bundle = config("--whale", "true", "--whale-bundle", "true",
-                "--host", "10.1.2.3", "--n-prefill", "48", "--n-decode", "192",
-                "--auto-fetch", "true", "--kmonitor", "true");
+        assertThrows(IllegalArgumentException.class, () -> config("--mock.whale_bundle", "true"));
+        var bundle = config("--mock.whale", "true", "--mock.whale_bundle", "true",
+                "--mock.host", "10.1.2.3", "--mock.n_prefill", "48", "--mock.n_decode", "192",
+                "--mock.auto_fetch", "true", "--mock.kmonitor", "true");
         assertNotNull(bundle.discoveryFile);
         assertTrue(bundle.autoFetch);
         assertEquals(240, bundle.nPrefill + bundle.nDecode);
@@ -249,8 +249,8 @@ class WhaleModeConfigurationTest {
     }
 
     private void assertBundleCompletion(boolean eos, boolean direct) throws Exception {
-        var cfg = config("--whale", "true", "--whale-bundle", "true", "--auto-fetch", "true",
-                "--host", "10.1.2.3", "--n-prefill", "1", "--n-decode", "1");
+        var cfg = config("--mock.whale", "true", "--mock.whale_bundle", "true", "--mock.auto_fetch", "true",
+                "--mock.host", "10.1.2.3", "--mock.n_prefill", "1", "--mock.n_decode", "1");
         var engineDocument = (com.fasterxml.jackson.databind.node.ObjectNode) MockEngineConfigFixture.load().snapshot();
         for (String role : new String[]{"prefill", "decode"}) {
             ((com.fasterxml.jackson.databind.node.ObjectNode)engineDocument.path("roles").path(role).path("capacity")).put("device_blocks", 32).put("reserve_blocks", 1).put("seq_size_per_block", role.equals("prefill") ? 512 : 64);
@@ -576,8 +576,8 @@ class WhaleModeConfigurationTest {
         assertTrue(process.waitFor(3, TimeUnit.SECONDS));
         String args = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
         assertEquals(0, process.exitValue(), args);
-        assertTrue(args.contains("--n-prefill\n0\n--n-decode\n1\n"), args);
-        assertTrue(args.contains("--base-grpc-port\n22291\n--auto-fetch\ntrue\n"), args);
-        assertTrue(args.contains("--kmonitor\ntrue\n"), args);
+        assertTrue(args.contains("--mock.n_prefill\n0\n--mock.n_decode\n1\n"), args);
+        assertTrue(args.contains("--mock.base_grpc_port\n22291\n--mock.auto_fetch\ntrue\n"), args);
+        assertTrue(args.contains("--mock.kmonitor\ntrue\n"), args);
     }
 }

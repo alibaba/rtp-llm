@@ -14,7 +14,6 @@ class FaultInjectionConfigTest {
         assertFalse(config.isFailOnEnqueue());
         assertEquals(13, config.getEnqueueErrorCode());
         assertEquals("mock enqueue failure", config.getEnqueueErrorMessage());
-        assertEquals(0, config.getEnqueueDelayMs());
         assertFalse(config.isGenerateError());
         assertFalse(config.isFetchError());
         assertFalse(config.isNoRespond());
@@ -29,7 +28,6 @@ class FaultInjectionConfigTest {
                 .failOnEnqueue(true)
                 .enqueueErrorCode(42)
                 .enqueueErrorMessage("custom error")
-                .enqueueDelayMs(500)
                 .generateError(true)
                 .fetchError(true)
                 .noRespond(true)
@@ -41,7 +39,6 @@ class FaultInjectionConfigTest {
         assertTrue(config.isFailOnEnqueue());
         assertEquals(42, config.getEnqueueErrorCode());
         assertEquals("custom error", config.getEnqueueErrorMessage());
-        assertEquals(500, config.getEnqueueDelayMs());
         assertTrue(config.isGenerateError());
         assertTrue(config.isFetchError());
         assertTrue(config.isNoRespond());
@@ -54,7 +51,6 @@ class FaultInjectionConfigTest {
     void toBuilderPreservesAllFields() {
         FaultInjectionConfig original = FaultInjectionConfig.builder()
                 .failOnEnqueue(true)
-                .enqueueDelayMs(200)
                 .generateError(true)
                 .kvPressureTokens(100_000)
                 .crashAfterNRequests(3)
@@ -65,7 +61,6 @@ class FaultInjectionConfigTest {
         assertEquals(original.isFailOnEnqueue(), copy.isFailOnEnqueue());
         assertEquals(original.getEnqueueErrorCode(), copy.getEnqueueErrorCode());
         assertEquals(original.getEnqueueErrorMessage(), copy.getEnqueueErrorMessage());
-        assertEquals(original.getEnqueueDelayMs(), copy.getEnqueueDelayMs());
         assertEquals(original.isGenerateError(), copy.isGenerateError());
         assertEquals(original.isFetchError(), copy.isFetchError());
         assertEquals(original.isNoRespond(), copy.isNoRespond());
@@ -78,7 +73,6 @@ class FaultInjectionConfigTest {
     void toBuilderAllowsPartialModification() {
         FaultInjectionConfig original = FaultInjectionConfig.builder()
                 .failOnEnqueue(true)
-                .enqueueDelayMs(200)
                 .build();
 
         FaultInjectionConfig modified = original.toBuilder()
@@ -86,7 +80,6 @@ class FaultInjectionConfigTest {
                 .build();
 
         assertFalse(modified.isFailOnEnqueue());
-        assertEquals(200, modified.getEnqueueDelayMs(), "unchanged fields should be preserved");
     }
 
     @Test

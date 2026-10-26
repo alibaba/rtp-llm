@@ -222,6 +222,17 @@ final class MockEngineTestSupport {
 
     static HttpResponse<String> httpPostResponse(int port, String path, String body)
             throws IOException, InterruptedException {
+        if (java.util.Set.of("/inject", "/set_queue_depth", "/set_kv_pressure").contains(path)) body = faultRequest(body);
+        if (java.util.Set.of("/prefill_formula", "/decode_model", "/output_length").contains(path)) {
+            var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            var input = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(body);
+            if (!input.has("mock")) {
+                var request = mapper.createObjectNode();
+                if (input.has("engine")) request.set("engine", input.remove("engine"));
+                request.putObject("mock").putObject("forward").set(path.equals("/prefill_formula") ? "prefill" : "decode", input);
+                body = mapper.writeValueAsString(request);
+            }
+        }
         return HTTP_CLIENT.send(
                 HttpRequest.newBuilder()
                         .uri(URI.create("http://127.0.0.1:" + port + path))
@@ -229,6 +240,16 @@ final class MockEngineTestSupport {
                         .POST(HttpRequest.BodyPublishers.ofString(body))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
+    }
+
+    static String faultRequest(String descriptor) throws IOException {
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        var input = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(descriptor);
+        if (input.has("mock")) return descriptor;
+        var request = mapper.createObjectNode();
+        for (String selector : new String[]{"port", "engine"}) if (input.has(selector)) request.set(selector, input.remove(selector));
+        request.putObject("mock").set("fault", input.has("config") ? input.get("config") : input);
+        return mapper.writeValueAsString(request);
     }
 
     private static void requireHttpOk(HttpResponse<?> response, String operation) {

@@ -74,6 +74,9 @@ def preset_names():
 
 def resolve_performance_calibration(performance, source_path):
     """Materialize a named test calibration without altering capture records."""
+    allowed = {"mock", "engine_config", "calibration", "calibration_id", "calibration_model", "calibration_hardware", "calibration_status", "calibration_sha256"}
+    if set(performance) - allowed:
+        raise ValueError("unknown calibration fields: " + str(sorted(set(performance) - allowed)))
     reference = performance.get("calibration")
     if reference is None:
         return performance
@@ -86,7 +89,7 @@ def resolve_performance_calibration(performance, source_path):
     from flexlb_profile_data import load_mock_calibration
 
     calibration = load_mock_calibration(target)
-    decode = performance.setdefault("decode", {})
+    decode = performance.setdefault("mock", {}).setdefault("forward", {}).setdefault("decode", {})
     if not isinstance(decode, dict):
         raise ValueError("performance.decode must be a mapping")
     for key, value in calibration["decode"].items():
@@ -111,8 +114,8 @@ def load_performance_bundle(path):
         from flexlb_profile_data import load_mock_calibration
 
         load_mock_calibration(path)
-        for key in ("schema_version", "id", "model", "hardware", "status", "source", "prefill_expression"):
-            document.pop(key)
+        document = {"mock": {"timing": {"time_scale": document["sleep_scale"], "seed": 0},
+                     "forward": {"decode": document["decode"]}}}
         document["calibration"] = Path(path).name
     capture = document.pop("capture", None)
     if capture is not None:
@@ -123,6 +126,11 @@ def load_performance_bundle(path):
             raise ValueError("performance capture record checksum mismatch")
         if capture["status"] == "verified" and (not capture.get("identity", {}).get("deployment") or not capture.get("capture_window")):
             raise ValueError("verified capture requires deployment and window")
+    if capture is not None:
+        document["mock"] = {"timing": {"time_scale": document.pop("sleep_scale", 1), "seed": 0},
+                            "forward": {key: document.pop(key) for key in ("prefill", "decode") if key in document}}
+        if document.pop("jitter_pct", 0) != 0:
+            raise ValueError("capture requires explicit timing recalibration")
     master = document.pop("master", {})
     PairedMasterSettings.from_record(master)
     if "block_size" in document:
@@ -131,28 +139,12 @@ def load_performance_bundle(path):
     if "engine_config" not in document:
         document["engine_config"] = json.loads((ROOT.parent / "mock_bundle/engine-config.json").read_text())
     resolve_performance_calibration(document, path)
-    allowed = {
-        "sleep_scale",
-        "jitter_pct",
-        "engine_config",
-        "prefill",
-        "decode",
-        "vit",
-        "calibration_id",
-        "calibration_model",
-        "calibration_hardware",
-        "calibration_status",
-        "calibration_sha256",
-    }
+    allowed = {"mock", "engine_config", "calibration_id", "calibration_model", "calibration_hardware", "calibration_status", "calibration_sha256"}
     if set(document) - allowed:
         raise ValueError("unknown calibration fields: " + str(sorted(set(document) - allowed)))
-    for role, fields in {
-        "prefill": {"expression", "fixed_ms", "min_ms", "scale", "noise"},
-        "decode": {"scale", "noise", "step_ms_by_batch", "step_base_ms", "step_per_running_ms", "tokens_per_step", "eos"},
-    }.items():
-        values = document.get(role, {})
-        if not isinstance(values, dict) or set(values) - fields:
-            raise ValueError("invalid " + role + " calibration fields")
+    mock = document.get("mock", {})
+    if not isinstance(mock, dict) or set(mock) - {"timing", "forward", "rpc", "vit"}:
+        raise ValueError("invalid mock calibration fields")
     return document, capture, master
 
 

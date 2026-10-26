@@ -29,8 +29,8 @@ key 版本初始为 -1，只在逻辑节点创建、最终移除时递增；GPU/
 | `MockControlServer`、`DynamicEngineManager` | HTTP 控制、故障和动态引擎管理 |
 | `JavaLoadClient` | 播放、Schedule、Fetch / Generate、请求终态证据 |
 
-行为配置通过 `--engine-config` 导入 real 最终值与 allocator 容量，
-`--calibration` 只接受性能模型。字段所有权、导出、支持边界与回读统一见
+行为配置通过 `--mock.engine_config` 导入 real 最终值与 allocator 容量，
+`--mock.calibration` 只接受性能模型。字段所有权、导出、支持边界与回读统一见
 [引擎配置](../tools/online_eval/docs/architecture/engine-configuration.md)。
 
 运行时性能控制使用单个不可变快照发布，单次耗时计算使用同一快照的系数。`/set_perf` 校验后一次发布 `prefill_fixed_ms`、`decode_scale`；被拒绝的请求不改变状态，scheduler 容量不由性能覆盖控制。
@@ -43,7 +43,7 @@ key 版本初始为 -1，只在逻辑节点创建、最终移除时递增；GPU/
 
 ## 请求、状态与资源
 
-BATCH 默认 `--auto-fetch false`：Decode 先保留 KV 并报告 `KV_ALLOCATED`，Prefill 完成后释放计算槽，但保留 deferred context 和 connector KV，直到 Fetch、取消或过期。Fetch 可以在 Prefill 完成之前或之后接入。NON_BATCH 已有客户端流。正常测试需要回读完整输出；显式 schedule-only 实验的 auto-fetch 不等于客户端 Fetch 证据。`no_respond` 表示服务端 RPC 黑洞。
+BATCH 默认 `--mock.auto_fetch false`：Decode 先保留 KV 并报告 `KV_ALLOCATED`，Prefill 完成后释放计算槽，但保留 deferred context 和 connector KV，直到 Fetch、取消或过期。Fetch 可以在 Prefill 完成之前或之后接入。NON_BATCH 已有客户端流。正常测试需要回读完整输出；显式 schedule-only 实验的 auto-fetch 不等于客户端 Fetch 证据。`no_respond` 表示服务端 RPC 黑洞。
 
 请求 `timeout_ms` 使用跨准备、KV 等待、Prefill、Fetch 和 Decode 的绝对预算，缺省或非正数不设置请求 deadline。Fetch 接入 TTL 与帧间等待是独立约束，不重置请求预算。Decode ALLOCATE 对永久容量不足立即返回领域错误 602；临时不足等待容量代际变化，直到释放、取消或请求超时。`decode_retry_*` 不作为容量等待上限，`/set_perf` 拒绝这些旧覆盖字段。
 

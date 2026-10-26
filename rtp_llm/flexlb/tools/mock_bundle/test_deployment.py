@@ -84,14 +84,14 @@ class DeploymentTest(unittest.TestCase):
             }
             for role in ("PREFILL", "DECODE"):
                 args = standalone_mock.command({**base, "MOCK_DEPLOYMENT_MODE": "per_engine", "ROLE_TYPE": role})
-                self.assertEqual(args[args.index("--whale-bundle") + 1], "false")
-                self.assertNotIn("--discovery-file", args)
+                self.assertEqual(args[args.index("--mock.whale_bundle") + 1], "false")
+                self.assertNotIn("--mock.discovery_file", args)
                 plan = json.loads(Path(directory, "deployment.json").read_text())
                 self.assertEqual(plan["vip_grpc_endpoints"], [{"role": role.lower(), "ip": "10.0.0.5", "port": 7002}])
             args = standalone_mock.command(
                 {**base, "MOCK_DEPLOYMENT_MODE": "single_pod", "MOCK_PREFILL_COUNT": "2", "MOCK_DECODE_COUNT": "3"}
             )
-            self.assertEqual(args[args.index("--whale-bundle") + 1], "true")
+            self.assertEqual(args[args.index("--mock.whale_bundle") + 1], "true")
             plan = json.loads(Path(directory, "deployment.json").read_text())
             self.assertEqual([e["port"] for e in plan["vip_grpc_endpoints"]], list(range(7002, 7007)))
             self.assertEqual([e["role"] for e in plan["vip_grpc_endpoints"]], ["prefill"] * 2 + ["decode"] * 3)

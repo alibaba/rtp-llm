@@ -14,7 +14,6 @@ import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ThreadLocalRandom;
 
 final class MockPerformanceModel {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -69,14 +68,12 @@ final class MockPerformanceModel {
     boolean prefillReuseCache = false;
     boolean prefillDeviceCache = true;
     boolean decodeDeviceCache = true;
-    long hostLoadMs;
+    double hostLoadMs;
     MockHostTransfer.Policy hostTransferPolicy;
     MockCacheWatermarks cacheWatermarks;
     MockPdPolicy pdPolicy = MockPdPolicy.DEFAULT;
-    private final double sleepScale;
     private final double prefillScale;
-    // Floor (ms) for the final post-scale prefill sleep from JSON "prefill.min_ms".
-    // Guards against sleep_scale making prefill unrealistically fast. Null signals
+    // Floor (ms) for the modeled mean before mock.timing.time_scale. Null signals
     // "absent in JSON → no floor".
     private final Double prefillMinMs;
     private final PrefillTimeFormula prefillFormula;
@@ -109,47 +106,8 @@ final class MockPerformanceModel {
     Double decodeReserveBlockRatio; // Explicit percentage; null preserves legacy case rounding.
     Double prefillReserveBlockRatio; // Explicit percentage; null preserves legacy case rounding.
     private final double decodeScale;
-    private volatile double jitterPct;
-    // Opt-in, bounded residual noise. Keep the legacy percentage jitter for old suites.
-    private NoiseSpec prefillNoise = NoiseSpec.DISABLED;
-    private NoiseSpec decodeNoise = NoiseSpec.DISABLED;
-
-    record NoiseSpec(double baseStdMs, double variancePerUnitMs2,
-                     double maxStdMs, double maxAbsMs) {
-        static final NoiseSpec DISABLED = new NoiseSpec(0, 0, 0, 0);
-
-        static NoiseSpec read(JsonNode node, String path) {
-            if (node.isMissingNode() || node.isNull()) return DISABLED;
-            if (!node.isObject()) throw new IllegalStateException(path + " must be an object");
-            double base = number(node, "base_std_ms", path);
-            double slope = number(node, "variance_per_unit_ms2", path);
-            double stdCap = number(node, "max_std_ms", path);
-            double absCap = number(node, "max_abs_ms", path);
-            if ((base > 0 || slope > 0) && (stdCap <= 0 || absCap <= 0))
-                throw new IllegalStateException(path + " requires positive max_std_ms and max_abs_ms");
-            return new NoiseSpec(base, slope, stdCap, absCap);
-        }
-
-        private static double number(JsonNode node, String key, String path) {
-            JsonNode value = node.path(key);
-            if (value.isMissingNode()) return 0;
-            double number = value.asDouble(Double.NaN);
-            if (!value.isNumber() || !Double.isFinite(number) || number < 0)
-                throw new IllegalStateException(path + "." + key + " must be finite and nonnegative");
-            return number;
-        }
-
-        double stdMs(double units) {
-            return Math.min(maxStdMs, Math.sqrt(baseStdMs * baseStdMs
-                    + variancePerUnitMs2 * Math.max(0, units)));
-        }
-
-        double sampleMs(double units) {
-            if (maxAbsMs == 0) return 0;
-            double z = Math.max(-3, Math.min(3, ThreadLocalRandom.current().nextGaussian()));
-            return Math.max(-maxAbsMs, Math.min(maxAbsMs, z * stdMs(units)));
-        }
-    }
+    private MockTiming timing = MockTiming.defaults();
+    MockTiming timing() { return timing; }
     // Explicit performance-JSON "prefill.fixed_ms": a declared flat prefill
     // for duration-blind suites (chaos/elastic). Null = not declared ->
     // formula-driven. This is an explicit configuration channel, NOT the
@@ -170,12 +128,17 @@ final class MockPerformanceModel {
     }
 
     static MockPerformanceModel loadCalibration(JsonNode node) throws IOException {
-        MockEngineConfig.fields(node, "sleep_scale", "jitter_pct", "prefill", "decode", "vit",
-                "calibration_id", "calibration_model", "calibration_hardware", "calibration_status", "calibration_sha256");
-        JsonNode prefill = node.path("prefill"), decode = node.path("decode");
-        if (node.has("prefill")) MockEngineConfig.fields(prefill, "expression", "fixed_ms", "min_ms", "scale", "noise", "host_load_ms");
-        if (node.has("decode")) MockEngineConfig.fields(decode, "scale", "noise", "step_ms_by_batch",
-                "step_base_ms", "step_per_running_ms", "tokens_per_step", "eos");
+        MockEngineConfig.fields(node, "mock", "calibration_id", "calibration_model", "calibration_hardware", "calibration_status", "calibration_sha256");
+        JsonNode mock = node.path("mock");
+        if (!mock.isMissingNode()) MockEngineConfig.fields(mock, "timing", "forward", "rpc", "vit");
+        JsonNode forward = mock.path("forward");
+        if (!forward.isMissingNode()) MockEngineConfig.fields(forward, "prefill", "decode", "vit");
+        JsonNode prefill = forward.path("prefill"), decode = forward.path("decode");
+        if (!prefill.isMissingNode()) MockEngineConfig.fields(prefill, "expression", "fixed_ms", "min_ms", "scale", "jitter", "pause", "host_load_ms");
+        if (!decode.isMissingNode()) MockEngineConfig.fields(decode, "scale", "jitter", "pause", "step_ms_by_batch", "step_base_ms", "step_per_running_ms", "tokens_per_step", "eos");
+        if (!forward.path("vit").isMissingNode()) MockEngineConfig.fields(forward.path("vit"), "fixed_ms", "jitter", "pause");
+        if (!mock.path("vit").isMissingNode()) MockEngineConfig.fields(mock.path("vit"), "hidden_size", "max_output_bytes");
+        number(forward.path("vit"), "fixed_ms", 1);
         Calibration calibration = loadCalibration();
         if (node.has("calibration_sha256") && !calibration.sha256().equals(node.path("calibration_sha256").asText()))
             throw new IllegalStateException("calibration_sha256 disagrees with packaged mock calibration");
@@ -201,23 +164,18 @@ final class MockPerformanceModel {
         }
         double tokens = number(decode, "tokens_per_step", defaults.path("tokens_per_step").doubleValue());
         if (tokens == 0) throw new IllegalArgumentException("tokens_per_step must be positive");
-        double jitter = number(node, "jitter_pct", 0);
-        NoiseSpec prefillNoise = NoiseSpec.read(prefill.path("noise"), "prefill.noise");
-        NoiseSpec decodeNoise = NoiseSpec.read(decode.path("noise"), "decode.noise");
-        if (jitter > 0 && (prefillNoise.maxAbsMs() > 0 || decodeNoise.maxAbsMs() > 0))
-            throw new IllegalStateException("jitter_pct and role noise are mutually exclusive");
-        var model = new MockPerformanceModel(1, number(node, "sleep_scale", 1), number(prefill, "scale", 1),
+        var model = new MockPerformanceModel(1, number(prefill, "scale", 1),
                 prefill.has("min_ms") ? number(prefill, "min_ms", 0) : null,
                 prefill.has("fixed_ms") ? number(prefill, "fixed_ms", 0) : null,
                 formula, List.copyOf(points),
                 number(decode, "step_base_ms", defaults.path("step_base_ms").doubleValue()),
                 number(decode, "step_per_running_ms", defaults.path("step_per_running_ms").doubleValue()),
-                tokens, 0, number(decode, "scale", 1), jitter);
+                tokens, 0, number(decode, "scale", 1));
+        model.timing = new MockTiming(mock);
         model.configuredPrefillExpression = expression;
         double hostLoadMs = number(prefill, "host_load_ms", 0);
         if (hostLoadMs > Long.MAX_VALUE) throw new IllegalArgumentException("host_load_ms is too large");
-        model.hostLoadMs = (long)Math.ceil(hostLoadMs);
-        model.prefillNoise = prefillNoise; model.decodeNoise = decodeNoise;
+        model.hostLoadMs = hostLoadMs;
         model.eosModel = MockEosModel.load(decode.path("eos"));
         model.calibrationConfig = node.deepCopy();
         return model;
@@ -237,7 +195,6 @@ final class MockPerformanceModel {
     }
 
     private MockPerformanceModel(int blockSize,
-                                 double sleepScale,
                                  double prefillScale,
                                  Double prefillMinMs,
                                  Double configuredFixedPrefillMs,
@@ -247,10 +204,8 @@ final class MockPerformanceModel {
                                  double stepPerRunningMs,
                                  double tokensPerStep,
                                  int decodeReserveStep,
-                                 double decodeScale,
-                                 double jitterPct) {
+                                 double decodeScale) {
         this.blockSize = blockSize;
-        this.sleepScale = sleepScale;
         this.prefillScale = prefillScale;
         this.prefillMinMs = prefillMinMs;
         this.configuredFixedPrefillMs = configuredFixedPrefillMs;
@@ -261,17 +216,19 @@ final class MockPerformanceModel {
         this.tokensPerStep = tokensPerStep;
         this.decodeReserveStep = Math.max(0, decodeReserveStep);
         this.decodeScale = decodeScale;
-        this.jitterPct = jitterPct;
     }
 
     /** Give each engine its own mutable controls, including dynamically added engines. */
-    MockPerformanceModel forEngine() {
+    MockPerformanceModel forEngine() { return forEngine("fixture"); }
+
+    MockPerformanceModel forEngine(String identity) {
         MockPerformanceModel copy = new MockPerformanceModel(
-                blockSize, sleepScale, prefillScale, prefillMinMs, configuredFixedPrefillMs,
+                blockSize, prefillScale, prefillMinMs, configuredFixedPrefillMs,
                 prefillFormula, List.copyOf(decodePoints), stepBaseMs, stepPerRunningMs,
-                tokensPerStep, decodeReserveStep, decodeScale, jitterPct);
+                tokensPerStep, decodeReserveStep, decodeScale);
         // Explicit overrides installed before startup are part of that engine's initial settings.
         copy.calibrationConfig = calibrationConfig;
+        copy.timing = timing.forEngine(identity);
         copy.eosModel = eosModel;
         copy.controls = controls;
         copy.decodeReuseCache = decodeReuseCache;
@@ -292,8 +249,6 @@ final class MockPerformanceModel {
         copy.pdPolicy = pdPolicy;
         copy.hostTransferPolicy = hostTransferPolicy;
         copy.cacheWatermarks = cacheWatermarks;
-        copy.prefillNoise = prefillNoise;
-        copy.decodeNoise = decodeNoise;
         copy.configuredPrefillExpression = configuredPrefillExpression;
         return copy;
     }
@@ -361,15 +316,15 @@ final class MockPerformanceModel {
                 "runtime_override", active != null);
     }
 
-    long prefillMs(List<RequestShape> requests) {
+    long prefillMs(List<RequestShape> requests) { return Math.max(1, Math.round(prefillDuration(requests).milliseconds())); }
+
+    MockTiming.Sample prefillDuration(List<RequestShape> requests) {
         RuntimeSettings settings = controls;
         RuntimePrefill runtime = settings.prefill();
-        if (requests.isEmpty()) {
-            return 0;
-        }
+        if (requests.isEmpty()) return timing.sample("forward.prefill", 0);
         double latency;
         if (runtime == null && settings.fixedPrefillMs() != null) {
-            // Runtime override (Python /set_perf prefill_fixed_ms): explicit
+            // Runtime mock.forward.prefill.fixed_ms override: explicit
             // test-time control, length-blind by design.
             latency = settings.fixedPrefillMs();
         } else if (runtime == null && configuredFixedPrefillMs != null) {
@@ -400,12 +355,9 @@ final class MockPerformanceModel {
             }
             latency = (runtime == null ? prefillFormula : runtime.formula()).evaluate(batchVars, itemVars);
         }
-        double computeKTokens = requests.stream()
-                .mapToDouble(r -> Math.max(0, r.inputLen - r.hitTokens)).sum() / 1024.0;
-        long result = scaledMs(latency * (runtime == null ? prefillScale : 1.0),
-                prefillNoise, computeKTokens);
-        // Clamp on the final (post-scale) value: min_ms is the actual-sleep floor.
-        return prefillMinMs != null ? Math.max(result, Math.round(prefillMinMs)) : result;
+        double mean = latency * (runtime == null ? prefillScale : 1.0);
+        if (prefillMinMs != null) mean = Math.max(mean, prefillMinMs);
+        return timing.sample("forward.prefill", mean);
     }
 
     static PrefillTimeFormula validatePrefillExpression(String expression) {
@@ -427,15 +379,28 @@ final class MockPerformanceModel {
         configGeneration.incrementAndGet();
     }
 
-    Map<String, Object> calibrationState() {
+    synchronized Map<String, Object> calibrationState() {
         var state = new java.util.LinkedHashMap<String, Object>();
         state.put("generation", configGeneration.get());
-        state.put("initial", calibrationConfig == null ? Map.of() : calibrationConfig);
-        state.put("prefill", prefillExpressionState());
-        state.put("decode", decodeModelState());
-        state.put("output_length", outputLengthState());
-        state.put("prefill_fixed_ms", controls.fixedPrefillMs() == null ? configuredFixedPrefillMs : controls.fixedPrefillMs());
-        state.put("decode_scale", effectiveDecodeScale(controls));
+        var effective = calibrationConfig == null ? new ObjectMapper().createObjectNode() : calibrationConfig.path("mock").deepCopy();
+        if (!effective.isObject()) effective = new ObjectMapper().createObjectNode();
+        var forward = ((com.fasterxml.jackson.databind.node.ObjectNode) effective).with("forward");
+        var prefill = forward.with("prefill"); var decode = forward.with("decode");
+        if (controls.prefill() != null) {
+            prefill.remove("fixed_ms");
+            prefill.put("expression", controls.prefill().expression()); prefill.put("scale", 1);
+        } else if (controls.fixedPrefillMs() != null) prefill.put("fixed_ms", controls.fixedPrefillMs());
+        if (controls.decode() != null) {
+            decode.remove("step_ms_by_batch");
+            decode.put("step_base_ms", controls.decode().stepBaseMs());
+            decode.put("step_per_running_ms", controls.decode().stepPerRunningMs());
+            decode.put("tokens_per_step", controls.decode().tokensPerStep());
+        } else if (controls.decodeStepMs() != null) {
+            decode.remove("step_ms_by_batch"); decode.put("step_base_ms", controls.decodeStepMs()); decode.put("step_per_running_ms", 0);
+        }
+        if (controls.decodeScale() != null) decode.put("scale", controls.decodeScale());
+        if (controls.eos() != null) decode.set("eos", MAPPER.valueToTree(controls.eos().configuration()));
+        state.put("mock", effective);
         return state;
     }
 
@@ -448,7 +413,7 @@ final class MockPerformanceModel {
     }
 
     synchronized void setOverrideFixedPrefillMs(Double ms) {
-        if (ms == null || !Double.isFinite(ms) || ms < 0) throw new IllegalArgumentException("prefill_fixed_ms must be finite and nonnegative");
+        if (ms == null || !Double.isFinite(ms) || ms < 0) throw new IllegalArgumentException("mock.forward.prefill.fixed_ms must be finite and nonnegative");
         RuntimeSettings settings = controls;
         controls = new RuntimeSettings(settings.prefill(), settings.decode(), settings.eos(), ms, settings.decodeStepMs(), settings.decodeScale());
         configGeneration.incrementAndGet();
@@ -457,14 +422,6 @@ final class MockPerformanceModel {
     synchronized void setOverrideDecodeStepMs(Double ms) {
         RuntimeSettings settings = controls;
         controls = new RuntimeSettings(settings.prefill(), settings.decode(), settings.eos(), settings.fixedPrefillMs(), ms, settings.decodeScale());
-    }
-
-    /** Python /set_perf {@code decode_scale}: replace the decode latency scale. */
-    synchronized void setOverrideDecodeScale(Double scale) {
-        if (scale == null || !Double.isFinite(scale) || scale < 0) throw new IllegalArgumentException("decode_scale must be finite and nonnegative");
-        RuntimeSettings settings = controls;
-        controls = new RuntimeSettings(settings.prefill(), settings.decode(), settings.eos(), settings.fixedPrefillMs(), settings.decodeStepMs(), scale);
-        configGeneration.incrementAndGet();
     }
 
     /** Set finalized allocator geometry before engine construction. */
@@ -482,10 +439,9 @@ final class MockPerformanceModel {
         var settings = controls;
         int steps = (int) Math.ceil(outputLen / tokensPerStep(settings));
         double step = stepMs(activeBatchSize, settings) * effectiveDecodeScale(settings);
-        if (decodeNoise.maxAbsMs() == 0) return scaledMs(steps * step);
         long duration = 0;
-        for (int i = 0; i < steps; i++) duration += scaledMs(step, decodeNoise, Math.max(1, activeBatchSize));
-        return duration;
+        for (int i = 0; i < steps; i++) duration += timing.sample("forward.decode", step).nanos();
+        return Math.max(1, Math.round(duration / 1e6));
     }
 
     /**
@@ -507,17 +463,35 @@ final class MockPerformanceModel {
     }
 
     synchronized void applyOverrides(JsonNode patch) {
-        MockEngineConfig.fields(patch, "engine", "port", "prefill_fixed_ms", "decode_scale");
-        for (String name : List.of("prefill_fixed_ms", "decode_scale")) {
-            var value = patch.get(name);
-            if (value != null && (!value.isNumber() || !Double.isFinite(value.doubleValue()) || value.doubleValue() < 0))
-                throw new IllegalArgumentException(name + " must be finite and nonnegative");
-        }
+        MockEngineConfig.fields(patch, "engine", "port", "mock");
+        var mock = patch.path("mock");
+        MockEngineConfig.fields(mock, "timing", "forward", "rpc");
+        var forward = mock.path("forward");
+        if (!forward.isMissingNode()) MockEngineConfig.fields(forward, "prefill", "decode");
+        var pre = forward.path("prefill"); var dec = forward.path("decode");
+        if (!pre.isMissingNode()) MockEngineConfig.fields(pre, "fixed_ms", "jitter", "pause");
+        if (!dec.isMissingNode()) MockEngineConfig.fields(dec, "scale", "jitter", "pause");
+        var merged = calibrationConfig == null ? new ObjectMapper().createObjectNode() : calibrationConfig.deepCopy();
+        merge((com.fasterxml.jackson.databind.node.ObjectNode) merged, patch);
+        ((com.fasterxml.jackson.databind.node.ObjectNode) merged).remove(java.util.List.of("engine", "port"));
+        loadCalibrationUnchecked(merged);
         var settings = controls;
         controls = new RuntimeSettings(settings.prefill(), settings.decode(), settings.eos(),
-                patch.has("prefill_fixed_ms") ? Double.valueOf(patch.path("prefill_fixed_ms").asDouble()) : settings.fixedPrefillMs(),
-                settings.decodeStepMs(), patch.has("decode_scale") ? Double.valueOf(patch.path("decode_scale").asDouble()) : settings.decodeScale());
+                pre.has("fixed_ms") ? Double.valueOf(pre.get("fixed_ms").doubleValue()) : settings.fixedPrefillMs(),
+                settings.decodeStepMs(), dec.has("scale") ? Double.valueOf(dec.get("scale").doubleValue()) : settings.decodeScale());
+        timing.configure(merged.path("mock"));
+        calibrationConfig = merged;
         configGeneration.incrementAndGet();
+    }
+    private static MockPerformanceModel loadCalibrationUnchecked(JsonNode node) {
+        try { return loadCalibration(node); } catch (IOException error) { throw new IllegalArgumentException(error); }
+    }
+    private static void merge(com.fasterxml.jackson.databind.node.ObjectNode target, JsonNode patch) {
+        patch.fields().forEachRemaining(entry -> {
+            if (entry.getValue().isObject() && target.path(entry.getKey()).isObject())
+                merge((com.fasterxml.jackson.databind.node.ObjectNode) target.get(entry.getKey()), entry.getValue());
+            else target.set(entry.getKey(), entry.getValue().deepCopy());
+        });
     }
 
     synchronized void setRuntimeDecode(double baseMs, double perRunningMs, double tokensPerStep) {
@@ -563,7 +537,7 @@ final class MockPerformanceModel {
         RuntimeDecode current = settings.decode();
         if (current != null) return current.stepBaseMs() + current.stepPerRunningMs() * activeBatchSize;
         if (settings.decodeStepMs() != null) {
-            // Runtime override (Python /set_perf decode_step_ms): fixed
+            // Internal fixed step override: fixed
             // per-STEP semantics (one step emits tokens_per_step tokens).
             return settings.decodeStepMs();
         }
@@ -585,9 +559,12 @@ final class MockPerformanceModel {
      * loop needs on top of the step duration.
      */
     long decodeStepDelayMs(int activeBatchSize) {
+        return Math.max(1, Math.round(decodeStepDuration(activeBatchSize).milliseconds()));
+    }
+
+    MockTiming.Sample decodeStepDuration(int batch) {
         var settings = controls;
-        return scaledMs(stepMs(activeBatchSize, settings) * effectiveDecodeScale(settings),
-                decodeNoise, Math.max(1, activeBatchSize));
+        return timing.sample("forward.decode", stepMs(batch, settings) * effectiveDecodeScale(settings));
     }
 
     private double interpolateStepMs(int activeBatchSize) {
@@ -608,20 +585,6 @@ final class MockPerformanceModel {
             }
         }
         return last.stepMs;
-    }
-
-    private long scaledMs(double latencyMs) {
-        return scaledMs(latencyMs, NoiseSpec.DISABLED, 0);
-    }
-
-    private long scaledMs(double latencyMs, NoiseSpec noise, double units) {
-        double scaled = Math.max(0.0, latencyMs) * sleepScale;
-        if (jitterPct > 0) {
-            double factor = 1.0 + ThreadLocalRandom.current().nextDouble(-jitterPct, jitterPct);
-            scaled = scaled * factor;
-        }
-        scaled += noise.sampleMs(units);
-        return Math.max(1L, Math.round(scaled));
     }
 
     int blockSize() {

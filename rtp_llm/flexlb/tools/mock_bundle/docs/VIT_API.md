@@ -20,7 +20,7 @@ java -cp flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar \
   --compute-delay-ms 1
 ```
 
-每个 ViT worker 使用独立监听地址，Master 的 `MODEL_SERVICE_CONFIG.role_endpoints` 增加 `vit_endpoint` 并在服务发现中提供 HTTP 端口（gRPC=HTTP+1）。frontend 使用 remote ViT 配置，并传递模型的 multimodal separator 配置。P/D 和 frontend 的 KV block size 必须一致；要模拟原生 token KV key，P/D 使用 whale 模式，可用 `--whale-bundle true` 在独立测试进程内运行。各角色 JAR 应先复制到运行目录，再启动，防止重新打包覆盖正在运行的产物。
+每个 ViT worker 使用独立监听地址，Master 的 `MODEL_SERVICE_CONFIG.role_endpoints` 增加 `vit_endpoint` 并在服务发现中提供 HTTP 端口（gRPC=HTTP+1）。frontend 使用 remote ViT 配置，并传递模型的 multimodal separator 配置。P/D 和 frontend 的 KV block size 必须一致；要模拟原生 token KV key，P/D 使用 whale 模式，可用 `--mock.whale_bundle true` 在独立测试进程内运行。各角色 JAR 应先复制到运行目录，再启动，防止重新打包覆盖正在运行的产物。
 
 ViT 接受 base64 data URL 和 HTTP(S) 图片；按 Qwen2-VL 的 28 像素粒度、min/max pixels、显式宽高计算 token 数。embedding 为 `[rows, hidden_size]` FP32，行 hash 与 main 的 `FeatureHash.h` CPU 算法一致。URL cache key 对齐 Linux libstdc++ `std::hash` 和预处理配置；相同图片重复出现时保留多个输出片段，共享计算。
 

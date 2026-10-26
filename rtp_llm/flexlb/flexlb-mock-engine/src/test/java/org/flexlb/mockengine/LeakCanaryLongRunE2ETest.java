@@ -65,7 +65,7 @@ class LeakCanaryLongRunE2ETest {
                     faultPhase = wantedPhase;
                     switch (faultPhase) {
                         case 1 -> faultTarget.setFaultConfig(FaultInjectionConfig.builder()
-                                .enqueueDelayMs(100).build());
+                                .build());
                         case 3 -> faultTarget.setFaultConfig(FaultInjectionConfig.builder()
                                 .failOnEnqueue(true)
                                 .enqueueErrorMessage("transient burst rejection").build());

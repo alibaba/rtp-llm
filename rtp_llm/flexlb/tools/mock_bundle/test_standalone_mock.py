@@ -28,14 +28,14 @@ class StandaloneMockTest(unittest.TestCase):
         self.assertEqual(executable, "/opt/taobao/java/bin/java")
         self.assertEqual(args.count("-jar"), 1)
         for flag, value in (
-            ("--n-prefill", "2"),
-            ("--n-decode", "3"),
-            ("--base-grpc-port", "29130"),
-            ("--unique-engine-ips", "false"),
-            ("--auto-fetch", "false"),
-            ("--kmonitor", "true"),
-            ("--cache-status-compact-encoding", "false"),
-            ("--engine-config", str(Path(self.directory.name) / "engine-config.json")),
+            ("--mock.n_prefill", "2"),
+            ("--mock.n_decode", "3"),
+            ("--mock.base_grpc_port", "29130"),
+            ("--mock.unique_engine_ips", "false"),
+            ("--mock.auto_fetch", "false"),
+            ("--mock.kmonitor", "true"),
+            ("--mock.cache_status_compact_encoding", "false"),
+            ("--mock.engine_config", str(Path(self.directory.name) / "engine-config.json")),
         ):
             self.assertEqual(args[args.index(flag) + 1], value)
         self.assertNotIn("master.jar", " ".join(args))
@@ -48,25 +48,25 @@ class StandaloneMockTest(unittest.TestCase):
                 "FETCH_OUTPUT_STREAM": "0",
                 "MOCK_KMONITOR_ENABLED": "false",
                 "FLEXLB_CONFIG": '{"schemaVersion":3}',
-                "MOCK_CALIBRATION_CONFIG_JSON": '{"sleep_scale":2}',
+                "MOCK_CALIBRATION_CONFIG_JSON": '{"mock":{"timing":{"time_scale":2}}}',
             }
         )
         args = standalone_mock.command(self.env)
         self.assertIn("-Ddescription=mock engine", args)
-        self.assertEqual(args[args.index("--auto-fetch") + 1], "true")
-        self.assertEqual(args[args.index("--kmonitor") + 1], "false")
-        self.assertEqual(json.loads((Path(self.directory.name) / "calibration.json").read_text())["sleep_scale"], 2)
+        self.assertEqual(args[args.index("--mock.auto_fetch") + 1], "true")
+        self.assertEqual(args[args.index("--mock.kmonitor") + 1], "false")
+        self.assertEqual(json.loads((Path(self.directory.name) / "calibration.json").read_text())["mock"]["timing"]["time_scale"], 2)
 
     def test_explicit_calibration_does_not_read_a_missing_default_file(self):
         from runtime_configs import calibration_input
 
-        explicit = {"MOCK_CALIBRATION_CONFIG_JSON": '{"sleep_scale":2}'}
-        self.assertEqual(calibration_input(explicit, Path(self.directory.name) / "missing.json"), {"sleep_scale": 2})
+        explicit = {"MOCK_CALIBRATION_CONFIG_JSON": '{"mock":{"timing":{"time_scale":2}}}'}
+        self.assertEqual(calibration_input(explicit, Path(self.directory.name) / "missing.json"), {"mock": {"timing": {"time_scale": 2}}})
 
     def test_compact_cache_status_is_explicitly_opt_in(self):
         self.env["MOCK_CACHE_STATUS_COMPACT_ENCODING"] = "1"
         args = standalone_mock.command(self.env)
-        self.assertEqual(args[args.index("--cache-status-compact-encoding") + 1], "true")
+        self.assertEqual(args[args.index("--mock.cache_status_compact_encoding") + 1], "true")
 
     def test_fetch_is_independent_of_placement(self):
         for mode, counts in (
@@ -76,14 +76,14 @@ class StandaloneMockTest(unittest.TestCase):
             for fetch in ("0", "1"):
                 with self.subTest(mode=mode, fetch=fetch):
                     args = standalone_mock.command({**self.env, **counts, "MOCK_DEPLOYMENT_MODE": mode, "FETCH_OUTPUT_STREAM": fetch})
-                    self.assertEqual(args[args.index("--auto-fetch") + 1], str(fetch == "0").lower())
-                    self.assertEqual(args[args.index("--whale-bundle") + 1], str(mode == "single_pod").lower())
+                    self.assertEqual(args[args.index("--mock.auto_fetch") + 1], str(fetch == "0").lower())
+                    self.assertEqual(args[args.index("--mock.whale_bundle") + 1], str(mode == "single_pod").lower())
 
     def test_separate_pods_use_remote_decode_without_local_discovery(self):
         self.env.update({"MOCK_PREFILL_COUNT": "1", "MOCK_DECODE_COUNT": "0", "MOCK_REMOTE_DECODE": "1"})
         args = standalone_mock.command(self.env)
-        self.assertEqual(args[args.index("--whale-bundle") + 1], "false")
-        self.assertNotIn("--discovery-file", args)
+        self.assertEqual(args[args.index("--mock.whale_bundle") + 1], "false")
+        self.assertNotIn("--mock.discovery_file", args)
         self.env["MOCK_DECODE_COUNT"] = "1"
         with self.assertRaises(ValueError):
             standalone_mock.command(self.env)

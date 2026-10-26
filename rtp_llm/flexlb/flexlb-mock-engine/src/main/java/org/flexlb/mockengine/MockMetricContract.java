@@ -18,7 +18,7 @@ final class MockMetricContract {
         }
     }
 
-    static final List<Metric> ALL = List.of(
+    static final List<Metric> ALL = withTiming(List.of(
         metric("mock_cache_status_rpcs_total", "cache_status_rpcs_total", "completed CacheStatus metadata read counter", Type.COUNTER, Unit.COUNT, Role.BOTH, Aggregation.SUM, Sampling.SNAPSHOT),
         metric("rtp_llm_rpc_cache_status_qps", "cache_status_qps", "CacheStatus metadata reads per second", Type.GAUGE, Unit.REQUESTS_PER_SECOND, Role.BOTH, Aggregation.SUM, Sampling.EVENT),
         metric("rtp_llm_rpc_cache_status_total_rt_us", "cache_status_rt_us", "CacheStatus metadata read duration; excludes protobuf map encoding and network", Type.GAUGE, Unit.MICROSECONDS, Role.BOTH, Aggregation.NONE, Sampling.EVENT),
@@ -122,10 +122,23 @@ final class MockMetricContract {
         metric("rtp_llm_sp_total_accepted_token_num", null, "Whale engine observation", Type.GAUGE, Unit.TOKENS, Role.DECODE, Aggregation.NONE, Sampling.EVENT),
         metric("rtp_llm_stream_cache_device_reuse_length", null, "Whale engine observation", Type.GAUGE, Unit.TOKENS, Role.BOTH, Aggregation.NONE, Sampling.EVENT),
         metric("rtp_llm_stream_cache_memory_reuse_length", null, "Whale engine observation", Type.GAUGE, Unit.TOKENS, Role.BOTH, Aggregation.NONE, Sampling.EVENT)
-    );
+    ));
     static final List<Metric> HTTP = ALL.stream().filter(metric -> metric.field() != null).toList();
     private static final Map<String, Metric> BY_NAME = index();
 
+    private static List<Metric> withTiming(List<Metric> base) {
+        var metrics = new java.util.ArrayList<>(base);
+        var paths = new java.util.ArrayList<>(List.of("forward_prefill", "forward_decode", "forward_vit"));
+        for (String method : MockTiming.RPC_METHODS)
+            for (String leg : List.of("request", "response")) paths.add("rpc_" + method + "_" + leg);
+        for (String path : paths)
+            for (String component : List.of("base", "jitter", "pause", "planned", "elapsed", "timer_lag"))
+                metrics.add(metric("mock_timing_" + path + "_" + component + "_us", null,
+                        "Mock scaled timing " + component, Type.GAUGE, Unit.MICROSECONDS,
+                        path.equals("forward_prefill") ? Role.PREFILL : path.equals("forward_decode") ? Role.DECODE : Role.BOTH,
+                        Aggregation.NONE, Sampling.EVENT));
+        return List.copyOf(metrics);
+    }
     private static Metric metric(String name, String field, String help, Type type, Unit unit,
                                  Role role, Aggregation aggregation, Sampling sampling) {
         return new Metric(name, field, help, type, unit, role, aggregation, sampling);

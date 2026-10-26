@@ -7,15 +7,57 @@ Mock 的行为配置消费 real 完成解析和推导后的值，不再维护另
 
 | 输入 | 内容 | 生效方式 |
 |---|---|---|
-| `--engine-config` | `schema_version`、源码来源、按角色区分的 scheduler、model、KV 策略与 allocator 容量；V 使用真实 VitConfig 字段 | 启动时校验，修改后重启 |
-| `--calibration` | P 公式、固定耗时与 host load 延迟、D step 曲线与 token 增量、噪声、EOS 模型；V 的假特征宽度、保护限制和 forward 延迟 | 启动时加载；控制 API 可覆盖声明的校准项 |
+| `--mock.engine_config` | `schema_version`、源码来源、按角色区分的 scheduler、model、KV 策略与 allocator 容量；V 使用真实 VitConfig 字段 | 启动时校验，修改后重启 |
+| `--mock.calibration` | P 公式、固定耗时与 host load 延迟、D step 曲线与 token 增量、噪声、EOS 模型；V 的假特征宽度、保护限制和 forward 延迟 | 启动时加载；控制 API 可覆盖声明的校准项 |
 | 进程参数 | 逻辑实例数、地址、端口、JVM、RPC/完成线程、显式 auto-fetch、监控 | 由运行环境负责 |
 
 校准文件不能包含 block size、FIFO、缓存复用、reserve 或等待队列门禁。
-`prefill.expression` 是 Mock 的执行公式；Master 的预测公式由 Master 配置独立负责。
+`mock.forward.prefill.expression` 是 Mock 的执行公式；Master 的预测公式由 Master 配置独立负责。
 旧 `--performance`、容量 CLI、`--master-config` 与 `MOCK_PERFORMANCE_CONFIG*` 不再接受。
-`/set_perf` 仅接受 `prefill_fixed_ms`、`decode_scale` 和引擎定位字段，不能修改行为门禁。
+`/set_perf` 接受嵌套的 `mock.timing`、`mock.rpc`、`mock.forward.prefill`（fixed_ms/jitter/pause）和 `mock.forward.decode`（scale/jitter/pause），以及 `engine`/`port` 定位字段；不能修改 real 行为门禁。
 故障仍由显式故障接口配置。
+
+## Mock 命名与时间模型
+
+Mock 自有配置使用 `mock.<领域>.<字段>` 路径，JSON 使用嵌套对象；叶子中的单位和复合词用下划线，例如 `mock.timing.time_scale`。进程入口使用 `--mock.<字段>`，例如 `--mock.rpc_threads`。real 原生字段保留其下划线名字、单位和作用域，不加 Mock 别名。`engine`/`port` 是控制请求的目标选择器，request_id、cache keys 等协议数据不是配置项。Shell 的 `MOCK_*` 环境变量只是 launcher 的传入绑定，内部生成同一份配置，不建立第二套耗时模型。
+
+```json
+{
+  "mock": {
+    "timing": {"seed": 42, "time_scale": 0.1},
+    "forward": {
+      "prefill": {
+        "jitter": {"stddev_ms": 2, "stddev_ratio": 0.02, "max_deviation_ms": 20},
+        "pause": {"probability": 0.01, "duration_ms": 100}
+      },
+      "decode": {"jitter": {"stddev_ratio": 0.03, "max_deviation_ms": 5}},
+      "vit": {"fixed_ms": 1}
+    },
+    "rpc": {
+      "get_worker_status": {
+        "request": {"delay_ms": 1},
+        "response": {
+          "delay_ms": 2,
+          "jitter": {"stddev_ms": 1, "max_deviation_ms": 3},
+          "pause": {"probability": 0.01, "duration_ms": 200}
+        }
+      }
+    }
+  }
+}
+```
+
+默认 seed 为 0、time_scale 为 1；抖动、附加 RPC 延迟和停顿默认关闭。抖动标准差为 `hypot(stddev_ms, mean_ms * stddev_ratio)`，采样高斯残差并裁剪到 `±max_deviation_ms`；非零抖动必须配置正的裁剪边界。每个事件独立按 probability 决定是否添加 duration_ms 停顿，不代表持续慢节点、跨事件相关抖动或特定硬件故障分布。最终时间为 `max(0, mean + jitter + pause) * time_scale`，包括 RPC 延迟与 forward 停顿一起缩放；使用纳秒调度保留亚毫秒模拟时间。host_load_ms 也按相同全局比例缩放；real 的请求期限、TTL、重试与资源预算保持真实墙钟。
+
+P 每个实际调度 batch、D 每次实际 forward step、V 每个实际 GPU batch 采样一次。RPC 每次调用的 request/response 两侧分别采样一个偏移，方法名支持 `get_worker_status`、`get_cache_status`、`enqueue_batch`、`cancel`、`fetch_response`、`generate_stream_call`、`remote_generate`、`check_health`、`remote_multimodal_embedding`、`get_multimodal_hashes`、`async_submit_embedding`、`wait_green_net_verdict`、`release_rdma_lease`；每条流中的消息保留原来的间隔和先后次序，完成排在消息之后，不逐帧重新抽取偏移。
+
+seed 与 engine 身份、方法/阶段及该阶段的事件序号共同决定随机数流，其他 engine 或方法的流量不会消耗本流序号。相同配置、身份和事件序列可复现采样；并发请求与事件的对应顺序、操作系统调度和实际墙钟耗时不保证逐次相同。运行时通过 /set_perf 覆盖配置会重置该 engine 的采样序列；已调度事件保留当时的采样值。
+
+request 延迟发生在 handler 收到请求之前，response 延迟发生在快照或输出产生之后；WorkerStatus/CacheStatus 的版本和数据保持产生时的值。对齐依据是 real `LocalRpcServer.cc` 的 GetWorkerStatus/GetCacheStatus 在 handler 内读取和构建快照，网络传输不重新生成快照或推进业务状态。延迟使用定时器，不在 RPC worker 中 sleep；调用在延迟期间仍占用 in-flight 额度。deadline、cancel、shutdown 清理延迟事件，request 延迟结束后不能再接纳已取消调用。已由 EnqueueBatch 接纳的逻辑请求仍按 real 的独立生命周期执行，传输取消不回滚成功入队。
+
+`/inject` 使用 `{"engine":"prefill-0","mock":{"fault":{"type":"enqueue_error","enabled":true}}}`。`/prefill_formula` 使用 `mock.forward.prefill.expression`；`/decode_model` 使用 `mock.forward.decode` 的三个系数；`/output_length` 使用 `mock.forward.decode.eos`。旧顶层耗时字段、noise、jitter_pct、enqueue/generate delay 和旧 CLI 不接受。采集档案保留原始格式与校验值，由数据加载层显式投影为运行配置，不作为旧运行参数入口。
+
+指标 `mock_timing_<阶段>_{base,jitter,pause,planned,elapsed,timer_lag}_us` 分别记录缩放后的分量、计划时间、实际等待及调度迟到；jitter 可为负。它们是 Mock 诊断指标。forward 停顿计入真实 forward/step 阶段，不归入队列等待。RPC 延迟不会伪造 engine 内部计算耗时。
 
 ## 默认值与推导
 
@@ -312,7 +354,7 @@ Mock 的公共入口是 `MockEngineConfig`、`MockVitServer` 和 `JavaMockEngine
 | `capacity.device_blocks` / `memory_blocks` | allocator 最终可用 pool 块数 | 观测值，不对应 `kv_cache_mem_mb` / `memory_cache_size_mb` 的直接别名 |
 | `capacity.reserve_step` | NormalEngine 计算后的 speculative reserve step | 不是每 step 增加的 token 数；prefill-only 不保留 speculative 空间 |
 | `disable_decode_first_malloc_device_reuse` / prefix-tree flags | allocator 实际运行策略 | 作为容量观测附带的行为，不能仅用 `reuse_cache` 代替 |
-| `fetch-attach-timeout-ms` | request `fetch_attach_timeout_ms`，缺省 600000 ms | Mock 默认覆盖项；不是 `prefill_max_wait_timeout_ms` 或请求总超时 |
+| `mock.fetch_attach_timeout_ms` | request `fetch_attach_timeout_ms`，缺省 600000 ms | Mock 默认覆盖项；不是 `prefill_max_wait_timeout_ms` 或请求总超时 |
 | 旧 V `max_input_bytes` | `mm_image_max_file_size_kb` | 公共输入文件限制改用 real 字段和单位；旧校准字段拒绝 |
 | V `mm_transport_mode` | `output_transport.mode` | 扁平投影；目前只接受 grpc，RDMA 明确拒绝 |
 
@@ -322,9 +364,9 @@ Mock 的公共入口是 `MockEngineConfig`、`MockVitServer` 和 `JavaMockEngine
 
 | 参数组 | 所属范围 |
 |---|---|
-| `sleep_scale`、P expression/fixed/scale/noise、`host_load_ms`、D step 曲线/tokens_per_step/scale、EOS 校准 | 模拟计算耗时或输出长度；real 模型实际计算、采样和 MTP 接受率替代这些参数 |
-| V `hidden_size`、`compute_delay_ms`、`max_output_bytes` | 假特征宽度、耗时和 JVM 输出保护；不是 real 模型隐藏维度及输出容量的完整等价 |
-| `auto-fetch`、逻辑 P/D 实例数、unique-engine-ips、端口布局、发现文件 | 测试部署方式及协议驱动 |
+| `mock.timing`、`mock.forward`、`mock.rpc` | 模拟计算耗时或输出长度；real 模型实际计算、采样和 MTP 接受率替代这些参数 |
+| `mock.vit.hidden_size`、`mock.forward.vit.fixed_ms`、`mock.vit.max_output_bytes` | 假特征宽度、耗时和 JVM 输出保护；不是 real 模型隐藏维度及输出容量的完整等价 |
+| `mock.auto_fetch`、逻辑 P/D 实例数、mock.unique_engine_ips、端口布局、发现文件 | 测试部署方式及协议驱动 |
 | `rpc_threads`、`rpc_max_calls`、completion/event-loop 线程 | JVM harness 容量；不是 C++ MAX_POLLERS、prepare pool 或 engine queue |
 | `queue_depth_limit`、status/ACK 故障注入 | 显式 Mock 故障实验；独立于 scheduler 的队列与预算模型 |
 | `source`、`provenance`、`capacity.kind` / `layout` | 配置来源与支持布局的元数据，不是推理算法开关 |

@@ -86,7 +86,7 @@ final class DynamicEngineManager {
     private final EventLoopGroup workerGroup;
     private final ScheduledExecutorService scheduler;
     private final JavaMockEngineCluster.ClusterStats stats;
-    /** Null when the cluster runs without --discovery-file (add/remove still work, file not maintained). */
+    /** Null when the cluster runs without --mock.discovery_file (add/remove still work, file not maintained). */
     private final DiscoveryFileStore discoveryFileStore;
     /** Cluster-shared engine_events.jsonl writer (null = event stream disabled); wired onto every dynamically added engine. */
     private final JavaMockEngineCluster.EngineEventLog engineEventLog;
@@ -110,7 +110,7 @@ final class DynamicEngineManager {
     private final Map<Integer, CompletableFuture<RemovedEngine>> drainingFutures = new HashMap<>();
     /**
      * Monotonic GLOBAL engine index for unique advertisement IPs
-     * ({@code --unique-engine-ips}): initialized to the initial engine count
+     * ({@code --mock.unique_engine_ips}): initialized to the initial engine count
      * (prefill + decode) and never decremented — a removed engine's index is
      * never reused, so dynamically added engines always get a fresh unique
      * 127.x.y.z advertisement IP (see

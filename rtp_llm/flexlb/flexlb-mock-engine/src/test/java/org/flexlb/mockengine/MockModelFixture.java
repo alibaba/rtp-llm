@@ -36,20 +36,21 @@ final class MockModelFixture {
         var json = new ObjectMapper();
         JsonNode input = json.readTree(Path.of(file).toFile());
         ObjectNode calibration = json.createObjectNode();
-        for (String field : new String[]{"sleep_scale", "jitter_pct", "calibration_sha256"})
-            if (input.has(field)) calibration.set(field, input.get(field));
+        if (input.has("calibration_sha256")) calibration.set("calibration_sha256", input.get("calibration_sha256"));
+        ObjectNode mock = calibration.putObject("mock");
+        mock.putObject("timing").put("time_scale", input.path("sleep_scale").asDouble(1));
+        ObjectNode forward = mock.putObject("forward");
         JsonNode pre = input.path("prefill"), dec = input.path("decode");
         for (String obsolete : new String[]{"max_waiting_batches", "direct_batch_size_max", "max_batch_tokens", "max_batch_requests"})
             if (pre.has(obsolete)) throw new IllegalArgumentException("removed scheduler parameter: " + obsolete);
         if (dec.has("report_queued_as_kv_allocated")) throw new IllegalArgumentException("removed decode reporting mode");
-        ObjectNode timing = calibration.putObject("prefill");
-        for (String field : new String[]{"fixed_ms", "min_ms", "scale", "noise"})
+        ObjectNode timing = forward.putObject("prefill");
+        for (String field : new String[]{"fixed_ms", "min_ms", "scale", "jitter", "pause"})
             if (pre.has(field)) timing.set(field, pre.get(field));
-        // Synthetic vectors explicitly select the predictor expression used by that test.
         var defaults = MockPerformanceModel.loadCalibration(json.createObjectNode());
         timing.put("expression", MockMasterConfig.readExpression(master, defaults.prefillExpressionState().get("expression").toString()));
-        ObjectNode decode = calibration.putObject("decode");
-        for (String field : new String[]{"scale", "noise", "step_ms_by_batch", "step_base_ms", "step_per_running_ms", "tokens_per_step", "eos"})
+        ObjectNode decode = forward.putObject("decode");
+        for (String field : new String[]{"scale", "jitter", "pause", "step_ms_by_batch", "step_base_ms", "step_per_running_ms", "tokens_per_step", "eos"})
             if (dec.has(field)) decode.set(field, dec.get(field));
         var model = MockPerformanceModel.loadCalibration(calibration);
         model.setBlockSize(input.path("block_size").asInt(1024));

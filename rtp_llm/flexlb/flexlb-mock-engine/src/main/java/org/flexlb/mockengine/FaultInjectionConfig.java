@@ -11,7 +11,6 @@ import java.util.List;
  * <pre>{@code
  * FaultInjectionConfig config = FaultInjectionConfig.builder()
  *     .failOnEnqueue(true)
- *     .enqueueDelayMs(500)
  *     .kvPressureTokens(500_000)
  *     .crashAfterNRequests(10)
  *     .build()
@@ -22,8 +21,6 @@ public final class FaultInjectionConfig {
     private final boolean failOnEnqueue;
     private final long enqueueErrorCode;
     private final String enqueueErrorMessage;
-    private final long enqueueDelayMs;
-    private final long generateDelayMs;
     private final boolean generateError;
     private final boolean fetchError;
     private final boolean noRespond;
@@ -70,8 +67,6 @@ public final class FaultInjectionConfig {
         this.failOnEnqueue = b.failOnEnqueue;
         this.enqueueErrorCode = b.enqueueErrorCode;
         this.enqueueErrorMessage = b.enqueueErrorMessage;
-        this.enqueueDelayMs = b.enqueueDelayMs;
-        this.generateDelayMs = b.generateDelayMs;
         this.generateError = b.generateError;
         this.fetchError = b.fetchError;
         this.noRespond = b.noRespond;
@@ -109,13 +104,7 @@ public final class FaultInjectionConfig {
         return enqueueErrorMessage;
     }
 
-    public long getEnqueueDelayMs() {
-        return enqueueDelayMs;
-    }
 
-    public long getGenerateDelayMs() {
-        return generateDelayMs;
-    }
 
     public boolean isGenerateError() {
         return generateError;
@@ -249,8 +238,6 @@ public final class FaultInjectionConfig {
                 .failOnEnqueue(failOnEnqueue)
                 .enqueueErrorCode(enqueueErrorCode)
                 .enqueueErrorMessage(enqueueErrorMessage)
-                .enqueueDelayMs(enqueueDelayMs)
-                .generateDelayMs(generateDelayMs)
                 .generateError(generateError)
                 .fetchError(fetchError)
                 .noRespond(noRespond)
@@ -281,8 +268,6 @@ public final class FaultInjectionConfig {
         return "FaultInjectionConfig{"
                 + "failOnEnqueue=" + failOnEnqueue
                 + ", enqueueErrorCode=" + enqueueErrorCode
-                + ", enqueueDelayMs=" + enqueueDelayMs
-                + ", generateDelayMs=" + generateDelayMs
                 + ", generateError=" + generateError
                 + ", fetchError=" + fetchError
                 + ", noRespond=" + noRespond
@@ -335,8 +320,6 @@ public final class FaultInjectionConfig {
         private boolean failOnEnqueue = false;
         private long enqueueErrorCode = 13;
         private String enqueueErrorMessage = "mock enqueue failure";
-        private long enqueueDelayMs = 0;
-        private long generateDelayMs = 0;
         private boolean generateError = false;
         private boolean fetchError = false;
         private boolean noRespond = false;
@@ -379,15 +362,7 @@ public final class FaultInjectionConfig {
             return this;
         }
 
-        public Builder enqueueDelayMs(long ms) {
-            this.enqueueDelayMs = ms;
-            return this;
-        }
 
-        public Builder generateDelayMs(long ms) {
-            this.generateDelayMs = ms;
-            return this;
-        }
 
         public Builder generateError(boolean generate) {
             this.generateError = generate;

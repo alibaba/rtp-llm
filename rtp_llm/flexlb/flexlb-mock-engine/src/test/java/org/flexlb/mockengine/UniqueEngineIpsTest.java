@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Unique per-engine loopback advertisement IPs ({@code --unique-engine-ips},
+ * Unique per-engine loopback advertisement IPs ({@code --mock.unique_engine_ips},
  * default on): every engine used to declare host 127.0.0.1, so the master-side
  * engineIp Prometheus label had a single variant and per-engine gauge series
  * overwrote each other. These tests pin the derivation formula, the CLI
@@ -80,18 +80,18 @@ class UniqueEngineIpsTest {
     @Test
     void spaceFormDisablesUniqueEngineIps() {
         JavaMockEngineCluster.Config config = JavaMockEngineCluster.Config.parse(
-                with(baseArgs(), "--unique-engine-ips", "false"));
+                with(baseArgs(), "--mock.unique_engine_ips", "false"));
         assertFalse(config.uniqueEngineIps);
     }
 
     @Test
     void gluedFormDisablesUniqueEngineIpsAndDoesNotSwallowNextArgument() {
         JavaMockEngineCluster.Config off = JavaMockEngineCluster.Config.parse(
-                with(baseArgs(), "--unique-engine-ips=false"));
+                with(baseArgs(), "--mock.unique_engine_ips=false"));
         assertFalse(off.uniqueEngineIps);
         // Glued true must not consume the following flag's value.
         JavaMockEngineCluster.Config on = JavaMockEngineCluster.Config.parse(
-                with(baseArgs(), "--unique-engine-ips=true", "--stats-interval-ms", "2000"));
+                with(baseArgs(), "--mock.unique_engine_ips=true", "--mock.stats_interval_ms", "2000"));
         assertTrue(on.uniqueEngineIps);
         assertEquals(2000, on.statsIntervalMs);
     }
@@ -99,16 +99,16 @@ class UniqueEngineIpsTest {
     @Test
     void booleanFlagRejectsGarbageValues() {
         assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(
-                with(baseArgs(), "--unique-engine-ips", "yes")));
+                with(baseArgs(), "--mock.unique_engine_ips", "yes")));
         assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(
-                with(baseArgs(), "--unique-engine-ips=maybe")));
+                with(baseArgs(), "--mock.unique_engine_ips=maybe")));
     }
 
     // ──────────── Discovery files carry the declared IPs ────────────
 
     @Test
     void writeDiscoveryFilesUsesUniqueIpsByDefault() throws Exception {
-        JsonNode payload = writeDiscovery("--n-prefill", "2", "--n-decode", "2");
+        JsonNode payload = writeDiscovery("--mock.n_prefill", "2", "--mock.n_decode", "2");
 
         JsonNode engines = payload.get("engines");
         assertEquals(4, engines.size());
@@ -128,8 +128,8 @@ class UniqueEngineIpsTest {
 
     @Test
     void writeDiscoveryFilesFallsBackToConfigHostWhenDisabled() throws Exception {
-        JsonNode payload = writeDiscovery("--n-prefill", "2", "--n-decode", "1",
-                "--unique-engine-ips", "false");
+        JsonNode payload = writeDiscovery("--mock.n_prefill", "2", "--mock.n_decode", "1",
+                "--mock.unique_engine_ips", "false");
 
         JsonNode engines = payload.get("engines");
         assertEquals(3, engines.size());
@@ -142,9 +142,9 @@ class UniqueEngineIpsTest {
     private JsonNode writeDiscovery(String... extra) throws Exception {
         Path endpointFile = tempDir.resolve("endpoint.json");
         JavaMockEngineCluster.Config config = JavaMockEngineCluster.Config.parse(with(new String[]{
-                "--endpoint-file", endpointFile.toString(),
-                "--engine-config", "../tools/mock_bundle/engine-config.json", "--calibration", tempDir.resolve("performance.json").toString(),
-                "--base-grpc-port", "64000",
+                "--mock.endpoint_file", endpointFile.toString(),
+                "--mock.engine_config", "../tools/mock_bundle/engine-config.json", "--mock.calibration", tempDir.resolve("performance.json").toString(),
+                "--mock.base_grpc_port", "64000",
         }, extra));
         JavaMockEngineCluster.writeDiscoveryFiles(config);
         return MAPPER.readTree(endpointFile.toFile());
@@ -152,8 +152,8 @@ class UniqueEngineIpsTest {
 
     private String[] baseArgs() {
         return new String[]{
-                "--endpoint-file", tempDir.resolve("endpoint.json").toString(),
-                "--engine-config", "../tools/mock_bundle/engine-config.json", "--calibration", tempDir.resolve("performance.json").toString(),
+                "--mock.endpoint_file", tempDir.resolve("endpoint.json").toString(),
+                "--mock.engine_config", "../tools/mock_bundle/engine-config.json", "--mock.calibration", tempDir.resolve("performance.json").toString(),
         };
     }
 

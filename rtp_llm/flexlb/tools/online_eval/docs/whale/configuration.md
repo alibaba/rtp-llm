@@ -29,7 +29,7 @@
 `MOCK_DEPLOYMENT_MODE` 描述 Pod/JVM 放置和发现方式。
 `master_mode=sb/sn/wb/wn` 描述 Master 的决策与 dispatcher，不描述部署。
 `mode_profiles` 中的 `whale_embedded` / `whale_independent` 是底层地址与观测
-预设；`--whale` / `--whale-bundle` 是 launcher 使用的 Java 兼容参数。
+预设；`--mock.whale` / `--mock.whale_bundle` 是 launcher 使用的 Java 部署参数。
 它们不构成第四种部署模式，平台配置不再手工组合这些内部参数。
 
 支持本契约的 bundle 启动脚本调用 `deployment.py`。既有镜像须根据实际打包

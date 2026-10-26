@@ -142,10 +142,10 @@ class CacheFixtureWireTest {
     }
 
     @Test void compactEncodingCliDefaultsOffAndRejectsInvalidBoolean() {
-        var args = new java.util.ArrayList<>(java.util.List.of("--endpoint-file", "endpoints.json",
-                "--engine-config", "../tools/mock_bundle/engine-config.json", "--calibration", "performance.json"));
+        var args = new java.util.ArrayList<>(java.util.List.of("--mock.endpoint_file", "endpoints.json",
+                "--mock.engine_config", "../tools/mock_bundle/engine-config.json", "--mock.calibration", "performance.json"));
         assertFalse(JavaMockEngineCluster.Config.parse(args.toArray(String[]::new)).cacheStatusCompactEncoding);
-        args.addAll(java.util.List.of("--cache-status-compact-encoding", "true"));
+        args.addAll(java.util.List.of("--mock.cache_status_compact_encoding", "true"));
         assertTrue(JavaMockEngineCluster.Config.parse(args.toArray(String[]::new)).cacheStatusCompactEncoding);
         args.set(args.size() - 1, "invalid");
         assertThrows(IllegalArgumentException.class,

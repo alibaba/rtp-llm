@@ -149,7 +149,7 @@ class StartupOptionsTest(unittest.TestCase):
         raw = dict(prefill_perf=perf)
         before = copy.deepcopy(raw)
         actual = spec(raw).perf
-        self.assertEqual(actual["prefill"], dict(fixed_ms=3000, scale=1))
+        self.assertEqual(actual["mock"]["forward"]["prefill"], dict(fixed_ms=3000, scale=1))
         self.assertEqual(actual["engine_config"]["roles"]["prefill"]["scheduler"]["max_generate_batch_size"], 2)
         self.assertEqual(raw, before)
 
@@ -186,7 +186,7 @@ class StartupOptionsTest(unittest.TestCase):
             actual = make_env_spec(later, "single-nonbatch", {"master_base": 28000})
             if index:
                 self.assertTrue(actual.master_debug_log)
-                self.assertEqual(actual.perf["prefill"], dict(fixed_ms=100.0, scale=1.0))
+                self.assertEqual(actual.perf["mock"]["forward"]["prefill"], dict(fixed_ms=100.0, scale=1.0))
             else:
                 self.assertNotIn("prefill_max_waiting_batches", initial)
                 self.assertNotIn("master_debug_log", initial)

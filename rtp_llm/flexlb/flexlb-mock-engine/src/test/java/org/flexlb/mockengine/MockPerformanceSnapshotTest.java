@@ -27,7 +27,7 @@ class MockPerformanceSnapshotTest {
         var model = MockEngineTestSupport.performanceModel(directory, "10", 1);
         var before = model.decodeModelState();
         var patch = new com.fasterxml.jackson.databind.ObjectMapper().readTree(
-                "{\"prefill_fixed_ms\":999,\"decode_scale\":7,\"max_waiting_batches\":-1}");
+                "{\"max_waiting_batches\":-1,\"mock\":{\"forward\":{\"prefill\":{\"fixed_ms\":999},\"decode\":{\"scale\":7}}}}");
         assertThrows(IllegalArgumentException.class, () -> model.applyOverrides(patch));
         assertEquals(before, model.decodeModelState());
     }

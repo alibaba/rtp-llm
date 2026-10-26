@@ -57,7 +57,7 @@ class MockCalibrationTest(unittest.TestCase):
         for key in ("id", "model", "hardware", "status"):
             self.assertEqual(performance["calibration_" + key], calibration[key])
         self.assertEqual(performance["calibration_sha256"], expected_sha)
-        self.assertEqual({key: performance["decode"][key] for key in calibration["decode"]}, calibration["decode"])
+        self.assertEqual({key: performance["mock"]["forward"]["decode"][key] for key in calibration["decode"]}, calibration["decode"])
         config = json.loads(render_env("single-nonbatch"))
         expression = config["router"]["roles"]["prefill"]["executionTimeEstimator"]["expression"]
         self.assertEqual(expression, calibration["prefill_expression"])
@@ -83,7 +83,7 @@ class MockCalibrationTest(unittest.TestCase):
             self.assertEqual(observed_perf["calibration_id"], calibration["id"])
             self.assertEqual(observed_perf["calibration_sha256"], expected_sha)
             for key, value in calibration["decode"].items():
-                self.assertEqual(observed_perf["decode"][key], value)
+                self.assertEqual(observed_perf["mock"]["forward"]["decode"][key], value)
 
     def test_missing_or_invalid_calibration_fails_loudly(self):
         with tempfile.TemporaryDirectory() as directory:

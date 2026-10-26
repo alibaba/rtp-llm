@@ -44,12 +44,12 @@ class VariantProgramsTest(unittest.TestCase):
         doc["variants"] = [dict(id="disabled"), dict(id="limited", environment_overrides=dict(prefill_perf=limited))]
         for plan, expected in zip(compile_scenarios([("budget.yaml", doc)], "batch-window"), (disabled, limited)):
             spec = make_env_spec(plan["environment"], plan["profile"], dict(master_base=28000))
-            self.assertEqual(spec.perf["prefill"], {key: expected[key] for key in ("fixed_ms", "scale")})
+            self.assertEqual(spec.perf["mock"]["forward"]["prefill"], {key: expected[key] for key in ("fixed_ms", "scale")})
             self.assertEqual(
                 spec.perf["engine_config"]["roles"]["prefill"]["scheduler"]["max_generate_batch_size"], expected["max_batch_requests"]
             )
-            self.assertEqual(spec.perf["decode"], default_perf()["decode"])
-            spec.perf["prefill"]["fixed_ms"] = 0
+            self.assertEqual(spec.perf["mock"]["forward"]["decode"], default_perf()["mock"]["forward"]["decode"])
+            spec.perf["mock"]["forward"]["prefill"]["fixed_ms"] = 0
             self.assertEqual(plan["environment"]["prefill_perf"]["fixed_ms"], 3000)
         self.assertEqual(doc["environment"]["prefill_perf"], disabled)
 

@@ -382,8 +382,7 @@ class PythonCompatControlApiTest {
         assertEquals(1L, perf.decodeMs(1, 1), "baseline decode should be 1ms");
 
         httpPost("/set_perf",
-                "{\"engine\":\"prefill-0\",\"prefill_fixed_ms\":50,"
-                        + "\"decode_scale\":2.0}");
+                "{\"engine\":\"prefill-0\",\"mock\":{\"forward\":{\"prefill\":{\"fixed_ms\":50},\"decode\":{\"scale\":2}}}}");
 
         assertEquals(50L, perf.prefillMs(List.of(shape)),
                 "prefill_fixed_ms must take effect");
@@ -409,15 +408,15 @@ class PythonCompatControlApiTest {
         MockPerformanceModel.RequestShape shape = first.shape(
                 inputWithDecode(1, 10, decodeServices.get(0).getGrpcPort()), new MockLruBlockCache(16));
 
-        httpPost("/set_perf", "{\"engine\":\"prefill-0\",\"prefill_fixed_ms\":50}");
-        httpPost("/set_perf", "{\"engine\":\"decode-0\",\"decode_scale\":7}");
+        httpPost("/set_perf", "{\"engine\":\"prefill-0\",\"mock\":{\"forward\":{\"prefill\":{\"fixed_ms\":50}}}}");
+        httpPost("/set_perf", "{\"engine\":\"decode-0\",\"mock\":{\"forward\":{\"decode\":{\"scale\":7}}}}");
         assertEquals(50L, first.prefillMs(List.of(shape)));
         assertEquals(10L, second.prefillMs(List.of(shape)));
         assertEquals(7L, decodeServices.get(0).getPerformance().decodeMs(1, 1));
         assertEquals(1L, decodeServices.get(1).getPerformance().decodeMs(1, 1));
         assertEquals(10L, initial.prefillMs(List.of(shape)), "startup template stays unchanged");
 
-        httpPost("/set_perf", "{\"engine\":\"prefill-1\",\"prefill_fixed_ms\":500}");
+        httpPost("/set_perf", "{\"engine\":\"prefill-1\",\"mock\":{\"forward\":{\"prefill\":{\"fixed_ms\":500}}}}");
         assertEquals(50L, first.prefillMs(List.of(shape)), "later writes to a sibling stay isolated");
         assertEquals(500L, second.prefillMs(List.of(shape)));
     }
@@ -454,7 +453,7 @@ class PythonCompatControlApiTest {
         startCluster(model("200", 1.0), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
-        httpPost("/set_queue_depth", "{\"engine\":\"prefill-0\",\"queue_depth\":1}");
+        httpPost("/set_queue_depth", "{\"engine\":\"prefill-0\",\"queue_depth_limit\":1}");
 
         EngineRpcService.EnqueueBatchResponsePB first = enqueueAndFetch(prefill, batch(7000, slot(0,
                 inputWithDecode(9200, 10, decodeServices.get(0).getGrpcPort()))));
@@ -470,7 +469,7 @@ class PythonCompatControlApiTest {
                 .contains("queue depth"));
 
         // Clearing the limit restores acceptance.
-        httpPost("/set_queue_depth", "{\"engine\":\"prefill-0\",\"queue_depth\":0}");
+        httpPost("/set_queue_depth", "{\"engine\":\"prefill-0\",\"queue_depth_limit\":0}");
         EngineRpcService.EnqueueBatchResponsePB third = enqueueAndFetch(prefill, batch(7002, slot(0,
                 inputWithDecode(9202, 10, decodeServices.get(0).getGrpcPort()))));
         assertEquals(1, third.getSuccessesCount());

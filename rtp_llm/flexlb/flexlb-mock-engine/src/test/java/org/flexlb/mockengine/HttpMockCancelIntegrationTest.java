@@ -458,10 +458,10 @@ class HttpMockCancelIntegrationTest {
                 HttpRequest.newBuilder()
                         .uri(URI.create("http://127.0.0.1:" + controlServer.getPort()
                                 + "/inject"))
-                        .POST(HttpRequest.BodyPublishers.ofString(
+                        .POST(HttpRequest.BodyPublishers.ofString(MockEngineTestSupport.faultRequest(
                                 "{\"port\": " + prefillService.getGrpcPort()
                                         + ", \"type\": \"" + type + "\", \"enabled\": "
-                                        + enabled + "}"))
+                                        + enabled + "}")))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode(),

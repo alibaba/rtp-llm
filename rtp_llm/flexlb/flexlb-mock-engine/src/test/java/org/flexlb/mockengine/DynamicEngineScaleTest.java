@@ -158,12 +158,12 @@ class DynamicEngineScaleTest {
     @Test
     void newAndReplacementEnginesUseStartupPerformance() throws Exception {
         int basePort = startCluster(model("10", 1.0), 1, 1);
-        postOk("/set_perf", "{\"engine\":\"decode-0\",\"decode_scale\":9}");
+        postOk("/set_perf", "{\"engine\":\"decode-0\",\"mock\":{\"forward\":{\"decode\":{\"scale\":9}}}}");
         assertEquals(9L, services.get(basePort + 1).getPerformance().decodeMs(1, 1));
         JsonNode added = postOk("/add_engine", "{\"role\":\"decode\"}");
         int addedPort = added.path("port").asInt();
         assertEquals(1L, services.get(addedPort).getPerformance().decodeMs(1, 1));
-        postOk("/set_perf", "{\"port\":" + addedPort + ",\"decode_scale\":4}");
+        postOk("/set_perf", "{\"port\":" + addedPort + ",\"mock\":{\"forward\":{\"decode\":{\"scale\":4}}}}");
         assertEquals(9L, services.get(basePort + 1).getPerformance().decodeMs(1, 1));
         postOk("/remove_engine", "{\"port\":" + addedPort + "}");
         JsonNode replacement = postOk("/add_engine", "{\"role\":\"decode\"}");

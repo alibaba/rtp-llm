@@ -26,7 +26,7 @@ import java.util.concurrent.TimeUnit;
  * snapshot, inject, clear_inject, health, requests, set_perf, set_kv_pressure,
  * set_queue_depth, cache_evict, stop_engine, start_engine, cancel_request,
  * add_engine, remove_engine, and metrics. add_engine/remove_engine back runtime
- * scale-out/in and keep the optional --discovery-file mapping in sync (see
+ * scale-out/in and keep the optional --mock.discovery_file mapping in sync (see
  * {@link DynamicEngineManager}).
  *
  * <p>Python compatibility layer (Phase 2): all POST endpoints accept dual
@@ -238,9 +238,14 @@ final class MockControlServer {
     }
 
     private void handleInject(HttpExchange exchange) throws IOException {
-        handleServicePost(exchange, (body, service) -> {
+        handleServicePost(exchange, (request, service) -> {
+            MockEngineConfig.fields(request, "engine", "port", "mock");
+            MockEngineConfig.fields(request.path("mock"), "fault");
+            JsonNode body = request.path("mock").path("fault");
+            if (!body.isObject()) throw new IllegalArgumentException("mock.fault is required");
             if (body.has("type")) {
-                // Original Java fault-injection format ({"port"/"engine", "type", "enabled", ...}).
+                MockEngineConfig.fields(body, "type", "enabled", "tokens", "depth", "n", "request_id", "batch_id", "phase", "error_code", "k", "code", "rid", "rids", "rounds", "delay_ms");
+                // Typed fault operation under mock.fault.
                 String type = body.path("type").asText();
                 boolean enabled = body.path("enabled").asBoolean(true);
                 FaultInjectionConfig.Builder builder = service.getFaultConfig().toBuilder();
@@ -252,8 +257,6 @@ final class MockControlServer {
                     case "kv_pressure" -> builder.kvPressureTokens(enabled ? body.path("tokens").asLong(500_000) : 0);
                     case "queue_depth" -> builder.queueDepthLimit(enabled ? body.path("depth").asInt(10) : 0);
                     case "crash_after" -> builder.crashAfterNRequests(enabled ? body.path("n").asInt(5) : 0);
-                    case "enqueue_delay" -> builder.enqueueDelayMs(enabled ? body.path("delay_ms").asLong(0) : 0);
-                    case "generate_delay" -> builder.generateDelayMs(enabled ? body.path("delay_ms").asLong(0) : 0);
                     // ── Status-report fault family (getWorkerStatus output layer) ──
                     case "status_missing_rounds", "status_completion_delay" -> {
                         if (!body.path("rid").isIntegralNumber() || body.path("rid").asLong() <= 0) {
@@ -334,11 +337,9 @@ final class MockControlServer {
                 return response;
             }
 
-            // Python format (_http_inject / set_injection):
-            // {"engine": "prefill-0", "config": {"enqueue_error": bool, "fetch_error": bool,
-            //                                     "generate_error": bool, "no_respond": bool}}
-            // Python REPLACES the whole inject config (not merge), so build a fresh one.
-            JsonNode cfg = body.path("config");
+            // Boolean fault configuration replaces the complete injection state.
+            JsonNode cfg = body;
+            MockEngineConfig.fields(cfg, "enqueue_error", "fetch_error", "generate_error", "no_respond");
             FaultInjectionConfig injected = FaultInjectionConfig.builder()
                     .failOnEnqueue(cfg.path("enqueue_error").asBoolean(false))
                     .fetchError(cfg.path("fetch_error").asBoolean(false))
@@ -446,16 +447,17 @@ final class MockControlServer {
             if ("POST".equals(exchange.getRequestMethod())) {
                 byte[] bytes = exchange.getRequestBody().readNBytes(65537);
                 if (bytes.length > 65536) throw new IllegalArgumentException("body too large");
-                JsonNode body = MAPPER.readTree(bytes);
+                JsonNode request = MAPPER.readTree(bytes);
+                JsonNode body = forwardControl(request, "prefill");
                 if (body == null || !body.isObject() || !body.path("expression").isTextual())
                     throw new IllegalArgumentException("expression string required");
                 body.fieldNames().forEachRemaining(key -> {
-                    if (!key.equals("expression") && !key.equals("engine"))
+                    if (!key.equals("expression"))
                         throw new IllegalArgumentException("unknown field: " + key);
                 });
-                if (body.has("engine")) {
-                    if (!body.path("engine").isTextual()) throw new IllegalArgumentException("engine string required");
-                    String engine = body.path("engine").asText();
+                if (request.has("engine")) {
+                    if (!request.path("engine").isTextual()) throw new IllegalArgumentException("engine string required");
+                    String engine = request.path("engine").asText();
                     targets = targets.stream().filter(s -> s.getEngineName().equals(engine)).toList();
                 }
                 if (targets.isEmpty()) throw new IllegalArgumentException("no matching prefill engine");
@@ -482,16 +484,17 @@ final class MockControlServer {
             if ("POST".equals(exchange.getRequestMethod())) {
                 byte[] bytes = exchange.getRequestBody().readNBytes(65537);
                 if (bytes.length > 65536) throw new IllegalArgumentException("body too large");
-                JsonNode body = MAPPER.readTree(bytes);
+                JsonNode request = MAPPER.readTree(bytes);
+                JsonNode body = forwardControl(request, "decode");
                 if (body == null || !body.isObject()) throw new IllegalArgumentException("JSON object required");
                 body.fieldNames().forEachRemaining(key -> {
                     if (!key.equals("step_base_ms") && !key.equals("step_per_running_ms")
-                            && !key.equals("tokens_per_step") && !key.equals("engine"))
+                            && !key.equals("tokens_per_step"))
                         throw new IllegalArgumentException("unknown field: " + key);
                 });
-                if (body.has("engine")) {
-                    if (!body.path("engine").isTextual()) throw new IllegalArgumentException("engine string required");
-                    String engine = body.path("engine").asText();
+                if (request.has("engine")) {
+                    if (!request.path("engine").isTextual()) throw new IllegalArgumentException("engine string required");
+                    String engine = request.path("engine").asText();
                     targets = targets.stream().filter(s -> s.getEngineName().equals(engine)).toList();
                 }
                 if (targets.isEmpty()) throw new IllegalArgumentException("no matching decode engine");
@@ -529,15 +532,16 @@ final class MockControlServer {
             if ("POST".equals(exchange.getRequestMethod())) {
                 byte[] bytes = exchange.getRequestBody().readNBytes(65537);
                 if (bytes.length > 65536) throw new IllegalArgumentException("body too large");
-                JsonNode body = MAPPER.readTree(bytes);
+                JsonNode request = MAPPER.readTree(bytes);
+                JsonNode body = forwardControl(request, "decode");
                 if (body == null || !body.isObject()) throw new IllegalArgumentException("JSON object required");
                 body.fieldNames().forEachRemaining(key -> {
-                    if (!key.equals("eos") && !key.equals("engine"))
+                    if (!key.equals("eos"))
                         throw new IllegalArgumentException("unknown field: " + key);
                 });
-                if (body.has("engine")) {
-                    if (!body.path("engine").isTextual()) throw new IllegalArgumentException("engine string required");
-                    String engine = body.path("engine").asText();
+                if (request.has("engine")) {
+                    if (!request.path("engine").isTextual()) throw new IllegalArgumentException("engine string required");
+                    String engine = request.path("engine").asText();
                     targets = targets.stream().filter(s -> s.getEngineName().equals(engine)).toList();
                 }
                 if (targets.isEmpty()) throw new IllegalArgumentException("no matching engine");
@@ -555,37 +559,44 @@ final class MockControlServer {
         }
     }
 
+    private static JsonNode forwardControl(JsonNode request, String role) {
+        if (request == null) throw new IllegalArgumentException("JSON object required");
+        MockEngineConfig.fields(request, "engine", "mock");
+        var mock = request.path("mock"); MockEngineConfig.fields(mock, "forward");
+        var forward = mock.path("forward"); MockEngineConfig.fields(forward, role);
+        var value = forward.path(role);
+        if (!value.isObject()) throw new IllegalArgumentException("mock.forward." + role + " object required");
+        return value;
+    }
+
     private void handleSetPerf(HttpExchange exchange) throws IOException {
         handleServicePost(exchange, (body, service) -> {
             MockPerformanceModel perf = service.getPerformance();
-            MockEngineConfig.fields(body, "engine", "port", "prefill_fixed_ms", "decode_scale");
-            for (String key : new String[]{"prefill_fixed_ms", "decode_scale"}) {
-                JsonNode value = body.get(key);
-                if (value != null && (!value.isNumber() || !Double.isFinite(value.doubleValue()) || value.doubleValue() < 0))
-                    throw new IllegalArgumentException(key + " must be finite and nonnegative");
-            }
             perf.applyOverrides(body);
             return successResponse(service);
         });
     }
 
+    private static JsonNode faultControl(JsonNode request) {
+        MockEngineConfig.fields(request, "engine", "port", "mock");
+        var mock = request.path("mock"); MockEngineConfig.fields(mock, "fault");
+        return mock.path("fault");
+    }
+
     private void handleSetKvPressure(HttpExchange exchange) throws IOException {
         handleServicePost(exchange, (body, service) -> {
-            // Python semantics (_http_set_kv_pressure): ABSOLUTE value —
-            // state._active_kv_tokens = value.
-            service.setAbsoluteActiveKvTokens(body.path("active_kv_tokens").asLong(0));
+            var fault = faultControl(body);
+            MockEngineConfig.fields(fault, "active_kv_tokens");
+            service.setAbsoluteActiveKvTokens(fault.path("active_kv_tokens").asLong(0));
             return successResponse(service);
         });
     }
 
     private void handleSetQueueDepth(HttpExchange exchange) throws IOException {
         handleServicePost(exchange, (body, service) -> {
-            // NOTE (intentional divergence): the legacy Python queue_depth was a fake
-            // display value (only bumped the snapshot "waiting" counter); Java
-            // implements it as real enqueue rejection. Field name kept for compatibility.
-            int depth = body.has("queue_depth")
-                    ? body.get("queue_depth").asInt(0)
-                    : body.path("depth").asInt(0);
+            var fault = faultControl(body);
+            MockEngineConfig.fields(fault, "queue_depth_limit");
+            int depth = fault.path("queue_depth_limit").asInt(0);
             FaultInjectionConfig.Builder builder = service.getFaultConfig().toBuilder();
             builder.queueDepthLimit(depth);
             service.setFaultConfig(builder.build());
@@ -874,7 +885,7 @@ final class MockControlServer {
      * POST /add_engine {"role": "prefill"|"decode", "port": <grpcPort, optional>} —
      * create and start a NEW engine (dynamic scale-out). Port is auto-allocated
      * (current max + 1) when omitted; an explicit port already in use is a 409.
-     * When the cluster runs with --discovery-file the mapping file is updated
+     * When the cluster runs with --mock.discovery_file the mapping file is updated
      * atomically so a file-discovery master picks the engine up.
      */
     private void handleAddEngine(HttpExchange exchange) throws IOException {
@@ -885,7 +896,7 @@ final class MockControlServer {
         try {
             if (engineManager == null) {
                 sendJson(exchange, 501, Map.of("error",
-                        "dynamic engine management not configured (start cluster with --discovery-file)"));
+                        "dynamic engine management not configured (start cluster with --mock.discovery_file)"));
                 return;
             }
             JsonNode body = MAPPER.readTree(exchange.getRequestBody());
@@ -935,7 +946,7 @@ final class MockControlServer {
         try {
             if (engineManager == null) {
                 sendJson(exchange, 501, Map.of("error",
-                        "dynamic engine management not configured (start cluster with --discovery-file)"));
+                        "dynamic engine management not configured (start cluster with --mock.discovery_file)"));
                 return;
             }
             JsonNode body = MAPPER.readTree(exchange.getRequestBody());

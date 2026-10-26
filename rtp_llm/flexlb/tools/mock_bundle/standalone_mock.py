@@ -68,10 +68,10 @@ def command(env):
         raise ValueError("POD_IP must be a routable IPv4 pod address")
     numeric = dict(n_prefill=prefill, n_decode=decode, base_grpc_port=port)
     for flag, key, default in (
-        ("--event-loop-threads", "MOCK_EVENT_LOOP_THREADS", 4),
-        ("--completion-threads", "MOCK_COMPLETION_THREADS", 4),
+        ("--mock.event_loop_threads", "MOCK_EVENT_LOOP_THREADS", 4),
+        ("--mock.completion_threads", "MOCK_COMPLETION_THREADS", 4),
     ):
-        numeric[flag.removeprefix("--").replace("-", "_")] = integer(env, key, default)
+        numeric[flag.removeprefix("--mock.")] = integer(env, key, default)
     from runtime_configs import calibration_input, engine_input
 
     engine = engine_input(env)

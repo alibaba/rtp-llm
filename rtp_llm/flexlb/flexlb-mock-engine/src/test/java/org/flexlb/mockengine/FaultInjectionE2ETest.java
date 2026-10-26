@@ -92,27 +92,7 @@ class FaultInjectionE2ETest {
 
     // ==================== C2 enqueueDelayMs ====================
 
-    @Test
-    @Timeout(30)
-    void c02_enqueue_delay_defers_ack_but_request_succeeds() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
-                BASE_PORT + 10, 1, 1, "5", 1.0, false, DecisionPolicyConfig.single())) {
-            arm(h);
-            h.prefillEngines.get(0).setFaultConfig(FaultInjectionConfig.builder()
-                    .enqueueDelayMs(300)
-                    .build());
 
-            long start = System.nanoTime();
-            Response response = submitTo(h, 0, 9201);
-            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-
-            assertTrue(response.isSuccess(),
-                    "delayed ack must still succeed: " + response.getErrorMessage());
-            assertTrue(elapsedMs >= 300,
-                    "terminal must wait for the delayed engine ack, took " + elapsedMs + "ms");
-            assertEquals(1, h.prefillEngines.get(0).getAcceptedCount());
-        }
-    }
 
     // ==================== C3 generateDelayMs ====================
 
@@ -124,9 +104,10 @@ class FaultInjectionE2ETest {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             prefill.setFaultConfig(FaultInjectionConfig.builder()
-                    .generateDelayMs(300)
+
                     .build());
 
+            h.prefillEngines.get(0).getPerformance().timing().configure(new com.fasterxml.jackson.databind.ObjectMapper().readTree("{\"forward\":{\"prefill\":{\"pause\":{\"probability\":1,\"duration_ms\":300}}}}"));
             long start = System.nanoTime();
             Response response = submitTo(h, 0, 9301);
             assertTrue(response.isSuccess(), "ack is not delayed by generateDelayMs");

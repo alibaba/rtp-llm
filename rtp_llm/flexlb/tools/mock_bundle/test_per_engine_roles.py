@@ -22,7 +22,7 @@ class PerEngineRolesTest(unittest.TestCase):
         with patch.object(vit, "prepare_assets", return_value=Path("/model")) as prepare:
             args = vit.command(env)
         prepare.assert_called_once()
-        for key, value in (("--http-port", "22160"), ("--port", "22161"), ("--model-path", "/model")):
+        for key, value in (("--mock.http_port", "22160"), ("--mock.port", "22161"), ("--mock.model_path", "/model")):
             self.assertEqual(args[args.index(key) + 1], value)
 
     def test_vit_passes_monitoring_toggle(self):
@@ -35,7 +35,7 @@ class PerEngineRolesTest(unittest.TestCase):
         for value, expected in ((None, "true"), ("true", "true"), ("1", "true"), ("false", "false"), ("0", "false")):
             with self.subTest(value=value), patch.object(vit, "prepare_assets", return_value=Path("/model")):
                 args = vit.command(base if value is None else {**base, "MOCK_KMONITOR_ENABLED": value})
-                self.assertEqual(args[args.index("--kmonitor") + 1], expected)
+                self.assertEqual(args[args.index("--mock.kmonitor") + 1], expected)
         with self.assertRaisesRegex(ValueError, "MOCK_KMONITOR_ENABLED"):
             vit.command({**base, "MOCK_KMONITOR_ENABLED": "typo"})
 

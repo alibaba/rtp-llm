@@ -25,7 +25,7 @@ set -eu
 }
 for argument in "$@"; do
     case "$argument" in
-        --whale|--whale-bundle|--n-prefill|--n-decode|--host|--unique-engine-ips|--base-grpc-port|--discovery-file|--endpoint-file|--engine-config|--calibration)
+        --mock.whale|--mock.whale_bundle|--mock.n_prefill|--mock.n_decode|--mock.host|--mock.unique_engine_ips|--mock.base_grpc_port|--mock.discovery_file|--mock.endpoint_file|--mock.engine_config|--mock.calibration)
             echo "Placement argument $argument is owned by MOCK_DEPLOYMENT_MODE and ROLE_TYPE" >&2; exit 2;;
     esac
 done
@@ -65,7 +65,7 @@ case "${FETCH_OUTPUT_STREAM:-1}" in
     *) echo "FETCH_OUTPUT_STREAM must be 0 or 1" >&2; exit 2;;
 esac
 case "${MOCK_EVENT_LOG_ENABLED:-$MOCK_MODE_JSONL_DEFAULT}" in
-    1) set -- --events-file "$run_dir/engine_events.jsonl" "$@";;
+    1) set -- --mock.events_file "$run_dir/engine_events.jsonl" "$@";;
     0) ;;
     *) echo "MOCK_EVENT_LOG_ENABLED must be 0 or 1" >&2; exit 2;;
 esac
@@ -77,11 +77,11 @@ printf '{"mode":"per_engine","entrypoint":"mock","master_discovery":"vipserver",
 cat "$run_dir/deployment.json"
 # exec preserves SIGTERM ownership: one engine JVM, no bundled master process.
 exec java -jar "${MOCK_ENGINE_JAR:-/opt/flexlb/mock-engine.jar}" \
-    --whale true --n-prefill "$prefill" --n-decode "$decode" \
-    --host "$POD_IP" --bind-host "${MOCK_BIND_HOST:-0.0.0.0}" \
-    --unique-engine-ips false \
-    --base-grpc-port "$((START_PORT + 1))" --auto-fetch "$automatic" \
-    --kmonitor "${MOCK_KMONITOR_ENABLED:-$MOCK_MODE_KMONITOR_DEFAULT}" \
-    --engine-config "$MOCK_ENGINE_CONFIG" --calibration "$MOCK_CALIBRATION_CONFIG" \
-    --endpoint-file "$run_dir/unused-endpoint.json" \
+    --mock.whale true --mock.n_prefill "$prefill" --mock.n_decode "$decode" \
+    --mock.host "$POD_IP" --mock.bind_host "${MOCK_BIND_HOST:-0.0.0.0}" \
+    --mock.unique_engine_ips false \
+    --mock.base_grpc_port "$((START_PORT + 1))" --mock.auto_fetch "$automatic" \
+    --mock.kmonitor "${MOCK_KMONITOR_ENABLED:-$MOCK_MODE_KMONITOR_DEFAULT}" \
+    --mock.engine_config "$MOCK_ENGINE_CONFIG" --mock.calibration "$MOCK_CALIBRATION_CONFIG" \
+    --mock.endpoint_file "$run_dir/unused-endpoint.json" \
     "$@"

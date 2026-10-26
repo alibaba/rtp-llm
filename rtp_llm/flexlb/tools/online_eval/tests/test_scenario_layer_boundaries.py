@@ -166,7 +166,7 @@ def test_invalid_master_probe_does_not_change_mock_or_environment_spec(tmp_path)
     ):
         with pytest.raises(RuntimeError, match="stop"):
             manager._start_mock(env)
-    assert "--engine-config" in spawn.call_args.args[0]
+    assert "--mock.engine_config" in spawn.call_args.args[0]
     assert "--master-config" not in spawn.call_args.args[0]
     assert env.spec is raw
 

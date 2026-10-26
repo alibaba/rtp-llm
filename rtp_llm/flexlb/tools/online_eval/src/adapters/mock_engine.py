@@ -27,20 +27,20 @@ class MockEngineControl:
         return body or {}
 
     def inject(self, engine_name: str, config: dict) -> dict:
-        return self._require_engine_command("inject", engine_name, config=config)
+        return self._require_engine_command("inject", engine_name, mock={"fault": config})
 
     def clear_inject(self, engine_name: str) -> dict:
         return self._require_engine_command("clear_inject", engine_name)
 
     def set_perf(self, engine_name: str, **kwargs) -> bool:
-        return self._engine_command("set_perf", engine_name, kwargs)[0] == 200
+        return self._engine_command("set_perf", engine_name, {"mock": kwargs})[0] == 200
 
     def set_kv_pressure(self, engine_name: str, active_kv_tokens: int) -> bool:
-        return self._engine_command("set_kv_pressure", engine_name, {"active_kv_tokens": active_kv_tokens})[0] == 200
+        return self._engine_command("set_kv_pressure", engine_name, {"mock": {"fault": {"active_kv_tokens": active_kv_tokens}}})[0] == 200
 
     def set_queue_depth(self, engine_name: str, queue_depth: int) -> bool:
         """Set the real enqueue-rejection limit, not a diagnostic display value."""
-        return self._engine_command("set_queue_depth", engine_name, {"queue_depth": queue_depth})[0] == 200
+        return self._engine_command("set_queue_depth", engine_name, {"mock": {"fault": {"queue_depth_limit": queue_depth}}})[0] == 200
 
     def stop_engine(self, engine_name: str) -> dict:
         return self._require_engine_command("stop_engine", engine_name)
@@ -55,7 +55,7 @@ class MockEngineControl:
         current max + 1 when omitted).  Returns (status, body) WITHOUT raising:
         200 → body carries ``engine`` (name) + ``port`` (gRPC) + ``http_port``;
         409 port-in-use / 400 bad role / 501 (cluster started without
-        --discovery-file) are surfaced to the caller (chaos cases exercise
+        --mock.discovery_file) are surfaced to the caller (chaos cases exercise
         concurrent add/remove and treat those as expected outcomes).
         """
         body: dict = {"role": role}

@@ -336,7 +336,7 @@ class ComprehensiveFaultInjectionTest {
         try {
             // Set queue depth limit to 2 via HTTP
             httpPost(controlServer.getPort(), "/set_queue_depth",
-                    "{\"port\":" + prefillPort + ",\"depth\":2}");
+                    "{\"port\":" + prefillPort + ",\"queue_depth_limit\":2}");
             assertEquals(2, prefill.getFaultConfig().getQueueDepthLimit());
 
             // Enqueue 5 requests one at a time
@@ -360,7 +360,7 @@ class ComprehensiveFaultInjectionTest {
 
             // Clear queue depth limit
             httpPost(controlServer.getPort(), "/set_queue_depth",
-                    "{\"port\":" + prefillPort + ",\"depth\":0}");
+                    "{\"port\":" + prefillPort + ",\"queue_depth_limit\":0}");
             assertEquals(0, prefill.getFaultConfig().getQueueDepthLimit());
 
             // Wait for in-flight requests to drain
@@ -453,124 +453,13 @@ class ComprehensiveFaultInjectionTest {
     //  Test 7: enqueue_delay
     // ════════════════════════════════════════════════════════════════
 
-    @Test
-    void enqueueDelayAddsLatency() throws Exception {
-        // enqueue_delay is now supported via HTTP /inject with delay_ms parameter.
-        MockPerformanceModel model = model("10");
-        int basePort = startCluster(model, 1, 2);
-        int prefillPort = basePort;
-        JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
-        try {
-            // Set enqueue delay via HTTP /inject
-            long delayMs = 100;
-            httpPost(controlServer.getPort(), "/inject",
-                    "{\"port\":" + prefillPort + ",\"type\":\"enqueue_delay\",\"enabled\":true,\"delay_ms\":" + delayMs + "}");
-            assertEquals(delayMs, prefill.getFaultConfig().getEnqueueDelayMs());
-
-            // Enqueue 5 requests — each should take at least delayMs
-            for (int i = 1; i <= 5; i++) {
-                long start = System.nanoTime();
-                EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(4000 + i, slot(0, input(i, 10))));
-                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-                assertEquals(1, response.getSuccessesCount(),
-                        "request " + i + " should succeed despite delay");
-                assertTrue(elapsedMs >= delayMs,
-                        "request " + i + " should take >= " + delayMs + "ms, got " + elapsedMs + "ms");
-            }
-
-            // Clear injection via HTTP /clear_inject
-            httpPost(controlServer.getPort(), "/clear_inject",
-                    "{\"port\":" + prefillPort + "}");
-            assertEquals(0, prefill.getFaultConfig().getEnqueueDelayMs());
-
-            // Enqueue 5 more — should be fast (no delay)
-            for (int i = 6; i <= 10; i++) {
-                long start = System.nanoTime();
-                EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(4000 + i, slot(0, input(i, 10))));
-                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-                assertEquals(1, response.getSuccessesCount(),
-                        "request " + i + " should succeed after clearing delay");
-                assertTrue(elapsedMs < delayMs,
-                        "request " + i + " should be fast after clearing delay, got " + elapsedMs + "ms");
-            }
-
-            awaitAllInflightZero(5_000);
-            for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                assertFalse(service.isLeakDetected(),
-                        "no leak on port " + service.getGrpcPort());
-            }
-        } finally {
-            cleanupCluster();
-        }
-    }
 
     // ════════════════════════════════════════════════════════════════
     //  Test 8: generate_delay (via /set_perf prefill_ms override)
     // ════════════════════════════════════════════════════════════════
 
-    @Test
-    void generateDelayAddsLatency() throws Exception {
-        // generate_delay is now supported via HTTP /inject with delay_ms parameter.
-        // It delays the prefill completion (generate) by the specified ms,
-        // independent of the performance model's prefill_ms formula.
-        MockPerformanceModel model = model("10");
-        int basePort = startCluster(model, 1, 2);
-        int prefillPort = basePort;
-        JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
-        try {
-            // Set generate delay via HTTP /inject
-            long delayMs = 200;
-            httpPost(controlServer.getPort(), "/inject",
-                    "{\"port\":" + prefillPort + ",\"type\":\"generate_delay\",\"enabled\":true,\"delay_ms\":" + delayMs + "}");
-            assertEquals(delayMs, prefill.getFaultConfig().getGenerateDelayMs());
-
-            // Call generateStreamCall 5 times — each should take at least delayMs
-            for (int i = 1; i <= 5; i++) {
-                long start = System.nanoTime();
-                GenerateResult result = generateStream(
-                        prefill, input(i, 10), 5_000);
-                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-                assertTrue(result.completed(),
-                        "generateStreamCall " + i + " should complete");
-                assertNotNull(result.response(),
-                        "generateStreamCall " + i + " should have response");
-                assertTrue(elapsedMs >= delayMs * 0.8,
-                        "generateStreamCall " + i + " should take >= ~" + delayMs
-                                + "ms, got " + elapsedMs + "ms");
-            }
-
-            // Clear generate delay via HTTP /clear_inject
-            httpPost(controlServer.getPort(), "/clear_inject",
-                    "{\"port\":" + prefillPort + "}");
-            assertEquals(0, prefill.getFaultConfig().getGenerateDelayMs());
-
-            // Call generateStreamCall 5 more times — should be fast
-            for (int i = 6; i <= 10; i++) {
-                long start = System.nanoTime();
-                GenerateResult result = generateStream(
-                        prefill, input(i, 10), 5_000);
-                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-                assertTrue(result.completed(),
-                        "generateStreamCall " + i + " should complete after clearing");
-                assertNotNull(result.response(),
-                        "generateStreamCall " + i + " should have response");
-                assertTrue(elapsedMs < delayMs,
-                        "generateStreamCall " + i + " should be fast after clearing, got " + elapsedMs + "ms");
-            }
-
-            awaitAllInflightZero(5_000);
-            for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                assertFalse(service.isLeakDetected(),
-                        "no leak on port " + service.getGrpcPort());
-            }
-        } finally {
-            cleanupCluster();
-        }
-    }
 
     // ════════════════════════════════════════════════════════════════
     //  Cluster setup helpers

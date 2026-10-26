@@ -179,7 +179,7 @@ session 监管只覆盖留在该进程组的后代；主动另建 session 的后
 
 ## Mock RPC 执行边界
 
-Mock cluster 的 gRPC 协议调度使用独立的轻量执行器；业务回调由 Java 21 虚拟线程执行，每个逻辑引擎独立限制业务并发和在途调用。cache、status 和推理方法在同一引擎内竞争，不按方法分池；某个引擎阻塞不占用其他引擎的并发额度。`--rpc-threads` 控制每引擎业务并发，`--rpc-max-calls` 控制每引擎在途 RPC 数，与 Netty 的 `--event-loop-threads` 分开配置。Python 环境声明对应 `rpc_threads`、`rpc_max_calls`。
+Mock cluster 的 gRPC 协议调度使用独立的轻量执行器；业务回调由 Java 21 虚拟线程执行，每个逻辑引擎独立限制业务并发和在途调用。cache、status 和推理方法在同一引擎内竞争，不按方法分池；某个引擎阻塞不占用其他引擎的并发额度。`--mock.rpc_threads` 控制每引擎业务并发，`--mock.rpc_max_calls` 控制每引擎在途 RPC 数，与 Netty 的 `--mock.event_loop_threads` 分开配置。Python 环境声明对应 `rpc_threads`、`rpc_max_calls`。
 
 超过 RPC 在途上限的新调用通过正常协议返回 `RESOURCE_EXHAUSTED`，错误描述明确标记为 mock harness 限制；这不表示真实引擎的 KV、调度队列或 GPU 容量不足。已接收调用的取消与终态通知不受该准入限制，取消通知不等待引擎业务额度；已过期的排队调用不执行业务方法。移除引擎时停止该引擎的 RPC 所有者；cluster 收尾先停止并等待服务与传输，再有界回收协议执行器和业务回调，未终止则报告失败并允许重试。该机制仍不模拟真实 Pod 的 CPU、GC 或过载时延。
 

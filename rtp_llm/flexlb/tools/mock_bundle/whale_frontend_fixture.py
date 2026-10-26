@@ -127,13 +127,13 @@ def start_mock_vit(model):
         "-cp",
         str(jar),
         "org.flexlb.mockengine.MockVitServer",
-        "--port",
+        "--mock.port",
         str(port),
-        "--model-path",
+        "--mock.model_path",
         str(model),
-        "--engine-config",
+        "--mock.engine_config",
         str(runtime / "engine-config.json"),
-        "--calibration",
+        "--mock.calibration",
         str(runtime / "calibration.json"),
     ]
     child = subprocess.Popen(args)

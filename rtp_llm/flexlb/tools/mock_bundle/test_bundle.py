@@ -29,8 +29,8 @@ class BundleConfigurationTest(unittest.TestCase):
         command, _ = self.launch_to_process_boundary(
             {"MOCK_DEPLOYMENT_MODE": "embedded", "MOCK_PREFILL_COUNT": "2", "MOCK_DECODE_COUNT": "3"}
         )
-        self.assertEqual(command[command.index("--n-prefill") + 1], "2")
-        self.assertEqual(command[command.index("--n-decode") + 1], "3")
+        self.assertEqual(command[command.index("--mock.n_prefill") + 1], "2")
+        self.assertEqual(command[command.index("--mock.n_decode") + 1], "3")
         for override in ({"MOCK_PREFILL_COUNT": "0"}, {"MOCK_PREFILL_COUNT": "2", "MOCK_BUNDLE_OVERRIDES_YAML": "{prefill: 3}"}):
             with self.subTest(override=override), self.assertRaises(ValueError):
                 self.launch_to_process_boundary(override)
@@ -77,15 +77,15 @@ class BundleConfigurationTest(unittest.TestCase):
         self.assertEqual(performance["calibration_id"], "dsv4_l20_legacy_mock")
         calibration = bundle.ROOT.parent / "online_eval/data/performance/dsv4_l20_mock_calibration.json"
         self.assertEqual(performance["calibration_sha256"], hashlib.sha256(calibration.read_bytes()).hexdigest())
-        self.assertEqual(set(performance["decode"]), {"scale", "step_base_ms", "step_per_running_ms", "tokens_per_step"})
+        self.assertEqual(set(performance["mock"]["forward"]["decode"]), {"scale", "step_base_ms", "step_per_running_ms", "tokens_per_step"})
         self.assertEqual(
-            command[command.index("--calibration") + 1],
-            str(Path(command[command.index("--engine-config") + 1]).parent / "performance.json"),
+            command[command.index("--mock.calibration") + 1],
+            str(Path(command[command.index("--mock.engine_config") + 1]).parent / "performance.json"),
         )
-        self.assertIn("--engine-config", command)
-        self.assertEqual(command[command.index("--auto-fetch") + 1], "true")
-        self.assertEqual(command[command.index("--unique-engine-ips") + 1], "true")
-        self.assertNotIn("--events-file", command)
+        self.assertIn("--mock.engine_config", command)
+        self.assertEqual(command[command.index("--mock.auto_fetch") + 1], "true")
+        self.assertEqual(command[command.index("--mock.unique_engine_ips") + 1], "true")
+        self.assertNotIn("--mock.events_file", command)
 
     def test_java_home_works_when_runtime_path_has_no_java(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -97,12 +97,12 @@ class BundleConfigurationTest(unittest.TestCase):
 
     def test_event_log_is_explicit(self):
         command, _ = self.launch_to_process_boundary({"MOCK_EVENT_LOG_ENABLED": "1"})
-        self.assertIn("--events-file", command)
+        self.assertIn("--mock.events_file", command)
 
     def test_frontend_fetch_controls_engine_continuation(self):
         command, _ = self.launch_to_process_boundary({"FETCH_OUTPUT_STREAM": "1"})
-        self.assertEqual(command[command.index("--auto-fetch") + 1], "false")
-        self.assertEqual(command[command.index("--unique-engine-ips") + 1], "false")
+        self.assertEqual(command[command.index("--mock.auto_fetch") + 1], "false")
+        self.assertEqual(command[command.index("--mock.unique_engine_ips") + 1], "false")
 
     def test_invalid_fetch_mode_cannot_launch(self):
         with self.assertRaisesRegex(ValueError, "FETCH_OUTPUT_STREAM must be 0 or 1"):
@@ -114,14 +114,14 @@ class BundleConfigurationTest(unittest.TestCase):
         command, performance = self.launch_to_process_boundary(
             {
                 "MOCK_ENGINE_CONFIG_JSON": json.dumps(engine),
-                "MOCK_CALIBRATION_CONFIG_JSON": '{"decode":{"step_base_ms":20}}',
+                "MOCK_CALIBRATION_CONFIG_JSON": '{"mock":{"forward":{"decode":{"step_base_ms":20}}}}',
                 "MOCK_EOS_CONFIG_JSON": '{"enabled":false}',
             }
         )
-        self.assertIn("--engine-config", command)
+        self.assertIn("--mock.engine_config", command)
         self.assertNotIn("--decode-max-concurrency", command)
-        self.assertEqual(performance["decode"]["step_base_ms"], 20)
-        self.assertEqual(performance["decode"]["eos"], {"enabled": False})
+        self.assertEqual(performance["mock"]["forward"]["decode"]["step_base_ms"], 20)
+        self.assertEqual(performance["mock"]["forward"]["decode"]["eos"], {"enabled": False})
 
     def test_invalid_capacity_cannot_launch(self):
         for value in [0, -1, True, "64"]:

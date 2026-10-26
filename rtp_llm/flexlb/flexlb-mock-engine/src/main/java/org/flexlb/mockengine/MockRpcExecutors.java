@@ -31,6 +31,8 @@ final class MockRpcExecutors implements AutoCloseable {
             Thread.ofVirtual().name("mock-rpc-", 0).factory());
     private final Set<Engine> engines = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean closing = new AtomicBoolean();
+    private final java.util.concurrent.ScheduledExecutorService timers = Executors.newScheduledThreadPool(1,
+            Thread.ofPlatform().daemon().name("mock-rpc-timer-", 0).factory());
     private final int concurrency;
     private final int maxCalls;
     private boolean terminated;
@@ -51,6 +53,26 @@ final class MockRpcExecutors implements AutoCloseable {
     }
 
     final class Engine implements ServerCallExecutorSupplier, ServerInterceptor {
+        private MockRpcTiming timing;
+        void timing(MockTiming model, java.util.function.Consumer<Map<String, Number>> metrics) {
+            if (timing != null) throw new IllegalStateException("RPC timing already configured");
+            timing = new MockRpcTiming(model, timers, command -> {
+                callbacksInProgress.incrementAndGet();
+                try { callbacks.execute(() -> {
+                    boolean acquired = false;
+                    var thread = Thread.currentThread(); running.add(thread); waiting.incrementAndGet();
+                    try {
+                        workers.acquire(); acquired = true;
+                        waiting.decrementAndGet();
+                        if (!stopped.get()) command.run();
+                    } catch (InterruptedException cancelled) { Thread.currentThread().interrupt(); }
+                    finally {
+                        if (acquired) workers.release(); else waiting.decrementAndGet();
+                        running.remove(thread); callbacksInProgress.decrementAndGet();
+                    }
+                }); } catch (RuntimeException error) { callbacksInProgress.decrementAndGet(); throw error; }
+            }, metrics);
+        }
         private final Semaphore workers = new Semaphore(concurrency, true);
         private final Semaphore calls = new Semaphore(maxCalls);
         private final ConcurrentHashMap<ServerCall<?, ?>, Admission> active = new ConcurrentHashMap<>();
@@ -64,7 +86,8 @@ final class MockRpcExecutors implements AutoCloseable {
         Map<String, Object> snapshot() {
             return Map.of("in_flight", inFlight(), "active_callbacks", concurrency - workers.availablePermits(),
                     "waiting_callbacks", waiting.get(), "rejected_calls_total", rejected.sum(),
-                    "concurrency_limit", concurrency, "in_flight_limit", maxCalls);
+                    "concurrency_limit", concurrency, "in_flight_limit", maxCalls,
+                    "delayed_calls", timing == null ? 0 : timing.pendingCalls());
         }
 
         @Override
@@ -142,7 +165,8 @@ final class MockRpcExecutors implements AutoCloseable {
             ServerCall<ReqT, RespT> owned = new ForwardingServerCall.SimpleForwardingServerCall<>(call) {
                 @Override public void close(Status status, Metadata trailers) { admission.close(status, trailers); }
             };
-            ServerCall.Listener<ReqT> listener = next.startCall(owned, headers);
+            ServerCall.Listener<ReqT> listener = timing == null ? next.startCall(owned, headers)
+                    : timing.interceptCall(owned, headers, next);
             return new ForwardingServerCallListener.SimpleForwardingServerCallListener<>(listener) {
                 @Override public void onHalfClose() {
                     if (!admission.closed.get() && !admission.context.isCancelled()) super.onHalfClose();
@@ -152,6 +176,7 @@ final class MockRpcExecutors implements AutoCloseable {
 
         void stop() {
             stopped.set(true);
+            if (timing != null) timing.close();
             active.values().forEach(admission -> admission.close(Status.UNAVAILABLE
                     .withDescription("mock RPC engine stopping"), new Metadata()));
             running.forEach(Thread::interrupt);
@@ -207,6 +232,7 @@ final class MockRpcExecutors implements AutoCloseable {
         if (terminated) return;
         closing.set(true);
         engines.forEach(Engine::stop);
+        timers.shutdownNow();
         // The owner calls close after server transports terminate. Drain their
         // already-delivered callbacks before retiring the protocol executor.
         control.shutdown();

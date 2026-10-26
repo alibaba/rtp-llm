@@ -22,7 +22,7 @@ class SetPerfMaxWaitingBatchesTest {
         try {
             for (String field : new String[]{"max_waiting_batches", "max_prefill_concurrency", "cache_retention_blocks", "decode_retry_times"})
                 assertEquals(400, httpPostResponse(63249, "/set_perf", "{\"port\":63250,\"" + field + "\":1}").statusCode());
-            assertEquals(200, httpPostResponse(63249, "/set_perf", "{\"port\":63250,\"prefill_fixed_ms\":2}").statusCode());
+            assertEquals(200, httpPostResponse(63249, "/set_perf", "{\"port\":63250,\"mock\":{\"forward\":{\"prefill\":{\"fixed_ms\":2}}}}").statusCode());
         } finally { control.stop(); service.shutdown(); scheduler.shutdownNow(); }
     }
 }

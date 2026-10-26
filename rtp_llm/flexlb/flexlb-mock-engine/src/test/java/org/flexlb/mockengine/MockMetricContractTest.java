@@ -47,4 +47,20 @@ class MockMetricContractTest {
                 service.whaleMetrics().keySet().forEach(MockMetricContract::require);
         }
     }
+    @Test void timingMetricsAreDeclaredAndReachTheMonitoringSink() {
+        var values = new java.util.HashMap<String, Double>();
+        var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{org.flexlb.metric.FlexMonitor.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("report")) values.put((String) args[0], ((Number) args[2]).doubleValue());
+                    return null;
+                });
+        var monitor = new WhaleMockMonitor(sink); var timing = MockTiming.defaults();
+        var sample = timing.sample("forward.prefill", 10);
+        var metrics = timing.metrics("forward.prefill", sample, 12_000_000);
+        monitor.reportEvent(metrics, Map.of("role", "ROLE_TYPE_PREFILL"));
+        assertEquals(6, values.size()); assertEquals(2000.0, values.get("mock_timing_forward_prefill_timer_lag_us"));
+        for (String name : metrics.keySet()) assertEquals(MockMetricContract.Unit.MICROSECONDS, MockMetricContract.require(name).unit());
+    }
+
 }
