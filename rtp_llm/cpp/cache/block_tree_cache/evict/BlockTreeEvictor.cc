@@ -501,7 +501,8 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t group_se
             if (tier == Tier::DEVICE) {
                 for (size_t i = 0; i < resource.device_blocks.size(); ++i) {
                     if (!isNullBlockIdx(resource.device_blocks[i])
-                        && group_set->devicePools()[i]->isFrozen(resource.device_blocks[i])) {
+                        && (group_set->devicePools()[i]->hasRequestRef(resource.device_blocks[i])
+                            || group_set->devicePools()[i]->isFrozen(resource.device_blocks[i]))) {
                         return false;
                     }
                 }
