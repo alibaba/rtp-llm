@@ -102,3 +102,13 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "token_processor_streaming_test",
+    srcs = ["token_processor_streaming_test.py"],
+    deps = [
+        "//rtp_llm:frontend",
+        "//rtp_llm:testlib",
+    ],
+    env = {"GPU_COUNT": "0"},
+)

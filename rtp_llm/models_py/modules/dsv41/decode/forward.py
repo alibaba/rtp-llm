@@ -323,28 +323,39 @@ def forward_layers(
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     routing_metadata = prepare_model_gate_routing_metadata(v4, input_ids)
     layer_forward_range = _profiler.make_layer_forward_range()
-    for layer_idx, layer in enumerate(v4.layers):
-        with layer_forward_range(layer_idx):
-            h = forward_decode_layer(
-                layer,
-                h,
-                attn_metadata,
-                input_ids,
-                next_layer=(
-                    v4.layers[layer_idx + 1] if layer_idx + 1 < len(v4.layers) else None
-                ),
-                preserve_output=_rt_on,
-                kv_cache=kv_cache,
-                routing_metadata=routing_metadata,
-                capture_input=(
-                    partial(v4.capture_aux_hidden, layer_idx)
-                    if layer_idx in capture_ids
-                    else None
-                ),
-                expert_load=expert_load_for_layer(expert_token_counts, layer_idx),
-            )
-            if _rt_on:
-                _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
+    from rtp_llm.models_py.modules.dsv41._engram_decode_prefetch import (
+        DecodeEngramPrefetch,
+    )
+
+    prefetch = DecodeEngramPrefetch(v4, attn_metadata)
+    try:
+        for layer_idx, layer in enumerate(v4.layers):
+            prefetch.before_layer(layer_idx)
+            with layer_forward_range(layer_idx):
+                h = forward_decode_layer(
+                    layer,
+                    h,
+                    attn_metadata,
+                    input_ids,
+                    next_layer=(
+                        v4.layers[layer_idx + 1]
+                        if layer_idx + 1 < len(v4.layers)
+                        else None
+                    ),
+                    preserve_output=_rt_on,
+                    kv_cache=kv_cache,
+                    routing_metadata=routing_metadata,
+                    capture_input=(
+                        partial(v4.capture_aux_hidden, layer_idx)
+                        if layer_idx in capture_ids
+                        else None
+                    ),
+                    expert_load=expert_load_for_layer(expert_token_counts, layer_idx),
+                )
+                if _rt_on:
+                    _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
+    finally:
+        prefetch.close()
     if v4._mtp_hidden_buffer is not None:
         if capture_ids:
             # DSpARK mode: the buffer already holds this forward's aux rows

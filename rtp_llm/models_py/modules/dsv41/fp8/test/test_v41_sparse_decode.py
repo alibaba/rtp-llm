@@ -38,7 +38,11 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
             torch.empty(2, dtype=torch.int32),
             None,
         )
-        for name in ("_clean_logits_kernel", "_repair_compat_logits_kernel", "_restore_indices_kernel"):
+        for name in (
+            "_clean_logits_kernel",
+            "_repair_compat_logits_kernel",
+            "_restore_indices_kernel",
+        ):
             mocked = patch.object(sparse, name, MagicMock())
             mocked.start()
             self.addCleanup(mocked.stop)
@@ -57,14 +61,18 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
                 os.environ
             ):
                 os.environ.pop("DSV41_DECODE_DEEPSELECT", None)
+                os.environ.pop("DSV41_DECODE_DEEPSELECT_SORTED", None)
                 if switch is not None:
                     os.environ["DSV41_DECODE_DEEPSELECT"] = switch
 
-                def select(scores, lengths, *, out, filter_finite, enabled):
+                def select(
+                    scores, lengths, *, out, filter_finite, enabled, sorted_index
+                ):
                     self.assertEqual(scores.dtype, self.logits.dtype)
                     self.assertEqual(scores.shape, (2, 4096))
                     self.assertEqual(lengths.shape, (2,))
                     self.assertFalse(filter_finite)
+                    self.assertEqual(sorted_index, self.logits.dtype == torch.bfloat16)
                     self.assertEqual(enabled, switch != "0")
                     return out if enabled and available else None
 
@@ -102,7 +110,11 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
             compact_lengths=torch.empty(2, dtype=torch.int32),
             repair_rows=torch.empty(2, dtype=torch.bool),
         )
-        with patch.object(sparse.deepselect, "try_select_tokens", side_effect=lambda *a, **kw: kw["out"]) as native:
+        with patch.object(
+            sparse.deepselect,
+            "try_select_tokens",
+            side_effect=lambda *a, **kw: kw["out"],
+        ) as native:
             sparse.select_tokens(self.logits, self.plan, inplace=True)
         self.assertIs(native.call_args.args[0], self.logits)
         self.assertIs(native.call_args.args[1], self.plan.compact_lengths)
@@ -110,12 +122,18 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
         sparse._repair_compat_logits_kernel.__getitem__.assert_called_once_with((2,))
 
     def test_borrowed_logits_and_legacy_plans_keep_copy_path(self):
-        with patch.object(sparse.deepselect, "try_select_tokens", side_effect=lambda *a, **kw: kw["out"]):
+        with patch.object(
+            sparse.deepselect,
+            "try_select_tokens",
+            side_effect=lambda *a, **kw: kw["out"],
+        ):
             sparse.select_tokens(self.logits, self.plan, inplace=True)
             sparse.select_tokens(
                 self.logits,
-                self.plan._replace(compact_lengths=torch.empty(2, dtype=torch.int32),
-                                   repair_rows=torch.empty(2, dtype=torch.bool)),
+                self.plan._replace(
+                    compact_lengths=torch.empty(2, dtype=torch.int32),
+                    repair_rows=torch.empty(2, dtype=torch.bool),
+                ),
             )
         self.assertEqual(sparse._clean_logits_kernel.__getitem__.call_count, 2)
         sparse._repair_compat_logits_kernel.__getitem__.assert_not_called()
@@ -124,20 +142,29 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
         self.plan = self.plan._replace(
             compact_lengths=torch.tensor([4096, 0], dtype=torch.int32),
         )
-        with patch.object(sparse.deepselect, "try_select_tokens", side_effect=lambda *a, **kw: kw["out"]) as native:
+        with patch.object(
+            sparse.deepselect,
+            "try_select_tokens",
+            side_effect=lambda *a, **kw: kw["out"],
+        ) as native:
             sparse.select_tokens(self.logits, self.plan, inplace=True)
         self.assertIs(native.call_args.args[0], self.logits)
         self.assertIs(native.call_args.args[1], self.plan.compact_lengths)
         sparse._clean_logits_kernel.__getitem__.assert_not_called()
         sparse._repair_compat_logits_kernel.__getitem__.assert_not_called()
         restore = sparse._restore_indices_kernel.__getitem__.return_value
-        self.assertIs(restore.call_args.kwargs["select_lengths"], self.plan.compact_lengths)
+        self.assertIs(
+            restore.call_args.kwargs["select_lengths"], self.plan.compact_lengths
+        )
 
     def test_fallback_preserves_padded_stride_without_a_copy(self):
         self.logits = torch.empty(2, 4608, dtype=torch.bfloat16)[:, :4096]
-        self.plan = self.plan._replace(compact_lengths=torch.tensor([4093, 0], dtype=torch.int32))
-        with patch.object(sparse.deepselect, "try_select_tokens", return_value=None), \
-             patch.object(sparse.rtp_llm_ops, "topk_v3") as fallback:
+        self.plan = self.plan._replace(
+            compact_lengths=torch.tensor([4093, 0], dtype=torch.int32)
+        )
+        with patch.object(
+            sparse.deepselect, "try_select_tokens", return_value=None
+        ), patch.object(sparse.rtp_llm_ops, "topk_v3") as fallback:
             sparse.select_tokens(self.logits, self.plan, inplace=True)
         self.assertIs(fallback.call_args.args[0], self.logits)
         self.assertEqual(fallback.call_args.args[0].stride(0), 4608)
@@ -146,8 +173,14 @@ class SparseDecodeTopKRoutingCPU(unittest.TestCase):
         sparse._repair_compat_logits_kernel.__getitem__.assert_not_called()
 
     def test_copy_path_reuses_compact_bounds_without_overwriting_them(self):
-        self.plan = self.plan._replace(compact_lengths=torch.tensor([4093, 0], dtype=torch.int32))
-        with patch.object(sparse.deepselect, "try_select_tokens", side_effect=lambda *a, **kw: kw["out"]) as native:
+        self.plan = self.plan._replace(
+            compact_lengths=torch.tensor([4093, 0], dtype=torch.int32)
+        )
+        with patch.object(
+            sparse.deepselect,
+            "try_select_tokens",
+            side_effect=lambda *a, **kw: kw["out"],
+        ) as native:
             sparse.select_tokens(self.logits, self.plan)
         clean = sparse._clean_logits_kernel.__getitem__.return_value
         self.assertIsNone(clean.call_args.args[6])
@@ -158,27 +191,35 @@ class SparseDecodeSupportCPU(unittest.TestCase):
     def test_plan_narrow_sort_dispatch(self):
         # Exercise the real make_plan dispatch without launching GPU work.
         backend = SimpleNamespace(get_paged_sparse_mqa_logits_metadata=Mock())
-        with patch.object(sparse, "_prepare_plan_kernel", MagicMock()) as kernel, patch.object(
-            sparse, "deep_gemm", backend
-        ):
+        with patch.object(
+            sparse, "_prepare_plan_kernel", MagicMock()
+        ) as kernel, patch.object(sparse, "deep_gemm", backend):
             for k in (512, 1024, 2048):
                 for cols in (256, 2047, 2048):
                     for switch in (None, "0", "1"):
-                        with self.subTest(k=k, cols=cols, switch=switch), patch.dict(os.environ):
+                        with self.subTest(k=k, cols=cols, switch=switch), patch.dict(
+                            os.environ
+                        ):
                             os.environ.pop("DSV41_SPARSE_PLAN_I16", None)
                             if switch is not None:
                                 os.environ["DSV41_SPARSE_PLAN_I16"] = switch
                             candidates = torch.empty(6, k, dtype=torch.int32)
                             lengths = torch.zeros(6, dtype=torch.int32)
                             table = torch.zeros(1, cols, dtype=torch.int32)
-                            plan = sparse.make_plan(candidates, lengths, table, query_len=6)
+                            plan = sparse.make_plan(
+                                candidates, lengths, table, query_len=6
+                            )
                             self.assertEqual(
-                                kernel.__getitem__.return_value.call_args.kwargs["SORT_I16"],
+                                kernel.__getitem__.return_value.call_args.kwargs[
+                                    "SORT_I16"
+                                ],
                                 k == 2048 and cols < 2048 and switch != "0",
                             )
                             self.assertEqual(plan.blocks.dtype, torch.int32)
                             self.assertEqual(plan.table.dtype, torch.int32)
-                            self.assertEqual(plan.lengths.data_ptr(), lengths.data_ptr())
+                            self.assertEqual(
+                                plan.lengths.data_ptr(), lengths.data_ptr()
+                            )
 
     def test_sparse_mqa_defaults_on_with_explicit_override(self):
         def init_base(attn, *args, **kwargs):
@@ -288,6 +329,40 @@ class SparseDecodeCUDA(unittest.TestCase):
         self.context.__enter__()
         self.addCleanup(self.context.__exit__, None, None, None)
 
+    def test_default_sorted_deepselect_survives_sparse_restore_with_candidate_holes(
+        self,
+    ):
+        torch.manual_seed(2048512)
+        rows, k = 7, 2048
+        blocks = (torch.arange(k, device="cuda", dtype=torch.int32) * 2)[None].repeat(
+            rows, 1
+        )
+        active = torch.ones_like(blocks, dtype=torch.bool)
+        active[:, 1::3] = False
+        lengths = torch.tensor(
+            [0, 1, 511, 512, 513, 16385, 32761], device="cuda", dtype=torch.int32
+        )
+        table = torch.ones(rows, 256, device="cuda", dtype=torch.int32)
+        plan = sparse.SparseDecodePlan(blocks, active, table, lengths, None)
+        logits = torch.randn(rows, k * 8, device="cuda", dtype=torch.bfloat16)
+        logits[:, :4] = torch.nan
+        with patch.dict(os.environ, {"DSV41_DECODE_DEEPSELECT_SORTED": "0"}):
+            baseline = sparse.select_tokens(logits, plan)
+        with patch.dict(os.environ), patch.object(
+            sparse.rtp_llm_ops,
+            "deepselect_bf16_dense_sorted",
+            wraps=sparse.rtp_llm_ops.deepselect_bf16_dense_sorted,
+        ) as native:
+            os.environ.pop("DSV41_DECODE_DEEPSELECT_SORTED", None)
+            actual = sparse.select_tokens(logits, plan)
+        native.assert_called_once()
+        torch.testing.assert_close(
+            actual.sort(-1).values, baseline.sort(-1).values, rtol=0, atol=0
+        )
+        for row in actual.cpu():
+            valid = row[row >= 0]
+            self.assertTrue(bool((valid[1:] > valid[:-1]).all()))
+
     def test_clean_logits_preserves_dtype_and_mask(self):
         k, rows = 512, 4
         blocks = (
@@ -305,9 +380,7 @@ class SparseDecodeCUDA(unittest.TestCase):
         allocated = table.gather(1, tokens.long() // 128) > 0
         for dtype in (torch.bfloat16, torch.float32):
             # Include an input row stride larger than the compact output width.
-            raw = torch.randn(rows, k * 8 + 32, device="cuda", dtype=dtype)[
-                :, : k * 8
-            ]
+            raw = torch.randn(rows, k * 8 + 32, device="cuda", dtype=dtype)[:, : k * 8]
             raw.masked_fill_(~valid | ~allocated, torch.nan)
             scores = torch.empty_like(raw, memory_format=torch.contiguous_format)
             ends = torch.empty_like(lengths)
@@ -365,8 +438,9 @@ class SparseDecodeCUDA(unittest.TestCase):
             capacity = cols * 128
             table = torch.arange(1, cols + 1, device="cuda", dtype=torch.int32)[None]
             lengths = torch.full((rows,), capacity, device="cuda", dtype=torch.int32)
-            ids = torch.arange(capacity // 8 - k, capacity // 8,
-                               device="cuda", dtype=torch.int32).flip(0)
+            ids = torch.arange(
+                capacity // 8 - k, capacity // 8, device="cuda", dtype=torch.int32
+            ).flip(0)
             candidates = ids.expand(rows, k).clone()
 
             def run():
@@ -374,7 +448,9 @@ class SparseDecodeCUDA(unittest.TestCase):
 
             stream = torch.cuda.Stream()
             stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(stream), patch.dict(os.environ, {"DSV41_SPARSE_PLAN_I16": "1"}):
+            with torch.cuda.stream(stream), patch.dict(
+                os.environ, {"DSV41_SPARSE_PLAN_I16": "1"}
+            ):
                 run()
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph, stream=stream):
@@ -385,7 +461,9 @@ class SparseDecodeCUDA(unittest.TestCase):
                     elif mode == "empty":
                         candidates.fill_(-1)
                     elif mode == "short":
-                        lengths.copy_(torch.tensor([0, 1, 7, 8, 511, 513], device="cuda"))
+                        lengths.copy_(
+                            torch.tensor([0, 1, 7, 8, 511, 513], device="cuda")
+                        )
                         # Keep all rows empty: the planner must rebuild fillers
                         # for new lengths and read updated tables on replay.
                         table[:, ::2] = -1
@@ -560,10 +638,13 @@ class SparseDecodeCUDA(unittest.TestCase):
         for k in (512, 1024, 2048):
             lengths = torch.tensor(
                 [0, 1, 7, 8, 513, 8191, 16383, 32761],
-                device="cuda", dtype=torch.int32,
+                device="cuda",
+                dtype=torch.int32,
             )
             rows, width = lengths.numel(), k * 8
-            candidates = torch.arange(k, device="cuda", dtype=torch.int32)[None].repeat(rows, 1)
+            candidates = torch.arange(k, device="cuda", dtype=torch.int32)[None].repeat(
+                rows, 1
+            )
             candidates.masked_fill_(candidates * 8 >= lengths[:, None], -1)
             candidates[4, ::3] = -1
             candidates[5].fill_(-1)
@@ -574,9 +655,13 @@ class SparseDecodeCUDA(unittest.TestCase):
             table[7, ::11] = -1
             plan = sparse.make_plan(candidates, lengths, table, query_len=1)
             self._check_plan(plan, candidates, lengths, table, 1)
-            storage = torch.randn(rows, width + 512, device="cuda", dtype=torch.bfloat16)
+            storage = torch.randn(
+                rows, width + 512, device="cuda", dtype=torch.bfloat16
+            )
             raw = storage[:, :width]
-            tokens = (plan.blocks[:, :, None].long() * 8 + torch.arange(8, device="cuda")).reshape(rows, width)
+            tokens = (
+                plan.blocks[:, :, None].long() * 8 + torch.arange(8, device="cuda")
+            ).reshape(rows, width)
             valid = plan.active.repeat_interleave(8, 1) & (tokens < lengths[:, None])
             allocated = plan.table.gather(1, tokens // 128) > 0
             raw.masked_fill_(~valid | ~allocated, torch.nan)
@@ -584,18 +669,43 @@ class SparseDecodeCUDA(unittest.TestCase):
             clean = torch.empty_like(raw, memory_format=torch.contiguous_format)
             ends = torch.empty_like(lengths)
             sparse._clean_logits_kernel[(rows, width // 2048)](
-                raw, plan.blocks, plan.active, plan.table, lengths,
-                clean, ends, k, raw.stride(0), table.shape[1], 2048,
+                raw,
+                plan.blocks,
+                plan.active,
+                plan.table,
+                lengths,
+                clean,
+                ends,
+                k,
+                raw.stride(0),
+                table.shape[1],
+                2048,
             )
             sparse._repair_compat_logits_kernel[(rows,)](
-                raw, plan.blocks, plan.active, plan.table,
-                plan.compact_lengths, plan.repair_rows,
-                k, raw.stride(0), table.shape[1],
+                raw,
+                plan.blocks,
+                plan.active,
+                plan.table,
+                plan.compact_lengths,
+                plan.repair_rows,
+                k,
+                raw.stride(0),
+                table.shape[1],
             )
-            prefix = torch.arange(width, device="cuda")[None] < plan.compact_lengths[:, None]
+            prefix = (
+                torch.arange(width, device="cuda")[None] < plan.compact_lengths[:, None]
+            )
             torch.testing.assert_close(raw[prefix], clean[prefix], rtol=0, atol=0)
-            torch.testing.assert_close(storage[:, width:], original[:, width:], rtol=0, atol=0)
-            torch.testing.assert_close(raw[~prefix], original[:, :width][~prefix], rtol=0, atol=0, equal_nan=True)
+            torch.testing.assert_close(
+                storage[:, width:], original[:, width:], rtol=0, atol=0
+            )
+            torch.testing.assert_close(
+                raw[~prefix],
+                original[:, :width][~prefix],
+                rtol=0,
+                atol=0,
+                equal_nan=True,
+            )
             for switch in ("0", "1"):
                 with patch.dict(os.environ, {"DSV41_DECODE_DEEPSELECT": switch}):
                     raw.copy_(original[:, :width])
@@ -610,7 +720,9 @@ class SparseDecodeCUDA(unittest.TestCase):
                         dense[tokens[row, valid[row]]] = clean[row, valid[row]].float()
                         torch.testing.assert_close(
                             dense[a[a >= 0].long()].sort().values,
-                            dense[b[b >= 0].long()].sort().values, rtol=0, atol=0,
+                            dense[b[b >= 0].long()].sort().values,
+                            rtol=0,
+                            atol=0,
                         )
 
     def test_deepselect_and_fallback_masked_selection_graph(self):
@@ -652,7 +764,10 @@ class SparseDecodeCUDA(unittest.TestCase):
                     sparse.rtp_llm_ops, "topk_v3", wraps=sparse.rtp_llm_ops.topk_v3
                 ) as fallback:
                     self._check_selection(
-                        sparse.select_tokens(raw, plan, inplace=True), candidates, lengths, dense
+                        sparse.select_tokens(raw, plan, inplace=True),
+                        candidates,
+                        lengths,
+                        dense,
                     )
                     stream = torch.cuda.Stream()
                     stream.wait_stream(torch.cuda.current_stream())

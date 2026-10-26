@@ -96,17 +96,31 @@ def is_supported(logits, ends, out=None, *, filter_finite=True, enabled=None) ->
     return is_available(logits.device, logits.dtype, enabled=enabled)
 
 
-def try_select_tokens(logits, ends, *, out=None, filter_finite=True, enabled=None):
+def try_select_tokens(
+    logits, ends, *, out=None, filter_finite=True, enabled=None, sorted_index=False
+):
     """Return K512 int32 indices, or None before an unsupported launch.
 
     Bounds are clamped in the native kernel. A caller using
     ``filter_finite=False`` must filter in its publication epilogue. Once a
     native launch is selected, execution errors propagate without fallback.
+    ``sorted_index`` uses the BF16 index epilogue; finite filtering must remain
+    in the caller. Valid IDs are ascending before that publication step.
     """
     if not is_supported(
         logits, ends, out, filter_finite=filter_finite, enabled=enabled
     ):
         return None
+    if sorted_index:
+        if logits.dtype != torch.bfloat16 or filter_finite:
+            raise ValueError(
+                "Sorted DeepSelect requires BF16 and deferred finite filtering"
+            )
+        select = getattr(rtp_llm_ops, "deepselect_bf16_dense_sorted", None)
+        if select is None:
+            return None
+        select(logits, ends, out)
+        return out
     if out is None:
         out = torch.empty(
             (logits.shape[0], 512), dtype=torch.int32, device=logits.device

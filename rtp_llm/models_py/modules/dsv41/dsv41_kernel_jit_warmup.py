@@ -368,7 +368,9 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     sms = max(lookup_sms)
     prefetch_config = None
     prefetch_carveout = None
-    if engram_lookup_prefetch_enabled():
+    from rtp_llm.models_py.modules.dsv41 import _engram_decode_prefetch
+
+    if engram_lookup_prefetch_enabled() or _engram_decode_prefetch.enabled():
         from rtp_llm.models_py.modules.dsv41._engram_triton import (
             PREFETCH_LOOKUP_CARVEOUT,
             PREFETCH_LOOKUP_CONFIG,
@@ -386,6 +388,8 @@ def warmup_v41_engram_jit(model, *, max_m, device):
                 tuple(layer.q_weight.shape),
                 layer.eps,
                 tuple(layer.embed_tokens.weight.shape),
+                getattr(layer, "_direct_fp8_lookup", False) is True,
+                getattr(layer.embed_tokens, "_scale_shard_count", 1),
             )
             for layer in layers
         ),
@@ -397,6 +401,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     if key in _ENGRAM_WARMED:
         for layer in layers:
             layer.prepare_lookup_prefetch()
+            _engram_decode_prefetch.prepare(layer)
         common._sync_cuda(device)
         prepare_engram_cpu_lookup(model, max_m=max_m)
         return
@@ -431,17 +436,27 @@ def warmup_v41_engram_jit(model, *, max_m, device):
         for layer in layers:
             ids = hashes[:, layer.layer_hash_index].contiguous()
             if rows <= limit:
+                lookup = (
+                    layer.warmup_lookup
+                    if getattr(layer, "_direct_fp8_lookup", False) is True
+                    else layer.embed_tokens
+                )
                 common._run_triton_warmup_launch_with_retry(
                     "DSV41 Engram",
                     f"lookup rows={rows}",
-                    partial(layer.embed_tokens, ids, device),
+                    partial(lookup, ids, device),
                     device=device,
                 )
             if rows <= prefetch_limit:
+                lookup = (
+                    layer.warmup_lookup
+                    if getattr(layer, "_direct_fp8_lookup", False) is True
+                    else layer.embed_tokens.warmup_prefetch
+                )
                 common._run_triton_warmup_launch_with_retry(
                     "DSV41 Engram",
                     f"prefetch lookup rows={rows} config={prefetch_config}",
-                    partial(layer.embed_tokens.warmup_prefetch, ids, device),
+                    partial(lookup, ids, device),
                     device=device,
                 )
         if rows in (1, 16):
@@ -471,6 +486,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
                     )
     for layer in layers:
         layer.prepare_lookup_prefetch()
+        _engram_decode_prefetch.prepare(layer)
     common._sync_cuda(device)
     prepare_engram_cpu_lookup(model, max_m=max_m)
     _ENGRAM_WARMED.add(key)

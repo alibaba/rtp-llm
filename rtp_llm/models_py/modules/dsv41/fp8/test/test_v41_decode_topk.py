@@ -87,11 +87,15 @@ class DecodeTopKTest(unittest.TestCase):
     def test_complete_candidates_are_sorted_and_only_pad_after_visible_prefix(self):
         for k in (512, 1024, 2048):
             source = torch.randn(6, 32768, device="cuda")
-            lengths = torch.tensor([0, 1, 513, 4096, 32761, 32768], device="cuda", dtype=torch.int32)
+            lengths = torch.tensor(
+                [0, 1, 513, 4096, 32761, 32768], device="cuda", dtype=torch.int32
+            )
             source[3].fill_(-torch.inf)
             source[4, :8192] = torch.nan
             source[5].fill_(-torch.inf)
-            candidates, flags = selector.select_candidates(source, lengths, 8, k, complete=True)
+            candidates, flags = selector.select_candidates(
+                source, lengths, 8, k, complete=True
+            )
             for row, length in enumerate(lengths.tolist()):
                 visible = (length + 7) // 8
                 count = min(visible, k)
@@ -110,7 +114,11 @@ class DecodeTopKTest(unittest.TestCase):
         torch.manual_seed(714)
         env = patch.dict(
             os.environ,
-            {"DSV41_PREFILL_DEEPSELECT": "0", "DSV41_DECODE_CANDIDATE_TOPK_V3": "0"},
+            {
+                "DSV41_PREFILL_DEEPSELECT": "0",
+                "DSV41_DECODE_CANDIDATE_TOPK_V3": "0",
+                "DSV41_DECODE_DEEPSELECT_SORTED": "0",
+            },
         )
         env.start()
         self.addCleanup(env.stop)
@@ -134,7 +142,9 @@ class DecodeTopKTest(unittest.TestCase):
         else:
             os.environ["DSV41_DECODE_DEEPSELECT"] = previous
 
-    def test_decode_uses_native_dense_deepselect_for_both_score_dtypes(self):
+    def test_explicit_unsorted_decode_uses_native_dense_deepselect_for_both_score_dtypes(
+        self,
+    ):
         for dtype, name in (
             (torch.float32, "deepselect_fp32"),
             (torch.bfloat16, "deepselect_bf16_dense"),
@@ -158,6 +168,107 @@ class DecodeTopKTest(unittest.TestCase):
                 torch.testing.assert_close(
                     result[3], torch.arange(512, device="cuda").int()
                 )
+
+    def assert_sorted_valid_ids(self, result):
+        for row in result.cpu():
+            valid = row[row >= 0]
+            self.assertTrue(bool((valid[1:] > valid[:-1]).all()))
+
+    def test_default_sorted_bf16_decode_preserves_selection_and_nonfinite_contract(
+        self,
+    ):
+        self.require_native(torch.bfloat16)
+        # Both native occupancy buckets, including the index-window shuffle.
+        for rows in (7, 173):
+            logits = torch.randn(rows, 32768, device="cuda", dtype=torch.bfloat16)
+            ends = (
+                torch.tensor(
+                    [0, 1, 511, 512, 513, 32761, 32768],
+                    device="cuda",
+                    dtype=torch.int32,
+                )
+                .repeat((rows + 6) // 7)[:rows]
+                .contiguous()
+            )
+            logits[::7].fill_(-torch.inf)
+            logits[4::7].fill_(-torch.inf)
+            logits[5::7, :900] = torch.nan
+            logits[6::7, 1:9] = torch.inf
+            logits[6::7, 9:11] = -torch.inf
+            baseline = selector.select_tokens(logits, ends, 512)
+            with patch.dict(os.environ), patch.object(
+                rtp_llm_ops,
+                "deepselect_bf16_dense_sorted",
+                wraps=rtp_llm_ops.deepselect_bf16_dense_sorted,
+            ) as native, patch.object(
+                rtp_llm_ops,
+                "topk_v3",
+                side_effect=AssertionError("lost DeepSelect"),
+            ):
+                os.environ.pop("DSV41_DECODE_DEEPSELECT_SORTED", None)
+                result = selector.select_tokens(logits, ends, 512)
+            native.assert_called_once()
+            torch.testing.assert_close(
+                result.sort(-1).values, baseline.sort(-1).values, rtol=0, atol=0
+            )
+            assert_equivalent(self, result, reference(logits, ends), logits, ends)
+            self.assert_sorted_valid_ids(result)
+
+    def test_sorted_bf16_graph_replay_changes_scores_and_bounds(self):
+        logits = torch.randn(7, 32768, device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((7,), 32768, device="cuda", dtype=torch.int32)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with patch.dict(os.environ, {"DSV41_DECODE_DEEPSELECT_SORTED": "1"}):
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    selector.select_tokens(logits, ends, 512)
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                result = selector.select_tokens(logits, ends, 512)
+            for lengths in (
+                [0, 1, 511, 512, 513, 32761, 32768],
+                [32768, 16001, 1023, 513, 512, 1, 0],
+            ):
+                logits.normal_()
+                logits[:, :3] = torch.nan
+                ends.copy_(torch.tensor(lengths, device="cuda", dtype=torch.int32))
+                graph.replay()
+                snapshot = result.clone()
+                eager = selector.select_tokens(logits, ends, 512)
+                torch.testing.assert_close(snapshot, eager, rtol=0, atol=0)
+                assert_equivalent(self, snapshot, reference(logits, ends), logits, ends)
+                self.assert_sorted_valid_ids(snapshot)
+
+    def test_sorted_raw_output_masks_partial_window_padding(self):
+        logits = torch.full((6, 32768), -torch.inf, device="cuda", dtype=torch.bfloat16)
+        ends = torch.tensor(
+            [513, 1023, 4095, 16385, 16895, 32761], device="cuda", dtype=torch.int32
+        )
+        output = torch.full((6, 512), 987654, device="cuda", dtype=torch.int32)
+        rtp_llm_ops.deepselect_bf16_dense_sorted(logits, ends, output)
+        self.assertTrue(
+            bool(((output == -1) | ((output >= 0) & (output < ends[:, None]))).all())
+        )
+        self.assert_sorted_valid_ids(output)
+        with patch.dict(os.environ, {"DSV41_DECODE_DEEPSELECT_SORTED": "1"}):
+            published = selector.select_tokens(logits, ends, 512)
+        self.assertTrue(bool((published == -1).all()))
+
+    def test_sort_switch_preserves_fp32_precision_and_backend(self):
+        logits = torch.randn(7, 4096, device="cuda", dtype=torch.float32)
+        ends = torch.full((7,), 4096, device="cuda", dtype=torch.int32)
+        with patch.dict(
+            os.environ, {"DSV41_DECODE_DEEPSELECT_SORTED": "1"}
+        ), patch.object(
+            rtp_llm_ops,
+            "deepselect_fp32",
+            wraps=rtp_llm_ops.deepselect_fp32,
+        ) as native:
+            result = selector.select_tokens(logits, ends, 512)
+        native.assert_called_once()
+        assert_equivalent(self, result, reference(logits, ends), logits, ends)
 
     def test_opt_out_and_missing_backend_retain_radix_fallback(self):
         logits = torch.randn(6, 4096, device="cuda")
@@ -676,9 +787,7 @@ class DecodeTopKTest(unittest.TestCase):
 
         with patch.dict(
             os.environ, {"DSV41_PREFILL_CANDIDATE_TOPK_V3": "1"}
-        ), patch.object(
-            rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3
-        ) as native:
+        ), patch.object(rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3) as native:
             warmup._warm_candidate_topk(torch.device("cuda"))
             native.assert_called_once()
         with patch.dict(
