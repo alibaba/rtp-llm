@@ -6,6 +6,7 @@ namespace rtp_llm {
 
 // Transport seam used by KVCMPublisher. Production uses the built-in HTTP
 // reporter; tests inject a deterministic implementation through this interface.
+// post() may run concurrently for heartbeat, incremental and snapshot requests.
 class KVCacheEventReporter {
 public:
     virtual ~KVCacheEventReporter() = default;

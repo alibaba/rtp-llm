@@ -73,7 +73,7 @@ void KVCacheEventQueue::waitForStopOrInterrupt(std::chrono::milliseconds timeout
 
 void KVCacheEventQueue::discardPending() {
     // Drain only items fully published at this boundary. Concurrently
-    // published events remain queued and are applied after the snapshot ACK.
+    // published events remain queued for the consumer.
     const size_t target = published_size_.load(std::memory_order_acquire);
     KVCacheEvent event;
     for (size_t i = 0; i < target && tryDequeue(event); ++i) {}

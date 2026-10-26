@@ -21,8 +21,8 @@ enum class PublisherState {
     DISABLED    = 0,
     STARTING    = 1,
     REGISTERING = 3,
-    RESYNCING   = 4,
-    READY       = 5,
+    RESYNCING   = 4,  // Reserved metric value; periodic snapshots no longer set this state.
+    READY       = 5,  // Registered; incremental publishing does not wait for a snapshot ACK.
     DEGRADED    = 6,
     STOPPED     = 7,
 };
