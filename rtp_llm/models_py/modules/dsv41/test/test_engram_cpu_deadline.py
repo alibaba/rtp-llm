@@ -91,6 +91,7 @@ class EngramCpuDeadlineTest(unittest.TestCase):
         self.runtime.retired = []
         self.runtime.executor = DeferredExecutor()
         self.runtime.capacity = 4
+        self.runtime.max_rows = 4
         self.runtime.slots = {1: self.slot}
         self.runtime.num_threads = 16
         for name, value in (
@@ -365,10 +366,10 @@ class EngramCpuDeadlineTest(unittest.TestCase):
         slot.packed = False
         slot._copy = Mock()
         self.slot = slot
-        work, ids = self.work()
+        work, ids = self.work(ids=TensorMetadata(10))
         hashes = Future()
-        hashes.set_result(torch.zeros((4, 1, 1), dtype=torch.int64))
-        output = SimpleNamespace(shape=(4, 32))
+        hashes.set_result(torch.zeros((10, 1, 1), dtype=torch.int64))
+        output = torch.empty((10, 32), dtype=torch.bfloat16)
 
         def native(*args, **kwargs):
             entered.set()
@@ -385,7 +386,7 @@ class EngramCpuDeadlineTest(unittest.TestCase):
                 try:
                     self.assertTrue(entered.wait(5))
                     self.current.query.return_value = True
-                    self.assertIsNone(work.consume(ids, TensorMetadata()))
+                    self.assertIsNone(work.consume(ids, TensorMetadata(10)))
                     self.assertTrue(work.abandoned)
                     slot._copy.assert_not_called()
                 finally:
@@ -395,6 +396,108 @@ class EngramCpuDeadlineTest(unittest.TestCase):
         self.assertEqual(work.timing["outcome"], "gpu_deadline_fallback")
         self.assertIn("lookup_finished_ns", work.timing)
         self.assertIsNone(work.future)
+
+    def test_long_lookup_first_copy_commits_remaining_chunks_despite_deadline(self):
+        tail_entered, release_tail, queried = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+        slot = object.__new__(engram._EngramCPULookupSlot)
+        slot.__dict__.update(self.slot.__dict__)
+        slot.stream = Mock()
+        slot.embedding = SimpleNamespace(weight=object(), scales=object())
+        slot.host = torch.empty((4, 32), dtype=torch.bfloat16)
+        slot.hash_index, slot.num_threads, slot.packed = 0, 16, False
+        slot._copy = Mock(side_effect=lambda output, host: output.copy_(host))
+        self.slot = slot
+        work, ids = self.work(ids=TensorMetadata(10))
+        hashes = Future()
+        hashes.set_result(torch.arange(10).view(10, 1, 1))
+        output = torch.empty((10, 32), dtype=torch.bfloat16)
+
+        def native(weight, scales, chunk_ids, host, **kwargs):
+            if chunk_ids[0, 0] == 4:
+                tail_entered.set()
+                if not release_tail.wait(5):
+                    raise RuntimeError("test tail release missing")
+            host.copy_(chunk_ids.expand(-1, 32))
+
+        def gpu_at_consumer():
+            queried.set()
+            return True
+
+        self.current.query.side_effect = gpu_at_consumer
+        package = "rtp_llm.models_py.modules.dsv41.engram_cpu"
+        with patch.dict(
+            sys.modules, {package: SimpleNamespace(lookup_host_rows_cpu=native)}
+        ):
+            with (
+                ThreadPoolExecutor(max_workers=1) as worker,
+                ThreadPoolExecutor(max_workers=1) as consumer,
+            ):
+                self.runtime.executor = worker
+                work.future = worker.submit(slot.run, hashes, output, 1, work)
+                try:
+                    self.assertTrue(tail_entered.wait(5))
+                    self.assertTrue(work.copy_submitted)
+                    consumption = consumer.submit(work.consume, ids, TensorMetadata(10))
+                    self.assertTrue(queried.wait(5))
+                    self.assertFalse(work.abandoned)
+                    self.assertFalse(consumption.done())
+                finally:
+                    release_tail.set()
+                self.assertIs(consumption.result(timeout=5), output)
+        torch.testing.assert_close(
+            output,
+            torch.arange(10).view(-1, 1).expand(-1, 32).bfloat16(),
+            rtol=0,
+            atol=0,
+        )
+        self.assertEqual(slot._copy.call_count, 3)
+        self.current.wait_event.assert_called_once_with(slot.copied)
+        self.assertEqual(self.runtime.retired, [])
+
+    def test_partial_long_lookup_or_copy_failure_drains_stream_and_propagates(self):
+        for failure in ("lookup", "copy"):
+            with self.subTest(failure=failure):
+                slot = object.__new__(engram._EngramCPULookupSlot)
+                slot.__dict__.update(self.slot.__dict__)
+                slot.stream = Mock()
+                slot.embedding = SimpleNamespace(weight=object(), scales=object())
+                slot.host = torch.empty((4, 32), dtype=torch.bfloat16)
+                slot.hash_index, slot.num_threads, slot.packed = 0, 16, False
+                slot.collect_timing = False
+                slot._copy = Mock()
+                native = Mock()
+                (native if failure == "lookup" else slot._copy).side_effect = [
+                    None,
+                    RuntimeError("partial chunk failure"),
+                ]
+                hashes = Future()
+                hashes.set_result(torch.zeros((10, 1, 1), dtype=torch.int64))
+                output = torch.empty((10, 32), dtype=torch.bfloat16)
+                work = engram._EngramCPULookupWork(
+                    slot, TensorMetadata(10), self.runtime
+                )
+                work.future = Future()
+                package = "rtp_llm.models_py.modules.dsv41.engram_cpu"
+                with patch.dict(
+                    sys.modules, {package: SimpleNamespace(lookup_host_rows_cpu=native)}
+                ):
+                    try:
+                        slot.run(hashes, output, work=work)
+                    except RuntimeError as error:
+                        work.future.set_exception(error)
+                    else:
+                        self.fail("chunk failure did not propagate")
+                slot.stream.synchronize.assert_called_once()
+                self.assertTrue(work.copy_submitted)
+                self.assertFalse(work._abandon_before_copy())
+                with self.assertRaisesRegex(RuntimeError, "partial chunk failure"):
+                    work._drain()
+                self.assertIsNone(work.future)
+                self.assertIsNone(work.ids)
 
     def test_h2d_commit_race_is_atomic_against_deadline_abandonment(self):
         copying, release, queried = (

@@ -922,12 +922,6 @@ class _EngramCPULookupSlot:
                     timing.update(getattr(hashes, "engram_timing", None) or {})
                 if work is not None and work.abandoned:
                     return None
-                # The host buffer may be overwritten once its preceding H2D
-                # finishes, independently of the previous GPU consumer.
-                self.copied.synchronize()
-                host = self.host[: output.shape[0]]
-                if timing is not None:
-                    timing["lookup_started_ns"] = time.perf_counter_ns()
                 lookup = lookup_host_rows_cpu
                 if getattr(self, "packed", False):
                     from rtp_llm.models_py.modules.dsv41.engram_cpu import (
@@ -935,29 +929,42 @@ class _EngramCPULookupSlot:
                     )
 
                     lookup = lookup_host_rows_cpu_packed
-                lookup(
-                    self.embedding.weight,
-                    self.embedding.scales,
-                    ids,
-                    host,
-                    num_threads=self.num_threads,
-                )
-                if timing is not None:
-                    timing["lookup_finished_ns"] = time.perf_counter_ns()
-                # Abandonment and copy submission must be one atomic decision.
-                # Once H2D is submitted, consuming it is cheaper than starting
-                # a competing UVA lookup, and its owning stream must join it.
-                if work is None:
-                    self._copy(output, host)
-                else:
-                    with work.lock:
-                        if work.abandoned:
-                            self.last_timing = timing
-                            return None
-                        self._copy(output, host)
-                        work.copy_submitted = True
-                if timing is not None:
-                    timing["copy_submitted_ns"] = time.perf_counter_ns()
+                count, capacity = output.shape[0], self.host.shape[0]
+                for begin in range(0, count, capacity):
+                    end = min(begin + capacity, count)
+                    # Reuse bounded pinned staging only after its preceding
+                    # H2D, including a previous chunk of this same request.
+                    self.copied.synchronize()
+                    if work is not None and work.abandoned:
+                        return None
+                    host = self.host[: end - begin]
+                    if timing is not None and begin == 0:
+                        timing["lookup_started_ns"] = time.perf_counter_ns()
+                    lookup(
+                        self.embedding.weight,
+                        self.embedding.scales,
+                        ids[begin:end],
+                        host,
+                        num_threads=self.num_threads,
+                    )
+                    if timing is not None:
+                        timing["lookup_finished_ns"] = time.perf_counter_ns()
+                    target = output if count <= capacity else output[begin:end]
+                    # First-copy commitment is atomic against abandonment.
+                    # After it, finish every chunk: the consumer must never
+                    # see a partly initialized request output or race a UVA
+                    # fallback. This may wait for later CPU chunks at deadline.
+                    if work is None:
+                        self._copy(target, host)
+                    else:
+                        with work.lock:
+                            if work.abandoned:
+                                self.last_timing = timing
+                                return None
+                            self._copy(target, host)
+                            work.copy_submitted = True
+                    if timing is not None:
+                        timing["copy_submitted_ns"] = time.perf_counter_ns()
                 self.last_timing = timing
                 return output
             except BaseException:
@@ -987,7 +994,8 @@ class EngramCPULookupRuntime:
         from rtp_llm.models_py.modules.dsv41.engram_cpu import prepare_cpu_lookup
 
         prepare_cpu_lookup()
-        self.capacity = min(int(capacity), 32768)
+        self.max_rows = int(capacity)
+        self.capacity = min(self.max_rows, 32768)
         self.num_threads = int(os.getenv("DSV41_CPU_ENGRAM_LOOKUP_THREADS", "16"))
         if not 1 <= self.num_threads <= 16:
             raise ValueError("DSV41_CPU_ENGRAM_LOOKUP_THREADS must be between 1 and 16")
@@ -1071,7 +1079,9 @@ def prepare_engram_cpu_lookup(model, *, max_m):
     ):
         return
     runtime = getattr(model, "_engram_cpu_runtime", None)
-    if runtime is not None and runtime.capacity >= min(max_m, 32768):
+    # The scheduler/workspace bound also caps request-owned device outputs.
+    # Refresh it on both growth and shrinkage; staging alone caps at 32K.
+    if runtime is not None and runtime.max_rows == int(max_m):
         return
     if runtime is not None:
         runtime.close()
@@ -1079,9 +1089,10 @@ def prepare_engram_cpu_lookup(model, *, max_m):
     runtime = EngramCPULookupRuntime(model, max_m)
     model._engram_cpu_runtime = runtime
     logger.info(
-        "[DSV41 Engram] CPU lookup ready=True capacity=%d slots=%d "
+        "[DSV41 Engram] CPU lookup ready=True capacity=%d max_rows=%d slots=%d "
         "workers=1 threads=%s pinned_bytes=%d device_bytes=%d",
         runtime.capacity,
+        runtime.max_rows,
         len(runtime.slots),
         tuple(slot.num_threads for slot in runtime.slots.values()),
         sum(
@@ -1221,7 +1232,7 @@ class EngramCPULookupPrefetch:
             or windows.dtype not in (torch.int32, torch.int64)
             or windows.ndim != 2
             or windows.shape[1] != model._engram_hash_state.layout.max_ngram_size
-            or not 0 < windows.shape[0] <= self.runtime.capacity
+            or not 0 < windows.shape[0] <= self.runtime.max_rows
             or torch.cuda.is_current_stream_capturing()
         ):
             return
@@ -1555,6 +1566,13 @@ class Engram(nn.Module):
             hidden, self.q_weight, self.k_weight, token_mask
         )
         if hidden.shape[0] > chunk_rows:
+            # Validate the original request IDs exactly once, before creating
+            # chunk views. Identity/version/stream checks must remain strict.
+            rows = None
+            cpu_work = self._cpu_lookup_work
+            if cpu_work is not None:
+                self._cpu_lookup_work = None
+                rows = cpu_work.consume(hash_ids, hidden)
             output = (
                 hidden
                 if inplace
@@ -1567,43 +1585,46 @@ class Engram(nn.Module):
                     hash_ids[begin:end],
                     None if token_mask is None else token_mask[begin:end],
                     out=output[begin:end],
+                    cpu_rows=None if rows is None else rows[begin:end],
                 )
             return output
         return self._forward_rows(
             hidden, hash_ids, token_mask, out=hidden if inplace else None
         )
 
-    def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None):
+    def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None, cpu_rows=None):
+        rows = cpu_rows
+        del cpu_rows
         cpu_work = self._cpu_lookup_work
-        if cpu_work is not None:
+        if rows is None and cpu_work is not None:
             self._cpu_lookup_work = None
             rows = cpu_work.consume(hash_ids, hidden)
-            if rows is not None:
-                if rows.dtype == torch.uint8:
-                    from rtp_llm.models_py.modules.dsv41._engram_packed_triton import (
-                        unpack_packed_rows,
-                    )
-
-                    pair = unpack_packed_rows(
-                        rows, self.layout.n_hash_cols, self.layout.head_dim
-                    )
-                    if pair is None:
-                        del rows
-                        return self._forward_rows(hidden, hash_ids, token_mask, out=out)
-                    kv = self.wkv.forward_quantized(*pair)
-                    del pair
-                else:
-                    kv = self.wkv(rows)
-                del rows
-                return gated_engram_residual(
-                    hidden,
-                    kv,
-                    self.q_weight,
-                    self.k_weight,
-                    self.eps,
-                    token_mask,
-                    out=out,
+        if rows is not None:
+            if rows.dtype == torch.uint8:
+                from rtp_llm.models_py.modules.dsv41._engram_packed_triton import (
+                    unpack_packed_rows,
                 )
+
+                pair = unpack_packed_rows(
+                    rows, self.layout.n_hash_cols, self.layout.head_dim
+                )
+                if pair is None:
+                    del rows
+                    return self._forward_rows(hidden, hash_ids, token_mask, out=out)
+                kv = self.wkv.forward_quantized(*pair)
+                del pair
+            else:
+                kv = self.wkv(rows)
+            del rows
+            return gated_engram_residual(
+                hidden,
+                kv,
+                self.q_weight,
+                self.k_weight,
+                self.eps,
+                token_mask,
+                out=out,
+            )
         work = self._lookup_work
         rows = None
         if work is not None:
