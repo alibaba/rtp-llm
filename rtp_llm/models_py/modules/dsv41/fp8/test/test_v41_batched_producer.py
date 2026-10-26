@@ -177,7 +177,7 @@ class BatchedProducerCPU(unittest.TestCase):
 
     def _preflight_case(self, ratio=2):
         regions = (
-            "global_kv_2" if ratio == 2 else "global_kv_1",
+            "csa_kv" if ratio == 2 else "hca_kv",
             "indexer_kv",
             "csa_state",
         )
@@ -247,7 +247,7 @@ class BatchedProducerCPU(unittest.TestCase):
 
     def test_preflight_layout_and_host_table_rejections(self):
         with patch.object(CPU, "is_supported", return_value=True):
-            for key in ("global_kv_2", "indexer_kv"):
+            for key in ("csa_kv", "indexer_kv"):
                 attention, x, cp, pools = self._preflight_case()
                 pools[key] = None
                 self.assertFalse(CPU.can_batch_groups(attention, x, cp))

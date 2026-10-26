@@ -59,9 +59,9 @@ class CacheSpecsTest(unittest.TestCase):
             [[d.tag for d in layer] for layer in descs],
             [
                 ["swa_kv"],
-                ["swa_kv", "global_kv_2", "indexer_kv", "csa_state"],
+                ["swa_kv", "csa_kv", "indexer_kv", "csa_state"],
                 ["swa_kv"],
-                ["swa_kv", "global_kv_1", "indexer_kv"],
+                ["swa_kv", "hca_kv", "indexer_kv"],
                 ["swa_kv"],
             ],
         )
