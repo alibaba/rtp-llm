@@ -25,6 +25,31 @@ _TILES = {
     },
 }
 
+# Separate opt-in for QKV, shared-expert and MTP projections. These tiles keep
+# the existing quantizer, K traversal and BF16 output boundary unchanged.
+_PROJECTION_TILES = {
+    (1536, 4096): {
+        8: (16, 64, 16, 16, 4),
+        24: (16, 64, 16, 16, 4),
+        32: (16, 64, 16, 16, 4),
+    },
+    (4096, 4096): {
+        8: (16, 64, 16, 16, 4),
+        24: (16, 64, 16, 16, 4),
+        32: (16, 64, 16, 16, 4),
+    },
+    (4096, 2048): {
+        8: (16, 128, 16, 32, 4),
+        24: (32, 64, 16, 32, 4),
+        32: (32, 64, 16, 32, 4),
+    },
+    (8192, 1024): {
+        8: (16, 128, 16, 32, 4),
+        24: (32, 64, 16, 32, 4),
+        32: (32, 64, 16, 32, 4),
+    },
+}
+
 
 @lru_cache(maxsize=None)
 def _config(tile, k, sms):
@@ -45,3 +70,14 @@ def decode_attention_gemm_config(m, n, k, *, groups=1):
     if sms != 39:
         return None
     return _config(tile, k, sms)
+
+
+def decode_projection_gemm_config(m, n, k):
+    """Opt-in dense projection tiles, with library fallback outside qualification."""
+    tile = _PROJECTION_TILES.get((n, k), {}).get(m)
+    if tile is None:
+        return None
+    from deep_gemm.jit_kernels.utils import get_num_sms
+
+    sms = get_num_sms()
+    return _config(tile, k, sms) if sms == 39 else None
