@@ -71,28 +71,8 @@ def percentile(values, q=0.99):
     return percentile_nr(values, q)
 
 
-def _validate_evidence(evidence: dict, errors: list[str]) -> tuple[dict, dict, dict, float, float]:
-    """Validate accounting before selecting the arrival cohort; preserve coverage errors."""
-    if not isinstance(evidence, dict):
-        raise ValueError("evidence must be an object")
-    if not isinstance(evidence.get("errors", []), list):
-        raise ValueError("errors must be a list")
-    errors.extend(evidence.get("errors", []))
-    criteria = validate_criteria(evidence["criteria"], evidence.get("gate_input"))
-    if not matches_schema(evidence, "performance_evidence_schema_version", 2):
-        raise ValueError("unsupported evidence version")
-    from artifacts.provenance import validate_gate_provenance
-
-    provenance = validate_gate_provenance(evidence["provenance"])
-    if str(provenance["client_environment"].get("FETCH_OUTPUT_STREAM")).lower() not in {"1", "true"}:
-        raise ValueError("complete Fetch chain required")
-    window_start_ms, window_end_ms = (evidence["window"]["start_epoch_ms"], evidence["window"]["end_epoch_ms"])
-    if not all(finite(x) for x in (window_start_ms, window_end_ms)) or window_end_ms <= window_start_ms:
-        raise ValueError("invalid measurement window")
-    duration = (window_end_ms - window_start_ms) / 1000
-    if abs(duration - criteria["measure_s"]) > 0.001:
-        raise ValueError("measurement duration differs from contract")
-    flow = evidence["flow"]
+def _request_ledger(flow: dict) -> tuple[dict, dict]:
+    """Require exactly one matching issued and terminal record per request."""
     if flow.get("complete") is not True or flow.get("errors"):
         raise ValueError("incomplete request accounting: " + str(flow.get("errors", [])))
     issued, records = flow["issued"], flow["records"]
@@ -123,6 +103,31 @@ def _validate_evidence(evidence: dict, errors: list[str]) -> tuple[dict, dict, d
                 raise ValueError("successful request lacks observed output tokens")
             if not finite(terminal.get("ttft_ms")) or not 0 < terminal["ttft_ms"] <= terminal["total_ms"]:
                 raise ValueError("invalid successful TTFT")
+    return issued_by_id, terminal_by_id
+
+
+def _validate_evidence(evidence: dict, errors: list[str]) -> tuple[dict, dict, dict, float, float]:
+    """Validate accounting before selecting the arrival cohort; preserve coverage errors."""
+    if not isinstance(evidence, dict):
+        raise ValueError("evidence must be an object")
+    if not isinstance(evidence.get("errors", []), list):
+        raise ValueError("errors must be a list")
+    errors.extend(evidence.get("errors", []))
+    criteria = validate_criteria(evidence["criteria"], evidence.get("gate_input"))
+    if not matches_schema(evidence, "performance_evidence_schema_version", 2):
+        raise ValueError("unsupported evidence version")
+    from artifacts.provenance import validate_gate_provenance
+
+    provenance = validate_gate_provenance(evidence["provenance"])
+    if str(provenance["client_environment"].get("FETCH_OUTPUT_STREAM")).lower() not in {"1", "true"}:
+        raise ValueError("complete Fetch chain required")
+    window_start_ms, window_end_ms = (evidence["window"]["start_epoch_ms"], evidence["window"]["end_epoch_ms"])
+    if not all(finite(x) for x in (window_start_ms, window_end_ms)) or window_end_ms <= window_start_ms:
+        raise ValueError("invalid measurement window")
+    duration = (window_end_ms - window_start_ms) / 1000
+    if abs(duration - criteria["measure_s"]) > 0.001:
+        raise ValueError("measurement duration differs from contract")
+    issued_by_id, terminal_by_id = _request_ledger(evidence["flow"])
     stamps = [x["epoch_ms"] for x in evidence["samples"]]
     if len(stamps) < 2 or any(not finite(x) for x in stamps):
         raise ValueError("missing observer coverage")
@@ -168,6 +173,71 @@ def _acceptance_checks(metrics: dict, criteria: dict, successful_requests: list[
     return checks
 
 
+def _tpot(request: dict) -> float | None:
+    tokens = request["observed_output_tokens"]
+    return (request["total_ms"] - request["ttft_ms"]) / (tokens - 1) if tokens > 1 else None
+
+
+def _cohort_metrics(cohort: list[dict], successful: list[dict], criteria: dict, duration: float) -> dict:
+    """Arrival-cohort latency and goodput include requests finishing after the window."""
+    good = [
+        request
+        for request in successful
+        if request["ttft_ms"] <= criteria["slo_ttft_ms"]
+        and request["total_ms"] <= criteria["slo_e2e_ms"]
+        and (_tpot(request) is None or _tpot(request) <= criteria["slo_tpot_ms"])
+    ]
+    return dict(
+        cohort_requests=len(cohort),
+        success_requests=len(successful),
+        cohort_error_rate=1 - len(successful) / len(cohort) if cohort else None,
+        slo_fraction=len(good) / len(cohort) if cohort else None,
+        goodput_rps=len(good) / duration,
+        input_goodput=sum(request["input_len"] for request in good) / duration,
+        output_goodput=sum(request["observed_output_tokens"] for request in good) / duration,
+        ttft_p99_ms=percentile([request["ttft_ms"] for request in successful]),
+        e2e_p99_ms=percentile([request["total_ms"] for request in successful]),
+        tpot_p99_ms=percentile([_tpot(request) for request in successful if _tpot(request) is not None]),
+    )
+
+
+def _completion_metrics(records: list[dict], start_ms: float, end_ms: float) -> tuple[dict, list[dict]]:
+    """Index once, then measure throughput and inflight in disjoint completion buckets."""
+
+    def finished(request):
+        return request["send_start_epoch_ms"] + request["total_ms"]
+
+    completed = sorted((request for request in records if request["status"] == "ok"), key=finished)
+    completed_stamps = [finished(request) for request in completed]
+    sends = sorted(request["send_start_epoch_ms"] for request in records)
+    ends = sorted(finished(request) for request in records)
+
+    def inflight(timestamp):
+        return bisect.bisect_left(sends, timestamp) - bisect.bisect_left(ends, timestamp)
+
+    def throughput(start, end):
+        rows = completed[bisect.bisect_left(completed_stamps, start) : bisect.bisect_left(completed_stamps, end)]
+        duration = (end - start) / 1000
+        return dict(
+            input_tps=sum(row["input_len"] for row in rows) / duration,
+            output_tps=sum(row["observed_output_tokens"] for row in rows) / duration,
+        )
+
+    duration = (end_ms - start_ms) / 1000
+    metrics = dict(
+        **throughput(start_ms, end_ms),
+        error_rate=sum(request["status"] != "ok" for request in records) / len(records),
+        inflight_start=inflight(start_ms),
+        inflight_end=inflight(end_ms),
+        inflight_growth_rps=(inflight(end_ms) - inflight(start_ms)) / duration,
+    )
+    windows = []
+    for second in range(math.ceil(duration)):
+        start, end = start_ms + second * 1000, min(end_ms, start_ms + (second + 1) * 1000)
+        windows.append(dict(t=second, **throughput(start, end), inflight=inflight(end)))
+    return metrics, windows
+
+
 def analyze(evidence: dict) -> dict:
     """Compute metrics from the validated ledger, then apply the frozen criteria."""
     errors: list[str] = []
@@ -188,60 +258,13 @@ def analyze(evidence: dict) -> dict:
         errors.append("offered QPS outside contract")
     if cohort and max(issued_by_id[r["rid"]]["pacing_lag_ms"] for r in cohort) > criteria["max_pacing_lag_ms"]:
         errors.append("client pacing lag exceeds budget")
-    successful_requests = [r for r in cohort if r["status"] == "ok"]
-
-    def tpot(r):
-        n = r["observed_output_tokens"]
-        return (r["total_ms"] - r["ttft_ms"]) / (n - 1) if n > 1 else None
-
-    def slo(r):
-        return (
-            r["ttft_ms"] <= criteria["slo_ttft_ms"]
-            and r["total_ms"] <= criteria["slo_e2e_ms"]
-            and (tpot(r) is None or tpot(r) <= criteria["slo_tpot_ms"])
-        )
-
-    good = [r for r in successful_requests if slo(r)]
-    all_rows = list(terminal_by_id.values())
-
-    def finished(r):
-        return r["send_start_epoch_ms"] + r["total_ms"]
-
-    # Index once: scanning every request for every one-second bucket made the
-    # full-scale gate spend its finish deadline analyzing an already drained run.
-    completed = sorted((r for r in all_rows if r["status"] == "ok"), key=finished)
-    completed_stamps = [finished(r) for r in completed]
-
-    def completions(start, end):
-        return completed[bisect.bisect_left(completed_stamps, start) : bisect.bisect_left(completed_stamps, end)]
-
-    sends = sorted(r["send_start_epoch_ms"] for r in all_rows)
-    ends = sorted(finished(r) for r in all_rows)
-
-    def inflight(t):
-        return bisect.bisect_left(sends, t) - bisect.bisect_left(ends, t)
-
-    completed_requests = completions(window_start_ms, window_end_ms)
-    metrics = dict(
+    successful_requests = [row for row in cohort if row["status"] == "ok"]
+    metrics, result["windows"] = _completion_metrics(list(terminal_by_id.values()), window_start_ms, window_end_ms)
+    metrics.update(_cohort_metrics(cohort, successful_requests, criteria, duration))
+    metrics.update(
         sent_qps=sent_qps,
         offered_qps_deviation=abs(sent_qps / criteria["qps"] - 1),
-        pacing_lag_max_ms=max((issued_by_id[r["rid"]]["pacing_lag_ms"] for r in cohort), default=None),
-        cohort_requests=len(cohort),
-        success_requests=len(successful_requests),
-        error_rate=sum(r["status"] != "ok" for r in all_rows) / len(all_rows),
-        cohort_error_rate=1 - len(successful_requests) / len(cohort) if cohort else None,
-        slo_fraction=len(good) / len(cohort) if cohort else None,
-        goodput_rps=len(good) / duration,
-        input_goodput=sum(r["input_len"] for r in good) / duration,
-        output_goodput=sum(r["observed_output_tokens"] for r in good) / duration,
-        input_tps=sum(r["input_len"] for r in completed_requests) / duration,
-        output_tps=sum(r["observed_output_tokens"] for r in completed_requests) / duration,
-        ttft_p99_ms=percentile([r["ttft_ms"] for r in successful_requests]),
-        e2e_p99_ms=percentile([r["total_ms"] for r in successful_requests]),
-        tpot_p99_ms=percentile([tpot(r) for r in successful_requests if tpot(r) is not None]),
-        inflight_start=inflight(window_start_ms),
-        inflight_end=inflight(window_end_ms),
-        inflight_growth_rps=(inflight(window_end_ms) - inflight(window_start_ms)) / duration,
+        pacing_lag_max_ms=max((issued_by_id[row["rid"]]["pacing_lag_ms"] for row in cohort), default=None),
     )
     checks = _acceptance_checks(metrics, criteria, successful_requests)
     # Curves use disjoint completion buckets; cohort goodput above includes delayed terminals.
@@ -251,17 +274,5 @@ def analyze(evidence: dict) -> dict:
         checks.extend(engine_checks)
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         errors.append("engine TPS: " + str(exc))
-    for i in range(math.ceil(duration)):
-        start, end = window_start_ms + i * 1000, min(window_end_ms, window_start_ms + (i + 1) * 1000)
-        rows = completions(start, end)
-        dt = (end - start) / 1000
-        result["windows"].append(
-            dict(
-                t=i,
-                input_tps=sum(r["input_len"] for r in rows) / dt,
-                output_tps=sum(r["observed_output_tokens"] for r in rows) / dt,
-                inflight=inflight(end),
-            )
-        )
     result.update(metrics=metrics, **gate_result(checks, errors))
     return result

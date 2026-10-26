@@ -45,26 +45,11 @@ def request_outcomes(evidence):
     return rows, kpis
 
 
-def prepare_report(directory, evidence, *, presentation=None):
-    from statistics import median
-
-    from monitoring.metric_store import MetricStore
-
-    rows = evidence["samples"]
-    anchor = evidence_origin(evidence)
-    store = MetricStore.read(directory)
-    observations, gaps, errors = store.project(anchor)
-    sources = {
-        row["series_key"]: dict(row["provenance"], metric_id=row["metric_id"], unit=row["unit"]) for row in observations if row["points"]
-    }
-    presentation = presentation if presentation is not None else view("cache_scale_in.yaml")
-    from reporting.metric_binding import monitoring_audit
-
-    inventory = monitoring_audit(store, presentation)
+def _monitoring_curves(observations: list[dict], sources: dict, presentation, visible_end: float) -> tuple[list[dict], list]:
+    """Bind visible Prefill curves and retain diagnostic/sparse/missing classifications."""
     diagnostic_only = set(presentation.metrics.diagnostic_only)
     curves = []
     audit = []
-    visible_end = max((r["t"] for r in rows), default=0)
     for observation in observations:
         points = observation["points"]
         if not points:
@@ -97,6 +82,15 @@ def prepare_report(directory, evidence, *, presentation=None):
         if identity not in by_id and identity == "mock/context_completed_qps":
             audit.append([definition.name, "0%", "MISSING", "本次归档没有该监控序列"])
 
+    return curves, audit
+
+
+def _baseline_warnings(curves: list[dict], evidence: dict) -> list[str]:
+    """Show poor pre-removal client success as diagnostics, without changing the gate."""
+    from statistics import median
+
+    by_id = {curve["metric_id"]: curve for curve in curves}
+
     def values(metric_id, start=None, end=None):
         return [
             point["y"]
@@ -108,13 +102,33 @@ def prepare_report(directory, evidence, *, presentation=None):
     sent = values("client/actual_send_qps", baseline_start, baseline_end)
     success = values("client/success_qps", baseline_start, baseline_end)
     failures = values("client/error_qps", baseline_start, baseline_end)
-    monitor_warnings = [str(error) for error in errors]
-    if not any("promql" in source for source in sources.values()):
-        monitor_warnings.append("缺少冻结的 Prometheus 样本；监控曲线不可用")
+    monitor_warnings = []
     if sent and success and median(sent) > 0 and median(success) / median(sent) < 0.9:
         monitor_warnings.append(f"缩容前客户端成功率偏低：success/send 中位数 {median(success) / median(sent):.1%}")
     if sent and failures and median(sent) > 0 and median(failures) / median(sent) > 0.05:
         monitor_warnings.append(f"缩容前客户端错误率偏高：error/send 中位数 {median(failures) / median(sent):.1%}")
+    return monitor_warnings
+
+
+def prepare_report(directory, evidence, *, presentation=None):
+    from monitoring.metric_store import MetricStore
+
+    rows = evidence["samples"]
+    anchor = evidence_origin(evidence)
+    store = MetricStore.read(directory)
+    observations, gaps, errors = store.project(anchor)
+    sources = {
+        row["series_key"]: dict(row["provenance"], metric_id=row["metric_id"], unit=row["unit"]) for row in observations if row["points"]
+    }
+    presentation = presentation if presentation is not None else view("cache_scale_in.yaml")
+    from reporting.metric_binding import monitoring_audit
+
+    inventory = monitoring_audit(store, presentation)
+    curves, audit = _monitoring_curves(observations, sources, presentation, max((row["t"] for row in rows), default=0))
+    monitor_warnings = [str(error) for error in errors]
+    if not any("promql" in source for source in sources.values()):
+        monitor_warnings.append("缺少冻结的 Prometheus 样本；监控曲线不可用")
+    monitor_warnings.extend(_baseline_warnings(curves, evidence))
     monitoring_status = "WARN" if monitor_warnings else "OK"
     return dict(
         curves=curves,

@@ -109,18 +109,18 @@ class _CacheRecoverySession:
             or len(self.engines) != self.ctx.env.spec.n_prefill + self.ctx.env.spec.n_decode
         ):
             raise ValueError("Mock topology differs from frozen case")
-        self.chosen = [
+        self.withdrawal_candidates = [
             self.prefill[i * len(self.prefill) // self.procedure["expired_workers"]] for i in range(self.procedure["expired_workers"])
         ]
-        self.victims = {e["http_addr"] for e in self.chosen} if self.intervention else set()
-        self.names = {e["http_addr"] for e in self.engines}
-        self.evidence["worker_addresses"] = sorted(self.names)
-        self.path = Path(self.ctx.env.discovery_file)
-        self.original = self.path.read_text()
-        self.ctx.add_cleanup("restore_cache_discovery", lambda d: atomic_write(self.path, self.original))
+        self.victims = {e["http_addr"] for e in self.withdrawal_candidates} if self.intervention else set()
+        self.worker_addresses = {e["http_addr"] for e in self.engines}
+        self.evidence["worker_addresses"] = sorted(self.worker_addresses)
+        self.discovery_path = Path(self.ctx.env.discovery_file)
+        self.original_discovery = self.discovery_path.read_text()
+        self.ctx.add_cleanup("restore_cache_discovery", lambda d: atomic_write(self.discovery_path, self.original_discovery))
         self.evidence["victims"] = sorted(self.victims)
-        self.baseline, self.last_sample = None, None
-        self.affected, self.absent, self.rebuilt = set(), set(), set()
+        self.baseline_workers, self.last_sample = None, None
+        self.affected_workers, self.expired_workers, self.rebuilt_workers = set(), set(), set()
         self.maximum_gap = 0
         self.diagnostics = MasterDiagnosticsClient(
             f"http://127.0.0.1:{self.ctx.ops.master_http_port}", timeout_s=min(5, self.deadline.remaining())
@@ -156,10 +156,12 @@ class _CacheRecoverySession:
         if self.last_sample is not None:
             self.maximum_gap = max(self.maximum_gap, now - self.last_sample)
         self.last_sample = now
-        if self.baseline is not None:
+        if self.baseline_workers is not None:
             excluded = self.victims if phase in {"intervention", "post", "drain", "cache_settle"} else set()
-            newly = set(collateral(rows, self.baseline, excluded, self.acceptance_limits["max_status_age_ms"])) - self.affected
-            self.affected.update(newly)
+            newly = (
+                set(collateral(rows, self.baseline_workers, excluded, self.acceptance_limits["max_status_age_ms"])) - self.affected_workers
+            )
+            self.affected_workers.update(newly)
             if newly:
                 proof = dict(phase=phase, epoch_s=self.ctx.wall_clock(), workers=sorted(newly))
                 try:
@@ -168,9 +170,11 @@ class _CacheRecoverySession:
                     proof["probe_error"] = str(error)
                 self.evidence["healthy_violations"].append(proof)
             if phase == "intervention":
-                self.absent.update(self.victims - rows.keys())
+                self.expired_workers.update(self.victims - rows.keys())
             if phase == "post":
-                self.rebuilt.update(a for a in self.victims if a in rows and rows[a]["generation"] != self.baseline[a]["generation"])
+                self.rebuilt_workers.update(
+                    a for a in self.victims if a in rows and rows[a]["generation"] != self.baseline_workers[a]["generation"]
+                )
         survivors = {a: w for a, w in rows.items() if a not in self.victims}
 
         def maximum_age(field):
@@ -191,11 +195,11 @@ class _CacheRecoverySession:
                 a: {k: w[k] for k in ("role", "generation", "reported_alive", "lifecycle_state", "status_age_ms", "applied_status_age_ms")}
                 for a, w in rows.items()
             },
-            missing_workers=len((self.baseline or {}).keys() - rows.keys() - self.victims),
+            missing_workers=len((self.baseline_workers or {}).keys() - rows.keys() - self.victims),
             healthy_max_status_age_ms=max(poll_age, applied_age) if poll_age is not None and applied_age is not None else None,
             healthy_max_rpc_age_ms=poll_age,
             healthy_max_applied_age_ms=applied_age,
-            affected_workers=len(self.affected),
+            affected_workers=len(self.affected_workers),
         )
         encoded = self.sample_budget.append(frame)
         self.evidence["frames"].append(frame)
@@ -230,11 +234,11 @@ class _CacheRecoverySession:
         initial_until = self.ctx.clock() + 60
         while self.ctx.clock() < initial_until:
             rows = self.sample("initial_health")
-            if set(rows) == self.names and all(healthy(w, self.acceptance_limits["max_status_age_ms"]) for w in rows.values()):
-                self.baseline = rows
+            if set(rows) == self.worker_addresses and all(healthy(w, self.acceptance_limits["max_status_age_ms"]) for w in rows.values()):
+                self.baseline_workers = rows
                 break
             self.deadline.sleep(self.observation["sample_s"])
-        if self.baseline is None:
+        if self.baseline_workers is None:
             raise ValueError("initial healthy Worker population unavailable")
         self.event("cache_seed_started")
         for i, e in enumerate(self.prefill):
@@ -254,21 +258,25 @@ class _CacheRecoverySession:
         frozen = self.stats()
         baseline_keys = {a: f["reported_keys"] for a, f in frozen.items()}
         self.evidence["cache_baseline_expected"] = dict(keys=baseline_keys, versions={a: f["version"] for a, f in frozen.items()})
-        self.baseline = None
+        self.baseline_workers = None
         ready = 0
         until = self.ctx.clock() + self.procedure["warmup_timeout_s"]
         while self.ctx.clock() < until:
             rows = self.sample("warmup")
             self.evidence["cache_baseline_last_workers"] = rows
             good = converged(
-                rows, self.names, baseline_keys, {a: f["version"] for a, f in frozen.items()}, self.acceptance_limits["max_status_age_ms"]
+                rows,
+                self.worker_addresses,
+                baseline_keys,
+                {a: f["version"] for a, f in frozen.items()},
+                self.acceptance_limits["max_status_age_ms"],
             )
             ready = ready + 1 if good else 0
             if ready >= self.observation["converged_samples"]:
-                self.baseline = rows
+                self.baseline_workers = rows
                 break
             self.deadline.sleep(self.observation["sample_s"])
-        if self.baseline is None:
+        if self.baseline_workers is None:
             raise ValueError("shared cache baseline failed to converge")
         self.last_sample = None
         self.maximum_gap = 0
@@ -315,12 +323,12 @@ class _CacheRecoverySession:
         self.hold("measurement", self.procedure["measurement_s"])
         self.event("measurement_finished")
         if self.intervention:
-            self.evidence["victim_alive_before"] = self.alive(self.chosen)
-            atomic_write(self.path, withdraw(self.original, self.victims))
+            self.evidence["victim_alive_before"] = self.alive(self.withdrawal_candidates)
+            atomic_write(self.discovery_path, withdraw(self.original_discovery, self.victims))
             self.event("partial_workers_withdrawn")
             self.hold("intervention", self.procedure["withdraw_s"])
-            self.evidence["victim_alive_withdrawn"] = self.alive(self.chosen)
-            atomic_write(self.path, self.original)
+            self.evidence["victim_alive_withdrawn"] = self.alive(self.withdrawal_candidates)
+            atomic_write(self.discovery_path, self.original_discovery)
             self.event("partial_workers_restored")
         # Identical post duration and unchanged background; do not stop at first convergence.
         self.hold("post", self.procedure["post_s"])
@@ -338,7 +346,7 @@ class _CacheRecoverySession:
         until = self.ctx.clock() + 120
         while self.ctx.clock() < until:
             rows = self.sample("cache_settle")
-            good = converged(rows, self.names, reported_keys, versions, self.acceptance_limits["max_status_age_ms"])
+            good = converged(rows, self.worker_addresses, reported_keys, versions, self.acceptance_limits["max_status_age_ms"])
             self.evidence["convergence_samples"] = self.evidence["convergence_samples"] + 1 if good else 0
             if self.evidence["convergence_samples"] >= self.observation["converged_samples"]:
                 break
@@ -351,9 +359,9 @@ class _CacheRecoverySession:
         )
         self.event("cache_progress_finished")
         self.evidence.update(
-            affected_workers=sorted(self.affected),
-            expired_workers=sorted(self.absent),
-            rebuilt_workers=sorted(self.rebuilt),
+            affected_workers=sorted(self.affected_workers),
+            expired_workers=sorted(self.expired_workers),
+            rebuilt_workers=sorted(self.rebuilt_workers),
             max_sample_gap_s=self.maximum_gap,
         )
         self.event("observation_finished")
@@ -365,13 +373,13 @@ class _CacheRecoverySession:
             self.settle_cache()
         except Exception as error:
             self.evidence["errors"].append(repr(error))
-            self.evidence.update(affected_workers=sorted(self.affected), runtime_incomplete=True)
+            self.evidence.update(affected_workers=sorted(self.affected_workers), runtime_incomplete=True)
             # Freeze partial evidence so an interrupted observation cannot hide collateral failure.
-            if not self.affected:
+            if not self.affected_workers:
                 raise
         finally:
             try:
-                atomic_write(self.path, self.original)
+                atomic_write(self.discovery_path, self.original_discovery)
             finally:
                 write_json(self.directory / "evidence.json", self.evidence)
         from cases.cache_sync_recovery.telemetry import gc_events

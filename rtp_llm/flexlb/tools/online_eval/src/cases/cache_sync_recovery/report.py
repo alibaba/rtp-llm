@@ -23,23 +23,9 @@ def _counter_rate(rows: list[dict], field: str, scale: float = 1):
     return (values[-1][field] - values[0][field]) / (values[-1]["epoch_s"] - values[0]["epoch_s"]) * scale
 
 
-def compact_report_spec(data, original, *, presentation=None, store=None):
-    """同一冻结数据按变体选择两张主图；完整指标保留在汇总和证据中。"""
-    spec = copy.deepcopy(original)
-    variant = "recovery" if data.get("intervention", data.get("parameters", {}).get("intervention", False)) else "steady"
+def _summary_panels(data: dict, rows: list[dict], spec: dict, variant: str) -> list[dict]:
+    """Build the two offline summary panels from the frozen observation rows."""
     zero = spec["timeOriginEpochS"]
-    end = zero + spec["timeAxis"]["max"]
-    rows = [r for r in data["frames"] if zero <= r["epoch_s"] <= end]
-    selected = {"measurement_started": "测量开始"}
-    if variant == "recovery":
-        selected.update(partial_workers_withdrawn="撤出12个P", partial_workers_restored="恢复发现")
-        count = data.get("parameters", {}).get("procedure", {}).get("expired_workers", 12)
-        selected["partial_workers_withdrawn"] = f"撤出{count}个P"
-    events = [
-        dict(id=e["id"], name=selected[e["id"]], t=e["epoch_s"] - zero)
-        for e in data["events"]
-        if e["id"] in selected and zero <= e["epoch_s"] <= end
-    ]
     panels = []
 
     def add(key, title, unit, points, caption):
@@ -50,7 +36,6 @@ def compact_report_spec(data, original, *, presentation=None, store=None):
                 type="line",
                 timeX=True,
                 axes={"y": dict(title=unit)},
-                events=events,
                 caption=caption,
                 series=[
                     dict(
@@ -70,38 +55,61 @@ def compact_report_spec(data, original, *, presentation=None, store=None):
     def points(items, field, scale=1):
         return [dict(x=r["epoch_s"] - zero, y=r[field] * scale if r.get(field) is not None else None) for r in items]
 
-    if presentation is None:
-        add(
-            "age",
-            "未参与撤出的 Worker 最长未更新时长",
-            "s",
-            points(rows, "healthy_max_status_age_ms", 0.001),
-            "成功轮询与已应用观测年龄的较大值；仅覆盖完整采样时刻，不代表连续时间窗无异常。",
-        )
-        env = data.get("environment", {})
-        total = env.get("n_prefill", 0) + env.get("n_decode", 0) - len(data.get("victims", []))
-        visible = [
-            dict(epoch_s=r["epoch_s"], value=total - r["missing_workers"] if total and r.get("missing_workers") is not None else None)
-            for r in rows
-        ]
-        add(
-            "workers",
-            "未参与撤出的 Worker 数量（Master 可见）",
-            "个",
-            points(visible, "value"),
-            "不包含选中撤出的 Worker；Master 可见端点不等于实际存活进程或可调度容量。",
-        )
-    else:
-        from reporting.curves import materialize, project_panels
+    add(
+        "age",
+        "未参与撤出的 Worker 最长未更新时长",
+        "s",
+        points(rows, "healthy_max_status_age_ms", 0.001),
+        "成功轮询与已应用观测年龄的较大值；仅覆盖完整采样时刻，不代表连续时间窗无异常。",
+    )
+    env = data.get("environment", {})
+    total = env.get("n_prefill", 0) + env.get("n_decode", 0) - len(data.get("victims", []))
+    visible = [
+        dict(epoch_s=r["epoch_s"], value=total - r["missing_workers"] if total and r.get("missing_workers") is not None else None)
+        for r in rows
+    ]
+    add(
+        "workers",
+        "未参与撤出的 Worker 数量（Master 可见）",
+        "个",
+        points(visible, "value"),
+        "不包含选中撤出的 Worker；Master 可见端点不等于实际存活进程或可调度容量。",
+    )
+    return panels
 
-        curves = [
-            materialize(key, style, row["points"], origin=zero, labels=row["labels"], provenance=row["provenance"])
-            for key, style in presentation.charts.curves.items()
-            for row in store.document["metrics"].get(style.metric_id, [])
-        ]
-        panels = [p for p in project_panels(curves, presentation) if p["id"].startswith(variant + "-")]
-        for panel in panels:
-            panel["events"] = events
+
+def _metric_panels(presentation, store, variant: str, origin: float) -> list[dict]:
+    """Project archived metrics using the selected YAML variant."""
+    from reporting.curves import materialize, project_panels
+
+    curves = [
+        materialize(key, style, row["points"], origin=origin, labels=row["labels"], provenance=row["provenance"])
+        for key, style in presentation.charts.curves.items()
+        for row in store.document["metrics"].get(style.metric_id, [])
+    ]
+    return [panel for panel in project_panels(curves, presentation) if panel["id"].startswith(variant + "-")]
+
+
+def compact_report_spec(data, original, *, presentation=None, store=None):
+    """同一冻结数据按变体选择两张主图；完整指标保留在汇总和证据中。"""
+    spec = copy.deepcopy(original)
+    variant = "recovery" if data.get("intervention", data.get("parameters", {}).get("intervention", False)) else "steady"
+    zero = spec["timeOriginEpochS"]
+    end = zero + spec["timeAxis"]["max"]
+    rows = [r for r in data["frames"] if zero <= r["epoch_s"] <= end]
+    selected = {"measurement_started": "测量开始"}
+    if variant == "recovery":
+        selected.update(partial_workers_withdrawn="撤出12个P", partial_workers_restored="恢复发现")
+        count = data.get("parameters", {}).get("procedure", {}).get("expired_workers", 12)
+        selected["partial_workers_withdrawn"] = f"撤出{count}个P"
+    events = [
+        dict(id=e["id"], name=selected[e["id"]], t=e["epoch_s"] - zero)
+        for e in data["events"]
+        if e["id"] in selected and zero <= e["epoch_s"] <= end
+    ]
+    panels = _summary_panels(data, rows, spec, variant) if presentation is None else _metric_panels(presentation, store, variant, zero)
+    for panel in panels:
+        panel["events"] = events
     anchor = [
         dict(id="cache_only_started", name="观察起点", t=e["epoch_s"] - zero) for e in data["events"] if e["id"] == "cache_only_started"
     ]
@@ -156,10 +164,8 @@ def _phase_summaries(raw: dict, rows: list[dict], gc: list[dict]) -> dict:
     return summaries
 
 
-def write_report(directory, raw, result, *, run=None, presentation=None):
-    """Render a committed gate; the workload runner owns invocation and delivery."""
-    directory = Path(directory)
-    identity = run["id"] + "-cache-stability" if run else directory.name + "-cache-stability"
+def _prepare_data(directory: Path, raw: dict, result: dict, presentation) -> tuple[dict, object, float, float]:
+    """Enrich display rows from archived metrics while keeping gate results frozen."""
     frames = [{k: v for k, v in r.items() if k != "workers"} for r in raw["frames"]]
     store = None
     if presentation is not None:
@@ -178,14 +184,7 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
     gc = [g for g in raw.get("gc", []) if zero <= g["epoch_s"] <= performance_end]
     from cases.cache_sync_recovery.analysis import VALIDITY_CHECKS
 
-    checks = [c for c in result["checks"] if c["id"] not in VALIDITY_CHECKS]
     validity_checks = [c for c in result["checks"] if c["id"] in VALIDITY_CHECKS]
-    launched = raw.get("launched_artifacts", {})
-    events = [
-        dict(id=e.get("name", e["id"]), name=e.get("name", e["id"]), t=e["epoch_s"] - zero)
-        for e in raw["events"]
-        if zero <= e["epoch_s"] <= performance_end
-    ]
     data = {k: v for k, v in raw.items() if k != "frames"}
     data.update(
         frames=frames,
@@ -196,12 +195,27 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
         execution_result=result,
         presentation_renderer_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         workload_acceptance={c["id"]: c["status"] for c in validity_checks},
-        launched_artifacts=launched,
+        launched_artifacts=raw.get("launched_artifacts", {}),
     )
     data.update(verdict=data["outcome"]["gate"], runtime_validity=data["outcome"]["validity"])
-    baseline_ready = any(e["id"] == "cache_baseline_ready" for e in raw["events"])
-    summaries = _phase_summaries(raw, rows, gc)
-    data["phase_summary"] = summaries
+    data["phase_summary"] = _phase_summaries(raw, rows, gc)
+    return data, store, zero, performance_end
+
+
+def _build_spec(directory: Path, identity: str, data: dict, zero: float, performance_end: float, run) -> dict:
+    """Assemble labels, summaries and frozen checks; do not decide acceptance."""
+    from cases.cache_sync_recovery.analysis import VALIDITY_CHECKS
+
+    checks = [check for check in data["execution_result"]["checks"] if check["id"] not in VALIDITY_CHECKS]
+    baseline_ready = any(e["id"] == "cache_baseline_ready" for e in data["events"])
+    summaries = data["phase_summary"]
+    gc = data["gc"]
+    launched = data["launched_artifacts"]
+    events = [
+        dict(id=e.get("name", e["id"]), name=e.get("name", e["id"]), t=e["epoch_s"] - zero)
+        for e in data["events"]
+        if zero <= e["epoch_s"] <= performance_end
+    ]
     spec = dict(
         report_spec_schema_version=1,
         run_id=identity,
@@ -220,15 +234,15 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
             dict(id=identity, kind="run", case="cache_sync_recovery"),
             implementation=dict(master=launched.get("master"), mock=launched.get("mock")),
             configuration=(run or {}).get("implementation"),
-            workload=raw["parameters"],
-            environment=raw["environment"],
+            workload=data["parameters"],
+            environment=data["environment"],
             evidence=dict(source=str(directory / "cache_stability-gate-evidence.json")),
         ),
         kpis=[
             dict(label="功能判定", value=data["outcome"]["gate"]),
             dict(label="实验有效性（含同步强度）", value=data["outcome"]["validity"]),
-            dict(label="Full GC次数", value=sum(g["full"] for g in gc) if raw.get("gc_available", True) else None),
-            dict(label="未参与撤出的 Worker 受影响数", value=len(set(raw.get("affected_workers", [])) - set(raw.get("victims", [])))),
+            dict(label="Full GC次数", value=sum(g["full"] for g in gc) if data.get("gc_available", True) else None),
+            dict(label="未参与撤出的 Worker 受影响数", value=len(set(data.get("affected_workers", [])) - set(data.get("victims", [])))),
         ],
         sections=[
             table(
@@ -266,24 +280,39 @@ def write_report(directory, raw, result, *, run=None, presentation=None):
                 ],
             ),
             table("功能断言", ["断言", "状态", "实际值"], [[c["id"], c["status"], str(c["actual"])] for c in checks]),
-            details("实际同步强度", raw["intensity"]),
-            details("缓存进度收敛", raw.get("cache_progress")),
-            details("健康Worker异常证据", raw.get("healthy_violations", [])),
-            details("证据边界", dict(scope=raw["expiry_scope"], errors=raw["errors"])),
+            details("实际同步强度", data["intensity"]),
+            details("缓存进度收敛", data.get("cache_progress")),
+            details("健康Worker异常证据", data.get("healthy_violations", [])),
+            details("证据边界", dict(scope=data["expiry_scope"], errors=data["errors"])),
         ],
     )
+    return spec
+
+
+def write_report(directory, raw: dict, result: dict, *, run=None, presentation=None):
+    """Prepare display data, assemble a view and publish the committed gate."""
+    from cases.cache_sync_recovery.analysis import VALIDITY_CHECKS
+
+    directory = Path(directory)
+    identity = run["id"] + "-cache-stability" if run else directory.name + "-cache-stability"
+    data, store, zero, performance_end = _prepare_data(directory, raw, result, presentation)
+    spec = _build_spec(directory, identity, data, zero, performance_end, run)
     if run is not None and run.get("workload", {}).get("runtime_validity") == "INVALID":
         data["outcome"]["validity"] = data["runtime_validity"] = "INVALID"
     spec = compact_report_spec(data, spec, presentation=presentation, store=store)
     spec["sections"].insert(
-        0, table("实验有效性", ["检查", "状态", "实际值"], [[c["id"], c["status"], str(c["actual"])] for c in validity_checks])
+        0,
+        table(
+            "实验有效性",
+            ["检查", "状态", "实际值"],
+            [[c["id"], c["status"], str(c["actual"])] for c in result["checks"] if c["id"] in VALIDITY_CHECKS],
+        ),
     )
     # Keep execution/telemetry provenance from the common runner; preserve the case's own origin.
     if run is not None:
         from reporting.run_context import canonical_spec
 
-        payload = dict(run)
-        spec = canonical_spec(spec, payload)
+        spec = canonical_spec(spec, dict(run))
         data["run"] = run
     return write_bundle(directory, "run", identity, data, spec, producer="cache_stability", role="gate")
 

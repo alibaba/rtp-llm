@@ -61,6 +61,14 @@ def _cycle(case, restart_mode):
         params={"client": output("flow", "client"), "stop_sending": True},
     )
 
+    _declare_analysis(case, data, windows, restart_mode)
+    case.step("clean_a", "master_inflight_clean", params={"target": "A"})
+    case.step("clean_b", "master_inflight_clean", params={"target": "B"})
+    case.step("cleanup", "teardown")
+
+
+def _declare_analysis(case, data: dict, windows: dict, restart_mode: str) -> None:
+    """Bind selected checks to the actual period outputs for this restart mode."""
     selected_windows = ["baseline", "b_only", "a_only", "both"]
     if restart_mode == "non_rolling":
         selected_windows.append("outage")
@@ -83,7 +91,7 @@ def _cycle(case, restart_mode):
         else ["handover_errors", "late_errors", "rolling_errors"]
     )
     selected_checks.append("unique_requests")
-    boundaries = {}
+    boundaries: dict = {}
     for name in selected_windows:
         boundaries[name] = {}
         for key, value in windows[name].boundaries.items():
@@ -107,9 +115,6 @@ def _cycle(case, restart_mode):
         params=dict(rows=output("finish", "rows"), windows=boundaries, checks=criteria, operation_timeout_s=case.stage_timeout_s),
         timeout_s=(len(selected_windows) + len(criteria)) * case.stage_timeout_s,
     )
-    case.step("clean_a", "master_inflight_clean", params={"target": "A"})
-    case.step("clean_b", "master_inflight_clean", params={"target": "B"})
-    case.step("cleanup", "teardown")
 
 
 def period(case, name, data, duration, *, baseline=False):

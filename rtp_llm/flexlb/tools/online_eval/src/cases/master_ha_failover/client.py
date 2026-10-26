@@ -14,6 +14,53 @@ from monitoring.sources import selected_sources
 from traffic.contracts import source_priority
 
 
+def _write_discovery(manager, env, case_dir: Path) -> tuple[list[str], Path]:
+    """Preserve registered Master membership and candidate order in discovery."""
+    # The environment registry owns membership and candidate order.
+    specs_by_target = {manager.master_instance_target(env, master_name): spec for master_name, spec in env.master_specs.items()}
+    if not specs_by_target:
+        raise ValueError("HA discovery requires registered Masters")
+    targets = list(specs_by_target)
+    discovery_file = case_dir / "master-discovery.json"
+    discovery_file.write_text(
+        json.dumps(
+            {
+                "hosts": [
+                    {"http": f"{specs_by_target[target].bind_ip}:{specs_by_target[target].http_port}", "grpc": target} for target in targets
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return targets, discovery_file
+
+
+def _validate_trace_duration(trace: Path, replay_speed: float, duration_s: int) -> None:
+    """A single pass must span the requested replay duration."""
+    first_ts = last_ts = None
+    with trace.open(encoding="utf-8") as stream:
+        for line in stream:
+            ts = json.loads(line)["ts"]
+            if first_ts is None:
+                first_ts = ts
+            last_ts = ts
+    if first_ts is None or (last_ts - first_ts) / replay_speed < duration_s * 1000:
+        raise ValueError("one-pass HA trace ends before the requested duration")
+
+
+def _write_flow_input(out_dir: Path, trace: Path, identity: dict, overrides: dict, playback: dict) -> None:
+    """Record the exact materialized source and client environment before launch."""
+    from file_digest import sha256_file
+
+    trace_info = {}
+    source_manifest = trace.with_suffix(".manifest.json")
+    if source_manifest.is_file():
+        trace_info.update(read_json(source_manifest))
+    trace_info.update(path=str(trace), sha256=sha256_file(trace), playback=playback)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "flow-input.json").write_text(json.dumps(dict(**identity, trace=trace_info, environment=overrides), indent=2))
+
+
 class HaReplayClient:
     """Own HA replay and observation resources across start, finish and cleanup."""
 
@@ -53,37 +100,13 @@ class HaReplayClient:
             self.state_sampler = evidence_collector(
                 monitor.query_plan, "master_inflight", env, case_dir / "master_states.jsonl", limits=sampler_limits, session=monitor
             )
-        # The environment registry owns membership and candidate order.
-        specs_by_target = {manager.master_instance_target(env, master_name): spec for master_name, spec in env.master_specs.items()}
-        if not specs_by_target:
-            raise ValueError("HA discovery requires registered Masters")
-        self.targets = list(specs_by_target)
-        discovery_file = case_dir / "master-discovery.json"
-        discovery_file.write_text(
-            json.dumps(
-                {
-                    "hosts": [
-                        {"http": f"{specs_by_target[target].bind_ip}:{specs_by_target[target].http_port}", "grpc": target}
-                        for target in self.targets
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
+        self.targets, discovery_file = _write_discovery(manager, env, case_dir)
         self._client = ClientOps(manager, "8g", "8g")
         from traffic.traffic_source import materialize
 
         trace = materialize(case_dir / "ha_trace.jsonl", source, name, source_dir, max_requests=max_requests)
         if not loop:
-            first_ts = last_ts = None
-            with trace.open(encoding="utf-8") as stream:
-                for line in stream:
-                    ts = json.loads(line)["ts"]
-                    if first_ts is None:
-                        first_ts = ts
-                    last_ts = ts
-            if first_ts is None or (last_ts - first_ts) / replay_speed < duration_s * 1000:
-                raise ValueError("one-pass HA trace ends before the requested duration")
+            _validate_trace_duration(trace, replay_speed, duration_s)
         self.control = case_dir / f"{name}_control"
         self.control.mkdir()
         self.flow_identity = dict(run_id=uuid.uuid4().hex, group_id=name, phase_id="ha")
@@ -118,17 +141,7 @@ class HaReplayClient:
             runtime["ENDPOINTS_FILE"] = str(env.endpoint_file)
         overrides = bind_environment(settings, runtime)
         self._overrides = overrides
-        from file_digest import sha256_file
-
-        trace_info = {}
-        source_manifest = trace.with_suffix(".manifest.json")
-        if source_manifest.is_file():
-            trace_info.update(read_json(source_manifest))
-        trace_info.update(path=str(trace), sha256=sha256_file(trace), playback=playback)
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-        (self.out_dir / "flow-input.json").write_text(
-            json.dumps(dict(**self.flow_identity, trace=trace_info, environment=overrides), indent=2)
-        )
+        _write_flow_input(self.out_dir, trace, self.flow_identity, overrides, playback)
         self.proc = None
         self.finished = False
 
