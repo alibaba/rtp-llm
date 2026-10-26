@@ -19,6 +19,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheOperationMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCachePoolMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheTransferMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheEvictionMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheInsertMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMTierStoreMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
@@ -824,6 +825,18 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tag
         evicted_block_lifetime_ms_metric->Report(&eviction_tags, collector->block_lifetime_ms);
         evicted_block_idletime_ms_metric->Report(&eviction_tags, collector->block_idletime_ms);
     }
+}
+
+bool RtpLLMCacheInsertMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(insert_hard_stop_qps_metric, "rtp_llm_kv_cache_insert_hard_stop_qps");
+    return true;
+}
+
+void RtpLLMCacheInsertMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheInsertMetricsCollector* collector) {
+    kmonitor::MetricsTags hard_stop_tags = tags ? *tags : kmonitor::MetricsTags{};
+    hard_stop_tags.AddTag("existing_tier", collector->existing_tier);
+    hard_stop_tags.AddTag("transfer_state", collector->transfer_state);
+    insert_hard_stop_qps_metric->Report(&hard_stop_tags, 1);
 }
 
 bool RtpLLMTierStoreMetrics::init(kmonitor::MetricsGroupManager* manager) {
