@@ -454,11 +454,11 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
                                               static_cast<IBlockPool*>(group_set->hostPool().get()) :
                                               static_cast<IBlockPool*>(group_set->diskPool().get());
                 for (BlockIdxType block : desc.source_blocks) {
-                    source_pool->freezeBlock(block, BlockTreeRefType::LOAD);
+                    source_pool->freezeBlock(block);
                 }
                 const auto& device_pools = group_set->devicePools();
                 for (size_t member = 0; member < device_pools.size(); ++member) {
-                    device_pools[member]->freezeBlock(desc.target_blocks[member], BlockTreeRefType::LOAD);
+                    device_pools[member]->freezeBlock(desc.target_blocks[member]);
                 }
             }
         }

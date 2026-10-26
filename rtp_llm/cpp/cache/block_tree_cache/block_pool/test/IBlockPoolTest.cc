@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <memory>
 #include <optional>
+#include <thread>
 
 #include "gtest/gtest.h"
 
@@ -247,7 +248,7 @@ TEST(IBlockPoolTest, MultipleTreeRefsReleaseOnlyAtLastHolder) {
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
 }
 
-TEST(IBlockPoolTest, FreezeDeduplicatesOperationsAndSurvivesOrdinaryReferenceRelease) {
+TEST(IBlockPoolTest, FrozenReferencesCountHoldsAndTrackDistinctBlocks) {
     auto pool   = makeInitializedPool(/*physical_block_count=*/4);
     auto blocks = pool->malloc(2);
     ASSERT_TRUE(blocks.has_value());
@@ -259,16 +260,15 @@ TEST(IBlockPoolTest, FreezeDeduplicatesOperationsAndSurvivesOrdinaryReferenceRel
     size_t notifications = 0;
     pool->setCapacityChangeCallback([&] { ++notifications; });
 
-    EXPECT_EQ(pool->frozenBlocksNum(), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     EXPECT_FALSE(pool->isFrozen(load_block));
-    pool->freezeBlock(load_block, BlockTreeRefType::LOAD);
-    pool->freezeBlock(load_block, BlockTreeRefType::EVICTION);
-    pool->freezeBlock(eviction_block, BlockTreeRefType::EVICTION);
-    pool->freezeBlock(eviction_block, BlockTreeRefType::LOAD);
-    EXPECT_EQ(pool->frozenBlocksNum(), 2u);
+    pool->freezeBlock(load_block);
+    pool->freezeBlock(load_block);
+    pool->incTreeRef(*blocks, BlockTreeRefType::FROZEN);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 2u);
     EXPECT_TRUE(pool->isFrozen(load_block));
     EXPECT_TRUE(pool->isFrozen(eviction_block));
-    EXPECT_EQ(pool->treeRefCount(load_block), 3u);
+    EXPECT_EQ(pool->treeRefCount(load_block), 5u);
     EXPECT_EQ(pool->treeRefCount(eviction_block), 3u);
 
     // A successful peer Task releases only its own ordinary reference.
@@ -277,11 +277,12 @@ TEST(IBlockPoolTest, FreezeDeduplicatesOperationsAndSurvivesOrdinaryReferenceRel
     pool->decTreeRef(load_block, BlockTreeRefType::LOAD);
     pool->decTreeRef(eviction_block, BlockTreeRefType::EVICTION);
     pool->decTreeRef(*blocks, BlockTreeRefType::CACHE);
-    EXPECT_EQ(pool->treeRefCount(load_block), 1u);
+    EXPECT_EQ(pool->treeRefCount(load_block), 3u);
     EXPECT_EQ(pool->treeRefCount(eviction_block), 1u);
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 2u);
     EXPECT_EQ(pool->activeBlocksNum(), 2u);
     EXPECT_EQ(pool->availableBlocksNum(), 1u);
     EXPECT_EQ(pool->freeBlocksNum(), 1u);
@@ -290,6 +291,89 @@ TEST(IBlockPoolTest, FreezeDeduplicatesOperationsAndSurvivesOrdinaryReferenceRel
     EXPECT_EQ(pool->last_tree_edges, 0u);
     EXPECT_EQ(pool->malloc(), std::optional<BlockIdxType>{3});
     EXPECT_FALSE(pool->malloc().has_value());
+    pool->incTreeRef(3, BlockTreeRefType::STORE);
+    pool->decTreeRef(3, BlockTreeRefType::STORE);
+
+    pool->decTreeRef(*blocks, BlockTreeRefType::FROZEN);
+    EXPECT_EQ(pool->treeRefCount(load_block), 2u);
+    EXPECT_TRUE(pool->isFrozen(load_block));
+    EXPECT_FALSE(pool->isFrozen(eviction_block));
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    EXPECT_EQ(pool->freeBlocksNum(), 2u);
+    pool->decTreeRef(load_block, BlockTreeRefType::FROZEN);
+    EXPECT_TRUE(pool->isFrozen(load_block));
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    pool->decTreeRef(load_block, BlockTreeRefType::FROZEN);
+    EXPECT_FALSE(pool->isFrozen(load_block));
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    EXPECT_EQ(pool->activeBlocksNum(), 0u);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+    EXPECT_EQ(pool->availableBlocksNum(), pool->totalBlocksNum());
+
+    // The same block ID in a separate pool has independent ownership.
+    auto other_pool = makeInitializedPool(3);
+    ASSERT_EQ(other_pool->malloc(), std::optional<BlockIdxType>{load_block});
+    other_pool->freezeBlock(load_block);
+    EXPECT_EQ(other_pool->treeRefCount(load_block), 1u);
+    EXPECT_EQ(other_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    EXPECT_EQ(other_pool->activeBlocksNum(), 1u);
+    EXPECT_EQ(other_pool->availableBlocksNum(), 1u);
+    EXPECT_NE(other_pool->debugString().find("frozen_ref_blocks=1"), std::string::npos);
+    other_pool->decTreeRef(load_block, BlockTreeRefType::FROZEN);
+    EXPECT_EQ(other_pool->freeBlocksNum(), other_pool->totalBlocksNum());
+}
+
+TEST(IBlockPoolTest, ConcurrentFreezeAddsOneReferencePerCall) {
+    auto pool  = makeInitializedPool(3);
+    auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    pool->incTreeRef(*block, BlockTreeRefType::CACHE);
+    std::vector<std::thread> threads;
+    constexpr size_t         thread_count = 8;
+    for (size_t i = 0; i < thread_count; ++i) {
+        threads.emplace_back([&] { pool->freezeBlock(*block); });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    EXPECT_EQ(pool->treeRefCount(*block), thread_count + 1);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    for (size_t i = 0; i < thread_count; ++i) {
+        EXPECT_TRUE(pool->isFrozen(*block));
+        pool->decTreeRef(*block, BlockTreeRefType::FROZEN);
+        EXPECT_EQ(pool->treeRefCount(*block), thread_count - i);
+    }
+    EXPECT_FALSE(pool->isFrozen(*block));
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    pool->decTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+}
+
+TEST(IBlockPoolTest, FrozenDecrementRejectsEmptyBalanceWithoutMutatingBatch) {
+    auto pool   = makeInitializedPool(4);
+    auto blocks = pool->malloc(2);
+    ASSERT_TRUE(blocks.has_value());
+    pool->incTreeRef(*blocks, BlockTreeRefType::CACHE);
+    pool->incTreeRef(blocks->front(), BlockTreeRefType::FROZEN);
+    pool->freezeBlock(blocks->front());
+
+    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    EXPECT_ANY_THROW(pool->decTreeRef(*blocks, BlockTreeRefType::FROZEN));
+    EXPECT_EQ(pool->treeRefCount(blocks->front()), 3u);
+    EXPECT_EQ(pool->treeRefCount(blocks->back()), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    pool->decTreeRef(blocks->front(), BlockTreeRefType::FROZEN);
+    pool->decTreeRef(blocks->front(), BlockTreeRefType::FROZEN);
+    EXPECT_ANY_THROW(pool->decTreeRef(blocks->front(), BlockTreeRefType::FROZEN));
+    EXPECT_ANY_THROW(pool->decTreeRef(*blocks, BlockTreeRefType::FROZEN));
+    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
+
+    EXPECT_EQ(pool->treeRefCount(blocks->front()), 1u);
+    EXPECT_EQ(pool->treeRefCount(blocks->back()), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    pool->decTreeRef(*blocks, BlockTreeRefType::CACHE);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
 }
 
 TEST(IBlockPoolTest, DecTreeRefRejectsWrongInternalType) {

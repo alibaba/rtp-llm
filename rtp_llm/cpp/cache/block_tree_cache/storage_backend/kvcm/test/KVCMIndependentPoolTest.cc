@@ -399,7 +399,7 @@ TEST_F(KVCMIndependentPoolTest, WorkerRejectsUnknownTagBeforeAnyTransfer) {
     EXPECT_EQ(state_->reads, (std::vector<size_t>{0, 0, 0}));
 }
 
-TEST_F(KVCMIndependentPoolTest, TimeoutQuarantinesUpperRequestPinsUntilShutdown) {
+TEST_F(KVCMIndependentPoolTest, TimeoutKeepsFrozenReferencesAcrossShutdown) {
     ASSERT_TRUE(initialize());
     const kv_cache_manager::Locations locations = {
         {{"tp0_Ffull0", "full0"}, {"tp0_Ffull1", "full1"}, {"tp0_Llinear0", "linear"}}};
@@ -419,11 +419,16 @@ TEST_F(KVCMIndependentPoolTest, TimeoutQuarantinesUpperRequestPinsUntilShutdown)
     EXPECT_FALSE(read(*backend_, request(), matched.match_meta));
     for (size_t group = 0; group < pools_.size(); ++group) {
         EXPECT_EQ(pools_[group]->refCount(blocks_[group]), ref_counts[group] + 1);
+        EXPECT_EQ(pools_[group]->treeRefCount(blocks_[group]), 1u);
+        EXPECT_TRUE(pools_[group]->isFrozen(blocks_[group]));
+        EXPECT_EQ(pools_[group]->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     }
 
     backend_->shutdown();
     for (size_t group = 0; group < pools_.size(); ++group) {
-        EXPECT_EQ(pools_[group]->refCount(blocks_[group]), ref_counts[group]);
+        EXPECT_EQ(pools_[group]->refCount(blocks_[group]), ref_counts[group] + 1);
+        EXPECT_TRUE(pools_[group]->isFrozen(blocks_[group]));
+        EXPECT_EQ(pools_[group]->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     }
 }
 
@@ -445,13 +450,14 @@ TEST_F(KVCMIndependentPoolTest, WorkerReportsTimeoutWithoutCreatingLocalPins) {
     }
 
     // Worker ranks only report the transfer result. Rank 0 owns and, when
-    // needed, quarantines the StorageBackend request pins.
+    // needed, replaces StorageBackend request pins with FROZEN references.
     state_->timeout_pool = 1;
     RemoteOperationResponsePB response;
     EXPECT_FALSE(backend_->execute(operation, response));
     EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_TIMEOUT);
     for (size_t group = 0; group < pools_.size(); ++group) {
         EXPECT_EQ(pools_[group]->refCount(blocks_[group]), ref_counts[group]);
+        EXPECT_FALSE(pools_[group]->isFrozen(blocks_[group]));
     }
 
     backend_->shutdown();
