@@ -166,10 +166,15 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 autoTpm, decisionPolicy, productionRouting, null);
     }
 
-    AutoTpmE2EHarness(int basePort, int nPrefill, int nDecode,
-                      String prefillFormulaMs, double decodeStepMs,
-                      boolean realCancelChannel, boolean autoTpm,
-                      DecisionPolicyConfig decisionPolicy, boolean productionRouting,
+    AutoTpmE2EHarness(int basePort,
+                      int nPrefill,
+                      int nDecode,
+                      String prefillFormulaMs,
+                      double decodeStepMs,
+                      boolean realCancelChannel,
+                      boolean autoTpm,
+                      DecisionPolicyConfig decisionPolicy,
+                      boolean productionRouting,
                       FlexlbConfig initialConfig) {
         this.config = initialConfig == null ? new FlexlbConfig() : initialConfig;
         this.fixedWindowDecision = decisionPolicy.getType()

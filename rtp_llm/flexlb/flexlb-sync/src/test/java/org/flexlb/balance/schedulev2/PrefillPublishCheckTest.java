@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
@@ -22,8 +23,7 @@ class PrefillPublishCheckTest {
     private final PrefillEndpoint prefill = V2TestSupport.prefillEndpoint("p1:8000");
     private final WorkerEndpoint.EndpointHold hold = mock(WorkerEndpoint.EndpointHold.class);
     private final Request request = V2TestSupport.request(SchedulingTestConfig.newConfig(), "1", 50, 16L);
-    private final PrefillPublishCheck check =
-            new PrefillPublishCheck(endpoints, mock(org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry.class));
+    private final PrefillPublishCheck check = new PrefillPublishCheck(endpoints, mock(PrefillQueueRegistry.class));
 
     PrefillPublishCheckTest() {
         V2TestSupport.choose(request, prefill, 0L, 10L);

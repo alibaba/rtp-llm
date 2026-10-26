@@ -8,6 +8,7 @@ import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -418,9 +419,9 @@ class RequestLifecycleDeliveryLockContractTest {
         assertNotNull(claim);
         RequestSlot original = lifecycle.requestSlot("207");
 
-        new EndpointEventHandler(lifecycle).onPrefillStatus(endpoint, RoleType.PDFUSION,
-                List.of(WorkerStatusFact.terminal(
-                        registered.item(), WorkerStatusFact.Kind.COMPLETED, 0L)));
+        new EndpointEventHandler(lifecycle, org.mockito.Mockito.mock(PrefillQueueRegistry.class)).onPrefillStatus(
+                endpoint, org.flexlb.balance.endpoint.EndpointTestSupport.statusObservation(RoleType.PDFUSION),
+                List.of(WorkerStatusFact.terminal(registered.item(), WorkerStatusFact.Kind.COMPLETED, 0L)));
         Response terminal = registered.future().get(5L, TimeUnit.SECONDS);
         assertTrue(terminal.isSuccess());
 

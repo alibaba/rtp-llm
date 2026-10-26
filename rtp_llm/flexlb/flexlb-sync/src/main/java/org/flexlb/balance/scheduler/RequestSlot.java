@@ -172,7 +172,7 @@ public final class RequestSlot {
     private DecisionDeadline decisionDeadline;
     private InactivityDeadline inactivityDeadline;
     private long inactivityTimeoutMs;
-    private long dispatchConfirmTimeoutMs;
+    private long statusUpdateTimeoutMs;
     private long deliveryStartedAtMs;
     private boolean engineStatusReceived;
     private long lastWorkerStatusAtMs;
@@ -1453,18 +1453,18 @@ public final class RequestSlot {
 
     // ── 沉默期限：计划、安装、消费与显式检查 ──
 
-    synchronized void configureInactivityTimeout(long timeoutMs) {
+    void configureInactivityTimeout(long timeoutMs) {
         if (timeoutMs <= 0L) {
             throw new IllegalArgumentException("request inactivity timeout must be positive");
         }
         inactivityTimeoutMs = timeoutMs;
     }
 
-    synchronized void configureDispatchConfirmTimeout(long timeoutMs) {
-        dispatchConfirmTimeoutMs = timeoutMs;
+    void configureStatusUpdateTimeout(long timeoutMs) {
+        statusUpdateTimeoutMs = timeoutMs;
     }
 
-    synchronized OptionalLong inactivityDeadlineAtMs() {
+    OptionalLong inactivityDeadlineAtMs() {
         return ownsResourceTrackingLocked() && inactivityDeadline == null
                 && (cleanupProgress == null || !cleanupProgress.expired)
                 && pendingAdmissionCancelReason == null && inactivityTimeoutMs > 0L
@@ -1472,7 +1472,7 @@ public final class RequestSlot {
                 : OptionalLong.empty();
     }
 
-    synchronized boolean installInactivityDeadline(InactivityDeadline exact) {
+    boolean installInactivityDeadline(InactivityDeadline exact) {
         if (inactivityDeadlineAtMs().isEmpty()) {
             return false;
         }
@@ -1538,14 +1538,15 @@ public final class RequestSlot {
     }
 
     private boolean awaitingFirstEngineStatusLocked() {
-        return dispatchConfirmTimeoutMs > 0L && deliveryStartedAtMs > 0L && !engineStatusReceived;
+        return statusUpdateTimeoutMs > 0L && deliveryStartedAtMs > 0L && !engineStatusReceived;
     }
 
     /** Delivered but never confirmed expires as a confirm timeout; otherwise as plain inactivity. */
     private DeferredTerminal buildSilenceTerminalLocked(String inactivityMessage) {
         if (awaitingFirstEngineStatusLocked()) {
-            return DeferredTerminal.dispatchConfirmTimeout("DISPATCH_CONFIRM_TIMEOUT: no matching Engine request status "
-                    + dispatchConfirmTimeoutMs + " ms after delivery started");
+            return DeferredTerminal
+                    .dispatchConfirmTimeout("DISPATCH_CONFIRM_TIMEOUT: no matching Engine request status "
+                            + statusUpdateTimeoutMs + " ms after delivery started");
         }
         return DeferredTerminal.inactivityExpired(inactivityMessage);
     }
@@ -1568,7 +1569,7 @@ public final class RequestSlot {
         }
         long expiresAtMs = deadlineAfter(observedSince, inactivityTimeoutMs);
         if (awaitingFirstEngineStatusLocked()) {
-            expiresAtMs = Math.min(expiresAtMs, deadlineAfter(deliveryStartedAtMs, dispatchConfirmTimeoutMs));
+            expiresAtMs = Math.min(expiresAtMs, deadlineAfter(deliveryStartedAtMs, statusUpdateTimeoutMs));
         }
         return expiresAtMs;
     }

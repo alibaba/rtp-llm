@@ -113,7 +113,7 @@ class PrefillQueueLoopTest {
 
     @Test
     void publishedRequestNotReportedByEngineIsRemovedAfterConfirmTimeout() {
-        config.getWorkerRegistry().getHealth().setStatusPollIntervalMs(0L);
+        config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(0L);
         Request request = addWaiting("1");
         loop.runOnce();
         assertEquals(1, queues.find(endpoint).dispatchedCount());
@@ -126,7 +126,7 @@ class PrefillQueueLoopTest {
         loop.runOnce();
 
         assertEquals(0, queues.find(endpoint).dispatchedCount());
-        verify(reporter).reportDispatchConfirmTimeout();
+        verify(reporter).reportStatusUpdateTimeout(endpoint.getStatus().getRole(), endpoint.ipPort());
     }
 
     @Test
@@ -164,6 +164,9 @@ class PrefillQueueLoopTest {
         V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of("1", TaskPhase.RUNNING));
         assertTrue(loop.runOnce());
         V2TestSupport.report(endpoint, 2L, 1_000L, 1_000L, Map.of());
+        assertFalse(loop.runOnce());
+        assertEquals(List.of(first, second), sentToDecode);
+        V2TestSupport.reportTasks(queues.find(endpoint), Map.of(), Map.of("1", TaskPhase.RUNNING));
         assertFalse(loop.runOnce());
         assertEquals(List.of(first, second), sentToDecode);
     }

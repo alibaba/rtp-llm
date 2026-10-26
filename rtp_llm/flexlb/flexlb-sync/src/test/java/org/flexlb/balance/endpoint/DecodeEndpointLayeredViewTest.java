@@ -139,8 +139,6 @@ class DecodeEndpointLayeredViewTest {
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.KV_ALLOCATED, 256)), null, 10_000);
         assertTrue(isConfirmed(1L));
 
-        // Next report no longer lists the request as confirmed — this is the
-        // release-confirmation signal the accepted-eviction wait polls for.
         updateStatus(Map.of(), null, 10_000);
 
         assertFalse(isConfirmed(1L));

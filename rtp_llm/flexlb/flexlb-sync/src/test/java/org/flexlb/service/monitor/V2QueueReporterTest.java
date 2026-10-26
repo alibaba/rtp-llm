@@ -181,10 +181,9 @@ class V2QueueReporterTest {
     @Test
     void prefillInflightReportsLimitChangesAndClearsRemovedEndpoint() {
         var endpoint = V2TestSupport.prefillEndpoint("p1:8000");
-        var queue = new org.flexlb.balance.schedulev2.prefill.PrefillQueue(endpoint, false);
+        var queue = endpoint.prefillQueue();
         V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L,
                 java.util.Map.of("running", org.flexlb.enums.TaskPhase.RUNNING));
-        queue.updateFromEngine();
         FlexMetricTags tags = FlexMetricTags.of("endpoint", endpoint.ipPort());
         reporter.samplePrefillInflight(List.of(queue), 4);
         verify(monitor).report(V2QueueReporter.PREFILL_INFLIGHT, tags, 1.0);

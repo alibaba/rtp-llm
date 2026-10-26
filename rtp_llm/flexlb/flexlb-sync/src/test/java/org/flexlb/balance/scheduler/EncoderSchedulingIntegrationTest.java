@@ -4,6 +4,7 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.EncoderStrategy;
@@ -373,7 +374,8 @@ class EncoderSchedulingIntegrationTest {
         when(engine.runningTaskList()).thenReturn(tasks);
         when(engine.runningQueryLen()).thenReturn(running);
         when(engine.waitingQueryLen()).thenReturn(waiting);
-        EncoderEndpoint endpoint = new EncoderEndpoint(status, new EndpointEventHandler(requests));
+        EncoderEndpoint endpoint = new EncoderEndpoint(status,
+                new EndpointEventHandler(requests, org.mockito.Mockito.mock(PrefillQueueRegistry.class)));
         when(directory.holdEndpoint(eq(RoleType.ENCODER), eq(ip))).thenAnswer(invocation -> endpoint.tryHold());
         return endpoint;
     }

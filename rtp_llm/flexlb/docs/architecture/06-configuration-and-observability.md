@@ -654,3 +654,9 @@ Master 身份由公共监控标签区分：
 队列移除后的下一次采样将两项指标补零。使用率按同一 Master、同一 endpoint 的占用数除以上限计算，
 仅使用上限大于零的序列。采样和监控聚合可能平滑瞬时占用；阻塞频率结合
 `PREFILL_INFLIGHT_FULL` 原因指标判断。
+
+### 请求下发确认
+
+`requestLifecycle.request.statusUpdateTimeoutMs` 为发布调度结果后等待引擎确认的毫秒数，默认 1000，必须大于零，与状态轮询周期独立。V2 从发布或最近一次匹配的请求状态更新开始计时，使用当前配置检查静默时长；旧调度器在请求注册时保存该值作为首次确认时限。
+
+Prefill 的 waiting/running 快照和 finished 通知都能确认请求。活跃及 finished 上报在状态提交后经 EndpointEventHandler 交付节点对应的 V2 队列，finished 释放本地占用。Prefill、Decode 分别等待各自 WorkerStatus，独立回收并计数；超时指标携带 role、endpoint 标签，两端回收分别记录 requestId、role、endpoint、publishedAgeMs 和 timeoutMs 日志。V2 的该超时指标同时包含首次上报超时和已上报后持续缺失的清理次数。

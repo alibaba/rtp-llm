@@ -10,6 +10,11 @@ import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.balance.schedulev2.V2TestSupport;
+import org.flexlb.balance.schedulev2.prefill.DispatchedRequest;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueue;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -27,6 +32,7 @@ import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.metric.MicrometerFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -88,6 +94,59 @@ class PrefillEndpointTest {
     @AfterEach
     void tearDown() {
         endpoint.close();
+    }
+
+    @Test
+    void finishedOnlyStatusReleasesV2PrefillClaim() {
+        var queue = createV2Queue();
+        var request = V2TestSupport.request(SchedulingTestConfig.newConfig(), "901", 50, 10);
+        queue.addDispatched(new DispatchedRequest(request, 10L, 5L));
+        assertNull(queue.tryAcquirePublishSlot(request, 1));
+        assertEquals(1L, queue.inflightCount());
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setFinishedTaskInfo(Map.of("901", taskInfo(901L, 0L, null, 0, 10)));
+        response.setRunningTaskInfo(Map.of());
+        Runnable notification = EndpointTestSupport.applyStatus(endpoint, response);
+        assertEquals(1, queue.dispatchedCount());
+        notification.run();
+        assertEquals(0, queue.dispatchedCount());
+        assertEquals(0L, queue.inflightCount());
+    }
+
+    @Test
+    void unchangedVersionHeartbeatRefreshesV2RequestStatus() {
+        var queue = createV2Queue();
+        var request = V2TestSupport.request(SchedulingTestConfig.newConfig(), "902", 50, 10);
+        org.springframework.test.util.ReflectionTestUtils.setField(request, "publishedAtMs",
+                System.currentTimeMillis() - 10_000L);
+        var record = new DispatchedRequest(request, 10L, 5L);
+        queue.addDispatched(record);
+        assertNull(queue.tryAcquirePublishSlot(request, 1));
+        assertTrue(record.statusExpired(System.currentTimeMillis(), 1000L));
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.PREFILL);
+        response.setAlive(true);
+        response.setRunningTaskInfo(Map.of("902", taskInfo(902L, 0L, TaskPhase.RUNNING, 0, 10)));
+        response.setFinishedTaskInfo(Map.of());
+        var status = endpoint.getStatus();
+        response.setStatusVersion(status.appliedStatusCursor().statusVersion());
+        endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response)).run();
+        queue.removeRequestStatusExpired(System.currentTimeMillis(), 1000L, mock(RequestSchedulerReporter.class));
+        assertEquals(1, queue.dispatchedCount());
+        assertEquals(1L, queue.inflightCount());
+    }
+
+    private PrefillQueue createV2Queue() {
+        endpoint.close();
+        var queues = mock(PrefillQueueRegistry.class);
+        var events = new org.flexlb.balance.scheduler.EndpointEventHandler(requestRuntime.requests(), queues);
+        endpoint = EndpointTestSupport.standalonePrefillEndpoint(
+                EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090), config,
+                EndpointTestSupport.routeStrategy(requestRuntime), events, endpointReporter);
+        endpoint.startGeneration();
+        var queue = new PrefillQueue(endpoint, false);
+        org.mockito.Mockito.when(queues.find(endpoint)).thenReturn(queue);
+        return queue;
     }
 
     // ---- batch commit / release ----

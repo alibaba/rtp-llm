@@ -8,6 +8,7 @@ import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -100,8 +101,8 @@ class QueuedBatchDeliveryTest {
                 ledger.prefill.removeCommittedRequest(call.getArgument(0)));
         doAnswer(call -> { prefill.releaseCommittedItem(call.getArgument(0)); return null; })
                 .when(prefill).settleFailedRequest(any());
-        decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null,
-                "127.0.0.1", 8080, 8081, null), new EndpointEventHandler(registry));
+        decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
+                new EndpointEventHandler(registry, org.mockito.Mockito.mock(PrefillQueueRegistry.class)));
         CountDownLatch entered = new CountDownLatch(1);
         dispatcher.tryPrepareSubmission().value().submit(sender -> {
             entered.countDown();
@@ -196,7 +197,9 @@ class QueuedBatchDeliveryTest {
         }
         InactivityDeadline originalTimer = (InactivityDeadline) ReflectionTestUtils.getField(slot, "inactivityDeadline");
         slot.onInactivityDeadline(originalTimer, lastStatus + TIMEOUT_MS);
-        assertEquals(handoff + TIMEOUT_MS, slot.inactivityDeadlineAtMs().orElseThrow());
+        synchronized (slot) {
+            assertEquals(handoff + TIMEOUT_MS, slot.inactivityDeadlineAtMs().orElseThrow());
+        }
         assertOccupancy(1, 1);
         registry.expireInactiveRequest(slot, handoff + TIMEOUT_MS - 1);
         assertOccupancy(1, 1);

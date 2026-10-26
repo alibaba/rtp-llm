@@ -17,92 +17,86 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class PrefillActiveTasks {
 
-    private final AtomicReference<Snapshot> snapshot = new AtomicReference<>(new Snapshot(null, Map.of()));
+    private final AtomicReference<PrefillCapacitySnapshot> capacitySnapshot =
+            new AtomicReference<>(new PrefillCapacitySnapshot(null, Map.of(), Set.of(), 0L));
 
-    public void updateEngine(WorkerStatus.EngineObservation engine) {
-        snapshot.updateAndGet(old -> new Snapshot(engine, old.claimed()));
+    public void updateWorkerCapacity(WorkerStatus.EngineObservation workerStatus) {
+        Set<String> workerActiveRequestIds = new HashSet<>();
+        for (WorkerStatus.TaskObservation task : workerStatus.runningTaskList().values()) {
+            workerActiveRequestIds.add(task.requestId());
+        }
+        Set<String> immutableWorkerActiveRequestIds = Set.copyOf(workerActiveRequestIds);
+        long nowMs = System.currentTimeMillis();
+        capacitySnapshot.updateAndGet(old -> new PrefillCapacitySnapshot(workerStatus, old.localPublishReservations(),
+                immutableWorkerActiveRequestIds, nowMs));
     }
 
     public long inflightCount() {
-        return snapshot.get().countTasks().count();
+        return capacitySnapshot.get().inflightCount();
     }
 
     public QueueBlockReason blockReason(long kvTokens, int limit) {
-        return snapshot.get().blockReason(kvTokens, limit);
+        return capacitySnapshot.get().blockReason(kvTokens, limit);
     }
 
     public QueueBlockReason tryAcquire(DispatchedRequest record, int limit) {
         while (true) {
-            Snapshot old = snapshot.get();
+            PrefillCapacitySnapshot old = capacitySnapshot.get();
             String id = record.request().requestId();
-            if (old.claimed().containsKey(id)) {
+            if (old.localPublishReservations().containsKey(id)) {
                 return QueueBlockReason.RESERVATION_CHANGED;
             }
             QueueBlockReason reason = old.blockReason(record.kvTokens(), limit);
             if (reason != null) {
                 return reason;
             }
-            Map<String, DispatchedRequest> claimed = new HashMap<>(old.claimed());
-            claimed.put(id, record);
-            if (snapshot.compareAndSet(old, new Snapshot(old.engine(), Map.copyOf(claimed)))) {
+            Map<String, DispatchedRequest> localPublishReservations = new HashMap<>(old.localPublishReservations());
+            localPublishReservations.put(id, record);
+            if (capacitySnapshot.compareAndSet(old,
+                    new PrefillCapacitySnapshot(old.workerStatus(), Map.copyOf(localPublishReservations),
+                            old.workerActiveRequestIds(), old.workerStatusUpdatedAtMs()))) {
                 return null;
             }
         }
     }
 
     public void release(Request request) {
+        DispatchedRequest record = capacitySnapshot.get().localPublishReservations().get(request.requestId());
+        if (record != null && record.request() == request) {
+            release(record);
+        }
+    }
+
+    public void release(DispatchedRequest record) {
+        release(record, false, 0L, 0L);
+    }
+
+    public void releaseExpired(DispatchedRequest record, long nowMs, long statusTimeoutMs) {
+        release(record, true, nowMs, statusTimeoutMs);
+    }
+
+    private void release(DispatchedRequest record, boolean expired, long nowMs, long statusTimeoutMs) {
+        String requestId = record.request().requestId();
         while (true) {
-            Snapshot old = snapshot.get();
-            DispatchedRequest record = old.claimed().get(request.requestId());
-            if (record == null || record.request() != request) {
+            PrefillCapacitySnapshot old = capacitySnapshot.get();
+            if (old.localPublishReservations().get(requestId) != record) {
                 return;
             }
-            Map<String, DispatchedRequest> claimed = new HashMap<>(old.claimed());
-            claimed.remove(request.requestId());
-            if (snapshot.compareAndSet(old, new Snapshot(old.engine(), Map.copyOf(claimed)))) {
+            Map<String, DispatchedRequest> localPublishReservations = new HashMap<>(old.localPublishReservations());
+            localPublishReservations.remove(requestId);
+            Set<String> workerActiveRequestIds = old.workerActiveRequestIds();
+            // 本地记录可以过期；并发收到的新引擎快照仍保留实际活跃占用。
+            if (expired && nowMs - old.workerStatusUpdatedAtMs() >= statusTimeoutMs) {
+                workerActiveRequestIds = new HashSet<>(workerActiveRequestIds);
+                workerActiveRequestIds.remove(requestId);
+                workerActiveRequestIds = Set.copyOf(workerActiveRequestIds);
+            }
+            if (capacitySnapshot.compareAndSet(old,
+                    new PrefillCapacitySnapshot(old.workerStatus(), Map.copyOf(localPublishReservations),
+                            workerActiveRequestIds, old.workerStatusUpdatedAtMs()))) {
                 return;
             }
         }
     }
 
-    /**
-     * 同一不可变快照内计算数量和未被引擎计入的 KV，避免把同一请求计算两次。
-     */
-    private record TaskCount(long count, long pendingKv) {
-    }
-
-    private record Snapshot(WorkerStatus.EngineObservation engine, Map<String, DispatchedRequest> claimed) {
-        private TaskCount countTasks() {
-            Set<String> engineIds = new HashSet<>();
-            if (engine != null && engine.runningTaskList() != null) {
-                for (WorkerStatus.TaskObservation task : engine.runningTaskList().values()) {
-                    if (task.requestId() != null) {
-                        engineIds.add(task.requestId());
-                    }
-                }
-            }
-            long count = engineIds.size();
-            long pendingKv = 0L;
-            for (var entry : claimed.entrySet()) {
-                if (!engineIds.contains(entry.getKey())) {
-                    count++;
-                    pendingKv += entry.getValue().kvTokens();
-                }
-            }
-            return new TaskCount(count, pendingKv);
-        }
-
-        QueueBlockReason blockReason(long kvTokens, int limit) {
-            TaskCount tasks = countTasks();
-            if (tasks.count() >= limit) {
-                return QueueBlockReason.PREFILL_INFLIGHT_FULL;
-            }
-            // 空机允许一个大请求，沿用原有的防饥饿规则。
-            if (tasks.count() > 0L && engine != null && engine.totalKvCacheTokens() > 0L
-                    && kvTokens > engine.availableKvCacheTokens() - tasks.pendingKv()) {
-                return QueueBlockReason.PREFILL_KV_FULL;
-            }
-            return null;
-        }
-    }
 }

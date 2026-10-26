@@ -70,7 +70,7 @@ final class RequestTerminalCleanup {
         if (event != null && event.endsLocalTracking()) {
             // Expiry ends exact local tracking even when delivery is uncertain or Engine-owned.
             if (event.kind() == DeferredTerminal.Kind.DISPATCH_CONFIRM_TIMEOUT) {
-                failure = runStep(failure, reporter::reportDispatchConfirmTimeout);
+                failure = runStep(failure, reporter::reportStatusUpdateTimeout);
             }
             failure = runStep(failure,
                     exact.decodeEp() == null ? null

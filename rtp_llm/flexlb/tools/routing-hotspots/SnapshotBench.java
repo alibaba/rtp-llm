@@ -30,6 +30,7 @@ public class SnapshotBench {
     static BatchDeliveryStrategy strategy;
     static final BatchTtftEstimator estimator = new BatchTtftEstimator();
     static RequestRegistry registry;
+    static org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry prefillQueues;
     static final PrefillTtftEstimate.Probe PROBE = new PrefillTtftEstimate.Probe(
             Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
 
@@ -74,7 +75,7 @@ public class SnapshotBench {
         var config = config();
         // No scheduler thread or RPCs. Mutations still use the real ownership ledger and lock.
         var runtime = new WorkerBatcher("bench-" + seed, null, config, strategy, estimator,
-                new EndpointEventHandler(registry), new QueueCapacity());
+                new EndpointEventHandler(registry, prefillQueues), new QueueCapacity());
         Field lockField = WorkerBatcher.class.getDeclaredField("queueLock");
         lockField.setAccessible(true);
         var lock = (ReentrantLock) lockField.get(runtime);
@@ -194,6 +195,7 @@ public class SnapshotBench {
                 "{\"requestLifecycle\":{\"request\":{\"timeoutMs\":60000},\"decision\":{\"lifetime\":2.0}}}");
         var reporter = new BatchSchedulerReporter(null);
         registry = new RequestRegistry(service, reporter, new RequestSchedulerReporter(null));
+        prefillQueues = new org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry();
         strategy = new BatchDeliveryStrategy(
                 () -> DeliveryBlockReason.Attempt.rejected(DeliveryBlockReason.OWNERSHIP_LOST),
                 () -> 1L, registry, new DeliveryMetrics(reporter));

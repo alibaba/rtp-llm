@@ -39,6 +39,80 @@ class DecodeStateTest {
     }
 
     @Test
+    void requestStatusRefreshesExpiryAndOtherRequestsDoNot() {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var reservation = state.reserve("1", 100, 200, 50, true, CAPACITY);
+        var permit = state.acquireDispatchPermit(reservation, CAPACITY).permit();
+        state.dispatch(permit, DispatchOutcome.ENGINE_OWNED);
+        long publishedAtMs = System.currentTimeMillis() - 10_000L;
+        calibrate(state, status, Map.of("1", task(1, TaskPhase.PENDING)), Map.of());
+        assertFalse(state.expireStaleRequest(reservation, publishedAtMs, System.currentTimeMillis(), 1000L));
+        calibrate(state, status, Map.of("1", task(1, TaskPhase.RUNNING)), Map.of());
+        assertFalse(state.expireStaleRequest(reservation, publishedAtMs, System.currentTimeMillis(), 1000L));
+        calibrate(state, status, Map.of("2", task(2, TaskPhase.RUNNING)), Map.of());
+        assertEquals(1, state.routingView().engineCapacityUsed());
+        assertTrue(state.expireStaleRequest(reservation, publishedAtMs, System.currentTimeMillis() + 1001L, 1000L));
+        assertFalse(state.hasOwnedResources(reservation));
+        assertEquals(1, state.routingView().engineCapacityUsed());
+        assertFalse(state.expireStaleRequest(reservation, publishedAtMs, System.currentTimeMillis() + 1001L, 1000L));
+    }
+
+    @Test
+    void unchangedVersionHeartbeatRefreshesRequestStatus() {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var reservation = state.reserve("1", 100, 200, 50, true, CAPACITY);
+        var permit = state.acquireDispatchPermit(reservation, CAPACITY).permit();
+        state.dispatch(permit, DispatchOutcome.ENGINE_OWNED);
+        WorkerStatusResponse response = response();
+        response.setRunningTaskInfo(Map.of("1", task(1, TaskPhase.PENDING)));
+        response.setStatusVersion(status.appliedStatusCursor().statusVersion());
+        state.observeHeartbeat(status.freezeStatusResponse(response));
+        assertTrue(state.isAcceptedByEngine(reservation));
+        assertFalse(state.expireStaleRequest(reservation, System.currentTimeMillis() - 10_000L,
+                System.currentTimeMillis(), 1000L));
+        assertEquals(1, state.routingView().engineCapacityUsed());
+    }
+
+    @Test
+    void finishedOnlyReportClearsPublishedReservation() {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var reservation = state.reserve("1", 100, 200, 50, true, CAPACITY);
+        var permit = state.acquireDispatchPermit(reservation, CAPACITY).permit();
+        state.dispatch(permit, DispatchOutcome.ENGINE_OWNED);
+        var result = calibrate(state, status, Map.of(), Map.of("1", task(1, TaskPhase.RUNNING)));
+        assertEquals(reservation, result.facts().getFirst().reservation());
+        assertFalse(state.hasOwnedResources(reservation));
+        assertEquals(null, state.reservationHandle("1"));
+        assertEquals(0, state.routingView().engineCapacityUsed());
+        calibrate(state, status, Map.of(), Map.of("1", task(1, TaskPhase.RUNNING)));
+        assertEquals(0, state.routingView().engineCapacityUsed());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = TaskPhase.class, names = {"RECEIVED", "PENDING"})
+    void waitingConfirmsDispatchWithoutReleasingCapacity(TaskPhase phase) {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var reservation = state.reserve("waiting", 100, 200, 50, true, CAPACITY);
+        var permit = state.acquireDispatchPermit(reservation, CAPACITY).permit();
+        state.dispatch(permit, DispatchOutcome.ENGINE_OWNED);
+        TaskInfo task = task(1, phase);
+        task.setRequestId("waiting");
+        calibrate(state, status, Map.of("waiting", task), Map.of());
+        assertTrue(state.isAcceptedByEngine(reservation));
+        assertEquals(1, state.routingView().engineCapacityUsed());
+        calibrate(state, status, Map.of(), Map.of());
+        assertTrue(state.isAcceptedByEngine(reservation));
+        assertEquals(1, state.routingView().engineCapacityUsed());
+        calibrate(state, status, Map.of(), Map.of("waiting", task));
+        assertFalse(state.hasOwnedResources(reservation));
+        assertEquals(0, state.routingView().engineCapacityUsed());
+    }
+
+    @Test
     void returnedPermitCannotDispatchOrReleaseItsReplacement() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
@@ -199,12 +273,12 @@ class DecodeStateTest {
             assertTrue(emptyReportResult.facts().isEmpty());
             assertEquals(0, state.routingView().engineCapacityUsed());
             assertEquals(0, state.routingView().engineLoad());
-        assertAdmissionMetricsMatch(state);
+            assertAdmissionMetricsMatch(state);
             assertTrue(state.resourceSnapshot().reserved().isEmpty());
             assertTrue(state.hasOwnedResources(reservation));
             assertTrue(state.isAcceptedByEngine(reservation));
-        assertEquals(0, state.stats().inflight());
-        assertAdmissionMetricsMatch(state);
+            assertEquals(0, state.stats().inflight());
+            assertAdmissionMetricsMatch(state);
         }
         assertEquals(TRANSFERRED, state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
         assertEquals(STILL_OWNED, state.release(reservation, ReleaseReason.COUNTERPART_FINISHED));

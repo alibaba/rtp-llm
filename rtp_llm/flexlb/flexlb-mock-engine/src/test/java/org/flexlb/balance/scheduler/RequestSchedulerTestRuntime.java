@@ -50,19 +50,16 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final RequestScheduler scheduler;
     private final SchedulerRuntime runtime;
 
-    public RequestSchedulerTestRuntime(
-            ConfigService configService,
-            Supplier<DeliveryBlockReason.Attempt<
-                    BatchDeliveryStrategy.PreparedSubmission>>
-                    prepareBatchSubmission,
-            BatchSchedulerReporter batchReporter,
-            RequestSchedulerReporter requestReporter,
-            EngineCancelChannel cancelChannel) {
+    public RequestSchedulerTestRuntime(ConfigService configService,
+                                       Supplier<DeliveryBlockReason.Attempt<BatchDeliveryStrategy.PreparedSubmission>> prepareBatchSubmission,
+                                       BatchSchedulerReporter batchReporter,
+                                       RequestSchedulerReporter requestReporter,
+                                       EngineCancelChannel cancelChannel) {
         Objects.requireNonNull(
                 prepareBatchSubmission, "prepareBatchSubmission");
         this.lifecycle = new RequestRegistry(
                 configService, batchReporter, requestReporter);
-        this.endpointEvents = new EndpointEventHandler(lifecycle);
+        this.endpointEvents = new EndpointEventHandler(lifecycle, org.mockito.Mockito.mock(PrefillQueueRegistry.class));
         AtomicLong batchIds = new AtomicLong();
         DeliveryMetrics deliveryMetrics = new DeliveryMetrics(batchReporter);
         DeliveryStrategy delivery = configService.loadBalanceConfig().getDispatcher().requiresGenerateInput()

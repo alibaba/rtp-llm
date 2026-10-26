@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -309,8 +310,9 @@ class RequestLifetimeTest {
 
     @ParameterizedTest
     @CsvSource({"PREFILL,true", "DECODE,true", "PREFILL,false", "DECODE,false"})
-    void uncertaintyAllowsActualAckIndependentlyOfMatchingEngineEvidence(
-            RoleType evidenceSource, boolean ackBeforeEvidence) throws Exception {
+    void uncertaintyAllowsActualAckIndependentlyOfMatchingEngineEvidence(RoleType evidenceSource,
+                                                                         boolean ackBeforeEvidence)
+            throws Exception {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
@@ -346,9 +348,11 @@ class RequestLifetimeTest {
                 assertFalse(future.isDone());
             }
 
-            EndpointEventHandler eventHandler = new EndpointEventHandler(registry);
+            EndpointEventHandler eventHandler =
+                    new EndpointEventHandler(registry, org.mockito.Mockito.mock(PrefillQueueRegistry.class));
             if (evidenceSource == RoleType.PREFILL) {
-                eventHandler.onPrefillStatus(prefill, RoleType.PREFILL,
+                eventHandler.onPrefillStatus(prefill,
+                        org.flexlb.balance.endpoint.EndpointTestSupport.statusObservation(RoleType.PREFILL),
                         List.of(WorkerStatusFact.active(item)));
             } else {
                 eventHandler.onDecodeStatus(decode, List.of(DecodeEndpoint.WorkerStatusFact.active(reservation)));

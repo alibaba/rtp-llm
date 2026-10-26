@@ -4,32 +4,33 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
- * Total entry point from endpoint-owned facts into exact RequestSlot
- * transitions. Endpoint accounting is already committed before this class is
- * called; stale generations are legal no-ops and are never queued for replay.
+ * 节点完成状态提交后，向对应的调度链路交付同一次 WorkerStatus。
+ * V2 Prefill 队列消费活跃及完成明细；旧调度器消费节点账本产生的请求事件。
  */
 @Component
 public final class EndpointEventHandler {
 
     private final RequestRegistry scheduler;
+    private final PrefillQueueRegistry prefillQueueRegistry;
 
-    public EndpointEventHandler(RequestRegistry scheduler) {
+    public EndpointEventHandler(RequestRegistry scheduler, PrefillQueueRegistry prefillQueueRegistry) {
         this.scheduler = scheduler;
+        this.prefillQueueRegistry = prefillQueueRegistry;
     }
 
-    public void onPrefillStatus(
-            PrefillEndpoint source,
-            RoleType role,
-            List<WorkerStatusFact> facts) {
-        handlePrefillStatus(source, role, facts);
+    public void onPrefillStatus(PrefillEndpoint prefillEndpoint,
+                                WorkerStatus.StatusObservation statusObservation,
+                                List<WorkerStatusFact> facts) {
+        handlePrefillStatus(prefillEndpoint, statusObservation, facts);
     }
 
     public void onDecodeStatus(
@@ -133,13 +134,14 @@ public final class EndpointEventHandler {
         scheduler.failDeliveryPreparation(exactItem, cause);
     }
 
-    private void handlePrefillStatus(
-            PrefillEndpoint source,
-            RoleType role,
-            List<WorkerStatusFact> facts) {
+    private void handlePrefillStatus(PrefillEndpoint source,
+                                     WorkerStatus.StatusObservation statusObservation,
+                                     List<WorkerStatusFact> facts) {
+        Optional.ofNullable(prefillQueueRegistry.find(source))
+                .ifPresent(queue -> queue.handlePrefillStatus(statusObservation));
         for (WorkerStatusFact fact : facts) {
             try {
-                scheduler.processPrefillStatus(source, role, fact);
+                scheduler.processPrefillStatus(source, statusObservation.role(), fact);
             } catch (Throwable failure) {
                 logErrorNoFail(
                         "Prefill status fact handling isolated: request_id={} engine={}",

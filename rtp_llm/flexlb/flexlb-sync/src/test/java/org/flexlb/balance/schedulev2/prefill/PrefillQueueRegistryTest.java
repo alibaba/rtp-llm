@@ -33,7 +33,7 @@ class PrefillQueueRegistryTest {
             return loop;
         });
 
-        endpoint.prefillQueue().updateFromEngine();
+        endpoint.prefillQueue().initializeFromCachedStatus();
 
         PrefillQueue queue = queues.find(endpoint);
         assertSame(endpoint.prefillQueue(), queue);

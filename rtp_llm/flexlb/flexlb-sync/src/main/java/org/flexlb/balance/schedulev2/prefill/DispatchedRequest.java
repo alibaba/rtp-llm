@@ -8,8 +8,8 @@ import org.flexlb.balance.schedulev2.request.Request;
  * <p>
  * 进入 Decode 队列时创建，用于负载预测，不代表占用 Prefill 活跃名额。
  * 最终发布名额由 PrefillActiveTasks 单独管理。引擎上报后改成 ENGINE_QUEUED 或 ENGINE_RUNNING。
- * 引擎上报过、后来又不在引擎的任务列表里时，说明 Prefill 已结束，记录被移除；请求失败或取消时也会移除。
- * 请求发布后超过 {@link org.flexlb.balance.schedulev2.DispatchConfirmTimeout} 引擎还没上报过，记录也会被移除。
+ * 引擎上报过、后来从活跃列表消失，或上报 Finished 时移除记录。请求失败或取消时也会移除。
+ * 请求发布或最近一次引擎上报后超过配置时长，记录和占用也会被清理。
  */
 public final class DispatchedRequest {
 
@@ -20,8 +20,9 @@ public final class DispatchedRequest {
     private final long kvTokens;
     private final long predictedMs;
     /**
-     * 只由 Prefill 队列循环线程修改。
+     * 最近一次包含该请求的引擎上报时间；未上报时为零。
      */
+    private volatile long lastStatusUpdatedAtMs;
     private volatile WorkView.Phase phase = WorkView.Phase.COMMITTED;
 
     public DispatchedRequest(Request request, long kvTokens, long predictedMs) {
@@ -46,14 +47,24 @@ public final class DispatchedRequest {
         return phase;
     }
 
-    public void setPhase(WorkView.Phase phase) {
+    public void updateStatus(WorkView.Phase phase, long nowMs) {
         this.phase = phase;
+        lastStatusUpdatedAtMs = nowMs;
     }
 
     /**
      * 引擎是否已经上报过这个请求。
      */
     public boolean seenByEngine() {
-        return phase != WorkView.Phase.COMMITTED;
+        return lastStatusUpdatedAtMs > 0L;
+    }
+
+    public boolean statusExpired(long nowMs, long timeoutMs) {
+        long publishedAtMs = request.publishedAtMs();
+        if (publishedAtMs <= 0L) {
+            return false;
+        }
+        long lastUpdateAtMs = Math.max(publishedAtMs, lastStatusUpdatedAtMs);
+        return nowMs - lastUpdateAtMs >= timeoutMs;
     }
 }

@@ -1,6 +1,7 @@
 package org.flexlb.service.monitor;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -31,8 +32,8 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_SCHEDULE_LATENCY_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_KV_TOKENS;
-import static org.flexlb.constant.MetricConstant.REQUEST_DISPATCH_CONFIRM_TIMEOUT_COUNT;
 import static org.flexlb.constant.MetricConstant.REQUEST_LIFECYCLE_FAILURES_TOTAL;
+import static org.flexlb.constant.MetricConstant.REQUEST_STATUS_UPDATE_TIMEOUT_COUNT;
 
 /**
  * Auto-TPM priority scheduling metrics reporter.
@@ -94,7 +95,7 @@ public class RequestSchedulerReporter {
         monitor.register(AUTO_TPM_VICTIM_KV_TOKENS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_RESERVED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_SHADOW_KV_RESERVED, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(REQUEST_DISPATCH_CONFIRM_TIMEOUT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(REQUEST_STATUS_UPDATE_TIMEOUT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         reportLifecycleFailureCounts();
         log.info("RequestSchedulerReporter initialized");
     }
@@ -132,8 +133,16 @@ public class RequestSchedulerReporter {
     /**
      * Report one request released locally because its first Engine status never arrived after delivery.
      */
-    public void reportDispatchConfirmTimeout() {
-        monitor.report(REQUEST_DISPATCH_CONFIRM_TIMEOUT_COUNT, FlexMetricTags.of(), 1.0);
+    public void reportStatusUpdateTimeout() {
+        monitor.report(REQUEST_STATUS_UPDATE_TIMEOUT_COUNT, FlexMetricTags.of(), 1.0);
+    }
+
+    /**
+     * 按角色和端点记录请求状态更新超时，包括首次上报超时和已上报后持续静默。
+     */
+    public void reportStatusUpdateTimeout(RoleType role, String endpoint) {
+        monitor.report(REQUEST_STATUS_UPDATE_TIMEOUT_COUNT,
+                FlexMetricTags.of("role", role.name(), "endpoint", endpoint), 1.0);
     }
 
     /**

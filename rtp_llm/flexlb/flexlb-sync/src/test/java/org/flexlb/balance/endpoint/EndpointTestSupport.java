@@ -41,6 +41,12 @@ public final class EndpointTestSupport {
     private EndpointTestSupport() {
     }
 
+    public static WorkerStatus.StatusObservation statusObservation(RoleType role) {
+        var observation = org.mockito.Mockito.mock(WorkerStatus.StatusObservation.class);
+        org.mockito.Mockito.when(observation.role()).thenReturn(role);
+        return observation;
+    }
+
     static PrefillEndpoint standalonePrefillEndpoint(
             WorkerStatus status, FlexlbConfig config, DeliveryStrategy deliveryStrategy,
             EndpointEventHandler endpointEvents, BatchSchedulerReporter reporter) {

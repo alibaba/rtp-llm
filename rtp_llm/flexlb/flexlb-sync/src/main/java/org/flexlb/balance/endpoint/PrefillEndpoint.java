@@ -141,7 +141,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     @Override
     void onPublished() {
-        prefillQueue.updateFromEngine();
+        prefillQueue.initializeFromCachedStatus();
         prefillQueueRegistry.start(this);
     }
 
@@ -407,8 +407,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         reportFinishedBatchesNoFail(result.finishedBatches());
         rethrowPublicationFailure(result.publicationFailure());
         List<WorkerStatusFact> facts = result.schedulerFacts();
-        return () -> endpointEvents.onPrefillStatus(
-                this, observation.role(), facts);
+        return () -> endpointEvents.onPrefillStatus(this, observation, facts);
     }
 
     @Override
@@ -435,7 +434,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         if (result.schedulingInputsChanged()) {
             workerBatcher.signalSchedulingInputsChanged();
         }
-        return () -> endpointEvents.onPrefillStatus(this, observation.role(), result.schedulerFacts());
+        return () -> endpointEvents.onPrefillStatus(this, observation, result.schedulerFacts());
     }
 
     private static void rethrowPublicationFailure(Throwable failure) {

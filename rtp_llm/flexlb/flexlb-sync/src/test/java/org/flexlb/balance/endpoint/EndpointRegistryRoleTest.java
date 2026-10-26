@@ -67,7 +67,7 @@ class EndpointRegistryRoleTest {
         var queues = Mockito.spy(new PrefillQueueRegistry());
         var runtime = EndpointTestSupport.requestRuntime();
         var availability = Mockito.mock(PlacementAvailability.class);
-        var events = new EndpointEventHandler(runtime.requests());
+        var events = new EndpointEventHandler(runtime.requests(), queues);
         var localRegistry = new EndpointRegistry(service, events, Mockito.mock(BatchSchedulerReporter.class),
                 EndpointTestSupport.routeStrategy(runtime), new NonBatchTtftEstimator(), availability,
                 new QueueCapacity(), queues);
@@ -102,8 +102,6 @@ class EndpointRegistryRoleTest {
             nextStatus.setRunningTaskInfo(Map.of());
             EndpointTestSupport.applyStatus(endpoint, nextStatus).run();
             assertSame(originalQueue, endpoint.prefillQueue());
-            assertEquals(1L, originalQueue.inflightCount());
-            originalQueue.updateFromEngine();
             assertEquals(0L, originalQueue.inflightCount());
 
             endpoint.close();

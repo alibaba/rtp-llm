@@ -357,7 +357,7 @@ public class RequestRegistry {
                 synchronized (slot) {
                     var requestLifecycle = context.getConfig().getRequestLifecycle().getRequest();
                     slot.configureInactivityTimeout(requestLifecycle.getTimeoutMs());
-                    slot.configureDispatchConfirmTimeout(requestLifecycle.getStatusUpdateTimeoutMs());
+                    slot.configureStatusUpdateTimeout(requestLifecycle.getStatusUpdateTimeoutMs());
                     phaseSlots.put(context.getRequestId(), slot);
                     registered = true;
                 }

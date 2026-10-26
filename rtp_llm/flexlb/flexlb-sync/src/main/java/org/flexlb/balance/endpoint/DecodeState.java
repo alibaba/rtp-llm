@@ -199,8 +199,7 @@ final class DecodeState {
         lock.lock();
         try {
             DecodeRequestState state = requestState(handle.requestId());
-            return handle.endpointGenerationId() == status.getGenerationId()
-                    && state != null && (state.confirmed() || state.waitingForWorkerFinishedReport)
+            return handle.endpointGenerationId() == status.getGenerationId() && state != null && state.lastSeenAtMs > 0L
                     && state.reservationToken() == handle.reservationToken();
         } finally {
             lock.unlock();
@@ -257,6 +256,23 @@ final class DecodeState {
                 case EXPIRED -> expireRequestLocked(reservation)
                         ? ReservationReleaseResult.RELEASED : ReservationReleaseResult.STALE;
             };
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    boolean expireStaleRequest(ReservationHandle reservation, long publishedAtMs, long nowMs, long timeoutMs) {
+        lock.lock();
+        try {
+            DecodeRequestState current = requestState(reservation.requestId());
+            if (!isExactReservation(current, reservation)) {
+                return false;
+            }
+            long lastUpdateAtMs = Math.max(publishedAtMs, current.lastSeenAtMs);
+            if (nowMs - lastUpdateAtMs < timeoutMs) {
+                return false;
+            }
+            return expireRequestLocked(reservation);
         } finally {
             lock.unlock();
         }
@@ -1374,6 +1390,10 @@ final class DecodeState {
         try {
             for (WorkerStatus.TaskObservation task
                     : observation.activeTasks().values()) {
+                DecodeRequestState current = requestState(task.requestId());
+                if (current != null) {
+                    current.lastSeenAtMs = System.currentTimeMillis();
+                }
                 ReservationHandle active = workerStatusHandleLocked(
                         task.requestId());
                 if (active != null) {
@@ -1416,6 +1436,9 @@ final class DecodeState {
             // Membership, allocation/running evidence and terminal evidence are distinct.
             // Engine may report RECEIVED again after freeing blocks, before publishing finished.
             requestIdsInWorkerActiveReport.add(requestId);
+            if (current != null) {
+                current.lastSeenAtMs = now;
+            }
             if (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING) {
                 actualConfirmed++;
                 DecodeRequestState removed = shadowReservation(requestId);

@@ -234,7 +234,9 @@ class RequestInactivityTest {
     }
 
     private long shortenConfirmTimeout() {
-        slot.configureDispatchConfirmTimeout(CONFIRM_TIMEOUT_MS);
+        synchronized (slot) {
+            slot.configureStatusUpdateTimeout(CONFIRM_TIMEOUT_MS);
+        }
         return (long) org.springframework.test.util.ReflectionTestUtils.getField(slot, "deliveryStartedAtMs");
     }
 

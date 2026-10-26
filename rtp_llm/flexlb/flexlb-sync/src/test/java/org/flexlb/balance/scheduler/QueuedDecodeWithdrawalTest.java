@@ -6,6 +6,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.WorkView;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -105,7 +106,8 @@ class QueuedDecodeWithdrawalTest {
         decode.close();
         WorkerStatus status = WorkerStatus.createDiscovered(RoleType.DECODE, null,
                 "127.0.0.1", 8000, 8001, null);
-        decode = new DecodeEndpoint(status, new EndpointEventHandler(registry));
+        decode = new DecodeEndpoint(status,
+                new EndpointEventHandler(registry, org.mockito.Mockito.mock(PrefillQueueRegistry.class)));
         applyStatus(Map.of(), Map.of());
         var item = queued(42);
         var slot = registry.requestSlot("42");
@@ -122,11 +124,12 @@ class QueuedDecodeWithdrawalTest {
         applyStatus(Map.of(), Map.of());
         assertEquals(RequestState.Phase.ACKNOWLEDGED, slot.snapshot().state());
         assertEquals(1, registry.snapshotActiveRequests().size());
-        assertEquals(0, decode.routingView().engineCapacityUsed());
+        assertEquals(1, decode.routingView().engineCapacityUsed());
         applyStatus(Map.of(), Map.of("42", task));
         assertEquals(RequestState.Phase.COMPLETED, slot.snapshot().state());
         assertTrue(registry.snapshotActiveRequests().isEmpty());
         assertFalse(decode.isAcceptedByEngine(item.decodeReservation()));
+        assertEquals(0, decode.routingView().engineCapacityUsed());
         applyStatus(Map.of(), Map.of("42", task));
         assertTrue(registry.snapshotActiveRequests().isEmpty());
         decode.close();

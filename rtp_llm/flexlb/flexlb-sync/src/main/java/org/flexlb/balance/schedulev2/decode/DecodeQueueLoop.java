@@ -13,11 +13,11 @@ import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.decode.DecodeMode;
 import org.flexlb.balance.scheduler.decode.DecodeRequirement;
-import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
 import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.PrefillPublishCheck;
 import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.RequestCleanup;
+import org.flexlb.balance.schedulev2.RequestStatusTimeout;
 import org.flexlb.balance.schedulev2.request.DecodeChoice;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.schedulev2.request.Stage;
@@ -50,8 +50,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Decode 队列线程，每一轮做三件事：
  * <ol>
- * <li>检查 published 的请求：引擎上报了，reserve 就交给 Decode 的状态同步管，不再跟踪；
- * 发布后超过 {@link DispatchConfirmTimeout} 引擎还没上报，说明调用方没把请求发给引擎，按 EXPIRED 归还 reserve；</li>
+ * <li>检查 published 的请求：Decode 状态同步按活跃列表缺失或 Finished 释放容量；
+ * 队列继续跟踪保留的请求记录，超过 {@link RequestStatusTimeout} 未更新状态时按 EXPIRED 清理；</li>
  * <li>reserved 的请求按顺序向 reserve 的那台 Decode 要 permit，拿到后发布结果（PUBLISHED）。
  * 发布后在 Decode 上有 reserve 的请求进入 published。扫到已经结束的请求就归还它的 reserve 并移出 reserved。
  * 某台 Decode 给不出 permit 时，这一轮跳过 reserve 在它上面的其他请求，等它有空位时被唤醒；</li>
@@ -234,11 +234,11 @@ public final class DecodeQueueLoop {
     /**
      * 检查已发布请求在 Decode 上的 reserve，返回有没有按超时归还 reserve。
      * <p>
-     * 引擎已经上报、reserve 已经不在（引擎做完了或被别的清理删了）、Decode 已经下线时，不再跟踪；
-     * 发布后超时引擎还没上报时，按 EXPIRED 归还 reserve。
+     * reserve 已清理或 Decode 下线时结束跟踪；waiting/running 续期。
+     * 活跃列表缺失可以先释放容量；从发布或最近一次状态更新开始，连续静默超时后清理剩余记录。
      */
     private boolean checkPublished() {
-        long confirmTimeoutMs = DispatchConfirmTimeout.timeoutMs(configService);
+        long statusUpdateTimeoutMs = RequestStatusTimeout.timeoutMs(configService);
         long nowMs = System.currentTimeMillis();
         boolean released = false;
         Iterator<Request> iterator = decodeQueue.publishedIterator();
@@ -247,30 +247,22 @@ public final class DecodeQueueLoop {
             DecodeChoice choice = request.decodeChoice();
             DecodeEndpoint endpoint = choice.endpoint();
             DecodeEndpoint.ReservationHandle reservation = choice.reservation();
-            if (endpoint.isRetired() || endpoint.isAcceptedByEngine(reservation)
-                    || !reservation.equals(endpoint.reservationHandle(request.requestId()))) {
+            if (endpoint.isRetired() || !reservation.equals(endpoint.reservationHandle(request.requestId()))) {
                 iterator.remove();
                 reservations.remove(request.requestId());
                 continue;
             }
-            if (DispatchConfirmTimeout.expired(request, nowMs, confirmTimeoutMs)) {
+            if (endpoint.expireStaleRequest(reservation, request.publishedAtMs(), nowMs, statusUpdateTimeoutMs)) {
                 iterator.remove();
-                expire(choice);
                 reservations.remove(request.requestId());
-                reporter.reportDispatchConfirmTimeout();
+                reporter.reportStatusUpdateTimeout(RoleType.DECODE, endpoint.ipPort());
+                Logger.warn(
+                        "Request worker status timeout: requestId={}, role=DECODE, endpoint={}, publishedAgeMs={}, timeoutMs={}",
+                        request.requestId(), endpoint.ipPort(), nowMs - request.publishedAtMs(), statusUpdateTimeoutMs);
                 released = true;
             }
         }
         return released;
-    }
-
-    private static void expire(DecodeChoice choice) {
-        try {
-            choice.endpoint().release(choice.reservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
-        } catch (RuntimeException failure) {
-            Logger.error("V2 decode reservation expire failed: request_id={}", choice.reservation().requestId(),
-                    failure);
-        }
     }
 
     private boolean dispatchReserved() {

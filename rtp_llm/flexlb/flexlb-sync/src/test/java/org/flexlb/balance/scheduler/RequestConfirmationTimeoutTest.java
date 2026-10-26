@@ -56,7 +56,7 @@ class RequestConfirmationTimeoutTest {
         var reporter = mock(BatchSchedulerReporter.class);
         var requestReporter = mock(RequestSchedulerReporter.class);
         var requests = new RequestRegistry(service, reporter, requestReporter);
-        var eventHandler = new EndpointEventHandler(requests);
+        var eventHandler = new EndpointEventHandler(requests, org.mockito.Mockito.mock(PrefillQueueRegistry.class));
         var queueCapacity = new QueueCapacity();
         var endpoints = new EndpointRegistry(service, eventHandler, reporter, EndpointTestSupport.parkedDelivery(),
                 new NonBatchTtftEstimator(), new PlacementAvailability(), queueCapacity, new PrefillQueueRegistry());
@@ -136,7 +136,7 @@ class RequestConfirmationTimeoutTest {
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
             assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(Long.toString(REQUEST_ID), 0L).state());
             assertEquals(0, requests.trackedRequestCount());
-            verify(requestReporter).reportDispatchConfirmTimeout();
+            verify(requestReporter).reportStatusUpdateTimeout();
             assertEquals(0L, prefill.observedRequestCount());
             assertEquals(0, prefill.getCommittedRequestCount());
             assertEquals(0L, decode.routingView().inputKvReserved());

@@ -263,7 +263,7 @@ class RequestResourceAccountingTest {
             var reporter = mock(BatchSchedulerReporter.class);
             var requestReporter = mock(RequestSchedulerReporter.class);
             requests = new RequestRegistry(service, reporter, requestReporter);
-            var eventHandler = new EndpointEventHandler(requests);
+            var eventHandler = new EndpointEventHandler(requests, org.mockito.Mockito.mock(PrefillQueueRegistry.class));
             var queueCapacity = new QueueCapacity();
             var endpoints = new EndpointRegistry(service, eventHandler, reporter, EndpointTestSupport.parkedDelivery(),
                     new NonBatchTtftEstimator(), new PlacementAvailability(), queueCapacity,

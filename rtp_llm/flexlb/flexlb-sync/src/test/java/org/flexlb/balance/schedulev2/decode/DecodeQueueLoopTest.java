@@ -195,11 +195,12 @@ class DecodeQueueLoopTest {
     }
 
     @Test
-    void publicationStopsAtFourUntilEngineReportsCompletion() {
+    void publicationResumesWhenActiveRequestsDisappearAndLateFinishedIsHarmless() {
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(20L);
         config.getDispatcher().setMaxInflightPerPrefillWorker(4);
         var prefill = V2TestSupport.prefillEndpoint("p1:8000");
         PrefillQueue queue = new PrefillQueue(prefill, true);
+        when(prefill.prefillQueue()).thenReturn(queue);
         var requests = new java.util.ArrayList<Request>();
         for (int i = 1; i <= 6; i++) {
             Request request = addWaiting(Integer.toString(i));
@@ -221,11 +222,15 @@ class DecodeQueueLoopTest {
         V2TestSupport.report(prefill, 1L, 1000L, 1000L,
                 java.util.Map.of("1", org.flexlb.enums.TaskPhase.RUNNING, "2", org.flexlb.enums.TaskPhase.PENDING, "3",
                         org.flexlb.enums.TaskPhase.RUNNING, "4", org.flexlb.enums.TaskPhase.PENDING));
-        queue.updateFromEngine();
         assertFalse(loop.runOnce());
         V2TestSupport.report(prefill, 2L, 1000L, 1000L, java.util.Map.of());
-        queue.updateFromEngine();
         assertTrue(loop.runOnce());
+        assertEquals(6L, requests.stream().filter(r -> r.stage() == Stage.PUBLISHED).count());
+        assertEquals(2L, queue.inflightCount());
+        V2TestSupport.reportTasks(queue, java.util.Map.of(),
+                java.util.Map.of("1", org.flexlb.enums.TaskPhase.RUNNING, "2", org.flexlb.enums.TaskPhase.PENDING));
+        assertFalse(loop.runOnce());
+        assertEquals(2L, queue.inflightCount());
         assertEquals(6L, requests.stream().filter(r -> r.stage() == Stage.PUBLISHED).count());
         assertEquals(0, decodeQueue.waitingCount());
     }
@@ -439,7 +444,7 @@ class DecodeQueueLoopTest {
 
     @Test
     void publishedReservationNotReportedByEngineIsExpiredAfterConfirmTimeout() {
-        config.getWorkerRegistry().getHealth().setStatusPollIntervalMs(0L);
+        config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(0L);
         Request request = addWaiting("1");
         loop.runOnce();
         assertEquals(Stage.PUBLISHED, request.stage());
@@ -452,7 +457,7 @@ class DecodeQueueLoopTest {
         assertEquals(0, decodeQueue.publishedCount());
         assertNull(decode.reservationHandle("1"));
         assertFalse(reservations.contains("1"));
-        verify(reporter).reportDispatchConfirmTimeout();
+        verify(reporter).reportStatusUpdateTimeout(RoleType.DECODE, decode.ipPort());
     }
 
     @Test
@@ -466,7 +471,7 @@ class DecodeQueueLoopTest {
         loop.runOnce();
 
         assertEquals(0, decodeQueue.publishedCount());
-        verify(reporter, never()).reportDispatchConfirmTimeout();
+        verify(reporter, never()).reportStatusUpdateTimeout(RoleType.DECODE, decode.ipPort());
     }
 
     @Test

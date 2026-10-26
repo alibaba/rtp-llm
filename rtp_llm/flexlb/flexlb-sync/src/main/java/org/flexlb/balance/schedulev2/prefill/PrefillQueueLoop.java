@@ -2,10 +2,10 @@ package org.flexlb.balance.schedulev2.prefill;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
 import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.RequestCleanup;
+import org.flexlb.balance.schedulev2.RequestStatusTimeout;
 import org.flexlb.balance.schedulev2.main.MainQueue;
 import org.flexlb.balance.schedulev2.request.PrefillChoice;
 import org.flexlb.balance.schedulev2.request.Request;
@@ -111,7 +111,7 @@ public final class PrefillQueueLoop {
      */
     boolean runOnce() {
         int maxInflight = configService.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker();
-        long confirmTimeoutMs = DispatchConfirmTimeout.timeoutMs(configService);
+        long requestUpdateStatusTimeoutMs = RequestStatusTimeout.timeoutMs(configService);
         long nowMs = System.currentTimeMillis();
         long starvationThresholdMs =
                 configService.loadBalanceConfig().getDispatcher().getDispatchStarvationThresholdMs();
@@ -122,8 +122,7 @@ public final class PrefillQueueLoop {
             close();
             return false;
         }
-        queue.updateFromEngine();
-        removeExpiredDispatched(queue, nowMs, confirmTimeoutMs);
+        queue.removeRequestStatusExpired(nowMs, requestUpdateStatusTimeoutMs, reporter);
         dispatchWaiting(queue, maxInflight, starvationThresholdMs, nowMs);
         return queue.waitingCount() > 0;
     }
@@ -152,13 +151,6 @@ public final class PrefillQueueLoop {
             queueReporter.preemptedReturn(preemptorPriority, request.priority(), queue.endpoint().ipPort());
         }
         mainQueue.addBack(request);
-    }
-
-    private void removeExpiredDispatched(PrefillQueue queue, long nowMs, long confirmTimeoutMs) {
-        int removed = queue.removeExpiredDispatched(nowMs, confirmTimeoutMs);
-        for (int i = 0; i < removed; i++) {
-            reporter.reportDispatchConfirmTimeout();
-        }
     }
 
     /**

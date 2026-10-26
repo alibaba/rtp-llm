@@ -103,7 +103,9 @@ class RequestSlotTerminalSettlementTest {
         assertTrue(slot.updatePreemption(claim, outcome));
         slot.cancelRequest(7L, CancelReason.CLIENT_CANCELLED);
         var inactivity = mock(ExpirationTimer.InactivityDeadline.class);
-        assertTrue(slot.installInactivityDeadline(inactivity));
+        synchronized (slot) {
+            assertTrue(slot.installInactivityDeadline(inactivity));
+        }
 
         slot.onInactivityDeadline(inactivity,
                 RequestLifecycleTestSupport.<Long>inspect(slot, "inactivityExpiresAtMsLocked"));
@@ -209,7 +211,9 @@ class RequestSlotTerminalSettlementTest {
         doCallRealMethod().when(publisher).submitDelivery(any(), any());
         ScheduledRequest item = new ScheduledRequest(context, slot.future(), new Response(), null, null,
                 mock(PrefillEndpoint.class), mock(DecodeEndpoint.class), RESERVATION, System.currentTimeMillis());
-        slot.configureInactivityTimeout(60_000L);
+        synchronized (slot) {
+            slot.configureInactivityTimeout(60_000L);
+        }
         AdmissionHandle admission = slot.tryBeginAdmissionHandle();
         assertNotNull(admission);
         assertEquals(org.flexlb.balance.PlacementResult.Status.SUCCESS, slot.commitRoute(item, () -> true));

@@ -5,7 +5,6 @@ import org.flexlb.balance.estimate.PrefillTtftEstimate;
 import org.flexlb.balance.estimate.QueueView;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.schedulev2.DispatchConfirmTimeout;
 import org.flexlb.balance.schedulev2.LoopSignal;
 import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.request.Request;
@@ -13,6 +12,8 @@ import org.flexlb.balance.schedulev2.request.RequestOrder;
 import org.flexlb.balance.schedulev2.request.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -37,7 +38,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * 出队只检查活跃任务数和 KV，不为等待 Decode 的候选占执行名额。活跃任务按请求 ID 合并引擎任务与本地发布名额；
  * 引擎剩余 KV 减去已占发布名额但引擎还没上报的请求所需 KV，要放得下这个请求。
  * <p>
- * dispatch 和根据引擎上报更新记录只在 Prefill 队列循环线程里做；加入等待请求和移除请求可以在任意线程。
+ * dispatch 在 Prefill 队列线程执行；状态提交线程更新活跃状态、处理完成通知。
+ * 清理通过请求 ID 和记录对象的条件删除生效，再归还这条记录的发布名额。
  */
 public final class PrefillQueue {
 
@@ -62,10 +64,6 @@ public final class PrefillQueue {
      * 引擎上报的任务里，这里没有 dispatch 记录的个数，比如别的 flexlb 发过去的请求。
      */
     private volatile long unknownRequestCount;
-    /**
-     * 最近一次处理过的上报版本号，只由循环线程读写。
-     */
-    private long handledStatusVersion = -1L;
 
     public PrefillQueue(PrefillEndpoint endpoint, boolean priorityOrdering) {
         this.endpoint = endpoint;
@@ -139,17 +137,29 @@ public final class PrefillQueue {
     }
 
     /**
-     * 只移除这个请求对象的记录，返回是否移除了。
+     * 只移除这个请求对象的记录，返回是否移除了。条件删除成功后，后续获取名额会发现记录已失效。
      */
-    public synchronized boolean removeDispatched(Request request) {
+    public boolean removeDispatched(Request request) {
         DispatchedRequest record = dispatched.get(request.requestId());
-        if (record == null || record.request() != request || !dispatched.remove(request.requestId(), record)) {
+        if (record == null || record.request() != request) {
             return false;
         }
-        activeTasks.release(request);
-        changeVersion.incrementAndGet();
+        boolean removedSuccess = removeRequestRecord(record);
+        if (!removedSuccess) {
+            return false;
+        }
+        activeTasks.release(record);
         signal.wake();
         capacityChanged.run();
+        return true;
+    }
+
+    private boolean removeRequestRecord(DispatchedRequest dispatchedRequest) {
+        boolean removeSuccess = dispatched.remove(dispatchedRequest.request().requestId(), dispatchedRequest);
+        if (!removeSuccess) {
+            return false;
+        }
+        changeVersion.incrementAndGet();
         return true;
     }
 
@@ -162,17 +172,18 @@ public final class PrefillQueue {
     }
 
     /**
-     * 有新的引擎上报时更新已 dispatch 记录：引擎上报了的改成 ENGINE_QUEUED 或 ENGINE_RUNNING；
-     * 上报过、这次不在任务列表里的说明 Prefill 已结束，移除记录。返回有没有处理新的上报。
+     * 节点发布时，从已缓存的 Worker 状态初始化队列容量。
      */
-    public synchronized boolean updateFromEngine() {
+    public void initializeFromCachedStatus() {
         WorkerStatus.CommittedWorkerStatus status = endpoint.getStatus().committedWorkerStatus();
-        if (status == null || status.cursor().statusVersion() == handledStatusVersion) {
-            return false;
+        if (status != null) {
+            updateActiveTasks(status.fields());
         }
-        handledStatusVersion = status.cursor().statusVersion();
-        WorkerStatus.EngineObservation engine = status.fields();
-        activeTasks.updateEngine(engine);
+    }
+
+    private void updateActiveTasks(WorkerStatus.EngineObservation engine) {
+        activeTasks.updateWorkerCapacity(engine);
+        long nowMs = System.currentTimeMillis();
         Map<String, WorkerStatus.TaskObservation> tasks =
                 engine.runningTaskList() == null ? Map.of() : engine.runningTaskList();
         Set<String> engineRequestIds = new HashSet<>();
@@ -183,9 +194,9 @@ public final class PrefillQueue {
             engineRequestIds.add(task.requestId());
             DispatchedRequest record = dispatched.get(task.requestId());
             if (record != null) {
-                record.setPhase(task.phase() == TaskPhase.RUNNING
+                record.updateStatus(task.phase() == TaskPhase.RUNNING
                         ? WorkView.Phase.ENGINE_RUNNING
-                        : WorkView.Phase.ENGINE_QUEUED);
+                        : WorkView.Phase.ENGINE_QUEUED, nowMs);
             }
         }
         long unknown = 0L;
@@ -202,29 +213,53 @@ public final class PrefillQueue {
         unknownRequestCount = unknown;
         capacityChanged.run();
         changeVersion.incrementAndGet();
-        return true;
     }
 
     /**
-     * 移除引擎一直没上报、而请求发布后已经超过 confirmTimeoutMs 的记录，返回移除了几条。
-     * <p>
-     * 这类记录说明调用方没把请求发给 Prefill，或者请求在两次上报之间就做完了，留着会一直占在途数。
-     * 删早了也不会多发：引擎之后再上报这个请求时，会算进 unknownRequestCount，照样占在途数。
+     * 状态提交时处理每次上报，避免独立队列轮询错过短暂的 waiting/running 或增量 finished。
+     * 活跃列表中消失的已上报请求和 Finished 请求都尝试清理；重复清理不再释放容量。
      */
-    public int removeExpiredDispatched(long nowMs, long confirmTimeoutMs) {
-        int removed = 0;
-        for (DispatchedRequest record : dispatched.values()) {
-            if (record.seenByEngine()) {
-                continue;
-            }
-            if (!DispatchConfirmTimeout.expired(record.request(), nowMs, confirmTimeoutMs)) {
-                continue;
-            }
-            if (removeDispatched(record.request())) {
-                removed++;
+    public void handlePrefillStatus(WorkerStatus.StatusObservation statusObservation) {
+        updateActiveTasks(statusObservation.engine());
+        removeFinishedTasks(statusObservation.finishedTasks());
+        signal.wake();
+    }
+
+    private void removeFinishedTasks(Map<String, WorkerStatus.TaskObservation> finishedTasks) {
+        for (WorkerStatus.TaskObservation task : finishedTasks.values()) {
+            DispatchedRequest record = dispatched.get(task.requestId());
+            if (record != null) {
+                removeDispatched(record.request());
             }
         }
-        return removed;
+    }
+
+    /**
+     * 移除发布后或最近一次请求状态更新后超过 statusTimeoutMs 的记录，并上报超时指标和日志。
+     * <p>
+     * 只有该请求的活跃上报续期；扫描判定超时后允许清理，即使随后收到该请求的新状态。
+     * 回收后若引擎迟到上报活跃请求，该请求仍计入引擎占用。
+     */
+    public void removeRequestStatusExpired(long nowMs, long statusTimeoutMs, RequestSchedulerReporter reporter) {
+        boolean removed = false;
+        for (DispatchedRequest record : dispatched.values()) {
+            if (!record.statusExpired(nowMs, statusTimeoutMs)) {
+                continue;
+            }
+            if (removeRequestRecord(record)) {
+                activeTasks.releaseExpired(record, nowMs, statusTimeoutMs);
+                removed = true;
+                Request request = record.request();
+                reporter.reportStatusUpdateTimeout(endpoint.getStatus().getRole(), endpoint.ipPort());
+                Logger.warn(
+                        "Request worker status timeout: requestId={}, role=PREFILL, endpoint={}, publishedAgeMs={}, timeoutMs={}",
+                        request.requestId(), endpoint.ipPort(), nowMs - request.publishedAtMs(), statusTimeoutMs);
+            }
+        }
+        if (removed) {
+            signal.wake();
+            capacityChanged.run();
+        }
     }
 
     /**
@@ -256,7 +291,7 @@ public final class PrefillQueue {
         }
         QueueBlockReason reason = activeTasks.tryAcquire(record, maxInflight);
         if (reason == null && (dispatched.get(request.requestId()) != record || request.stage().isEnded())) {
-            activeTasks.release(request);
+            activeTasks.release(record);
             return QueueBlockReason.RESERVATION_CHANGED;
         }
         return reason;

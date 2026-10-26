@@ -56,7 +56,7 @@ public final class V2TestSupport {
     }
 
     /**
-     * 设置引擎上报：版本号、剩余和总 KV、任务列表（requestId → 阶段）。
+     * 缓存引擎上报并通知节点队列：版本号、剩余和总 KV、任务列表（requestId → 阶段）。
      */
     public static void report(PrefillEndpoint endpoint,
                               long statusVersion,
@@ -72,14 +72,40 @@ public final class V2TestSupport {
                 new WorkerStatus.CommittedWorkerStatus(engine, new WorkerStatus.AppliedStatusCursor(statusVersion, 0L));
         WorkerStatus status = endpoint.getStatus();
         when(status.committedWorkerStatus()).thenReturn(committed);
+        var observation = mock(WorkerStatus.StatusObservation.class);
+        when(observation.engine()).thenReturn(engine);
+        when(observation.finishedTasks()).thenReturn(Map.of());
+        endpoint.prefillQueue().handlePrefillStatus(observation);
     }
 
     /**
      * 模拟节点完成首次状态初始化并发布到选路目录。
      */
     public static void register(PrefillQueueRegistry queues, PrefillEndpoint endpoint) {
-        endpoint.prefillQueue().updateFromEngine();
+        endpoint.prefillQueue().initializeFromCachedStatus();
         queues.start(endpoint);
+    }
+
+    /**
+     * 向队列发送一次节点状态上报。
+     */
+    public static void reportTasks(org.flexlb.balance.schedulev2.prefill.PrefillQueue queue,
+                                   Map<String, TaskPhase> active,
+                                   Map<String, TaskPhase> finished) {
+        var activeTasks = active.entrySet()
+                .stream()
+                .collect(Collectors.toMap(Map.Entry::getKey, entry -> task(entry.getKey(), entry.getValue())));
+        var finishedTasks = finished.entrySet()
+                .stream()
+                .collect(Collectors.toMap(Map.Entry::getKey, entry -> task(entry.getKey(), entry.getValue())));
+        var engine = new WorkerStatus.EngineObservation(RoleType.PREFILL, null, 1000L, 1000L, activeTasks, 0.0, 0L, 1L,
+                1L, 0L, 0L, 0L, 0L, 0L);
+        var observation = mock(WorkerStatus.StatusObservation.class);
+        when(observation.activeTasks()).thenReturn(activeTasks);
+        when(observation.engine()).thenReturn(engine);
+        when(observation.statusVersion()).thenReturn(1L);
+        when(observation.finishedTasks()).thenReturn(finishedTasks);
+        queue.handlePrefillStatus(observation);
     }
 
     /**

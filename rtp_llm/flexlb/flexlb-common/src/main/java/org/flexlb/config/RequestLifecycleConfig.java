@@ -17,9 +17,8 @@ public final class RequestLifecycleConfig {
         /** Maximum silence since registration or the latest matching Engine request status. */
         private Long timeoutMs;
         /**
-         * Milliseconds allowed after delivery starts before the first matching Engine request status.
-         * Independent of workerRegistry.health.statusPollIntervalMs. Heartbeats and delivery
-         * acknowledgement do not count.
+         * Milliseconds allowed without matching request status after publication. V2 refreshes the
+         * deadline on each waiting/running report; finished releases the request immediately.
          */
         private Long statusUpdateTimeoutMs = 1_000L;
     }

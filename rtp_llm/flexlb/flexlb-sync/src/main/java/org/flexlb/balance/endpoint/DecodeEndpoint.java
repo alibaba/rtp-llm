@@ -96,6 +96,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return !state.hasOwnedResources(reservation);
     }
 
+    /**
+     * 该请求的 WorkerStatus 超时后释放占用；检查更新时间与清理在同一账本锁内完成。
+     */
+    public boolean expireStaleRequest(ReservationHandle reservation, long publishedAtMs, long nowMs, long timeoutMs) {
+        boolean released = state.expireStaleRequest(reservation, publishedAtMs, nowMs, timeoutMs);
+        if (released) {
+            publishCapacityRelease();
+        }
+        return released;
+    }
+
     public boolean isAcceptedByEngine(ReservationHandle reservation) { return state.isAcceptedByEngine(reservation); }
 
     public ReservationHandle reservationHandle(String requestId) {
