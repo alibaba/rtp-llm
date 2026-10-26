@@ -199,7 +199,7 @@ void LoadAsyncContext::onBackendRead(ErrorInfo error) {
         if (error.ok()) {
             matched_blocks_ = backend_matched_blocks_;
         } else {
-            has_failure_ = true;
+            backend_error_ = error;
             error_info_  = std::move(error);
         }
         backend_pending_ = false;
@@ -298,7 +298,7 @@ bool LoadAsyncContext::completeTransfers(size_t count, bool success) {
         if (state != State::PENDING || count == 0 || count > remaining_transfer_count_) {
             return false;
         }
-        has_failure_ = has_failure_ || !success;
+        has_local_failure_ = has_local_failure_ || !success;
         if (!success && error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load transfer failed");
         }
@@ -314,13 +314,28 @@ void LoadAsyncContext::cancelUnsubmittedTransfers() {
     // Already delivered join completions need not be counted a second time.
     std::lock_guard<std::mutex> lock(mutex_);
     assert(!committed_);
-    has_failure_              = true;
+    has_local_failure_        = true;
     remaining_transfer_count_ = 0;
 }
 
 bool LoadAsyncContext::aggregateSuccess() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return settlement_ready_ && !has_failure_;
+    return settlement_ready_ && !has_local_failure_ && backend_error_.ok();
+}
+
+bool LoadAsyncContext::localTransfersSucceeded() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return settlement_ready_ && !has_local_failure_;
+}
+
+bool LoadAsyncContext::localLoadSucceeded() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return done() && local_load_succeeded_;
+}
+
+bool LoadAsyncContext::backendTimedOut() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return backend_error_.code() == ErrorCode::DEADLINE_EXCEEDED;
 }
 
 bool LoadAsyncContext::settle(bool success) {
@@ -329,7 +344,8 @@ bool LoadAsyncContext::settle(bool success) {
         if (state_.load() != State::PENDING || !settlement_ready_) {
             return false;
         }
-        const bool completed_successfully = success && !has_failure_;
+        local_load_succeeded_             = success && !has_local_failure_;
+        const bool completed_successfully = local_load_succeeded_ && backend_error_.ok();
         if (!completed_successfully && error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load settlement failed");
         }
@@ -370,7 +386,8 @@ void LoadAsyncContext::finishIfReadyLocked(bool& notify, SettlementReadyCallback
         settlement_ready_callback = std::move(settlement_ready_callback_);
         return;
     }
-    state_.store(has_failure_ ? State::FAILED : State::SUCCEEDED);
+    local_load_succeeded_ = !has_local_failure_;
+    state_.store(local_load_succeeded_ && backend_error_.ok() ? State::SUCCEEDED : State::FAILED);
     notify = true;
 }
 

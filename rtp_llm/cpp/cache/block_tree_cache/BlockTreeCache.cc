@@ -143,11 +143,12 @@ TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               cache_keys,
-                                           const std::function<bool(size_t)>& valid_prefix) {
+                                           const std::function<bool(size_t)>& valid_prefix,
+                                           bool                               enable_storage_backend) {
     BlockTreeMatchResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        result = loader_.matchLocked(cache_keys, valid_prefix);
+        result = loader_.matchLocked(cache_keys, valid_prefix, enable_storage_backend);
     }
     metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics_snapshots);
     return result;
