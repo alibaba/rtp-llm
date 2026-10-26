@@ -133,6 +133,7 @@ public:
                   bool                                              is_resident);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
+    // Skips plans containing device blocks that would remain referenced after dropping.
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
 
     CacheStats                                getStats() const;
