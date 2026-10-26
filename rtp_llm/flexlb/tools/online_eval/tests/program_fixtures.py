@@ -10,7 +10,7 @@ from pathlib import Path
 
 from document_io import DocumentError, load_document
 from scenario.compiler import ScenarioCompiler as Compiler
-from scenario.program import ProgramPlan, StageDefinition, VariantPlan
+from scenario.program import Program, StageDefinition, Variant
 
 
 def stage(value):
@@ -18,10 +18,10 @@ def stage(value):
 
 
 def program(value, source="fixture"):
-    if isinstance(value, ProgramPlan):
+    if isinstance(value, Program):
         return value
     value = copy.deepcopy(value)
-    allowed = {f.name for f in fields(ProgramPlan)} | {"stages"}
+    allowed = {f.name for f in fields(Program)} | {"stages"}
     if set(value) - allowed:
         raise DocumentError(source + ": unknown fixture fields")
     variants = value.pop("variants", [{"id": "default"}])
@@ -43,11 +43,11 @@ def program(value, source="fixture"):
         for key in ("profiles", "requires", "findings"):
             if key in variant:
                 variant[key] = tuple(variant[key])
-        compiled.append(VariantPlan(stages=tuple(stage(s) for s in steps), **variant))
+        compiled.append(Variant(stages=tuple(stage(s) for s in steps), **variant))
     for key in ("profiles", "requires", "tags", "findings"):
         if key in value and isinstance(value[key], list):
             value[key] = tuple(value[key])
-    return ProgramPlan(variants=tuple(compiled), **value)
+    return Program(variants=tuple(compiled), **value)
 
 
 class ScenarioCompiler(Compiler):

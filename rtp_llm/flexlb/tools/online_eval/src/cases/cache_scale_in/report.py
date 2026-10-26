@@ -5,7 +5,7 @@ from pathlib import Path
 
 from artifacts.gate_inputs import evidence_origin
 from reporting import run_meta
-from reporting.curves import materialize, project_panels
+from reporting.curves import build_panels, materialize
 from reporting.gate_report import write_archived_gate_report, write_gate_report
 from reporting.run_context import KPI_LABELS, title
 from reporting.view_sections import view_details, view_table
@@ -116,7 +116,7 @@ def prepare_report(directory, evidence, *, presentation=None):
     rows = evidence["samples"]
     anchor = evidence_origin(evidence)
     store = MetricStore.read(directory)
-    observations, gaps, errors = store.project(anchor)
+    observations, gaps, errors = store.relative_series(anchor)
     sources = {
         row["series_key"]: dict(row["provenance"], metric_id=row["metric_id"], unit=row["unit"]) for row in observations if row["points"]
     }
@@ -183,7 +183,7 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
             dict(label=KPI_LABELS["monitoring"], value=monitoring_status, tone="danger" if monitor_warnings else "success"),
         ]
         + request_kpis,
-        panels=project_panels(curves, presentation),
+        panels=build_panels(curves, presentation),
         sections=[
             view_table(presentation, "request_outcomes", request_rows),
             view_table(presentation, "audit", audit),

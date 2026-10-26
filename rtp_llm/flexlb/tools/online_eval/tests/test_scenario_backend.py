@@ -9,11 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
+from context_fixtures import runtime_context
 from document_io import DocumentError as ScenarioError
 from scenario.backend import BoundedOps
 from scenario.lease import validate_lease
 from scenario.request_batch import RequestBatch
-from scenario.runtime import Deadline, RuntimeContext, StageTimeout, interruptible
+from scenario.runtime import Deadline, StageTimeout, interruptible
 
 
 class BackendTest(unittest.TestCase):
@@ -25,7 +26,7 @@ class BackendTest(unittest.TestCase):
                 return grpc.StatusCode.DEADLINE_EXCEEDED
 
         with tempfile.TemporaryDirectory() as root:
-            ctx = RuntimeContext({}, None, root, time.monotonic, time.sleep)
+            ctx = runtime_context({}, None, root, time.monotonic, time.sleep)
             ctx.ops = Ops()
             ctx.instance_deadline_s = time.monotonic() + 2
             observed = {}
@@ -58,7 +59,7 @@ class BackendTest(unittest.TestCase):
     def run_batch(self, consume, batch=True, hanging=False):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        ctx = RuntimeContext({}, None, tmp.name, time.monotonic, time.sleep)
+        ctx = runtime_context({}, None, tmp.name, time.monotonic, time.sleep)
         ctx.ops = Ops(batch, hanging)
         ctx.instance_deadline_s = time.monotonic() + 2
         requests = RequestBatch(ctx, dict(count=2, input_len=10, output_len=2, consume=consume))
@@ -69,7 +70,7 @@ class BackendTest(unittest.TestCase):
     def test_schedule_open_cancellation_reaches_new_call_before_result(self):
         for batch_mode in (True, False):
             with self.subTest(batch=batch_mode), tempfile.TemporaryDirectory() as root:
-                ctx = RuntimeContext({}, None, root, time.monotonic, time.sleep)
+                ctx = runtime_context({}, None, root, time.monotonic, time.sleep)
                 ctx.ops = Ops(batch_mode)
                 ctx.instance_deadline_s = time.monotonic() + 2
                 requests = RequestBatch(ctx, dict(count=2, consume="immediate", input_len=10, output_len=2))
@@ -91,7 +92,7 @@ class BackendTest(unittest.TestCase):
 
     def test_precancelled_batch_never_opens_schedule(self):
         with tempfile.TemporaryDirectory() as root:
-            ctx = RuntimeContext({}, None, root, time.monotonic, time.sleep)
+            ctx = runtime_context({}, None, root, time.monotonic, time.sleep)
             ctx.ops = Ops(True)
             requests = RequestBatch(ctx, dict(count=2, consume="immediate", input_len=10, output_len=2))
             requests.cancel("already stopped")
@@ -117,7 +118,7 @@ class BackendTest(unittest.TestCase):
 
     def test_explicit_prefix_and_priority_reach_both_protocol_builders(self):
         with tempfile.TemporaryDirectory() as root:
-            ctx = RuntimeContext({}, None, root, time.monotonic, time.sleep)
+            ctx = runtime_context({}, None, root, time.monotonic, time.sleep)
             ctx.ops = Ops(batch=False)
             ctx.ops.build_generate_input = Mock(wraps=ctx.ops.build_generate_input)
             ctx.instance_deadline_s = time.monotonic() + 2
@@ -167,7 +168,7 @@ class BackendTest(unittest.TestCase):
                 return result
 
         with tempfile.TemporaryDirectory() as root:
-            ctx = RuntimeContext({}, None, root, time.monotonic, time.sleep)
+            ctx = runtime_context({}, None, root, time.monotonic, time.sleep)
             ctx.ops = Ops()
             ctx.instance_deadline_s = time.monotonic() + 2
             batch = Generated(ctx, dict(count=1, input_len=10, output_len=2, consume="immediate"))
@@ -185,7 +186,7 @@ class BackendTest(unittest.TestCase):
             now[0] += value
 
         with tempfile.TemporaryDirectory() as root:
-            ctx = RuntimeContext({}, None, root, clock, sleep)
+            ctx = runtime_context({}, None, root, clock, sleep)
             ctx.ops = Ops()
             ctx.instance_deadline_s = 10
             batch = RequestBatch(ctx, dict(count=3, input_len=10, output_len=2, consume="deferred", post_issue_delay_s=0.12))
@@ -208,7 +209,7 @@ class BackendTest(unittest.TestCase):
 
     def test_partial_submission_resources_registered_before_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ctx = RuntimeContext({}, None, tmp, time.monotonic, time.sleep)
+            ctx = runtime_context({}, None, tmp, time.monotonic, time.sleep)
             ctx.ops = Ops(batch=False)
             ctx.instance_deadline_s = time.monotonic() + 2
             requests = RequestBatch(ctx, dict(count=1, input_len=10, output_len=2, consume="deferred"))

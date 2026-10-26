@@ -1,7 +1,7 @@
 """Project HA request and Master-state evidence into the case-selected view."""
 
 from reporting import write_bundle
-from reporting.curves import materialize, project_panels
+from reporting.curves import build_panels, materialize
 from reporting.run_context import KPI_LABELS, canonical_spec, provenance_from, title
 from reporting.run_model import RunPresentation
 from reporting.view_sections import view_details
@@ -37,7 +37,7 @@ def build_spec(payload, presentation):
             )
     from reporting.gate_lines import apply_gate_lines
 
-    panels = apply_gate_lines(project_panels(curves, presentation), presentation, {})
+    panels = apply_gate_lines(build_panels(curves, presentation), presentation, {})
     sections = [
         view_details(
             presentation,

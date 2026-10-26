@@ -17,11 +17,11 @@ class RuntimeContext(ResourceScope):
     experiment_definition: dict
     instance_deadline_s: float
 
-    def __init__(self, instance, backend, artifact_dir, clock, sleeper, enforce_deadlines=False, wall_clock=None):
+    def __init__(self, plan, backend, artifact_dir, clock, sleeper, enforce_deadlines=False, wall_clock=None):
         from scenario.registry import registry
 
         self.case_sources = registry().sources
-        self.instance = instance
+        self.plan = plan
         self.backend = backend
         self.artifact_dir = Path(artifact_dir)
         self.wall_clock = wall_clock if wall_clock is not None else lambda: time.time()
@@ -32,14 +32,6 @@ class RuntimeContext(ResourceScope):
         self.services = RuntimeCapabilities(self)
         self.outputs = {}
         self.report_events = []
-
-    @property
-    def environment_plan(self):
-        from scenario.plan import EnvironmentPlan
-
-        if hasattr(self, "plan"):
-            return self.plan.environment
-        return EnvironmentPlan.read(self.instance["environment"])
 
     def record_event(self, identity, *, timestamp=None):
         """Record the actual case event time; presentation names belong to views."""

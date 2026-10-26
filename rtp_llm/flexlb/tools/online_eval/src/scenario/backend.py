@@ -78,15 +78,15 @@ class JavaMockBackend:
         if ":" in str(ctx.artifact_dir.resolve()):
             raise ValueError("Java mock artifact path contains the JVM -Xlog colon delimiter")
         workers = plan["n_prefill"] + plan["n_decode"]
-        budget = ctx.instance["resource_budget"]
+        budget = ctx.plan.resource_budget.to_metadata()
         bound = budget.get("max_environment_workers", budget["initial_workers"])
         if workers > bound or workers + budget["max_dynamic_additions"] > self.lease["worker_capacity"]:
             raise ValueError("environment topology exceeds compiled or leased worker capacity")
         from adapters.engine_ops import EngineOps
         from adapters.environment import EnvManager
 
-        spec = make_env_spec(plan, ctx.instance["profile"], self.lease)
-        spec.diagnostic_events = ctx.instance.get("collection_profile", "diagnostic") == "diagnostic"
+        spec = make_env_spec(plan, ctx.plan.profile, self.lease)
+        spec.diagnostic_events = (ctx.plan.execution.collection or "diagnostic") == "diagnostic"
         # Keep the first-epoch artifact layout compatible with existing runs.
         # Later environments never overwrite its config, logs or cleanup proof.
         artifact_dir = ctx.artifact_dir if ctx.env_epoch == 1 else ctx.artifact_dir / f"environment-epoch-{ctx.env_epoch}"
@@ -140,7 +140,7 @@ class JavaMockBackend:
         ):
             raise RuntimeError("environment manager changed a leased port")
         self.raw_ops = EngineOps("127.0.0.1", env.master_http_port, env.mock_http_port)
-        ops = BoundedOps(self.raw_ops, ctx.instance["resource_budget"], self.lease)
+        ops = BoundedOps(self.raw_ops, ctx.plan.resource_budget.to_metadata(), self.lease)
         return env, ops
 
     def probe_startup(self, ctx, plan, raw_config, deadline):

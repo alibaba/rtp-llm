@@ -88,7 +88,7 @@ def produce(directory, evidence, result):
 CONTRACTS = {"cache_windows": metric_contract}
 
 
-def project(directory, selected, deadline):
+def write_metrics(directory, selected, deadline):
     from artifacts.gate import project_gate
 
     if "cache_windows" in selected:

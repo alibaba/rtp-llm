@@ -42,14 +42,14 @@ def test_case_reader_rejects_foreign_legacy_mixed_and_invalid_versions(header):
 
 def test_compiler_accepts_typed_programs_and_rejects_external_or_internal_documents():
     from scenario.compiler import compile_scenarios as compile_program
-    from scenario.program import ProgramPlan
+    from scenario.program import Program
 
     document = yaml.safe_load((ROOT / "config/scenarios/request_completion.yaml").read_text())
     program = configure_program(document, "input.yaml")
-    assert isinstance(program, ProgramPlan)
+    assert isinstance(program, Program)
     assert not hasattr(program, "program_schema_version")
     for raw in (document, {"program_schema_version": 1, "id": program.id}):
-        with pytest.raises(ScenarioError, match="expected ProgramPlan"):
+        with pytest.raises(ScenarioError, match="expected Program"):
             compile_program([("input.yaml", raw)])
 
 

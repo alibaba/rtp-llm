@@ -10,6 +10,7 @@ from unittest import mock
 from artifacts.gate_inputs import trace_workload_sha
 from cases.master_performance.analysis import analyze
 from cases.master_performance.inputs import validate
+from context_fixtures import runtime_context
 from metric_fixtures import freeze_metrics
 from program_fixtures import compile_scenarios
 from reporting.view_model import ViewDefinition
@@ -73,9 +74,7 @@ class PerformanceGateTest(unittest.TestCase):
             return event
 
         with tempfile.TemporaryDirectory() as d:
-            from scenario.context import RuntimeContext
-
-            ctx = RuntimeContext(
+            ctx = runtime_context(
                 dict(id="master_performance::default::batch-window", profile="batch-window"),
                 None,
                 Path(d),
@@ -114,9 +113,7 @@ class PerformanceGateTest(unittest.TestCase):
 
         identity = "master_performance::default::single-nonbatch"
         with tempfile.TemporaryDirectory() as d:
-            from scenario.context import RuntimeContext
-
-            ctx = RuntimeContext(
+            ctx = runtime_context(
                 dict(id=identity, profile="single-nonbatch"), None, Path(d), lambda: 1, lambda _: None, wall_clock=lambda: 100
             )
             ctx.env_epoch = 2

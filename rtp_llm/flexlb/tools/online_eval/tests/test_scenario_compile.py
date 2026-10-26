@@ -65,7 +65,7 @@ class CompileTest(unittest.TestCase):
         from scenario.compiler import compile_scenarios
 
         for document in (scenario(), {"program_schema_version": 1}, {"python": "exec()"}, {1: "bad"}):
-            with self.subTest(document=document), self.assertRaisesRegex(ScenarioError, "test.yaml.*ProgramPlan"):
+            with self.subTest(document=document), self.assertRaisesRegex(ScenarioError, "test.yaml.*Program"):
                 compile_scenarios([("test.yaml", document)])
 
     def test_setup_order_and_references_are_checked_before_runtime(self):

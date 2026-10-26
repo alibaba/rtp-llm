@@ -4,7 +4,7 @@ import copy
 
 import pytest
 
-from reporting.curves import materialize, project_panels
+from reporting.curves import build_panels, materialize
 from reporting.gate_lines import Threshold, apply_gate_lines
 from reporting.view_model import ViewDefinition
 from scenario.registry import view as view
@@ -16,7 +16,7 @@ def test_overlay_preserves_observations_clock_and_scales_threshold_once():
     presentation = ViewDefinition.read(data, subtitle_fields={"expected_behavior", "observed_behavior"})
     style = presentation.charts.curves["derived/survivor_hit_ratio"]
     curve = materialize("derived/survivor_hit_ratio", style, [[10, 0.8], [15, None], [20, 0.9]])
-    panels = project_panels([curve], presentation)
+    panels = build_panels([curve], presentation)
     original = copy.deepcopy(panels)
     result = apply_gate_lines(panels, presentation, {"survivor_hit_floor": Threshold(0.6, 11, 19)})
     assert panels == original
@@ -31,7 +31,7 @@ def test_overlay_preserves_observations_clock_and_scales_threshold_once():
 
 def test_optional_reference_is_omitted_but_unknown_reference_is_an_error():
     presentation = view("cache_scale_in.yaml")
-    panels = project_panels([], presentation)
+    panels = build_panels([], presentation)
     assert apply_gate_lines(panels, presentation, {"survivor_hit_floor": None}) == panels
     with pytest.raises(ValueError, match="unknown gate line"):
         apply_gate_lines(panels, presentation, {})
@@ -65,7 +65,7 @@ def test_observations_and_reference_use_the_same_frozen_display_clock():
 
     presentation = view("cache_scale_in.yaml")
     style = presentation.charts.curves["derived/survivor_hit_ratio"]
-    panels = project_panels([materialize("derived/survivor_hit_ratio", style, [[5, 0.8]])], presentation)
+    panels = build_panels([materialize("derived/survivor_hit_ratio", style, [[5, 0.8]])], presentation)
     panels = apply_gate_lines(panels, presentation, {"survivor_hit_floor": Threshold(0.6, 3, 9)})
     clock = freeze(
         {"time_axis": {"origin": {"event": "traffic_started"}, "range": {"from": "origin", "until": {"event": "end"}}}},

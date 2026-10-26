@@ -71,5 +71,5 @@ def test_dictionary_without_provenance_is_not_a_program_input():
 
     raw = asdict(document)
     del raw["implementation"]
-    with pytest.raises(ScenarioError, match="expected ProgramPlan"):
+    with pytest.raises(ScenarioError, match="expected Program"):
         compile_scenarios([(source, raw)])

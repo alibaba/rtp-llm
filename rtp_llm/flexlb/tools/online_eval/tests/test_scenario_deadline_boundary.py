@@ -2,6 +2,7 @@
 
 import unittest
 
+from context_fixtures import runtime_context
 from scenario.runtime import Deadline, StageTimeout
 
 
@@ -40,7 +41,6 @@ def test_policy_hook_cannot_consume_budget_and_still_start_operation(tmp_path):
 
     from program_fixtures import compile_scenarios
     from runtime_fixtures import Backend, Clock, source
-    from scenario.context import RuntimeContext
     from scenario.plan import CompiledInstance
     from scenario.stage_execution import StageExecutor
 
@@ -48,7 +48,7 @@ def test_policy_hook_cannot_consume_budget_and_still_start_operation(tmp_path):
     backend = Backend(clock)
     doc = source()
     compiled = compile_scenarios([(str(tmp_path / "case.yaml"), doc)])[0]
-    ctx = RuntimeContext(compiled, backend, tmp_path, clock, clock.sleep, False)
+    ctx = runtime_context(compiled, backend, tmp_path, clock, clock.sleep, False)
     ctx.plan = CompiledInstance.read(compiled)
     policy = SimpleNamespace(
         attach=lambda ctx: None, before_stage=lambda ctx, spec: clock.sleep(100000), after_stage=lambda ctx, spec, row: None

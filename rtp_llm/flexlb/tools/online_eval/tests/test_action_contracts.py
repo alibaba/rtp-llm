@@ -10,6 +10,7 @@ from unittest.mock import patch
 from case_registry_fixtures import entry, snapshot
 from cases.master_ha_failover import actions as master_ha
 from cases.master_performance import program as master_performance
+from context_fixtures import runtime_context
 from document_io import load_document
 from program_fixtures import compile_scenarios
 from scenario import ScenarioError, registry
@@ -96,14 +97,13 @@ class ActionContractsTest(unittest.TestCase):
 
     def test_ha_period_records_the_same_bounded_event_boundaries(self):
         from runtime.deadline import Deadline
-        from scenario.runtime import RuntimeContext
 
         now = [10.0]
 
         def sleep(seconds):
             now[0] += seconds
 
-        ctx = RuntimeContext({}, None, ".", lambda: now[0], sleep, wall_clock=lambda: 1234 + now[0] - 10)
+        ctx = runtime_context({}, None, ".", lambda: now[0], sleep, wall_clock=lambda: 1234 + now[0] - 10)
         deadline = Deadline(30, ctx.clock, sleep)
         result = master_ha._period(ctx, dict(name="b", settle_s=2, duration_s=3, operation_timeout_s=6), deadline)
         self.assertEqual(["b_start", "b_end"], [e["id"] for e in ctx.report_events])

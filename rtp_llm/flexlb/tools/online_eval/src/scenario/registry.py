@@ -141,7 +141,7 @@ class CaseRegistry:
                         raise ValueError("invalid metric source: " + str(name))
                     validate_call(describe, 3, case.module + ".metrics." + name)
                     add(contracts, name, describe, "metric source")
-                validate_call(getattr(definition.metrics, "project", None), 3, case.module + ".metrics.project")
+                validate_call(getattr(definition.metrics, "write_metrics", None), 3, case.module + ".metrics.write_metrics")
                 if hasattr(definition.metrics, "finalize"):
                     validate_call(definition.metrics.finalize, 4, case.module + ".metrics.finalize")
             for name, capability in definition.sources.items():

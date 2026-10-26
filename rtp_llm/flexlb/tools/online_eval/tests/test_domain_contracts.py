@@ -14,7 +14,7 @@ from scenario.environment_config import environment
 from scenario.environment_declaration import PrefillCachePolicy
 from scenario.environment_snapshot import EnvironmentSnapshot
 from scenario.execution_plan import ExecutionPlanCodec, _sha
-from scenario.plan import CompiledInstance, ExecutionPlan
+from scenario.plan import CompiledInstance
 from scenario.runtime import ScenarioRunner
 from scenario.stage_parameters import RequestParameters
 from traffic import prefix_lineage, prefix_lineage_v3
@@ -45,8 +45,8 @@ def test_compiler_and_runner_exchange_domain_objects(tmp_path):
 def test_valid_checksum_cannot_admit_semantically_invalid_plan(tmp_path, damage):
     codec = ExecutionPlanCodec(dependencies=lambda: {})
     path = tmp_path / "plan.json"
-    digest = codec.write(path, ExecutionPlan((compiled(),), ()))
-    assert codec.read(path, digest).instances[0] == compiled()
+    digest = codec.write(path, (compiled(),), {})
+    assert codec.read(path, digest)[0] == compiled()
     document = json.loads(path.read_text())
     instance = document["instances"][0]
     if damage == "budget":
@@ -156,10 +156,10 @@ def test_freezing_preserves_collection_definition_order(tmp_path):
         plan = ScenarioCompiler(handlers()).compile([(str(path), configure_program(load_document(path), str(path)))])
         codec = ExecutionPlanCodec(dependencies=lambda: {})
         frozen = tmp_path / "plan.json"
-        digest = codec.write(frozen, ExecutionPlan(tuple(plan), ()))
+        digest = codec.write(frozen, tuple(plan), {})
         restored = codec.read(frozen, digest)
-        assert restored == ExecutionPlan(tuple(plan), ())
-        for instance in restored.instances:
+        assert restored == tuple(plan)
+        for instance in restored:
             projected = instance.to_dict()
             assert instance_plan(projected) == projected["implementation"]["monitoring_query_plan"]["definition"]
 
@@ -203,3 +203,16 @@ def test_report_adapter_cannot_rewrite_frozen_gate_verdict(tmp_path, fails):
     assert outcome.delivery == "ERROR"
     assert outcome.validity == "VALID"
     assert result.to_dict()["status"] == "ERROR"
+
+
+@pytest.mark.parametrize("identities", [[], [0, 0]])
+def test_plan_file_requires_nonempty_unique_instances_even_with_a_valid_digest(tmp_path, identities):
+    codec = ExecutionPlanCodec(dependencies=lambda: {})
+    path = tmp_path / "plan.json"
+    codec.write(path, (compiled(),), {})
+    document = json.loads(path.read_text())
+    document["instances"] = [document["instances"][index] for index in identities]
+    document["sha256"] = _sha({key: value for key, value in document.items() if key != "sha256"})
+    path.write_text(json.dumps(document))
+    with pytest.raises(ScenarioError, match="unique compiled instances"):
+        codec.read(path, document["sha256"])

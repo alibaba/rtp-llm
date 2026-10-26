@@ -45,10 +45,10 @@ def collection_plan(plan):
 
 
 def instance_plan(instance):
-    from monitoring.collection_plan import instance_plan as read
+    from monitoring.collection_plan import selected_plan as read
     from scenario.registry import registry
 
-    return read(instance, registry().sources)
+    return read(instance.get("implementation", {}), instance["execution"]["monitoring"], registry().sources)
 
 
 def frozen_plan(name, plan):

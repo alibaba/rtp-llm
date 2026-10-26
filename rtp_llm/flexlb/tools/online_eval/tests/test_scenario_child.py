@@ -9,11 +9,13 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 
+from context_fixtures import runtime_context
+
 TOOLS = Path(__file__).resolve().parents[1]
 from document_io import DocumentError as ScenarioError
 from scenario.backend import JavaMockBackend
 from scenario.child_cli import instance_directory, select, summarize
-from scenario.runtime import Deadline, RuntimeContext
+from scenario.runtime import Deadline
 
 
 class ChildTest(unittest.TestCase):
@@ -29,7 +31,7 @@ class ChildTest(unittest.TestCase):
 
     def test_backend_rejects_unsafe_root_before_process_harness_import(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ctx = RuntimeContext({}, None, Path(tmp) / "unsafe:root", time.monotonic, time.sleep)
+            ctx = runtime_context({}, None, Path(tmp) / "unsafe:root", time.monotonic, time.sleep)
             backend = JavaMockBackend({})
             with self.assertRaisesRegex(ValueError, "JVM -Xlog"):
                 backend.setup(ctx, {}, Deadline(time.monotonic() + 1))
@@ -101,7 +103,7 @@ class ChildTest(unittest.TestCase):
             # A restart/kill helper can clear this slot before final teardown.
             backend.environments[0].master = None
             with tempfile.TemporaryDirectory() as tmp:
-                ctx = RuntimeContext({}, backend, tmp, time.monotonic, time.sleep)
+                ctx = runtime_context({}, backend, tmp, time.monotonic, time.sleep)
                 backend.teardown(ctx, Deadline(time.monotonic() + 3))
                 evidence = json.loads((Path(tmp) / "process-cleanup.json").read_text())
             self.assertIsNotNone(owned.poll())

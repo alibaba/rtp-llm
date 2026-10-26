@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from adapters.client_journal import first_request
+from context_fixtures import runtime_context
 from document_io import DocumentError as ScenarioError
 from document_io import load_document
 from reporting.timeline import apply, freeze, traffic_event, validate_configuration
@@ -176,13 +177,12 @@ def test_runtime_freezes_resource_onset_into_evidence_metrics_analysis_and_repor
     from types import SimpleNamespace
 
     from adapters.resource_evidence import ResourceEvidence
-    from scenario.context import RuntimeContext
     from scenario.measurement import WorkloadPolicy
 
     instance = dict(
         reporting=declaration(), execution={"monitoring": {}}, workload_runtime={"capture_metrics": False}, collection_profile="request"
     )
-    ctx = RuntimeContext(instance, None, tmp_path, lambda: 1, lambda _: None)
+    ctx = runtime_context(instance, None, tmp_path, lambda: 1, lambda _: None)
     stamp = first_request([dict(rid="first-failed", send_start_epoch_ms=100000, status="exception")])
     ctx.register_resource("java_flow", None, evidence=lambda *_: ResourceEvidence(requests={"traffic_start": stamp}, producer="client"))
     policy = WorkloadPolicy()

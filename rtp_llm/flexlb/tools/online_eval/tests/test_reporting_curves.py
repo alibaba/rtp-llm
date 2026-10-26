@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from reporting.curves import materialize, project_panels
+from reporting.curves import build_panels, materialize
 from reporting.view_model import CurvePresentation, ViewDefinition
 from scenario import registry
 
@@ -43,7 +43,7 @@ def presentation():
 def test_null_nan_and_zero_use_one_empty_panel_rule(values, caption):
     config = presentation()
     curves = [materialize("a", config.charts.curves["a"], list(enumerate(values)))]
-    assert project_panels(curves, config)[0]["caption"] == caption
+    assert build_panels(curves, config)[0]["caption"] == caption
 
 
 def test_materialization_and_projection_keep_labels_scaling_provenance_and_order():
@@ -55,7 +55,7 @@ def test_materialization_and_projection_keep_labels_scaling_provenance_and_order
     )
     b = materialize("b", config.charts.curves["b"], [[0, 1]])
     original = copy.deepcopy([a, b])
-    panel = project_panels([a, b], config)[0]
+    panel = build_panels([a, b], config)[0]
     assert [curve["curve_id"] for curve in panel["series"]] == ["b", "a"]
     assert a["points"] == [{"x": 0, "y": 500}, {"x": 1, "y": None}]
     assert a["name"] == "A · A" and a["group"] == "A"
@@ -133,7 +133,7 @@ def test_selected_presets_and_visibility_reach_the_html(tmp_path):
     config["charts"]["panels"][0]["presets"] = {"A": {"ids": ["a"]}, "B": {"ids": ["b"]}}
     config = ViewDefinition.read(config)
     curves = [materialize(key, style, [[0, 0]]) for key, style in config.charts.curves.items()]
-    panels = project_panels(curves, config)
+    panels = build_panels(curves, config)
     assert panels[0]["presets"] == {"A": ["A"], "B": ["B"]}
     assert [c["hidden"] for c in panels[0]["series"]] == [True, False]
     bundle = write_bundle(tmp_path, "run", "selected-presets", {}, dict(title="Test", timeAxis={"min": 0, "max": 1}, panels=panels))

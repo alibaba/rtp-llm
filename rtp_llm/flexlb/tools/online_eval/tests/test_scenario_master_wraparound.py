@@ -6,8 +6,9 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
+from context_fixtures import runtime_context
 from scenario.actions import master
-from scenario.runtime import Deadline, RuntimeContext, StageTimeout
+from scenario.runtime import Deadline, StageTimeout
 
 
 class Clock:
@@ -25,7 +26,7 @@ class WraparoundTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         clock = Clock()
-        ctx = RuntimeContext({}, NS(), tmp.name, clock, clock.sleep)
+        ctx = runtime_context({}, NS(), tmp.name, clock, clock.sleep)
         ctx.env = NS(spec=NS(n_prefill=2, n_decode=4))
 
         def http(ctx, target, endpoint, deadline, *args):

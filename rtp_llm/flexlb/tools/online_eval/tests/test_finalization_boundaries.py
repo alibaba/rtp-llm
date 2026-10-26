@@ -7,12 +7,13 @@ from unittest import mock
 import pytest
 
 from adapters.resource_evidence import ResourceEvidence
+from context_fixtures import runtime_context
 from metric_fixtures import cache_evidence, performance_evidence
 from program_fixtures import compile_scenarios
 from runtime_fixtures import Backend, Clock, source
 from scenario.measurement import WorkloadPolicy, execute_workload
 from scenario.run_result import EvidenceResult
-from scenario.runtime import Deadline, RuntimeContext
+from scenario.runtime import Deadline
 
 
 def plan():
@@ -39,7 +40,7 @@ def test_online_gate_never_calls_metric_or_html_delivery(tmp_path, kind):
     snapshot = e["flow"] if kind == "performance" else dict(issued=[], records=[], complete=True, errors=[], status=dict(submitted=0))
     flow = SimpleNamespace(directory=tmp_path, evidence_snapshot=lambda: snapshot)
     (tmp_path / "client_lifecycle.jsonl").write_text("")
-    ctx = RuntimeContext({"implementation": {"configuration": {"case": case}}}, None, tmp_path, lambda: 0, lambda _: None)
+    ctx = runtime_context({"implementation": {"configuration": {"case": case}}}, None, tmp_path, lambda: 0, lambda _: None)
     if kind == "cache":
         e["client_attribution"] = {}
         e["capture_limits"] = dict(max_samples=1000, max_bytes=1000000)
@@ -131,7 +132,7 @@ def test_uncooperative_finalization_is_interrupted(tmp_path):
 def test_new_resource_evidence_needs_no_policy_branch(tmp_path):
     clock = Clock()
     instance = plan()
-    ctx = RuntimeContext(instance, None, tmp_path, clock, clock.sleep)
+    ctx = runtime_context(instance, None, tmp_path, clock, clock.sleep)
     policy = WorkloadPolicy()
     policy.attach(ctx)
     ctx.env_epoch = 7
@@ -155,7 +156,7 @@ def test_new_resource_evidence_needs_no_policy_branch(tmp_path):
     result = dict(id="example", status="PASS", error=None, stages=[], cleanup=[])
     from monitoring.metric_store import MetricStore
 
-    with mock.patch.object(MetricStore, "project", autospec=True, side_effect=MetricStore.project) as project:
+    with mock.patch.object(MetricStore, "relative_series", autospec=True, side_effect=MetricStore.relative_series) as project:
         policy.finalize(ctx, result, Deadline(20, clock, clock.sleep))
     assert project.call_count == 1
     payload = json.loads((tmp_path / "workload-evidence.json").read_text())

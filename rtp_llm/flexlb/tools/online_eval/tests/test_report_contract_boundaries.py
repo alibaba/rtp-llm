@@ -42,7 +42,7 @@ def test_bundle_publication_does_not_import_comparison_pipeline(tmp_path):
 
 
 def test_views_decode_once_and_projection_does_not_parse_again():
-    from reporting.curves import materialize, project_panels
+    from reporting.curves import build_panels, materialize
     from reporting.view_model import CurvePresentation, PanelPresentation, SectionPresentation
     from reporting.view_sections import view_details
 
@@ -57,7 +57,7 @@ def test_views_decode_once_and_projection_does_not_parse_again():
         assert sections.call_count == len(definition.sections)
         counts = (curves.call_count, panels.call_count, sections.call_count)
         measured = [materialize("ha/sent", definition.charts.curves["ha/sent"], [(1, 0)])]
-        project_panels(measured, definition)
+        build_panels(measured, definition)
         view_details(definition, "sources", {"status": "frozen"})
         assert counts == (curves.call_count, panels.call_count, sections.call_count)
 

@@ -8,13 +8,14 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from adapters.java_mock_resources import JavaMockBudget, ResourcePlanError, plan_lane_leases
+from context_fixtures import runtime_context
 from program_fixtures import compile_scenarios
 from runtime_fixtures import source
 from scenario.backend import BoundedOps, JavaMockBackend
 from scenario.catalog import handlers
 from scenario.contracts import StageHandler
 from scenario.lease import validate_lease
-from scenario.runtime import Deadline, RuntimeContext
+from scenario.runtime import Deadline
 
 
 def program():
@@ -96,10 +97,10 @@ class EnvironmentBudgetTest(unittest.TestCase):
             0
         ].to_manifest()
         with tempfile.TemporaryDirectory() as tmp, patch("adapters.environment.EnvManager.ensure") as ensure:
-            ctx = RuntimeContext(instance, None, tmp, time.monotonic, time.sleep)
+            ctx = runtime_context(instance, None, tmp, time.monotonic, time.sleep)
             ctx.env_epoch = 1
             for compiled_bound, capacity in ((4, 5), (5, 4)):
-                ctx.instance["resource_budget"]["max_environment_workers"] = compiled_bound
+                ctx.plan.resource_budget.to_metadata()["max_environment_workers"] = compiled_bound
                 lease["worker_capacity"] = capacity
                 with self.assertRaisesRegex(ValueError, "capacity"):
                     JavaMockBackend(lease).setup(ctx, target, Deadline(time.monotonic() + 1))

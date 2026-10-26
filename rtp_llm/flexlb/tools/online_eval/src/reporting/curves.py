@@ -41,7 +41,7 @@ def materialize(
     return result
 
 
-def project_panels(curves, presentation):
+def build_panels(curves, presentation):
     """Keep missing observations visible; configuration lines are added afterward."""
     panels = []
     for value in presentation.charts.panels:

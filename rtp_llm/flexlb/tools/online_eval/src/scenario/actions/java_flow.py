@@ -20,11 +20,12 @@ def _start_validate(params, plan):
 
 
 def _start(ctx, p, deadline):
-    if ctx.instance["environment"].get("master_test_control", False):
+    environment_config = ctx.plan.environment.to_dict()
+    if environment_config.get("master_test_control", False):
         from adapters.master_control import affinity_request
 
         initial = affinity_request(ctx, deadline)
-        expected = ctx.instance["environment"]["resolved_config"]["router"]["roles"]["prefill"]["cacheAffinity"]["maxExtraTtftMs"]
+        expected = environment_config["resolved_config"]["router"]["roles"]["prefill"]["cacheAffinity"]["maxExtraTtftMs"]
         if initial.get("maxExtraTtftMs") != expected:
             raise ValueError("unexpected initial affinity test policy")
         (ctx.artifact_dir / "master-test-control.json").write_text(json.dumps(initial, indent=2))
@@ -36,11 +37,11 @@ def _start(ctx, p, deadline):
         trace = materialize(
             directory.parent / (p["group_id"] + ".jsonl"),
             p["source"],
-            ctx.instance["id"] + ":" + p["group_id"],
-            Path(ctx.instance["source_path"]).parent,
+            ctx.plan.id + ":" + p["group_id"],
+            Path(ctx.plan.source_path).parent,
             max_requests=p.get("max_requests"),
         )
-    environment = p["client"]
+    client_settings = p["client"]
     client = ctx.services.environment.client_operations(p["jvm_xms"], p["jvm_xmx"])
     # This is a retained-evidence ceiling, not a prediction of Java scheduling.
     # The journal grows on demand and fails explicitly when the ceiling is exceeded.
@@ -53,7 +54,7 @@ def _start(ctx, p, deadline):
         phase_id=p["phase_id"],
         poll_s=p["poll_s"],
         max_events=event_budget,
-        collection_profile=ctx.instance.get("collection_profile", "request"),
+        collection_profile=ctx.plan.execution.collection or "request",
         monitor=getattr(ctx, "monitor", None),
     )
 
@@ -65,7 +66,7 @@ def _start(ctx, p, deadline):
     from adapters.resource_evidence import flow_evidence
 
     handle = ctx.register_resource("java_flow", flow, cleanup=cleanup, evidence=flow_evidence, request_stop=flow.request_stop)
-    flow.start(trace, environment, deadline, target=f"127.0.0.1:{ctx.env.master_http_port + 2}", priority=source_priority(p["source"]))
+    flow.start(trace, client_settings, deadline, target=f"127.0.0.1:{ctx.env.master_http_port + 2}", priority=source_priority(p["source"]))
     return StageOutput({"flow": handle}, artifacts=[str(directory / "flow-input.json")])
 
 

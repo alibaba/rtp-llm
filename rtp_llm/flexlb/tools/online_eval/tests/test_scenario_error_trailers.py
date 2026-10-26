@@ -9,9 +9,10 @@ from types import SimpleNamespace as NS
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 
 from adapters.rpc_error_evidence import error_trailer_evidence
+from context_fixtures import runtime_context
 from runtime_fixtures import Ops, Stream
 from scenario.request_batch import RequestBatch
-from scenario.runtime import Deadline, RuntimeContext
+from scenario.runtime import Deadline
 
 
 def details_type():
@@ -50,7 +51,7 @@ class ErrorTrailerTest(unittest.TestCase):
         for transport in ("INTERNAL", "CANCELLED"):
             with self.subTest(transport=transport), tempfile.TemporaryDirectory() as tmp:
                 raw = DETAILS(error_code=8430, error_message="victim").SerializeToString()
-                ctx = RuntimeContext({}, None, tmp, time.monotonic, time.sleep)
+                ctx = runtime_context({}, None, tmp, time.monotonic, time.sleep)
                 ctx.ops = Ops(batch=False)
                 ctx.ops.pb2.ErrorDetailsPB = DETAILS
                 ctx.ops.pb2_grpc.RpcServiceStub = lambda channel, raw=raw, transport=transport: NS(

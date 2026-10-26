@@ -5,8 +5,8 @@ from unittest.mock import Mock
 
 import pytest
 
+from context_fixtures import runtime_context
 from runtime.deadline import Deadline
-from scenario.context import RuntimeContext
 from scenario.measurement import WorkloadPolicy
 
 
@@ -20,7 +20,7 @@ def measured(tmp_path, monkeypatch):
     monkeypatch.setattr("monitoring.archive.export_metrics", lambda *args: store)
     monkeypatch.setattr("monitoring.metric_store.MetricStore.read", lambda *args: store)
     instance = dict(workload_runtime={"capture_metrics": False}, collection_profile="request", execution={"monitoring": {}})
-    ctx = RuntimeContext(instance, None, tmp_path, lambda: 0, lambda _: None)
+    ctx = runtime_context(instance, None, tmp_path, lambda: 0, lambda _: None)
     policy = WorkloadPolicy()
     policy.attach(ctx)
     result = dict(
@@ -61,7 +61,7 @@ def test_finalizer_metadata_is_json_valid(measured, monkeypatch, metadata):
 def test_expired_measurement_never_calls_case_projection(measured, monkeypatch):
     policy, ctx, snapshot, metrics = measured
     project = Mock()
-    monkeypatch.setattr(metrics, "project", project)
+    monkeypatch.setattr(metrics, "write_metrics", project)
     with pytest.raises(TimeoutError):
         policy.finalize(ctx, snapshot, Deadline(-1, lambda: 0))
     project.assert_not_called()

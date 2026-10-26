@@ -224,7 +224,7 @@ def produce_gates(directory):
 CONTRACTS = dict.fromkeys(("ha_gates", "ha_evidence"), metric_contract)
 
 
-def project(directory, selected, deadline):
+def write_metrics(directory, selected, deadline):
     if "ha_gates" in selected:
         deadline.check()
         produce_gates(directory)

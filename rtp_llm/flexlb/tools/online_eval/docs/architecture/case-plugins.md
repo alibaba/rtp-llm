@@ -52,7 +52,7 @@ YAML 声明环境、输入、阈值和视图；Python 定义步骤与业务算�
 
 `CASE.metrics` 指向所属 case 的指标模块。模块的 `CONTRACTS` 是来源 ID 到口径函数的声明索引，签名为 `describe(source_id, metric_id, calculation)`；它用于校验来源、单位、计算方法和实现出处，不分派执行函数。指标文件的 `producer` 字段保留为已有来源标识。
 
-最终遥测导出后，执行器直接调用 `project(directory, selected, deadline)`，将冻结门禁或阶段检查转换为已声明指标。需要整轮分析的模块可提供 `finalize(directory, analysis, selected, deadline)`；其输入是顶层只读、嵌套独立复制的快照，返回以已选择来源 ID 为键的 metadata，保留到兼容的 `producer_results` 字段。回调不得扩大本轮选中的指标集合，也不能覆盖执行检查或判定。
+最终遥测导出后，执行器直接调用 `write_metrics(directory, selected, deadline)`，将冻结门禁或阶段检查转换为已声明指标。需要整轮分析的模块可提供 `finalize(directory, analysis, selected, deadline)`；其输入是顶层只读、嵌套独立复制的快照，返回以已选择来源 ID 为键的 metadata，保留到兼容的 `producer_results` 字段。回调不得扩大本轮选中的指标集合，也不能覆盖执行检查或判定。
 
 统一的 `monitoring.publication.publish` 校验定义、序列身份、来源和实现口径，再更新 `MetricStore`。缺失来源不回退到其他文件或 debug API。指标和图表需求的选择发生在编译期，运行投影不能扩大采集计划。
 

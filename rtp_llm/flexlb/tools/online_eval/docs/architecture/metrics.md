@@ -137,7 +137,7 @@ calculation:
 
 只有 `sources` 展开为真实查询，`produced` 即使标为 `source_type: prometheus` 也不会新增查询。`export_metrics` 只转换已归档的查询结果并保留 producer 输出，不发起抓取。查询展开可用 `queries_for_targets` 核对，实际采集清单保存在 `telemetry/<epoch>/queries.json`；报告分类审计区分已展示、门禁证据及显式诊断指标，未分类指标报错。
 
-声明层的 `monitoring.contracts` 提供测量元数据校验和指标异常，`monitoring.measurement_contract` 校验调用方显式提供的输出契约，不执行 producer 或导入指标存储。case 指标模块负责收尾投影，`monitoring.publication` 接收所属 case 的 describe 函数，校验 producer 输出并附加实现来源。`MetricStore` 负责冻结存储、选择和归约，不解析注册能力。`monitoring.archive` 只将查询归档转换成完整的 `MetricStore`，校验成功后才通过 `file_io.write_json` 原子替换 `metrics.json`；转换失败保留上一份有效产物。报告通过 `MetricStore.project(anchor)` 直接读取带身份、标签、来源和相对时间的结构化序列，不从字符串键反解析身份。有效性检查与既有分析格式继续使用 `series(anchor)` 的映射视图，两者共享样本校验和时间转换。收尾只在 case 回调新增指标后刷新分析序列。
+声明层的 `monitoring.contracts` 提供测量元数据校验和指标异常，`monitoring.measurement_contract` 校验调用方显式提供的输出契约，不执行 producer 或导入指标存储。case 指标模块负责收尾投影，`monitoring.publication` 接收所属 case 的 describe 函数，校验 producer 输出并附加实现来源。`MetricStore` 负责冻结存储、选择和归约，不解析注册能力。`monitoring.archive` 只将查询归档转换成完整的 `MetricStore`，校验成功后才通过 `file_io.write_json` 原子替换 `metrics.json`；转换失败保留上一份有效产物。报告通过 `MetricStore.relative_series(anchor)` 直接读取带身份、标签、来源和相对时间的结构化序列，不从字符串键反解析身份。有效性检查与既有分析格式继续使用 `series(anchor)` 的映射视图，两者共享样本校验和时间转换。收尾只在 case 回调新增指标后刷新分析序列。
 
 新建 session 和展开查询时必须显式提供每个 target 的来源种类，不能通过实例名称猜测。旧归档缺少 `target_kinds` 时，名称推断仅保留在归档转换边界。`monitoring.client.PrometheusClient` 显式接收 URL、冻结计划、来源种类清单及最大采集间隔；清单与资源所有者共享，动态客户端注册后立即可查询。`monitoring.session` 管理进程、配置和资源注册，通过组合持有 `client`；调用方使用 `monitor.client` 读取 TSDB。动态 client 入口为 `add_client_target(s)`，不接受隐式的其他来源种类。
 

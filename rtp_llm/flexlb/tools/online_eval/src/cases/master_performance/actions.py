@@ -39,7 +39,7 @@ def provenance(ctx, flow):
 
 def observe(ctx, params, deadline):
     flow = ctx.resource(params["flow"], "java_flow")
-    criteria = effective_profile(params["criteria"], ctx.instance["profile"])
+    criteria = effective_profile(params["criteria"], ctx.plan.profile)
     # With no warmup the first observed state defines the window origin;
     # provenance/HTTP work must not create an uncovered gap before that sample.
     initial_state = initial_provenance = initial_error = None
@@ -57,7 +57,7 @@ def observe(ctx, params, deadline):
         "performance_evidence_schema_version",
         clock,
         criteria,
-        instance=ctx.instance["id"],
+        instance=ctx.plan.id,
         env_epoch=ctx.env_epoch,
         version=2,
         gate_input=params["gate_input"],

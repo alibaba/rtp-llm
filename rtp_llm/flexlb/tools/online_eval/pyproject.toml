@@ -13,7 +13,7 @@ skip-magic-trailing-comma = true
 select = ["F", "E9", "I", "Q", "B023", "B904", "SIM115"]
 
 [tool.mypy]
-files = ["."]
+files = ["src", "scripts", "tests", "*.py"]
 mypy_path = "$MYPY_CONFIG_FILE_DIR/src:$MYPY_CONFIG_FILE_DIR:$MYPY_CONFIG_FILE_DIR/tests"
 explicit_package_bases = true
 namespace_packages = true

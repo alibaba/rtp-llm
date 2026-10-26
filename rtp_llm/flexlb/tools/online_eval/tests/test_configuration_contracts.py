@@ -158,7 +158,9 @@ def test_origin_does_not_control_producer_execution_or_retention(tmp_path):
     case = registry.registry().cases["master_ha_failover"]
     from types import SimpleNamespace
 
-    metrics = SimpleNamespace(CONTRACTS=case.definition.metrics.CONTRACTS, project=case.definition.metrics.project, finalize=producer)
+    metrics = SimpleNamespace(
+        CONTRACTS=case.definition.metrics.CONTRACTS, write_metrics=case.definition.metrics.write_metrics, finalize=producer
+    )
     changed = replace(case, definition=replace(case.definition, metrics=metrics))
     with patch.object(registry, "_snapshot", snapshot(changed, include_existing=True)):
         produce(tmp_path / "ha", {})

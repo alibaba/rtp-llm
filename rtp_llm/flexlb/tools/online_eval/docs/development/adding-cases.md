@@ -223,7 +223,7 @@ Prometheus 优先适用于监控指标；请求是否完成、RPC 是否符合�
 
 `CASE.actions` 声明所属能力；单次运行的分析参数由所属 program 校验。指标用 `case.metric(id, ...)` 声明所有门禁及 producer 的采样输入依赖，编译检查 ID、单位与身份标签。采集清单来自这些依赖、报告曲线与显式诊断项的并集；目录中无人消费的能力不采集，不能靠 producer 运行时加载整份 plan 扩大清单。复杂指标的口径与投影由 `CASE.metrics` 指向的模块维护；定义数据放在 `config/monitoring/`，规则见[指标配置](../../config/monitoring/README.md)。
 
-指标口径由 case 的 `metrics.CONTRACTS` 声明，`CASE.metrics` 指向所属指标模块。执行器在证据冻结后直接调用 `project(directory, selected, deadline)`；需要依赖整轮分析的模块还可提供 `finalize(directory, analysis, selected, deadline)`，返回以已选择来源 ID 为键的诊断 metadata。指标发布继续使用统一的 `monitoring.publication.publish`，逐项校验定义、身份和来源。
+指标口径由 case 的 `metrics.CONTRACTS` 声明，`CASE.metrics` 指向所属指标模块。执行器在证据冻结后直接调用 `write_metrics(directory, selected, deadline)`；需要依赖整轮分析的模块还可提供 `finalize(directory, analysis, selected, deadline)`，返回以已选择来源 ID 为键的诊断 metadata。指标发布继续使用统一的 `monitoring.publication.publish`，逐项校验定义、身份和来源。
 
 
 注册接口的参数契约定义在 `scenario.contracts`，发现阶段检查可调用参数，不执行能力函数：

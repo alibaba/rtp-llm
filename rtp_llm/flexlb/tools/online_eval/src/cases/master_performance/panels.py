@@ -1,7 +1,7 @@
 """Selectable request and archived Prometheus views; never affect gate decisions."""
 
 from monitoring.metric_store import MetricStore
-from reporting.curves import materialize, project_panels
+from reporting.curves import build_panels, materialize
 from reporting.gate_lines import Threshold, apply_gate_lines
 
 
@@ -31,7 +31,7 @@ def prepare_curves(directory, evidence, presentation):
     inventory = monitoring_audit(store, presentation)
     from reporting.metric_binding import bindings
 
-    rows, gaps, errors = store.project(lo / 1000)
+    rows, gaps, errors = store.relative_series(lo / 1000)
     for row in rows:
         if row["metric_id"].startswith("request/"):
             for curve_id, _ in bindings(presentation, row["metric_id"], row["labels"]):
@@ -70,4 +70,4 @@ def report_panels(curves, criteria, presentation):
         metric: Threshold(floors[metric], 0, duration) if metric in floors else None
         for metric in ("mock/rtp_llm_context_tps", "mock/rtp_llm_context_tps_with_cache", "mock/mock_decode_wall_tps")
     }
-    return apply_gate_lines(project_panels(curves, presentation), presentation, thresholds)
+    return apply_gate_lines(build_panels(curves, presentation), presentation, thresholds)

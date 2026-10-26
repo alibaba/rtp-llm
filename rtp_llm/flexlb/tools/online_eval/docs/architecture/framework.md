@@ -46,7 +46,7 @@ case analysis/report     明确判定后装配 HTML bundle
 | 实验归档 manifest / 请求计划 manifest | `archive_manifest_schema_version` / `request_plan_manifest_schema_version` | 1 |
 | Master 模板 / 流量保真度分析 | `master_template_schema_version` / `traffic_fidelity_schema_version` | 1 |
 
-case YAML 默认调用 Python 的 `default` 构建器，生成 `ProgramPlan`、`VariantPlan` 和 `StageDefinition`。编译器校验引用与资源约束，直接生成 `CompiledInstance` 和 `StagePlan`；内存程序对象不定义文件格式或版本。落盘读取方校验本格式的版本字段及整数类型，拒绝其他格式或旧通用版本字段，不能根据文件名或版本数字猜测格式。报告生产器组装的内存图表可以暂不带版本字段，由 bundle 写入器明确标记；落盘文件和离线读取必须带有相应字段。
+case YAML 默认调用 Python 的 `default` 构建器，生成 `Program`、`Variant` 和 `StageDefinition`。编译器校验引用与资源约束，直接生成 `CompiledInstance` 和 `StagePlan`；内存程序对象不定义文件格式或版本。落盘读取方校验本格式的版本字段及整数类型，拒绝其他格式或旧通用版本字段，不能根据文件名或版本数字猜测格式。报告生产器组装的内存图表可以暂不带版本字段，由 bundle 写入器明确标记；落盘文件和离线读取必须带有相应字段。
 
 真实采集输入、固定合成流量 profile 及 Java 共享性能 / 流控协议保留它们原有的 `schema_version`，由相应协议读取器校验，不进入 case、执行计划、指标和报告的读取边界。它们的语义与准入见[数据目录](../../data/README.md)。调整这类字段需要同步固定输入及协议双方。
 
@@ -56,7 +56,7 @@ case YAML 默认调用 Python 的 `default` 构建器，生成 `ProgramPlan`、`
 
 编译按 document、variant、profile 三层展开，读取声明、preset 和实现源码，但不启动服务。环境声明与标量合同由 `environment_declaration` 维护，Master patch 由 `master_patch` 校验，preset、profile 渲染、偏离检查和快照冻结由 `environment_resolver` 负责。
 
-`ProgramPlan.implementation` 携带实现与配置来源，实例编译和冻结计划序列化保留该信息。编译后的 `metadata.kind` 与 `execution` 是执行策略的来源，`test_kind`、`collection_profile`、`workload_runtime` 是 plan 生成并复核的一致性投影。suite 只选择实例，不补齐执行策略。
+`Program.implementation` 携带实现与配置来源，实例编译和冻结计划序列化保留该信息。编译后的 `metadata.kind` 与 `execution` 是执行策略的来源，`test_kind`、`collection_profile`、`workload_runtime` 只在文件输出时生成并在读取时复核。suite 只选择实例，不补齐执行策略。
 
 端口窗口准入、探测与锁由 `adapters.port_windows` 提供。`admit_port_window()` 返回包含选定端口、来源、逐 lane 状态、诊断及锁所有权的 `PortAdmission`，不改写参数或进程环境，不打印或退出。父编排器在上下文作用域内持有窗口锁与输出锁，规划失败、执行失败和正常返回都释放所有权；子进程端口环境从选定租约生成。命令入口负责准入错误的退出码和诊断。子结果的身份和嵌套证据由 `scenario.result_validation` 复核，耗时缓存由 `scenario.timing_store` 维护。编译、冻结计划读取、lease 校验与父进程结果接收各自保留边界校验，共享字段和参数规则。
 
@@ -80,7 +80,7 @@ case YAML 默认调用 Python 的 `default` 构建器，生成 `ProgramPlan`、`
 
 运行底座只依赖标准库和包内机制。`runtime.network` 提供通用 HTTP 传输和端口探测，Master 的 info、inflight 控制路由由 `adapters.master_control.master_url` 统一定义。具体客户端等待调用 `runtime.startup.wait_ready`，协议状态与进程退出码由 `adapters.flow_control.wait_flow_started` 解释；`artifacts.startup.startup_phase` 使用同一 deadline 保存启动耗时。`runtime.resource_plan` 检查通用端口区间，`adapters.java_mock_resources` 定义 Java mock 的保留端口、累计扩容容量、子进程环境及租约投影。
 
-集中归属不合并职责。`analysis.py` 根据显式输入计算，不访问网络、进程或报告；`actions.py` 操作现场并取证；`metrics.py` 发布声明的指标；`report.py` 展示既定结论，不能隐式重判。门禁动作先冻结独立 result 和校验 manifest，再返回共用的 `CheckResult`。数值投影在最终遥测导出后执行，报告在统一的 renderer 阶段生成一次，不重新裁决或改写冻结判定。bundle 写入器在写入任何文件前校验图表，内部渲染复用该校验结果；公开离线 renderer 仍独立校验输入，bundle 读取仍校验格式与摘要。附件名称和内容在写入前一次准入，发布时保留与归档证据文件的冲突检查。
+集中归属不合并职责。`analysis.py` 根据显式输入计算，不访问网络、进程或报告；`actions.py` 操作现场并取证；`metrics.py` 发布声明的指标；`report.py` 展示既定结论，不能隐式重判。门禁动作先冻结独立 result 和校验 manifest，再返回共用的 `CheckResult`。指标生成在最终遥测导出后执行，报告在统一的 renderer 阶段生成一次，不重新裁决或改写冻结判定。bundle 写入器在写入任何文件前校验图表，内部渲染复用该校验结果；公开离线 renderer 仍独立校验输入，bundle 读取仍校验格式与摘要。附件名称和内容在写入前一次准入，发布时保留与归档证据文件的冲突检查。
 
 采集质量由 `monitoring.quality.CollectionQuality` 统一表示，问题记录区分预期故障缺口、可容忍短缺口、致命缺口、可选诊断、完整性错误与缺失来源。有效性、完整性和兼容的报告字段从同一对象派生，不单独维护多份判定状态。`scenario.measurement` 将冻结指标与执行快照组合为分析输入；`reporting` 只装配和展示既定结论。
 
@@ -104,7 +104,7 @@ case YAML 默认调用 Python 的 `default` 构建器，生成 `ProgramPlan`、`
 
 ## 现场观测与冻结证据
 
-持续时间和轮询由阶段的单调时钟控制；epoch 秒用于关联客户端流水和 Prometheus。`RuntimeContext.start_observation` 记录观测开始事件，并把两种时钟的锚点交给 `runtime.observation.ObservationClock`；样本传入当前单调时间，用同一锚点加时间差生成 `epoch_s`、`monotonic_s`、`elapsed_s`。已有证据中的毫秒字段与相对 `t` 是格式投影，不形成第二个时钟来源。
+持续时间和轮询由阶段的单调时钟控制；epoch 秒用于关联客户端流水和 Prometheus。`RuntimeContext.start_observation` 记录观测开始事件，并把两种时钟的锚点交给 `runtime.observation.ObservationClock`；样本传入当前单调时间，用同一锚点加时间差生成 `epoch_s`、`monotonic_s`、`elapsed_s`。已有证据中的毫秒字段与相对 `t` 是格式转换，不形成第二个时钟来源。
 
 `RuntimeContext.record_event` 是事件时间的权威记录。证据内事件保存同一记录及相对时间投影，供独立离线重判；stage 的起止记录描述执行生命周期，不能代替采样点或业务事件。具名窗口声明负责边界，测量实现负责 cohort 与统计口径。
 
@@ -114,7 +114,7 @@ case YAML 默认调用 Python 的 `default` 构建器，生成 `ProgramPlan`、`
 
 `run_provenance.collect` 收集实际环境代次的启动输入；门禁复用其严格获取路径并冻结业务源码摘要。`adapters.java_flow.evidence_environment` 定义可比较客户端环境中的 run-local 字段排除规则。源文件位置变化只改变摘要，不改变历史证据的重判口径。
 
-停止发流和排空由 program 显式编排；门禁仅读取所声明的测量证据，全量 Prometheus 查询归档由采集器清理统一完成，公共 finalize 物化指标一次；门禁 handler 保存判定，最终归档后投影指标，再由注册 renderer 生成报告。采集或归档失败保留为 errors，产生 INVALID/ERROR；分析或判定保存异常成为 stage ERROR，报告交付错误单独记录。门禁证据句柄使用 `gate_evidence`，与基础快照分开；historical 表示可以显式读取旧环境证据，默认读取仍拒绝环境换代。功能程序没有持续采样需求时不创建空观测组件。
+停止发流和排空由 program 显式编排；门禁仅读取所声明的测量证据，全量 Prometheus 查询归档由采集器清理统一完成，公共 finalize 物化指标一次；门禁 handler 保存判定，最终归档后生成指标，再由注册 renderer 生成报告。采集或归档失败保留为 errors，产生 INVALID/ERROR；分析或判定保存异常成为 stage ERROR，报告交付错误单独记录。门禁证据句柄使用 `gate_evidence`，与基础快照分开；historical 表示可以显式读取旧环境证据，默认读取仍拒绝环境换代。功能程序没有持续采样需求时不创建空观测组件。
 
 跨阶段后台工作由 context 登记的资源对象持有，action 只负责参数校验、登记、调用与输出。客户端启动、finish、证据快照与 cleanup 使用同一对象，不另外包装第二套生命周期。Java 发流控制复用 `adapters.flow_control` 的原子命令、身份校验和排空计数；发现方式及业务证据校验留在所属能力。独立资源的清理复用 `cleanup_all`，启动失败与清理失败同时存在时保留启动错误及其原因链。
 
@@ -140,11 +140,11 @@ Java 流量控制使用 `FlowState`、`FlowStatus`、`StopCommand` 和 `DrainRes
 
 监控默认值、数值规则和预算名称由 `scenario.execution_policy` 单点维护；声明允许省略预算，有效计划要求完整预算，两个准入边界调用同一校验器。数据型 case YAML 在入口解码为 `CaseDeclaration`、`VariantDeclaration`、`ExecutionPolicy` 和 `MonitoringPolicy`。case 的业务参数由所属程序校验，公共构建层不通过任意模块属性寻找入口。`CaseDefinition` 声明全部能力，注册器按目录发现并校验冲突。输入由 `InputSchema` 单点声明字段和数值规则，递归验证已声明对象；部分对象的额外字段通过 `open_objects` 显式交给所属业务解析器验证。编译器应用 YAML 收紧约束后解析为 `case.config`。一次编译共享已验证的指标计划和不可变视图，指标字典返回独立副本；编译成功或失败退出后缓存均销毁，不跨运行复用。case 显式调用分析和冻结函数；`CASE.metrics` 指向普通指标模块，视图由 `CASE.report_views` 声明。
 
-环境覆盖通过统一规则合并：配置字段整体替换，profile 按名称及字段继承，列表与完整模型整体替换。编译阶段将最终 Master JSON、preset 性能数据及运行选项冻结为带 SHA 的 `EnvironmentSnapshot`。运行时使用冻结数据投影进程参数，不重新读取 preset 或应用配置默认值。
+环境覆盖通过统一规则合并：配置字段整体替换，profile 按名称及字段继承，列表与完整模型整体替换。编译阶段将最终 Master JSON、preset 性能数据及运行选项冻结为带 SHA 的 `EnvironmentSnapshot`。运行时使用确定的数据生成进程参数，不重新读取 preset 或应用配置默认值。
 
 ## 执行领域对象与序列化边界
 
-`ScenarioCompiler.compile()` 返回不可变的 `CompiledInstance`，其中阶段为 `StagePlan`，公共请求、句柄引用和比较参数分别使用具体参数类型。实例的 metadata、implementation、reports 和 reporting 为具名字段，不在进程内编码成 JSON 字符串。`metadata.kind` 与 `execution` 为策略唯一来源；兼容的 test_kind、collection_profile 和 workload_runtime 只在外部投影生成。编译与冻结文件读取共用阶段生命周期及引用遍历规则，各自保留准入校验。`ExecutionPlan` 组合实例与依赖摘要，`ExecutionPlanCodec` 负责落盘、完整性验证和领域解码。摘要一致之外，加载时还检查身份、预算、资源范围和环境快照的一致性。`compile_scenarios()`、`freeze_plan()` 和 `load_plan()` 是清单及文件格式的投影入口，不作为运行时状态容器。
+`ScenarioCompiler.compile()` 返回不可变的 `CompiledInstance`，其中阶段为 `StagePlan`，公共请求、句柄引用和比较参数分别使用具体参数类型。实例的 metadata、implementation、reports 和 reporting 为具名字段，不在进程内编码成 JSON 字符串。`metadata.kind` 与 `execution` 为策略唯一来源；兼容的 test_kind、collection_profile 和 workload_runtime 只在文件序列化时生成。编译与冻结文件读取共用阶段生命周期及引用遍历规则，各自保留准入校验。`RuntimeContext.plan` 直接持有 `CompiledInstance`，阶段回调直接接收 `StagePlan`，不维护整份运行字典副本。计划文件由 `ExecutionPlanCodec` 写入实例列表与依赖摘要，读取后直接返回实例列表，不额外包装。摘要一致之外，加载时还检查身份、预算、资源范围和环境快照的一致性。`compile_scenarios()`、`freeze_plan()` 和 `load_plan()` 用于清单输出和计划文件读写，不作为运行时状态容器。
 
 `ScenarioRunner.run()` 接收编译实例并返回 `RunResult`。`StageExecutor` 返回 `StageExecutionSummary`，阶段、清理和交付状态具有独立的结果类型。`RunOutcome.evaluate()` 使用 `OutcomeEvidence` 统一判定执行、gate、有效性和交付；报告失败不重写阶段检查。`RunFinalizer` 在证据和报告各自的 deadline 内调用适配器，并在阶段开始、完成或失败时保存检查点。
 
@@ -152,7 +152,7 @@ Java 流量控制使用 `FlowState`、`FlowStatus`、`StopCommand` 和 `DrainRes
 
 case action 保留自身参数和输出的所有权。公共 core action 使用具体参数对象；扩展 action 的冻结传输由 `AdapterParameters` 承载，在进入注册适配器时转换为该适配器的参数格式。报告视图、来源信息和扩展证据作为序列化边界数据保存，不通过公共层识别某个 case 的字段名。
 
-`ClientConfiguration` 是客户端意图的类型化对象，映射输入在准入边界解析，Java flow 内部持有该对象并直接投影环境变量。子进程边界仍校验运行时字段与配置字段的冲突；优先级继续由流量来源提供。
+`ClientConfiguration` 是客户端意图的类型化对象，映射输入在准入边界解析，Java flow 内部持有该对象并直接生成环境变量。子进程边界仍校验运行时字段与配置字段的冲突；优先级继续由流量来源提供。
 
 回放配置由 `PlaybackConfiguration` 表达，`PlaybackConfigurationCodec` 校验 uniform/true-ts、圈数和请求身份策略。`normalize()` 生成 Java 环境变量；Java 客户端控制发送与循环，发送端的 `PLAYBACK_V1` 快照用于离线重建和一致性验证。
 

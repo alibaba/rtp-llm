@@ -346,13 +346,3 @@ class CompiledInstance:
             if value is not None:
                 result[key] = list(value) if key == "reports" else value.to_dict()
         return result
-
-
-@dataclass(frozen=True)
-class ExecutionPlan:
-    instances: tuple[CompiledInstance, ...]
-    dependencies: tuple[tuple[str, str], ...]
-
-    def __post_init__(self):
-        if not self.instances or len({instance.id for instance in self.instances}) != len(self.instances):
-            raise ScenarioError("execution plan requires unique compiled instances")

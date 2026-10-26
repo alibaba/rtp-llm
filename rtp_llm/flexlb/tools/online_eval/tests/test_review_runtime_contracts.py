@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from context_fixtures import runtime_context
 from monitoring.contracts import MetricContractError, MetricUnavailable
 from monitoring.metric_store import MetricStore
 from runtime.cleanup import stop_process
@@ -153,7 +154,6 @@ def test_live_zero_warmup_starts_with_a_real_covered_sample(tmp_path):
 
     from cases.master_performance.actions import observe
     from metric_fixtures import performance_evidence as evidence
-    from scenario.context import RuntimeContext
 
     now = [1.0]
 
@@ -162,7 +162,7 @@ def test_live_zero_warmup_starts_with_a_real_covered_sample(tmp_path):
         return dict(state="SENDING", process_returncode=None)
 
     flow = SimpleNamespace(control_status=status)
-    ctx = RuntimeContext(
+    ctx = runtime_context(
         dict(id="performance", profile="single-nonbatch"),
         None,
         tmp_path,

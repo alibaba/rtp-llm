@@ -80,14 +80,14 @@ def _summary_panels(data: dict, rows: list[dict], spec: dict, variant: str) -> l
 
 def _metric_panels(presentation, store, variant: str, origin: float) -> list[dict]:
     """Project archived metrics using the selected YAML variant."""
-    from reporting.curves import materialize, project_panels
+    from reporting.curves import build_panels, materialize
 
     curves = [
         materialize(key, style, row["points"], origin=origin, labels=row["labels"], provenance=row["provenance"])
         for key, style in presentation.charts.curves.items()
         for row in store.document["metrics"].get(style.metric_id, [])
     ]
-    return [panel for panel in project_panels(curves, presentation) if panel["id"].startswith(variant + "-")]
+    return [panel for panel in build_panels(curves, presentation) if panel["id"].startswith(variant + "-")]
 
 
 def compact_report_spec(data, original, *, presentation=None, store=None):

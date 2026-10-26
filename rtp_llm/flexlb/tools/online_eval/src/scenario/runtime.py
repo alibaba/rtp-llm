@@ -28,8 +28,7 @@ class ScenarioRunner:
         policy=None,
     ) -> RunResult:
         plan = CompiledInstance.read(instance)
-        ctx = RuntimeContext(plan.to_dict(), backend, artifact_dir, clock, sleeper, enforce_deadlines)
-        ctx.plan = plan
+        ctx = RuntimeContext(plan, backend, artifact_dir, clock, sleeper, enforce_deadlines)
         ctx.artifact_dir.mkdir(parents=True, exist_ok=True)
         from file_io import write_json
         from reporting.view_config import DEFAULT_VIEW
@@ -40,8 +39,8 @@ class ScenarioRunner:
             experiment_definition_schema_version=1,
             plan=plan.to_dict(),
             dependencies=dependency_files([plan]),
-            views={name: view(name).to_dict() for name in dict.fromkeys([DEFAULT_VIEW, *ctx.instance.get("reports", [])])}
-            if ctx.instance["metadata"]["kind"] == "workload"
+            views={name: view(name).to_dict() for name in dict.fromkeys([DEFAULT_VIEW, *(plan.reports or ())])}
+            if plan.metadata.to_dict()["kind"] == "workload"
             else {},
         )
         write_json(ctx.artifact_dir / "experiment-definition.json", ctx.experiment_definition)

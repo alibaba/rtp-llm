@@ -152,7 +152,7 @@ class CacheGateTest(unittest.TestCase):
         self.assertTrue(all("presets" not in p for p in spec["panels"]))
 
     def test_split_panels_keep_metric_values_and_missing_annotations(self):
-        from reporting.curves import project_panels
+        from reporting.curves import build_panels
 
         names = ["P cache hit ratio", "P engine count", "Client sent QPS", "Client success QPS", "Client error QPS", "P Waiting / engine"]
         metric_ids = [
@@ -173,7 +173,7 @@ class CacheGateTest(unittest.TestCase):
             )
             for metric_id, name in zip(metric_ids, names)
         ]
-        panels = project_panels(curves, view("cache_scale_in.yaml"))
+        panels = build_panels(curves, view("cache_scale_in.yaml"))
         self.assertEqual([s["name"] for s in panels[0]["series"]], names[:2])
         self.assertEqual([s["name"] for s in panels[1]["series"]], names[2:5] + names[1:2])
         self.assertEqual([s["name"] for s in panels[2]["series"]], ["P Waiting / engine", "P engine count"])
@@ -183,7 +183,7 @@ class CacheGateTest(unittest.TestCase):
         for panel, axis in zip(panels, ("ratio", "qps")):
             self.assertEqual("left", panel["axes"][axis]["position"])
             self.assertEqual("right", panel["axes"]["count"]["position"])
-        sparse = project_panels(curves[:2], view("cache_scale_in.yaml"))
+        sparse = build_panels(curves[:2], view("cache_scale_in.yaml"))
         self.assertIn("Client error QPS", sparse[1]["caption"])
 
     def test_status_reporting_is_observation_only(self):

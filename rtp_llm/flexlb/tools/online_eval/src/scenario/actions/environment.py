@@ -82,7 +82,7 @@ def _begin(ctx):
 def reconfigure(ctx, params, deadline):
     _close(ctx, deadline)
     _begin(ctx)
-    plan = params["environments"][ctx.instance["profile"]]
+    plan = params["environments"][ctx.plan.profile]
     ctx.env, ctx.ops = ctx.backend.setup(ctx, plan, deadline)
     return StageOutput({"environment": ctx.register_resource("environment", ctx.env)})
 
@@ -90,7 +90,7 @@ def reconfigure(ctx, params, deadline):
 def startup_probe(ctx, params, deadline):
     _close(ctx, deadline)
     _begin(ctx)
-    plan = params["environments"][ctx.instance["profile"]]
+    plan = params["environments"][ctx.plan.profile]
     raw_config = mutate_config(plan["resolved_config"], params["mutation"])
     observation = dict(env_epoch=ctx.env_epoch, mutation=params["mutation"], raw_config=raw_config)
     path = ctx.artifact_dir / f"startup-probe-{ctx.env_epoch}.json"

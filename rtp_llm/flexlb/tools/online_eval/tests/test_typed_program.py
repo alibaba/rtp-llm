@@ -14,7 +14,7 @@ from scenario.contracts import StageHandler
 from scenario.execution_plan import freeze_plan, load_plan
 from scenario.loader import load_scenarios
 from scenario.plan import CompiledInstance, EnvironmentPlan, StagePlan
-from scenario.program import ProgramPlan, StageDefinition, VariantPlan
+from scenario.program import Program, StageDefinition, Variant
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -78,8 +78,8 @@ def test_builder_returns_typed_isolated_steps_and_keeps_observation_purpose():
 def test_real_case_builds_typed_program_and_compiles_without_dictionary_decoders(tmp_path):
     documents = load_scenarios(ROOT / "config/scenarios/request_completion.yaml")
     program = documents[0][1]
-    assert isinstance(program, ProgramPlan)
-    assert all(isinstance(variant, VariantPlan) for variant in program.variants)
+    assert isinstance(program, Program)
+    assert all(isinstance(variant, Variant) for variant in program.variants)
     with (
         patch.object(CompiledInstance, "read", side_effect=AssertionError("instance roundtrip")),
         patch.object(StagePlan, "read", side_effect=AssertionError("stage roundtrip")),
@@ -107,7 +107,7 @@ def test_adapter_payload_references_are_checked_before_publishing_current_output
 
 
 def test_raw_internal_documents_are_not_a_compiler_input():
-    with pytest.raises(DocumentError, match="expected ProgramPlan"):
+    with pytest.raises(DocumentError, match="expected Program"):
         ScenarioCompiler().compile([("fixture", {"id": "example", "stages": []})])
 
 

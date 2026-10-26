@@ -18,7 +18,7 @@ def _core_action(action, ctx, params, deadline):
     if action == "setup":
         ctx.env_epoch += 1
         ctx.add_cleanup("environment", lambda d: ctx.backend.teardown(ctx, d))
-        ctx.env, ctx.ops = ctx.backend.setup(ctx, ctx.environment_plan.to_dict(), deadline)
+        ctx.env, ctx.ops = ctx.backend.setup(ctx, ctx.plan.environment.to_dict(), deadline)
         handle = ctx.register_resource("environment", ctx.env)
         return StageOutput({"environment": handle})
     if action == "request":
@@ -99,7 +99,7 @@ class StageExecutor:
                     action = spec.action
                     with interruptible(deadline, enforce_deadlines):
                         if _policy is not None:
-                            _policy.before_stage(ctx, spec.to_dict())
+                            _policy.before_stage(ctx, spec)
                         deadline.check()
                         if action in handlers:
                             descriptor = handlers[action]
@@ -132,10 +132,10 @@ class StageExecutor:
                             if row.status != StageStatus.ERROR:
                                 row.status = StageStatus.FAIL
                                 terminal_status = "FAIL"
-                                blocked = blocked or not (_policy is not None and _policy.continue_after_failure(spec.to_dict()))
+                                blocked = blocked or not (_policy is not None and _policy.continue_after_failure(spec))
                     if _policy is not None:
                         with interruptible(deadline, enforce_deadlines):
-                            _policy.after_stage(ctx, spec.to_dict(), row.to_dict())
+                            _policy.after_stage(ctx, spec, row.to_dict())
                             deadline.check()
                     # Known findings do not prevent additional independent checks.
                 except Exception as exc:

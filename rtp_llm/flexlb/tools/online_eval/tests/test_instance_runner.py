@@ -157,7 +157,7 @@ class FixtureBackend:
 backend.JavaMockBackend = FixtureBackend
 def validate(params, plan): return params
 def evaluate(ctx, params, deadline):
-    grade = ctx.instance['grade']
+    grade = ctx.plan.grade
     status = 'FAIL' if grade == 'strict' else 'PASS'
     return StageOutput({'observed': grade}, [CheckResult('selected', status, actual=grade)])
 child.handlers = lambda: {'grade_probe': StageHandler('grade_probe', validate, evaluate, {'observed': 'string'}, checks=frozenset({'selected'}))}

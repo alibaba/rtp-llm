@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from cases.cache_scale_in.actions import observe
+from context_fixtures import plan
 from file_io import read_json
 
 
@@ -78,7 +79,7 @@ def test_scale_observation_keeps_evidence_and_joins_removals(tmp_path, monkeypat
     )
     ctx = SimpleNamespace(
         artifact_dir=tmp_path,
-        instance={"id": "scale"},
+        plan=plan({"id": "scale"}),
         env_epoch=1,
         monitor=None,
         ops=None,

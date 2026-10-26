@@ -11,6 +11,7 @@ import pytest
 
 from adapters.master_artifact import configure_master
 from artifacts.provenance import gate_provenance
+from context_fixtures import plan
 
 
 @pytest.mark.parametrize("missing", [None, "master-artifact.json", "actual-master-config.json", "perf.json"])
@@ -34,7 +35,7 @@ def test_gate_provenance_consumes_launch_outputs_and_rejects_missing_observed_in
     (tmp_path / "flow-input.json").write_text('{"environment":{"QPS":"10"}}')
     flow = SimpleNamespace(directory=tmp_path, trace_manifest=dict(path=str(trace), sha256=hashlib.sha256(trace.read_bytes()).hexdigest()))
     ctx = SimpleNamespace(
-        artifact_dir=tmp_path, env=env, env_epoch=1, instance=dict(id="run", implementation=dict(configuration_sha256="a" * 64))
+        artifact_dir=tmp_path, env=env, env_epoch=1, plan=plan(dict(id="run", implementation=dict(configuration_sha256="a" * 64)))
     )
     if missing:
         (tmp_path / missing).unlink()

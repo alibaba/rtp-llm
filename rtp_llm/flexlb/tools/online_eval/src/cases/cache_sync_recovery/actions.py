@@ -91,7 +91,7 @@ class _CacheRecoverySession:
         self.evidence = dict(
             intervention=self.intervention,
             parameters=copy.deepcopy(self.params),
-            environment=self.ctx.instance["environment"],
+            environment=self.ctx.plan.environment.to_dict(),
             events=[],
             intensity={},
             frames=[],
@@ -228,7 +228,7 @@ class _CacheRecoverySession:
             self.directory / "traffic.jsonl",
             self.traffic["source"],
             "cache-sync-shared-background",
-            Path(self.ctx.instance["source_path"]).parent,
+            Path(self.ctx.plan.source_path).parent,
             max_requests=int(self.traffic["client"]["playback"]["duration_s"] * self.traffic["client"]["playback"]["qps"] * 1.02),
         )
         initial_until = self.ctx.clock() + 60

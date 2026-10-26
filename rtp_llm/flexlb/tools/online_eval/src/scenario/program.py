@@ -18,7 +18,7 @@ class StageDefinition:
 
 
 @dataclass(frozen=True)
-class VariantPlan:
+class Variant:
     id: str
     stages: tuple[StageDefinition, ...]
     profiles: Optional[tuple[str, ...]] = None
@@ -33,12 +33,12 @@ class VariantPlan:
 
 
 @dataclass(frozen=True)
-class ProgramPlan:
+class Program:
     id: str
     description: str
     category: str
     environment: dict
-    variants: tuple[VariantPlan, ...]
+    variants: tuple[Variant, ...]
     profiles: tuple[str, ...] = tuple(PROFILES)
     implementation: dict = field(default_factory=dict)
     execution: dict = field(default_factory=dict)

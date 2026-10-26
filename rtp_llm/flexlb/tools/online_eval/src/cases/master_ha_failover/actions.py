@@ -90,9 +90,9 @@ def _ha_start(ctx, params, deadline):
             timeout_ms=params["timeout_ms"],
             enable_fallback=params["fallback"],
             live_events=params["live_events"],
-            collection_profile=ctx.instance.get("collection_profile", "request"),
+            collection_profile=ctx.plan.execution.collection or "request",
             source=params["source"],
-            source_dir=(Path(ctx.instance["source_path"]).parent),
+            source_dir=(Path(ctx.plan.source_path).parent),
             max_requests=params.get("max_requests"),
             loop=params["loop"],
             **({"replay_speed": params["replay_speed"]} if "replay_speed" in params else {}),
@@ -223,7 +223,7 @@ def _client_check(ctx, params, deadline, rows=None):
         actual,
         params["op"],
         params["expected"],
-        advisory=bool(params.get("warning_profiles")) and ctx.instance["profile"] in params["warning_profiles"],
+        advisory=bool(params.get("warning_profiles")) and ctx.plan.profile in params["warning_profiles"],
         evidence=dict(
             metric=params["metric"],
             op=params["op"],
@@ -240,7 +240,7 @@ def _client_check(ctx, params, deadline, rows=None):
 
         logging.getLogger(__name__).warning(
             "HA advisory criterion: profile=%s metric=%s actual=%s expected=%s samples=%s",
-            ctx.instance["profile"],
+            ctx.plan.profile,
             metric,
             actual,
             params["expected"],

@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
+from context_fixtures import runtime_context
 from environment_expectations import configuration
 from flexlb_cfg import render_env
 from program_fixtures import compile_scenarios
@@ -18,7 +19,7 @@ from scenario.backend import JavaMockBackend
 from scenario.catalog import handlers
 from scenario.contracts import PlanContext
 from scenario.environment_config import environment
-from scenario.runtime import Deadline, RuntimeContext
+from scenario.runtime import Deadline
 from scenario.stage_execution import _core_action
 
 PROFILE = "single-nonbatch"
@@ -53,7 +54,7 @@ class EnvironmentTest(unittest.TestCase):
         self.raw_env = {"n_prefill": 1, "n_decode": 4, "config_overrides": {"ordering": "priority"}}
         self.plan = PlanContext("test", {}, self.raw_env, (PROFILE,))
         self.backend = FakeBackend()
-        self.ctx = RuntimeContext(
+        self.ctx = runtime_context(
             {"profile": PROFILE, "environment": environment(self.raw_env, "test", PROFILE)},
             self.backend,
             self.tmp.name,
@@ -155,7 +156,7 @@ class EnvironmentTest(unittest.TestCase):
     def test_backend_epochs_keep_configuration_artifacts(self):
         backend = JavaMockBackend(lease_manifest())
         self.ctx.backend = backend
-        self.ctx.instance["resource_budget"] = {"max_dynamic_additions": 0, "initial_workers": 5}
+        self.ctx.plan.resource_budget.to_metadata().update(max_dynamic_additions=0, initial_workers=5)
         env = NS(base_grpc_port=55000, master_http_port=28000, master_management_port=28001, mock_http_port=54999)
         with patch("adapters.environment.EnvManager.ensure", return_value=env) as ensure, patch("adapters.engine_ops.EngineOps"):
             self.ctx.env_epoch = 1

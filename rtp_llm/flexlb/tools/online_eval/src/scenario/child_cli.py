@@ -17,6 +17,7 @@ from scenario import ScenarioError, compile_scenarios, load_scenarios
 from scenario.catalog import handlers
 from scenario.compiler import plan_counts
 from scenario.lease import validate_lease
+from scenario.plan import CompiledInstance
 from scenario.selection_cli import add_selection_arguments, resolve_selection
 from scenario.suites import classify, exact_documents, preselect_documents
 
@@ -70,7 +71,7 @@ def select(plans, exact_ids):
             raise ScenarioError("no matching instances")
         return plans
     ids = exact_ids.split(",")
-    known = {plan["id"]: plan for plan in plans}
+    known = {plan.id if isinstance(plan, CompiledInstance) else plan["id"]: plan for plan in plans}
     if not ids or any(not value for value in ids) or len(ids) != len(set(ids)):
         raise ScenarioError("instance selection is empty or contains duplicates")
     missing = set(ids) - set(known)
@@ -128,7 +129,6 @@ def main(argv=None):
 
 
 def run_selected(args, document=None):
-    typed_plans = {}
     try:
         from scenario.execution_plan import dependency_files
 
@@ -142,9 +142,8 @@ def run_selected(args, document=None):
                 # Case import is executable code; recheck dependencies across that boundary.
                 codec.verify_dependencies(document)
             decoded = codec.decode_document(document) if document is not None else codec.read(args.plan, args.plan_sha256)
-            typed_plans = {plan.id: plan for plan in decoded.instances}
-            plans = select([plan.to_dict() for plan in decoded.instances], args.instances)
-            if any(plan["profile"] != args.profile or plan["grade"] != args.grade for plan in plans):
+            plans = select(decoded, args.instances)
+            if any(plan.profile != args.profile or plan.grade != args.grade for plan in plans):
                 raise ScenarioError("frozen plan profile/grade disagrees with selection")
         else:
             if args.plan_sha256:
@@ -174,7 +173,8 @@ def run_selected(args, document=None):
             raise ScenarioError("execution requires --out-dir and --lease-json from the parent port planner")
         if ":" in str(args.out_dir.resolve()):
             raise ScenarioError("Java mock output directory cannot contain a colon (JVM -Xlog delimiter)")
-        leases = [validate_lease(args.lease_json, p["resource_budget"]) for p in plans]
+        plans = [CompiledInstance.read(plan) for plan in plans]
+        leases = [validate_lease(args.lease_json, plan.resource_budget.to_metadata()) for plan in plans]
     except (ScenarioError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -204,7 +204,8 @@ def run_selected(args, document=None):
             if retirement is not None:
                 rows.append(
                     dict(
-                        {key: plan[key] for key in ("id", "scenario_id", "variant_id", "profile", "grade", "test_kind") if key in plan},
+                        {key: getattr(plan, key) for key in ("id", "scenario_id", "variant_id", "profile", "grade")},
+                        test_kind=plan.metadata.to_dict()["kind"],
                         status="ERROR",
                         duration_ms=0,
                         not_started=True,
@@ -217,11 +218,11 @@ def run_selected(args, document=None):
                 backend = JavaMockBackend(lease)
                 backend.retain_tsdb = args.retain_tsdb
                 rows.append(
-                    (execute_workload if plan["test_kind"] == "workload" else execute_instance)(
-                        typed_plans.get(plan["id"], plan),
+                    (execute_workload if plan.metadata.to_dict()["kind"] == "workload" else execute_instance)(
+                        plan,
                         backend,
                         registry,
-                        args.out_dir / "instances" / instance_directory(plan["id"]),
+                        args.out_dir / "instances" / instance_directory(plan.id),
                         cancelled=cancelled,
                         enforce_deadlines=True,
                     )

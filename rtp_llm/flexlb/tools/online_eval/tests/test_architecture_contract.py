@@ -8,10 +8,10 @@ import pytest
 from analysis.checks import CheckResult
 from analysis.gates import gate_checks
 from cases.master_ha_failover.actions import _client_check
+from context_fixtures import runtime_context
 from document_io import DocumentError as ScenarioError
 from reporting.run_context import canonical_spec
 from runtime.deadline import Deadline
-from scenario.context import RuntimeContext
 from scenario.execution_plan import freeze_plan, load_plan
 from scenario.outcome import RunOutcome, apply_outcome
 from scenario.stage_execution import _validate_output
@@ -39,7 +39,7 @@ def run(check="PASS", **changes):
 
 
 def test_insufficient_ha_samples_survive_runtime_contract_without_a_fake_number(tmp_path):
-    ctx = RuntimeContext({}, None, tmp_path, lambda: 0, lambda _: None)
+    ctx = runtime_context({}, None, tmp_path, lambda: 0, lambda _: None)
     rows = ctx.register_resource("ha_rows", [])
     output = _client_check(ctx, dict(rows=rows, metric="ha_gate/success_rate", min_samples=100, expected=0.95), Deadline(10, lambda: 0))
     _validate_output(ctx, output, {"actual": "nullable_number"}, {"criterion"})
@@ -49,7 +49,7 @@ def test_insufficient_ha_samples_survive_runtime_contract_without_a_fake_number(
 
 
 def test_ha_decision_needs_neither_a_metric_store_nor_a_monitor(tmp_path):
-    ctx = RuntimeContext(dict(profile="batch-window"), None, tmp_path, lambda: 0, lambda _: None)
+    ctx = runtime_context(dict(profile="batch-window"), None, tmp_path, lambda: 0, lambda _: None)
     rows = ctx.register_resource("ha_rows", [dict(status="ok", send_start_epoch_ms=1000)])
     with patch("monitoring.publication.publish", side_effect=AssertionError("publish during gate")):
         output = _client_check(

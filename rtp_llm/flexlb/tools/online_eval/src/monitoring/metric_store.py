@@ -154,7 +154,7 @@ class MetricStore:
         value = {"min": min, "max": max, "first": lambda x: x[0], "last": lambda x: x[-1]}[op](values)
         return value, rows
 
-    def project(self, anchor):
+    def relative_series(self, anchor):
         """Read structured series once; only the presentation timestamp changes."""
         rows, seen = [], set()
         for observations in self.document["metrics"].values():
@@ -181,7 +181,7 @@ class MetricStore:
         return rows, gaps, copy.deepcopy(self.document.get("errors", []))
 
     def series(self, anchor):
-        rows, gaps, errors = self.project(anchor)
+        rows, gaps, errors = self.relative_series(anchor)
         rows = [row for row in rows if row["points"]]
         return (
             {row["series_key"]: row["points"] for row in rows},

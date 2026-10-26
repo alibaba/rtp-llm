@@ -58,19 +58,19 @@ def frozen_plan(name, plan, sources=None):
     return dict(name=name, sha256=plan_hash(plan), definition=plan, collection=collection_plan(plan, sources))
 
 
-def instance_plan(instance, sources=None):
+def selected_plan(implementation, monitoring, sources=None):
     """Execution uses the compiled selection, never reloads a larger catalog."""
-    frozen = instance.get("implementation", {}).get("monitoring_query_plan")
+    frozen = implementation.get("monitoring_query_plan")
     if frozen is not None:
         if frozen["sha256"] != plan_hash(frozen["definition"]):
             raise ValueError("frozen monitoring plan hash mismatch")
         if frozen["collection"] != collection_plan(frozen["definition"], sources):
             raise ValueError("frozen collection implementation mismatch")
         return frozen["definition"]
-    if instance.get("implementation", {}).get("program") is not None:
+    if implementation.get("program") is not None:
         raise ValueError("compiled workload is missing its frozen monitoring plan")
     # Low-level runtime plans may not be built by a case program.
-    return load_plan(instance["execution"]["monitoring"].get("query_plan", DEFAULT_PLAN))
+    return load_plan(monitoring.get("query_plan", DEFAULT_PLAN))
 
 
 def scrape_job(plan, name, url, kind):

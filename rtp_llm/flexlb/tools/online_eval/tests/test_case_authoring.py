@@ -37,7 +37,7 @@ def test_registration_does_not_execute_capabilities():
 
     from types import SimpleNamespace
 
-    metrics = SimpleNamespace(CONTRACTS={"metric": forbidden}, project=forbidden, finalize=forbidden)
+    metrics = SimpleNamespace(CONTRACTS={"metric": forbidden}, write_metrics=forbidden, finalize=forbidden)
     CaseRegistry.build([entry(CaseDefinition(builders={"default": forbidden}, metrics=metrics))])
 
 
@@ -147,11 +147,11 @@ def test_full_inventory_explains_metric_consumers_and_profile_contracts(tmp_path
         assert any(stage["check_ids"] for stage in instance["stages"])
 
 
-@pytest.mark.parametrize("target", ["describe", "project", "finalize"])
+@pytest.mark.parametrize("target", ["describe", "write_metrics", "finalize"])
 def test_metric_module_signatures_are_checked_without_execution(target):
     from types import SimpleNamespace
 
-    metrics = SimpleNamespace(CONTRACTS={"metric": lambda a, b, c: {}}, project=lambda a, b, c: None, finalize=lambda a, b, c, d: {})
+    metrics = SimpleNamespace(CONTRACTS={"metric": lambda a, b, c: {}}, write_metrics=lambda a, b, c: None, finalize=lambda a, b, c, d: {})
     if target == "describe":
         metrics.CONTRACTS = {"metric": lambda a: {}}
     else:

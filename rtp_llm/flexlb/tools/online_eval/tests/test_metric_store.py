@@ -197,7 +197,7 @@ class MetricArtifactTest(unittest.TestCase):
                 metric_plan=self.plan(),
             )
             store = export_metrics(d)
-            rows, gaps, errors = store.project(1)
+            rows, gaps, errors = store.relative_series(1)
             (row,) = rows
             self.assertEqual(row["points"], [[0, 0], [1, None], [2, 3]])
             self.assertEqual((row["metric_id"], row["epoch"], row["labels"], row["unit"]), ("mock/temperature", "1", {"engine": "a"}, "K"))
@@ -213,7 +213,7 @@ class MetricArtifactTest(unittest.TestCase):
             )
             self.assertEqual(store.document["metrics"]["mock/temperature"][0]["points"][0], [1, 0])
             store.document["metrics"]["mock/temperature"][0]["points"] = []
-            self.assertEqual(store.project(1)[0][0]["points"], [])
+            self.assertEqual(store.relative_series(1)[0][0]["points"], [])
             self.assertEqual(store.series(1)[:2], ({}, {}))
 
     def test_ha_producer_uses_declared_fleet_from_compact_results(self):

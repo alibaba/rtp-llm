@@ -1,7 +1,7 @@
 """Continuous-measurement hooks over the common scenario executor."""
 
 from file_io import write_json
-from monitoring.collection_plan import instance_plan
+from monitoring.collection_plan import selected_plan
 from monitoring.run_monitor import RunMonitor
 from scenario.run_result import EvidenceResult, ReportResult, WorkloadResult
 from scenario.runtime import execute_instance
@@ -9,12 +9,12 @@ from scenario.runtime import execute_instance
 
 class WorkloadPolicy:
     def attach(self, ctx):
-        self.reports = ctx.instance.get("reports")
+        self.reports = ctx.plan.reports
         self.monitoring = RunMonitor()
         self.monitoring.attach(ctx)
 
     def continue_after_failure(self, spec):
-        return spec.get("purpose") == "observation"
+        return spec.purpose == "observation"
 
     def before_stage(self, ctx, spec):
         self.monitoring.before_stage(ctx, spec)
@@ -50,7 +50,7 @@ class WorkloadPolicy:
             if any(event["id"] == "traffic_started" for event in events):
                 raise ValueError("traffic_started is reserved for issued-request evidence")
             events.append(onset)
-        timeline = freeze(ctx.instance["reporting"], events=events, phases=monitor.events) if "reporting" in ctx.instance else None
+        timeline = freeze(ctx.plan.reporting.to_dict(), events=events, phases=monitor.events) if ctx.plan.reporting is not None else None
         payload = dict(
             workload_evidence_schema_version=1,
             instance_id=result["id"],
@@ -96,7 +96,9 @@ class WorkloadPolicy:
         workload.details["monitor_backend"] = "prometheus"
         from monitoring.archive import export_metrics
 
-        metric_plan = instance_plan(ctx.instance, ctx.case_sources)
+        metric_plan = selected_plan(
+            ctx.plan.implementation.to_dict() if ctx.plan.implementation is not None else {}, monitor.options, ctx.case_sources
+        )
         metric_store = export_metrics(ctx.artifact_dir, metric_plan)
         metric_store.document["run"] = dict(
             id=result["id"],
@@ -116,7 +118,7 @@ class WorkloadPolicy:
             raise ValueError("metric sources are not owned by the executing case")
         if metrics is not None and selected:
             deadline.check()
-            metrics.project(ctx.artifact_dir, selected, deadline)
+            metrics.write_metrics(ctx.artifact_dir, selected, deadline)
         finalized = analyze_evidence(ctx.artifact_dir, result, payload, workload)
         analysis = finalized.analysis
         analysis["metric_directory"] = str(ctx.artifact_dir)

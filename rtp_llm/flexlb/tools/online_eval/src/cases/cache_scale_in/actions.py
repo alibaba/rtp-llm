@@ -80,7 +80,7 @@ class _ScaleInObservation:
             "cache_evidence_schema_version",
             self.clock,
             self.criteria,
-            instance=self.ctx.instance["id"],
+            instance=self.ctx.plan.id,
             env_epoch=self.ctx.env_epoch,
             measurement_policy=MEASUREMENT_POLICY,
             window_declarations=self.observation["windows"],

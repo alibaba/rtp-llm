@@ -13,7 +13,7 @@ from scenario.environment_declaration import EnvironmentDeclaration, variant_env
 from scenario.environment_resolver import CAPABILITIES, EnvironmentResolver
 from scenario.execution_policy import DEFAULT_BUDGETS, EXECUTION_BUDGETS, EXECUTION_FIELDS, normalize_execution, normalize_metadata
 from scenario.plan import CompiledInstance, EnvironmentPlan, ExecutionBudgets, StagePlan, json_document
-from scenario.program import ProgramPlan, VariantPlan
+from scenario.program import Program, Variant
 from scenario.stage_compiler import OUTPUTS, stages
 from scenario.stage_parameters import AdapterParameters
 from scenario.validation import fail, identifier, mapping, names, number
@@ -34,7 +34,7 @@ def plan_counts(plans):
 @dataclass(frozen=True)
 class _DocumentCompilation:
     source: str
-    doc: ProgramPlan
+    doc: Program
     profile: str | None
     handlers: dict
     grade: str
@@ -49,7 +49,7 @@ class _DocumentCompilation:
 @dataclass(frozen=True)
 class _VariantCompilation:
     document: _DocumentCompilation
-    variant: VariantPlan
+    variant: Variant
     vid: str
     selected: list[str]
     variant_budgets: dict[str, float]
@@ -80,8 +80,8 @@ def _compile_documents(documents, profile=None, handlers=None, grade="normal"):
 
 
 def _compile_document(source, doc, profile, handlers, grade, seen):
-    if not isinstance(doc, ProgramPlan):
-        fail(source, "expected ProgramPlan from a Python builder")
+    if not isinstance(doc, Program):
+        fail(source, "expected Program from a Python builder")
     sid = identifier(doc.id, source + ".id")
     if sid in seen:
         fail(source, f"duplicate scenario id {sid}")
@@ -122,8 +122,8 @@ def _compile_variant(document, variant, variant_ids):
     requires = document.requires
     budgets = document.budgets
     loc = source + ".variants"
-    if not isinstance(variant, VariantPlan):
-        fail(loc, "expected VariantPlan")
+    if not isinstance(variant, Variant):
+        fail(loc, "expected Variant")
     vid = identifier(variant.id, loc + ".id")
     if vid in variant_ids:
         fail(loc, f"duplicate variant {vid}")

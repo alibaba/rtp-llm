@@ -4,9 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from context_fixtures import runtime_context
 from program_fixtures import compile_scenarios
 from scenario.contracts import CheckResult, StageHandler, StageOutput
-from scenario.runtime import RuntimeContext, execute_instance
+from scenario.runtime import execute_instance
 
 
 class RuntimeTest(unittest.TestCase):
@@ -131,7 +132,7 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(len(result["cleanup"]), 2)
 
     def test_handle_authenticity_epoch_and_historical_read(self):
-        ctx = RuntimeContext({}, self.backend, self.tmp.name, self.clock, self.clock.sleep)
+        ctx = runtime_context({}, self.backend, self.tmp.name, self.clock, self.clock.sleep)
         live = ctx.register_resource("requests", [1])
         historic = ctx.register_resource("snapshot", {"count": 1}, historical=True)
         with self.assertRaisesRegex(ValueError, "forged"):

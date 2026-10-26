@@ -11,12 +11,13 @@ from unittest.mock import Mock, patch
 from adapters.master_evidence import endpoint_loads
 from cases.master_ha_failover import actions as ha
 from cases.master_ha_failover.client import HaReplayClient
+from context_fixtures import runtime_context
 from ha_fixtures import client_resource, replay_source, replay_trace
 from monitoring.probe import evidence_collector
 from scenario.actions import master
 from scenario.contracts import PlanContext
 from scenario.registry import load_metric_plan as load_plan
-from scenario.runtime import Deadline, RuntimeContext
+from scenario.runtime import Deadline
 
 
 class MasterActionsTest(unittest.TestCase):
@@ -214,7 +215,7 @@ class MasterActionsTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.proc = SimpleNamespace(pid=123, alive=Mock(return_value=True), proc=Mock(), freeze=Mock(), unfreeze=Mock())
         self.manager = Mock()
-        self.ctx = RuntimeContext({}, SimpleNamespace(manager=self.manager), self.tmp.name, time.monotonic, time.sleep)
+        self.ctx = runtime_context({}, SimpleNamespace(manager=self.manager), self.tmp.name, time.monotonic, time.sleep)
         from metric_fixtures import PrometheusSession
 
         self.ctx.monitor = PrometheusSession(

@@ -1,5 +1,7 @@
 from dataclasses import asdict
 
+from context_fixtures import plan
+
 """Reject invalid workloads and distinguish healthy survivors from planned victims."""
 
 import copy
@@ -286,7 +288,7 @@ def test_later_collection_error_preserves_positive_collateral_failure(tmp_path, 
         ops=ops,
         artifact_dir=tmp_path,
         env_epoch=1,
-        instance=dict(environment={}, source_path=str(tmp_path / "case.yaml")),
+        plan=plan(dict(environment={}, source_path=str(tmp_path / "case.yaml"))),
         env=SimpleNamespace(
             spec=SimpleNamespace(n_prefill=3, n_decode=1), discovery_file=discovery, master_management_port=2, master=None, mock=None
         ),
@@ -543,7 +545,7 @@ def test_shared_producer_and_automatic_report_render_frozen_gate(tmp_path, monke
             errors=[],
         )
     ).save(tmp_path)
-    metrics.project(tmp_path, {"cache_stability"}, Deadline(time.monotonic() + 10))
+    metrics.write_metrics(tmp_path, {"cache_stability"}, Deadline(time.monotonic() + 10))
     stored = MetricStore.read(tmp_path)
     assert stored.document["metrics"]["cache_stability/full_gc_pause_ms"][0]["points"] == [[15, 180]]
     # Delivery must not analyze, acquire telemetry, or parse mutable live logs.

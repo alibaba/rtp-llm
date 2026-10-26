@@ -6,7 +6,7 @@ from pathlib import Path
 
 from document_io import DocumentError as ScenarioError
 from file_io import read_json, write_json
-from scenario.plan import CompiledInstance, ExecutionPlan
+from scenario.plan import CompiledInstance
 from schema_contract import matches_schema
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -70,6 +70,13 @@ def dependency_files(instances=None):
     return {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in selected.items()}
 
 
+def _instances(values):
+    instances = tuple(CompiledInstance.read(value) for value in values)
+    if not instances or len({instance.id for instance in instances}) != len(instances):
+        raise ScenarioError("execution plan requires unique compiled instances")
+    return instances
+
+
 class ExecutionPlanCodec:
     """Frozen artifact codec: validate envelope, dependencies and domain contracts."""
 
@@ -79,13 +86,14 @@ class ExecutionPlanCodec:
     def current_dependencies(self, instances):
         return dependency_files(instances) if self.dependencies is None else self.dependencies()
 
-    def write(self, path, plan):
-        if dict(plan.dependencies) != self.current_dependencies(plan.instances):
+    def write(self, path, instances, dependencies):
+        instances = _instances(instances)
+        if dependencies != self.current_dependencies(instances):
             raise ScenarioError("execution code/config changed after compilation")
         payload = dict(
             execution_plan_schema_version=1,
-            instances=[instance.to_dict() for instance in plan.instances],
-            dependencies=dict(plan.dependencies),
+            instances=[instance.to_dict() for instance in instances],
+            dependencies=dict(sorted(dependencies.items())),
         )
         payload["sha256"] = _sha(payload)
         write_json(path, payload)
@@ -116,18 +124,15 @@ class ExecutionPlanCodec:
     @staticmethod
     def decode_document(document):
         """Decode an already verified envelope after selected case registration."""
-        return ExecutionPlan(
-            tuple(CompiledInstance.read(instance) for instance in document["instances"]), tuple(sorted(document["dependencies"].items()))
-        )
+        return _instances(document["instances"])
 
 
 def freeze_plan(path, plans, *, dependencies=None):
-    """Artifact-facing projection; internal callers can write ExecutionPlan directly."""
+    """Write compiled instances and dependency checksums to the execution file."""
     plans = tuple(plans)
     dependencies = dependency_files(plans) if dependencies is None else scope_dependencies(dependencies, plans)
-    plan = ExecutionPlan(tuple(CompiledInstance.read(instance) for instance in plans), tuple(sorted(dependencies.items())))
-    return ExecutionPlanCodec().write(path, plan)
+    return ExecutionPlanCodec().write(path, plans, dependencies)
 
 
 def load_plan(path, expected_sha):
-    return [instance.to_dict() for instance in ExecutionPlanCodec().read(path, expected_sha).instances]
+    return [instance.to_dict() for instance in ExecutionPlanCodec().read(path, expected_sha)]

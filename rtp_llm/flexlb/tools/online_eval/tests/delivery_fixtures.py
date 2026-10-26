@@ -8,7 +8,7 @@ from artifacts.gate import publish_gate
 from metric_fixtures import freeze_metrics
 from monitoring.metric_store import MetricStore
 from reporting import run_meta, write_bundle
-from reporting.curves import materialize, project_panels
+from reporting.curves import build_panels, materialize
 from reporting.gate_lines import Threshold, apply_gate_lines
 from runtime.deadline import Deadline
 from scenario.registry import view as view
@@ -93,7 +93,7 @@ def demo_runs(root):
             "mock/rtp_llm_context_tps_with_cache": None,
             "mock/mock_decode_wall_tps": None,
         }
-        panels = apply_gate_lines(project_panels([curve], presentation), presentation, thresholds)
+        panels = apply_gate_lines(build_panels([curve], presentation), presentation, thresholds)
         for panel in panels:
             panel["caption"] = "兼容性演示数据，不是实际压测。" + panel["caption"]
             panel["events"] = [dict(id="checkpoint", name="演示对齐事件", t=event)]

@@ -1,3 +1,4 @@
+from context_fixtures import runtime_context
 from reporting.view_model import ViewDefinition
 
 """Events are frozen observations, with shared selection and clock semantics."""
@@ -16,7 +17,6 @@ from monitoring.metric_store import MetricStore
 from reporting.events import attach_events, project_events
 from scenario.registry import view as view
 from scenario.registry import write_views as write_views
-from scenario.runtime import RuntimeContext
 
 
 def presentation():
@@ -95,7 +95,7 @@ def test_event_declarations_are_validated_in_shared_loader(mutation):
 
 
 def test_runtime_case_event_records_both_clocks_and_isolates_returned_record(tmp_path):
-    ctx = RuntimeContext({}, None, tmp_path, clock=lambda: 50, sleeper=lambda _: None)
+    ctx = runtime_context({}, None, tmp_path, clock=lambda: 50, sleeper=lambda _: None)
     with patch("scenario.runtime.time.time", return_value=1000):
         event = ctx.record_event("withdraw_start")
     assert event == dict(id="withdraw_start", epoch_s=1000, monotonic_s=50)

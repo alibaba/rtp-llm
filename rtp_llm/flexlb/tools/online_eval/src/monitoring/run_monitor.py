@@ -3,14 +3,14 @@
 import json
 import time
 
-from monitoring.collection_plan import instance_plan
+from monitoring.collection_plan import selected_plan
 from monitoring.query_plan import DEFAULT_PLAN
 
 
 class RunMonitor:
     def attach(self, ctx):
-        self.options = dict(ctx.instance["workload_runtime"])
-        self.profile = ctx.instance.get("collection_profile", "request")
+        self.options = ctx.plan.execution.monitoring.to_dict()
+        self.profile = ctx.plan.execution.collection or "request"
         self.monitors = {}
         self.anchor = dict(monotonic_s=ctx.clock(), epoch_s=time.time())
         self.events = []
@@ -53,27 +53,20 @@ class RunMonitor:
         source.stop(shutdown, export=remaining > 0, materialize=False, archive_timeout=max(0, remaining - shutdown), deadline=deadline)
 
     def before_stage(self, ctx, spec):
-        if spec["action"] == "teardown" and ctx.env_epoch in self.monitors:
+        if spec.action == "teardown" and ctx.env_epoch in self.monitors:
             # Stop the monitoring interval before intentional target teardown.
             self._stop_monitor(ctx, self.monitors[ctx.env_epoch], ctx.stage_deadline)
-        if spec["action"] == "teardown" and ctx.env is not None and self.options["capture_metrics"]:
+        if spec.action == "teardown" and ctx.env is not None and self.options["capture_metrics"]:
             self._snapshot_servers(ctx, ctx.env, ctx.env_epoch, max(0, ctx.instance_deadline_s - ctx.clock()))
         self.events.append(
-            dict(
-                stage=spec["id"],
-                action=spec["action"],
-                event="start",
-                monotonic_s=ctx.clock(),
-                epoch_s=time.time(),
-                env_epoch=ctx.env_epoch,
-            )
+            dict(stage=spec.id, action=spec.action, event="start", monotonic_s=ctx.clock(), epoch_s=time.time(), env_epoch=ctx.env_epoch)
         )
 
     def after_stage(self, ctx, spec, row):
         self.events.append(
             dict(
-                stage=spec["id"],
-                action=spec["action"],
+                stage=spec.id,
+                action=spec.action,
                 event="end",
                 status=row["status"],
                 master_generations=dict(getattr(ctx.env, "masters_start_count", {})),
@@ -103,8 +96,10 @@ class RunMonitor:
             targets,
             self.options["sample_interval_s"],
             self.options.get("max_sample_gap_s", 5),
-            query_plan=ctx.instance["execution"]["monitoring"].get("query_plan", DEFAULT_PLAN),
-            metric_plan=instance_plan(ctx.instance, ctx.case_sources),
+            query_plan=self.options.get("query_plan", DEFAULT_PLAN),
+            metric_plan=selected_plan(
+                ctx.plan.implementation.to_dict() if ctx.plan.implementation is not None else {}, self.options, ctx.case_sources
+            ),
             sources=ctx.case_sources,
             target_kinds={name: "mock" if name == "mock" else "master" for name in targets},
         )

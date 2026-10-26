@@ -11,7 +11,7 @@ from scenario.builder import CaseBuilder
 from scenario.config_data import leaf_paths, merge_data, merge_environment, path_in_scope
 from scenario.declarations import CaseDeclaration, VariantDeclaration
 from scenario.execution_policy import DEFAULT_BUDGETS, EXECUTION_BUDGETS
-from scenario.program import ProgramPlan, VariantPlan
+from scenario.program import Program, Variant
 from scenario.registry import compilation_scope
 
 
@@ -24,7 +24,7 @@ def program_module(name, source):
 
 
 @compilation_scope()
-def configure_program(config, source) -> ProgramPlan:
+def configure_program(config, source) -> Program:
     """Build a typed program using a registered Python entry point, without starting services."""
     config = CaseDeclaration.read(config, source)
     name = config.case
@@ -63,7 +63,7 @@ def configure_program(config, source) -> ProgramPlan:
             if not isinstance(metadata[key], list):
                 raise ScenarioError(source + ".metadata." + key + ": expected string list")
             metadata[key] = tuple(metadata[key])
-    return ProgramPlan(
+    return Program(
         id=config.identity,
         environment=copy.deepcopy(config.environment),
         variants=tuple(variants),
@@ -123,9 +123,7 @@ def _build_variant(config, row, identity, module, selected_profiles, source, num
     variant = _variant_contract(config, builder, source)
     if "reports" in variant:
         variant["reports"] = tuple(variant["reports"])
-    return VariantPlan(
-        id=identity, profiles=tuple(profiles), stages=builder.finish(), environment_overrides=copy.deepcopy(patch), **variant
-    )
+    return Variant(id=identity, profiles=tuple(profiles), stages=builder.finish(), environment_overrides=copy.deepcopy(patch), **variant)
 
 
 def _variant_contract(config, builder, source):

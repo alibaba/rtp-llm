@@ -7,12 +7,12 @@ import pytest
 
 from cases.master_ha_failover import actions as ha
 from cases.request_completion.actions import execute, validate
+from context_fixtures import runtime_context
 from document_io import load_document
 from program_fixtures import compile_scenarios
 from runtime.deadline import Deadline, StageTimeout
 from runtime_fixtures import Backend, Clock
 from scenario.catalog import handlers
-from scenario.context import RuntimeContext
 from scenario.program_compiler import configure_program
 from scenario.runtime import execute_instance
 from scenario.stage_execution import _validate_output
@@ -53,7 +53,7 @@ def test_completion_runs_real_executor_and_always_reclaims_owned_requests(tmp_pa
 
 def test_issue_and_wait_keep_independent_operation_budgets(tmp_path):
     clock = Clock()
-    ctx = RuntimeContext({}, None, tmp_path, clock, clock.sleep)
+    ctx = runtime_context({}, None, tmp_path, clock, clock.sleep)
 
     def issue(ctx, params, deadline):
         deadline.sleep(3)
@@ -81,7 +81,7 @@ def test_completion_reuses_strict_criterion_contract(change):
 
 
 def test_ha_batch_keeps_issue_time_windows_sample_errors_and_all_named_checks(tmp_path):
-    ctx = RuntimeContext(dict(profile="batch-window"), None, tmp_path, lambda: 0, lambda _: None)
+    ctx = runtime_context(dict(profile="batch-window"), None, tmp_path, lambda: 0, lambda _: None)
     rows = ctx.register_resource(
         "ha_rows",
         [dict(status=status, send_start_epoch_ms=stamp) for stamp, status in [(1000, "ok"), (2000, "schedule_error"), (3000, "ok")]],
@@ -114,7 +114,7 @@ def test_ha_batch_keeps_issue_time_windows_sample_errors_and_all_named_checks(tm
 
 def test_ha_period_cannot_spend_one_operations_budget_on_another(tmp_path):
     clock = Clock()
-    ctx = RuntimeContext({}, None, tmp_path, clock, clock.sleep, wall_clock=clock)
+    ctx = runtime_context({}, None, tmp_path, clock, clock.sleep, wall_clock=clock)
     with pytest.raises(StageTimeout):
         ha._period(ctx, dict(name="b", settle_s=4, duration_s=1, operation_timeout_s=3), Deadline(6, clock, clock.sleep))
     assert not ctx.report_events
@@ -136,7 +136,7 @@ def test_child_deadline_inherits_cancellation_and_parent_limit():
 
 def test_operation_rejects_a_backend_that_returns_after_its_own_budget(tmp_path):
     clock = Clock()
-    ctx = RuntimeContext({}, None, tmp_path, clock, clock.sleep)
+    ctx = runtime_context({}, None, tmp_path, clock, clock.sleep)
 
     def issue(ctx, params, deadline):
         clock.sleep(5)  # backend ignores its supplied deadline

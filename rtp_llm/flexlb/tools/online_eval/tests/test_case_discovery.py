@@ -46,7 +46,7 @@ def test_conflicting_producers_and_sources_are_rejected():
         original,
         name="another",
         definition=replace(
-            original.definition, metrics=SimpleNamespace(CONTRACTS={"ha_gates": lambda a, b, c: {}}, project=lambda a, b, c: None)
+            original.definition, metrics=SimpleNamespace(CONTRACTS={"ha_gates": lambda a, b, c: {}}, write_metrics=lambda a, b, c: None)
         ),
     )
     with pytest.raises(ValueError, match="conflicting registered metric source"):

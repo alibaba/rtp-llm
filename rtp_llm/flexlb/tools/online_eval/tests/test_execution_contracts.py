@@ -1,3 +1,4 @@
+from context_fixtures import runtime_context
 from scenario.registry import registry
 
 """Input mutations, clock jumps and acquisition failures must remain visible."""
@@ -15,7 +16,7 @@ from document_io import load_document
 from input_contract import mapping_fields
 from runtime.observation import SampleBudget, poll_samples
 from scenario.program_compiler import configure_program
-from scenario.runtime import Deadline, RuntimeContext
+from scenario.runtime import Deadline
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -110,7 +111,7 @@ def test_shared_field_guard_keeps_detail_with_adapter_exception_boundary():
 
 def test_monotonic_anchor_survives_wall_clock_jump_and_poll_uses_virtual_time(tmp_path):
     value = [0]
-    ctx = RuntimeContext(
+    ctx = runtime_context(
         {},
         None,
         tmp_path,
@@ -143,7 +144,7 @@ def test_performance_sampling_uses_framework_clock_and_freezes_failure(tmp_path)
     params = next(stage for stage in configure_program(data, "performance.yaml").variants[0].stages if stage.id == "measure").params
     params["observation"]["capture"]["max_samples"] = 1
     value = [0]
-    ctx = RuntimeContext(
+    ctx = runtime_context(
         dict(id="master_performance::default::batch-window", profile="batch-window"),
         None,
         tmp_path,

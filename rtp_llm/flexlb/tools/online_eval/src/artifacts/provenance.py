@@ -61,9 +61,9 @@ def gate_provenance(ctx, flow, *, source_files, analyzer_file):
     )
     files = {str(path): sha256_file(path) for path in (API_JAR, MOCK_JAR, *source_files, *common)}
     value = dict(
-        instance=ctx.instance["id"],
+        instance=ctx.plan.id,
         env_epoch=ctx.env_epoch,
-        configuration_sha256=ctx.instance["implementation"]["configuration_sha256"],
+        configuration_sha256=ctx.plan.implementation.to_dict()["configuration_sha256"],
         topology=dict(prefill=ctx.env.spec.n_prefill, decode=ctx.env.spec.n_decode),
         capacity=dict(
             prefill_cache_blocks=ctx.env.spec.prefill_cache_blocks,

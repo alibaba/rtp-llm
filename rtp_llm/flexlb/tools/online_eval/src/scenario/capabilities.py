@@ -27,11 +27,11 @@ class RuntimeCapabilities:
 
     @property
     def case(self):
-        return self._context.instance["implementation"]["configuration"]["case"]
+        return self._context.plan.implementation.to_dict()["configuration"]["case"]
 
     def source_files(self):
         """Use the declared case source inventory; actions do not import program."""
         from scenario.registry import registry
 
         owner = registry().cases[self.case].path.parent
-        return tuple(owner / name for name in self._context.instance["implementation"]["case_sources"])
+        return tuple(owner / name for name in self._context.plan.implementation.to_dict()["case_sources"])
