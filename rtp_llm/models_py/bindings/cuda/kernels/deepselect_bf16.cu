@@ -34,7 +34,7 @@ bool deepselect_bf16_available() {
 
 namespace {
 
-template<bool DENSE>
+template<bool DENSE, bool CANDIDATES = false, bool SORTED_TOKENS = false>
 void deepselect_bf16_impl(const torch::Tensor& logits,
                           const torch::Tensor& ends,
                           torch::Tensor&       output,
@@ -57,10 +57,13 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
                 "DeepSelect logits require unit inner stride, 1024B row stride and 16B base alignment");
     TORCH_CHECK(ends.dim() == 1 && ends.size(0) == rows && ends.is_contiguous(),
                 "DeepSelect ends must be contiguous [M]");
-    TORCH_CHECK(output.dim() == 2 && output.size(0) == rows && output.size(1) == 512 && output.stride(1) == 1
-                    && output.stride(0) >= 512 && output.stride(0) % 8 == 0
+    constexpr int64_t topk = CANDIDATES ? 2048 : 512;
+    TORCH_CHECK(output.dim() == 2 && output.size(0) == rows && output.size(1) == topk && output.stride(1) == 1
+                    && output.stride(0) >= topk && output.stride(0) % 8 == 0
                     && reinterpret_cast<uintptr_t>(output.data_ptr()) % 32 == 0,
-                "DeepSelect output must be [M,512] with unit inner stride and 32B row/base alignment");
+                "DeepSelect output must be [M,",
+                topk,
+                "] with unit inner stride and 32B row/base alignment");
     at::assert_no_overlap(output, logits);
     at::assert_no_overlap(output, ends);
     const c10::cuda::CUDAGuard device_guard(logits.device());
@@ -74,7 +77,8 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
     TopkSelectArgs args{};
     args.batch_size                = static_cast<uint32_t>(rows);
     args.vocab_size                = static_cast<uint32_t>(width);
-    args.topk                      = 512;
+    args.topk                      = topk;
+    args.sorted_index              = CANDIDATES || SORTED_TOKENS;
     args.input                     = logits.data_ptr();
     args.output_index              = output.data_ptr();
     args.end_ptr                   = ends.data_ptr<int32_t>();
@@ -85,15 +89,41 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
     args.shared_memory_size_per_sm = properties->sharedMemPerBlockOptin;
     args.stream                    = at::cuda::getCurrentCUDAStream(logits.get_device());
 
+    if constexpr (CANDIDATES) {
+        // Upstream normal BF16 has capacity buckets 512/1024/4096, not 2048.
+        // Select runtime K2048 using the 4096 bucket. Keep occupancy at one:
+        // its survivor buffers are larger than the token K512 instantiations.
+        using Config = TopkSelectConfig<nv_bfloat16,
+                                        int32_t,
+                                        false,
+                                        true,
+                                        false,
+                                        4096,
+                                        256,
+                                        1,
+                                        4096,
+                                        4096,
+                                        4,
+                                        512,
+                                        1,
+                                        true,
+                                        false,
+                                        true>;
+        topk_select_bf16_normal::run_topk_select_kernel<Config>(args);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        return;
+    }
+
     // Match the upstream BF16 normal dispatcher, but instantiate only K512,
-    // int32 indices and no sorting/value output. No FP32 logits or workspace.
+    // int32 indices and optional index sorting, without value output.
+    // Sorting uses upstream's window epilogue within the selecting CTA.
     const auto launch = [&](auto finite) {
         constexpr bool FILTER_FINITE = decltype(finite)::value;
         if (rows <= properties->multiProcessorCount) {
             using Config = TopkSelectConfig<nv_bfloat16,
                                             int32_t,
                                             false,
-                                            false,
+                                            SORTED_TOKENS,
                                             false,
                                             512,
                                             512,
@@ -110,7 +140,7 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
             using Config = TopkSelectConfig<nv_bfloat16,
                                             int32_t,
                                             false,
-                                            false,
+                                            SORTED_TOKENS,
                                             false,
                                             512,
                                             256,
@@ -125,7 +155,7 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
             topk_select_bf16_normal::run_topk_select_kernel<Config>(args);
         }
     };
-    if constexpr (DENSE) {
+    if constexpr (DENSE && !SORTED_TOKENS) {
         if (filter_finite) {
             launch(std::true_type{});
         } else {
@@ -151,6 +181,15 @@ void deepselect_bf16_dense(const torch::Tensor& logits,
                            torch::Tensor&       output,
                            bool                 filter_finite) {
     deepselect_bf16_impl<true>(logits, ends, output, filter_finite);
+}
+
+void deepselect_bf16_candidates(const torch::Tensor& scores, const torch::Tensor& ends, torch::Tensor& output) {
+    deepselect_bf16_impl<true, true>(scores, ends, output, false);
+}
+
+void deepselect_bf16_dense_sorted(const torch::Tensor& logits, const torch::Tensor& ends, torch::Tensor& output) {
+    // Decode publication already filters nonfinite scores, after selection.
+    deepselect_bf16_impl<true, false, true>(logits, ends, output, false);
 }
 
 }  // namespace torch_ext

@@ -67,14 +67,21 @@ class FullDecodeWork:
     def wait_global(self) -> None:
         self.current.wait_stream(self.global_stream)
 
-    def select_candidates(self, logits, lengths, block_size, count, *, complete=False):
+    def select_candidates(
+        self, logits, lengths, block_size, count, *, complete=False, build_flags=True
+    ):
         self.inputs.extend((logits, lengths))
         self.auxiliary.wait_stream(self.current)
         with torch.cuda.stream(self.auxiliary):
             result = _v41_decode_topk.select_candidates(
-                logits, lengths, block_size, count, **({"complete": True} if complete else {})
+                logits,
+                lengths,
+                block_size,
+                count,
+                **({"complete": True} if complete else {}),
+                **({"build_flags": False} if not build_flags else {}),
             )
-        self.outputs.extend(result)
+        self.outputs.extend(tensor for tensor in result if tensor is not None)
         return result
 
     def finish(self) -> None:

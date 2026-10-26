@@ -16,7 +16,8 @@ template<typename ValueT_,
          uint32_t elements_per_segment_ = 512,
          uint32_t cluster_size_         = 1,
          bool     canonicalize_nan_     = false,
-         bool     filter_finite_        = false>
+         bool     filter_finite_        = false,
+         bool     pin_last_index_       = false>
 struct TopkSelectConfig {
     using ValueT                                    = ValueT_;
     using OutIdxT                                   = OutIdxT_;
@@ -34,4 +35,7 @@ struct TopkSelectConfig {
     // RTP dense token selection. Defaults preserve upstream/sparse semantics.
     static constexpr bool canonicalize_nan = canonicalize_nan_;
     static constexpr bool filter_finite    = filter_finite_;
+    // Complete decode candidates: replace the greatest selected ID with the
+    // last visible block, after index ordering. Token selectors leave this off.
+    static constexpr bool pin_last_index = pin_last_index_;
 };

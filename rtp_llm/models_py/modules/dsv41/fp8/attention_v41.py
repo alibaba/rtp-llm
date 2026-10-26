@@ -1256,7 +1256,9 @@ class AttentionV41FP8(AttentionFP8):
     def _begin_forward(self):
         if self.layer_id == min(self._shared_attention["layers"]):
             for key in (
-                "prefill_pool_ready", "prefill_state_ready", "decode_sparse_plan_ready"
+                "prefill_pool_ready",
+                "prefill_state_ready",
+                "decode_sparse_plan_ready",
             ):
                 pending = self._shared_attention.pop(key, None)
                 if pending is not None:
@@ -3087,7 +3089,8 @@ class AttentionV41FP8(AttentionFP8):
             else:
                 weights = (
                     F.linear(x.reshape(T, -1), self.index_weights)
-                    if head_weights is None else head_weights
+                    if head_weights is None
+                    else head_weights
                 )
             return None, weights, index_prepared
         if index_q is None and paged and self.rope_head_dim == 64 and overlap is None:
@@ -3101,7 +3104,8 @@ class AttentionV41FP8(AttentionFP8):
             if pair is not None:
                 weights = (
                     F.linear(x.reshape(T, -1), self.index_weights)
-                    if head_weights is None else head_weights
+                    if head_weights is None
+                    else head_weights
                 )
                 scaled = torch.empty_like(weights, dtype=torch.bfloat16)
                 torch.mul(
@@ -3135,7 +3139,8 @@ class AttentionV41FP8(AttentionFP8):
         else:
             weights = (
                 F.linear(x.reshape(T, -1), self.index_weights)
-                if head_weights is None else head_weights
+                if head_weights is None
+                else head_weights
             )
         prepared = None
         if paged:
@@ -3179,8 +3184,15 @@ class AttentionV41FP8(AttentionFP8):
         capacity = keys.capacity if paged else keys.shape[1]
         if prepared_query is None:
             prepared_query = AttentionV41FP8._prepare_indexer_query_decode(
-                self, x, qr, positions, qr_quantized, index_q,
-                head_weights, index_prepared, overlap=overlap,
+                self,
+                x,
+                qr,
+                positions,
+                qr_quantized,
+                index_q,
+                head_weights,
+                index_prepared,
+                overlap=overlap,
             )
         q, weights, prepared = prepared_query
         if q is not None:
@@ -3284,7 +3296,13 @@ class AttentionV41FP8(AttentionFP8):
                 weights.float() * (self.index_head_dim * self.index_n_heads) ** -0.5
             )
             freqs = self.freqs_cis[positions]
-            q = fp4_roundtrip(rope_only(q.view(T, self.index_n_heads, self.index_head_dim), freqs, self.rope_head_dim))
+            q = fp4_roundtrip(
+                rope_only(
+                    q.view(T, self.index_n_heads, self.index_head_dim),
+                    freqs,
+                    self.rope_head_dim,
+                )
+            )
         publish = (
             self.layer_id == candidate_source
             and candidate_blocks > 0
@@ -3313,9 +3331,20 @@ class AttentionV41FP8(AttentionFP8):
                 candidate_size > 0
                 and cached_mask is not None
                 and cached_mask[0] is candidates
-                and cached_mask[1].shape
-                == (T, (capacity + candidate_size - 1) // candidate_size)
                 and cached_mask[2] == candidate_size
+                and (
+                    (
+                        cached_mask[1] is None
+                        and len(cached_mask) == 4
+                        and cached_mask[3] == "sorted_prefix"
+                        and candidates.shape[0] == T
+                    )
+                    or (
+                        cached_mask[1] is not None
+                        and cached_mask[1].shape
+                        == (T, (capacity + candidate_size - 1) // candidate_size)
+                    )
+                )
             )
             if decode_topk.is_supported(all_logits, visible_i32, self.index_topk) and (
                 candidates is None or publish or compatible_mask
@@ -3329,12 +3358,21 @@ class AttentionV41FP8(AttentionFP8):
                             if overlap is None
                             else overlap.select_candidates
                         )
-                        complete_prefix = (
-                            candidate_size == 8 and candidate_blocks in (512, 1024, 2048)
+                        complete_prefix = candidate_size == 8 and candidate_blocks in (
+                            512,
+                            1024,
+                            2048,
                         )
                         candidates, flags = select_candidates(
-                            all_logits, visible_i32, candidate_size, candidate_blocks,
-                            **({"complete": True} if complete_prefix else {}),
+                            all_logits,
+                            visible_i32,
+                            candidate_size,
+                            candidate_blocks,
+                            **(
+                                {"complete": True, "build_flags": False}
+                                if complete_prefix
+                                else {}
+                            ),
                         )
                         shared["candidates"] = candidates
                         shared["candidate_mask"] = (
@@ -3347,10 +3385,29 @@ class AttentionV41FP8(AttentionFP8):
                         # Reuse the source's int32 lengths; plan/metadata need
                         # no data produced by the later reindex layer.
                         start_plan(
-                            self, keys, visible_i32, query_len=S,
-                            producer_stream=None if overlap is None else overlap.auxiliary,
+                            self,
+                            keys,
+                            visible_i32,
+                            query_len=S,
+                            producer_stream=(
+                                None if overlap is None else overlap.auxiliary
+                            ),
                         )
                     elif candidate_source >= 0 and self.layer_id > candidate_source:
+                        if cached_mask[1] is None:
+                            # Sparse consumers never need a bitmap. A dense
+                            # fallback builds it once per forward, after the
+                            # FULL producer's stream join; replay reruns writes.
+                            flags = decode_topk.build_candidate_flags(
+                                candidates, capacity, candidate_size
+                            )
+                            cached_mask = (
+                                candidates,
+                                flags,
+                                candidate_size,
+                                "sorted_prefix",
+                            )
+                            shared["candidate_mask"] = cached_mask
                         decode_topk.mask_candidates(
                             all_logits, cached_mask[1], candidate_size
                         )
@@ -3565,7 +3622,11 @@ class AttentionV41FP8(AttentionFP8):
                 self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
             if global_work is not None:
                 prepared_query = self._prepare_indexer_query_decode(
-                    x, qkv.qr, positions, qkv.qr_quantized, qkv.index_q,
+                    x,
+                    qkv.qr,
+                    positions,
+                    qkv.qr_quantized,
+                    qkv.index_q,
                     getattr(qkv, "head_weights", None),
                     getattr(qkv, "index_prepared", None),
                 )

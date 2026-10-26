@@ -441,6 +441,30 @@ class FullOverlapCPUTest(unittest.TestCase):
         flags.record_stream.assert_called_once_with(main)
         self.assertEqual(work.inputs, [])
 
+    def test_sorted_candidate_fork_without_bitmap(self):
+        main, glob, aux = Mock(), Mock(), Mock()
+        logits, lengths, candidates = (Mock() for _ in range(3))
+        work = full_overlap.FullDecodeWork(main, glob, aux)
+        with patch(
+            "torch.cuda.stream", return_value=contextlib.nullcontext()
+        ), patch.object(
+            full_overlap._v41_decode_topk,
+            "select_candidates",
+            return_value=(candidates, None),
+        ) as select:
+            self.assertEqual(
+                work.select_candidates(
+                    logits, lengths, 8, 2048, complete=True, build_flags=False
+                ),
+                (candidates, None),
+            )
+        select.assert_called_once_with(
+            logits, lengths, 8, 2048, complete=True, build_flags=False
+        )
+        self.assertEqual(work.outputs, [candidates])
+        work.finish()
+        candidates.record_stream.assert_called_once_with(main)
+
     def test_cold_capture_and_failed_producer(self):
         x = torch.empty(1, 1, 5120)
         metadata = SimpleNamespace(

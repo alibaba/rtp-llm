@@ -162,4 +162,7 @@ class DSv4DecodeFmhaImpl:
     def prepare_cuda_graph(self, attn_inputs) -> None:
         """Called by ``CudaGraphRunner::prepareInputs`` between every
         replay. Re-runs ``prepare`` to update the graph's existing buffers."""
+        resources = getattr(self.metadata, "_engram_decode_tables", None)
+        if resources is not None:
+            resources.validate()
         self.prepare(attn_inputs, forbid_realloc=True)
