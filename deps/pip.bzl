@@ -18,6 +18,12 @@ FLASHINFER_069_ANNOTATIONS = {
                 ],
                 "patch_strip": 1,
             }),
+            # Guard Hopper symbols on other SMs; version the patched package
+            # so staged Python packages and compiled JIT artifacts cannot alias.
+            "@rtp_llm//patches/flashinfer:0017-xqa-sm90-link-guard.patch": json.encode({
+                "whls": ["flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl"],
+                "patch_strip": 1,
+            }),
         },
     ),
 }

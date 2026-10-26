@@ -7,7 +7,26 @@ py_test(
     srcs = ["dynamic_decode_gate_test.py"],
     deps = py_test_deps,
     env = {"GPU_COUNT": "1"},
-    tags = ["H20"],
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cu12_9_or_13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "dynamic_decode_gate_test_arm",
+    srcs = ["dynamic_decode_gate_test.py"],
+    main = "dynamic_decode_gate_test.py",
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )
 
 py_test(
