@@ -10,6 +10,7 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.ops import SpeculativeType
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
     get_role_names,
@@ -187,6 +188,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
     async def test_get_master_route_addrs_passes_pb_and_marks_master_enqueue(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.seq_size_per_block = 16
+        visitor.sp_config = None
         visitor.master_client = _FakeMasterClient()
         visitor._route_cache_keys = lambda keys: keys
         visitor._report_recent_cache_key_metrics = lambda keys: None
@@ -215,6 +217,46 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             visitor.master_client.calls[0]["input_pb"].SerializeToString(),
             b"serialized-input",
         )
+
+    async def test_route_cache_key_mode_follows_engine_mtp_config(self):
+        for sp_type in (
+            None,
+            SpeculativeType.NONE,
+            SpeculativeType.MTP,
+            SpeculativeType.EAGLE3,
+            SpeculativeType.DSPARK,
+        ):
+            for force_disable_sp_run in (False, True):
+                with self.subTest(
+                    sp_type=sp_type, force_disable_sp_run=force_disable_sp_run
+                ):
+                    visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+                    visitor.seq_size_per_block = 64
+                    visitor.sp_config = (
+                        SimpleNamespace(type=sp_type) if sp_type is not None else None
+                    )
+                    visitor.master_client = _FakeMasterClient()
+                    visitor._route_cache_keys = lambda keys: keys
+                    visitor._report_recent_cache_key_metrics = lambda keys: None
+                    visitor._page_rr_route_cache_keys = False
+                    visitor._page_rr_cp_size = 1
+                    input = _FakeRouteInput()
+                    input.generate_config.force_disable_sp_run = force_disable_sp_run
+
+                    with patch(
+                        "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
+                        return_value=[11],
+                    ) as get_keys, patch(
+                        "rtp_llm.server.backend_rpc_server_visitor.trans_input",
+                        return_value=_FakeInputPB(),
+                    ), patch(
+                        "rtp_llm.server.backend_rpc_server_visitor.kmonitor"
+                    ):
+                        await visitor.get_master_route_addrs(input)
+
+                    get_keys.assert_called_once_with(
+                        [1, 2, 3], 64, mtp_lookahead=sp_type == SpeculativeType.MTP
+                    )
 
     async def test_route_ips_preserves_master_route_error_code_on_route_error(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)

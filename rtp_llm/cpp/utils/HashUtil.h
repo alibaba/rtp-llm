@@ -1,8 +1,14 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
+#include <vector>
 
 namespace rtp_llm {
+
+// MTP KV at position i also depends on token i+1. Keep its inclusive-prefix
+// hashes separate from legacy token-prefix hashes, including in remote caches.
+inline constexpr int64_t kMtpCacheKeySeed = 0x4d54505f4b455931LL;  // MTP_KEY1
 
 inline int64_t hashInt64Func(const std::hash<int32_t>& hasher, int64_t hash, int32_t value) {
     // Jenkins hash function (modified for 64 bits)
