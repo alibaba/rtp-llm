@@ -41,6 +41,9 @@ public:
     }
 
     EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finished_version) {
+        // RPC teardown never waits for the engine. Keep its exact stream visible
+        // until scheduler completion and worker bookkeeping permit resource release.
+        // Rebuild only when this poll actually retires an entry.
         for (bool reconcile = true;; reconcile = false) {
             std::vector<std::pair<int64_t, GenerateStreamPtr>> ready_to_dequeue;
             EngineScheduleInfo                                 info;

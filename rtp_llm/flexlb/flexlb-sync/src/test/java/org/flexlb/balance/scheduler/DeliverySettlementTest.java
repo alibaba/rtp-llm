@@ -592,8 +592,7 @@ class DeliverySettlementTest {
         Member member = member(90L, 90L);
         ledger.commit(90L, List.of(member.item()));
         PreemptionRegistration preemption =
-                registry.tryClaim(member.item().decodeReservation(), 91L, "priority victim")
-                        .orElseThrow();
+                registry.tryClaim(member.item().decodeReservation(), 91L).orElseThrow();
         assertTrue(
                 registry.onPreemption(
                         preemption,

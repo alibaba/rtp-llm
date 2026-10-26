@@ -185,6 +185,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         private boolean submitted;
         private boolean sourceClosed;
         private boolean started;
+        private boolean executed;
 
         private WorkRegistration(RequestContext context) {
             this.context = context;
@@ -219,11 +220,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
                     // Accepted terminal/publication owners cannot be dropped or run on an RPC
                     // callback.
                     recordFailure(Failures.append(rejected, recoveryRejected));
-                    try {
-                        Thread.ofPlatform().daemon().name("request-work-emergency").start(task);
-                    } catch (RuntimeException | Error failedToStart) {
-                        throw failedToStart;
-                    }
+                    Thread.ofPlatform().daemon().name("request-work-emergency").start(task);
                 }
             }
         }
@@ -268,6 +265,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
                     return;
                 }
                 started = true;
+                executed = true;
             }
             var previous = executingRequest.get();
             executingRequest.set(context);
@@ -307,6 +305,10 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
 
         synchronized boolean hasTaskOwner() {
             return owners > (sourceClosed ? 0 : 1);
+        }
+
+        synchronized boolean canRetrySubmission() {
+            return !executed && owners == (sourceClosed ? 0 : 1);
         }
 
         @Override

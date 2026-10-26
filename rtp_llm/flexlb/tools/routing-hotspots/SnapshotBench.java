@@ -8,6 +8,7 @@ import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueExecutionSettings;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.FlexlbConfig;

@@ -2,7 +2,9 @@ import com.sun.management.ThreadMXBean;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
 
 import java.lang.management.ManagementFactory;
 import java.nio.file.Files;

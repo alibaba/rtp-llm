@@ -1590,8 +1590,7 @@ class RequestContextLifecycleTest {
         assertNotNull(delivery);
         PreemptionRegistration preemption =
                 lifecycle
-                        .tryClaim(
-                                new DecodeResources.ReservationHandle(1L, 703L, 1L), 19L, "victim")
+                        .tryClaim(new DecodeResources.ReservationHandle(1L, 703L, 1L), 19L)
                         .orElseThrow();
         RequestProtocolTestSupport.expireInactiveRequest(
                 lifecycle,
@@ -1738,8 +1737,7 @@ class RequestContextLifecycleTest {
                         + " contract");
         var claim =
                 lifecycle
-                        .tryClaim(
-                                new DecodeResources.ReservationHandle(1L, 706L, 1L), 20L, "victim")
+                        .tryClaim(new DecodeResources.ReservationHandle(1L, 706L, 1L), 20L)
                         .orElseThrow();
         assertTrue(
                 lifecycle.onPreemption(
@@ -1837,8 +1835,7 @@ class RequestContextLifecycleTest {
                                 false));
         var claim =
                 lifecycle
-                        .tryClaim(
-                                new DecodeResources.ReservationHandle(1L, 707L, 1L), 21L, "victim")
+                        .tryClaim(new DecodeResources.ReservationHandle(1L, 707L, 1L), 21L)
                         .orElseThrow();
         assertTrue(
                 lifecycle.onPreemption(
@@ -1931,8 +1928,7 @@ class RequestContextLifecycleTest {
         var context = registered.item().ctx();
         var claim =
                 lifecycle
-                        .tryClaim(
-                                new DecodeResources.ReservationHandle(1L, 711L, 1L), 22L, "victim")
+                        .tryClaim(new DecodeResources.ReservationHandle(1L, 711L, 1L), 22L)
                         .orElseThrow();
         assertTrue(
                 lifecycle.onPreemption(
@@ -2132,12 +2128,11 @@ class RequestContextLifecycleTest {
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
         assertTrue(
                 lifecycle
-                        .tryClaim(new DecodeResources.ReservationHandle(1L, 709L, 2L), 23L, "stale")
+                        .tryClaim(new DecodeResources.ReservationHandle(1L, 709L, 2L), 23L)
                         .isEmpty());
         PreemptionRegistration claim =
                 lifecycle
-                        .tryClaim(
-                                new DecodeResources.ReservationHandle(1L, 709L, 1L), 24L, "victim")
+                        .tryClaim(new DecodeResources.ReservationHandle(1L, 709L, 1L), 24L)
                         .orElseThrow();
         assertEquals(
                 new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 8090),
@@ -2147,10 +2142,7 @@ class RequestContextLifecycleTest {
         SchedulingTestConfig.prefillTemplate(registered.item()).setGrpcPort(0);
         assertTrue(
                 lifecycle
-                        .tryClaim(
-                                new DecodeResources.ReservationHandle(1L, 709L, 1L),
-                                26L,
-                                "already claimed")
+                        .tryClaim(new DecodeResources.ReservationHandle(1L, 709L, 1L), 26L)
                         .isEmpty());
         lifecycle.onPreemption(
                 claim, new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
@@ -2163,11 +2155,7 @@ class RequestContextLifecycleTest {
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
         assertThrows(
                 IllegalArgumentException.class,
-                () ->
-                        lifecycle.tryClaim(
-                                new DecodeResources.ReservationHandle(1L, 710L, 1L),
-                                25L,
-                                "victim"));
+                () -> lifecycle.tryClaim(new DecodeResources.ReservationHandle(1L, 710L, 1L), 25L));
         assertNull(SchedulerTestSupport.preemption(registered.item().ctx()));
     }
 
@@ -2181,10 +2169,9 @@ class RequestContextLifecycleTest {
                         current.endpointGenerationId() + 1L,
                         current.requestId(),
                         current.reservationToken());
-        assertTrue(lifecycle.tryClaim(stale, 27L, "old endpoint").isEmpty());
+        assertTrue(lifecycle.tryClaim(stale, 27L).isEmpty());
         assertNull(SchedulerTestSupport.preemption(registered.item().ctx()));
-        PreemptionRegistration valid =
-                lifecycle.tryClaim(current, 28L, "current endpoint").orElseThrow();
+        PreemptionRegistration valid = lifecycle.tryClaim(current, 28L).orElseThrow();
         assertEquals(
                 new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 8090),
                 valid.cancelTarget());

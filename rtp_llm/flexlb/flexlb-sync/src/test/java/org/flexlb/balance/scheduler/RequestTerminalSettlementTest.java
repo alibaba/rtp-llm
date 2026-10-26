@@ -123,11 +123,7 @@ class RequestTerminalSettlementTest {
     void decodeRetirementPublishesTheOriginalPreemptionResolution(boolean cancelAlreadyUnknown) {
         Fixture f = fixture(true);
         PreemptionRegistration claim =
-                f.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 40L, "victim")
-                        .orElse(null);
+                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 40L).orElse(null);
         assertNotNull(claim);
         if (cancelAlreadyUnknown) {
             assertTrue(
@@ -161,11 +157,7 @@ class RequestTerminalSettlementTest {
     void unknownCancelOutcomeKeepsTheAcknowledgedCancellationVisible() {
         Fixture f = fixture(true, true);
         PreemptionRegistration claim =
-                f.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 4L, "victim")
-                        .orElse(null);
+                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
         assertNotNull(claim);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
@@ -190,11 +182,7 @@ class RequestTerminalSettlementTest {
     void queuedCancellationResumesAfterExactPreemptionRelease() {
         Fixture f = fixture(true, true);
         PreemptionRegistration claim =
-                f.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 4L, "victim")
-                        .orElse(null);
+                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
         assertNotNull(claim);
         assertEquals(
                 RequestState.Phase.CANCEL_REQUESTED,
@@ -253,11 +241,7 @@ class RequestTerminalSettlementTest {
                 sender,
                 DeliveryResult.uncertain(new IllegalStateException("reply lost")));
         PreemptionRegistration claim =
-                f.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 4L, "victim")
-                        .orElse(null);
+                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -292,11 +276,7 @@ class RequestTerminalSettlementTest {
                                 RequestProtocolTestSupport.handoff(() -> true));
         assertNotNull(delivery);
         PreemptionRegistration preemption =
-                f.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 9L, "victim")
-                        .orElse(null);
+                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 9L).orElse(null);
         assertNotNull(preemption);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
@@ -412,11 +392,7 @@ class RequestTerminalSettlementTest {
                 sender,
                 DeliveryResult.uncertain(new IllegalStateException("reply lost")));
         PreemptionRegistration claim =
-                f.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 4L, "victim")
-                        .orElse(null);
+                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -493,11 +469,7 @@ class RequestTerminalSettlementTest {
         Fixture f = fixture(true);
         var assignedDecode = f.item().decodeEp();
         var claim =
-                f.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 31L, "victim")
-                        .orElse(null);
+                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 31L).orElse(null);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -594,11 +566,7 @@ class RequestTerminalSettlementTest {
                                 7L,
                                 RequestProtocolTestSupport.handoff(() -> true));
         PreemptionRegistration claim =
-                requestContext
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 9L, "victim")
-                        .orElse(null);
+                requestContext.data().getScheduler().tryClaim(RESERVATION, 9L).orElse(null);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -732,11 +700,7 @@ class RequestTerminalSettlementTest {
                                 RequestProtocolTestSupport.handoff(() -> true));
         if (preempting) {
             PreemptionRegistration claim =
-                    requestContext
-                            .data()
-                            .getScheduler()
-                            .tryClaim(RESERVATION, 9L, "victim")
-                            .orElse(null);
+                    requestContext.data().getScheduler().tryClaim(RESERVATION, 9L).orElse(null);
             assertTrue(
                     RequestProtocolTestSupport.preemptionPhase(
                             f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -861,11 +825,7 @@ class RequestTerminalSettlementTest {
         Fixture owner = fixture(true, true);
         Fixture other = fixture(true, true);
         PreemptionRegistration claim =
-                owner.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 4L, "victim")
-                        .orElse(null);
+                owner.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
         assertNotNull(claim);
         var before = owner.requestContext().snapshot();
         assertFalse(
@@ -888,7 +848,7 @@ class RequestTerminalSettlementTest {
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void cleanupProofSettlesDecodeBeforeAdvancingRequest(boolean resourceSettled) {
         Fixture f = fixture(true, true);
-        var claim = f.scheduler().tryClaim(RESERVATION, 4L, "victim").orElseThrow();
+        var claim = f.scheduler().tryClaim(RESERVATION, 4L).orElseThrow();
         var proof = DecodeResources.PreemptionUpdate.fenced(RESERVATION);
         when(f.item().decodeEp().updatePreemption(4L, proof))
                 .thenAnswer(
@@ -929,7 +889,7 @@ class RequestTerminalSettlementTest {
     @Test
     void cleanupProofCannotMixVictimsFromTheSamePreemptionAttempt() {
         Fixture f = fixture(true, true);
-        var claim = f.scheduler().tryClaim(RESERVATION, 4L, "victim").orElseThrow();
+        var claim = f.scheduler().tryClaim(RESERVATION, 4L).orElseThrow();
         var wrongVictim =
                 new DecodeResources.ReservationHandle(
                         RESERVATION.endpointGenerationId(),
@@ -953,7 +913,7 @@ class RequestTerminalSettlementTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {1, 2, 3})
+    @ValueSource(ints = {1, 2, 3, 5})
     void transientTerminalTimerFailureRetriesAfterActualResourceSettlement(int failures) {
         Fixture f = fixture(true, true);
         var context = f.requestContext();
@@ -961,11 +921,24 @@ class RequestTerminalSettlementTest {
         org.mockito.Mockito.clearInvocations(timer);
         var expected = new IllegalStateException("timer update failed");
         var attempts = new java.util.concurrent.atomic.AtomicInteger();
+        var installedRevision =
+                new java.util.concurrent.atomic.AtomicLong(
+                        context.snapshot().deadlines().revision());
+        when(timer.needsUpdate(any(), any()))
+                .thenAnswer(
+                        call -> {
+                            RequestContext owner = call.getArgument(0);
+                            ExpirationTimer.Plan plan = call.getArgument(1);
+                            return f.scheduler().requests.isCurrent(owner)
+                                    && plan.revision() > installedRevision.get();
+                        });
         doAnswer(
                         call -> {
                             if (attempts.incrementAndGet() <= failures) {
                                 throw expected;
                             }
+                            ExpirationTimer.Plan plan = call.getArgument(1);
+                            installedRevision.accumulateAndGet(plan.revision(), Math::max);
                             return null;
                         })
                 .when(timer)
@@ -994,15 +967,24 @@ class RequestTerminalSettlementTest {
         var original = context.snapshot().outcome();
         assertEquals("original terminal failure", original.detail());
         assertFalse(RequestProtocolTestSupport.awaitResult(context.data().getFuture()).isSuccess());
-        if (failures == 3) {
-            assertEquals(3, attempts.get(), "the first close flow has a three-attempt bound");
+        if (failures == 5) {
+            assertEquals(
+                    5,
+                    attempts.get(),
+                    "close installs at most three times, then settlement recovers at most twice");
             assertEquals(Phase.ENDING, context.snapshot().phase());
             assertNotNull(context.snapshot().close().endOperation());
             assertTrue(context.snapshot().close().notificationsAttempted());
+            assertFalse(context.snapshot().close().timersDone());
+            assertTrue(timer.needsUpdate(context, context.snapshot().deadlines()));
             assertNotNull(
                     context.snapshot().deadlines().inactivity(),
                     "real pending notification keeps its existing watch");
             assertSame(context, f.scheduler().requests.findActive(RESERVATION.requestId()));
+            assertNull(f.scheduler().requests.findTerminal(RESERVATION.requestId()));
+            verify(f.item().prefillEp(), times(1)).release(null, f.item());
+            verify(f.item().decodeEp(), times(1))
+                    .release(RESERVATION, DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
             f.scheduler().requestCleanup(context);
             SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
         }
