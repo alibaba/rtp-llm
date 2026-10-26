@@ -1273,8 +1273,7 @@ void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
 }
 
 bool KVCacheManager::writebackEnabled() const {
-    return cache_store_config_.p2p_writeback_enable && pd_sep_config_.role_type == RoleType::DECODE && p2p_connector_
-           && (!parallelism_config_.prefill_cp_config.kv_cache_sharded || parallelism_config_.tp_size == 1);
+    return cache_store_config_.p2p_writeback_enable && pd_sep_config_.role_type == RoleType::DECODE && p2p_connector_;
 }
 
 std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheResourcePtr& resource,

@@ -61,9 +61,9 @@ std::shared_ptr<const PlanResult> P2PSchedulerDecodeWrite::planFor(int prefill_t
         }
     }
     const auto& pc = config_.parallelism_config;
-    if (pc.tp_size <= 0 || prefill_tp_size <= 0 || (pc.prefill_cp_config.kv_cache_sharded && pc.tp_size != 1)) {
+    if (pc.tp_size <= 0 || prefill_tp_size <= 0) {
         return std::make_shared<const PlanResult>(
-            PlanResult{{}, ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback requires D_CP=1 and positive TP sizes")});
+            PlanResult{{}, ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback requires positive TP sizes")});
     }
     const auto               src_layout = ShardLayoutFactory::fromTopology(*config_.topology, pc, RoleType::DECODE, config_.cache_key_tokens_per_block);
     std::vector<std::string> tags;
@@ -143,10 +143,12 @@ ErrorInfo P2PSchedulerDecodeWrite::buildDecodeRankRoutes(const TransferPlan&    
 
 std::optional<P2PSchedulerDecodeWrite::WriteRange> P2PSchedulerDecodeWrite::writeRange(
     int input_length, size_t kv_ready_token_count, const Meta::P2PRoutingContext& routing) const {
-    const int expected_cp_size =
-        config_.parallelism_config.prefill_cp_config.kv_cache_sharded ? routing.prefill_tp_size : 1;
+    const auto& cp_config = config_.parallelism_config.prefill_cp_config;
+    const int expected_cp_size = cp_config.kv_cache_sharded ? routing.prefill_tp_size : 1;
     if (input_length < 0 || static_cast<size_t>(input_length) > kv_ready_token_count || routing.prefill_cp_size <= 0
-        || routing.prefill_cp_size != expected_cp_size || config_.cache_key_tokens_per_block == 0) {
+        || routing.prefill_cp_size != expected_cp_size
+        || (cp_config.prefill_cp_size > 0 && cp_config.prefill_cp_size != routing.prefill_cp_size)
+        || config_.cache_key_tokens_per_block == 0) {
         return std::nullopt;
     }
     // P reuses whole CP units, so both ends round down to one; the unit straddling the prompt is resent whole.
