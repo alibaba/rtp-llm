@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 namespace {
@@ -159,7 +160,7 @@ TEST(KVCMLocalTest, InitRejectsInvalidQuarantineAbortRatio) {
     auto            environment    = makeBackendEnvironment("kvcm_storage_backend_invalid_quarantine_ratio");
     auto            client_wrapper = std::make_shared<MockClientWrapper>();
     EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).Times(0);
-    EXPECT_CALL(*client_wrapper, shutdown()).Times(0);
+    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     EXPECT_FALSE(initSingleRank(*backend.backend, environment));
 }
@@ -557,9 +558,6 @@ TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
     EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
     EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
 
     ScopedReferencedBlocks healthy_blocks(environment.device_pool, 1);
     auto                   healthy_request =
@@ -585,6 +583,7 @@ TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
+    // Snapshot consumes gauge samples; inspect the unchanged quarantine state only once.
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
@@ -599,8 +598,14 @@ TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
 }
 
 TEST(KVCMLocalTest, RankZeroAbortsWhenQuarantinedBlocksExceedConfiguredRatio) {
+    // CUDA needs a fresh process rather than the default fork-only death-test child.
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
     ASSERT_EXIT(
         ([]() {
+            (void)dup2(STDERR_FILENO, STDOUT_FILENO);
+            if (!initLogger()) {
+                _exit(5);
+            }
             autil::EnvGuard quarantine_abort_ratio("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "0.1");
             auto environment    = makeBackendEnvironment("kvcm_storage_backend_quarantine_abort");
             auto client_wrapper = std::make_shared<MockClientWrapper>();
@@ -629,7 +634,7 @@ TEST(KVCMLocalTest, RankZeroAbortsWhenQuarantinedBlocksExceedConfiguredRatio) {
             _exit(4);
         }()),
         ::testing::KilledBySignal(SIGABRT),
-        "");
+        "KVCM quarantined block capacity exceeded on rank 0");
 }
 
 }  // namespace

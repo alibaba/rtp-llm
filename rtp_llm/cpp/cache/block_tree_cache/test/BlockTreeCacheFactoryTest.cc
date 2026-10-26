@@ -2103,7 +2103,7 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
         EXPECT_EQ(cache->config().business_queue_max_size, 0u);
         EXPECT_EQ(cache->config().transfer_queue_max_size, 0u);
     }
-    for (const auto invalid_field : {std::string("worker"), std::string("business"), std::string("transfer")}) {
+    for (const auto& invalid_field : {std::string("worker"), std::string("business"), std::string("transfer")}) {
         auto          allocator = initAllocator<CoordinatorCacheManager>(config);
         KVCacheConfig kv_cache_config;
         if (invalid_field == "worker") {
