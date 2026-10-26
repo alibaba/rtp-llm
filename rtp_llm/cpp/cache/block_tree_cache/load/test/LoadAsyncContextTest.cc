@@ -110,6 +110,9 @@ public:
     void failNextRead() {
         fail_read_ = true;
     }
+    void timeoutNextRead() {
+        timeout_read_ = true;
+    }
     bool readPending() const {
         return executor_->pendingCount() != 0;
     }
@@ -146,6 +149,10 @@ protected:
         return pending_match_;
     }
     void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override {
+        if (timeout_read_) {
+            timeout_read_ = false;
+            throw StorageOperationTimeout("injected read timeout", StorageQuarantineReason::RPC_TIMEOUT);
+        }
         if (fail_read_) {
             fail_read_ = false;
             throw std::runtime_error("read failed");
@@ -177,6 +184,7 @@ private:
     std::shared_ptr<TestMatchMeta>        read_match_meta_;
     bool                                  fail_match_{false};
     bool                                  fail_read_{false};
+    bool                                  timeout_read_{false};
 };
 
 std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> types = {CacheGroupType::FULL}) {
@@ -806,6 +814,134 @@ TEST(LoadAsyncContextTest, BackendFailureWaitsForLocalTransferBeforePublishingFa
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, RemoteTimeoutPreservesOnlySettledLocalReuse) {
+    for (bool remote_first : {false, true}) {
+        for (bool local_success : {false, true}) {
+            for (bool settlement_success : {false, true}) {
+                SCOPED_TRACE(testing::Message() << remote_first << ":" << local_success << ":" << settlement_success);
+                size_t     commits     = 0;
+                size_t     aborts      = 0;
+                auto       coordinator = makeCoordinator(commits, aborts);
+                auto       backend     = std::make_shared<ManualBackend>();
+                auto       pool        = std::make_shared<TestBlockPool>();
+                const auto block       = pool->malloc().value();
+                pool->incRef(block);
+                initBackend(*backend, pool);
+                TransferDescriptor host;
+                host.source_tier = Tier::HOST;
+                host.path_index  = 1;
+                TransferDescriptor disk;
+                disk.source_tier                 = Tier::DISK;
+                disk.path_index                  = 2;
+                auto request                     = makeRequest(4);
+                request.local_matched_blocks_num = 3;
+                auto context = coordinator->create({host, disk}, {false, true}, 3, backend, std::move(request));
+                ASSERT_TRUE(coordinator->registerContext(context));
+                context->startJoinWait(1);
+                context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
+                    EXPECT_EQ(matched, 4u);
+                    current.setBackendTargetBlock(3, 0, block);
+                    return current.commit();
+                });
+                size_t settlements = 0;
+                context->setSettlementReadyCallback([&](const auto& current) {
+                    ++settlements;
+                    EXPECT_FALSE(current->aggregateSuccess());
+                    EXPECT_EQ(current->localTransfersSucceeded(), local_success);
+                    EXPECT_FALSE(current->localLoadSucceeded());
+                    EXPECT_TRUE(current->settle(current->localTransfersSucceeded() && settlement_success));
+                });
+                context->startBackendMatch();
+                backend->completeMatch(4);
+                backend->timeoutNextRead();
+                const auto finish_local = [&] {
+                    EXPECT_TRUE(context->completeTransfers(1, true));
+                    bool    joined  = false;
+                    int64_t latency = 0;
+                    EXPECT_TRUE(context->completeJoinedOne(local_success, joined, latency));
+                    EXPECT_TRUE(joined);
+                };
+                if (remote_first) {
+                    backend->completeRead();
+                    EXPECT_FALSE(context->done());
+                    EXPECT_FALSE(context->localLoadSucceeded());
+                    finish_local();
+                } else {
+                    finish_local();
+                    EXPECT_FALSE(context->done());
+                    EXPECT_FALSE(context->localLoadSucceeded());
+                    backend->completeRead();
+                }
+                EXPECT_EQ(settlements, 1u);
+                EXPECT_TRUE(context->done());
+                EXPECT_FALSE(context->success());
+                EXPECT_TRUE(context->backendTimedOut());
+                EXPECT_EQ(context->localLoadSucceeded(), local_success && settlement_success);
+                EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+                EXPECT_EQ(context->localMatchedBlocks(), 3u);
+                EXPECT_EQ(context->matchedBlocks(Tier::HOST), 1u);
+                EXPECT_EQ(context->matchedBlocks(Tier::DISK), 1u);
+                EXPECT_TRUE(pool->isFrozen(block));
+                pool->decRef(block);
+                coordinator->shutdown();
+            }
+        }
+    }
+}
+
+TEST(LoadAsyncContextTest, RemoteTimeoutDoesNotFailLocalJoiners) {
+    size_t     commits     = 0;
+    size_t     aborts      = 0;
+    auto       coordinator = makeCoordinator(commits, aborts);
+    auto       backend     = std::make_shared<ManualBackend>();
+    auto       pool        = std::make_shared<TestBlockPool>();
+    const auto block       = pool->malloc().value();
+    pool->incRef(block);
+    initBackend(*backend, pool);
+    TransferDescriptor host;
+    host.source_tier                 = Tier::HOST;
+    auto request                     = makeRequest(2);
+    request.local_matched_blocks_num = 1;
+    auto owner                       = coordinator->create({host}, {false}, 1, backend, std::move(request));
+    ASSERT_TRUE(coordinator->registerContext(owner));
+    owner->setMatchCallback([&](LoadAsyncContext& current, size_t) {
+        current.setBackendTargetBlock(1, 0, block);
+        return current.commit();
+    });
+    std::vector<std::shared_ptr<LoadAsyncContext>> joiners;
+    for (int i = 0; i < 2; ++i) {
+        auto joined = coordinator->create({host}, {true}, 1);
+        ASSERT_TRUE(coordinator->registerContext(joined));
+        joined->startJoinWait(1);
+        ASSERT_TRUE(joined->commit());
+        joiners.push_back(joined);
+    }
+    owner->setSettlementReadyCallback([&](const auto& current) {
+        const bool local_success = current->localTransfersSucceeded();
+        for (const auto& joined : joiners) {
+            bool    complete = false;
+            int64_t latency  = 0;
+            EXPECT_TRUE(joined->completeJoinedOne(local_success, complete, latency));
+            EXPECT_TRUE(complete);
+        }
+        EXPECT_TRUE(current->settle(local_success));
+    });
+    owner->startBackendMatch();
+    backend->completeMatch(2);
+    ASSERT_TRUE(owner->completeTransfers(1, true));
+    backend->timeoutNextRead();
+    backend->completeRead();
+    EXPECT_FALSE(owner->success());
+    EXPECT_TRUE(owner->localLoadSucceeded());
+    for (const auto& joined : joiners) {
+        EXPECT_TRUE(joined->success());
+        EXPECT_TRUE(joined->localLoadSucceeded());
+        EXPECT_TRUE(joined->errorInfo().ok());
+    }
     pool->decRef(block);
     coordinator->shutdown();
 }

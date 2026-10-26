@@ -39,6 +39,7 @@ public:
     }
 
     std::atomic<size_t> read_calls{0};
+    std::shared_ptr<block_tree_cache_test::CallbackBarrier> read_barrier;
 
 protected:
     bool initImpl() override {
@@ -49,12 +50,15 @@ protected:
     }
     void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
         ++read_calls;
+        if (read_barrier) {
+            read_barrier->enterAndWait();
+        }
         throw std::runtime_error("injected remote read failure");
     }
     void writeImpl(const StorageRequest&) override {}
 };
 
-TEST(BlockTreeLoaderTest, CrcDeviceReuseDoesNotPromoteUnprotectedBackendFailure) {
+TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -127,21 +131,44 @@ TEST(BlockTreeLoaderTest, CrcDeviceReuseDoesNotPromoteUnprotectedBackendFailure)
         EXPECT_EQ(matched, 2u);
         return current.commit();
     });
+    backend->read_barrier = std::make_shared<block_tree_cache_test::CallbackBarrier>();
+    block_tree_cache_detail::ScopeRollback release_read([&] { backend->read_barrier->release(); });
     context->startBackendMatch();
+    ASSERT_TRUE(backend->read_barrier->waitUntilEnteredFor(1, std::chrono::seconds(5)));
+    auto joined_result = environment->cache->match(environment->keys);
+    auto joined        = joined_result.async_context;
+    ASSERT_NE(joined, nullptr);
+    ASSERT_EQ(joined->loadDescs().size(), 2u);
+    ASSERT_TRUE(joined->joinedLoads()[1]);
+    for (const auto& desc : joined->loadDescs()) {
+        const auto& blocks = desc.source_tier == Tier::DEVICE ? desc.source_blocks : desc.target_blocks;
+        const auto& group  = environment->groups[desc.group_set_id];
+        for (size_t member = 0; member < blocks.size(); ++member) {
+            request_refs.emplace_back(group->devicePools()[member], blocks[member]);
+        }
+    }
+    ASSERT_TRUE(joined->commit());
+    backend->read_barrier->release();
     context->waitDone();
+    joined->waitDone();
+    EXPECT_TRUE(joined->success());
+    EXPECT_TRUE(joined->localLoadSucceeded());
     backend->shutdown();
     EXPECT_EQ(backend->read_calls.load(), 1u);
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
     resources = environment->resourcesForPathNode(0);
     EXPECT_TRUE(resources[0].hasTier(Tier::DEVICE));
-    EXPECT_TRUE(resources[1].hasTier(Tier::HOST));
-    EXPECT_FALSE(resources[1].hasTier(Tier::DEVICE));
+    EXPECT_FALSE(resources[1].hasTier(Tier::HOST));
+    EXPECT_TRUE(resources[1].hasTier(Tier::DEVICE));
+    EXPECT_TRUE(context->localLoadSucceeded());
     for (const auto& resource : resources) {
         EXPECT_TRUE(resource.isMatchUsable());
     }
 
     result.async_context.reset();
+    joined_result.async_context.reset();
+    joined.reset();
     context.reset();
     for (const auto& [pool, block] : request_refs) {
         releaseDeviceBlocks(*environment->cache, pool, {block});
