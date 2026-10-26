@@ -25,6 +25,7 @@ from rtp_llm.models_py.modules.dsv41.bounded_replay import (
 )
 from rtp_llm.models_py.modules.dsv41.cp import CPContext, build_cp_context
 from rtp_llm.models_py.modules.dsv41.hc import build_hc_head
+from rtp_llm.models_py.utils.expert_load_monitor import expert_load_for_layer
 
 
 @dataclass
@@ -108,6 +109,8 @@ class V4Args:
     fp8_kv_cache: bool = True
     # V4.1 uses delayed mHC readout and a distinct compressed attention layout.
     v41_config: Optional[Dict] = None
+    # Routed storage and dispatch capacity; gate scores retain the logical count.
+    n_physical_experts: Optional[int] = None
 
 
 def _block_kwargs(
@@ -145,6 +148,7 @@ def _block_kwargs(
         index_topk=args.index_topk,
         moe_inter_dim=args.moe_inter_dim,
         n_routed_experts=args.n_routed_experts,
+        n_physical_experts=args.n_physical_experts,
         n_activated_experts=args.n_activated_experts,
         n_shared_experts=args.n_shared_experts,
         score_func=args.score_func,
@@ -481,6 +485,7 @@ class V4Transformer(nn.Module):
         self,
         input_ids: torch.Tensor,  # [T_total] int (== [B] for q_len=1)
         attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        expert_token_counts: Optional[torch.Tensor],
         kv_cache=None,
     ) -> torch.Tensor:
         """Decode-only forward.
@@ -509,8 +514,14 @@ class V4Transformer(nn.Module):
         layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx, layer in enumerate(self.layers):
             with layer_forward_range(layer_idx):
+                expert_load = expert_load_for_layer(expert_token_counts, layer_idx)
                 h = layer.forward_decode(
-                    h, attn_metadata, input_ids_2d, kv_cache=kv_cache, **routing_kwargs
+                    h,
+                    attn_metadata,
+                    input_ids_2d,
+                    kv_cache=kv_cache,
+                    expert_load=expert_load,
+                    **routing_kwargs,
                 )
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
         # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
@@ -521,6 +532,7 @@ class V4Transformer(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
+        expert_token_counts: Optional[torch.Tensor],
         start_pos=0,
         apply_lm_head: bool = True,
         kv_cache=None,
@@ -634,6 +646,7 @@ class V4Transformer(nn.Module):
         layer_forward_range = _profiler.make_layer_forward_range()
         for li, layer in enumerate(self.layers):
             with layer_forward_range(li):
+                expert_load = expert_load_for_layer(expert_token_counts, li)
                 h_flat = layer(
                     h_flat,
                     input_ids_flat,
@@ -642,6 +655,7 @@ class V4Transformer(nn.Module):
                     kv_cache=kv_cache,
                     block_tables_by_type=block_tables_by_type,
                     **routing_kwargs,
+                    expert_load=expert_load,
                 )
                 if _rt_on:
                     _rt.record(f"layer{li:02d}_out", h_flat)

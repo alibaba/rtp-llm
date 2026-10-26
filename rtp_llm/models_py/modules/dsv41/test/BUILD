@@ -1,5 +1,6 @@
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -90,7 +91,7 @@ _TESTS = [
         }),
         legacy_create_init = 0,
     )
-    for name in _TESTS if name not in ["test_v41_mega_mhc", "test_mhc_moe_inputs", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup"] + _ENGRAM_SM100_TESTS
+    for name in _TESTS if name not in ["test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mhc_moe_inputs", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup"] + _ENGRAM_SM100_TESTS
 ]
 
 py_test(
@@ -123,5 +124,26 @@ py_test(
         tags = ["dsv41_cuda13"],
         legacy_create_init = 0,
     )
-    for name in ["test_v41_mega_mhc", "test_mhc_moe_inputs", "test_fake_balance_expert", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup"] + _ENGRAM_SM100_TESTS
+    for name in ["test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mhc_moe_inputs", "test_fake_balance_expert", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup"] + _ENGRAM_SM100_TESTS
 ]
+
+dsv4_sm100_py_test(
+    name = "test_eplb_contract",
+    gpu_count = 0,
+    tags = ["dsv41_cuda13"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+)
+
+dsv4_sm100_py_test(
+    name = "test_eplb_mega",
+    gpu_count = 2,
+    tags = ["dsv41_cuda13"],
+    extra_srcs = ["//rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test:mega_moe_routed_only_execution_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+)

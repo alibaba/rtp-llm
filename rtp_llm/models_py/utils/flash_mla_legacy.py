@@ -1,6 +1,6 @@
 """Resolve the FlashMLA runtime for existing MLA/DSv4 cache formats.
 
-CUDA13 ARM ships separate current V4.1 and legacy wheels. Other platform locks
+CUDA13 ARM and x86 ship separate current V4.1 and legacy wheels. Other platform locks
 retain their original FlashMLA distribution, so use that only when the isolated
 legacy distribution is absent. V4.1 never imports this module.
 

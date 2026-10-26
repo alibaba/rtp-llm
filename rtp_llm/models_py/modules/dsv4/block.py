@@ -25,6 +25,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.weight_adapter import (
     adapt_split_moe_weights,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.utils.model_weight import W
 
 _PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
@@ -382,9 +383,12 @@ class Block(nn.Module):
         return residual, x_pre, post, comb
 
     def prefill_fast_ffn_body(
-        self, x_pre: torch.Tensor, input_ids: torch.Tensor
+        self,
+        x_pre: torch.Tensor,
+        input_ids: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
     ) -> torch.Tensor:
-        return self.ffn(x_pre, input_ids)
+        return self.ffn(x_pre, input_ids=input_ids, expert_load=expert_load)
 
     def prefill_fast_ffn_post(
         self,
@@ -401,6 +405,7 @@ class Block(nn.Module):
         x: torch.Tensor,  # [B, 1, hc, dim]
         attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
         input_ids: torch.Tensor,  # [B, 1]
+        expert_load: Optional[ExpertLoadContext],
         kv_cache=None,
         attn_fn=None,
     ) -> torch.Tensor:
@@ -469,7 +474,12 @@ class Block(nn.Module):
         x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
-        ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True)
+        ffn_out = self.ffn(
+            x_pre,
+            input_ids=input_ids,
+            is_decode_forward=True,
+            expert_load=expert_load,
+        )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
@@ -481,6 +491,7 @@ class Block(nn.Module):
         input_ids: Optional[torch.Tensor],  # [T]
         positions: torch.Tensor,  # [T] int64
         cu_seqlens: torch.Tensor,  # [B+1] int64
+        expert_load: Optional[ExpertLoadContext],
         kv_cache=None,
         block_tables_by_type=None,
     ) -> torch.Tensor:
@@ -501,6 +512,7 @@ class Block(nn.Module):
                 cu_seqlens,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
+                expert_load=expert_load,
             )
         return fast_call(
             x,
@@ -509,6 +521,7 @@ class Block(nn.Module):
             cu_seqlens,
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
+            expert_load=expert_load,
         )
 
     def _forward_prefill_fast_fp8(
@@ -517,6 +530,7 @@ class Block(nn.Module):
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
         kv_cache=None,
         block_tables_by_type=None,
     ) -> torch.Tensor:
@@ -568,7 +582,11 @@ class Block(nn.Module):
         residual = x
         x_pre, post, comb = ffn_hc_pre(x)
         x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
-        ffn_out = self.ffn(x_pre, input_ids)
+        ffn_out = self.ffn(
+            x_pre,
+            input_ids=input_ids,
+            expert_load=expert_load,
+        )
         return ffn_hc_post(ffn_out, residual, post, comb)
 
     def forward(
@@ -577,6 +595,7 @@ class Block(nn.Module):
         input_ids: Optional[torch.Tensor],  # [T]
         positions: torch.Tensor,  # [T] int64
         cu_seqlens: torch.Tensor,  # [B+1] int64
+        expert_load: Optional[ExpertLoadContext],
         kv_cache=None,
         block_tables_by_type=None,
     ) -> torch.Tensor:
@@ -731,9 +750,18 @@ class Block(nn.Module):
             else torch.zeros(x.size(0), dtype=torch.long, device=x.device)
         )
         if _dbg_layer and dbg_pos_mask is not None:
-            ffn_out = self.ffn(x_pre, ffn_in_ids, positions=dbg_positions)
+            ffn_out = self.ffn(
+                x_pre,
+                input_ids=ffn_in_ids,
+                positions=dbg_positions,
+                expert_load=expert_load,
+            )
         else:
-            ffn_out = self.ffn(x_pre, ffn_in_ids)  # [T, dim]
+            ffn_out = self.ffn(
+                x_pre,
+                input_ids=ffn_in_ids,
+                expert_load=expert_load,
+            )  # [T, dim]
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_ffn_out", ffn_out)
             if dbg_pos_mask is not None:

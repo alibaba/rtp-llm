@@ -31,6 +31,7 @@ from rtp_llm.models_py.modules.dsv41.chunk_env import (
     dsv4_chunk_tokens_from_env,
     dsv4_global_chunk_tokens_configured,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 
 from .gate import Gate
 from .routing_metadata import GateRoutingMetadata
@@ -170,6 +171,7 @@ class MoE(nn.Module):
         dp_size: int = 1,
         dp_rank: int = 0,
         fake_balance_expert: bool = False,
+        n_physical_experts: Optional[int] = None,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -189,11 +191,25 @@ class MoE(nn.Module):
         self._is_decode_role = bool(is_decode_role)
         self.ep_size = ep_size
         self.ep_rank = ep_rank
-        self.n_local_experts = n_routed_experts // max(ep_size, 1)
+        self.n_physical_experts = (
+            n_routed_experts if n_physical_experts is None else n_physical_experts
+        )
+        if self.n_physical_experts < n_routed_experts or self.n_physical_experts % max(
+            ep_size, 1
+        ):
+            raise ValueError(
+                "Physical experts must cover logical experts and divide evenly over EP"
+            )
+        self.n_local_experts = self.n_physical_experts // max(ep_size, 1)
         self.local_expert_start = ep_rank * self.n_local_experts
         self.local_expert_end = self.local_expert_start + self.n_local_experts
         from rtp_llm.utils.model_weight import W
 
+        logical_to_physical = resolved_layer_weights.get(W.log2phy)
+        logical_count = resolved_layer_weights.get(W.logic_expert_cnt)
+        if (logical_to_physical is None) != (logical_count is None):
+            raise ValueError("EPLB requires both log2phy and logic_expert_cnt")
+        self.eplb_layer = None
         shared_weight = resolved_layer_weights[W.v4_shared_w13_w]
         shared_scale = resolved_layer_weights[W.v4_shared_w13_s]
         shared_fp8_block_size = (
@@ -221,6 +237,7 @@ class MoE(nn.Module):
             dim=dim,
             moe_inter_dim=moe_inter_dim,
             n_routed_experts=n_routed_experts,
+            n_physical_experts=self.n_physical_experts,
             n_activated_experts=n_activated_experts,
             swiglu_limit=swiglu_limit,
             ep_size=ep_size,
@@ -270,6 +287,18 @@ class MoE(nn.Module):
         self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
         self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
         self._strategy.setup_weights(resolved_layer_weights)
+        if logical_to_physical is not None:
+            from rtp_llm.eplb.runtime import EplbLayer
+
+            self.eplb_layer = EplbLayer(
+                layer_id,
+                logical_to_physical,
+                logical_count,
+                self._strategy.get_eplb_weights(),
+                ep_rank=ep_rank,
+                # Mega dispatches each rank's full input and returns its own sum.
+                replica_offset=ep_rank,
+            )
         self._strategy.setup_runtime()
 
     def _should_chunk(self, tokens: int) -> bool:
@@ -308,14 +337,18 @@ class MoE(nn.Module):
             return None
         return self._strategy.prepare_mhc_inputs(x)
 
-    def _forward_gate_pack(self, x: torch.Tensor, input_ids: torch.Tensor):
+    def _forward_gate_pack(self, x: torch.Tensor, input_ids: torch.Tensor, expert_load):
         from .mega_gate import can_use_mega_gate, mega_gate
 
         if can_use_mega_gate(x, self.gate):
             with record_function_range("dsv4.moe.deepgemm_mega_gate"):
                 weights, indices = mega_gate(x, self.gate, self._strategy.cfg.ep_rank)
-            return self._strategy(x, weights, indices)
-        return self._strategy.forward_with_gate_pack(x, self.gate, input_ids)
+            return self._strategy(
+                x, weights, indices, expert_load=expert_load, eplb_layer=self.eplb_layer
+            )
+        return self._strategy.forward_with_gate_pack(
+            x, self.gate, input_ids, expert_load=expert_load, eplb_layer=self.eplb_layer
+        )
 
     def _run_chunk(
         self,
@@ -323,18 +356,19 @@ class MoE(nn.Module):
         input_ids: torch.Tensor,
         out: torch.Tensor,
         routing_metadata: Optional[GateRoutingMetadata] = None,
+        expert_load: Optional[ExpertLoadContext] = None,
     ) -> None:
         if self._use_gate_pack():
             if self._routed_includes_shared:
                 with record_function_range("dsv4.moe.routed_experts"):
-                    routed = self._forward_gate_pack(x, input_ids)
+                    routed = self._forward_gate_pack(x, input_ids, expert_load)
                 out.copy_(routed)
                 return
             with record_function_range("dsv4.moe.shared_expert_start"):
                 self._shared_executor.start(self.shared_experts, x)
             try:
                 with record_function_range("dsv4.moe.routed_experts"):
-                    routed = self._forward_gate_pack(x, input_ids)
+                    routed = self._forward_gate_pack(x, input_ids, expert_load)
             except Exception:
                 with record_function_range("dsv4.moe.shared_expert_finish"):
                     self._shared_executor.finish()
@@ -355,14 +389,26 @@ class MoE(nn.Module):
 
         if self._routed_includes_shared:
             with record_function_range("dsv4.moe.routed_experts"):
-                routed = self._strategy(x, weights, indices)
+                routed = self._strategy(
+                    x,
+                    weights,
+                    indices,
+                    expert_load=expert_load,
+                    eplb_layer=self.eplb_layer,
+                )
             out.copy_(routed)
             return
         with record_function_range("dsv4.moe.shared_expert_start"):
             self._shared_executor.start(self.shared_experts, x)
         try:
             with record_function_range("dsv4.moe.routed_experts"):
-                routed = self._strategy(x, weights, indices)
+                routed = self._strategy(
+                    x,
+                    weights,
+                    indices,
+                    expert_load=expert_load,
+                    eplb_layer=self.eplb_layer,
+                )
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()
@@ -380,6 +426,7 @@ class MoE(nn.Module):
         input_ids_flat: torch.Tensor,
         shape: torch.Size,
         routing_metadata: Optional[GateRoutingMetadata] = None,
+        expert_load: Optional[ExpertLoadContext] = None,
     ) -> torch.Tensor:
         global _CHUNKED_MOE_LOGGED
         T = x.size(0)
@@ -402,6 +449,7 @@ class MoE(nn.Module):
                 x[token_start:token_end],
                 input_ids_flat[token_start:token_end],
                 out[token_start:token_end],
+                expert_load=expert_load,
                 routing_metadata=(
                     routing_metadata.slice(token_start, token_end)
                     if routing_metadata is not None
@@ -414,6 +462,7 @@ class MoE(nn.Module):
         self,
         x: torch.Tensor,
         input_ids: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext] = None,
         *,
         routing_metadata: Optional[GateRoutingMetadata] = None,
         mhc_inputs: MegaMoEInputs | None = None,
@@ -430,7 +479,13 @@ class MoE(nn.Module):
             if routing_metadata is not None or _dbg:
                 raise ValueError("Prepared MegaMHC inputs require plain decode routing")
             with record_function_range("dsv4.moe.routed_experts"):
-                y = self._strategy.forward_from_mhc(x, self.gate, mhc_inputs)
+                y = self._strategy.forward_from_mhc(
+                    x,
+                    self.gate,
+                    mhc_inputs,
+                    expert_load=expert_load,
+                    eplb_layer=self.eplb_layer,
+                )
             return y.view(shape)
         input_ids_flat = (
             routing_metadata.input_ids
@@ -455,18 +510,20 @@ class MoE(nn.Module):
                     x[dbg_pos_mask].contiguous(),
                 )
         if self._should_chunk(x.size(0)):
-            return self._forward_chunked(x, input_ids_flat, shape, routing_metadata)
+            return self._forward_chunked(
+                x, input_ids_flat, shape, routing_metadata, expert_load=expert_load
+            )
 
         if self._use_gate_pack():
             if self._routed_includes_shared:
                 with record_function_range("dsv4.moe.routed_experts"):
-                    y = self._forward_gate_pack(x, input_ids_flat)
+                    y = self._forward_gate_pack(x, input_ids_flat, expert_load)
                 return (y if y.dtype == x.dtype else y.type_as(x)).view(shape)
             with record_function_range("dsv4.moe.shared_expert_start"):
                 self._shared_executor.start(self.shared_experts, x)
             try:
                 with record_function_range("dsv4.moe.routed_experts"):
-                    y = self._forward_gate_pack(x, input_ids_flat)
+                    y = self._forward_gate_pack(x, input_ids_flat, expert_load)
             except Exception:
                 with record_function_range("dsv4.moe.shared_expert_finish"):
                     self._shared_executor.finish()
@@ -508,7 +565,13 @@ class MoE(nn.Module):
                 )
         if self._routed_includes_shared:
             with record_function_range("dsv4.moe.routed_experts"):
-                y = self._strategy(x, weights, indices)
+                y = self._strategy(
+                    x,
+                    weights,
+                    indices,
+                    expert_load=expert_load,
+                    eplb_layer=self.eplb_layer,
+                )
             if _dbg:
                 _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_routed_y", y)
                 if dbg_pos_mask is not None:
@@ -522,7 +585,13 @@ class MoE(nn.Module):
             self._shared_executor.start(self.shared_experts, x)
         try:
             with record_function_range("dsv4.moe.routed_experts"):
-                y = self._strategy(x, weights, indices)
+                y = self._strategy(
+                    x,
+                    weights,
+                    indices,
+                    expert_load=expert_load,
+                    eplb_layer=self.eplb_layer,
+                )
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()

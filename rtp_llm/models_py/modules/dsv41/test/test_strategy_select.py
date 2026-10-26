@@ -15,6 +15,8 @@ from contextlib import contextmanager
 from dataclasses import replace
 from unittest import mock
 
+import torch
+
 from rtp_llm.models_py.modules.dsv41.moe.mega_se_buf import (
     _mega_moe_se_unavailable_reason,
 )
@@ -251,13 +253,18 @@ class StrategySelectTest(unittest.TestCase):
                     "_mega_l1_sf",
                     "_mega_l2_w",
                     "_mega_l2_sf",
-                    "_mega_buf",
                     "_se_l1_w",
                     "_se_l1_sf",
                     "_se_l2_w",
                     "_se_l2_sf",
                 ):
                     setattr(strategy, name, object())
+                strategy._mega_buf = types.SimpleNamespace(
+                    topk_idx=torch.zeros(
+                        16, cfg.n_activated_experts, dtype=torch.int64
+                    ),
+                    topk_weights=torch.ones(16, cfg.n_activated_experts),
+                )
                 with mock.patch.object(
                     deep_gemm, "fp8_fp4_mega_moe"
                 ) as launch, mock.patch(
@@ -352,26 +359,14 @@ class StrategySelectTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "mega_se.*cannot handle"):
                     select_strategy(cfg, forced="mega")
 
-    def test_v41_shared_default_rejects_old_fused_recipe(self):
+    def test_removed_fused_strategy_is_unknown(self):
         for decode in (False, True):
             cfg = replace(
                 _cfg(ep_size=4), shared_fp8_block_size=32, is_decode_role=decode
             )
             with self.subTest(decode=decode), _env(DSV4_USE_MEGA_MOE_SE=None):
-                with self.assertRaisesRegex(ValueError, "block-128"):
+                with self.assertRaisesRegex(RuntimeError, "Unknown MoE strategy"):
                     select_strategy(cfg, forced="mega_fused")
-
-    def test_v41_shared_rejects_conflicting_fused_toggle(self):
-        for decode in (False, True):
-            cfg = replace(
-                _cfg(ep_size=4), shared_fp8_block_size=32, is_decode_role=decode
-            )
-            with self.subTest(decode=decode), _env(
-                DSV4_USE_MEGA_MOE_SE=None,
-                DSV4_USE_MEGA_MOE_FUSED="1",
-            ):
-                with self.assertRaisesRegex(RuntimeError, "conflicts"):
-                    select_strategy(cfg, forced="mega")
 
     def test_ep_gt1_explicit_se_zero_picks_non_fused_mega(self):
         with _env(DSV4_USE_MEGA_MOE_SE="0"), mock.patch.object(
@@ -474,15 +469,6 @@ class StrategySelectTest(unittest.TestCase):
             with self.assertRaises(RuntimeError) as cm:
                 select_strategy(_cfg(ep_size=2), forced=forced, strict=strict)
         self.assertIn("Forced MoE strategy 'mega_se'", str(cm.exception))
-
-    def test_mega_moe_se_and_old_fused_conflict(self):
-        with _env(
-            DSV4_USE_MEGA_MOE_SE="1",
-            DSV4_USE_MEGA_MOE_FUSED="1",
-        ):
-            with self.assertRaises(RuntimeError) as cm:
-                select_strategy(_cfg(ep_size=2))
-        self.assertIn("conflicts with DSV4_USE_MEGA_MOE_FUSED=1", str(cm.exception))
 
     def test_legacy_use_grouped_fp4_1_translates_to_grouped_nonstrict(self):
         with _env(DSV4_USE_GROUPED_FP4="1"):

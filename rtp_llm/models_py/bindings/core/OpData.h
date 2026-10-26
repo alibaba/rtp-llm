@@ -4,7 +4,6 @@
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
-#include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
@@ -267,8 +266,6 @@ struct MoeConfigs {
     double routed_scaling_factor = 1.0;  // used in deepseek v2 and glm4 moe
 
     bool enable_eplb = false;
-    // NOTE(yinzhi): not used yet
-    EplbBalanceMethod balance_method = EplbBalanceMethod::EQUAL;
 };
 
 struct FfnConfigs {

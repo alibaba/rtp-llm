@@ -268,7 +268,7 @@ class StrategyRegistryDiagnosticsTest(unittest.TestCase):
         self.assertEqual(config.local_expert_start, 27)
         self.assertEqual(config.local_expert_end, 36)
 
-    def test_fp8_fp4_strategy_rejects_redundant_experts(self):
+    def test_fp8_fp4_strategy_accepts_redundant_experts(self):
         config = SimpleNamespace(
             moe_strategy="mega_moe",
             moe_quant_method="FP8_FP4",
@@ -279,27 +279,7 @@ class StrategyRegistryDiagnosticsTest(unittest.TestCase):
 
         CudaMegaMoeStrategy.check_conditions(checker, config)
 
-        self.assertFalse(checker.all_passed())
-
-    def test_fp8_fp4_eplb_failure_explains_expert_counts(self):
-        config = SimpleNamespace(
-            moe_strategy="mega_moe",
-            moe_quant_method="FP8_FP4",
-            expert_num=64,
-            physical_expert_num=72,
-            has_redundant_experts=True,
-            ep_size=8,
-            world_size=8,
-            tp_size=1,
-        )
-
-        with self.assertRaises(ValueError) as cm:
-            StrategyRegistry().get_strategy(config)
-
-        message = str(cm.exception)
-        self.assertIn("do not support EPLB redundant experts", message)
-        self.assertIn("logical_experts=64", message)
-        self.assertIn("physical_experts=72", message)
+        self.assertTrue(checker.all_passed())
 
     def test_local_loop_rejects_non_sm100_device(self):
         config = SimpleNamespace(ep_size=1, moe_quant_method="FP8_FP4")
@@ -390,7 +370,7 @@ class StrategyRegistryDiagnosticsTest(unittest.TestCase):
 
         registry = MagicMock()
         registry.get_strategy.return_value = UnnamedStrategy()
-        config = SimpleNamespace(expert_num=8)
+        config = SimpleNamespace(expert_num=8, physical_expert_num=8)
         with patch.object(FusedMoeFactory, "_registry", registry), patch(
             "rtp_llm.models_py.modules.factory.fused_moe.factory.FusedMoe"
         ) as fused_moe:
@@ -401,6 +381,7 @@ class StrategyRegistryDiagnosticsTest(unittest.TestCase):
             "executor",
             expert_num=8,
             strategy_name="UnnamedStrategy",
+            eplb_layer=None,
         )
 
     def test_package_import_does_not_eagerly_import_deep_gemm(self):

@@ -2,7 +2,6 @@
 
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
-#include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
@@ -76,6 +75,8 @@ struct GptModelInitParams {
 
     std::vector<int64_t>    hidden_state_capture_layer_ids;
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
+    EPLBConfig              eplb_config;
+    QuantAlgo               quant_algo;
 };
 
 enum GptModelInputIndex : size_t {
@@ -201,10 +202,13 @@ struct TokenSliceInfo {
 
 class ModelBase {
 public:
-    virtual ~ModelBase()                                                     = default;
-    virtual GptModelOutputs            forward(const GptModelInputs& inputs) = 0;
-    virtual void                       releaseBuffers() {}
-    virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual ~ModelBase()                                          = default;
+    virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
+    virtual void            releaseBuffers() {}
+    virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual bool            updateEplbConfig(const EPLBConfig&) {
+        return true;
+    }
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
         return std::nullopt;
     }
@@ -253,9 +257,8 @@ public:
         return torch::Tensor();
     }
 
-    rtp_llm::Weights            weights_;
-    rtp_llm::OverallExpertStats overall_expert_stats_;
-    size_t                      model_id_ = 0;
+    rtp_llm::Weights weights_;
+    size_t           model_id_ = 0;
 };
 
 }  // namespace rtp_llm

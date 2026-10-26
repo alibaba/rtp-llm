@@ -261,15 +261,19 @@ class GrpcClientWrapper:
         }
 
     async def update_eplb_config(self, req: Any) -> Dict[str, Any]:
-        """Update EPLB config - this would need to be implemented based on your requirements"""
+        """Update the mode and, when supplied, the rearrangement step interval."""
         try:
             await self._ensure_connection()
             if isinstance(req, str):
                 req = json.loads(req)
-            epld_req = pb2.UpdateEplbConfigRequestPB(
-                mode=req.get("mode", "NONE"),
-                update_time=int(time.time()),
-            )
+            epld_req = pb2.UpdateEplbConfigRequestPB(mode=req.get("mode", "NONE"))
+            if "update_time" in req:
+                interval = req["update_time"]
+                if type(interval) is not int or interval < 0:
+                    raise ValueError(
+                        "update_time must be a non-negative integer step interval"
+                    )
+                epld_req.update_time = interval
             await self.stub.UpdateEplbConfig(epld_req)
             return {"status": "ok"}
         except Exception as e:

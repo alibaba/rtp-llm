@@ -76,11 +76,16 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             torch.cat([weights, pad_w], dim=-1),
         )
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return self._local.get_eplb_weights()
+
     def forward(
         self,
         x: torch.Tensor,  # [N, D] local rank's tokens (BF16)
         weights: torch.Tensor,  # [N, k] fp32
         indices: torch.Tensor,  # [N, k] int64 global expert IDs
+        expert_load=None,
+        eplb_layer=None,
     ) -> torch.Tensor:
         """DP+EP path: DeepEP normal dispatch → local per-expert compute
         → DeepEP combine. Requires ``init_deepep_wrapper`` to have been
@@ -92,7 +97,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         buf = wrapper.buffer
         cfg = self.cfg
 
-        self.apply_fake_balance(indices, weights)
+        self.finalize_routing(indices, weights, eplb_layer)
 
         # Pad topk to nearest supported value (V4's 6 → 8).
         indices_p, weights_p = self._pad_topk_for_deepep(indices, weights)
@@ -104,7 +109,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             num_tokens_per_expert,
             is_token_in_rank,
             _,
-        ) = buf.get_dispatch_layout(indices_p, cfg.n_routed_experts)
+        ) = buf.get_dispatch_layout(indices_p, cfg.physical_expert_num)
 
         # 2. Dispatch the BF16 tokens + topk scaffolding.
         (
@@ -125,6 +130,9 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             weights_p,
             expert_alignment=1,
         )
+
+        if expert_load is not None:
+            expert_load.record_ids(recv_topk_idx)
 
         # 3. Local per-expert compute. ACCL-EP's dispatch returns
         # ``recv_topk_idx`` in the LOCAL index space ``[0, n_local_experts)``

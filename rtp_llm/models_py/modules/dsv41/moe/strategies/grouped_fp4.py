@@ -103,7 +103,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
-        E, D, inter = (cfg.n_routed_experts, cfg.dim, cfg.moe_inter_dim)
+        E, D, inter = (cfg.physical_expert_num, cfg.dim, cfg.moe_inter_dim)
         stacked_w1_w = layer_weights.pop(W.v4_routed_w1_w)
         stacked_w1_s = layer_weights.pop(W.v4_routed_w1_s)
         stacked_w2_w = layer_weights.pop(W.v4_routed_w2_w)
@@ -142,8 +142,23 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         del s13_raw, s2_raw
         torch.cuda.empty_cache()
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return (
+            self._w13,
+            self._s13,
+            self._w2,
+            self._s2,
+            self._s13_dense_t,
+            self._s2_dense_t,
+        )
+
     def forward(
-        self, x: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        expert_load=None,
+        eplb_layer=None,
     ) -> torch.Tensor:
         """4-opt prefill path; returns ``[N, D] fp32``.
 
@@ -157,9 +172,11 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
              ``weight * expert[idx](x)``.
         """
         cfg = self.cfg
-        self.apply_fake_balance(indices, weights)
+        self.finalize_routing(indices, weights, eplb_layer)
+        if expert_load is not None:
+            expert_load.record_ids(indices)
         N, D = x.shape
-        E = cfg.n_routed_experts
+        E = cfg.physical_expert_num
         inter = cfg.moe_inter_dim
         device = x.device
         if N == 0:
@@ -204,6 +221,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             scatter_out_scale,
             m_indices,
             output_index,
+            expert_token_counts=None,
             scale_ue8m0=True,
         )
         m_indices.clamp_(min=0, max=E - 1)

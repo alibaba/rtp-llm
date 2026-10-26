@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.ops import SpeculativeType
+from rtp_llm.ops import EPLBConfig, EplbMode, SpeculativeType
 
 
 class DSparkRuntimeConfigTest(unittest.TestCase):
@@ -78,7 +78,9 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
     def test_only_explicit_dspark_wires_dspark_runtime_config(self):
         for sp_type, model_type, should_setup_dspark in (
             (SpeculativeType.MTP, "deepseek_v4_mtp", False),
+            (SpeculativeType.EAGLE, "eagle", False),
             (SpeculativeType.DSPARK, "deepseek_v4_dspark", True),
+            (SpeculativeType.DSPARK, "deepseek_v41_dspark", True),
         ):
             with self.subTest(sp_type=sp_type, model_type=model_type):
                 sp_config, target_config, draft_config = self._configs(gamma=3)
@@ -87,6 +89,11 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
                 sp_config.model_type = model_type
                 sp_config.quantization = None
                 target_config.max_seq_len = 4096
+                target_config.eplb_config = EPLBConfig()
+                target_config.eplb_config.eplb_mode = EplbMode.ALL
+                target_config.eplb_config.redundant_expert = 32
+                target_config.eplb_config.eplb_metrics_report_interval = 4
+                draft_config.eplb_config = EPLBConfig()
                 target_config.capture_aux_hidden_layer_ids = None
                 draft_config.tokenizer_path = ""
                 draft_config.ckpt_path = ""
@@ -117,6 +124,12 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
 
                 self.assertIs(result, draft_config)
                 self.assertEqual(result.max_seq_len, target_config.max_seq_len)
+                self.assertEqual(result.eplb_config.redundant_expert, 0)
+                self.assertEqual(result.eplb_config.eplb_mode, EplbMode.NONE)
+                self.assertEqual(result.eplb_config.eplb_metrics_report_interval, 0)
+                self.assertIsNot(result.eplb_config, target_config.eplb_config)
+                self.assertEqual(target_config.eplb_config.eplb_mode, EplbMode.ALL)
+                self.assertEqual(target_config.eplb_config.redundant_expert, 32)
                 if should_setup_dspark:
                     setup_dspark.assert_called_once_with(
                         sp_config, target_config, draft_config

@@ -980,9 +980,6 @@ public:
     int64_t model_forward_us                     = 0;
     int64_t sample_input_us                      = 0;
     int64_t dispatch_output_us                   = 0;
-
-    // eplb metrics
-    int64_t eplb_step_latency_us = 0;
 };
 
 class RtpLLMExecutorMetrics: public kmonitor::MetricsGroup {
@@ -1005,9 +1002,6 @@ public:
     kmonitor::MutableMetric* model_forward_us_metric      = nullptr;
     kmonitor::MutableMetric* sample_input_us_metric       = nullptr;
     kmonitor::MutableMetric* dispatch_output_us_metric    = nullptr;
-
-    // eplb metrics
-    kmonitor::MutableMetric* eplb_step_latency_us_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1480,13 +1474,9 @@ private:
 
 class RtpLLmEplbMetricsCollector final {
 public:
-    int64_t ep_rank;
-    int64_t update_layer_id;
-
-    int64_t update_weights_latency_ms;
-    bool    update_weights_qps;
-
-    std::vector<int64_t> gpu_loads;
+    // Planner steps and monitor windows report independently.
+    int64_t step_latency_us = -1;
+    double  moe_lb          = -1;
 };
 
 class RtpLLmEplbMetrics: public kmonitor::MetricsGroup {
@@ -1495,10 +1485,8 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* update_weights_qps_metric        = nullptr;
-    kmonitor::MutableMetric* update_layer_weights_qps_metric  = nullptr;
-    kmonitor::MutableMetric* update_weights_latency_ms_metric = nullptr;
-    kmonitor::MutableMetric* gpu_loads_metric                 = nullptr;
+    kmonitor::MutableMetric* step_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* moe_lb_metric          = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

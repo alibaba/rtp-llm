@@ -197,7 +197,7 @@ bool HttpApiServer::registerTokenizerService() {
 
 bool HttpApiServer::registerChatService() {
     chat_service_.reset(new ChatService(
-        engine_, mm_processor_, request_counter_, tokenizer_, render_, params_.model_config_, metric_reporter_));
+        engine_, mm_processor_, request_counter_, tokenizer_, render_, model_config_, metric_reporter_));
     auto chat_completions_callback = [admission            = admission_,
                                       active_request_count = active_request_count_,
                                       chat_service         = chat_service_,
@@ -263,13 +263,8 @@ bool HttpApiServer::registerInferenceService() {
         RTP_LLM_LOG_WARNING("register inference service failed, http server is null");
         return false;
     }
-    inference_service_.reset(new InferenceService(engine_,
-                                                  mm_processor_,
-                                                  request_counter_,
-                                                  token_processor_,
-                                                  controller_,
-                                                  params_.model_config_,
-                                                  metric_reporter_));
+    inference_service_.reset(new InferenceService(
+        engine_, mm_processor_, request_counter_, token_processor_, controller_, model_config_, metric_reporter_));
     auto inference_internal_callback =
         [admission = admission_, active_request_count = active_request_count_, inference_service = inference_service_](
             std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {

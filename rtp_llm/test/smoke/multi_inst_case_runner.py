@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Union
 
 from smoke.case_runner import CaseRunner
+from smoke.eplb_smoke_checks import check_eplb_applied
 from smoke.task_info import TaskInfo, TaskStates
 
 from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
@@ -524,6 +525,35 @@ class SeparatedCaseRunner(CaseRunner):
                 else (PREFILL_ROLE_NAME if has_pd else LLM_ROLE_NAME)
             )
             state = self.curl_server(managers[curl_role])
+            if str_to_bool(os.environ.get("SMOKE_ASSERT_EPLB_APPLIED", "0")):
+                evidence = {
+                    role: check_eplb_applied(
+                        Path(managers[role].log_file_path).parent,
+                        sizes[role],
+                    )
+                    for role in (PREFILL_ROLE_NAME, DECODE_ROLE_NAME)
+                }
+                # Use the original JSON oracle, whose response has no cold-cache
+                # assumptions. A successful request after these records proves
+                # both services can keep serving after the migration completed.
+                probe = self.task_info.model_copy(deep=True)
+                probe.query_result = [
+                    next(
+                        query
+                        for query in probe.query_result
+                        if query.get("case_name") == "eplb_post_rebalance_json_probe"
+                    )
+                ]
+                probe.taskinfo_rel_path += ".post_eplb"
+                probe_state = self._curl_server_impl(managers[curl_role], probe)
+                state.query_status.extend(probe_state.query_status)
+                state.total_count += probe_state.total_count
+                state.ret = state.ret and probe_state.ret
+                evidence["post_rebalance_request_passed"] = probe_state.ret
+                output = Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"])
+                (output / "eplb_migration_evidence.json").write_text(
+                    json.dumps(evidence, indent=2) + "\n"
+                )
             assert_affinity = str_to_bool(
                 os.environ.get("SMOKE_ASSERT_VIT_CACHE_AFFINITY", "0")
             )
