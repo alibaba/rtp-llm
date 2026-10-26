@@ -281,14 +281,14 @@ public final class EndpointTestSupport {
         try {
             state.enableQueueLocked(
                     config.isPriorityOrdering()
-                            ? org.flexlb.balance.scheduler.WorkerBatcher.PRIORITY_QUEUE_ORDER
-                            : org.flexlb.balance.scheduler.WorkerBatcher.FIFO_QUEUE_ORDER);
+                            ? org.flexlb.balance.scheduler.PrefillQueueRunner.PRIORITY_QUEUE_ORDER
+                            : org.flexlb.balance.scheduler.PrefillQueueRunner.FIFO_QUEUE_ORDER);
         } finally {
             state.lock.unlock();
         }
         var worker =
                 org.mockito.Mockito.mock(
-                        org.flexlb.balance.scheduler.WorkerBatcher.class,
+                        org.flexlb.balance.scheduler.PrefillQueueRunner.class,
                         org.mockito.Mockito.withSettings()
                                 .useConstructor(
                                         status.getIpPort(),
@@ -310,13 +310,14 @@ public final class EndpointTestSupport {
                 .when(worker)
                 .offer(org.mockito.ArgumentMatchers.any());
         org.flexlb.balance.scheduler.DeliveryTestSupport.installQueueFixture(worker, delivery);
-        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "batcher", worker);
+        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "queueRunner", worker);
         return endpoint;
     }
 
-    public static org.flexlb.balance.scheduler.WorkerBatcher batcher(PrefillEndpoint endpoint) {
-        return (org.flexlb.balance.scheduler.WorkerBatcher)
-                org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "batcher");
+    public static org.flexlb.balance.scheduler.PrefillQueueRunner queueRunner(
+            PrefillEndpoint endpoint) {
+        return (org.flexlb.balance.scheduler.PrefillQueueRunner)
+                org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "queueRunner");
     }
 
     public static DecodeEndpoint decode(
@@ -398,18 +399,18 @@ public final class EndpointTestSupport {
                                                 this, "ownership");
                         state.lock.lock();
                         try {
-                            if (EndpointTestSupport.batcher(this) != null) {
+                            if (EndpointTestSupport.queueRunner(this) != null) {
                                 return;
                             }
                             state.enableQueueLocked(
                                     settings.priorityOrdering()
-                                            ? org.flexlb.balance.scheduler.WorkerBatcher
+                                            ? org.flexlb.balance.scheduler.PrefillQueueRunner
                                                     .PRIORITY_QUEUE_ORDER
-                                            : org.flexlb.balance.scheduler.WorkerBatcher
+                                            : org.flexlb.balance.scheduler.PrefillQueueRunner
                                                     .FIFO_QUEUE_ORDER);
                             var worker =
                                     org.mockito.Mockito.mock(
-                                            org.flexlb.balance.scheduler.WorkerBatcher.class,
+                                            org.flexlb.balance.scheduler.PrefillQueueRunner.class,
                                             org.mockito.Mockito.withSettings()
                                                     .useConstructor(
                                                             status.getIpPort(),
@@ -423,7 +424,7 @@ public final class EndpointTestSupport {
                             org.flexlb.balance.scheduler.DeliveryTestSupport.installQueueFixture(
                                     worker, delivery);
                             org.springframework.test.util.ReflectionTestUtils.setField(
-                                    this, "batcher", worker);
+                                    this, "queueRunner", worker);
                             org.springframework.test.util.ReflectionTestUtils.setField(
                                     this,
                                     "projectionOrder",

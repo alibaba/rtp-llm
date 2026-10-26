@@ -120,6 +120,7 @@ public final class ContextResult {
 
     public enum ProgressKind {
         NOTIFICATIONS,
+        NOTIFICATION_REJECTED,
         RELEASE
     }
 
@@ -682,7 +683,7 @@ public final class ContextResult {
                     false,
                     timersDone,
                     expired,
-                    false);
+                    notificationsAttempted);
         }
 
         CloseFacts claimRelease(ClosePermit exact) {
@@ -698,18 +699,18 @@ public final class ContextResult {
         }
 
         CloseFacts recordProgress(CloseProgress progress, boolean preemptionFinished) {
-            boolean notification = progress.kind() == ProgressKind.NOTIFICATIONS;
+            boolean notification = progress.kind() != ProgressKind.RELEASE;
             boolean notified =
                     notificationsDone || progress.notificationsDone() && preemptionFinished;
             return new CloseFacts(
-                    notification && notified ? null : endOperation,
+                    notification ? null : endOperation,
                     notification ? releaseOperation : null,
                     prefillSettled || progress.prefillSettled(),
                     decodeSettled || progress.decodeSettled(),
                     notified,
                     timersDone || progress.timersDone(),
                     expired,
-                    notificationsAttempted || notification);
+                    notificationsAttempted || progress.kind() == ProgressKind.NOTIFICATIONS);
         }
 
         CloseFacts retainEnd(EndEvidence evidence) {

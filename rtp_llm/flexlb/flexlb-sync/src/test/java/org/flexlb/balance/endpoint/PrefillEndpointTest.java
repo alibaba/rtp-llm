@@ -155,7 +155,7 @@ class PrefillEndpointTest {
         directConfig.setDispatcher(ConfigTestSupport.nonBatch());
         PrefillEndpoint direct = routeEndpoint(directConfig, "127.0.0.8");
         try {
-            assertNull(EndpointTestSupport.batcher(direct));
+            assertNull(EndpointTestSupport.queueRunner(direct));
             var empty = direct.captureRouteProjectionInputs();
             assertFalse(empty.queue().queueScheduling());
             assertSame(empty, direct.captureRouteProjectionInputs());
@@ -199,7 +199,8 @@ class PrefillEndpointTest {
 
             assertTrue(
                     routeEndpoint.control(
-                            queued, org.flexlb.balance.scheduler.WorkerBatcher.Control.REMOVE));
+                            queued,
+                            org.flexlb.balance.scheduler.PrefillQueueRunner.Control.REMOVE));
             assertEquals(0, routeEndpoint.ownership.progress().queueDepth());
         } finally {
             routeEndpoint.close();
@@ -1563,7 +1564,8 @@ class PrefillEndpointTest {
             assertTrue(EndpointTestSupport.offer(handoffEndpoint, active));
             assertTrue(
                     handoffEndpoint.control(
-                            active, org.flexlb.balance.scheduler.WorkerBatcher.Control.REMOVE));
+                            active,
+                            org.flexlb.balance.scheduler.PrefillQueueRunner.Control.REMOVE));
             registerDirect(handoffEndpoint, requestId, 100L);
 
             assertEquals(
@@ -1802,7 +1804,7 @@ class PrefillEndpointTest {
         routeEndpoint.enableQueueRuntime(
                 org.flexlb.balance.scheduler.QueueExecutionSettings.capture(routeConfig));
         org.flexlb.balance.scheduler.DeliveryTestSupport.afterSelection(
-                EndpointTestSupport.batcher(routeEndpoint),
+                EndpointTestSupport.queueRunner(routeEndpoint),
                 items -> {
                     firstPreparation.countDown();
                 });
@@ -1856,7 +1858,7 @@ class PrefillEndpointTest {
         routeEndpoint.enableQueueRuntime(
                 org.flexlb.balance.scheduler.QueueExecutionSettings.capture(routeConfig));
         org.flexlb.balance.scheduler.DeliveryTestSupport.afterSelection(
-                EndpointTestSupport.batcher(routeEndpoint),
+                EndpointTestSupport.queueRunner(routeEndpoint),
                 items -> {
                     preparationCount.incrementAndGet();
                     firstPreparation.countDown();

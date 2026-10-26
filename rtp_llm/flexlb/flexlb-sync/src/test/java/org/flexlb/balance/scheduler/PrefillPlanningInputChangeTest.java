@@ -70,7 +70,7 @@ class PrefillPlanningInputChangeTest {
         PrefillEndpoint endpoint = endpoint(config, status);
         var before = endpoint.captureRouteProjectionInputs();
         var progress = endpoint.ownership.progress();
-        var worker = EndpointTestSupport.batcher(endpoint);
+        var worker = EndpointTestSupport.queueRunner(endpoint);
         clearInvocations(worker);
 
         apply(endpoint, response(2, newBatchTokens, newSeqLen, newAvailableKv, newTotalKv));
@@ -107,7 +107,7 @@ class PrefillPlanningInputChangeTest {
         PrefillEndpoint endpoint = endpoint(config, status);
         var before = endpoint.captureRouteProjectionInputs();
         var progress = endpoint.ownership.progress();
-        var worker = EndpointTestSupport.batcher(endpoint);
+        var worker = EndpointTestSupport.queueRunner(endpoint);
         clearInvocations(worker);
 
         apply(endpoint, response(2, 200, 999, 200, 100));
@@ -129,13 +129,13 @@ class PrefillPlanningInputChangeTest {
         WorkerStatus status = status();
         publishInitial(status, response(1, 1000, 1000, 0, 100));
         PrefillEndpoint endpoint = endpoint(config, status);
-        WorkerBatcher worker = EndpointTestSupport.batcher(endpoint);
+        PrefillQueueRunner worker = EndpointTestSupport.queueRunner(endpoint);
         CountDownLatch selected = new CountDownLatch(1);
         doAnswer(
                         invocation -> {
                             List<RequestRoute> candidates = invocation.getArgument(0);
                             RequestRoute exact = candidates.getFirst();
-                            assertTrue(worker.control(exact, WorkerBatcher.Control.REMOVE));
+                            assertTrue(worker.control(exact, PrefillQueueRunner.Control.REMOVE));
                             selected.countDown();
                             return null;
                         })
@@ -176,7 +176,7 @@ class PrefillPlanningInputChangeTest {
         }
     }
 
-    private static void awaitKvWait(WorkerBatcher worker, PrefillEndpoint endpoint) {
+    private static void awaitKvWait(PrefillQueueRunner worker, PrefillEndpoint endpoint) {
         Condition condition =
                 (Condition)
                         ReflectionTestUtils.getField(

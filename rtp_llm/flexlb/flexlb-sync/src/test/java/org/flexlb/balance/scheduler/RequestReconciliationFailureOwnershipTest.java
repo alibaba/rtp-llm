@@ -40,7 +40,7 @@ import static org.mockito.Mockito.when;
 class RequestReconciliationFailureOwnershipTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void transientDecodeReconciliationFailureRetainsFactsAndMatchingEvidenceCanRetry(
+    void reconciliationOwnerRetriesItsLedgerActionWithoutReplayingTheAcceptedFact(
             boolean matchingDecodeTerminal) throws Exception {
         var config = SchedulingTestConfig.newConfig();
         config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
@@ -111,28 +111,24 @@ class RequestReconciliationFailureOwnershipTest {
         try {
             RequestProtocolTestSupport.applyPrefillStatus(
                     owner, context, prefill, RoleType.PREFILL, failed);
-            var retained = context.snapshot();
-            assertSame(registration, retained.preemption().identity());
-            assertNull(
-                    retained.preemption().reconciliation(),
-                    "exception must return its exact operation token");
-            assertEquals(PreemptionCancelPhase.CANCEL_IN_FLIGHT, retained.preemption().phase());
-            assertNotNull(retained.preemption().pendingTerminal());
-            assertFalse(retained.preemption().finished());
-            assertFalse(
-                    retained.close().decodeSettled(),
-                    "exception cannot fabricate Decode release proof");
-            assertNull(retained.outcome());
-            assertFalse(context.data().getFuture().isDone());
+            SchedulerTestSupport.awaitRequestWork(owner.runtime);
+            assertSame(transientFailure, ReflectionTestUtils.getField(owner.runtime, "failure"));
             if (matchingDecodeTerminal) {
+                var retained = context.snapshot();
+                assertSame(registration, retained.preemption().identity());
+                assertNull(retained.preemption().reconciliation());
+                assertEquals(PreemptionCancelPhase.CANCEL_IN_FLIGHT, retained.preemption().phase());
+                assertNotNull(retained.preemption().pendingTerminal());
+                assertFalse(retained.preemption().finished());
+                assertFalse(
+                        retained.close().decodeSettled(), "STALE cannot fabricate release proof");
+                assertNull(retained.outcome());
+                assertFalse(context.data().getFuture().isDone());
                 RequestProtocolTestSupport.applyDecodeStatus(
                         owner,
                         context,
                         decode,
                         DecodeResources.DecodeRequestStatus.terminal(reservation, 27L));
-            } else {
-                RequestProtocolTestSupport.applyPrefillStatus(
-                        owner, context, prefill, RoleType.PREFILL, failed);
             }
             RequestProtocolTestSupport.awaitCondition(
                     () -> context.snapshot().phase() == Phase.CLOSED);
@@ -140,7 +136,7 @@ class RequestReconciliationFailureOwnershipTest {
                     "worker error code 9",
                     context.snapshot().outcome().detail(),
                     "later physical proof must preserve the first worker failure");
-            verify(decode, times(matchingDecodeTerminal ? 1 : 2)).updatePreemption(4L, proof);
+            verify(decode, times(2)).updatePreemption(4L, proof);
             assertFalse(
                     context.data()
                             .getFuture()

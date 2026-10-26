@@ -127,7 +127,7 @@ class RequestDeliveryLockContractTest {
                 new PrefillState(
                         new java.util.concurrent.locks.ReentrantLock(),
                         org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
-                                1, WorkerBatcher.PRIORITY_QUEUE_ORDER),
+                                1, PrefillQueueRunner.PRIORITY_QUEUE_ORDER),
                         System::currentTimeMillis);
         assertSame(
                 registered.item(),
@@ -137,7 +137,7 @@ class RequestDeliveryLockContractTest {
                         System.currentTimeMillis()));
         var worker =
                 org.mockito.Mockito.spy(
-                        new WorkerBatcher(
+                        new PrefillQueueRunner(
                                 "atomic-prepare",
                                 endpoint,
                                 QueueExecutionSettings.capture(config),
@@ -406,7 +406,7 @@ class RequestDeliveryLockContractTest {
                 new PrefillState(
                         new java.util.concurrent.locks.ReentrantLock(),
                         org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
-                                1, WorkerBatcher.PRIORITY_QUEUE_ORDER),
+                                1, PrefillQueueRunner.PRIORITY_QUEUE_ORDER),
                         System::currentTimeMillis);
         java.util.concurrent.atomic.AtomicInteger releases =
                 new java.util.concurrent.atomic.AtomicInteger();

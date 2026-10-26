@@ -691,7 +691,7 @@ class RequestContextLifecycleTest {
                         null,
                         null,
                         System.currentTimeMillis());
-        when(prefill.control(item, org.flexlb.balance.scheduler.WorkerBatcher.Control.WAKE))
+        when(prefill.control(item, org.flexlb.balance.scheduler.PrefillQueueRunner.Control.WAKE))
                 .thenReturn(true);
         try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(10004L, future);
                 var admissionCompletion4 = RequestProtocolTestSupport.finishOnExit(admission)) {
@@ -704,7 +704,7 @@ class RequestContextLifecycleTest {
             assertTrue(future.isCancelled());
         }
         verify(prefill, org.mockito.Mockito.atLeastOnce())
-                .control(item, org.flexlb.balance.scheduler.WorkerBatcher.Control.WAKE);
+                .control(item, org.flexlb.balance.scheduler.PrefillQueueRunner.Control.WAKE);
         lifecycle.onQueueEvent(item, AbstractRequestScheduler.QueueKind.CONTROL, null, null);
         assertEquals(
                 RequestState.Phase.CANCELLED,
@@ -1046,7 +1046,7 @@ class RequestContextLifecycleTest {
                         null,
                         null,
                         System.currentTimeMillis());
-        when(prefill.control(item, org.flexlb.balance.scheduler.WorkerBatcher.Control.WAKE))
+        when(prefill.control(item, org.flexlb.balance.scheduler.PrefillQueueRunner.Control.WAKE))
                 .thenReturn(true);
         try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(707L, future);
                 var admissionCompletion7 = RequestProtocolTestSupport.finishOnExit(admission)) {
@@ -1141,7 +1141,7 @@ class RequestContextLifecycleTest {
                         null,
                         null,
                         System.currentTimeMillis());
-        when(prefill.control(item, org.flexlb.balance.scheduler.WorkerBatcher.Control.WAKE))
+        when(prefill.control(item, org.flexlb.balance.scheduler.PrefillQueueRunner.Control.WAKE))
                 .thenReturn(true);
         try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(709L, future);
                 var admissionCompletion9 = RequestProtocolTestSupport.finishOnExit(admission)) {
