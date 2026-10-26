@@ -46,48 +46,53 @@ const char* memoryTypeName(MemoryType memory_type) {
 DeviceBlockPool::DeviceBlockPool(std::shared_ptr<const DeviceBlockPoolConfig> config):
     IBlockPool(normalizeConfig(config)) {
     refcounts_.assign(this->config().physical_block_count, 0);
+    for (auto& typed_refcounts : refcounts_by_type_) {
+        typed_refcounts.assign(this->config().physical_block_count, 0);
+    }
 }
 
-void DeviceBlockPool::incRef(BlockIdxType block) {
-    incRef(BlockIdList{block});
+void DeviceBlockPool::incRef(BlockIdxType block, DeviceBlockRefType ref_type) {
+    incRef(BlockIdList{block}, ref_type);
 }
 
-void DeviceBlockPool::incRef(const BlockIdList& blocks) {
+void DeviceBlockPool::incRef(const BlockIdList& blocks, DeviceBlockRefType ref_type) {
+    const size_t type_index = static_cast<size_t>(ref_type);
     mutateAllocatedBlocks(
         blocks,
         [](BlockIdxType) {},
-        [this](BlockIdxType block) {
+        [this, type_index](BlockIdxType block) {
             const bool was_active     = isActiveNoLock(block);
             const bool was_available  = isAvailableNoLock(block);
-            const bool was_referenced = hasRequestRefNoLock(block);
             ++refcounts_[block];
-            if (!was_referenced) {
-                ++request_referenced_blocks_num_;
+            if (refcounts_by_type_[type_index][block]++ == 0) {
+                ++referenced_block_counts_[type_index];
             }
             updateActiveBlocksNumNoLock(block, was_active);
             updateAvailableBlocksNumNoLock(block, was_available);
         });
 }
 
-void DeviceBlockPool::decRef(BlockIdxType block) {
-    decRef(BlockIdList{block});
+void DeviceBlockPool::decRef(BlockIdxType block, DeviceBlockRefType ref_type) {
+    decRef(BlockIdList{block}, ref_type);
 }
 
-void DeviceBlockPool::decRef(const BlockIdList& blocks) {
+void DeviceBlockPool::decRef(const BlockIdList& blocks, DeviceBlockRefType ref_type) {
+    const size_t type_index = static_cast<size_t>(ref_type);
     mutateAllocatedBlocks(
         blocks,
-        [this](BlockIdxType block) {
-            RTP_LLM_CHECK_WITH_INFO(hasRequestRefNoLock(block),
-                                    "cannot decRef block [%d] of pool [%s] without a request reference",
+        [this, type_index](BlockIdxType block) {
+            RTP_LLM_CHECK_WITH_INFO(refcounts_by_type_[type_index][block] > 0,
+                                    "cannot decRef block [%d] of pool [%s] without a reference of type [%zu]",
                                     block,
-                                    poolName().c_str());
+                                    poolName().c_str(),
+                                    type_index);
         },
-        [this](BlockIdxType block) {
+        [this, type_index](BlockIdxType block) {
             const bool was_active    = isActiveNoLock(block);
             const bool was_available = isAvailableNoLock(block);
             --refcounts_[block];
-            if (!hasRequestRefNoLock(block)) {
-                --request_referenced_blocks_num_;
+            if (--refcounts_by_type_[type_index][block] == 0) {
+                --referenced_block_counts_[type_index];
             }
             if (refcounts_[block] == 0) {
                 freeAllocatedBlockNoLock(block);
@@ -134,15 +139,15 @@ bool DeviceBlockPool::tryReplaceRequestReferences(const std::vector<RequestRefer
         for (size_t i = 0; i < changes.size(); ++i) {
             const auto& change = changes[i];
             checkAllocatedNoLock(change.block);
-            const uint32_t tree_hold    = treeRefCountNoLock(change.block) > 0 ? 1 : 0;
-            const uint32_t request_refs = refcounts_[change.block] - tree_hold;
+            const uint32_t request_refs =
+                refcounts_by_type_[static_cast<size_t>(DeviceBlockRefType::REQUEST)][change.block];
             RTP_LLM_CHECK_WITH_INFO(request_refs >= static_cast<uint32_t>(change.old_count),
                                     "replacing more request references than owned for block %d",
                                     change.block);
             RTP_LLM_CHECK(static_cast<uint64_t>(refcounts_[change.block]) - change.old_count + change.new_count
                           <= std::numeric_limits<uint32_t>::max());
-            // CACHE, LOAD, EVICTION and STORE holds all prevent donor reuse.
-            if (request_refs == static_cast<uint32_t>(change.old_count) && change.new_count == 0 && tree_hold == 0) {
+            // Every tree or connector hold prevents donor reuse.
+            if (refcounts_[change.block] == static_cast<uint32_t>(change.old_count) && change.new_count == 0) {
                 reclaimable.push_back(i);
             }
         }
@@ -172,8 +177,10 @@ bool DeviceBlockPool::tryReplaceRequestReferences(const std::vector<RequestRefer
             const bool was_available  = isAvailableNoLock(block);
             const bool was_referenced = hasRequestRefNoLock(block);
             refcounts_[block]         = refcounts_[block] - change.old_count + change.new_count;
+            auto& request_refs        = refcounts_by_type_[static_cast<size_t>(DeviceBlockRefType::REQUEST)][block];
+            request_refs              = request_refs - change.old_count + change.new_count;
             if (was_referenced && !hasRequestRefNoLock(block)) {
-                --request_referenced_blocks_num_;
+                --referenced_block_counts_[static_cast<size_t>(DeviceBlockRefType::REQUEST)];
             }
             if (refcounts_[block] == 0) {
                 freeAllocatedBlockNoLock(block);
@@ -185,7 +192,8 @@ bool DeviceBlockPool::tryReplaceRequestReferences(const std::vector<RequestRefer
         for (const auto block : *fresh_blocks) {
             const bool was_active = isActiveNoLock(block);
             refcounts_[block]     = 1;
-            ++request_referenced_blocks_num_;
+            refcounts_by_type_[static_cast<size_t>(DeviceBlockRefType::REQUEST)][block] = 1;
+            ++referenced_block_counts_[static_cast<size_t>(DeviceBlockRefType::REQUEST)];
             updateActiveBlocksNumNoLock(block, was_active);
         }
         capacity_increased |= availableFreeBlocksNoLock() > free_before;
@@ -201,7 +209,7 @@ bool DeviceBlockPool::isExclusiveRequestBlock(BlockIdxType block) const {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
-    return refcounts_[block] == 1 && treeRefCountNoLock(block) == 0;
+    return refcounts_[block] == 1 && hasRequestRefNoLock(block);
 }
 
 uint32_t DeviceBlockPool::refCount(BlockIdxType block) const {
@@ -211,10 +219,10 @@ uint32_t DeviceBlockPool::refCount(BlockIdxType block) const {
     return refcounts_[block];
 }
 
-size_t DeviceBlockPool::referencedBlocksNum() const {
+size_t DeviceBlockPool::referencedBlocksNum(DeviceBlockRefType ref_type) const {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
-    return request_referenced_blocks_num_;
+    return referenced_block_counts_[static_cast<size_t>(ref_type)];
 }
 
 void DeviceBlockPool::onFirstTreeRefNoLock(BlockIdxType block) {
@@ -228,11 +236,11 @@ bool DeviceBlockPool::onLastTreeRefNoLock(BlockIdxType block) {
 }
 
 bool DeviceBlockPool::hasRequestRefNoLock(BlockIdxType block) const {
-    return refcounts_[block] > static_cast<uint32_t>(treeRefCountNoLock(block) > 0);
+    return refcounts_by_type_[static_cast<size_t>(DeviceBlockRefType::REQUEST)][block] > 0;
 }
 
 bool DeviceBlockPool::hasExternalRefNoLock(BlockIdxType block) const {
-    return hasRequestRefNoLock(block);
+    return refcounts_[block] > static_cast<uint32_t>(treeRefCountNoLock(block) > 0);
 }
 
 DeviceBlockPool::~DeviceBlockPool() {
@@ -766,16 +774,20 @@ size_t DeviceBlockPool::blockSizeBytes() const {
 }
 
 std::string DeviceBlockPool::debugString() const {
-    size_t request_ref_blocks;
+    std::array<size_t, kRefTypeCount> referenced_blocks;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        request_ref_blocks = request_referenced_blocks_num_;
+        referenced_blocks = referenced_block_counts_;
     }
 
     std::ostringstream oss;
     oss << "DeviceBlockPool{" << IBlockPool::debugString() << ", pool_name=" << config().pool_name
         << ", memory_layouts=" << config().memory_layouts.size() << ", total_size_bytes=" << config().total_size_bytes
-        << ", request_ref_blocks=" << request_ref_blocks << ", where=" << memoryTypeName(where()) << "}";
+        << ", request_ref_blocks=" << referenced_blocks[static_cast<size_t>(DeviceBlockRefType::REQUEST)]
+        << ", remote_connector_ref_blocks="
+        << referenced_blocks[static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR)]
+        << ", pd_connector_ref_blocks=" << referenced_blocks[static_cast<size_t>(DeviceBlockRefType::PD_CONNECTOR)]
+        << ", where=" << memoryTypeName(where()) << "}";
     return oss.str();
 }
 

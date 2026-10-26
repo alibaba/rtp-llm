@@ -57,6 +57,8 @@ BlockTreePoolMetricsSnapshot makePoolMetricsSnapshot(Tier tier, const IBlockPool
 BlockTreePoolMetricsSnapshot makeDevicePoolMetricsSnapshot(const DeviceBlockPool& pool) {
     BlockTreePoolMetricsSnapshot snapshot = makePoolMetricsSnapshot(Tier::DEVICE, pool);
     snapshot.request_ref_blocks           = pool.referencedBlocksNum();
+    snapshot.remote_connector_ref_blocks  = pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR);
+    snapshot.pd_connector_ref_blocks      = pool.referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR);
     return snapshot;
 }
 
