@@ -33,44 +33,72 @@ class InspectionTimeoutError(concurrent.futures.TimeoutError):
 class SourceInspection:
     """One-shot ownership handoff from CPU workers to the background loop."""
 
-    def __init__(self):
+    def __init__(self, request=None):
+        self.request = request
         self.sources = concurrent.futures.Future()
         self.verdict = None
         self._lock = threading.Lock()
+        self._worker_futures = []
+        self._cancelled = False
 
-    def supply(self, mm_inputs, sources, cached_entries):
+    def bind_work_item(self, item, index):
+        if self.request is not None:
+            item.inspection_request = SimpleNamespace(
+                **vars(self.request), input_index_offset=index
+            )
+
+    def track_work_item(self, item):
+        if item.inspection_future is not None:
+            with self._lock:
+                if self._cancelled:
+                    item.inspection_future.cancel()
+                else:
+                    self._worker_futures.append(item.inspection_future)
+
+    def supply(self, mm_inputs, sources, cached_entries, worker_futures=()):
         # Only the owning request calls supply; cancellation may race with it.
         with self._lock:
             future = self.sources
             if future is None or future.cancelled():
                 raise concurrent.futures.CancelledError("Inspection already ended")
-            future.set_result((mm_inputs, sources, cached_entries))
+            future.set_result((mm_inputs, sources, cached_entries, worker_futures))
 
     def supply_work_items(self, work_items):
         """Bind the audit to the bytes that produced each embedding."""
         source_inputs, sources, cached_entries = [], [], []
+        worker_futures = []
         producers = {
             item.cache_entry: item
             for item in work_items
-            if item.inspection_sources is not None and item.cache_entry is not None
+            if (
+                item.inspection_sources is not None
+                or item.inspection_future is not None
+            )
+            and item.cache_entry is not None
         }
         for item in work_items:
             producer = producers.get(item.cache_entry, item)
-            if producer.inspection_sources is not None:
+            if producer.inspection_future is not None:
+                worker_futures.append(producer.inspection_future)
+            elif producer.inspection_sources is not None:
                 source_inputs.extend(item.mm_inputs)
                 sources.extend(producer.inspection_sources)
             elif item.cache_entry is not None:
                 cached_entries.append(item.cache_entry)
             else:
                 raise RuntimeError("Missing CPU inspection sources")
-        self.supply(source_inputs, sources, cached_entries)
+        self.supply(source_inputs, sources, cached_entries, worker_futures)
         for item in work_items:
             item.inspection_sources = None
 
     def cancel(self):
         with self._lock:
+            self._cancelled = True
             if self.sources is not None:
                 self.sources.cancel()
+            futures, self._worker_futures = self._worker_futures, []
+        for future in futures:
+            future.cancel()
         if self.verdict is not None:
             self.verdict.cancel()
 
@@ -293,7 +321,7 @@ class MMInspectionCoordinator:
         return rewritten, verdict_future, handle
 
     def _begin_sources(self, mm_inputs, request, entry, deadline, loop):
-        handoff = SourceInspection()
+        handoff = SourceInspection(request)
 
         async def inspect():
             handle = None
@@ -301,8 +329,8 @@ class MMInspectionCoordinator:
 
                 async def run():
                     nonlocal handle
-                    source_inputs, sources, cached_entries = await asyncio.wrap_future(
-                        handoff.sources
+                    source_inputs, sources, cached_entries, worker_futures = (
+                        await asyncio.wrap_future(handoff.sources)
                     )
                     with handoff._lock:
                         handoff.sources = None
@@ -321,6 +349,12 @@ class MMInspectionCoordinator:
                             return verdict
                         if not cached.greennet_passed:
                             raise RuntimeError("Cached embedding was not inspected")
+                    for worker_future in worker_futures:
+                        verdict = await asyncio.wrap_future(worker_future)
+                        if not isinstance(verdict, GreenNetVerdict):
+                            raise RuntimeError("Worker returned no inspection verdict")
+                        if not verdict.passed:
+                            return verdict
                     if not source_inputs:
                         return GreenNetVerdict(passed=True)
                     handle = await self._greennet_provider.submit_sources(

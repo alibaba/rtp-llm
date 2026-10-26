@@ -220,7 +220,18 @@ class MMProcessEngine:
         else:
             mp_context = multiprocessing.get_context("spawn")
             self.preprocess_executor = MultiprocessPreprocessExecutor(
-                mp_context, vit_config, preprocess_params, preprocess_func
+                mp_context,
+                vit_config,
+                preprocess_params,
+                preprocess_func,
+                inspection_factory=(
+                    inspection_provider.worker_factory()
+                    if self.mm_part.supports_inspection_sources
+                    and not getattr(
+                        self.mm_part, "inspection_verdict_is_request_scoped", False
+                    )
+                    else None
+                ),
             )
             logging.info(
                 f"MMProcessEngine: Using MULTIPROCESS preprocessing mode with {vit_config.mm_preprocess_max_workers} workers"
@@ -854,6 +865,7 @@ class MMProcessEngine:
                         capture_inspection_sources=isinstance(
                             inspection_handle, SourceInspection
                         ),
+                        inspection_handle=inspection_handle,
                     )
                     self._wait_for_preprocessing(work_items, scheduled, deadline)
                     if isinstance(inspection_handle, SourceInspection):
@@ -913,6 +925,7 @@ class MMProcessEngine:
         defer_feature_hashes: bool = False,
         deadline: Optional[float] = None,
         capture_inspection_sources: bool = False,
+        inspection_handle: Optional[SourceInspection] = None,
     ) -> List[MMWorkItem]:
         """Create work items and submit preprocessing tasks."""
         # Request-level image-count cap BEFORE any preprocessing: a request whose
@@ -952,6 +965,8 @@ class MMProcessEngine:
                 )
                 work_items.append(work_item)
                 work_item.capture_inspection_sources = capture_inspection_sources
+                if isinstance(inspection_handle, SourceInspection):
+                    inspection_handle.bind_work_item(work_item, index)
                 work_item.preprocess_ready_event = ready_event
                 remote_cache = self._remote_embedding_cache
                 if (
@@ -967,11 +982,15 @@ class MMProcessEngine:
                     )
                 work_item.remaining_timeout_s()
                 self.preprocess_executor.submit(work_item)
+                if isinstance(inspection_handle, SourceInspection):
+                    inspection_handle.track_work_item(work_item)
 
         except Exception as error:
             # The caller has not received this list yet and cannot roll it back.
             for work_item in work_items:
                 work_item.fail_cache(error)
+                if work_item.inspection_future is not None:
+                    work_item.inspection_future.cancel()
             raise
 
         return work_items

@@ -9,11 +9,16 @@ import signal
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Set, Tuple
 
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.multimodal.mm_preprocess_result import MMPreprocessResult
+from rtp_llm.multimodal.mm_worker_inspection import (
+    WorkerInspectionChannel,
+    WorkerInspectionRunner,
+)
 from rtp_llm.multimodal.multimodal_util import (
     collect_download_timing,
     url_data_cache_,
@@ -24,7 +29,6 @@ from rtp_llm.multimodal.vit_metrics import (
     collect_vit_preprocess_metrics,
 )
 from rtp_llm.ops import MultimodalInput
-from rtp_llm.multimodal.mm_preprocess_result import MMPreprocessResult
 from rtp_llm.utils.time_util import Timer
 
 if TYPE_CHECKING:
@@ -34,6 +38,7 @@ if TYPE_CHECKING:
 _worker_vit_config: Optional[VitConfig] = None
 _worker_preprocess_params: Optional[dict] = None
 _worker_preprocess_func: Optional[Callable] = None
+_worker_inspection = None
 
 
 @dataclass
@@ -98,17 +103,24 @@ def _worker_initializer(
     vit_config: VitConfig,
     preprocess_params: dict,
     preprocess_func: Callable,
+    inspection_args=None,
 ) -> None:
     """
     每个工作进程启动时调用的初始化函数。
     接收一次不变的参数，并将其存储在进程的全局变量中。
     """
     global _worker_vit_config, _worker_preprocess_params, _worker_preprocess_func
+    global _worker_inspection
     # 让工作进程忽略 SIGINT 信号，这样主进程的 Ctrl+C 不会杀死它们
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     _worker_vit_config = vit_config
     _worker_preprocess_params = preprocess_params
     _worker_preprocess_func = preprocess_func
+    _worker_inspection = (
+        WorkerInspectionRunner(*inspection_args)
+        if inspection_args is not None
+        else None
+    )
     # Spawned workers import fresh module-level caches; parent-only resizing
     # does not propagate. Apply the operator's capacities once per worker.
     url_data_cache_.resize_cache(vit_config.url_cache_item_num)
@@ -120,6 +132,7 @@ def _worker_process_task(
     mm_inputs: List[MultimodalInput],
     capture_inspection_sources: bool = False,
     deadline: Optional[float] = None,
+    inspection_task=None,
 ) -> PreprocessTaskResult:
     """
     只接收变化的 `mm_inputs` 参数。
@@ -130,14 +143,34 @@ def _worker_process_task(
     params = dict(_worker_preprocess_params)
     if capture_inspection_sources:
         params.update(capture_inspection_sources=True, deadline=deadline)
-    if deadline is not None and time.monotonic() >= deadline:
-        raise TimeoutError("ViT request expired before CPU preprocessing")
-    return _run_preprocess_task(
-        _worker_preprocess_func,
-        mm_inputs,
-        _worker_vit_config,
-        params,
-    )
+    try:
+        if inspection_task is not None:
+            if _worker_inspection is None:
+                raise RuntimeError("CPU worker inspection is unavailable")
+            _worker_inspection.started(inspection_task)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("ViT request expired before CPU preprocessing")
+        payload = _run_preprocess_task(
+            _worker_preprocess_func, mm_inputs, _worker_vit_config, params
+        )
+        if inspection_task is not None:
+            result = payload.result
+            if not isinstance(result, MMPreprocessResult) or len(
+                result.inspection_sources
+            ) != len(mm_inputs):
+                raise ValueError(
+                    "CPU preprocessing did not return matching inspection sources"
+                )
+            sources = result.inspection_sources
+            # Transfer ownership inside this process. The Pool carries only RGB
+            # and the ordinary model metadata; no original JPEG/base64 bytes.
+            result.inspection_sources = []
+            _worker_inspection.submit(inspection_task, mm_inputs, sources)
+        return payload
+    except BaseException as error:
+        if inspection_task is not None and _worker_inspection is not None:
+            _worker_inspection.failed(inspection_task, error)
+        raise
 
 
 def _unpack_preprocess_result(payload: Any) -> Tuple[Any, float, float]:
@@ -222,9 +255,13 @@ class PreprocessExecutor:
     @staticmethod
     def _set_result(work_item, result):
         if isinstance(result, MMPreprocessResult):
-            if len(result.inspection_sources) != len(work_item.mm_inputs):
+            if work_item.inspection_future is not None:
+                if result.inspection_sources:
+                    raise ValueError("Worker inspection leaked source bytes to parent")
+            elif len(result.inspection_sources) != len(work_item.mm_inputs):
                 raise ValueError("CPU inspection sources changed input count")
-            work_item.inspection_sources = result.inspection_sources
+            else:
+                work_item.inspection_sources = result.inspection_sources
             work_item.preprocess_result = result.data
         elif work_item.capture_inspection_sources:
             raise ValueError("CPU preprocessing did not return inspection sources")
@@ -291,6 +328,24 @@ class LocalPreprocessExecutor(PreprocessExecutor):
             raise
 
 
+class _PreprocessPool(multiprocessing.pool.Pool):
+    @staticmethod
+    def _help_stuff_finish(inqueue, task_handler, size):
+        """Do not wait on an orphaned read lock after the writer has exited.
+
+        Python 3.10's Pool unconditionally acquires this lock on terminate().
+        A worker dying in its audit thread while its main thread waits in get()
+        leaves that lock held. With no writer left there is nothing to drain.
+        Keep the upstream draining behavior while the task writer is alive.
+        """
+        while task_handler.is_alive():
+            if inqueue._rlock.acquire(timeout=0.1):
+                while task_handler.is_alive() and inqueue._reader.poll():
+                    inqueue._reader.recv()
+                    time.sleep(0)
+                return
+
+
 class MultiprocessPreprocessExecutor(PreprocessExecutor):
     """多进程预处理执行器
 
@@ -308,6 +363,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         vit_config: VitConfig,
         preprocess_params: dict,
         preprocess_func: Callable,
+        inspection_factory=None,
     ):
         self.mp_context = mp_context
         self.vit_config = vit_config
@@ -325,6 +381,22 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         # concurrent get_result/submit callers can race to _rebuild_pool, double
         # tear down the pool, or miscount consecutive timeouts.
         self._pool_lock = threading.Lock()
+        self._pool_broken = threading.Event()
+        limits = vit_config.async_compute_executor_args()
+        self._inspection_channel = (
+            WorkerInspectionChannel(
+                mp_context,
+                inspection_factory,
+                max(
+                    vit_config.mm_preprocess_max_workers,
+                    limits["max_workers"] + limits["max_queue_size"],
+                ),
+                lambda: self._get_child_pids_from_pool(self.pool),
+                self._pool_broken.set,
+            )
+            if inspection_factory is not None
+            else None
+        )
         _report_preprocess_queue_size(0)
         self._create_pool()
 
@@ -333,13 +405,19 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         logging.info(
             f"Creating multiprocessing pool for preprocessing with {self.vit_config.mm_preprocess_max_workers} workers"
         )
-        self.pool = self.mp_context.Pool(
+        self.pool = _PreprocessPool(
+            context=self.mp_context,
             processes=self.vit_config.mm_preprocess_max_workers,
             initializer=_worker_initializer,
             initargs=(
                 self.vit_config,
                 self.preprocess_params,
                 self.preprocess_func,
+                (
+                    self._inspection_channel.worker_args
+                    if self._inspection_channel is not None
+                    else None
+                ),
             ),
         )
 
@@ -376,23 +454,41 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         _report_preprocess_queue_size(0)
 
     def _apply_async(self, work_item: "MMWorkItem", task_id: int) -> Any:
+        inspection_task = None
+        channel = getattr(self, "_inspection_channel", None)
+        if channel is not None and work_item.inspection_request is not None:
+            deadline = work_item.deadline or (
+                time.monotonic() + work_item.remaining_timeout_s()
+            )
+            inspection_task, work_item.inspection_future = channel.register(
+                work_item.inspection_request, deadline
+            )
+
         def completed(_result):
+            if inspection_task is not None and isinstance(_result, BaseException):
+                channel.finish(inspection_task.task_id, error=_result)
             work_item.preprocess_received_at = time.monotonic()
             self._finish_preprocess_task(task_id)
             work_item.preprocess_ready = True
             work_item.preprocess_ready_event.set()
 
         work_item.preprocess_submitted_at = time.monotonic()
-        return self.pool.apply_async(
-            _worker_process_task,
-            args=(
-                work_item.mm_inputs,
-                work_item.capture_inspection_sources,
-                work_item.deadline,
-            ),
-            callback=completed,
-            error_callback=completed,
-        )
+        try:
+            return self.pool.apply_async(
+                _worker_process_task,
+                args=(
+                    work_item.mm_inputs,
+                    work_item.capture_inspection_sources,
+                    work_item.deadline,
+                    inspection_task,
+                ),
+                callback=completed,
+                error_callback=completed,
+            )
+        except BaseException as error:
+            if inspection_task is not None:
+                channel.finish(inspection_task.task_id, error=error)
+            raise
 
     def _rebuild_pool(self) -> None:
         """Tear down the current pool and create a fresh one.
@@ -402,6 +498,10 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         """
         old = self.pool
         self.pool = None
+        if self._inspection_channel is not None:
+            self._inspection_channel.fail_all(
+                RuntimeError("CPU preprocessing pool rebuilt")
+            )
         self._clear_preprocess_tasks()
         try:
             if old is not None:
@@ -420,6 +520,12 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             # Serialize submission with pool rebuilds. This keeps a task from
             # being submitted to an old pool while its queue accounting resets.
             with self._pool_lock:
+                if (
+                    getattr(self, "_pool_broken", None) is not None
+                    and self._pool_broken.is_set()
+                ):
+                    self._rebuild_pool()
+                    self._pool_broken.clear()
                 # Track only after taking the rebuild lock. Otherwise a pool
                 # rebuild can clear the task between accounting and submit.
                 task_id = self._track_preprocess_task()
@@ -505,6 +611,10 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
     def shutdown(self) -> None:
         if self.pool is None:
             return
+        if self._inspection_channel is not None:
+            self._inspection_channel.fail_all(
+                RuntimeError("CPU preprocessing pool stopped")
+            )
         logging.info("Shutting down the preprocessing pool...")
         pool = self.pool
         pool.close()
@@ -518,6 +628,9 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             pool.terminate()
             pool.join()
         self._clear_preprocess_tasks()
+        if self._inspection_channel is not None:
+            self._inspection_channel.close()
+        self.pool = None
         logging.info("Preprocessing pool shut down.")
 
 

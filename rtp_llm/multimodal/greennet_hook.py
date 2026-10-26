@@ -22,7 +22,16 @@ Lifetime contract:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
+
+
+@dataclass(frozen=True)
+class GreenNetWorkerFactory:
+    create: Callable
+    max_concurrency: int
+
+    def __call__(self):
+        return self.create()
 
 
 @dataclass
@@ -58,6 +67,13 @@ class GreenNetHandle:
 
 
 class GreenNetProvider:
+    def worker_factory(self):
+        """Optional picklable CPU-only factory; never pass a live HTTP client.
+
+        Providers without this capability keep the parent-loop source path.
+        """
+        return None
+
     def is_enabled(self) -> bool:
         """Effective enablement: internal source present AND the runtime flag
         on. When False, callers MUST skip greennet entirely (no preprocess,
