@@ -522,6 +522,297 @@ TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
     checkTensorEqual(output.all_probs, torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}}).to(torch::kCUDA));
 }
 
+TEST_F(MtpExecutorTest, testForwardOverlapConsumesGrpcPayloadBeforeFirstForwardAndFallback) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 1;
+    auto components = createMtpExecutorComponents(config);
+    auto& executor = *components.executor;
+    // Exercise the real decodeStep gate with a probe model instead of weights.
+    executor.forward_overlap_supported_ = true;
+    executor.role_type_ = RoleType::DECODE;
+    // The legacy mock cache omits the explicit FULL group metadata.
+    executor.batch_stream_processor_->model_input_gatherer_config_.kv_cache_group_types = {CacheGroupType::FULL};
+    if (!executor.useForwardOverlap()) {
+        GTEST_SKIP() << "Requires RTP_LLM_MTP_FORWARD_OVERLAP=1, RTP_LLM_STREAM_ASYNC=1, "
+                       "RTP_LLM_DEVICE_INPUT=1 and RTP_LLM_MTP_ASYNC_PREPARE=0";
+    }
+    auto context = components.resource_context;
+    context.cache_manager = executor.cache_manager_;
+    auto stream = createContextStream(components.model_config, components.runtime_config, context, {1, 2, 3});
+    stream->setReserveStep(4);
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    stream->setIsContextStream(false);
+    stream->setScoreLen(2);
+    stream->setReturnAllProbs(true);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    const auto pinned_f32 = torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true);
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto sp = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp->tokens = torch::tensor({1, 2}, torch::kInt32).reshape({1, 2});
+    sp->tensors_holder = {torch::full({1, 4}, 0.25, pinned_f32), torch::full({1, 2}, 10.0, pinned_f32)};
+    sp->all_probs = sp->tensors_holder[0].to(torch::kCUDA);
+    sp->hidden_states = sp->tensors_holder[1].to(torch::kCUDA);
+    stream->setSPOutputBuffer(sp);
+    GenerateStream::MtpAsyncDeviceState state;
+    state.accept_len_gpu = torch::ones({1}, cuda_i32);
+    state.accept_tokens_gpu = torch::tensor({1, 0}, torch::kInt32).reshape({1, 2}).to(torch::kCUDA);
+    state.next_seq_len_gpu = torch::full({1}, stream->seqLength(), cuda_i32);
+    state.propose_tokens_gpu = torch::full({1}, 2, cuda_i32);
+    state.last_hidden_states_gpu = sp->hidden_states;
+    state.draft_all_probs_gpu = sp->all_probs;
+    state.next_real_seq_len = stream->seqLength();
+    stream->setMtpAsyncDeviceState(state);
+    ASSERT_TRUE(stream->tryAcquireMtpForwardClaim());
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    ASSERT_TRUE(executor.batch_stream_processor_->tryGatherDecodeForwardInput({stream}, executor.buffer_holder_)
+                    .has_value());
+
+    struct ForwardReached {};
+    struct ProbeModel final: ModelBase {
+        std::function<void()> probe;
+        GptModelOutputs forward(const GptModelInputs&) override {
+            probe();
+            throw ForwardReached{};  // Stop before sampling; no fabricated model outputs.
+        }
+    };
+    int forwards = 0;
+    auto expected_probs = state.draft_all_probs_gpu;
+    auto expected_hidden = state.last_hidden_states_gpu;
+    auto model = std::make_unique<ProbeModel>();
+    model->probe = [&] {
+        ++forwards;
+        EXPECT_EQ(stream->hasPendingAsyncBookkeeping(), forwards == 1);  // Early forward owns a KV claim.
+        EXPECT_TRUE(sp->tensors_holder.empty());
+        EXPECT_TRUE(torch::equal(stream->getMtpAsyncDeviceState().draft_all_probs_gpu, expected_probs));
+        EXPECT_TRUE(torch::equal(stream->getMtpAsyncDeviceState().last_hidden_states_gpu, expected_hidden));
+    };
+    executor.setTargetModel(std::move(model));
+    executor.setDraftModel(std::move(components.fake_draft_model));
+    MtpMetricsCollector metrics;
+    EXPECT_THROW(executor.decodeStep({stream}, metrics), ForwardReached);
+    ASSERT_EQ(forwards, 1);
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+
+    // A later ordinary/fallback round must not restore the initial RPC payload
+    // over the new GPU state produced by decode bookkeeping.
+    state = stream->getMtpAsyncDeviceState();
+    expected_probs = torch::full_like(state.draft_all_probs_gpu, 0.5);
+    expected_hidden = torch::full_like(state.last_hidden_states_gpu, 20.0);
+    state.draft_all_probs_gpu = expected_probs;
+    state.last_hidden_states_gpu = expected_hidden;
+    stream->setMtpAsyncDeviceState(std::move(state));
+    sp->all_probs = expected_probs;
+    sp->hidden_states = expected_hidden;
+    executor.forward_overlap_supported_ = false;
+    EXPECT_THROW(executor.decodeStep({stream}, metrics), ForwardReached);
+    EXPECT_EQ(forwards, 2);
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+}
+
+TEST_F(MtpExecutorTest, testForwardOverlapDynamicRoundsMatchBarrierPath) {
+    if (!autil::EnvUtil::getEnv("RTP_LLM_MTP_FORWARD_OVERLAP", false)
+        || !autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false)
+        || !autil::EnvUtil::getEnv("RTP_LLM_DEVICE_INPUT", false)
+        || autil::EnvUtil::getEnv("RTP_LLM_MTP_ASYNC_PREPARE", false)) {
+        GTEST_SKIP() << "Requires RTP_LLM_MTP_FORWARD_OVERLAP=1, RTP_LLM_STREAM_ASYNC=1, "
+                       "RTP_LLM_DEVICE_INPUT=1 and RTP_LLM_MTP_ASYNC_PREPARE=0";
+    }
+    // Replace only the model: exercise the real target/draft samplers,
+    // rejection sampling, dispatch worker and published state across rounds.
+    // This is execution/state coverage, not a real-model accuracy or graph test.
+    struct TokenSuccessorModel final: ModelBase {
+        std::function<void(const GptModelInputs&)> before_forward;
+        GptModelOutputs forward(const GptModelInputs& input) override {
+            if (before_forward) {
+                before_forward(input);
+            }
+            auto tokens = input.combo_tokens.to(torch::kLong);
+            auto selected = tokens.index_select(0, input.lm_output_indexes.to(torch::kLong));
+            auto next = (selected + 1).remainder(4).reshape({-1, 1});
+            GptModelOutputs output;
+            output.logits = torch::full({selected.numel(), 4}, -20.0,
+                                         tokens.options().dtype(torch::kFloat32));
+            output.logits.scatter_(1, next, 20.0);
+            auto hidden = tokens.to(torch::kFloat32);
+            output.all_hidden_states = torch::stack({hidden, hidden + 0.25}, 1);
+            return output;
+        }
+    };
+    struct Result {
+        std::vector<std::vector<int>> tokens;
+        std::vector<torch::Tensor> target_inputs;
+        std::vector<torch::Tensor> states;
+        torch::Tensor logprobs;
+        torch::Tensor top_ids;
+        torch::Tensor top_logprobs;
+        int grammar_calls = 0;
+    };
+    struct CountingSpecProcessor final: RejectDraftTokenSpecProcessor {
+        CountingSpecProcessor(): RejectDraftTokenSpecProcessor(3, 0) {}
+        int calls = 0;
+        int tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override {
+            ++calls;
+            return RejectDraftTokenSpecProcessor::tryAcceptAndFillBitmask(request);
+        }
+    };
+
+    auto run = [&](bool overlap, Result& result) {
+        MtpExecutorTestConfig config;
+        config.gen_num_per_cycle = 1;
+        config.vocab_size_override = 4;
+        auto components = createMtpExecutorComponents(config);
+        auto& executor = *components.executor;
+        // The tiny C++ model has no Python graph capability declaration.
+        // Override only that capability; all runtime overlap gates stay real.
+        executor.forward_overlap_supported_ = overlap;
+        executor.role_type_ = RoleType::DECODE;
+        executor.batch_stream_processor_->model_input_gatherer_config_.kv_cache_group_types = {CacheGroupType::FULL};
+        ASSERT_EQ(executor.useForwardOverlap(), overlap)
+            << "Requires RTP_LLM_MTP_FORWARD_OVERLAP=1, RTP_LLM_STREAM_ASYNC=1, "
+               "RTP_LLM_DEVICE_INPUT=1 and RTP_LLM_MTP_ASYNC_PREPARE=0";
+        ASSERT_TRUE(executor.useStreamAsync());
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        auto context = components.resource_context;
+        context.cache_manager = executor.cache_manager_;
+        context.role_type = RoleType::DECODE;
+
+        auto make_stream = [&](int token, int draft_token, int budget, int reserve, bool logprobs) {
+            auto input = std::make_shared<GenerateInput>();
+            input->input_ids = torch::tensor({token}, torch::kInt32);
+            input->generate_config = std::make_shared<GenerateConfig>();
+            auto& gc = *input->generate_config;
+            gc.top_k = 1;
+            gc.do_sample = false;
+            gc.max_new_tokens = budget;
+            gc.force_sp_accept = false;
+            gc.ignore_eos = true;  // Token 0 is ordinary test data; finish only at the budget.
+            gc.return_logprobs = logprobs;
+            gc.top_logprobs = logprobs ? 1 : 0;
+            auto stream = std::make_shared<NormalGenerateStream>(
+                input, components.model_config, components.runtime_config, context, nullptr);
+            stream->setReserveStep(reserve);
+            auto status = stream->initKVBlock();
+            if (!status.ok()) {
+                throw std::runtime_error(status.ToString());
+            }
+            stream->setIsContextStream(false);
+            stream->setScoreLen(2);
+            stream->setReturnAllProbs(true);
+            stream->generate_status_->status = StreamState::RUNNING;
+            auto sp = std::make_shared<SpeculativeExecutorStreamOutput>();
+            sp->tokens = torch::tensor({token, draft_token}, torch::kInt32).reshape({1, 2});
+            sp->target_token_gpu = torch::full({1}, token, cuda_i32);
+            sp->propose_tokens_gpu = torch::full({1}, draft_token, cuda_i32);
+            sp->all_probs = torch::zeros({1, 4}, cuda_i32.dtype(torch::kFloat32));
+            sp->all_probs[0][draft_token] = 1.0;
+            sp->hidden_states = torch::zeros({1, 2}, cuda_i32.dtype(torch::kFloat32));
+            stream->setSPOutputBuffer(sp);
+            GenerateStream::MtpAsyncDeviceState state;
+            state.accept_len_gpu = torch::ones({1}, cuda_i32);
+            state.accept_tokens_gpu = torch::tensor({token, 0}, torch::kInt32).reshape({1, 2}).to(torch::kCUDA);
+            state.propose_tokens_gpu = sp->propose_tokens_gpu;
+            state.next_seq_len_gpu = torch::full({1}, stream->seqLength(), cuda_i32);
+            state.draft_all_probs_gpu = sp->all_probs;
+            state.last_hidden_states_gpu = sp->hidden_states;
+            state.last_real_seq_len = stream->seqLength();
+            state.next_real_seq_len = stream->seqLength();
+            stream->setMtpAsyncDeviceState(std::move(state));
+            return stream;
+        };
+
+        // Eight initial blocks fit the fixture's nine usable two-token blocks.
+        // B's incorrect initial draft must be rejected by the real sampler.
+        auto a = make_stream(1, 2, 6, 5, true);
+        auto b = make_stream(2, 0, 3, 5, false);
+        auto c = make_stream(3, 0, 6, 3, false);
+        auto grammar = std::make_shared<CountingSpecProcessor>();
+        c->logits_processor_list_.push_back(grammar);
+        std::list<GenerateStreamPtr> active;
+        int forwards = 0;
+        auto target = std::make_unique<TokenSuccessorModel>();
+        target->before_forward = [&](const GptModelInputs& input) {
+            ++forwards;
+            for (const auto& stream : active) {
+                // A successful fast forward holds a claim; the barrier path
+                // has drained the previous dispatch before invoking the model.
+                EXPECT_EQ(stream->hasPendingAsyncBookkeeping(), overlap);
+            }
+            for (const auto& tensor : {input.combo_tokens, input.input_lengths,
+                                       input.prefix_lengths, input.lm_output_indexes}) {
+                result.target_inputs.push_back(tensor.clone());
+            }
+        };
+        executor.setTargetModel(std::move(target));
+        executor.setDraftModel(std::make_unique<TokenSuccessorModel>());
+        MtpMetricsCollector metrics;
+        active = {a, b};
+        ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
+        // Do not drain the worker between these rounds. C is a fresh request
+        // and A/B move to different rows while consuming round one's GPU state.
+        active = {b, c, a};
+        ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
+        executor.waitPreviousBookkeepingAndKvSwaps(active);
+        EXPECT_TRUE(b->generate_status_->hasEvent(StreamEvents::GenerateDone));
+        EXPECT_EQ(b->getCompleteTokenIds()->completeTokenIdsVec(0), std::vector<int>({2, 3, 0, 1}));
+        b->releaseResource();
+        EXPECT_TRUE(b->stream_cache_resource_->isResourceReleased());
+        // Model the scheduler growing live requests after B releases its blocks.
+        for (const auto& stream : {a, c}) {
+            stream->setReserveStep(2);
+            ASSERT_TRUE(stream->incrKVBlock().ok());
+        }
+        active = {c, a};
+        ASSERT_TRUE(executor.decodeStep(active, metrics).ok());
+        executor.waitPreviousBookkeepingAndKvSwaps(active);
+        ASSERT_EQ(forwards, 3);
+        EXPECT_TRUE(a->generate_status_->hasEvent(StreamEvents::GenerateDone));
+        EXPECT_EQ(a->getCompleteTokenIds()->completeTokenIdsVec(0), std::vector<int>({1, 2, 3, 0, 1, 2, 3}));
+        EXPECT_EQ(c->getCompleteTokenIds()->completeTokenIdsVec(0), std::vector<int>({3, 0, 1, 2, 3}));
+        EXPECT_GT(grammar->calls, 0);
+        EXPECT_EQ(grammar->acceptedTokenLen(), c->outputTokenLen());
+        result.grammar_calls = grammar->calls;
+        for (const auto& stream : {a, b, c}) {
+            EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+            EXPECT_FALSE(stream->hasError());
+            EXPECT_FALSE(stream->forceSpAccept());
+            result.tokens.push_back(stream->getCompleteTokenIds()->completeTokenIdsVec(0));
+            const auto& state = stream->getMtpAsyncDeviceState();
+            for (const auto& tensor : {state.accept_len_gpu, state.accept_tokens_gpu,
+                                       state.next_seq_len_gpu, state.propose_tokens_gpu, state.draft_all_probs_gpu}) {
+                result.states.push_back(tensor.cpu().clone());
+            }
+            stream->releaseResource();
+        }
+        ASSERT_TRUE(a->token_logprobs_.defined());
+        ASSERT_TRUE(a->top_logprob_token_ids_.defined());
+        ASSERT_TRUE(a->top_logprobs_.defined());
+        result.logprobs = a->token_logprobs_.narrow(1, 0, a->logprobs_history_size_).clone();
+        result.top_ids = a->top_logprob_token_ids_.narrow(1, 0, a->logprobs_history_size_).clone();
+        result.top_logprobs = a->top_logprobs_.narrow(1, 0, a->logprobs_history_size_).clone();
+        EXPECT_EQ(a->logprobs_history_size_, 6);
+    };
+
+    Result barrier, overlap;
+    run(false, barrier);
+    ASSERT_FALSE(HasFatalFailure());
+    run(true, overlap);
+    ASSERT_FALSE(HasFatalFailure());
+    EXPECT_EQ(overlap.tokens, barrier.tokens);
+    EXPECT_EQ(overlap.grammar_calls, barrier.grammar_calls);
+    ASSERT_EQ(overlap.target_inputs.size(), barrier.target_inputs.size());
+    for (size_t i = 0; i < overlap.target_inputs.size(); ++i) {
+        checkTensorEqual(overlap.target_inputs[i], barrier.target_inputs[i]);
+    }
+    ASSERT_EQ(overlap.states.size(), barrier.states.size());
+    for (size_t i = 0; i < overlap.states.size(); ++i) {
+        checkTensorEqual(overlap.states[i], barrier.states[i]);
+    }
+    checkTensorEqual(overlap.logprobs, barrier.logprobs);
+    checkTensorEqual(overlap.top_ids, barrier.top_ids);
+    checkTensorEqual(overlap.top_logprobs, barrier.top_logprobs);
+}
+
 TEST_F(MtpExecutorTest, testFakeDecodeStreamGetsReusableIndexerSeedBeforeColdCheck) {
     MtpExecutorTestConfig test_config;
     auto                  components                = createMtpExecutorComponents(test_config);

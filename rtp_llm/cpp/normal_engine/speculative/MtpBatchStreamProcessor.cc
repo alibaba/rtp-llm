@@ -627,6 +627,118 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
     return model_input;
 }
 
+std::optional<GptModelInputs>
+MtpBatchStreamProcessor::tryGatherDecodeForwardInput(
+    const std::list<GenerateStreamPtr>& streams, TensorHolder& host_holder) const {
+    const auto& config = model_input_gatherer_config_;
+    // Keep the existing supported model scope; other layouts use the barrier path.
+    if (streams.empty() || config.is_multimodal || config.has_positional_encoding
+        || config.use_opaque_kv_cache_store || config.mm_position_ids_style != PositionIdsStyle::DEFAULT
+        || config.seq_size_per_block == 0 || config.kv_cache_group_nums != 1
+        || config.kv_cache_group_types.size() != 1
+        || config.kv_cache_group_types.front() != CacheGroupType::FULL) {
+        return std::nullopt;
+    }
+    const auto& first_state = streams.front()->getMtpAsyncDeviceState();
+    if (!first_state.next_seq_len_gpu.defined() || !first_state.next_seq_len_gpu.is_cuda()) {
+        return std::nullopt;
+    }
+    const auto device = first_state.next_seq_len_gpu.device();
+    size_t max_blocks = 0;
+    for (const auto& stream : streams) {
+        if (stream->isFakeStream() || stream->hasNumBeams() || stream->maxBatchSize() != 1
+            || !stream->adapterName().empty() || !stream->generateConfig()->adapter_names.empty()
+            || stream->kvCache().batchSize() != 1 || stream->kvCache().groupNums() != 1
+            || !stream->streamCacheResource().getKVBlockUpdateMapping().empty()) {
+            return std::nullopt;
+        }
+        const auto& state = stream->getMtpAsyncDeviceState();
+        const auto valid = [&device](const torch::Tensor& t) {
+            return t.defined() && t.device() == device && t.numel() > 0;
+        };
+        const auto blocks = stream->kvCache().blocksNum(0, 0);
+        const int64_t required = static_cast<int64_t>(state.next_real_seq_len) + propose_step_ + 1;
+        if (state.next_real_seq_len < 0 || required > static_cast<int64_t>(blocks * config.seq_size_per_block)
+            || required > static_cast<int64_t>(stream->maxSeqLen())
+            || !valid(state.accept_len_gpu) || state.accept_len_gpu.numel() != 1
+            || !valid(state.next_seq_len_gpu) || state.next_seq_len_gpu.numel() != 1
+            || !valid(state.accept_tokens_gpu) || state.accept_tokens_gpu.dim() != 2
+            || state.accept_tokens_gpu.size(0) != 1 || state.accept_tokens_gpu.size(1) < propose_step_ + 1
+            // RPC initialization publishes [1]; decode dispatch publishes [1, N].
+            // Both represent one request and lastColumnAsFlat handles either.
+            || !valid(state.propose_tokens_gpu)
+            || !((state.propose_tokens_gpu.dim() == 1 && state.propose_tokens_gpu.numel() == 1)
+                 || (state.propose_tokens_gpu.dim() == 2 && state.propose_tokens_gpu.size(0) == 1))
+            || !valid(state.draft_all_probs_gpu)
+            || (propose_step_ > 1 && (!valid(state.last_hidden_states_gpu)
+                || state.last_hidden_states_gpu.dim() != 2 || state.last_hidden_states_gpu.size(0) != 1))) {
+            return std::nullopt;
+        }
+        if (stream->kvCache().kernelBlocks(0, 0).size() > blocks * config.kernel_blocks_per_kv_block) {
+            return std::nullopt;
+        }
+        max_blocks = std::max(max_blocks, static_cast<size_t>(blocks));
+    }
+
+    // Gather current request order, including newly admitted requests. Claims
+    // protect FULL KV allocation; scheduler changes occur on this same thread.
+    const int64_t batch = streams.size();
+    const auto pinned = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    auto lengths = torch::empty({batch}, pinned);
+    auto blocks = torch::zeros({1, batch, static_cast<int64_t>(max_blocks)}, pinned);
+    auto kernel_blocks = torch::zeros(
+        {1, batch, static_cast<int64_t>(max_blocks * config.kernel_blocks_per_kv_block)}, pinned);
+    GptModelInputs model_input;
+    int64_t row = 0;
+    for (const auto& stream : streams) {
+        lengths.data_ptr<int32_t>()[row] = stream->inputLength();
+        const auto& ids = stream->kvCache().blocks(0, 0);
+        const auto& kernel_ids = stream->kvCache().kernelBlocks(0, 0);
+        std::copy(ids.begin(), ids.end(), blocks.data_ptr<int32_t>() + row * max_blocks);
+        std::copy(kernel_ids.begin(), kernel_ids.end(),
+                  kernel_blocks.data_ptr<int32_t>() + row * max_blocks * config.kernel_blocks_per_kv_block);
+        model_input.trace_ids.push_back(stream->traceId());
+        model_input.need_all_logits |= stream->calculateLoss();
+        model_input.need_all_hidden_states |= stream->needReturnHiddenStates();
+        ++row;
+    }
+    model_input.input_lengths = toCudaInt32(lengths, host_holder);
+    // Match the normal gather: keep physical block IDs on host so attention
+    // input preparation does not copy them back from CUDA and wait for forward.
+    model_input.kv_cache_block_id = blocks;
+    model_input.kv_cache_kernel_block_id = toCudaInt32(kernel_blocks, host_holder);
+    model_input.kv_cache_layer_to_group = torch::zeros(
+        {static_cast<int64_t>(config.num_layers)}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+    model_input.kv_cache_group_types = torch::full(
+        {1}, static_cast<int32_t>(CacheGroupType::FULL), torch::TensorOptions().dtype(torch::kInt32).device(device));
+    model_input.kv_block_stride_bytes = config.block_stride_bytes;
+    model_input.kv_scale_stride_bytes = config.scale_stride_bytes;
+    model_input.seq_size_per_block = config.seq_size_per_block;
+    model_input.kernel_seq_size_per_block = config.kernel_seq_size_per_block;
+    model_input.decode_entrance = config.decode_entrance;
+    const StreamGroups groups(streams, /*mtp_forward_only=*/true);
+    if (propose_step_ == 1) {
+        if (!gatherMtpDecodeModelInputFromDeviceState(groups, model_input, host_holder)) {
+            return std::nullopt;
+        }
+    } else {
+        std::vector<torch::Tensor> propose_tokens;
+        std::vector<torch::Tensor> next_seq_lengths;
+        propose_tokens.reserve(streams.size());
+        next_seq_lengths.reserve(streams.size());
+        for (const auto& stream : streams) {
+            propose_tokens.push_back(lastColumnAsFlat(stream->getProposeTokensGpu()));
+            next_seq_lengths.push_back(stream->getNextSeqLenGpu());
+        }
+        model_input.combo_tokens = torch::cat(propose_tokens, 0).to(torch::kInt32);
+        model_input.sequence_lengths = committedLenToDraftDecodePosition(torch::cat(next_seq_lengths, 0), host_holder);
+        model_input.prefix_lengths = (model_input.sequence_lengths - 1).to(torch::kInt32);
+        model_input.lm_output_indexes = makeCudaInt32Range(model_input.combo_tokens.numel());
+        gatherHiddenStates(groups, model_input);
+    }
+    return model_input;
+}
+
 absl::StatusOr<SamplerInputs>
 MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                                                 const GptModelInputs&                       model_inputs,

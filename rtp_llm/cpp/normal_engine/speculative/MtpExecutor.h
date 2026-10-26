@@ -5,6 +5,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -90,6 +91,8 @@ public:
                                                        int                    vocab_size);
 
 protected:
+    struct MtpForwardClaims;
+
     struct AcceptLenMetricsSnapshot {
         int64_t total_accept_len        = 0;
         int64_t total_stream_num        = 0;
@@ -127,7 +130,8 @@ protected:
     SpecLogitsVerifyRunner::LaunchResult
          buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
                                      const torch::Tensor&                draft_tokens,
-                                     std::shared_ptr<torch::Event>       draft_tokens_ready_event);
+                                     std::shared_ptr<torch::Event>       draft_tokens_ready_event,
+                                     bool                              skip_finished_streams = false);
     void collectDecodeMetrics(const StreamGroups&                          stream_groups,
                               torch::Event&                                accept_len_ready_event,
                               const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
@@ -146,7 +150,8 @@ protected:
                                       GptModelOutputs                              draft_prefill_model_output,
                                       SamplerOutput                                draft_prefill_sampler_output,
                                       std::shared_ptr<torch::Event>                rejection_event,
-                                      std::shared_ptr<torch::Event>                draft_event);
+                                      std::shared_ptr<torch::Event>                draft_event,
+                                      std::shared_ptr<MtpForwardClaims>            forward_claims = nullptr);
 
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
@@ -191,6 +196,7 @@ protected:
     // Device state, epoch-guarded clears, and single-slotted workers preserve
     // correctness while bookkeeping overlaps the next step.
     bool useDropBroadSync() const;
+    bool useForwardOverlap() const;
 
     bool shouldSkipFakeStreamForStop(const GptModelInputs& model_input, const char* phase) const;
 
@@ -202,7 +208,8 @@ protected:
                                      MtpTargetLogprobs                            target_logprobs,
                                      MergedOutput                                 draft_prefill_output,
                                      std::shared_ptr<torch::Event>                rejection_event,
-                                     std::shared_ptr<torch::Event>                draft_event);
+                                     std::shared_ptr<torch::Event>                draft_event,
+                                     std::shared_ptr<MtpForwardClaims>            forward_claims = nullptr);
 
     // Synchronous dispatch also publishes the same per-stream device state as
     // the async path, using the host seqLength after specUpdate as truth.
@@ -236,6 +243,7 @@ private:
     size_t                                           propose_step_;
     size_t                                           draft_vocab_size_;
     bool                                             mtp_indexer_share_enabled_ = false;
+    bool                                             forward_overlap_supported_ = false;
     int64_t                                          mtp_indexer_topk_          = 0;
     std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       seed_decode_draft_model_;

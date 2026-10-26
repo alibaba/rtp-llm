@@ -20,6 +20,11 @@ public:
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        // Synthetic decode perf has no prefill peer; keep ordinary DECODE RPC
+        // semantics unchanged unless both the perf gate and batch scheduler are on.
+        if (perf_local_decode_requests_) {
+            return LocalRpcServiceImpl::GenerateStreamCall(context, request, writer);
+        }
         if (!prefill_server_) {
             auto error_msg = "server not implement GenerateStreamCall";
             RTP_LLM_LOG_ERROR(error_msg);
@@ -180,6 +185,7 @@ private:
     std::shared_ptr<PrefillBatchRpcServer> prefill_server_;
     std::shared_ptr<DecodeRpcServer>       decode_server_;
     bool                                    defer_cache_store_{false};
+    bool                                    perf_local_decode_requests_{false};
 };
 
 }  // namespace rtp_llm

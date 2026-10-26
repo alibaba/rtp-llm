@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
+#include <optional>
 #include <vector>
 
 namespace rtp_llm {
@@ -148,6 +149,12 @@ public:
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
+
+    // Like DSpARK, assemble each request from its published GPU state. Caller
+    // owns forward claims; FULL KV mappings cannot be released while gathering.
+    // No CPU token history or worker-owned SP mirrors are read here.
+    std::optional<GptModelInputs> tryGatherDecodeForwardInput(
+        const std::list<GenerateStreamPtr>& streams, TensorHolder& host_holder) const;
 
     absl::StatusOr<SamplerInputs>
     gatherSpecSamplerInput(const StreamGroups&                         stream_groups,

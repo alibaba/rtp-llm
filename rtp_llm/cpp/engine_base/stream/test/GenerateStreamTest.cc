@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -41,7 +42,7 @@ public:
             generate_input, model_config_, runtime_config_, resource_context, nullptr);
     };
 
-    GenerateStreamPtr createComplexContextStream(std::vector<int> input_ids) {
+    GenerateStreamPtr createComplexContextStream(std::vector<int> input_ids, int num_return_sequences = 2) {
         autil::EnvGuard perf_scope("PERF_TEST", "1");
 
         auto cache_config  = init_config();
@@ -53,7 +54,7 @@ public:
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
-        generate_config->num_return_sequences = 2;
+        generate_config->num_return_sequences = num_return_sequences;
         generate_input->input_ids =
             torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
         generate_input->generate_config = generate_config;
@@ -145,6 +146,146 @@ TEST_F(GenerateStreamTest, testAsyncReleaseConcurrentHandoff) {
         ASSERT_EQ(stream->stream_cache_resource_->curBlocksNum(), 0) << "trial=" << trial;
         ASSERT_FALSE(stream->hasPendingAsyncBookkeeping());
         ASSERT_FALSE(stream->isDeferredReleasePending());
+    }
+}
+
+TEST_F(GenerateStreamTest, testMtpIgnoresUpdateAfterFinalOutputBeforeStateTransition) {
+    for (const std::string reason : {"eos", "stop", "length"}) {
+        SCOPED_TRACE(reason);
+        auto config = std::make_shared<GenerateConfig>();
+        config->is_streaming = false;
+        config->ignore_eos = reason != "eos";
+        config->max_new_tokens = reason == "length" ? 1 : 100;
+        if (reason == "stop") {
+            config->stop_words_list = {{7}};
+        }
+        auto stream = GenerateStreamBuilder().createContextStream({1, 2}, config);
+        stream->special_tokens_.eos_token_id = reason == "eos" ? 7 : 9;
+        auto sp_output = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_output->tokens = torch::zeros({2}, torch::kInt32);
+        stream->setSPOutputBuffer(sp_output);
+        stream->update({torch::tensor({{7}}, torch::kInt32), 1});
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+        ASSERT_TRUE(stream->isSubGenerateDoneWithoutLock(0));
+        ASSERT_FALSE(stream->isFinished());
+        auto final_output = stream->nextOutput();
+        ASSERT_TRUE(final_output.ok());
+        ASSERT_TRUE(final_output.value().generate_outputs[0].finished);
+        ASSERT_FALSE(stream->hasOutput());
+        const auto seq_len = stream->seqLength();
+        const auto tokens = stream->completeTokenIds().clone();
+        stream->specUpdate({torch::tensor({{8}}, torch::kInt32),
+                            1,
+                            -1,
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor()});
+        EXPECT_EQ(stream->seqLength(), seq_len);
+        EXPECT_TRUE(torch::equal(stream->completeTokenIds(), tokens));
+        EXPECT_FALSE(stream->hasOutput());
+        EXPECT_FALSE(stream->hasError());
+    }
+}
+
+TEST_F(GenerateStreamTest, testMtpForwardGroupsDeferHostTimelineEligibility) {
+    auto stream = GenerateStreamBuilder().createDecoderStream({1, 2}, {3});
+    stream->generateConfig()->profile_step = 2;
+    stream->setGenTimeline(true);
+    GenerateStream::MtpAsyncDeviceState state;
+    state.next_real_seq_len = 7;
+    stream->setMtpAsyncDeviceState(std::move(state));
+
+    // The worker may still be updating the host length during forward gather.
+    // Profiling eligibility is only read when rebuilding after bookkeeping.
+    StreamGroups forward_groups({stream}, /*mtp_forward_only=*/true);
+    EXPECT_EQ(forward_groups.maxSeqLen(), 7);
+    EXPECT_FALSE(forward_groups.genTimeline());
+    StreamGroups ready_groups({stream});
+    EXPECT_EQ(ready_groups.maxSeqLen(), 3);
+    EXPECT_TRUE(ready_groups.genTimeline());
+    stream->setSeqLength(4);
+    StreamGroups after_profile_window({stream});
+    EXPECT_FALSE(after_profile_window.genTimeline());
+}
+
+TEST_F(GenerateStreamTest, testMtpForwardClaimRejectsUnavailableStreams) {
+    for (const std::string reason : {"context", "empty", "multiple", "finished", "error", "done", "deferred", "released"}) {
+        SCOPED_TRACE(reason);
+        auto stream = GenerateStreamBuilder().createComplexContextStream({1, 2}, reason == "multiple" ? 2 : 1);
+        if (reason != "empty") {
+            ASSERT_TRUE(stream->initKVBlock().ok());
+        }
+        stream->setIsContextStream(reason == "context");
+        if (reason == "finished") {
+            stream->generate_status_->status.store(StreamState::FINISHED);
+        } else if (reason == "error") {
+            stream->reportError(ErrorCode::CANCELLED, "cancelled before forward");
+        } else if (reason == "done") {
+            stream->reportEvent(StreamEvents::GenerateDone);
+        } else if (reason == "deferred") {
+            stream->incPendingAsyncBookkeeping();
+            ASSERT_TRUE(stream->markDeferredRelease());
+        } else if (reason == "released") {
+            stream->releaseResource();
+        }
+        EXPECT_FALSE(stream->tryAcquireMtpForwardClaim());
+        if (reason == "deferred") {
+            stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        }
+        EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+    }
+}
+
+TEST_F(GenerateStreamTest, testMtpForwardClaimOutlivesPreviousBookkeeping) {
+    auto stream = GenerateStreamBuilder().createComplexContextStream({1, 2}, 1);
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    stream->setIsContextStream(false);
+    stream->incPendingAsyncBookkeeping();
+    ASSERT_TRUE(stream->tryAcquireMtpForwardClaim());
+    {
+        std::lock_guard<std::mutex> lock(*stream->mutex_);
+        stream->generate_status_->releaseResource();
+    }
+    // Previous CPU work finishes while the next forward still owns the KV.
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_FALSE(stream->stream_cache_resource_->isResourceReleased());
+    EXPECT_FALSE(stream->tryAcquireMtpForwardClaim());
+    // The executor drops this claim only after the forward completion event.
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_FALSE(stream->isDeferredReleasePending());
+}
+
+TEST_F(GenerateStreamTest, testMtpForwardClaimConcurrentRelease) {
+    auto stream = GenerateStreamBuilder().createComplexContextStream({1, 2}, 1);
+    stream->setIsContextStream(false);
+    for (int trial = 0; trial < 1000; ++trial) {
+        stream->stream_cache_resource_->init(1);
+        ASSERT_TRUE(stream->initKVBlock().ok());
+        std::atomic<bool> start{false};
+        std::thread releaser([&] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            stream->releaseResource();
+        });
+        start.store(true, std::memory_order_release);
+        if (stream->tryAcquireMtpForwardClaim()) {
+            {
+                std::lock_guard<std::mutex> lock(*stream->mutex_);
+                EXPECT_FALSE(stream->stream_cache_resource_->isResourceReleased()) << "trial=" << trial;
+            }
+            stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        }
+        releaser.join();
+        ASSERT_TRUE(stream->stream_cache_resource_->isResourceReleased()) << "trial=" << trial;
+        ASSERT_FALSE(stream->hasPendingAsyncBookkeeping());
     }
 }
 

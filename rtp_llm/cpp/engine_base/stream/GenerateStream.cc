@@ -257,11 +257,33 @@ void GenerateStream::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
     // Return KV blocks only after all workers that captured this stream finish.
     // Earlier release could let a worker write into blocks owned by another stream.
-    waitPendingAsyncBookkeeping();
-    std::lock_guard<std::mutex> lock(*mutex_);
-    if (!stream_cache_resource_->isResourceReleased()) {
-        stream_cache_resource_->releaseResource();
+    for (;;) {
+        waitPendingAsyncBookkeeping();
+        std::lock_guard<std::mutex> lock(*mutex_);
+        // A forward may acquire a claim after the count reached zero but before
+        // this lock was taken. Never wait while holding the stream update lock.
+        if (hasPendingAsyncBookkeeping()) {
+            continue;
+        }
+        if (!stream_cache_resource_->isResourceReleased()) {
+            stream_cache_resource_->releaseResource();
+        }
+        return;
     }
+}
+
+bool GenerateStream::tryAcquireMtpForwardClaim() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (isContextStream() || !isActive() || generate_status_->hasEvent(StreamEvents::GenerateDone)
+        || isDeferredReleasePending() || maxBatchSize() != 1
+        || stream_cache_resource_->isResourceReleased() || stream_cache_resource_->curBlocksNum() == 0) {
+        return false;
+    }
+    // Use the same lock as state-machine release so it cannot free the blocks
+    // between the eligibility check and this claim. Snapshot/capacity checks
+    // remain the caller's responsibility; this claim only protects ownership.
+    incPendingAsyncBookkeeping();
+    return true;
 }
 
 void GenerateStream::incPendingAsyncBookkeeping() {
@@ -1132,7 +1154,10 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     }
     // Ignore stale worker updates after finish; committing them would duplicate
     // tokens and touch KV blocks only deferred until this worker exits.
-    if (isFinished() && !update_info.force_update_info) {
+    if ((isFinished() || (maxBatchSize() == 1 && isSubGenerateDoneWithoutLock(0)))
+        && !update_info.force_update_info) {
+        // EOS/stop can finish the substream before the scheduler consumes
+        // GenerateDone. Discard an already-enqueued next MTP round as well.
         return;
     }
 
