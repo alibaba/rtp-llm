@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include <exception>
 #include <mutex>
 #include <utility>
 #include "autil/EnvUtil.h"
@@ -1221,7 +1222,11 @@ bool registerKmonitorShutdownHook(void* owner, std::function<void()> hook) {
     if (lifecycle.shutdown_started) {
         return false;
     }
-    lifecycle.shutdown_hooks[owner] = std::move(hook);
+    // 不覆盖已有回调：覆盖会丢失旧上报线程唯一的停止入口。
+    if (!lifecycle.shutdown_hooks.emplace(owner, std::move(hook)).second) {
+        RTP_LLM_LOG_WARNING("kmonitor shutdown hook already registered for owner [%p], keep the existing one", owner);
+        return false;
+    }
     return true;
 }
 
@@ -1238,8 +1243,15 @@ void stopKmonitorFactory() {
     // 持锁执行使注销等待在途回调结束，也阻止关闭期间注册并启动新的异步上报者。
     // 停止回调返回前不能关闭 factory；否则在途 report 仍可能访问其已释放的指标资源。
     // 重复关闭仍执行尚未注销的回调，因此回调必须可重复调用；shutdown_started 只阻止新注册。
+    // 回调按契约不应抛异常；若抛出则记录后继续，避免跳过其余回调和 factory 关闭。
     for (const auto& hook : lifecycle.shutdown_hooks) {
-        hook.second();
+        try {
+            hook.second();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("kmonitor shutdown hook of owner [%p] threw: %s", hook.first, e.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("kmonitor shutdown hook of owner [%p] threw unknown exception", hook.first);
+        }
     }
     kmonitor::KMonitorFactory::Shutdown();
 }
