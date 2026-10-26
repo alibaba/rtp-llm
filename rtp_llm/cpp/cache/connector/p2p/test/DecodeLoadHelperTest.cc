@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <thread>
 #include <atomic>
 #include <future>
@@ -113,7 +114,7 @@ TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_RequestSuccess) {
     EXPECT_EQ(server_->service()->getStartLoadCallCount(), 1);
 }
 
-TEST_F(DecodeLoadHelperTest, LoadCarriesOnlyLoadTimeoutAndKeepsLocalDeadline) {
+TEST_F(DecodeLoadHelperTest, LoadCarriesRemainingBudgetAndKeepsLocalDeadline) {
     const int64_t request_deadline_ms  = currentTimeMs() + 5000;
     const int64_t transfer_deadline_ms = currentTimeMs() + 500;
     constexpr uint64_t plan_digest     = 0xfedcba9876543210ULL;
@@ -129,12 +130,33 @@ TEST_F(DecodeLoadHelperTest, LoadCarriesOnlyLoadTimeoutAndKeepsLocalDeadline) {
                                 plan_digest);
 
     ASSERT_NE(result, nullptr);
-    EXPECT_EQ(result->request.timeout_ms(), 1000);
+    EXPECT_EQ(result->request.timeout_ms(), result->timeout_ms);
+    EXPECT_GT(result->request.timeout_ms(), 0);
+    EXPECT_LE(result->request.timeout_ms(), 500);
     EXPECT_EQ(result->request.plan_digest(), plan_digest);
     EXPECT_GT(result->timeout_ms, 0);
     EXPECT_LE(result->timeout_ms, 500);
     EXPECT_TRUE(waitDone(result));
     EXPECT_EQ(server_->service()->getLastStartLoadRequest().plan_digest(), plan_digest);
+    EXPECT_EQ(server_->service()->getLastStartLoadRequest().timeout_ms(), result->request.timeout_ms());
+}
+
+TEST_F(DecodeLoadHelperTest, LoadRemainingBudgetDoesNotExceedConfiguredTimeout) {
+    const int64_t deadline_ms = currentTimeMs() + 5000;
+    auto result = client_->load(1011,
+                                "127.0.0.1",
+                                static_cast<uint32_t>(server_->listenPort()),
+                                "test_capped_remaining_budget",
+                                deadline_ms,
+                                deadline_ms,
+                                1000);
+
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->request.timeout_ms(), std::min<int64_t>(1000, result->timeout_ms));
+    EXPECT_GT(result->request.timeout_ms(), 0);
+    EXPECT_LE(result->request.timeout_ms(), 1000);
+    EXPECT_TRUE(waitDone(result));
+    EXPECT_EQ(server_->service()->getLastStartLoadRequest().timeout_ms(), result->request.timeout_ms());
 }
 
 TEST_F(DecodeLoadHelperTest, LoadReturnsPlanDigestMismatchBeforeTransferDeadline) {
