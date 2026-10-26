@@ -786,6 +786,7 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
                            page_indice_d,
                            batch_indice_d,
                            positions_d,
+                           qo_indptr_d,
                            stream);
 
     // FlashInfer uses paged_kv_last_page_len/decode_page_indptr sizes;
@@ -793,6 +794,7 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
     // to nnz without a host sync.
     paged_kv_last_page_len_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
     decode_page_indptr_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size + 1});
+    qo_indptr_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size + 1});
     page_indice_d.unsafeGetTensorImpl()->set_sizes_contiguous({page_num_upper});
 
     decode_page_indptr     = decode_page_indptr_d;
@@ -800,6 +802,7 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
     paged_kv_last_page_len = paged_kv_last_page_len_d;
     batch_indice           = batch_indice_d;
     positions              = positions_d;
+    qo_indptr              = qo_indptr_d;
 }
 
 void registerPyFlashInferMlaParams(pybind11::module& m) {

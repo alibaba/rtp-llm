@@ -24,7 +24,8 @@ __global__ void mhaPagedAttnPlanKernel(const int32_t* __restrict__ input_lengths
                                        int32_t* __restrict__ decode_page_indptr,
                                        int32_t* __restrict__ page_indice,
                                        int32_t* __restrict__ batch_indice,
-                                       int32_t* __restrict__ positions) {
+                                       int32_t* __restrict__ positions,
+                                       int32_t* __restrict__ qo_indptr) {
     __shared__ int32_t s_pages[kMaxBatchPerCta];
     __shared__ int32_t s_input_lens[kMaxBatchPerCta];
     __shared__ int32_t s_token_offset[kMaxBatchPerCta];
@@ -57,12 +58,14 @@ __global__ void mhaPagedAttnPlanKernel(const int32_t* __restrict__ input_lengths
         int32_t t_off         = 0;
         int32_t p_off         = 0;
         decode_page_indptr[0] = 0;
+        qo_indptr[0]         = 0;
         for (int b = 0; b < batch_size; ++b) {
             s_token_offset[b] = t_off;
             s_page_offset[b]  = p_off;
             t_off += s_input_lens[b];
             p_off += s_pages[b];
             decode_page_indptr[b + 1] = p_off;
+            qo_indptr[b + 1]         = t_off;
         }
     }
     __syncthreads();
@@ -106,6 +109,7 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
                             at::Tensor&       page_indice,
                             at::Tensor&       batch_indice,
                             at::Tensor&       positions,
+                            at::Tensor&       qo_indptr,
                             cudaStream_t      stream) {
     TORCH_CHECK(input_lengths.defined() && input_lengths.is_cuda() && input_lengths.scalar_type() == at::kInt
                     && input_lengths.is_contiguous(),
@@ -160,6 +164,8 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
                 "batch_indice buffer too small");
     TORCH_CHECK(positions.is_cuda() && positions.scalar_type() == at::kInt && positions.numel() >= batch_size,
                 "positions buffer too small");
+    TORCH_CHECK(qo_indptr.is_cuda() && qo_indptr.scalar_type() == at::kInt && qo_indptr.numel() >= batch_size + 1,
+                "qo_indptr buffer too small");
 
     const int threads = ((batch_size + 31) / 32) * 32;  // round up to warp
     mhaPagedAttnPlanKernel<<<1, threads, 0, stream>>>(input_lengths.data_ptr<int32_t>(),
@@ -173,7 +179,8 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
                                                       decode_page_indptr.data_ptr<int32_t>(),
                                                       page_indice.data_ptr<int32_t>(),
                                                       batch_indice.data_ptr<int32_t>(),
-                                                      positions.data_ptr<int32_t>());
+                                                      positions.data_ptr<int32_t>(),
+                                                      qo_indptr.data_ptr<int32_t>());
     const auto err = cudaGetLastError();
     TORCH_CHECK(err == cudaSuccess, "mhaPagedAttnPlanKernel launch failed: ", cudaGetErrorString(err));
 }
