@@ -63,6 +63,10 @@ public:
     void     decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type);
     uint32_t treeRefCount(BlockIdxType block) const;
 
+    // True when releasing one CACHE reference would immediately free the block.
+    // Checks tree and external ownership together under the pool mutex.
+    bool canReclaimCacheBlock(BlockIdxType block) const;
+
     // Add one FROZEN reference; the caller decides when to release its hold.
     void freezeBlock(BlockIdxType block) noexcept;
     bool isFrozen(BlockIdxType block) const;
