@@ -189,11 +189,11 @@ public:
                                                  int                            kv_ready_token_count,
                                                  const Meta&                    meta) noexcept;
 
-    void handleWrite(const P2PConnectorStartWriteRequestPB& request,
-                     P2PConnectorStartWriteResponsePB&      response,
+    void handleWrite(const P2PConnectorStartWriteBackRequestPB& request,
+                     P2PConnectorStartWriteBackResponsePB&      response,
                      std::function<bool()>                  is_cancelled = nullptr);
 
-    void cancelP2PWrite(const P2PConnectorCancelWriteRequestPB& request, P2PConnectorStartWriteResponsePB& response);
+    void cancelP2PWrite(const P2PConnectorCancelWriteBackRequestPB& request, P2PConnectorStartWriteBackResponsePB& response);
 
     void stopWriteback();
 private:

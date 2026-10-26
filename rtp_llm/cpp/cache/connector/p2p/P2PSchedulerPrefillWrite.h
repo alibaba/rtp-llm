@@ -22,10 +22,10 @@ public:
     ~P2PSchedulerPrefillWrite();
     bool      init();
     void      stop();
-    void      handleWrite(const P2PConnectorStartWriteRequestPB& request,
-                          P2PConnectorStartWriteResponsePB&      response,
+    void      handleWrite(const P2PConnectorStartWriteBackRequestPB& request,
+                          P2PConnectorStartWriteBackResponsePB&      response,
                           std::function<bool()>                  is_cancelled = nullptr);
-    void      cancelWrite(const P2PConnectorCancelWriteRequestPB& request, P2PConnectorStartWriteResponsePB& response);
+    void      cancelWrite(const P2PConnectorCancelWriteBackRequestPB& request, P2PConnectorStartWriteBackResponsePB& response);
     ErrorInfo workerRegistered(const P2PConnectorBroadcastTpRequestPB& request);
     size_t    inflightContextCount() const;
 
@@ -58,7 +58,7 @@ private:
                                                              size_t                          block_count,
                                                              P2PBroadcastClient::RankRoutes& routes,
                                                              int64_t*                        planned_bytes) const;
-    ErrorInfo                           selectSendRoutes(const P2PConnectorStartWriteRequestPB& request,
+    ErrorInfo                           selectSendRoutes(const P2PConnectorStartWriteBackRequestPB& request,
                                                          const P2PBroadcastClient::RankRoutes&  receive_routes,
                                                          P2PBroadcastClient::RankRoutes&        send_routes) const;
 

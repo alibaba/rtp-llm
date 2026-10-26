@@ -66,17 +66,17 @@ public:
                                          FunctionResponsePB*      response) override {
         return local.ExecuteFunction(context, request, response);
     }
-    grpc::Status StartWrite(grpc::ServerContext*                   context,
-                            const P2PConnectorStartWriteRequestPB* request,
-                            P2PConnectorStartWriteResponsePB*      response) override {
+    grpc::Status StartWriteBack(grpc::ServerContext*                   context,
+                            const P2PConnectorStartWriteBackRequestPB* request,
+                            P2PConnectorStartWriteBackResponsePB*      response) override {
         ++handshakes;
-        return prefill.StartWrite(context, request, response);
+        return prefill.StartWriteBack(context, request, response);
     }
 
-    grpc::Status CancelWrite(grpc::ServerContext*                    context,
-                             const P2PConnectorCancelWriteRequestPB* request,
-                             P2PConnectorStartWriteResponsePB*       response) override {
-        return prefill.CancelWrite(context, request, response);
+    grpc::Status CancelWriteBack(grpc::ServerContext*                    context,
+                             const P2PConnectorCancelWriteBackRequestPB* request,
+                             P2PConnectorStartWriteBackResponsePB*       response) override {
+        return prefill.CancelWriteBack(context, request, response);
     }
 };
 

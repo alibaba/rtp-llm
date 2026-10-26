@@ -42,13 +42,13 @@ public:
     GetPeerInfo(::grpc::ServerContext* context, const GetPeerInfoRequestPB* request, GetPeerInfoResponsePB* response);
 
 public:
-    grpc::Status StartWrite(grpc::ServerContext*                   context,
-                            const P2PConnectorStartWriteRequestPB* request,
-                            P2PConnectorStartWriteResponsePB*      response);
+    grpc::Status StartWriteBack(grpc::ServerContext*                   context,
+                            const P2PConnectorStartWriteBackRequestPB* request,
+                            P2PConnectorStartWriteBackResponsePB*      response);
 
-    grpc::Status CancelWrite(grpc::ServerContext*                    context,
-                             const P2PConnectorCancelWriteRequestPB* request,
-                             P2PConnectorStartWriteResponsePB*       response);
+    grpc::Status CancelWriteBack(grpc::ServerContext*                    context,
+                             const P2PConnectorCancelWriteBackRequestPB* request,
+                             P2PConnectorStartWriteBackResponsePB*       response);
 
 private:
     std::unique_ptr<PDCancelRegistry> cancel_registry_;

@@ -1313,8 +1313,8 @@ void KVCacheManager::stopWriteback() {
     }
 }
 
-void KVCacheManager::handleWrite(const P2PConnectorStartWriteRequestPB& request,
-                                 P2PConnectorStartWriteResponsePB&      response,
+void KVCacheManager::handleWrite(const P2PConnectorStartWriteBackRequestPB& request,
+                                 P2PConnectorStartWriteBackResponsePB&      response,
                                  std::function<bool()>                  is_cancelled) {
     if (p2p_connector_) {
         p2p_connector_->handleWrite(request, response, std::move(is_cancelled));
@@ -1326,8 +1326,8 @@ void KVCacheManager::handleWrite(const P2PConnectorStartWriteRequestPB& request,
     }
 }
 
-void KVCacheManager::cancelP2PWrite(const P2PConnectorCancelWriteRequestPB& request,
-                                    P2PConnectorStartWriteResponsePB&       response) {
+void KVCacheManager::cancelP2PWrite(const P2PConnectorCancelWriteBackRequestPB& request,
+                                    P2PConnectorStartWriteBackResponsePB&       response) {
     if (p2p_connector_) {
         p2p_connector_->handleCancelWrite(request, response);
     } else {

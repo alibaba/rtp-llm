@@ -193,11 +193,11 @@ public:
                                               location + ": " + response.error_message());
                         }
                     }
-                } else if constexpr (std::is_same_v<RequestPB, P2PConnectorStartWriteRequestPB>
-                                     && std::is_same_v<ResponsePB, P2PConnectorStartWriteResponsePB>) {
+                } else if constexpr (std::is_same_v<RequestPB, P2PConnectorStartWriteBackRequestPB>
+                                     && std::is_same_v<ResponsePB, P2PConnectorStartWriteBackResponsePB>) {
                     if (ctx->response.error_code() != ErrorCodePB::NONE_ERROR) {
                         error = ErrorInfo(transRPCErrorCode(static_cast<ErrorCodePB>(ctx->response.error_code())),
-                                          "StartWrite peer=" + ctx->server_addr + " key=" + ctx->request.unique_key()
+                                          "StartWriteBack peer=" + ctx->server_addr + " key=" + ctx->request.unique_key()
                                               + ": " + ctx->response.error_message());
                     }
                 }
