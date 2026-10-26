@@ -41,6 +41,23 @@ from rtp_llm.utils.scr_local_comm import cache_store_advertise_ip
 
 
 @dataclass
+def resolve_pd_role_type(py_env_configs) -> RoleType:
+    """Return the engine PD role for this process.
+
+    ``VIT_SEPARATION=ROLE`` only says that VIT runs as its own role somewhere in
+    the deployment.  A prefill or decode container must keep its own role, or
+    the engine would take VIT-only code paths (and skip the PD role setup) while
+    the launcher still treats it as a prefill/decode worker.
+    """
+    launcher_role = py_env_configs.role_config.role_type
+    if (
+        py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
+        and launcher_role == RoleType.VIT
+    ):
+        return RoleType.VIT
+    return launcher_role
+
+
 class EngineConfig:
     """Engine configuration collection created from py_env_configs.
 
@@ -197,15 +214,11 @@ class EngineConfig:
 
         derive_grammar_compile_threads(grammar_config, parallelism_config)
 
-        # Setup pd_sep_config role_type based on vit_separation
-        if (
-            py_env_configs.vit_config.vit_separation
-            == VitSeparation.VIT_SEPARATION_ROLE
-        ):
-            pd_sep_config.role_type = RoleType.VIT
-        else:
-            # role_config.role_type property automatically converts string to RoleType enum
-            pd_sep_config.role_type = py_env_configs.role_config.role_type
+        # Setup pd_sep_config role_type.  VIT_SEPARATION=ROLE describes the
+        # deployment, not this process: only the container that actually runs
+        # the VIT role reports RoleType.VIT.  A prefill/decode container keeps
+        # its own role even when the flag is set for the whole deployment.
+        pd_sep_config.role_type = resolve_pd_role_type(py_env_configs)
 
         # Mirror role into parallelism_config so model construction can read it
         # via parallelism_config.role_type instead of os.environ["ROLE_TYPE"].

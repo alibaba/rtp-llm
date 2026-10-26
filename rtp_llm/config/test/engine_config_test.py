@@ -1,8 +1,9 @@
 import unittest
+from types import SimpleNamespace
 from unittest import TestCase
 
-from rtp_llm.config.engine_config import finalize_scheduler_config
-from rtp_llm.ops import RoleType
+from rtp_llm.config.engine_config import finalize_scheduler_config, resolve_pd_role_type
+from rtp_llm.ops import RoleType, VitSeparation
 
 
 class DummyFIFOSchedulerConfig:
@@ -10,6 +11,49 @@ class DummyFIFOSchedulerConfig:
         self.max_context_batch_size = 2
         self.max_batch_tokens_size = 0
         self.prefill_chunk_size = 0
+
+
+class PdRoleResolutionTest(TestCase):
+    """VIT_SEPARATION=ROLE must not turn a prefill/decode container into VIT."""
+
+    @staticmethod
+    def _config(role_type, separation):
+        return SimpleNamespace(
+            role_config=SimpleNamespace(role_type=role_type),
+            vit_config=SimpleNamespace(vit_separation=separation),
+        )
+
+    def test_vit_container_reports_vit(self):
+        self.assertEqual(
+            resolve_pd_role_type(
+                self._config(RoleType.VIT, VitSeparation.VIT_SEPARATION_ROLE)
+            ),
+            RoleType.VIT,
+        )
+
+    def test_prefill_container_keeps_its_role_under_role_separation(self):
+        self.assertEqual(
+            resolve_pd_role_type(
+                self._config(RoleType.PREFILL, VitSeparation.VIT_SEPARATION_ROLE)
+            ),
+            RoleType.PREFILL,
+        )
+
+    def test_decode_container_keeps_its_role_under_role_separation(self):
+        self.assertEqual(
+            resolve_pd_role_type(
+                self._config(RoleType.DECODE, VitSeparation.VIT_SEPARATION_ROLE)
+            ),
+            RoleType.DECODE,
+        )
+
+    def test_local_separation_uses_the_launcher_role(self):
+        self.assertEqual(
+            resolve_pd_role_type(
+                self._config(RoleType.PDFUSION, VitSeparation.VIT_SEPARATION_LOCAL)
+            ),
+            RoleType.PDFUSION,
+        )
 
 
 class EngineConfigTest(TestCase):
