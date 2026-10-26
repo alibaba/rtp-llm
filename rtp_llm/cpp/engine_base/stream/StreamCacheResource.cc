@@ -406,6 +406,15 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
     }
+    // PD decode streams append the current token to complete_token_ids only
+    // after this growth call, so at a page boundary the block table would lag
+    // one step behind the per-page writes (PLE page checkpoints, first-slot KV
+    // writes) that target page seq_len / seq_size_per_block. Fuse one
+    // write-ahead token into the growth target, matching the fusion loop's
+    // append-before-grow ordering.
+    if (seq_len_override < 0 && resource_context_.role_type == RoleType::DECODE) {
+        seq_len_override = stream_->completeTokenIdsPtr()->seqLength() + 1;
+    }
     // The scheduler owns host block-table mutation. In particular, an async
     // output worker may have committed tokens while the previous gather still
     // read this table. Its watermark is safe to consume here, before the next
