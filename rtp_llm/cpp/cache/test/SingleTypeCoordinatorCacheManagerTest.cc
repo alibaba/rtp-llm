@@ -1938,11 +1938,21 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, IncrKVCacheRefPreservesConnectorDu
     EXPECT_FALSE(ref_resource->lastBlockAligned());
     EXPECT_EQ(ref_resource->cacheKeys(), (CacheKeysType{101, 103, 999}));
     EXPECT_EQ(ref_resource->blocks("default"), (BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX}));
+    EXPECT_EQ(block_pool->referencedBlocksNum(), 2u);
+    EXPECT_EQ(block_pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 2u);
+    const auto snapshots = allocator_->poolMetricsSnapshots();
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots.front().request_ref_blocks, 2u);
+    EXPECT_EQ(snapshots.front().pd_connector_ref_blocks, 2u);
+    EXPECT_EQ(snapshots.front().remote_connector_ref_blocks, 0u);
 
     block_pool->decRef(blocks);
+    EXPECT_EQ(block_pool->referencedBlocksNum(), 0u);
+    EXPECT_EQ(block_pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 2u);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
     ref_resource.reset();
+    EXPECT_EQ(block_pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 0u);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 

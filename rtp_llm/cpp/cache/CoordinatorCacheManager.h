@@ -45,6 +45,8 @@ struct KVCachePoolMetricsSnapshot {
     size_t      total_blocks               = 0;
     size_t      reserve_blocks             = 0;
     size_t      request_ref_blocks         = 0;
+    size_t      remote_connector_ref_blocks = 0;
+    size_t      pd_connector_ref_blocks     = 0;
     size_t      block_cache_ref_blocks     = 0;
     size_t      load_ref_blocks            = 0;
     size_t      eviction_target_ref_blocks = 0;
@@ -210,6 +212,7 @@ protected:
                                                      int  target_batch_size) const;
     virtual void  checkCPShardedMallocResult(const MallocInfo&) const;
     virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
+    void          decrKVCacheRef(const KVCacheResource& kvcache_resource, DeviceBlockRefType ref_type);
     size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;
     int           deviceCacheMetricTokensPerBlock() const;
     static size_t maxReusableMatchKeys(int seq_len, int reuse_unit_tokens) {
