@@ -3787,8 +3787,8 @@ TEST_F(BlockTreeCacheTest, EventPublicationTracksComponentsIndependently) {
     publisher->result = PublishResult::QUEUE_FULL;
     EXPECT_EQ(cache->evictForGroup("group1", 2), 2);
     const auto snapshot = cache->logicalCacheSnapshot();
-    EXPECT_EQ(snapshot.block_groups,
-              (std::map<int64_t, std::vector<size_t>>{{100, {1}}, {200, {1}}, {300, {1}}}));
+    EXPECT_TRUE(cache->getKeySnapshot().keys.empty());
+    EXPECT_TRUE(snapshot.block_groups.empty());
     std::map<int64_t, std::vector<size_t>> replayed;
     for (const auto& event : publisher->events) {
         auto& components = replayed[event.block_key];
