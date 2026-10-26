@@ -16,7 +16,7 @@ TEST(KVCMMockFullLinearTest, RegistersFullLinearWriteShapeBeforeSwaBecomesComple
     auto topology = CacheTopology::create(std::move(groups), environment.cache_config.topology().layers());
     kvcm::FullLinearLayerGroupPolicy policy(*topology,
         [](int, const std::string&, int) { return std::vector<BlockInfo>{}; },
-        {"full0"}, {"linear0", "linear1"}, 1);
+        {"full0"}, {"linear0", "linear1"});
     ASSERT_TRUE(policy.init());
     kvcm::GroupPolicy::LocationSpecGroups registered_groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(1, registered_groups));
