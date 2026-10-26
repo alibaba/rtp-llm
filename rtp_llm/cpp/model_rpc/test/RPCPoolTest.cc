@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -125,6 +126,19 @@ TEST(RPCPoolTest, UnreadyRemoteGenerateBlocksUntilClientDeadline) {
     EXPECT_LT(elapsed_ms, 1500);
 }
 
+TEST(RPCPoolTest, CachedLookupDoesNotStartConnectingAnIdleChannel) {
+    TcpBlackhole blackhole;
+    RPCPool pool;
+    auto original = pool.getConnection(blackhole.address());
+    ASSERT_TRUE(original.ok());
+    ASSERT_EQ(original->channel->GetState(false), GRPC_CHANNEL_IDLE);
+    auto reused = pool.getConnection(blackhole.address());
+    ASSERT_TRUE(reused.ok());
+    EXPECT_EQ(reused->channel, original->channel);
+    EXPECT_EQ(reused->stub, original->stub);
+    EXPECT_EQ(reused->channel->GetState(false), GRPC_CHANNEL_IDLE);
+}
+
 TEST(RPCPoolTest, ReadyPreflightBoundsUnreadyChannelAndEvictsItsGeneration) {
     TcpBlackhole blackhole;
     RPCPool      pool;
@@ -182,6 +196,142 @@ TEST(RPCPoolTest, ReadyPreflightReusesReadyChannel) {
     EXPECT_EQ(no_wait->channel, first->channel);
 }
 
+TEST(RPCPoolTest, PeerMutexIsReclaimedAfterNewAndCachedConnectionLookups) {
+    TestGrpcServer server;
+    RPCPool        pool;
+    auto first = pool.getReadyConnection(server.address(), 2s);
+    ASSERT_TRUE(first.ok()) << first.status();
+    EXPECT_TRUE(pool.peer_mutexes_.empty());
+
+    auto second = pool.getConnection(server.address());
+    ASSERT_TRUE(second.ok()) << second.status();
+    EXPECT_EQ(first->channel, second->channel);
+    EXPECT_TRUE(pool.peer_mutexes_.empty());
+}
+
+TEST(RPCPoolTest, PeerMutexRemainsSharedUntilLastConcurrentHolderExits) {
+    RPCPool pool;
+    const std::string peer = "127.0.0.1:12345";
+    std::shared_ptr<std::mutex> first;
+    std::shared_ptr<std::mutex> second;
+    {
+        std::lock_guard<std::mutex> guard(pool.mutex_);
+        first = pool.getPeerMutexLocked(peer);
+        second = pool.getPeerMutexLocked(peer);
+    }
+    ASSERT_EQ(first, second);
+    pool.releasePeerMutex(peer, first);
+    EXPECT_EQ(first, nullptr);
+    ASSERT_EQ(pool.peer_mutexes_.size(), 1u);
+
+    std::shared_ptr<std::mutex> third;
+    {
+        std::lock_guard<std::mutex> guard(pool.mutex_);
+        third = pool.getPeerMutexLocked(peer);
+    }
+    EXPECT_EQ(second, third);
+    pool.releasePeerMutex(peer, second);
+    EXPECT_EQ(second, nullptr);
+    EXPECT_EQ(pool.peer_mutexes_.size(), 1u);
+    pool.releasePeerMutex(peer, third);
+    EXPECT_EQ(third, nullptr);
+    EXPECT_TRUE(pool.peer_mutexes_.empty());
+}
+
+TEST(RPCPoolTest, SimultaneousExitsReclaimPeerMutexRegistryEntry) {
+    RPCPool pool;
+    const std::string peer = "127.0.0.1:12345";
+    std::vector<std::shared_ptr<std::mutex>> holders(8);
+    {
+        std::lock_guard<std::mutex> guard(pool.mutex_);
+        for (auto& holder : holders) {
+            holder = pool.getPeerMutexLocked(peer);
+        }
+    }
+    std::promise<void> release;
+    auto ready = release.get_future().share();
+    std::vector<std::thread> threads;
+    for (size_t i = 0; i < holders.size(); ++i) {
+        threads.emplace_back([&, i, ready] {
+            ready.wait();
+            pool.releasePeerMutex(peer, holders[i]);
+        });
+    }
+    release.set_value();
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    EXPECT_TRUE(pool.peer_mutexes_.empty());
+    for (const auto& holder : holders) {
+        EXPECT_EQ(holder, nullptr);
+    }
+}
+
+struct FailingStubService {
+    struct Stub {};
+    static std::unique_ptr<Stub> NewStub(const std::shared_ptr<grpc::Channel>&) {
+        return nullptr;
+    }
+};
+
+TEST(RPCPoolTest, FailedStubCreationReclaimsPeerMutex) {
+    Pool<FailingStubService> pool;
+    auto result = pool.getConnection("127.0.0.1:12345");
+    EXPECT_FALSE(result.ok());
+    EXPECT_TRUE(pool.connection_pool_.empty());
+    EXPECT_TRUE(pool.peer_mutexes_.empty());
+}
+
+TEST(RPCPoolTest, ConnectionCacheIsBoundedAndKeepsRecentlyUsedPeer) {
+    TestGrpcServer server;
+    RPCPool pool;
+    auto live = pool.getReadyConnection(server.address(), 2s);
+    ASSERT_TRUE(live.ok()) << live.status();
+    {
+        std::lock_guard<std::mutex> guard(pool.mutex_);
+        for (size_t i = 0; i < RPCPool::kMaxCachedConnections - 1; ++i) {
+            pool.cacheConnectionLocked("cache-peer-" + std::to_string(i), live.value());
+        }
+    }
+    ASSERT_EQ(pool.connection_pool_.size(), RPCPool::kMaxCachedConnections);
+    auto recent = pool.getConnection(server.address());
+    ASSERT_TRUE(recent.ok()) << recent.status();
+    EXPECT_EQ(recent->channel, live->channel);
+    {
+        std::lock_guard<std::mutex> guard(pool.mutex_);
+        pool.cacheConnectionLocked("new-cache-peer", live.value());
+    }
+    EXPECT_EQ(pool.connection_pool_.size(), RPCPool::kMaxCachedConnections);
+    EXPECT_EQ(pool.connection_lru_.size(), pool.connection_pool_.size());
+    EXPECT_EQ(pool.connection_pool_.count("cache-peer-0"), 0u);
+    EXPECT_EQ(pool.connection_pool_.count(server.address()), 1u);
+}
+
+TEST(RPCPoolTest, CacheEvictionPreservesOutstandingChannelAndStub) {
+    TestGrpcServer server;
+    TestGrpcServer other_server;
+    RPCPool pool;
+    auto outstanding = pool.getReadyConnection(server.address(), 2s);
+    ASSERT_TRUE(outstanding.ok()) << outstanding.status();
+    auto filler = pool.getReadyConnection(other_server.address(), 2s);
+    ASSERT_TRUE(filler.ok()) << filler.status();
+    {
+        std::lock_guard<std::mutex> guard(pool.mutex_);
+        for (size_t i = 0; i < RPCPool::kMaxCachedConnections; ++i) {
+            pool.cacheConnectionLocked("cache-peer-" + std::to_string(i), filler.value());
+        }
+    }
+    ASSERT_EQ(pool.connection_pool_.count(server.address()), 0u);
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + 2s);
+    GetPeerInfoRequestPB request;
+    GetPeerInfoResponsePB response;
+    auto status = outstanding->stub->GetPeerInfo(&context, request, &response);
+    // The test service does not implement GetPeerInfo. Receiving its status
+    // proves the externally held stub/channel still works after cache eviction.
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::UNIMPLEMENTED);
+}
+
 TEST(RPCPoolTest, OldGenerationCannotEraseReadyReplacement) {
     TestGrpcServer server;
     RPCPool        pool;
@@ -197,6 +347,7 @@ TEST(RPCPoolTest, OldGenerationCannotEraseReadyReplacement) {
     auto current = pool.getReadyConnection(server.address(), 2s);
     ASSERT_TRUE(current.ok()) << current.status();
     EXPECT_EQ(current->channel, replacement->channel);
+    EXPECT_EQ(pool.connection_lru_.size(), pool.connection_pool_.size());
 }
 
 }  // namespace

@@ -823,9 +823,14 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
     if (!validateStreamForScheduling(stream)) {
+        stream->finishWithoutGenerate();
         return;
     }
-    (void)scheduler_->enqueue(stream);
+    const auto status = scheduler_->enqueue(stream);
+    if (!status.ok()) {
+        stream->reportError(ErrorCode::EXECUTION_EXCEPTION, status.ToString());
+        stream->finishWithoutGenerate();
+    }
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
@@ -878,6 +883,13 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
         enqueue_successes[schedulable_indexes[i]] = schedulable_result.first[i];
     }
     return {std::move(enqueue_successes), std::move(streams)};
+}
+
+std::vector<GenerateStreamPtr> NormalEngine::batchEnqueue(const std::vector<GenerateStreamPtr>& streams) {
+    for (const auto& stream : streams) {
+        stream->setReserveStep(reserve_step_);
+    }
+    return scheduler_->enqueueGroup(streams).second;
 }
 
 absl::Status NormalEngine::step() try {

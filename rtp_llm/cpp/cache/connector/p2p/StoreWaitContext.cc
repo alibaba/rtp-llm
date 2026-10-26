@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <algorithm>
+#include <exception>
 #include <functional>
 
 namespace rtp_llm {
@@ -16,7 +17,12 @@ StoreWaitContextChecker::~StoreWaitContextChecker() {}
 
 void StoreWaitContextChecker::addContext(StoreWaitContext context) {
     std::lock_guard<std::mutex> lock(contexts_mutex_);
-    contexts_.push_back(std::move(context));
+    // The model writer normally synchronizes this event before publishing the
+    // layer. Publish already-ready data now instead of waiting for the next tick.
+    if (!checkContext(context)) {
+        contexts_.push_back(std::move(context));
+        computed_buffers_->notification()->notify();
+    }
 }
 
 size_t StoreWaitContextChecker::getContextCount() const {
@@ -28,42 +34,97 @@ void StoreWaitContextChecker::checkOnce() {
     std::lock_guard<std::mutex> lock(contexts_mutex_);
     auto                        iter = contexts_.begin();
     while (iter != contexts_.end()) {
-        auto& context = *iter;
-
-        // check timeout
-        if (currentTimeMs() >= context.deadline_ms) {
-            RTP_LLM_LOG_WARNING("StoreWaitContextChecker: wait timeout, request_id: %ld, deadline_ms: %ld",
-                                context.request_id,
-                                context.deadline_ms);
-            if (context.collector) {
-                context.collector->success                 = false;
-                context.collector->store_wait_done_time_us = currentTimeUs() - context.collector->start_time_us;
-            }
-            if (metrics_reporter_ && context.collector) {
-                metrics_reporter_->report<P2PConnectorMetrics, PrefillWorkerStoreMetricsCollector>(
-                    nullptr, context.collector.get());
-            }
+        if (checkContext(*iter)) {
             iter = contexts_.erase(iter);
-            continue;
+        } else {
+            ++iter;
         }
-
-        // check event readiness
-        if (!context.event || context.event->query()) {
-            if (computed_buffers_) {
-                computed_buffers_->addBuffer(context.request_id, context.layer_cache_buffer, context.deadline_ms);
-            }
-            if (context.collector) {
-                context.collector->store_wait_done_time_us = currentTimeUs() - context.collector->start_time_us;
-            }
-            if (metrics_reporter_ && context.collector) {
-                metrics_reporter_->report<P2PConnectorMetrics, PrefillWorkerStoreMetricsCollector>(
-                    nullptr, context.collector.get());
-            }
-            iter = contexts_.erase(iter);
-            continue;
-        }
-        ++iter;
     }
+}
+
+bool StoreWaitContextChecker::checkContext(StoreWaitContext& context) {
+    // Read the current phase on every check; removed requests cannot be revived.
+    const auto deadline = computed_buffers_->requestHorizon(context.request_id, context.request_deadline_ms);
+    if (!deadline) {
+        return true;
+    }
+    context.deadline_ms = *deadline;
+
+    // check timeout
+    if (currentTimeMs() >= context.deadline_ms) {
+        RTP_LLM_LOG_WARNING("StoreWaitContextChecker: wait timeout, request_id: %ld, deadline_ms: %ld",
+                            context.request_id,
+                            context.deadline_ms);
+        if (computed_buffers_) {
+            computed_buffers_->removeBuffer(context.request_id, context.request_deadline_ms);
+        }
+        if (context.collector) {
+            context.collector->prefill_worker_store_success = false;
+            context.collector->prefill_worker_store_store_wait_done_time_us =
+                currentTimeUs() - context.collector->prefill_worker_store_start_time_us;
+        }
+        if (metrics_reporter_ && context.collector) {
+            metrics_reporter_->report<P2PConnectorMetrics, P2PConnectorMetricsCollector>(nullptr,
+                                                                                         context.collector.get());
+        }
+        return true;
+    }
+
+    bool event_ready = !context.event;
+    if (context.event) {
+        try {
+            event_ready = context.event->query();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR(
+                "StoreWaitContextChecker: event query failed, request_id=%ld, error=%s", context.request_id, e.what());
+            if (computed_buffers_) {
+                computed_buffers_->removeBuffer(context.request_id, context.request_deadline_ms);
+            }
+            if (context.collector) {
+                context.collector->prefill_worker_store_success = false;
+                context.collector->prefill_worker_store_store_wait_done_time_us =
+                    currentTimeUs() - context.collector->prefill_worker_store_start_time_us;
+                if (metrics_reporter_) {
+                    metrics_reporter_->report<P2PConnectorMetrics, P2PConnectorMetricsCollector>(
+                        nullptr, context.collector.get());
+                }
+            }
+            return true;
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("StoreWaitContextChecker: event query failed, request_id=%ld, unknown error",
+                              context.request_id);
+            if (computed_buffers_) {
+                computed_buffers_->removeBuffer(context.request_id, context.request_deadline_ms);
+            }
+            if (context.collector) {
+                context.collector->prefill_worker_store_success = false;
+                context.collector->prefill_worker_store_store_wait_done_time_us =
+                    currentTimeUs() - context.collector->prefill_worker_store_start_time_us;
+                if (metrics_reporter_) {
+                    metrics_reporter_->report<P2PConnectorMetrics, P2PConnectorMetricsCollector>(
+                        nullptr, context.collector.get());
+                }
+            }
+            return true;
+        }
+    }
+
+    // check event readiness
+    if (event_ready) {
+        if (computed_buffers_) {
+            computed_buffers_->addBuffer(context.request_id, context.layer_cache_buffer, context.request_deadline_ms);
+        }
+        if (context.collector) {
+            context.collector->prefill_worker_store_store_wait_done_time_us =
+                currentTimeUs() - context.collector->prefill_worker_store_start_time_us;
+        }
+        if (metrics_reporter_ && context.collector) {
+            metrics_reporter_->report<P2PConnectorMetrics, P2PConnectorMetricsCollector>(nullptr,
+                                                                                         context.collector.get());
+        }
+        return true;
+    }
+    return false;
 }
 
 }  // namespace rtp_llm

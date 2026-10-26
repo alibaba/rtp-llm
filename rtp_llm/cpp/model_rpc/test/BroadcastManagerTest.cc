@@ -2,6 +2,7 @@
 #include <future>
 #include <thread>
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include "grpc++/grpc++.h"
 
 #include "autil/NetUtil.h"
@@ -211,6 +212,30 @@ TEST_F(BroadcastManagerTest, Init_ReturnTrue_ValidWorkerAddrs) {
 
 // ---------------------------- broadcast ----------------------------
 
+TEST_F(BroadcastManagerTest, RuntimeBroadcastUsesPinnedStubsWithoutEnteringTheConnectionPool) {
+    ASSERT_EQ(manager_->worker_connections_.size(), manager_->workerNum());
+    std::unique_lock<std::mutex> blocked_pool(manager_->rpc_pool_->mutex_);
+    auto                         dispatched = std::async(std::launch::async, [&] {
+        std::vector<FunctionRequestPB> requests(manager_->workerNum());
+        return manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+            requests,
+            200,
+            [](const std::shared_ptr<RpcService::Stub>&    stub,
+               const std::shared_ptr<grpc::ClientContext>& context,
+               const FunctionRequestPB&                    request,
+               grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(context.get(), request, cq); });
+    });
+    const auto                   ready      = dispatched.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(ready, std::future_status::ready);
+    blocked_pool.unlock();
+    auto result = dispatched.get();
+    ASSERT_NE(result, nullptr);
+    for (size_t i = 0; i < manager_->workerNum(); ++i) {
+        EXPECT_EQ(result->worker_contexts_[i]->stub, manager_->worker_connections_[i].stub);
+    }
+    result->waitDone();
+}
+
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNull_RequestsSizeMismatch) {
     std::vector<FunctionRequestPB> requests(1);
     auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
@@ -282,12 +307,10 @@ TEST_F(BroadcastManagerTest, Broadcast_OnDoneCompletesWithoutWaitDone) {
     ASSERT_TRUE(manager->init());
 
     std::vector<FunctionRequestPB> requests(manager->workerNum());
-    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+    auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& ctx,
                        const FunctionRequestPB&                    req,
-                       grpc::CompletionQueue*                      cq) {
-        return stub->AsyncExecuteFunction(ctx.get(), req, cq);
-    };
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(ctx.get(), req, cq); };
     auto result = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, 500, rpc_call);
     ASSERT_NE(result, nullptr);
     std::promise<void> done;
@@ -693,10 +716,98 @@ TEST_F(BroadcastManagerTest, DeadlineKeepsAggregateErrorConsistentAcrossCompleti
     verify(/*deadline_first=*/false);
 }
 
+TEST_F(BroadcastManagerTest, ImmediateProgressCallbackExceptionDoesNotEscapeRegistration) {
+    auto ctx    = makeIdleContext();
+    auto result = std::make_shared<FunctionBroadcastResult>(
+        std::vector<std::shared_ptr<FunctionBroadcastResult::WorkerRpcContext>>{ctx});
+    int progress_calls = 0;
+    EXPECT_NO_THROW(result->setProgressCallback([&] {
+        ++progress_calls;
+        throw std::runtime_error("progress observer failed");
+    }));
+    EXPECT_EQ(progress_calls, 1);
+    EXPECT_FALSE(result->done());
+    EXPECT_NO_THROW(result->finishRank(0, true));
+    EXPECT_EQ(progress_calls, 2);
+    EXPECT_TRUE(result->done());
+    EXPECT_TRUE(result->success());
+    EXPECT_TRUE(result->firstError().error.ok());
+}
+
+TEST_F(BroadcastManagerTest, LateCompletionCallbackExceptionPreservesFatalRpcError) {
+    auto ctx    = makeIdleContext();
+    auto result = std::make_shared<FunctionBroadcastResult>(
+        std::vector<std::shared_ptr<FunctionBroadcastResult::WorkerRpcContext>>{ctx});
+    result->finishRank(0, false);
+    EXPECT_NO_THROW(result->onDone([&] { result->waitDone(); }));
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+}
+
+TEST_F(BroadcastManagerTest, ThrowingObserversDoNotSkipLaterCompletionCallbacks) {
+    auto ctx    = makeIdleContext();
+    auto result = std::make_shared<FunctionBroadcastResult>(
+        std::vector<std::shared_ptr<FunctionBroadcastResult::WorkerRpcContext>>{ctx});
+    int progress_calls   = 0;
+    int completion_calls = 0;
+    result->setProgressCallback([&] {
+        ++progress_calls;
+        throw std::runtime_error("progress observer failed");
+    });
+    result->onDone([&] {
+        ++completion_calls;
+        throw 7;
+    });
+    result->onDone([&] { ++completion_calls; });
+    EXPECT_NO_THROW(result->finishRank(0, false));
+    EXPECT_EQ(progress_calls, 2);
+    EXPECT_EQ(completion_calls, 2);
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+}
+
 // ---------------------------- workerNum ----------------------------
 
 TEST_F(BroadcastManagerTest, WorkerNum) {
     EXPECT_EQ(manager_->workerNum(), 2u);
+}
+
+TEST(BroadcastFirstErrorTest, FirstRankFailureIsAvailableBeforeOtherRanksFinish) {
+    using Result   = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    auto a         = std::make_shared<Result::WorkerRpcContext>();
+    auto b         = std::make_shared<Result::WorkerRpcContext>();
+    a->server_addr = "worker-0:9000";
+    b->server_addr = "worker-1:9000";
+    b->status      = grpc::Status(grpc::StatusCode::UNAVAILABLE, "connection reset by peer");
+    Result result({a, b});
+    result.finishRank(1, true);
+    EXPECT_FALSE(result.done());
+    const auto first = result.firstError();
+    EXPECT_EQ(first.error.code(), ErrorCode::CONNECT_FAILED);
+    EXPECT_NE(first.error.ToString().find("rank=1 peer=worker-1:9000"), std::string::npos);
+    EXPECT_NE(first.error.ToString().find("connection reset by peer"), std::string::npos);
+    a->status = grpc::Status(grpc::StatusCode::CANCELLED, "cleanup");
+    result.finishRank(0, true);
+    EXPECT_TRUE(result.done());
+    EXPECT_EQ(result.firstError().order, first.order);
+    EXPECT_EQ(result.firstError().error.ToString(), first.error.ToString());
+}
+
+TEST(BroadcastFirstErrorTest, ApplicationFailurePrecedesLaterTransportFailure) {
+    using Result = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    auto a       = std::make_shared<Result::WorkerRpcContext>();
+    auto b       = std::make_shared<Result::WorkerRpcContext>();
+    b->request.mutable_p2p_request()->set_unique_key("key");
+    b->response.mutable_p2p_response()->set_error_code(ErrorCodePB::MM_PROCESS_ERROR);
+    b->response.mutable_p2p_response()->set_error_message("first worker error");
+    Result result({a, b});
+    result.finishRank(1, true);
+    a->status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "later timeout");
+    result.finishRank(0, true);
+    EXPECT_EQ(result.firstError().error.code(), ErrorCode::MM_PROCESS_ERROR);
+    EXPECT_NE(result.firstError().error.ToString().find("first worker error"), std::string::npos);
 }
 
 }  // namespace rtp_llm::test

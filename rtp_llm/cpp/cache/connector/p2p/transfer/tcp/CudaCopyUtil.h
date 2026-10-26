@@ -9,9 +9,10 @@ namespace tcp {
 
 /// @brief 待拷贝的 buffer 信息
 struct CopyTask {
-    void*  src_ptr;  // 源地址
-    size_t size;     // 拷贝大小
-    char*  dst_ptr;  // 目标地址，必须由调用者预先分配
+    void*  src_ptr;            // 源地址
+    size_t size;               // 拷贝大小
+    char*  dst_ptr;            // 目标地址，必须由调用者预先分配
+    int    device_index = -1;  // GPU allocation device; -1 selects the current device.
 };
 
 /// @brief GPU 拷贝工具类，封装批量拷贝逻辑

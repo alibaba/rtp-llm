@@ -120,7 +120,7 @@ public:
             generate_input, model_config_, runtime_config_, resource_context, nullptr);
     };
 
-    GenerateStreamPtr createComplexContextStream(std::vector<int> input_ids) {
+    GenerateStreamPtr createComplexContextStream(std::vector<int> input_ids, RoleType role = RoleType::PDFUSION) {
         autil::EnvGuard perf_scope("PERF_TEST", "1");
 
         auto cache_config  = init_config();
@@ -129,6 +129,7 @@ public:
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
         resource_context.reuse_cache   = true;
+        resource_context.role_type     = role;
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
@@ -167,6 +168,17 @@ public:
         stream_ptr->setSeqLength(stream_ptr->seqLength() + new_token_ids.size());
         return stream_ptr;
     };
+
+    GenerateStreamPtr createMockStream(std::vector<int> input_ids, int64_t /*batch_padding*/) {
+        std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
+        std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
+        ResourceContext                 resource_context;
+        generate_input->generate_config = generate_config;
+        generate_input->input_ids =
+            torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
+        return std::make_shared<NormalGenerateStream>(
+            generate_input, model_config_, runtime_config_, resource_context, nullptr);
+    }
 
 private:
     ModelConfig   model_config_;
@@ -234,6 +246,8 @@ TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAux
     stream->generateConfig()->num_return_sequences = 1;
     stream->generateConfig()->max_new_tokens       = 4;
     stream->generateConfig()->aux_info             = true;
+    // Both reads assert intermediate updates, so this fixture must stream them.
+    stream->generateConfig()->is_streaming         = true;
     stream->generateConfig()->pd_separation        = true;
     stream->reportEvent(StreamEvents::CanRun);
     ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
@@ -252,7 +266,7 @@ TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAux
     update_info.generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
     stream->update(update_info);
 
-    auto output_result = stream->nextOutput();
+    auto output_result = stream->nextOutput(1000);
     ASSERT_TRUE(output_result.ok());
     ASSERT_EQ(output_result.value().generate_outputs.size(), 1);
     EXPECT_EQ(output_result.value().generate_outputs[0].aux_info.generation_prefill_cuda_graph_status, "replayed");
@@ -270,7 +284,7 @@ TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAux
                                    torch::Tensor(),
                                    torch::Tensor()};
     stream->update(decode_update);
-    auto decode_output_result = stream->nextOutput();
+    auto decode_output_result = stream->nextOutput(1000);
     ASSERT_TRUE(decode_output_result.ok());
     ASSERT_EQ(decode_output_result.value().generate_outputs.size(), 1);
     EXPECT_EQ(decode_output_result.value().generate_outputs[0].aux_info.generation_prefill_cuda_graph_status,
@@ -576,6 +590,25 @@ TEST_F(GenerateStreamTest, outputPublishedBeforeConsumerWaitIsObserved) {
     EXPECT_EQ(result.value().request_id, 321);
 }
 
+TEST_F(GenerateStreamTest, RejectedUnenqueuedStreamFinishesWithoutLosingOriginalError) {
+    GenerateStreamBuilder builder;
+    auto stream = builder.createContextStream({1, 2, 3});
+    ASSERT_EQ(stream->getStatus(), StreamState::WAITING);
+    stream->reportError(ErrorCode::INVALID_PARAMS, "rejected before enqueue");
+    ASSERT_TRUE(stream->finishWithoutGenerate());
+    EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+}
+
+TEST_F(GenerateStreamTest, UnenqueuedCompletionCannotFinishSchedulerOwnedRunningStream) {
+    GenerateStreamBuilder builder;
+    auto stream = builder.createContextStream({1, 2, 3});
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    EXPECT_FALSE(stream->finishWithoutGenerate());
+    EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
+}
+
 TEST_F(GenerateStreamTest, pendingCompletionIsConsumerVisibleBeforeSchedulerCommit) {
     auto builder = GenerateStreamBuilder();
     auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));
@@ -735,7 +768,7 @@ TEST_F(GenerateStreamTest, outputQueueCapacityReportsFullWithoutDeadlock) {
     EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
 }
 
-TEST_F(GenerateStreamTest, consumerWaitWakesOnNeedRemoteGenerate) {
+TEST_F(GenerateStreamTest, consumerWaitWakesOnPrefillHandoffReady) {
     auto builder = GenerateStreamBuilder();
     auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
 
@@ -746,7 +779,7 @@ TEST_F(GenerateStreamTest, consumerWaitWakesOnNeedRemoteGenerate) {
         return stream->nextOutput();
     });
     consumer_ready.get();
-    stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+    stream->reportEvent(StreamEvents::PrefillHandoffReady);
 
     waitForConsumer(consumer, stream);
     auto result = consumer.get();
@@ -755,9 +788,52 @@ TEST_F(GenerateStreamTest, consumerWaitWakesOnNeedRemoteGenerate) {
     EXPECT_NE(stream->getStatus(), StreamState::FINISHED);
 }
 
+TEST_F(GenerateStreamTest, PDDecodePublishesHandoffOnceThenHonorsStreamingMode) {
+    autil::EnvGuard real_outputs("PERF_TEST", "0");
+    for (bool streaming : {false, true}) {
+        SCOPED_TRACE(streaming);
+        GenerateStreamBuilder builder;
+        auto stream = std::dynamic_pointer_cast<NormalGenerateStream>(
+            builder.createComplexContextStream({1, 2, 3}, RoleType::DECODE));
+        stream->generateConfig()->pd_separation = true;
+        stream->generateConfig()->is_streaming = streaming;
+        stream->generateConfig()->max_new_tokens = 3;
+        stream->generateConfig()->aux_info = true;
+        stream->generate_status_->status.store(StreamState::RUNNING);
+        const auto update = [&](int token, bool handoff) {
+            stream->step();
+            stream->update({.new_tokens = torch::full({2, 1}, token, torch::kInt32),
+                            .num_new_tokens = 1,
+                            .update_remote_generate = !handoff});
+        };
+        update(42, true);
+        ASSERT_TRUE(stream->hasOutput());
+        auto first = stream->nextOutput(1);
+        ASSERT_TRUE(first.ok());
+        ASSERT_EQ(first.value().generate_outputs.size(), 2u);
+        EXPECT_EQ(first.value().generate_outputs[0].aux_info.step_output_len, 1);
+        update(43, false);
+        EXPECT_EQ(stream->hasOutput(), streaming);
+        if (streaming) {
+            auto middle = stream->nextOutput(1);
+            ASSERT_TRUE(middle.ok());
+            EXPECT_EQ(middle.value().generate_outputs[0].aux_info.step_output_len, 1);
+        }
+        update(44, false);
+        auto last = stream->nextOutput(1);
+        ASSERT_TRUE(last.ok());
+        const auto& output = last.value().generate_outputs[0];
+        EXPECT_TRUE(output.finished);
+        EXPECT_EQ(output.aux_info.output_len, 3);
+        EXPECT_EQ(output.aux_info.step_output_len, streaming ? 1 : 2);
+        EXPECT_EQ(output.output_ids.size(1), streaming ? 1 : 2);
+        EXPECT_EQ(output.output_ids[0][output.output_ids.size(1) - 1].item<int32_t>(), 44);
+    }
+}
+
 TEST_F(GenerateStreamTest, pdUpdatePublishesOutputBeforeRemoteHandoffCompletion) {
     auto builder = GenerateStreamBuilder();
-    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}, RoleType::PREFILL));
     stream->generateConfig()->num_return_sequences = 1;
     stream->generateConfig()->pd_separation        = true;
     stream->generate_status_->status.store(StreamState::RUNNING);
@@ -776,7 +852,7 @@ TEST_F(GenerateStreamTest, pdUpdatePublishesOutputBeforeRemoteHandoffCompletion)
                     true,
                     false});
 
-    ASSERT_TRUE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    ASSERT_TRUE(stream->hasEvent(StreamEvents::PrefillHandoffReady));
     auto output_result = stream->nextOutput();
     ASSERT_TRUE(output_result.ok());
     ASSERT_EQ(output_result.value().generate_outputs.size(), 1);
@@ -915,7 +991,7 @@ TEST_F(GenerateStreamTest, schedulerTimeoutDoesNotOverrideRemoteHandoff) {
     stream->generateConfig()->timeout_ms = 10;
     stream->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - 20 * 1000);
 
-    stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+    stream->reportEvent(StreamEvents::PrefillHandoffReady);
 
     EXPECT_FALSE(stream->checkTimeoutAndHasError());
     EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
@@ -1296,7 +1372,7 @@ TEST_F(GenerateStreamTest, timeInfoPublishesFirstTokenAndGenerateDoneOnlyAfterCo
     EXPECT_EQ(invalid_info.first_token_time_us, 0);
     EXPECT_FALSE(invalid_info.generation_done);
 
-    auto valid                             = builder.createComplexContextStream({1, 2, 3});
+    auto valid                             = builder.createComplexContextStream({1, 2, 3}, RoleType::PREFILL);
     valid->generateConfig()->pd_separation = true;
     valid->reportEvent(StreamEvents::CanRun);
     ASSERT_EQ(valid->moveToNext(), StreamState::RUNNING);
@@ -1377,7 +1453,7 @@ TEST_F(GenerateStreamTest, firstTokenNotCommittedWhenMaxTokenTruncatesNewTokensT
 
 TEST_F(GenerateStreamTest, timeInfoSnapshotIsCoherentDuringLifecyclePublication) {
     auto builder                            = GenerateStreamBuilder();
-    auto stream                             = builder.createComplexContextStream({1, 2, 3});
+    auto stream                             = builder.createComplexContextStream({1, 2, 3}, RoleType::PREFILL);
     stream->generateConfig()->pd_separation = true;
 
     std::atomic<bool>  start{false};
@@ -1571,6 +1647,15 @@ TEST_F(GenerateStreamTest, logprobsAcceptDefaultSingleSequenceSentinel) {
                             stream->inputLength());
         EXPECT_FLOAT_EQ(stream->getTokenLogProbs().index({0, 0}).item<float>(), -0.5f);
     }
+}
+
+TEST_F(GenerateStreamTest, P2PRequestDeadlineDoesNotRestartWithStreamBeginTime) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createMockStream({1, 2, 3}, 1001);
+    const int64_t deadline_ms = autil::TimeUtility::currentTimeInMicroSeconds() / 1000 + 1000;
+    stream->generate_input_->request_deadline_ms = deadline_ms;
+    stream->resetBeginTime((deadline_ms + 5000) * 1000);
+    EXPECT_EQ(stream->deadlineMs(), deadline_ms);
 }
 
 }  // namespace rtp_llm

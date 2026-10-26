@@ -72,7 +72,7 @@ def _cp_forward_inputs(
     shuffle_for_rank: list[int] = []
     chunk_offset = 0
     padded_offset = 0
-    for length, chunk in zip(lengths, chunks):
+    for length, chunk, prefix in zip(lengths, chunks, prefixes):
         padded = chunk * cp_size
         pair = chunk // 2
         padding[padded_offset : padded_offset + length] = 1
@@ -85,7 +85,7 @@ def _cp_forward_inputs(
                     rank * total_chunk + chunk_offset + local_idx
                 )
             if rank == cp_rank:
-                shuffle_for_rank.extend(rank_shuffle)
+                shuffle_for_rank.extend(position + prefix for position in rank_shuffle)
         chunk_offset += chunk
         padded_offset += padded
 
@@ -119,7 +119,7 @@ def _cp_forward_reference(
     for request_id, (length, chunk, prefix) in enumerate(
         zip(lengths, chunks, prefixes)
     ):
-        request_shuffle = shuffle[local_offset : local_offset + chunk]
+        request_shuffle = shuffle[local_offset : local_offset + chunk] - prefix
         relative_parts.append(request_shuffle + padded_offset)
         global_parts.append(request_shuffle.clamp_max(max(length - 1, 0)) + prefix)
         request_parts.append(

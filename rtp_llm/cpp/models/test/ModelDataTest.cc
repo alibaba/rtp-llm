@@ -3,6 +3,7 @@
 
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
@@ -103,6 +104,18 @@ TEST_F(ModelDataTest, testPrefillCPExecutionFollowsRoleConfig) {
     ParallelismConfig decode_config;
     decode_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
     EXPECT_FALSE(buildExecProperties(decode_config, DeviceResourceConfig{}).enable_prefill_cp);
+}
+
+TEST_F(ModelDataTest, P2PDeadlineClockAnchorDoesNotRewriteRequestIdentity) {
+    GptModelInputs inputs;
+    inputs.request_deadline_ms = torch::tensor({int64_t{123456}}, torch::kInt64);
+    const auto before_ms       = currentTimeMs();
+    const auto hints           = getModelInputShapeHints(inputs);
+    const auto after_ms        = currentTimeMs();
+    EXPECT_GE(hints[GptModelInputIndex::p2pDeadlineSourceTimeMs], before_ms);
+    EXPECT_LE(hints[GptModelInputIndex::p2pDeadlineSourceTimeMs], after_ms);
+    EXPECT_EQ(inputs.request_deadline_ms.item<int64_t>(), 123456);
+    EXPECT_EQ(inputs.p2p_deadline_clock_offset_ms, 0);
 }
 
 TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
@@ -224,7 +237,6 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     inputs.is_fake_stream            = true;
     inputs.is_target_verify          = true;
     inputs.pd_separation             = true;
-    inputs.decode_entrance           = true;
     inputs.use_opaque_kv_cache_store = true;
     inputs.kv_block_stride_bytes     = 4096;
     inputs.kv_scale_stride_bytes     = 256;
@@ -243,7 +255,8 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlFakeStream));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlTargetVerify));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlPdSeparation));
-    EXPECT_TRUE(has(GptModelInputControlFlag::kControlDecodeEntrance));
+    // All current control flags are set; the removed decode-entrance bit 8 stays clear.
+    EXPECT_EQ(flags, ((1u << 8) - 1u) | (1u << 9));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlOpaqueKvCacheStore));
     EXPECT_EQ(hints[GptModelInputIndex::kvBlockStrideBytes], 4096);
     EXPECT_EQ(hints[GptModelInputIndex::kvScaleStrideBytes], 256);
@@ -289,6 +302,7 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
     if (rank == 0) {
         inputs.combo_tokens             = torch::tensor({7, 8}, torch::kInt32);
         inputs.input_lengths            = torch::tensor({1, 1}, torch::kInt32);
+        inputs.request_deadline_ms      = torch::tensor({int64_t{123456}, int64_t{123457}}, torch::kInt64);
         inputs.sequence_lengths         = torch::tensor({4, 5}, torch::kInt32);
         inputs.kv_cache_block_id        = physical.clone();
         inputs.kv_cache_kernel_block_id = kernel.clone();
@@ -329,6 +343,10 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
         expectIntTensor(inputs.kv_cache_update_mapping, expected_copies.to(inputs.kv_cache_update_mapping.device()));
     }
     expectIntTensor(inputs.combo_tokens, torch::tensor({7, 8}, torch::kInt32));
+    expectIntTensor(inputs.request_deadline_ms, torch::tensor({int64_t{123456}, int64_t{123457}}, torch::kInt64));
+    if (rank == 0) {
+        EXPECT_EQ(inputs.p2p_deadline_clock_offset_ms, 0);
+    }
     if (rank == 0) {
         EXPECT_TRUE(inputs.kv_cache_block_id.is_same(original_physical));
         EXPECT_TRUE(inputs.kv_cache_kernel_block_id.is_same(original_kernel));
@@ -407,9 +425,9 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
     invalid.kv_cache_group_tags.clear();
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
-    invalid.kv_cache_group_tags      = {"first", "second"};
-    invalid.kv_cache_block_id        = torch::zeros({2, 1, 1}, torch::kInt32);
-    invalid.kv_cache_update_mapping  = torch::tensor({2, 1, 2}, torch::kInt32).reshape({1, 3});
+    invalid.kv_cache_group_tags     = {"first", "second"};
+    invalid.kv_cache_block_id       = torch::zeros({2, 1, 1}, torch::kInt32);
+    invalid.kv_cache_update_mapping = torch::tensor({2, 1, 2}, torch::kInt32).reshape({1, 3});
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
     broadcaster.reset();
     ::alarm(0);

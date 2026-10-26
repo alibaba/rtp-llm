@@ -93,11 +93,14 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DecodeTpReplicatesFullPagesWhilePrefillCp
             par.prefill_cp_config.prefill_cp_size  = 2;
             PDSepConfig pd;
             pd.role_type = role;
+            pd.cache_store_rdma_mode = false;
             auto config  = finalizeCacheConfig(CacheConfigCreator::createConfig(model, par, {}), 20);
             EXPECT_EQ(config.group(full.tag).seqSizePerBlock(), 256u);
             EXPECT_EQ(config.group(swa.tag).seqSizePerBlock(), 512u);
-            auto manager = std::make_shared<KVCacheManager>(
-                config, false, nullptr, KVCacheConfig{}, par, RuntimeConfig{}, SpeculativeExecutionConfig{}, pd);
+            RuntimeConfig runtime;
+            runtime.worker_grpc_addrs = {"127.0.0.1:12345", "127.0.0.1:12346"};
+            auto manager              = std::make_shared<KVCacheManager>(
+                config, false, nullptr, KVCacheConfig{}, par, runtime, SpeculativeExecutionConfig{}, pd);
             ASSERT_TRUE(manager->init());
             EXPECT_EQ(manager->cpSlotMapper() != nullptr, role == RoleType::PREFILL);
             auto       resource = makeResource(1, config);

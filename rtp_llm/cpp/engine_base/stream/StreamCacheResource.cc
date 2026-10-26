@@ -6,20 +6,260 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
-#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include <algorithm>
 #include <limits>
+#include <cstring>
 #include <thread>
+#include <torch/extension.h>
 
 using namespace std;
 
 namespace rtp_llm {
 
+class StreamConnectorContext: public KVCacheConnectorReadWriteContext {
+public:
+    StreamConnectorContext(std::shared_ptr<BatchKVCacheResource> resource,
+                           std::shared_ptr<Meta>                 meta,
+                           size_t                                tree_covered_block_num):
+        resource_(std::move(resource)), meta_(std::move(meta)), tree_covered_block_num_(tree_covered_block_num) {}
+
+    const KVCacheResource& kvCacheResource() const override {
+        return resource_->cacheResource(0);
+    }
+    const std::shared_ptr<Meta>& meta() const override {
+        return meta_;
+    }
+    size_t treeCoveredBlockNum() const override {
+        return tree_covered_block_num_;
+    }
+
+private:
+    std::shared_ptr<BatchKVCacheResource> resource_;
+    std::shared_ptr<Meta>                 meta_;
+    size_t                                tree_covered_block_num_{0};
+};
+
+class MetaImpl: public Meta {
+public:
+    MetaImpl(bool enable_memory_cache, bool enable_remote_cache, std::string trace_id):
+        enable_memory_cache_(enable_memory_cache),
+        enable_remote_cache_(enable_remote_cache),
+        trace_id_(std::move(trace_id)) {}
+    ~MetaImpl() override = default;
+
+    bool enableMemoryCache() const override {
+        return enable_memory_cache_;
+    }
+    bool enableRemoteCache() const override {
+        return enable_remote_cache_;
+    }
+    const std::string& trace_id() const override {
+        return trace_id_;
+    }
+    const std::string& unique_id() const override {
+        return unique_id_;
+    }
+    const std::vector<int64_t>& tokens() const override {
+        return tokens_;
+    }
+    GenerateStream* generateStream() const override {
+        return generate_stream_;
+    }
+    void reportError(ErrorCode code, const std::string& message) override {
+        if (generate_stream_) {
+            generate_stream_->reportError(code, message);
+        }
+    }
+    std::optional<P2PRoutingContext> p2pRouting() const override {
+        return routing_ctx_;
+    }
+    void fillRoutingContext(GenerateStream* stream) {
+        if (stream && !routing_ctx_.has_value()) {
+            auto& routing                = routing_ctx_.emplace();
+            routing.request_id           = stream->streamId();
+            routing.unique_key           = stream->uniqueKey();
+            routing.deadline_ms          = stream->deadlineMs();
+            routing.prefill_addr         = stream->prefillAddr();
+            routing.prefill_tp_size      = stream->getPrefillTpSize();
+            routing.prefill_cp_size      = stream->getPrefillCpSize();
+            routing.decode_needs_compute = stream->needsDecodeAfterPrefill();
+        }
+    }
+
+    GenerateStream*                  generate_stream_ = nullptr;
+    std::optional<P2PRoutingContext> routing_ctx_;
+
+private:
+    bool                 enable_memory_cache_{false};
+    bool                 enable_remote_cache_{false};
+    std::string          trace_id_;
+    std::string          unique_id_;
+    std::vector<int64_t> tokens_;
+};
+
 namespace {
+
+torch::Tensor buildFirstTokenUpdateTokens(GenerateStream* stream, int32_t first_token_id) {
+    const auto next_batch_size = static_cast<int64_t>(stream->nextBatchSize());
+    if (!stream->hasNumBeams()) {
+        auto tokens = torch::empty({next_batch_size, 1}, torch::kInt32);
+        std::fill(tokens.data_ptr<int32_t>(), tokens.data_ptr<int32_t>() + next_batch_size, first_token_id);
+        return tokens;
+    }
+    const auto seq_len         = static_cast<int64_t>(stream->seqLength());
+    auto       tokens          = torch::zeros({next_batch_size, seq_len + 1}, torch::kInt32);
+    const auto current_batches = std::max<int64_t>(1, static_cast<int64_t>(stream->currentBatchSize()));
+    for (int64_t batch = 0; batch < next_batch_size; ++batch) {
+        const auto source = static_cast<int>(std::min(batch, current_batches - 1));
+        const auto prefix = stream->completeTokenIdsVec(source);
+        auto*      row    = tokens.data_ptr<int32_t>() + batch * tokens.size(1);
+        std::copy(prefix.begin(), prefix.end(), row);
+        row[seq_len] = first_token_id;
+    }
+    return tokens;
+}
+
+const P2PSideChannelPayload* p2pSideChannel(const std::shared_ptr<AsyncContext>& context) {
+    auto p2p = std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(context);
+    return p2p ? p2p->sideChannelPayload() : nullptr;
+}
+
+bool p2pLoadSafeToRelease(const std::shared_ptr<AsyncContext>& context) {
+    if (!context || !context->done()) {
+        return context == nullptr;
+    }
+    const auto p2p = std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(context);
+    return !p2p || !p2p->resourceHoldPending();
+}
+
+void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* stream, int reuse_block_tokens) {
+#if defined(USING_CUDA)
+    auto generator = stream->getGenerator();
+    if (stream->generateConfig()->random_seed.has_value() || payload.has_rng_state) {
+        if (!payload.has_rng_state || !generator.defined() || !stream->generateConfig()->random_seed.has_value()) {
+            stream->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+                                           "P2P handoff is missing or has unexpected request RNG state");
+            return;
+        }
+        try {
+            // The request seed is already installed. Restore before replay and first Decode sampling.
+            std::lock_guard<std::mutex> lock(generator.mutex());
+            generator.set_offset(payload.rng_offset);
+        } catch (const std::exception& error) {
+            stream->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+                                           std::string("failed to restore P2P RNG offset: ") + error.what());
+            return;
+        }
+    }
+#endif
+    // Independent pools expose the resident Decode prefix after StartLoad.
+    // Single-pool reuse continues to count allocator/cache hits only; receiving
+    // newly computed Prefill KV is not an additional cache hit in that contract.
+    // Count only complete logical blocks, using the same CP/group geometry as
+    // allocator reuse. This is Decode remote reuse, not a Prefill cache hit.
+    // Preserve execution positions: only the published usage counters change.
+    if (payload.prefill_use_independent_block_pools && reuse_block_tokens > 0) {
+        const int resident_prefix = std::max(0, stream->inputLength() - 1) / reuse_block_tokens * reuse_block_tokens;
+        const int added_remote    = std::max(0, resident_prefix - stream->initialReuseLength());
+        stream->setInitialReuseLength(stream->initialReuseLength() + added_remote);
+        stream->setRemoteReuseLength(stream->remoteReuseLength() + added_remote);
+    }
+    stream->generateInput()->handoff_multimodal_lengths = payload.multimodal_lengths;
+    if (payload.has_first_token) {
+        const auto output_tensor = [&](const char* name) {
+            const auto it = payload.first_token_tensors.find(name);
+            return it == payload.first_token_tensors.end() ? torch::Tensor{} : TensorPbConvert::pbToTorch(it->second);
+        };
+        stream->setIsContextStream(false);
+        stream->step();
+        stream->updateWithoutLock(
+            {.new_tokens        = buildFirstTokenUpdateTokens(stream, static_cast<int32_t>(payload.first_token_id)),
+             .num_new_tokens    = 1,
+             .hidden_states     = output_tensor("first_token_hidden_states"),
+             .logits            = output_tensor("first_token_logits"),
+             .softmax_probs     = output_tensor("first_token_softmax_probs"),
+             .cum_log_probs     = output_tensor("first_token_cum_log_probs"),
+             .all_probs         = output_tensor("first_token_all_probs"),
+             .loss              = output_tensor("first_token_loss"),
+             .src_batch_indices = {},
+             .all_hidden_states = output_tensor("first_token_all_hidden_states"),
+             .update_remote_generate = false,
+             .force_update_info      = false,
+             .generation_prefill_cuda_graph_status =
+                 static_cast<GenerationPrefillCudaGraphStatus>(payload.generation_prefill_cuda_graph_status)});
+        // DSpARK resumes from the prompt tail without a Prefill proposal.
+        stream->initSpeculativeHandoffPositions();
+    }
+
+    {
+        stream->setPrefillReuseLength(payload.total_reuse_len,
+                                      payload.local_reuse_len,
+                                      payload.remote_reuse_len,
+                                      payload.memory_reuse_len,
+                                      payload.disk_reuse_len,
+                                      payload.prefill_use_independent_block_pools);
+    }
+
+    torch::Tensor probs;
+    torch::Tensor hidden;
+    try {
+        // A shape such as [0] describes an empty tensor, not a proposal.
+        // Decode before checking numel so malformed shapes/bytes still fail.
+        probs  = TensorPbConvert::pbToTorch(payload.propose_probs);
+        hidden = TensorPbConvert::pbToTorch(payload.propose_hidden);
+    } catch (const std::exception& error) {
+        stream->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+                                       std::string("invalid P2P speculative tensor: ") + error.what());
+        return;
+    }
+    const bool has_probs  = probs.numel() > 0;
+    const bool has_hidden = hidden.numel() > 0;
+    if (!payload.propose_tokens.empty() || has_probs || has_hidden) {
+        if (payload.propose_tokens.size() < 2) {
+            stream->setContainProposeToken(false);
+            stream->setProposeToken({});
+            stream->setSPOutputBuffer(nullptr);
+            if (!stream->disableSpRun()) {
+                stream->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+                                               "P2P side channel has invalid speculative tokens");
+            }
+        } else {
+            if (!has_probs) {
+                probs = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
+            }
+            if (!has_hidden) {
+                hidden = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
+            }
+            stream->initSpeculativeHandoffPositions();
+            stream->setContainProposeToken(true);
+            stream->setProposeToken(payload.propose_tokens);
+            auto output    = std::make_shared<SpeculativeExecutorStreamOutput>();
+            output->tokens = torch::zeros({1, static_cast<int64_t>(payload.propose_tokens.size())}, torch::kInt32);
+            memcpy(output->tokens.data_ptr<int>(),
+                   payload.propose_tokens.data(),
+                   payload.propose_tokens.size() * sizeof(int));
+            // Wire snapshots are CPU-owned; speculative execution consumes device tensors.
+            output->all_probs     = probs.to(torch::kCUDA);
+            output->hidden_states = hidden.to(torch::kCUDA);
+            output->tensors_holder.emplace_back(std::move(probs));
+            output->tensors_holder.emplace_back(std::move(hidden));
+            stream->setSPOutputBuffer(output);
+        }
+    }
+
+    if (!payload.position_ids.empty()) {
+        stream->setContextPositionIds(
+            torch::tensor(payload.position_ids, torch::dtype(torch::kInt32).device(torch::kCPU)));
+    }
+}
 
 std::shared_ptr<const CacheTopology> warmupCacheTopology() {
     static const auto topology = []() {
@@ -48,6 +288,10 @@ void StreamCacheResource::init(int batch_size) {
                               warmupCacheTopology();
     batch_kv_cache_resource_->initGroups(topology);
     resource_released_ = false;
+}
+
+bool StreamCacheResource::p2pReleasePending() const {
+    return !p2pLoadSafeToRelease(p2p_load_context_) || !p2pLoadSafeToRelease(released_p2p_load_context_.lock());
 }
 
 void StreamCacheResource::releaseResource() {
@@ -83,14 +327,18 @@ void StreamCacheResource::releaseResource() {
         }
         allocator_load_context_.reset();
     }
+    if (p2p_load_context_) {
+        resource_context_.cache_manager->cancelP2PLoad(p2p_load_context_);
+        released_p2p_load_context_ = p2p_load_context_;
+        p2p_load_context_.reset();
+    }
+    allocator_load_error_ = absl::OkStatus();
+    p2p_cancel_requested_ = false;
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasErrorWithoutLock())) {
         return;
     }
-    RTP_LLM_LOG_DEBUG("releaseResource: stream=%ld, curBlocksNum=%d, pd_kvcache_ref=%p",
-                      stream_->streamId(),
-                      curBlocksNum(),
-                      pd_kvcache_ref_.get());
+    RTP_LLM_LOG_DEBUG("releaseResource: stream=%ld, curBlocksNum=%d", stream_->streamId(), curBlocksNum());
     tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
     resource_released_ = true;
@@ -124,7 +372,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{
                     batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, stream_->streamId()};
-                size_t     resident_prefix_length = 0;
+                size_t resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
         } else {
@@ -435,10 +683,43 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
 
 bool StreamCacheResource::asyncLoadCache() {
     RTP_LLM_PROFILE_FUNCTION();
-    return allocator_load_context_ != nullptr;
+    // Async tree allocation publishes its final physical table on completion.
+    // P2P must hold that committed table, including newly materialized targets.
+    if (allocator_load_context_) {
+        return true;
+    }
+    if (stream_->queryPdSep() && !p2p_load_context_ && resource_context_.cache_manager
+        && resource_context_.cache_manager->hasP2PConnector()) {
+        auto meta              = std::make_shared<MetaImpl>(reuseCache() && enableMemoryCache(),
+                                               reuseCache() && resource_context_.enable_remote_cache,
+                                               stream_->traceId());
+        meta->generate_stream_ = stream_;
+        meta->fillRoutingContext(stream_);
+        const size_t tree_covered_block_num = treeCoveredBlockNum();
+        auto         context =
+            std::make_shared<StreamConnectorContext>(batch_kv_cache_resource_, std::move(meta), tree_covered_block_num);
+        p2p_load_context_ = resource_context_.cache_manager->asyncLoadCache(context);
+    }
+    return allocator_load_context_ != nullptr || p2p_load_context_ != nullptr;
+}
+
+size_t StreamCacheResource::treeCoveredBlockNum() const {
+    const auto& resource = batch_kv_cache_resource_->cacheResource(0);
+    if (!allocator_load_context_) {
+        // After materialization all restored tiers reside in the physical table.
+        return resource.deviceReuseBlockNum() + resource.memoryReuseBlockNum() + resource.diskReuseBlockNum()
+               + resource.storageBackendReuseBlockNum();
+    }
+    const auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
+    if (!load_context) {
+        RTP_LLM_LOG_WARNING("allocator load context is not LoadAsyncContext, stream=%ld", stream_->streamId());
+        return resource.deviceReuseBlockNum();
+    }
+    return load_context->matchedBlocks();
 }
 
 bool StreamCacheResource::loadCacheDone() {
+    bool allocator_completed = false;
     if (allocator_load_context_) {
         if (!allocator_load_context_->done()) {
             return false;
@@ -446,19 +727,68 @@ bool StreamCacheResource::loadCacheDone() {
         const ErrorInfo error   = allocator_load_context_->errorInfo();
         const bool      success = allocator_load_context_->success();
         const auto      status  = finalizeAllocatorLoad();
+        allocator_completed     = status.ok();
         if (!success && !absl::IsUnavailable(status)) {
             RTP_LLM_LOG_WARNING(
                 "block tree load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
         }
-        if (absl::IsUnavailable(status)) {
+        if (absl::IsUnavailable(status) && !p2p_load_context_) {
             ++malloc_failed_times_;
             stream_->generate_status_->clearLoadInitiated();
             reportMallocRetry();
-        } else if (!status.ok()) {
-            stream_->reportEventWithoutLock(StreamEvents::Error,
-                                            absl::IsDeadlineExceeded(status) ? ErrorCode::LOAD_CACHE_TIMEOUT :
-                                                                               ErrorCode::MALLOC_FAILED,
-                                            std::string(status.message()));
+            return true;
+        }
+        if (!status.ok()) {
+            // Preserve the allocator cause while cancellation drains P2P writes.
+            allocator_load_error_ = status;
+            if (p2p_load_context_ && !p2p_cancel_requested_) {
+                resource_context_.cache_manager->cancelP2PLoad(p2p_load_context_);
+                p2p_cancel_requested_ = true;
+            }
+        }
+    }
+
+    if (!allocator_load_error_.ok()) {
+        // Tree failure terminates the whole load. Keep the Stream in
+        // LOADING_CACHE until P2P cancellation reaches a terminal state and
+        // its Decode target lease confirms that no transfer can still write.
+        if (!p2pLoadSafeToRelease(p2p_load_context_)) {
+            return false;
+        }
+        p2p_load_context_.reset();
+        p2p_cancel_requested_ = false;
+        stream_->reportEventWithoutLock(
+            StreamEvents::Error,
+            absl::IsDeadlineExceeded(allocator_load_error_) ? ErrorCode::LOAD_CACHE_TIMEOUT : ErrorCode::MALLOC_FAILED,
+            std::string(allocator_load_error_.message()));
+        allocator_load_error_ = absl::OkStatus();
+        return true;
+    }
+
+    if (allocator_completed && !p2p_load_context_) {
+        // Resume a P2P start deferred until tree allocation supplied its blocks.
+        asyncLoadCache();
+    }
+    if (p2p_load_context_) {
+        if (!p2p_load_context_->done()) {
+            return false;
+        }
+        if (p2p_load_context_->success()) {
+            if (const auto* payload = p2pSideChannel(p2p_load_context_)) {
+                applyP2PSideChannel(*payload, stream_, reuseBlockTokens());
+            }
+            p2p_load_context_.reset();
+        } else {
+            // P2P always represents a mandatory request lifecycle once a
+            // context exists. This includes Tree-full-hit/no-transfer, where
+            // StartLoad still returns side-channel state and releases Prefill
+            // resources, and Prefill registration itself. None of these
+            // failures is a benign cache miss.
+            const auto error = p2p_load_context_->errorInfo();
+            p2p_load_context_.reset();
+            RTP_LLM_LOG_WARNING(
+                "P2P cache load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
+            stream_->reportEventWithoutLock(StreamEvents::Error, error.code(), error.ToString());
         }
     }
     return true;
@@ -581,16 +911,4 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
     }
 }
 
-void StreamCacheResource::holdKVCacheForPDSep() {
-    auto&       resource   = batch_kv_cache_resource_->cacheResource(0);
-    const auto& cache_keys = resource.cacheKeys();
-    auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
-    if (ref) {
-        pd_kvcache_ref_ = std::move(ref);
-    }
-}
-
-void StreamCacheResource::releaseKVCacheForPDSep() {
-    pd_kvcache_ref_.reset();
-}
 }  // namespace rtp_llm

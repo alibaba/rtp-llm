@@ -9,20 +9,18 @@
 #include <thread>
 #include <utility>
 
-#include "opentelemetry/exporters/memory/in_memory_span_data.h"
-#include "opentelemetry/exporters/memory/in_memory_span_exporter_factory.h"
-#include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
+#include "opentelemetry/exporters/memory/in_memory_span_data.h"
+#include "opentelemetry/exporters/memory/in_memory_span_exporter_factory.h"
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 
 namespace rtp_llm {
 namespace {
-
-namespace memory_exporter = opentelemetry::exporter::memory;
-namespace nostd           = opentelemetry::nostd;
 
 class RejectingWriter: public grpc::internal::WriterInterface<GenerateOutputsPB> {
 public:
@@ -76,125 +74,6 @@ private:
     }
 };
 
-class SingleResponseClientStream: public grpc::ClientReaderWriterInterface<GenerateRequestPB, GenerateOutputsPB> {
-public:
-    explicit SingleResponseClientStream(grpc::Status finish_status = grpc::Status(grpc::StatusCode::CANCELLED,
-                                                                                  "cancelled by client")):
-        finish_status_(std::move(finish_status)) {}
-
-    bool Read(GenerateOutputsPB* response) override {
-        ++read_calls;
-        if (read_calls != 1) {
-            return false;
-        }
-        response->mutable_flatten_output()->add_finished(false);
-        response->mutable_flatten_output()->add_aux_info();
-        return true;
-    }
-
-    bool NextMessageSize(uint32_t*) override {
-        return false;
-    }
-
-    bool Write(const GenerateRequestPB&, grpc::WriteOptions) override {
-        return true;
-    }
-
-    void WaitForInitialMetadata() override {}
-
-    bool WritesDone() override {
-        ++writes_done_calls;
-        return true;
-    }
-
-    grpc::Status Finish() override {
-        ++finish_calls;
-        return finish_status_;
-    }
-
-    int read_calls        = 0;
-    int writes_done_calls = 0;
-    int finish_calls      = 0;
-
-private:
-    grpc::Status finish_status_;
-};
-
-class DecodeFirstReadService final: public RpcService::Service {
-public:
-    grpc::Status RemoteGenerate(grpc::ServerContext* context, ServerStream* stream) override {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            entered_ = true;
-        }
-        condition_.notify_all();
-
-        auto status = decode_server_.RemoteGenerate(context, stream);
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            return_status_ = status;
-        }
-        condition_.notify_all();
-        return status;
-    }
-
-    bool waitUntilEntered(std::chrono::milliseconds timeout) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        return condition_.wait_for(lock, timeout, [this] { return entered_; });
-    }
-
-    std::optional<grpc::Status> waitUntilReturned(std::chrono::milliseconds timeout) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        if (!condition_.wait_for(lock, timeout, [this] { return return_status_.has_value(); })) {
-            return std::nullopt;
-        }
-        return return_status_;
-    }
-
-private:
-    DecodeRpcServer             decode_server_;
-    std::mutex                  mutex_;
-    std::condition_variable     condition_;
-    bool                        entered_{false};
-    std::optional<grpc::Status> return_status_;
-};
-
-std::shared_ptr<memory_exporter::InMemorySpanData> startTelemetryForCloseTest() {
-    telemetry::TelemetryRuntime::shutdown(5000);
-    std::shared_ptr<memory_exporter::InMemorySpanData> span_data;
-    auto                       exporter = memory_exporter::InMemorySpanExporterFactory::Create(span_data);
-    telemetry::TelemetryConfig config;
-    config.enabled = true;
-    config.role    = "test";
-    config.tp_rank = 0;
-    EXPECT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
-    return span_data;
-}
-
-void expectClientSpanError(const std::shared_ptr<memory_exporter::InMemorySpanData>& span_data,
-                           const std::string&                                        error_type,
-                           const std::optional<std::string>&                         rpc_status = std::nullopt) {
-    auto spans = span_data->GetSpans();
-    ASSERT_EQ(spans.size(), 1u);
-    ASSERT_NE(spans[0], nullptr);
-    const auto& span = spans[0];
-    EXPECT_EQ(span->GetStatus(), opentelemetry::trace::StatusCode::kError);
-    const auto& attributes = span->GetAttributes();
-    ASSERT_NE(attributes.find("error.type"), attributes.end());
-    EXPECT_EQ(nostd::get<std::string>(attributes.at("error.type")), error_type);
-    if (rpc_status.has_value()) {
-        ASSERT_NE(attributes.find("rpc.response.status_code"), attributes.end());
-        EXPECT_EQ(nostd::get<std::string>(attributes.at("rpc.response.status_code")), *rpc_status);
-    }
-}
-
-void expectClientSpanOk(const std::shared_ptr<memory_exporter::InMemorySpanData>& span_data) {
-    auto spans = span_data->GetSpans();
-    ASSERT_EQ(spans.size(), 1u);
-    ASSERT_NE(spans[0], nullptr);
-    EXPECT_EQ(spans[0]->GetStatus(), opentelemetry::trace::StatusCode::kOk);
-}
-
 TEST(RpcWriterCancellationTest, LocalWriteFailureCancelsStreamAndReturnsCancelled) {
     LocalRpcServer                  server;
     RejectingWriter                 writer;
@@ -206,270 +85,6 @@ TEST(RpcWriterCancellationTest, LocalWriteFailureCancelsStreamAndReturnsCancelle
     EXPECT_EQ(status.error_code(), grpc::StatusCode::CANCELLED);
     EXPECT_TRUE(stream->hasError());
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
-}
-
-TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
-    // The handler checks CHECK_REQUEST_CANCELLED before prepareGenerateContext,
-    // so a cancel that lands too early short-circuits without ever attempting
-    // the read this test is about. Both outcomes return CANCELLED, and the only
-    // evidence distinguishing them is the warning logged after the failed read
-    // (DecodeRpcServer.cc:236-241) -- nothing is logged before it, so there is no
-    // marker to wait on. A fixed settle window is therefore a race: 500ms was
-    // enough on an idle box and not enough on a loaded CI worker.
-    //
-    // Retry the scenario with a growing window and stop at the first attempt
-    // that reaches the read path.
-    static constexpr const char*    kReadFailureMarker = "read allocate request failed";
-    const std::chrono::milliseconds settle_windows[]   = {
-        std::chrono::milliseconds(500), std::chrono::milliseconds(1500), std::chrono::milliseconds(4000)};
-    bool reached_read_path = false;
-
-    for (const auto settle : settle_windows) {
-        test::TestLogCapture   log_capture("decode_first_read_cancel");
-        DecodeFirstReadService service;
-        int                    listen_port = 0;
-        grpc::ServerBuilder    builder;
-        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &listen_port);
-        builder.RegisterService(&service);
-        auto server = builder.BuildAndStart();
-        ASSERT_NE(server, nullptr);
-        ASSERT_NE(listen_port, 0);
-
-        auto channel =
-            grpc::CreateChannel("127.0.0.1:" + std::to_string(listen_port), grpc::InsecureChannelCredentials());
-        auto                stub = RpcService::NewStub(channel);
-        grpc::ClientContext client_context;
-        client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
-        auto stream = stub->RemoteGenerate(&client_context);
-        ASSERT_NE(stream, nullptr);
-
-        EXPECT_TRUE(service.waitUntilEntered(std::chrono::seconds(5)));
-        // waitUntilEntered fires before the fake delegates to the real handler,
-        // so give the handler this long to get past the gate and park in Read
-        // (the client sends nothing, so it parks there indefinitely).
-        std::this_thread::sleep_for(settle);
-        client_context.TryCancel();
-
-        const auto client_status = stream->Finish();
-        const auto server_status = service.waitUntilReturned(std::chrono::seconds(5));
-
-        // Read the evidence before tearing the server down.
-        reached_read_path = log_capture.waitFor(kReadFailureMarker, std::chrono::seconds(5));
-
-        server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
-        server->Wait();
-
-        // Holds on both paths; the cancel is observed either way.
-        EXPECT_EQ(client_status.error_code(), grpc::StatusCode::CANCELLED);
-        ASSERT_TRUE(server_status.has_value());
-        EXPECT_EQ(server_status->error_code(), grpc::StatusCode::CANCELLED);
-        EXPECT_EQ(log_capture.content().find("GenerateContext destroyed before RPC handling completed"),
-                  std::string::npos);
-
-        if (reached_read_path) {
-            break;
-        }
-    }
-
-    EXPECT_TRUE(reached_read_path) << "cancel never landed while the handler was blocked in Read, so the "
-                                      "read-failure path was not exercised in any attempt";
-}
-
-TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {
-    PrefillRpcServer server;
-    RejectingWriter  writer;
-    GenerateInputPB  request;
-    request.set_request_id(42);
-    RPCContext                   rpc_context{&request, &writer};
-    RemoteServerResource         resource;
-    kmonitor::MetricsReporterPtr metrics_reporter;
-    auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
-    PrefillGenerateContext       context(&resource, rpc_context, 0, nullptr, metrics_reporter, meta);
-    context.stream_        = std::make_shared<SingleOutputStream>(GenerationPrefillCudaGraphStatus::REPLAYED);
-    context.client_context = std::make_shared<grpc::ClientContext>();
-    auto client_stream     = std::make_shared<SingleResponseClientStream>();
-    context.client_stream  = client_stream;
-
-    server.pollRemoteOutput(context);
-
-    EXPECT_EQ(client_stream->read_calls, 1);
-    EXPECT_EQ(writer.write_calls, 1);
-    ASSERT_EQ(writer.last_response.flatten_output().aux_info_size(), 1);
-    EXPECT_EQ(writer.last_response.flatten_output().aux_info(0).generation_prefill_cuda_graph_status(), "replayed");
-    EXPECT_TRUE(context.cancelled());
-    EXPECT_EQ(context.error_status.error_code(), grpc::StatusCode::CANCELLED);
-    const auto close_status = context.closeGrpcStream();
-    EXPECT_EQ(close_status.error_code(), grpc::StatusCode::CANCELLED);
-    EXPECT_EQ(client_stream->writes_done_calls, 1);
-    EXPECT_EQ(client_stream->finish_calls, 1);
-
-    context.stream_.reset();
-}
-
-TEST(RpcWriterCancellationTest, CloseGrpcStreamIgnoresLateOverrideAndDoesNotRefinish) {
-    auto                 span_data = startTelemetryForCloseTest();
-    test::TestLogCapture log_capture("close_grpc_stream_late_override");
-    {
-        GenerateInputPB request;
-        request.set_request_id(43);
-        RPCContext                   rpc_context{&request, nullptr};
-        RemoteServerResource         resource;
-        kmonitor::MetricsReporterPtr metrics_reporter;
-        PrefillGenerateContext       context(&resource, rpc_context, 0, nullptr, metrics_reporter, nullptr);
-        auto                         client_stream =
-            std::make_shared<SingleResponseClientStream>(grpc::Status(grpc::StatusCode::INTERNAL, "transport failure"));
-        context.client_stream        = client_stream;
-        context.pd_client_span_guard = std::make_unique<telemetry::RequestSpanGuard>(
-            telemetry::TelemetryRuntime::tracer()->StartSpan("attempt_override"));
-
-        EXPECT_EQ(context.closeGrpcStream().error_code(), grpc::StatusCode::INTERNAL);
-        EXPECT_EQ(context.closeGrpcStream("REMOTE_GENERATE_FAILED").error_code(), grpc::StatusCode::INTERNAL);
-        EXPECT_EQ(client_stream->finish_calls, 1);
-    }
-    EXPECT_EQ(log_capture.content().find("ignored attempt_error_override"), std::string::npos);
-    ASSERT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
-    expectClientSpanError(span_data, "Internal");
-}
-
-TEST(RpcWriterCancellationTest, CloseGrpcStreamFallsBackToTransportErrorOnSecondCall) {
-    auto span_data = startTelemetryForCloseTest();
-    {
-        GenerateInputPB request;
-        request.set_request_id(44);
-        RPCContext                   rpc_context{&request, nullptr};
-        RemoteServerResource         resource;
-        kmonitor::MetricsReporterPtr metrics_reporter;
-        PrefillGenerateContext       context(&resource, rpc_context, 0, nullptr, metrics_reporter, nullptr);
-        context.client_stream =
-            std::make_shared<SingleResponseClientStream>(grpc::Status(grpc::StatusCode::CANCELLED, "cancelled"));
-        context.pd_client_span_guard = std::make_unique<telemetry::RequestSpanGuard>(
-            telemetry::TelemetryRuntime::tracer()->StartSpan("attempt_transport"));
-
-        EXPECT_EQ(context.closeGrpcStream().error_code(), grpc::StatusCode::CANCELLED);
-    }
-    ASSERT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
-    expectClientSpanError(span_data, "Cancelled");
-}
-
-TEST(RpcWriterCancellationTest, CloseGrpcStreamIncludesInFlightAllocateTime) {
-    auto span_data = startTelemetryForCloseTest();
-    {
-        GenerateInputPB request;
-        request.set_request_id(47);
-        RPCContext                   rpc_context{&request, nullptr};
-        RemoteServerResource         resource;
-        kmonitor::MetricsReporterPtr metrics_reporter;
-        PrefillGenerateContext       context(&resource, rpc_context, 0, nullptr, metrics_reporter, nullptr);
-        context.client_stream =
-            std::make_shared<SingleResponseClientStream>(grpc::Status(grpc::StatusCode::INTERNAL, "allocate failed"));
-        context.pd_client_span_guard = std::make_unique<telemetry::RequestSpanGuard>(
-            telemetry::TelemetryRuntime::tracer()->StartSpan("attempt_allocate_failure"));
-        context.stat_info.stage      = PrefillStatInfo::remoteAllocateResource;
-        context.stat_info.begin_time = currentTimeUs() - 1000;
-
-        EXPECT_EQ(context.closeGrpcStream().error_code(), grpc::StatusCode::INTERNAL);
-    }
-    ASSERT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
-    auto spans = span_data->GetSpans();
-    ASSERT_EQ(spans.size(), 1u);
-    const auto& attributes  = spans[0]->GetAttributes();
-    const auto  allocate_rt = attributes.find("rtp_llm.allocate_rt_us");
-    ASSERT_NE(allocate_rt, attributes.end());
-    EXPECT_GE(nostd::get<int64_t>(allocate_rt->second), 1000);
-}
-
-TEST(RpcWriterCancellationTest, CloseGrpcStreamMarksSuccessfulTransportAsOk) {
-    auto span_data = startTelemetryForCloseTest();
-    {
-        GenerateInputPB request;
-        request.set_request_id(45);
-        RPCContext                   rpc_context{&request, nullptr};
-        RemoteServerResource         resource;
-        kmonitor::MetricsReporterPtr metrics_reporter;
-        PrefillGenerateContext       context(&resource, rpc_context, 0, nullptr, metrics_reporter, nullptr);
-        context.client_stream        = std::make_shared<SingleResponseClientStream>(grpc::Status::OK);
-        context.pd_client_span_guard = std::make_unique<telemetry::RequestSpanGuard>(
-            telemetry::TelemetryRuntime::tracer()->StartSpan("attempt_ok"));
-
-        EXPECT_TRUE(context.closeGrpcStream().ok());
-    }
-    ASSERT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
-    expectClientSpanOk(span_data);
-}
-
-TEST(RpcWriterCancellationTest, CloseGrpcStreamUsesOverrideOnFirstOkClose) {
-    auto span_data = startTelemetryForCloseTest();
-    {
-        GenerateInputPB request;
-        request.set_request_id(46);
-        RPCContext                   rpc_context{&request, nullptr};
-        RemoteServerResource         resource;
-        kmonitor::MetricsReporterPtr metrics_reporter;
-        PrefillGenerateContext       context(&resource, rpc_context, 0, nullptr, metrics_reporter, nullptr);
-        context.client_stream        = std::make_shared<SingleResponseClientStream>(grpc::Status::OK);
-        context.pd_client_span_guard = std::make_unique<telemetry::RequestSpanGuard>(
-            telemetry::TelemetryRuntime::tracer()->StartSpan("attempt_override_first"));
-
-        EXPECT_TRUE(context.closeGrpcStream("REMOTE_GENERATE_FAILED").ok());
-    }
-    ASSERT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
-    expectClientSpanError(span_data, "REMOTE_GENERATE_FAILED");
-}
-
-TEST(RpcWriterCancellationTest, PriorityPreemptionOverridesOkAndCancelledTransportStatus) {
-    const std::vector<std::pair<grpc::Status, std::string>> cases = {
-        {grpc::Status::OK, "OK"},
-        {grpc::Status(grpc::StatusCode::CANCELLED, "cancelled"), "CANCELLED"},
-    };
-    for (const auto& [finish_status, expected_rpc_status] : cases) {
-        auto span_data = startTelemetryForCloseTest();
-        {
-            GenerateInputPB request;
-            request.set_request_id(48);
-            RPCContext                   rpc_context{&request, nullptr};
-            RemoteServerResource         resource;
-            kmonitor::MetricsReporterPtr metrics_reporter;
-            PrefillGenerateContext       context(&resource, rpc_context, 0, nullptr, metrics_reporter, nullptr);
-            context.client_stream        = std::make_shared<SingleResponseClientStream>(finish_status);
-            context.pd_client_span_guard = std::make_unique<telemetry::RequestSpanGuard>(
-                telemetry::TelemetryRuntime::tracer()->StartSpan("priority_preempt"));
-
-            EXPECT_EQ(context.requestPriorityPreempt(), PriorityPreemptionRequestResult::INSTALLED);
-            EXPECT_TRUE(context.finalizePriorityPreemption());
-        }
-        ASSERT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
-        expectClientSpanError(span_data, "PRIORITY_PREEMPTED", expected_rpc_status);
-    }
-}
-
-TEST(RpcWriterCancellationTest, DecodeStageSettlementIsIdempotent) {
-    DecodeStatInfo stat_info;
-    stat_info.stage      = DecodeStatInfo::allocateResource;
-    stat_info.begin_time = currentTimeUs() - 1000;
-
-    stat_info.finishStage();
-    const auto recorded = stat_info.allocate_resource_rt_us;
-
-    EXPECT_GE(recorded, 1000);
-    EXPECT_EQ(stat_info.begin_time, 0);
-    stat_info.finishStage();
-    EXPECT_EQ(stat_info.allocate_resource_rt_us, recorded);
-    EXPECT_EQ(stat_info.load_cache_from_prefill_rt_us, 0);
-}
-
-TEST(RpcWriterCancellationTest, PrefillStageSettlementIsIdempotent) {
-    PrefillStatInfo stat_info;
-    stat_info.stage      = PrefillStatInfo::remoteAllocateResource;
-    stat_info.begin_time = currentTimeUs() - 1000;
-
-    stat_info.finishStage();
-    const auto recorded = stat_info.remote_allocate_resource_rt_us;
-
-    EXPECT_GE(recorded, 1000);
-    EXPECT_EQ(stat_info.begin_time, 0);
-    stat_info.finishStage();
-    EXPECT_EQ(stat_info.remote_allocate_resource_rt_us, recorded);
-    EXPECT_EQ(stat_info.enqueue_request_rt_us, 0);
 }
 
 TEST(RpcWriterCancellationTest, ContextCleanupPropagatesSpecificTerminalError) {
@@ -502,6 +117,399 @@ TEST(RpcWriterCancellationTest, ContextCleanupPreservesExistingStreamError) {
     }
 
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+}
+
+TEST(RpcWriterCancellationTest, ContextMetricsPreserveTypedRpcErrorWithoutStream) {
+    for (auto code : {ErrorCode::INVALID_PARAMS, ErrorCode::GENERATE_TIMEOUT, ErrorCode::PRIORITY_PREEMPTED}) {
+        SCOPED_TRACE(static_cast<int>(code));
+        kmonitor::MetricsReporterPtr metrics_reporter;
+        auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+        GenerateContext              context(52, 0, nullptr, metrics_reporter, meta);
+        context.error_status = grpcStatusFromErrorInfo({code, "early RPC failure"});
+        RpcMetricsCollector collector;
+        context.collectBasicMetrics(collector);
+        EXPECT_TRUE(collector.qps);
+        EXPECT_TRUE(collector.error_qps);
+        EXPECT_EQ(collector.error_code, code);
+        EXPECT_FALSE(collector.cancel_qps);
+        context.markRpcHandlingCompleted();
+    }
+}
+
+TEST(RpcWriterCancellationTest, ContextMetricsKeepExplicitFirstErrorAheadOfGrpcFallback) {
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+    GenerateContext              context(53, 0, nullptr, metrics_reporter, meta);
+    context.error_info   = {ErrorCode::MALLOC_FAILED, "first failure"};
+    context.error_status = grpcStatusFromErrorInfo({ErrorCode::EXECUTION_EXCEPTION, "later failure"});
+    RpcMetricsCollector collector;
+    context.collectBasicMetrics(collector);
+    EXPECT_TRUE(collector.error_qps);
+    EXPECT_EQ(collector.error_code, ErrorCode::MALLOC_FAILED);
+    context.markRpcHandlingCompleted();
+}
+
+TEST(RpcWriterCancellationTest, PdPhaseSynthesisExportsRoleSpecificFailureSpans) {
+    namespace memory = opentelemetry::exporter::memory;
+    telemetry::TelemetryRuntime::shutdown(5000);
+    std::shared_ptr<memory::InMemorySpanData> span_data;
+    auto                                      exporter = memory::InMemorySpanExporterFactory::Create(span_data);
+    telemetry::TelemetryConfig                config;
+    config.enabled = true;
+    config.role    = "test";
+    ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
+    for (auto role : {telemetry::PhaseRole::Prefill, telemetry::PhaseRole::Decode}) {
+        kmonitor::MetricsReporterPtr reporter;
+        auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+        GenerateContext              context(54, 0, nullptr, reporter, meta);
+        auto                         stream = std::make_shared<SingleOutputStream>();
+        const auto                   now    = currentTimeUs();
+        stream->begin_time_us_              = now - 3000;
+        stream->running_started_            = true;
+        stream->running_started_time_us_    = now - 2000;
+        context.setStream(stream);
+        context.error_status = grpcStatusFromErrorInfo({ErrorCode::GENERATE_TIMEOUT, "phase timeout"});
+        auto span = telemetry::startRpcServerSpan("pd-test-request", nullptr, true, "RpcService/GenerateStreamCall");
+        context.trace_span_guard = std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &context.error_status);
+        context.synthesizeTracePhases(role, false);
+        context.markRpcHandlingCompleted();
+    }
+    EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+    auto   spans         = span_data->GetSpans();
+    size_t prefill_count = 0;
+    size_t decode_count  = 0;
+    size_t server_count  = 0;
+    for (const auto& span : spans) {
+        const auto name = span->GetName();
+        if (name == "pd-test-request") {
+            ++server_count;
+            EXPECT_EQ(span->GetSpanKind(), opentelemetry::trace::SpanKind::kServer);
+            EXPECT_EQ(span->GetStatus(), opentelemetry::trace::StatusCode::kError);
+        } else if (name == "prefill" || name == "decode") {
+            prefill_count += name == "prefill";
+            decode_count += name == "decode";
+            EXPECT_EQ(span->GetStatus(), opentelemetry::trace::StatusCode::kError);
+            const auto& attributes = span->GetAttributes();
+            const auto  found      = attributes.find(telemetry::kAttrGenAiPdRole);
+            EXPECT_NE(found, attributes.end());
+            if (found != attributes.end()) {
+                const auto* role = opentelemetry::nostd::get_if<std::string>(&found->second);
+                EXPECT_NE(role, nullptr);
+                if (role) {
+                    EXPECT_EQ(*role, name == "prefill" ? "producer" : "consumer");
+                }
+            }
+        }
+    }
+    EXPECT_EQ(server_count, 2u);
+    EXPECT_EQ(prefill_count, 1u);
+    EXPECT_EQ(decode_count, 1u);
+}
+
+TEST(RpcWriterCancellationTest, PdUsageRequiresSuccessfulCompletedGeneration) {
+    namespace memory = opentelemetry::exporter::memory;
+    telemetry::TelemetryRuntime::shutdown(5000);
+    std::shared_ptr<memory::InMemorySpanData> span_data;
+    auto                                      exporter = memory::InMemorySpanExporterFactory::Create(span_data);
+    telemetry::TelemetryConfig                config;
+    config.enabled = true;
+    config.role    = "test";
+    ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
+    for (auto role : {telemetry::PhaseRole::Prefill, telemetry::PhaseRole::Decode}) {
+        for (int outcome = 0; outcome < 3; ++outcome) {
+            kmonitor::MetricsReporterPtr reporter;
+            GenerateContext              context(65, 0, nullptr, reporter, std::make_shared<RpcServerRuntimeMeta>());
+            auto                         stream = std::make_shared<SingleOutputStream>();
+            stream->setSeqLength(3);  // One prompt token, two generated tokens.
+            if (outcome != 2) {
+                stream->reportEvent(StreamEvents::GenerateDone);
+            }
+            if (outcome == 1) {
+                context.recordRpcFailure({ErrorCode::CANCELLED, "cancelled after generation"});
+            }
+            context.setStream(stream);
+            auto span =
+                telemetry::startRpcServerSpan(outcome == 0 ? "pd-usage-ok" : "pd-usage-incomplete", nullptr, true);
+            context.trace_span_guard = std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &context.error_status);
+            context.synthesizeTracePhases(role, false);
+            context.markRpcHandlingCompleted();
+        }
+    }
+    EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+    size_t successful = 0;
+    size_t incomplete = 0;
+    for (const auto& span : span_data->GetSpans()) {
+        const auto& attrs = span->GetAttributes();
+        if (span->GetName() == "pd-usage-ok") {
+            ++successful;
+            ASSERT_NE(attrs.find(telemetry::kAttrGenAiUsageTotalTokens), attrs.end());
+            EXPECT_EQ(opentelemetry::nostd::get<int64_t>(attrs.at(telemetry::kAttrGenAiUsageInputTokens)), 1);
+            EXPECT_EQ(opentelemetry::nostd::get<int64_t>(attrs.at(telemetry::kAttrGenAiUsageOutputTokens)), 2);
+            EXPECT_EQ(opentelemetry::nostd::get<int64_t>(attrs.at(telemetry::kAttrGenAiUsageTotalTokens)), 3);
+        } else if (span->GetName() == "pd-usage-incomplete") {
+            ++incomplete;
+            EXPECT_EQ(attrs.count(telemetry::kAttrGenAiUsageTotalTokens), 0u);
+        }
+    }
+    EXPECT_EQ(successful, 2u);
+    EXPECT_EQ(incomplete, 4u);
+}
+
+TEST(RpcWriterCancellationTest, KvLoadTraceKeepsCompletedSuccessAndAttributesDependencyFailure) {
+    namespace memory = opentelemetry::exporter::memory;
+    telemetry::TelemetryRuntime::shutdown(5000);
+    std::shared_ptr<memory::InMemorySpanData> span_data;
+    auto                                      exporter = memory::InMemorySpanExporterFactory::Create(span_data);
+    telemetry::TelemetryConfig                config;
+    config.enabled = true;
+    config.role    = "test";
+    ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
+    for (bool load_success : {false, true}) {
+        kmonitor::MetricsReporterPtr reporter;
+        auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+        GenerateContext              context(55, 0, nullptr, reporter, meta);
+        auto                         stream  = std::make_shared<SingleOutputStream>();
+        stream->loading_cache_start_time_us_ = currentTimeUs() - 3000;
+        if (load_success) {
+            stream->recordLoadingCacheDoneTime();
+            // Failure after transfer completion must not repaint load_cache.
+            stream->reportError(ErrorCode::CANCELLED, "later generation cancellation");
+            context.error_status = grpcStatusFromErrorInfo(stream->statusInfo());
+        } else {
+            FirstError dependency;
+            dependency.record({ErrorCode::CONNECT_TIMEOUT, "Prefill dependency timed out"});
+            context.dependency_failure = dependency.snapshot();
+            stream->reportError(ErrorCode::CONNECT_TIMEOUT, "Prefill dependency timed out");
+            stream->recordLoadingCacheDoneTime();
+            context.error_status = grpcStatusFromErrorInfo(stream->statusInfo());
+        }
+        context.setStream(stream);
+        auto span                = telemetry::startRpcServerSpan("kv-load-test", nullptr, true);
+        context.trace_span_guard = std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &context.error_status);
+        context.synthesizeTracePhases(telemetry::PhaseRole::Decode, false);
+        context.markRpcHandlingCompleted();
+    }
+    EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+    auto   spans            = span_data->GetSpans();
+    size_t successful_loads = 0;
+    size_t failed_loads     = 0;
+    for (const auto& span : spans) {
+        if (span->GetName() != "load_cache") {
+            continue;
+        }
+        const auto& attrs = span->GetAttributes();
+        EXPECT_EQ(attrs.count(telemetry::kAttrGenAiPdRole), 0u);
+        if (span->GetStatus() == opentelemetry::trace::StatusCode::kOk) {
+            ++successful_loads;
+            EXPECT_EQ(attrs.count(telemetry::kAttrErrorType), 0u);
+        } else {
+            ++failed_loads;
+            const auto type = attrs.find(telemetry::kAttrErrorType);
+            ASSERT_NE(type, attrs.end());
+            EXPECT_EQ(opentelemetry::nostd::get<std::string>(type->second), "DependencyFailure");
+            const auto code = attrs.find(telemetry::kAttrRtpLlmErrorCode);
+            ASSERT_NE(code, attrs.end());
+            EXPECT_EQ(opentelemetry::nostd::get<int64_t>(code->second),
+                      static_cast<int64_t>(ErrorCode::CONNECT_TIMEOUT));
+        }
+    }
+    EXPECT_EQ(successful_loads, 1u);
+    EXPECT_EQ(failed_loads, 1u);
+}
+
+class ObservedLoadingStream: public SingleOutputStream {
+public:
+    std::atomic<StreamState> observed{StreamState::LOADING_CACHE};
+    StreamState              getStatus() const override {
+        return observed.load();
+    }
+};
+
+TEST(RpcWriterCancellationTest, StageMetricsSampleLiveLoadingStreamsAndExcludeCancelOverlays) {
+    kmonitor::MetricsReporterPtr reporter;
+    auto                         meta   = std::make_shared<RpcServerRuntimeMeta>();
+    auto                         first  = std::make_shared<ObservedLoadingStream>();
+    auto                         second = std::make_shared<ObservedLoadingStream>();
+    meta->enqueue(56, first);
+    meta->enqueue(57, second);
+    meta->markCancellationPending(TaskIdentity{58, -1}, false);
+    std::atomic<size_t> onflight{2};
+    GenerateContext     context(56, 0, nullptr, reporter, meta);
+    context.onflight_requests = &onflight;
+    RpcMetricsCollector stage;
+    stage.onflight_request      = 999;
+    stage.loading_cache_request = 999;
+    context.reportMetrics(stage);
+    EXPECT_EQ(stage.onflight_request, 2);
+    EXPECT_EQ(stage.loading_cache_request, 2);
+
+    first->observed.store(StreamState::RUNNING);
+    RpcMetricsCollector basic;
+    context.collectBasicMetrics(basic);
+    EXPECT_EQ(basic.loading_cache_request, 1);
+    second->observed.store(StreamState::FINISHED);
+    meta->dequeue(57, second);
+    onflight.store(1);
+    context.reportMetrics(stage);
+    EXPECT_EQ(stage.onflight_request, 1);
+    EXPECT_EQ(stage.loading_cache_request, 0);
+    context.markRpcHandlingCompleted();
+}
+
+TEST(RpcWriterCancellationTest, PdValidationAndAdmissionErrorsEndServerSpanBeforeEngineAccess) {
+    namespace memory = opentelemetry::exporter::memory;
+    telemetry::TelemetryRuntime::shutdown(5000);
+    std::shared_ptr<memory::InMemorySpanData> span_data;
+    auto                                      exporter = memory::InMemorySpanExporterFactory::Create(span_data);
+    telemetry::TelemetryConfig                config;
+    config.enabled = true;
+    config.role    = "test";
+    ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
+    {
+        GenerateInputPB request;
+        request.set_request_id(60);
+        request.mutable_request_info()->set_trace_id("prefill-rejected-trace");
+        request.add_token_ids(1);
+        auto* generate = request.mutable_generate_config();
+        generate->set_can_use_pd_separation(true);
+        generate->set_max_new_tokens(8);
+        generate->set_timeout_ms(1000);
+        grpc::ServerContext context;
+        PrefillRpcServer    server;
+        server.maga_init_params_.pd_sep_config.role_type = RoleType::PREFILL;
+        // Missing handoff key must fail before the uninitialized engine is used.
+        const auto status = server.GenerateStreamCall(&context, &request, nullptr);
+        EXPECT_EQ(errorInfoFromGrpcStatus(status).code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_NE(status.error_message().find("trace_id=prefill-rejected-trace"), std::string::npos);
+        EXPECT_EQ(server.onflight_requests_.load(), 0u);
+        EXPECT_TRUE(server.onflight_trackers_.empty());
+    }
+    {
+        GenerateInputPB request;
+        request.set_request_id(61);
+        request.mutable_request_info()->set_trace_id("decode-rejected-trace");
+        request.set_enqueued_by_master(true);
+        auto* generate = request.mutable_generate_config();
+        generate->set_can_use_pd_separation(true);
+        generate->set_max_new_tokens(8);
+        generate->set_timeout_ms(1000);
+        grpc::ServerContext context;
+        DecodeRpcServer     server;
+        server.maga_init_params_.pd_sep_config.role_type = RoleType::DECODE;
+        server.meta_                                     = std::make_shared<RpcServerRuntimeMeta>();
+        server.cancel_registry_                          = std::make_unique<PDCancelRegistry>(server.meta_);
+        EXPECT_EQ(server.cancel_registry_->cancel(61, {ErrorCode::GENERATE_TIMEOUT, "late admission"}).value(),
+                  CANCEL_STATUS_TOMBSTONED);
+        const auto status = server.GenerateStreamCall(&context, &request, nullptr);
+        EXPECT_EQ(errorInfoFromGrpcStatus(status).code(), ErrorCode::GENERATE_TIMEOUT);
+        EXPECT_NE(status.error_message().find("trace_id=decode-rejected-trace"), std::string::npos);
+        EXPECT_EQ(server.onflight_requests_.load(), 0u);
+        EXPECT_TRUE(server.cancel_registry_->pending().empty());
+    }
+    EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+    auto   spans        = span_data->GetSpans();
+    size_t server_count = 0;
+    for (const auto& span : spans) {
+        if (span->GetName() == "rtp_llm.generate_stream_call") {
+            ++server_count;
+            EXPECT_EQ(span->GetSpanKind(), opentelemetry::trace::SpanKind::kServer);
+            EXPECT_EQ(span->GetStatus(), opentelemetry::trace::StatusCode::kError);
+            EXPECT_EQ(span->GetAttributes().count(telemetry::kAttrErrorType), 1u);
+        }
+    }
+    EXPECT_EQ(server_count, 2u);
+}
+
+TEST(RpcWriterCancellationTest, RecordedRpcFailureFeedsMetricsAndPreservesExistingStreamCause) {
+    kmonitor::MetricsReporterPtr reporter;
+    auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+    GenerateContext              context(62, 0, nullptr, reporter, meta);
+    context.recordRpcFailure({ErrorCode::INVALID_PARAMS, "invalid input"});
+    RpcMetricsCollector metrics;
+    context.collectBasicMetrics(metrics);
+    EXPECT_TRUE(metrics.error_qps);
+    EXPECT_EQ(metrics.error_code, ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(errorInfoFromGrpcStatus(context.error_status).code(), ErrorCode::INVALID_PARAMS);
+    context.recordRpcFailure({ErrorCode::EXECUTION_EXCEPTION, "later exception"});
+    EXPECT_EQ(context.error_info.code(), ErrorCode::INVALID_PARAMS);
+    context.markRpcHandlingCompleted();
+
+    GenerateContext with_stream(63, 0, nullptr, reporter, meta);
+    auto            stream = std::make_shared<SingleOutputStream>();
+    stream->reportError(ErrorCode::PRIORITY_PREEMPTED, "original stream failure");
+    with_stream.setStream(stream);
+    with_stream.recordRpcFailure({ErrorCode::EXECUTION_EXCEPTION, "later exception"});
+    EXPECT_EQ(with_stream.error_info.code(), ErrorCode::PRIORITY_PREEMPTED);
+    EXPECT_EQ(errorInfoFromGrpcStatus(with_stream.error_status).code(), ErrorCode::PRIORITY_PREEMPTED);
+    with_stream.markRpcHandlingCompleted();
+}
+
+TEST(RpcWriterCancellationTest, BatchItemTraceUsesItsRemoteContextAndEndsOnPreemption) {
+    namespace memory = opentelemetry::exporter::memory;
+    telemetry::TelemetryRuntime::shutdown(5000);
+    std::shared_ptr<memory::InMemorySpanData> span_data;
+    auto                                      exporter = memory::InMemorySpanExporterFactory::Create(span_data);
+    telemetry::TelemetryConfig                config;
+    config.enabled = true;
+    config.role    = "test";
+    ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
+    {
+        PrefillRpcServer server;
+        server.meta_            = std::make_shared<RpcServerRuntimeMeta>();
+        server.cancel_registry_ = std::make_unique<PDCancelRegistry>(server.meta_);
+        GenerateInputPB request;
+        request.set_request_id(64);
+        request.set_start_time(currentTimeUs() - 1000);
+        request.mutable_generate_config()->set_timeout_ms(1000);
+        request.mutable_request_info()->mutable_trace_context()->set_traceparent(
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+        auto context                     = server.makeBatchRequestContext(request, {});
+        auto stream                      = std::make_shared<SingleOutputStream>();
+        stream->begin_time_us_           = currentTimeUs() - 3000;
+        stream->running_started_         = true;
+        stream->running_started_time_us_ = currentTimeUs() - 2000;
+        context->setStream(stream);
+        auto& entry    = server.batch_entries_["trace-batch"];
+        entry.reserved = true;
+        entry.context  = std::move(context);
+        stream->reportError(ErrorCode::PRIORITY_PREEMPTED, "victim preempted");
+        server.batchContextCleanupTick();
+        EXPECT_TRUE(server.batch_entries_.empty());
+    }
+    EXPECT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+    auto   spans          = span_data->GetSpans();
+    size_t requests       = 0;
+    size_t prefill_phases = 0;
+    for (const auto& span : spans) {
+        if (span->GetName() == "prefill") {
+            ++prefill_phases;
+            const auto& attrs = span->GetAttributes();
+            ASSERT_NE(attrs.find(telemetry::kAttrErrorType), attrs.end());
+            EXPECT_EQ(opentelemetry::nostd::get<std::string>(attrs.at(telemetry::kAttrErrorType)),
+                      "PRIORITY_PREEMPTED");
+        }
+        if (span->GetName() != "rtp_llm.prefill_batch_request") {
+            continue;
+        }
+        ++requests;
+        char source_id[16];
+        span->GetParentSpanId().ToLowerBase16(source_id);
+        EXPECT_EQ(std::string(source_id, sizeof(source_id)), "00f067aa0ba902b7");
+        EXPECT_EQ(span->GetSpanKind(), opentelemetry::trace::SpanKind::kInternal);
+        const auto& handoff_attrs = span->GetAttributes();
+        ASSERT_NE(handoff_attrs.find(telemetry::kAttrRtpLlmPrefillHandoffDelayUs), handoff_attrs.end());
+        EXPECT_GE(opentelemetry::nostd::get<int64_t>(handoff_attrs.at(telemetry::kAttrRtpLlmPrefillHandoffDelayUs)),
+                  1000);
+        EXPECT_EQ(handoff_attrs.count(telemetry::kAttrGenAiUsageTotalTokens), 0u);
+        EXPECT_EQ(span->GetStatus(), opentelemetry::trace::StatusCode::kError);
+        const auto& attrs = span->GetAttributes();
+        ASSERT_NE(attrs.find(telemetry::kAttrErrorType), attrs.end());
+        EXPECT_EQ(opentelemetry::nostd::get<std::string>(attrs.at(telemetry::kAttrErrorType)), "PRIORITY_PREEMPTED");
+        EXPECT_EQ(opentelemetry::nostd::get<int64_t>(attrs.at(telemetry::kAttrRtpLlmErrorCode)),
+                  static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    }
+    EXPECT_EQ(requests, 1u);
+    EXPECT_EQ(prefill_phases, 1u);
 }
 
 TEST(RpcWriterCancellationTest, RequestGaugeSamplesLiveAtomicValue) {

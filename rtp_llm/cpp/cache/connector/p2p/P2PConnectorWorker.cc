@@ -21,8 +21,10 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
 
     auto backend = config_.transfer_backend_config.cache_store_rdma_mode ? transfer::TransferBackend::kBarexRdma :
                                                                            transfer::TransferBackend::kTcp;
-    auto [sender, receiver] =
-        transfer::createTransferBackend(backend, config_.transfer_backend_config, metrics_reporter_);
+    auto sender = transfer::createTransferBackend(backend, config_.transfer_backend_config,
+                                                  transfer::TransferBackendRole::kSender, metrics_reporter_).sender;
+    auto receiver = transfer::createTransferBackend(backend, config_.transfer_backend_config,
+                                                    transfer::TransferBackendRole::kReceiver, metrics_reporter_).receiver;
     if (!sender || !receiver) {
         RTP_LLM_LOG_ERROR("init failed: createTransferBackend failed");
         return false;
@@ -40,13 +42,13 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
         }
     }
 
-    prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(config_, layer_block_converter_, metrics_reporter_, sender);
+    prefill_ = std::make_unique<P2PWorkerPrefillRead>(config_, layer_block_converter_, metrics_reporter_, sender);
     if (!prefill_->init(store_wait_timeout_ms)) {
         RTP_LLM_LOG_ERROR("init failed: prefill init failed");
         return false;
     }
 
-    decode_ = std::make_unique<P2PConnectorWorkerDecode>(config_, layer_block_converter_, metrics_reporter_, receiver);
+    decode_ = std::make_unique<P2PWorkerDecodeRead>(config_, layer_block_converter_, metrics_reporter_, receiver);
 
     RTP_LLM_LOG_INFO("init success");
     return true;
