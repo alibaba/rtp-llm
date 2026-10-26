@@ -13,7 +13,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 
-def run_case(rank, prefixes, lengths, producer):
+def run_case(rank, prefixes, lengths, producer, cache_dtype=torch.uint8):
     from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.cp_kv_prefetch import (
         CrossLayerKvPrefetch,
         prefix_plan,
@@ -26,7 +26,7 @@ def run_case(rank, prefixes, lengths, producer):
     )
     from rtp_llm.ops.compute_ops import LayerKVCache
 
-    size, owner, page, layers = 8, 512, 64, 8
+    size, owner, page, layers = dist.get_world_size(), 512, 64, 8
     totals = [p + q for p, q in zip(prefixes, lengths)]
     # Independent scalar ownership/reference: cache pages are deliberately
     # permuted and sparse, then the real staging cache compacts them again.
@@ -93,6 +93,7 @@ def run_case(rank, prefixes, lengths, producer):
         fresh_bytes.append(source.view(-1, 656)[fresh_owned].cuda())
         # A prefetched future layer must never read these not-yet-written rows.
         source.view(-1, 656)[fresh_owned] = 255
+        source = source.view(cache_dtype)
         backing.append(source.cuda() if layer < 2 else source.pin_memory())
         expected.append(decoded.cuda())
     plan = prefix_plan(totals, [0] * len(totals), size, rank, owner)
@@ -144,8 +145,11 @@ def run_case(rank, prefixes, lengths, producer):
     )
     cache.begin_forward(fmha)
     pipeline = cache.kv_prefetch
+    if os.environ.get("RTP_LLM_CP_PACKED_PIPELINE", "0") == "1":
+        assert pipeline.transport is not None, f"packed path fell back for {cache_dtype}"
     assert pipeline.registered == (
         os.environ.get("RTP_LLM_CP_KV_REGISTERED", "1") == "1"
+        and pipeline.plan["history_padded"] > 0
     )
     fmha._cross_layer_prefetch = pipeline
     compute = torch.cuda.current_stream()
@@ -159,7 +163,7 @@ def run_case(rank, prefixes, lengths, producer):
             kv_cache.kv_cache_base = backing[layer]
             with cache.attention(layer, fmha, kv_cache) as target:
                 slots = op.sharded_slot_mapping
-                target.kv_cache_base.view(-1, 656).index_copy_(
+                target.kv_cache_base.view(torch.uint8).view(-1, 656).index_copy_(
                     0, slots[slots >= 0], fresh_bytes[layer]
                 )
                 fused, ready = pipeline.prepare(layer, target)
@@ -193,7 +197,7 @@ def run_case(rank, prefixes, lengths, producer):
     # partial pages shared by immutable prefix and new tokens.
     for layer, source in enumerate(backing):
         torch.testing.assert_close(
-            source.cpu().view(-1, 656)[fresh_owned],
+            source.cpu().view(torch.uint8).view(-1, 656)[fresh_owned],
             fresh_bytes[layer].cpu(),
             rtol=0,
             atol=0,

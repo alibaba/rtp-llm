@@ -896,6 +896,30 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         return out
 
     def write_kv(self, compressed_kv, k_pe, kv_cache):
+        if (
+            os.environ.get("RTP_LLM_CP_PACKED_PIPELINE", "0") == "1"
+            and not self.use_cuda_graph
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            from rtp_llm.models_py.distributed.pynccl_cp import all_gather_current_cp
+
+            packed = torch.cat((compressed_kv, k_pe), dim=-1)
+            restored = all_gather_current_cp(packed, Group.TP)[
+                self.kv_restore_unpad_indices
+            ]
+            self.kv_cache_write_op.forward(
+                restored[:, : compressed_kv.size(-1)],
+                restored[:, compressed_kv.size(-1) :],
+                kv_cache,
+                self.mla_params,
+                slot_mapping_override=(
+                    self.sharded_slot_mapping if self.kv_cache_sharded else None
+                ),
+            )
+            common.apply_write_cache_store(
+                self.write_cache_store_impl, self.attn_inputs, kv_cache
+            )
+            return
         gathered_ckv = all_gather(
             compressed_kv.contiguous(), group=Group.TP, role="mla_ckv"
         )
@@ -1128,6 +1152,14 @@ class SparseMlaCpImpl(SparseMlaImpl):
         # a dictionary lookup only.
         if cp_opt_enabled() and self._cp_size > 1:
             warmup_pynccl(Group.TP)
+        if (
+            os.environ.get("RTP_LLM_CP_PACKED_PIPELINE", "0") == "1"
+            and self._cp_size > 1
+            and not is_cuda_graph
+        ):
+            from rtp_llm.models_py.distributed.pynccl_cp import warmup_current_cp
+
+            warmup_current_cp(Group.TP)
 
         self._kv_cache_sharded = bool(
             cp_cfg is not None
@@ -1179,7 +1211,8 @@ class SparseMlaCpImpl(SparseMlaImpl):
             and attn_configs.q_lora_rank > 0
             and not is_cuda_graph
             and (
-                os.environ.get("RTP_LLM_CP_KV_OVERLAP", "1") == "1"
+                os.environ.get("RTP_LLM_CP_PACKED_PIPELINE", "0") == "1"
+                or os.environ.get("RTP_LLM_CP_KV_OVERLAP", "1") == "1"
                 or os.environ.get("RTP_LLM_CP_KV_CROSS_LAYER", "1") == "1"
             )
         )
@@ -1296,6 +1329,26 @@ class SparseMlaCpImpl(SparseMlaImpl):
             indexer_src_for_padded=self.fmha_impl.indexer_src_for_padded,
             total_local_ids_is_identity=self.fmha_impl.total_local_ids_is_identity,
         )
+        new_params["indexer_transport_rows"] = None
+        new_params["indexer_transport_table"] = self.fmha_impl.block_table
+        new_params["packed_kv_transport"] = None
+        if (
+            os.environ.get("RTP_LLM_CP_PACKED_PIPELINE", "0") == "1"
+            and not use_cuda_graph
+            and not self.fmha_impl.use_cuda_graph
+            and self.fmha_impl.indexer_cp_plan is not None
+            and self.fmha_impl.block_table.is_cuda
+        ):
+            from rtp_llm.models_py.triton_kernels.sparse_mla.cp_cache_transport import (
+                paged_row_map,
+            )
+
+            plan = self.fmha_impl.indexer_cp_plan
+            new_params["indexer_transport_rows"] = paged_row_map(
+                plan.per_req_actual_local_kv_lens,
+                plan.per_req_local_kv_lens,
+                plan.total_local_T,
+            )
 
         if self.cp_params is None or not use_cuda_graph:
             self.cp_params = SimpleNamespace(**new_params)
@@ -1373,7 +1426,9 @@ class SparseMlaCpImpl(SparseMlaImpl):
         return k_pe
 
     @contextmanager
-    def prepare_kv(self, q, compressed_kv, k_pe, kv_cache, layer_id=0):
+    def prepare_kv(
+        self, q, compressed_kv, k_pe, kv_cache, layer_id=0, joint_indexer=False
+    ):
         """Prepare this layer's KV and return its consumer-ready event.
 
         Enter inside the layer-cache context: its H2D-ready event must already
@@ -1385,13 +1440,76 @@ class SparseMlaCpImpl(SparseMlaImpl):
         stream = self._kv_overlap_stream
         assert stream is not None
         k_pe = self._apply_rope(q, k_pe)
-        self.fmha_impl.write_kv(compressed_kv, k_pe, kv_cache)
+        write_ready = None
+        if (
+            os.environ.get("RTP_LLM_CP_PACKED_PIPELINE", "0") == "1"
+            and kv_cache.kv_cache_base.element_size() == 1
+            and kv_cache.kv_cache_base.shape[-1] == 656
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            from rtp_llm.models_py.distributed.pynccl_cp import warmup_current_cp
+
+            writer = warmup_current_cp(Group.TP)
+            writer.wait_stream(compute)
+            for tensor in (compressed_kv, k_pe, kv_cache.kv_cache_base):
+                tensor.record_stream(writer)
+            with torch.cuda.stream(writer):
+                self.fmha_impl.write_kv(compressed_kv, k_pe, kv_cache)
+                write_ready = torch.cuda.Event()
+                write_ready.record(writer)
+        else:
+            self.fmha_impl.write_kv(compressed_kv, k_pe, kv_cache)
         pipeline = getattr(self, "_cross_layer_prefetch", None)
         if pipeline is not None:
             # Forward cleanup owns the producer join. A layer-exit wait here
             # would serialize the next layer's prefetch before O projection.
-            yield pipeline.prepare(layer_id, kv_cache)
+            self.cp_params.packed_kv_transport = pipeline.transport
+            if pipeline.transport is not None:
+                pipeline.transport.defer_joint = joint_indexer
+            elif write_ready is not None:
+                compute.wait_event(write_ready)
+            try:
+                yield pipeline.prepare(layer_id, kv_cache)
+            finally:
+                if write_ready is not None:
+                    compute.wait_event(write_ready)
+                self.cp_params.packed_kv_transport = None
             return
+        if os.environ.get("RTP_LLM_CP_PACKED_PIPELINE", "0") == "1":
+            from rtp_llm.models_py.triton_kernels.sparse_mla.cp_cache_transport import (
+                PagedRows,
+                is_supported,
+            )
+            from .cp_packed_read import KvReadTarget, PackedKvRead
+
+            source = kv_cache.kv_cache_base.view(torch.uint8)
+            if source.ndim == 4:
+                source = source.squeeze(2)
+            rows = self.cp_params.indexer_transport_rows
+            if rows is not None:
+                paged = PagedRows(source, self.fmha_impl.block_table, rows)
+                if source.shape[-1] == 656 and is_supported(paged):
+                    fused_kv = self.fmha_impl._allocate_fused_kv()
+                    read = PackedKvRead(
+                        paged,
+                        KvReadTarget(
+                            self.fmha_impl.sharded_kv_restore_indices, fused_kv
+                        ),
+                        joint_indexer,
+                    )
+                    self.cp_params.packed_kv_transport = read
+                    if not joint_indexer:
+                        read.launch()
+                    ready = torch.cuda.Event()
+                    ready.record(compute)
+                    try:
+                        yield fused_kv, ready
+                    finally:
+                        read.close()
+                        self.cp_params.packed_kv_transport = None
+                    return
+        if write_ready is not None:
+            compute.wait_event(write_ready)
         fused_kv = self.fmha_impl._allocate_fused_kv()
         # Pack before releasing independent compute. Otherwise Q BMM can use
         # every SM while packing is still queued, delaying NCCL until Q ends.
@@ -1516,6 +1634,8 @@ class SparseMlaCpImpl(SparseMlaImpl):
             pipeline = getattr(self, "_cross_layer_prefetch", None)
             if pipeline is not None:
                 pipeline.consume(layer_id)
+            elif getattr(self.cp_params, "packed_kv_transport", None) is not None:
+                self.cp_params.packed_kv_transport.consume()
         attn_output = self.fmha_impl.forward(
             q_transformed,
             compressed_kv,

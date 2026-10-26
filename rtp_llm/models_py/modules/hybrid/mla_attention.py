@@ -334,6 +334,12 @@ class MlaAttention(nn.Module):
                         k_pe,
                         attention_cache,
                         layer_id=self.layer_idx,
+                        joint_indexer=(
+                            self.indexer is not None
+                            and not self.reuse_topk_indices
+                            and not force_reuse_topk_indices
+                            and not early_prefetch
+                        ),
                     )
                 )
             if not early_prefetch:

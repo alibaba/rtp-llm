@@ -57,6 +57,7 @@ def prefix_plan(prefixes, lengths, size, rank, owner):
     actual_starts = [sum(actual[:i]) for i in range(len(actual))]
     return {
         "history_lengths": torch.tensor(actual, dtype=torch.int32, device="cpu"),
+        "history_padded_lengths": torch.tensor(padded, dtype=torch.int32, device="cpu"),
         "history_starts": torch.tensor(actual_starts, dtype=torch.int32, device="cpu"),
         "history_scatter": torch.cat(scatter),
         "history_restore": restore,
@@ -94,8 +95,20 @@ class CrossLayerKvPrefetch:
         self.buffers = [self.op._allocate_fused_kv() for _ in range(2)]
         width = self.buffers[0].size(1)
         options = dict(dtype=torch.bfloat16, device=self.device)
+        self.transport = None
+        packed = (
+            os.environ.get("RTP_LLM_CP_PACKED_PIPELINE", "0") == "1"
+            and self.device.type == "cuda"
+            and cache.backing[0].element_size() == 1
+            and cache.backing[0].shape[-1] == 656
+            and all(tensor.is_contiguous() for tensor in cache.backing)
+            and not torch.cuda.is_current_stream_capturing()
+        )
+        if packed:
+            width = 656
+            options["dtype"] = torch.uint8
         pair = registered_kv_overlap_buffers(
-            plan["history_padded"], width, torch.bfloat16, self.device, Group.TP
+            plan["history_padded"], width, options["dtype"], self.device, Group.TP
         )
         self.registered = pair is not None
         if pair is None:
@@ -136,8 +149,16 @@ class CrossLayerKvPrefetch:
         # All long-lived buffers/metadata are allocated on compute, once per
         # forward. Subsequent submissions wait only on their own slot events.
         self.stream.wait_stream(self.compute)
+        if packed:
+            from .cp_packed_pipeline import PackedKvTransport
+
+            self.transport = PackedKvTransport(self)
 
     def prepare(self, layer, kv_cache):
+        if layer and self.owners[layer % 2] != layer:
+            raise RuntimeError("next-layer history was not prefetched")
+        if self.transport is not None:
+            return self.transport.prepare(layer, kv_cache)
         if layer == 0:
             # First layer follows the existing full-KV path, after its KV write.
             local = self.op._pack_sharded_kv_cache(kv_cache, self.buffers[0])
@@ -155,8 +176,6 @@ class CrossLayerKvPrefetch:
                 )
                 self._record_ready(0)
         else:
-            if self.owners[layer % 2] != layer:
-                raise RuntimeError("next-layer history was not prefetched")
             # Read newly written bytes through the SAME FP8 upconverter as the
             # full gather. Never substitute unquantized QKV projection values.
             source = kv_cache.kv_cache_base.view(torch.uint8)
@@ -199,6 +218,9 @@ class CrossLayerKvPrefetch:
         """Called after the consumer waits on this layer's ready event."""
         if self.owners[layer % 2] != layer:
             raise RuntimeError("history buffer owner mismatch")
+        if self.transport is not None:
+            self.transport.consume()
+            return
         if layer:
             self.buffers[layer % 2].index_copy_(
                 0, self.plan["new_dest"], self.pending_new
@@ -210,6 +232,9 @@ class CrossLayerKvPrefetch:
             self.first_buffers = None
 
     def prefetch(self, layer):
+        if self.transport is not None:
+            self.transport.prefetch(layer)
+            return
         if layer == len(self.cache.backing):
             return
         source, table, ready = self.cache.prefetched_layer(layer, self.original_table)
@@ -262,5 +287,7 @@ class CrossLayerKvPrefetch:
     def close(self):
         # Join all outstanding work on forward cleanup, including exceptions.
         # Normal layer exits leave prefetch running until the MoE fence.
+        if self.transport is not None:
+            self.transport.close()
         self.compute.wait_stream(self.stream)
         self.fmha._cross_layer_prefetch = None

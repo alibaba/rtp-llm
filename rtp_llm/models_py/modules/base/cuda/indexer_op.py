@@ -989,6 +989,7 @@ class IndexerOp(nn.Module):
         indexer_src_for_padded: Optional[torch.Tensor] = None,
         total_local_ids_is_identity: bool = False,
         q_scale: Optional[torch.Tensor] = None,
+        prepared_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute TopK indices for ragged attention (prefill phase) with context parallel
@@ -1050,18 +1051,26 @@ class IndexerOp(nn.Module):
             weights_sq0 = weights_sq[:0]
 
         # Full KV from cache (KV not split).
-        k_fp8 = torch.empty(
-            (total_kv_tokens, self.index_head_dim),
-            dtype=torch.float8_e4m3fn,
-            device=device,
+        k_fp8 = (
+            prepared_kv[0]
+            if prepared_kv is not None
+            else torch.empty(
+                (total_kv_tokens, self.index_head_dim),
+                dtype=torch.float8_e4m3fn,
+                device=device,
+            )
         )
-        k_scale = torch.empty(
-            (total_kv_tokens, self.index_head_dim // self.block_size * 4),
-            dtype=torch.uint8,
-            device=device,
+        k_scale = (
+            prepared_kv[1]
+            if prepared_kv is not None
+            else torch.empty(
+                (total_kv_tokens, self.index_head_dim // self.block_size * 4),
+                dtype=torch.uint8,
+                device=device,
+            )
         )
         block_table = _prefill_physical_block_table(attention_inputs)
-        if sharded_cp_kv:
+        if sharded_cp_kv and prepared_kv is None:
             from rtp_llm.models_py.triton_kernels.sparse_mla.fused_indexer_cp_assemble import (
                 fused_copy_and_assemble_indexer_k,
             )
@@ -1111,7 +1120,7 @@ class IndexerOp(nn.Module):
             # allocator reuse is ordered after the assemble kernel and needs no
             # synchronize/empty_cache on the hot path.
             del actual_k, actual_s
-        else:
+        elif prepared_kv is None:
             rtp_llm_ops.cp_gather_indexer_k_quant_cache(
                 self._kv_cache_blocks(kv_cache),
                 k_fp8,

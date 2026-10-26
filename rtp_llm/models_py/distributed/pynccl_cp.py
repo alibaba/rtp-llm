@@ -21,10 +21,13 @@ import ctypes
 import glob
 import logging
 import os
-from typing import Any, Dict, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Tuple
 
 import torch
 import torch.distributed as dist
+
+if TYPE_CHECKING:
+    from rtp_llm.models_py.distributed.collective_torch import Group
 
 _ncclComm_t = ctypes.c_void_p
 _cudaStream_t = ctypes.c_void_p
@@ -203,6 +206,10 @@ _LIB: "_NCCLLib | None" = None
 # deployment, but include the device index in the cache key for correctness.
 _COMMS: Dict[Tuple[Any, int], Tuple["_NCCLLib", Any]] = {}
 _OVERLAP_COMMS: Dict[Tuple[Any, int], Tuple["_NCCLLib", Any]] = {}
+_CURRENT_COMMS: dict[
+    tuple[dist.ProcessGroup, int], tuple["_NCCLLib", ctypes.c_void_p]
+] = {}
+_CURRENT_STREAMS: dict[tuple[dist.ProcessGroup, int], torch.cuda.Stream] = {}
 _OVERLAP_STREAMS: Dict[Tuple[Any, int], torch.cuda.Stream] = {}
 _WORLD_SIZES: Dict[Any, int] = {}
 _OVERLAP_BUFFERS: Dict[Tuple[Any, ...], Any] = {}
@@ -265,12 +272,20 @@ def _torch_all_gather(input: torch.Tensor, group: Any) -> torch.Tensor:
     return all_gather(input, group=group)
 
 
-def _get_comm(process_group, device: torch.device, *, independent: bool = False):
+def _get_comm(
+    process_group,
+    device: torch.device,
+    *,
+    independent: bool = False,
+    current_layer: bool = False,
+):
     """Collectively create and cache the direct NCCL communicator at startup."""
     global _LIB
 
     key = _comm_key(process_group, device)
-    cache = _OVERLAP_COMMS if independent else _COMMS
+    cache = (
+        _CURRENT_COMMS if current_layer else (_OVERLAP_COMMS if independent else _COMMS)
+    )
     cached = cache.get(key)
     if cached is not None:
         return cached
@@ -306,6 +321,38 @@ def warmup_kv_overlap(group: Any) -> torch.cuda.Stream:
     if key not in _OVERLAP_STREAMS:
         _OVERLAP_STREAMS[key] = torch.cuda.Stream(device=device)
     return _OVERLAP_STREAMS[key]
+
+
+def warmup_current_cp(group: Group | dist.ProcessGroup) -> torch.cuda.Stream:
+    process_group = _resolve_process_group(group)
+    device = torch.device("cuda", torch.cuda.current_device())
+    _get_comm(process_group, device, current_layer=True)
+    key = _comm_key(process_group, device)
+    if key not in _CURRENT_STREAMS:
+        _CURRENT_STREAMS[key] = torch.cuda.Stream(device=device)
+    return _CURRENT_STREAMS[key]
+
+
+def all_gather_current_cp(
+    input: torch.Tensor, group: Group | dist.ProcessGroup
+) -> torch.Tensor:
+    process_group = _resolve_process_group(group)
+    lib, comm = _CURRENT_COMMS[_comm_key(process_group, input.device)]
+    output = torch.empty(
+        (_WORLD_SIZES[process_group] * input.size(0), *input.shape[1:]),
+        dtype=input.dtype,
+        device=input.device,
+    )
+    _validate_all_gather(output, input, process_group)
+    lib.all_gather(
+        input.data_ptr(),
+        output.data_ptr(),
+        input.numel(),
+        input.dtype,
+        comm,
+        torch.cuda.current_stream(input.device).cuda_stream,
+    )
+    return output
 
 
 class _RegisteredKvBuffers:
@@ -509,7 +556,13 @@ def destroy() -> None:
                 "Failed to deregister GLM5 pynccl symmetric window: %s", error
             )
 
-    for lib, comm in [*_COMMS.values(), *_OVERLAP_COMMS.values()]:
+    for stream in _CURRENT_STREAMS.values():
+        stream.synchronize()
+    for lib, comm in [
+        *_COMMS.values(),
+        *_OVERLAP_COMMS.values(),
+        *_CURRENT_COMMS.values(),
+    ]:
         try:
             lib.destroy_comm(comm)
         except RuntimeError as error:
@@ -527,6 +580,8 @@ def destroy() -> None:
     _SYMM_POOL_FAILED.clear()
     _COMMS.clear()
     _OVERLAP_COMMS.clear()
+    _CURRENT_COMMS.clear()
+    _CURRENT_STREAMS.clear()
     _OVERLAP_STREAMS.clear()
     _OVERLAP_BUFFERS.clear()
     _INDEXER_BUFFERS.clear()

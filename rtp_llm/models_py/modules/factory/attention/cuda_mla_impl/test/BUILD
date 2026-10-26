@@ -4,6 +4,25 @@ load("//bazel:arch_select.bzl", "requirement")
 requirement(["torch", "triton", "flash-mla"])
 
 py_test(
+    name = "cp_prepared_indexer_test",
+    srcs = ["cp_prepared_indexer_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "cp_packed_pipeline_gpu_test",
+    srcs = ["cp_packed_pipeline_gpu_test.py", "cp_kv_prefetch_gpu_test.py"],
+    main = "cp_packed_pipeline_gpu_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "2", "RTP_LLM_CP_KV_REGISTERED": "0"},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "2"},
+)
+
+py_test(
     name = "history_remap_collective_test",
     srcs = ["history_remap_collective_test.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],

@@ -333,6 +333,7 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         cp_params: Optional[Any],
         q_scale: Optional[torch.Tensor] = None,
+        prepared_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         is_multi_token_decode = bool(
             getattr(attention_inputs, "is_target_verify", False)
@@ -370,6 +371,7 @@ class Indexer(nn.Module):
                     getattr(cp_params, "total_local_ids_is_identity", False)
                 ),
                 q_scale=q_scale,
+                prepared_kv=prepared_kv,
             )
         return self.indexer_op._get_topk_ragged(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs, q_scale=q_scale
@@ -447,6 +449,21 @@ class Indexer(nn.Module):
                 query, key, kv_cache, fmha_params, attention_inputs, cp_params
             )
 
+        pending_indexer = None
+        if (
+            self._is_sparse_prefill_cp(attention_inputs)
+            and not getattr(attention_inputs, "is_target_verify", False)
+            and not getattr(attention_inputs, "is_draft_extend", False)
+        ):
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.cp_indexer_transport import (
+                start_indexer_read,
+            )
+
+            pending_indexer = start_indexer_read(
+                self.indexer_op._kv_cache_blocks(kv_cache),
+                cp_params,
+                self.index_head_dim,
+            )
         weights = self._get_logits_head_gate(hidden_states, q_scale)
         return self._compute_topk(
             q_fp8,
@@ -456,4 +473,5 @@ class Indexer(nn.Module):
             attention_inputs,
             cp_params,
             q_scale=q_scale if self.indexer_op.use_mxfp8 else None,
+            prepared_kv=None if pending_indexer is None else pending_indexer.wait(),
         )
