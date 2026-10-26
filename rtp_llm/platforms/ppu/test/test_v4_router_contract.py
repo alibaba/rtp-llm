@@ -35,7 +35,7 @@ _stub_package(
 from rtp_llm.platforms.ppu.models.dsv4 import (
     gate as gate_module,
 )
-from rtp_llm.models_py.modules.dsv4 import platform_provider as provider_module
+from rtp_llm.platforms.ppu.models.dsv4.impl import platform_provider as provider_module
 from rtp_llm.platforms.ppu.models.dsv4.gate import (
     Gate,
     _select_routes_with_nonfinite_fallback,

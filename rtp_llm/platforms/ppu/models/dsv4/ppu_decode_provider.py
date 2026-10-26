@@ -80,10 +80,11 @@ class PpuDecodeProvider(PpuModuleProvider):
         if self._moe_backend not in ("deepep", "megamoe"):
             raise ValueError("DSV4_PPU_DECODE_MOE_BACKEND must be deepep or megamoe")
         self._mega_resources = None
-        self._mega_module_name = self.execution_options.get("DSV4_PPU_MEGAMOE_PACKAGE", "deep_gemm")
+        self._mega_module_name = "deep_gemm_mega"
         if self._moe_backend == "megamoe":
-            if self._mega_module_name not in ("deep_gemm", "deep_gemm_mega"):
-                raise ValueError("DSV4_PPU_MEGAMOE_PACKAGE must be deep_gemm or deep_gemm_mega")
+            package = self.execution_options.get("DSV4_PPU_MEGAMOE_PACKAGE", "deep_gemm_mega")
+            if package != self._mega_module_name:
+                raise ValueError("DSV4_PPU_MEGAMOE_PACKAGE must be deep_gemm_mega")
             from .ppu_mega_moe import PpuMegaMoEResources
 
             self._mega_resources = PpuMegaMoEResources()

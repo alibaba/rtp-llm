@@ -57,10 +57,19 @@ class MegaMoEContractTest(unittest.TestCase):
         b = PpuDecodeProvider(options)
         self.assertEqual(a._moe_backend, "megamoe")
         self.assertEqual(b._moe_backend, "deepep")
+        self.assertEqual(a._mega_module_name, "deep_gemm_mega")
         c = PpuDecodeProvider(
             {**DECODE_EXECUTION_OPTIONS, "DSV4_PPU_DECODE_MOE_BACKEND": "megamoe"}
         )
         self.assertIsNot(a._mega_resources, c._mega_resources)
+        with self.assertRaisesRegex(ValueError, "must be deep_gemm_mega"):
+            PpuDecodeProvider(
+                {
+                    **DECODE_EXECUTION_OPTIONS,
+                    "DSV4_PPU_DECODE_MOE_BACKEND": "megamoe",
+                    "DSV4_PPU_MEGAMOE_PACKAGE": "deep_gemm",
+                }
+            )
         with self.assertRaisesRegex(ValueError, "must be deepep or megamoe"):
             PpuDecodeProvider({**options, "DSV4_PPU_DECODE_MOE_BACKEND": "typo"})
 

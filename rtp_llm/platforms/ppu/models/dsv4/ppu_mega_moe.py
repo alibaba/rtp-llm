@@ -65,7 +65,7 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
         ) == (1, 8, 4096, 2048, 256, 6)
 
     def __init__(
-        self, cfg, *, resources, module_name="deep_gemm", **kwargs
+        self, cfg, *, resources, module_name="deep_gemm_mega", **kwargs
     ):
         kwargs.setdefault("output_dtype", torch.bfloat16)
         if kwargs["output_dtype"] != torch.bfloat16:
@@ -73,8 +73,8 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
         super().__init__(cfg, **kwargs)
         import importlib
 
-        if module_name not in ("deep_gemm", "deep_gemm_mega"):
-            raise ValueError("MegaMoE package must be deep_gemm or deep_gemm_mega")
+        if module_name != "deep_gemm_mega":
+            raise ValueError("MegaMoE package must be deep_gemm_mega")
         deep_gemm = importlib.import_module(module_name)
 
         required = (

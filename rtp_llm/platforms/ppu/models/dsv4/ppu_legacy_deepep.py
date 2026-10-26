@@ -293,7 +293,10 @@ class PpuLegacyDeepEPStrategy(torch.nn.Module):
         indices_p, weights_p = self._pad_topk_for_deepep(indices, weights)
 
         if wrapper.mode != DeepEPMode.NORMAL:
-            raise RuntimeError(f"unsupported DeepEP mode for DSV4: {wrapper.mode}")
+            raise RuntimeError(
+                "PPU legacy DeepEP strategy requires normal-mode dispatch; "
+                f"got {wrapper.mode}"
+            )
 
         # 1. Dispatch layout. indices cast to int64 already.
         (
