@@ -142,7 +142,7 @@ class DecodeEndpointAdmissionTest {
                     exactEndpoint.tryReserveQueuedRequest(pin, 11L, 100L, 110L, 10, null).handle();
         }
         exactEndpoint.release(speculative, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
-        verify(availability).changed(RoleType.DECODE, null, "10.0.0.1:8080");
+        verify(availability).changed(exactEndpoint.getStatus(), "10.0.0.1:8080");
 
         DecodeResources.ReservationHandle published;
         try (WorkerEndpoint.GenerationPin pin = exactEndpoint.tryPinGeneration()) {
@@ -151,7 +151,7 @@ class DecodeEndpointAdmissionTest {
                     exactEndpoint.tryReserveQueuedRequest(pin, 12L, 100L, 110L, 10, null).handle();
         }
         exactEndpoint.release(published, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
-        verify(availability, times(2)).changed(RoleType.DECODE, null, "10.0.0.1:8080");
+        verify(availability, times(2)).changed(exactEndpoint.getStatus(), "10.0.0.1:8080");
     }
 
     @Test
