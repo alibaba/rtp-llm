@@ -299,6 +299,34 @@ TEST(DeviceBlockPoolTest, RequestAndCacheRefsUpdateAvailableIndependently) {
     EXPECT_EQ(pool.availableBlocksNum(), total_blocks);
 }
 
+TEST(DeviceBlockPoolTest, ReclaimCacheBlockRequiresOneCacheRefAndNoOtherHolders) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+    EXPECT_FALSE(pool.canReclaimCacheBlock(*block));
+
+    pool.incTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_TRUE(pool.canReclaimCacheBlock(*block));
+    pool.incRef(*block);
+    pool.incRef(*block);
+    EXPECT_FALSE(pool.canReclaimCacheBlock(*block));
+    pool.decRef(*block);
+    EXPECT_FALSE(pool.canReclaimCacheBlock(*block));
+    pool.decRef(*block);
+    EXPECT_TRUE(pool.canReclaimCacheBlock(*block));
+
+    for (const BlockTreeRefType type :
+         {BlockTreeRefType::CACHE, BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE, BlockTreeRefType::FROZEN}) {
+        pool.incTreeRef(*block, type);
+        EXPECT_FALSE(pool.canReclaimCacheBlock(*block));
+        pool.decTreeRef(*block, type);
+        EXPECT_TRUE(pool.canReclaimCacheBlock(*block));
+    }
+    pool.decTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_FALSE(pool.isAllocated(*block));
+}
+
 TEST(DeviceBlockPoolTest, ActiveBlocksIncludeRequestAndTreeOperationRefs) {
     std::shared_ptr<const DeviceBlockPoolConfig> config = makeConfig();
     DeviceBlockPool                              pool(config);
