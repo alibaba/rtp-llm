@@ -115,9 +115,9 @@ std::shared_ptr<const PlanResult> P2PSchedulerPrefillWrite::planFor(int decode_t
         }
     }
     const auto& pc = config_.parallelism_config;
-    if (pc.tp_size <= 0 || decode_tp_size <= 0 || (pc.prefill_cp_config.kv_cache_sharded && decode_tp_size != 1)) {
+    if (pc.tp_size <= 0 || decode_tp_size <= 0) {
         return std::make_shared<const PlanResult>(
-            PlanResult{{}, ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback requires D_CP=1 and positive TP sizes")});
+            PlanResult{{}, ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback requires positive TP sizes")});
     }
     const auto               dst_layout = ShardLayoutFactory::fromTopology(*config_.topology, pc, RoleType::PREFILL, config_.cache_key_tokens_per_block);
     std::vector<std::string> tags;

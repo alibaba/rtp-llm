@@ -1244,22 +1244,20 @@ TEST(PlannerGroupD, FactoryMirrorsCpStatePayloadFromRealSpecs) {
                     EXPECT_EQ(route.src_bytes, prefill.group(kFixedTag).kv_block_stride_bytes);
                     EXPECT_EQ(route.dst_bytes, route.src_bytes);
                 }
-                if (decode_tp_size == 1) {
-                    const auto reverse_decode  = KVCacheTransferPlanner::plan(decode, inferred_prefill, {kFixedTag});
-                    const auto reverse_prefill = KVCacheTransferPlanner::plan(inferred_decode, prefill, {kFixedTag});
-                    ASSERT_TRUE(reverse_decode.ok()) << reverse_decode.error.ToString();
-                    ASSERT_TRUE(reverse_prefill.ok()) << reverse_prefill.error.ToString();
-                    EXPECT_EQ(reverse_decode.plan.digest(), reverse_prefill.plan.digest());
-                    ASSERT_EQ(reverse_decode.plan.routes.size(), cp_size);
-                    for (const auto& route : reverse_decode.plan.routes) {
-                        EXPECT_EQ(route.src_slice, (SliceSpec{mode, cp_size, route.dst_rank}));
-                        EXPECT_EQ(route.dst_slice.mode, CpBlockSliceMode::NONE);
-                        EXPECT_EQ(route.src_bytes, route.dst_bytes);
-                        EXPECT_EQ(route.dst_bytes, prefill.group(kFixedTag).kv_block_stride_bytes);
-                        EXPECT_EQ(KVCacheTransferPlanner::resolveKeys(route.src_keys, 4 * cp_size),
-                                  (std::vector<size_t>{static_cast<size_t>(4 * cp_size - 2),
-                                                       static_cast<size_t>(4 * cp_size - 1)}));
-                    }
+                const auto reverse_decode  = KVCacheTransferPlanner::plan(decode, inferred_prefill, {kFixedTag});
+                const auto reverse_prefill = KVCacheTransferPlanner::plan(inferred_decode, prefill, {kFixedTag});
+                ASSERT_TRUE(reverse_decode.ok()) << reverse_decode.error.ToString();
+                ASSERT_TRUE(reverse_prefill.ok()) << reverse_prefill.error.ToString();
+                EXPECT_EQ(reverse_decode.plan.digest(), reverse_prefill.plan.digest());
+                ASSERT_EQ(reverse_decode.plan.routes.size(), cp_size);
+                for (const auto& route : reverse_decode.plan.routes) {
+                    EXPECT_EQ(route.src_slice, (SliceSpec{mode, cp_size, route.dst_rank}));
+                    EXPECT_EQ(route.dst_slice.mode, CpBlockSliceMode::NONE);
+                    EXPECT_EQ(route.src_bytes, route.dst_bytes);
+                    EXPECT_EQ(route.dst_bytes, prefill.group(kFixedTag).kv_block_stride_bytes);
+                    EXPECT_EQ(KVCacheTransferPlanner::resolveKeys(route.src_keys, 4 * cp_size),
+                              (std::vector<size_t>{static_cast<size_t>(4 * cp_size - 2),
+                                                   static_cast<size_t>(4 * cp_size - 1)}));
                 }
             }
         }

@@ -16,6 +16,8 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeWrite.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeWrite.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillWrite.h"
@@ -712,6 +714,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, StartWriteBackSendsRemainingBudgetInstead
 
 TEST_F(P2PConnectorWriteSchedulerTest, ReceiverBuildsLocalDeadlineFromRemainingBudgetAndLocalLimits) {
     prefill_.reset();
+    decode_workers_[1].start_delay_ms = 20;
     prefill_config_.p2p_writeback_timeout_ms = 1500;
     prefill_config_.load_cache_timeout_ms = 1000;
     prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator_, nullptr, prefill_client_);
@@ -720,7 +723,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, ReceiverBuildsLocalDeadlineFromRemainingB
     P2PConnectorStartWriteBackResponsePB response;
     const auto before_ms = currentTimeMs();
     auto handling = std::async(std::launch::async, [&]() { prefill_->handleWrite(input, response); });
-    EXPECT_TRUE(await([&]() { return decode_workers_[0].starts == 1; }));
+    EXPECT_TRUE(await([&]() { return decode_workers_[0].starts == 1 && decode_workers_[1].starts == 1; }));
     completeAll();
     handling.get();
     const auto after_ms = currentTimeMs();
@@ -1221,22 +1224,107 @@ TEST_F(P2PConnectorWriteSchedulerTest, WritebackPlanPreservesConfiguredActiveTai
     }
 }
 
-TEST_F(P2PConnectorWriteSchedulerTest, AsymmetricTpIsSupportedButDecodeCpRemainsOne) {
-    auto cp                               = decode_config_.parallelism_config;
-    cp.prefill_cp_config.kv_cache_sharded = true;
-    EXPECT_TRUE(decode_->planFor(1)->ok());
-    EXPECT_TRUE(prefill_->planFor(1)->ok());
-    auto cp_config               = prefill_config_;
-    cp_config.parallelism_config = cp;
-    P2PSchedulerPrefillWrite cp_scheduler(cp_config, allocator_, nullptr, prefill_client_);
-    EXPECT_FALSE(cp_scheduler.planFor(2)->ok());
-    decode_.reset();
-    decode_config_.parallelism_config = cp;
-    createDecode();
-    auto context = asyncWrite(source());
-    ASSERT_TRUE(await([&]() { return context->done(); }));
-    EXPECT_FALSE(context->success());
-    EXPECT_EQ(prefill_workers_[0].handshakes, 0);
+TEST_F(P2PConnectorWriteSchedulerTest, WritebackMatchesForwardTpCpSupportFromRealSpecs) {
+    AttentionConfigs attention;
+    attention.kv_head_num   = 4;
+    attention.size_per_head = 2;
+    attention.kv_lora_rank  = 4;
+    attention.rope_head_dim = 2;
+    LinearAttentionConfig linear;
+    linear.linear_num_key_heads   = 4;
+    linear.linear_num_value_heads = 4;
+    linear.linear_key_head_dim    = 2;
+    linear.linear_value_head_dim  = 2;
+    linear.linear_conv_kernel_dim = 2;
+    linear.ssm_state_dtype        = DataType::TYPE_FP32;
+    linear.conv_state_dtype       = DataType::TYPE_FP16;
+    for (const auto& [spec_type, group_type] :
+         std::vector<std::pair<KVCacheSpecType, CacheGroupType>>{
+             {KVCacheSpecType::MultiHeadAttention, CacheGroupType::FULL},
+             {KVCacheSpecType::MultiHeadAttention, CacheGroupType::SWA},
+             {KVCacheSpecType::MultiHeadLatentAttention, CacheGroupType::FULL},
+             {KVCacheSpecType::LinearAttention, CacheGroupType::LINEAR}}) {
+        for (int prefill_tp : {1, 2, 4}) {
+            for (int decode_tp : {1, 2, 4}) {
+                for (auto method : {CPRotateMethod::DISABLED, CPRotateMethod::ALL_GATHER, CPRotateMethod::ALLTOALL}) {
+                    for (bool sharded : {false, true}) {
+                        if (method == CPRotateMethod::DISABLED && sharded) {
+                            continue;
+                        }
+                        SCOPED_TRACE(::testing::Message() << "spec=" << static_cast<int>(spec_type)
+                                                          << " group=" << static_cast<int>(group_type)
+                                                          << " P=" << prefill_tp << " D=" << decode_tp
+                                                          << " method=" << static_cast<int>(method)
+                                                          << " sharded=" << sharded);
+                        auto prefill_config = prefill_config_;
+                        auto decode_config  = decode_config_;
+                        auto& prefill_pc = prefill_config.parallelism_config;
+                        auto& decode_pc  = decode_config.parallelism_config;
+                        prefill_pc.tp_size = prefill_tp;
+                        decode_pc.tp_size  = decode_tp;
+                        prefill_pc.prefill_cp_config.method = method;
+                        decode_pc.prefill_cp_config.method = method == CPRotateMethod::DISABLED ?
+                                                                 CPRotateMethod::DISABLED : CPRotateMethod::PREFILL_CP;
+                        prefill_pc.prefill_cp_config.kv_cache_sharded = sharded;
+                        decode_pc.prefill_cp_config.kv_cache_sharded  = sharded;
+                        const int prefill_cp = sharded ? prefill_tp : 1;
+                        decode_pc.prefill_cp_config.prefill_cp_size = prefill_cp;
+                        for (auto* config : {&prefill_config, &decode_config}) {
+                            KVCacheSpecDesc desc;
+                            desc.tag        = "default";
+                            desc.cache_type = spec_type;
+                            desc.dtype      = DataType::TYPE_FP16;
+                            SpecBuildContext build;
+                            build.seq_size_per_block      = 4;
+                            build.attn_config             = &attention;
+                            build.linear_attention_config = &linear;
+                            build.parallelism_config      = &config->parallelism_config;
+                            auto group   = config_.topology().groups().front();
+                            group.spec   = SpecBuilder::build(desc, build);
+                            group.policy = defaultCacheGroupPolicy(group_type);
+                            group.policy.enable_prefix_reuse = true;
+                            config->topology = CacheTopology::create({group}, config_.topology().layers());
+                        }
+                        P2PSchedulerPrefillRead forward_prefill(prefill_config, nullptr, prefill_client_);
+                        P2PSchedulerDecodeRead forward_decode(decode_config, nullptr, decode_client_);
+                        P2PSchedulerPrefillWrite reverse_prefill(prefill_config, allocator_, nullptr, prefill_client_);
+                        P2PSchedulerDecodeWrite reverse_decode(decode_config, decode_client_, *decode_source_worker_);
+                        const auto forward = forward_prefill.planFor(decode_tp, routing_.unique_key);
+                        const auto forward_peer = forward_decode.planFor(prefill_tp, prefill_cp, routing_.unique_key);
+                        const auto reverse = reverse_decode.planFor(prefill_tp);
+                        const auto reverse_peer = reverse_prefill.planFor(decode_tp);
+                        const bool supported = spec_type != KVCacheSpecType::LinearAttention
+                                               || prefill_pc.get_attn_tp_size() == decode_pc.get_attn_tp_size();
+                        ASSERT_EQ(forward->ok(), supported) << forward->error.ToString();
+                        ASSERT_EQ(forward_peer->ok(), supported) << forward_peer->error.ToString();
+                        ASSERT_EQ(reverse->ok(), supported) << reverse->error.ToString();
+                        ASSERT_EQ(reverse_peer->ok(), supported) << reverse_peer->error.ToString();
+                        if (supported) {
+                            EXPECT_FALSE(reverse->plan.routes.empty());
+                            EXPECT_EQ(forward->plan.digest(), forward_peer->plan.digest());
+                            EXPECT_EQ(reverse->plan.digest(), reverse_peer->plan.digest());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, WriteRangeRejectsExplicitPeerCpLayoutDriftLikeForward) {
+    auto config = decode_config_;
+    config.parallelism_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
+    config.parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+    config.parallelism_config.prefill_cp_config.prefill_cp_size = 4;
+    routing_.prefill_cp_size = 2;
+    P2PSchedulerDecodeRead forward(config, nullptr, decode_client_);
+    P2PSchedulerDecodeWrite reverse(config, decode_client_, *decode_source_worker_);
+    EXPECT_TRUE(forward.checkPeerCpLayout(2, 2).hasError());
+    EXPECT_FALSE(reverse.writeRange(input_length_, kv_ready_token_count_, routing_).has_value());
+    routing_.prefill_tp_size = 4;
+    routing_.prefill_cp_size = 4;
+    EXPECT_TRUE(forward.checkPeerCpLayout(4, 4).ok());
+    EXPECT_TRUE(reverse.writeRange(input_length_, kv_ready_token_count_, routing_).has_value());
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, CpWritebackIncludesPromptBoundaryAndPublishesCanonicalKeys) {
