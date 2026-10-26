@@ -351,6 +351,52 @@ class V41MegaMHCCudaTest(unittest.TestCase):
                 self.assertTrue(torch.equal(got, ref))
             case["residual"].copy_(original)
 
+    @torch.inference_mode()
+    def test_block_reuses_large_residual_and_reduces_peak_allocation(self):
+        from rtp_llm.models_py.modules.dsv41.block import Block
+
+        for tokens in (128, 32768):
+            with self.subTest(tokens=tokens):
+                case = make_case((tokens,))
+                block = SimpleNamespace(
+                    attn_hc=case["previous"],
+                    ffn_hc=case["next_hc"],
+                    ffn_norm=case["norm"],
+                )
+                # Warm JIT and cached weights before measuring allocations.
+                warmup = try_fused_post_pre(**case)
+                del warmup
+                torch.cuda.synchronize()
+                torch.cuda.reset_peak_memory_stats()
+                before = torch.cuda.memory_allocated()
+                expected = try_fused_post_pre(**case)
+                torch.cuda.synchronize()
+                baseline_peak = torch.cuda.max_memory_allocated() - before
+                expected_pre = case["next_hc"].pre_mix_out.clone()
+                torch.cuda.reset_peak_memory_stats()
+                before = torch.cuda.memory_allocated()
+                actual = Block._try_mega_mhc(
+                    block,
+                    *(case[key] for key in ("attn_out", "residual", "post", "comb")),
+                )
+                torch.cuda.synchronize()
+                candidate_peak = torch.cuda.max_memory_allocated() - before
+                for got, ref in zip(actual, expected):
+                    self.assertTrue(torch.equal(got, ref))
+                self.assertTrue(torch.equal(case["next_hc"].pre_mix_out, expected_pre))
+                residual_bytes = (
+                    case["residual"].numel() * case["residual"].element_size()
+                )
+                if residual_bytes > 1 << 30:
+                    self.assertEqual(actual[0].data_ptr(), case["residual"].data_ptr())
+                    self.assertGreaterEqual(
+                        baseline_peak - candidate_peak, residual_bytes
+                    )
+                else:
+                    self.assertNotEqual(
+                        actual[0].data_ptr(), case["residual"].data_ptr()
+                    )
+
     @torch.no_grad()
     def test_zero_and_rescaled_inputs(self):
         for amplitude in (0.0, 1e-5, 1.0, 32.0):
