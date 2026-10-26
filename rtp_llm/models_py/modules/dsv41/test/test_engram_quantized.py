@@ -63,13 +63,40 @@ class QuantizedMetadataTest(unittest.TestCase):
                 ) as query:
                     self.assertEqual(direct.supports_device("cuda:0"), supported)
                     query.assert_called_once()
-                self.assertEqual(direct._gather_grid(148), 128)
+                self.assertEqual(direct._gather_grid(148), 148)
             direct._supports_cuda_device.cache_clear()
             with patch.object(torch.cuda, "get_device_capability") as query:
                 self.assertFalse(direct.supports_device("cpu"))
                 query.assert_not_called()
         finally:
             direct._supports_cuda_device.cache_clear()
+
+    def test_explicit_cta_budgets_are_preserved(self):
+        with patch.object(torch.cuda, "get_device_properties") as query:
+            for grid in (1, 80, 120, 128, 132, 148, 160):
+                self.assertEqual(direct._gather_grid(grid), grid)
+            for invalid in (None, 0, -1, True, 148.0, "148"):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    direct._gather_grid(invalid)
+            query.assert_not_called()
+
+    def test_default_grid_uses_cached_device_sm_count(self):
+        direct._device_sm_count.cache_clear()
+        try:
+            with patch.object(
+                torch.cuda,
+                "get_device_properties",
+                side_effect=[
+                    SimpleNamespace(multi_processor_count=148),
+                    SimpleNamespace(multi_processor_count=132),
+                ],
+            ) as query:
+                self.assertEqual(direct._gather_grid(None, "cuda:0"), 148)
+                self.assertEqual(direct._gather_grid(None, "cuda:0"), 148)
+                self.assertEqual(direct._gather_grid(None, "cuda:1"), 132)
+                self.assertEqual(query.call_count, 2)
+        finally:
+            direct._device_sm_count.cache_clear()
 
     def test_cpu_and_wrong_geometry_reject_before_allocation(self):
         invalid = [
@@ -227,7 +254,7 @@ class QuantizedLookupCUDA(unittest.TestCase):
 
     @torch.inference_mode()
     def test_changed_graph_inputs_all_bytes_tail_strides_invalid_and_padding(self):
-        for tokens in (1, 37, 384, 385):
+        for tokens in (1, 7, 19, 32, 37, 384, 385, 1024):
             ids_storage = torch.empty(
                 (tokens * 2 + 2, 50), dtype=torch.int64, device="cuda"
             )
@@ -236,7 +263,23 @@ class QuantizedLookupCUDA(unittest.TestCase):
             live.copy_(self._ids(tokens, 0))
             with self.subTest(tokens=tokens):
                 buffers = direct.allocate_outputs(live)
-                direct.prepare_lookup(*self.embedding._uva, live, buffers)
+                prepared = direct.prepare_lookup(*self.embedding._uva, live, buffers)
+                self.assertEqual(
+                    prepared["resources"]["epilogue"]["grid"],
+                    [self.embedding._num_sms, 1, 1],
+                )
+                if tokens == 19 and self.embedding._num_sms == 148:
+                    resource = prepared["resources"]["epilogue"]
+                    self.assertEqual(resource["block_rows"], 4)
+                    self.assertEqual(resource["num_warps"], 1)
+                if tokens == 384:
+                    resource = prepared["resources"]["epilogue"]
+                    self.assertEqual(resource["block_rows"], 16)
+                    self.assertEqual(resource["num_warps"], 4)
+                    self.assertEqual(
+                        resource["loop_iterations_max"],
+                        (tokens * 24 - 1) // (self.embedding._num_sms * 16) + 1,
+                    )
                 graph = torch.cuda.CUDAGraph()
                 pointers = (buffers.values.data_ptr(), buffers.scales.data_ptr())
                 try:
