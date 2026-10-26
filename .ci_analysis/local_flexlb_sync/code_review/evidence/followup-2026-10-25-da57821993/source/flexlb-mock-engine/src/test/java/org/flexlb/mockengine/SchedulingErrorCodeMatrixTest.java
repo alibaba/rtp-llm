@@ -1,0 +1,408 @@
+package org.flexlb.mockengine;
+
+import com.google.protobuf.ByteString;
+import org.flexlb.balance.scheduler.CancelReason;
+import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.SchedulerTestSupport;
+import org.flexlb.config.ConfigTestSupport;
+import org.flexlb.config.DecisionPolicyConfig;
+import org.flexlb.config.DispatcherConfig;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.QueueOrderingConfig;
+import org.flexlb.dao.SchedulingMetadata;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.pv.PvLogData;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
+
+import static org.flexlb.dao.loadbalance.AdmissionRejectReason.HIGHER_PRIORITY_AHEAD;
+import static org.flexlb.dao.loadbalance.AdmissionRejectReason.RESOURCE_EXHAUSTED;
+import static org.flexlb.dao.loadbalance.AdmissionRejectReason.SAME_PRIORITY_AHEAD;
+import static org.flexlb.dao.loadbalance.AdmissionRejectReason.UNSPECIFIED;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Real AbstractRequestScheduler, selection, admission, queue, delivery and in-process Mock Engine.
+ * Only cache/metrics/config lookup and gRPC transport are stand-ins. Values are
+ * FlexLB codes, not HTTP or gRPC statuses. Schema v3 keeps blocked placement in
+ * its global queue, and stops the request deadline once delivery is claimed.
+ * Engine-owned victim settlement is covered by PreemptionPhasesE2ETest.
+ */
+@Timeout(15)
+class SchedulingErrorCodeMatrixTest {
+    private static final long REQUEST_ID = 71_001L;
+
+    static Stream<String> queuedModes() {
+        return Stream.of("FIFO", "PRIORITY")
+                .flatMap(
+                        order ->
+                                Stream.of("SINGLE", "FIXED_WINDOW")
+                                        .flatMap(
+                                                decision ->
+                                                        Stream.of("NON_BATCH", "BATCH")
+                                                                .map(
+                                                                        dispatch ->
+                                                                                order + "/"
+                                                                                        + decision
+                                                                                        + "/"
+                                                                                        + dispatch)));
+    }
+
+    static Stream<String> modes() {
+        return Stream.concat(Stream.of("DIRECT"), queuedModes());
+    }
+
+    static Stream<String> batchModes() {
+        return queuedModes().filter(mode -> mode.endsWith("/BATCH"));
+    }
+
+    @ParameterizedTest(name = "{0}: healthy -> 200")
+    @MethodSource("modes")
+    void healthyPlacement(String mode) throws Exception {
+        try (Fixture fixture = new Fixture(mode)) {
+            Response result = fixture.schedule(fixture.context());
+            assertTrue(result.isSuccess(), result.getErrorMessage());
+            assertEquals(200, result.getCode());
+            assertEquals(UNSPECIFIED, result.getAdmissionRejectReason());
+            assertEquals(
+                    fixture.harness.config.getDispatcher().requiresGenerateInput()
+                            ? List.of(REQUEST_ID)
+                            : List.of(),
+                    fixture.harness.engineArrivalOrder);
+        }
+    }
+
+    @ParameterizedTest(name = "{0}: expired before placement")
+    @MethodSource("modes")
+    void expiredBeforePlacement(String mode) throws Exception {
+        try (Fixture fixture = new Fixture(mode)) {
+            RequestContext context = fixture.context();
+            context.data()
+                    .setSchedulingMetadata(
+                            SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1));
+            // DIRECT retains 8511; QUEUE reports 8431 and never sends an Engine RPC.
+            assertFailure(
+                    fixture.schedule(context),
+                    fixture.harness.config.isDirect() ? 8511 : 8431,
+                    fixture.harness.config.isDirect() ? UNSPECIFIED : RESOURCE_EXHAUSTED,
+                    "expired");
+            assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
+            assertEquals(0, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
+        }
+    }
+
+    @ParameterizedTest(name = "{0}: request exceeds every Decode KV budget -> 8431")
+    @MethodSource("modes")
+    void impossibleDecodeDemand(String mode) throws Exception {
+        try (Fixture fixture = new Fixture(mode)) {
+            fixture.harness.setDecodeKvCapacity(0, 64, 64);
+            assertFailure(
+                    fixture.schedule(fixture.context()),
+                    8431,
+                    RESOURCE_EXHAUSTED,
+                    "admission capacity is temporarily exhausted");
+            assertEquals(0, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
+            assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"duplicate", "expired", "nonBatch"})
+    void malformedInputDoesNotChangeEarlierDecisions(String scenario) throws Exception {
+        try (Fixture fixture =
+                new Fixture(
+                        "FIFO/SINGLE/" + (scenario.equals("nonBatch") ? "NON_BATCH" : "BATCH"))) {
+            RequestContext malformed = fixture.context();
+            malformed.data().setGenerateInputPb(ByteString.copyFrom(new byte[] {(byte) 0xff}));
+            if (scenario.equals("duplicate")) {
+                fixture.reserveDecode(70);
+                var original = fixture.service.submit(fixture.context());
+                assertFailure(fixture.schedule(malformed), 8406, UNSPECIFIED, "duplicate");
+                assertFalse(original.isDone());
+                fixture.service.cancel(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED);
+                assertFailure(original.get(5, TimeUnit.SECONDS), 8504, UNSPECIFIED, "cancel");
+            } else if (scenario.equals("expired")) {
+                malformed
+                        .data()
+                        .setSchedulingMetadata(
+                                SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1));
+                assertFailure(fixture.schedule(malformed), 8431, RESOURCE_EXHAUSTED, "expired");
+            } else {
+                assertTrue(fixture.schedule(malformed).isSuccess());
+            }
+            assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
+        }
+    }
+
+    static Stream<Arguments> directPriorityCases() {
+        return Stream.of(
+                Arguments.of(70, 8430, HIGHER_PRIORITY_AHEAD, "higher-priority requests are ahead"),
+                Arguments.of(50, 8430, SAME_PRIORITY_AHEAD, "same-priority requests are ahead"),
+                Arguments.of(
+                        30,
+                        8431,
+                        RESOURCE_EXHAUSTED,
+                        "admission capacity is temporarily exhausted"),
+                Arguments.of(0, 8432, UNSPECIFIED, "blocker priority attribution is unavailable"));
+    }
+
+    static Stream<Arguments> prefillPriorityCases() {
+        return directPriorityCases().filter(arguments -> (int) arguments.get()[0] > 0);
+    }
+
+    @ParameterizedTest(name = "DIRECT: Prefill owner P{0} -> {1}")
+    @MethodSource("prefillPriorityCases")
+    void directPrefillCapacityUsesOwnerProvenance(
+            int priority, int code, AdmissionRejectReason reason, String message) throws Exception {
+        try (Fixture fixture = new Fixture("DIRECT", 1, 0L)) {
+            assertTrue(
+                    fixture.schedule(fixture.harness.context(REQUEST_ID - 1, priority))
+                            .isSuccess());
+            RequestContext context = fixture.context();
+            Response failure = fixture.schedule(context);
+            assertFailure(failure, code, reason, message);
+            assertEquals("PREFILL", context.data().getSchedulingDiagnostics().get("role"));
+            assertEquals(1, context.data().getSchedulingDiagnostics().get("workers"));
+            assertEquals(
+                    1, fixture.harness.prefillEndpoint(0).ownership.stats().locallyOwnedRequests());
+            assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
+        }
+    }
+
+    @ParameterizedTest(name = "DIRECT: Decode owner P{0} -> {1}")
+    @MethodSource("directPriorityCases")
+    void directDecodeCapacityUsesOwnerProvenance(
+            int priority, int code, AdmissionRejectReason reason, String message) throws Exception {
+        try (Fixture fixture = new Fixture("DIRECT")) {
+            fixture.reserveDecode(priority);
+            RequestContext context = fixture.context();
+            assertFailure(fixture.schedule(context), code, reason, message);
+            assertNotNull(context.data().getSchedulingDiagnostics());
+            assertEquals(1, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
+            assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
+        }
+    }
+
+    @ParameterizedTest(name = "{0}: blocked Decode queue expires -> 8431")
+    @MethodSource("queuedModes")
+    void queueExpiryReadsRecordedWait(String mode) throws Exception {
+        try (Fixture fixture = new Fixture(mode)) {
+            fixture.reserveDecode(70);
+            RequestContext context = fixture.context();
+            context.data()
+                    .setSchedulingMetadata(
+                            SchedulingMetadata.explicit(50, System.currentTimeMillis() + 500));
+            // Once QUEUE owns the request, SLO uses the queue cause (8431), not
+            // a second admission classification (8430) or generic timeout (8511).
+            Response failure = fixture.schedule(context);
+            assertFailure(failure, 8431, RESOURCE_EXHAUSTED, "DECODE");
+            assertQueueWaitPv(context, failure, "DECODE");
+            assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
+            assertEquals(1, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
+        }
+    }
+
+    @ParameterizedTest(name = "{0}: healthy Prefill has no KV -> queue expiry 8431")
+    @MethodSource("queuedModes")
+    void queueExpiryRetainsPrefillPressure(String mode) throws Exception {
+        try (Fixture fixture = new Fixture(mode)) {
+            fixture.harness
+                    .prefillEngines
+                    .getFirst()
+                    .setFaultConfig(
+                            FaultInjectionConfig.builder()
+                                    .kvPressureTokens(Long.MAX_VALUE)
+                                    .build());
+            fixture.harness.pumpOnce();
+            RequestContext context = fixture.context();
+            context.data()
+                    .setSchedulingMetadata(
+                            SchedulingMetadata.explicit(50, System.currentTimeMillis() + 500));
+            Response failure = fixture.schedule(context);
+            assertFailure(
+                    failure,
+                    8431,
+                    RESOURCE_EXHAUSTED,
+                    "admission capacity is temporarily exhausted");
+            assertQueueWaitPv(context, failure, "PREFILL");
+            assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
+        }
+    }
+
+    @ParameterizedTest(name = "{0}: Engine admission rejects -> 8510")
+    @MethodSource("batchModes")
+    void engineRejectionRetainsItsDiagnostic(String mode) throws Exception {
+        try (Fixture fixture = new Fixture(mode)) {
+            fixture.harness.config.getRequestLifecycle().getRequest().setTimeoutMs(500L);
+            fixture.harness
+                    .prefillEngines
+                    .getFirst()
+                    .setFaultConfig(
+                            FaultInjectionConfig.builder()
+                                    .failOnEnqueue(true)
+                                    .enqueueErrorMessage("injected admission rejection")
+                                    .build());
+            var future = fixture.service.submit(fixture.context());
+            assertFailure(
+                    future.get(5, TimeUnit.SECONDS),
+                    8510,
+                    UNSPECIFIED,
+                    "injected admission rejection");
+            assertEquals(List.of(REQUEST_ID), fixture.harness.engineArrivalOrder);
+            assertEquals(
+                    0,
+                    MockEngineTestSupport.getAcceptedCount(
+                            fixture.harness.prefillEngines.getFirst()));
+            // A Prefill rejection does not prove Decode has not observed the request.
+            // Preserve that ownership until the existing inactivity reducer settles it.
+            AutoTpmE2EHarness.await(
+                    () -> fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount() == 0,
+                    2_000L,
+                    "Decode reservation must settle after inactivity");
+            assertFailure(future.join(), 8510, UNSPECIFIED, "injected admission rejection");
+        }
+    }
+
+    @ParameterizedTest(name = "{0}: duplicate -> 8406; client cancel -> 8504")
+    @MethodSource("queuedModes")
+    void duplicateAndClientCancellationPreserveOriginalOwnership(String mode) throws Exception {
+        try (Fixture fixture = new Fixture(mode)) {
+            fixture.reserveDecode(70);
+            var original = fixture.service.submit(fixture.context());
+            assertFailure(
+                    fixture.schedule(fixture.context()), 8406, UNSPECIFIED, "duplicate request_id");
+            assertFalse(original.isDone());
+            fixture.service.cancel(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED);
+            assertFailure(original.get(5, TimeUnit.SECONDS), 8504, UNSPECIFIED, "cancel");
+            assertEquals(1, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
+            assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
+        }
+    }
+
+    @ParameterizedTest(name = "{0}: missing input -> 8409; malformed protobuf -> 8510")
+    @MethodSource("batchModes")
+    void invalidBatchInputNeverReachesEngine(String mode) throws Exception {
+        try (Fixture fixture = new Fixture(mode)) {
+            RequestContext missing = fixture.context();
+            missing.data().setGenerateInputPb(ByteString.EMPTY);
+            assertFailure(
+                    fixture.schedule(missing),
+                    8409,
+                    UNSPECIFIED,
+                    "missing serialized generate_input");
+            RequestContext malformed = fixture.context();
+            malformed.data().setGenerateInputPb(ByteString.copyFrom(new byte[] {(byte) 0xff}));
+            assertFailure(fixture.schedule(malformed), 8510, UNSPECIFIED, "build");
+            assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
+        }
+    }
+
+    private static void assertQueueWaitPv(RequestContext context, Response failure, String role) {
+        assertSame(failure, context.data().getResponse());
+        PvLogData pv =
+                new PvLogData(
+                        context,
+                        failure.isSuccess(),
+                        failure.getErrorMessage(),
+                        failure.getCode(),
+                        RESOURCE_EXHAUSTED.name(),
+                        "MASTER",
+                        0L,
+                        "TIMED_OUT",
+                        null,
+                        System.currentTimeMillis());
+        assertNotNull(pv.getSchedulingDiagnostics());
+        assertEquals(context.data().getSchedulingDiagnostics(), pv.getSchedulingDiagnostics());
+        assertTrue(
+                pv.getSchedulingDiagnostics()
+                        .get("cause")
+                        .toString()
+                        .toUpperCase(java.util.Locale.ROOT)
+                        .contains(role));
+    }
+
+    private static void assertFailure(
+            Response response, int code, AdmissionRejectReason reason, String message) {
+        assertFalse(response.isSuccess());
+        assertEquals(code, response.getCode(), response.getErrorMessage());
+        assertEquals(reason, response.getAdmissionRejectReason());
+        assertTrue(response.getErrorMessage().contains(message), response.getErrorMessage());
+    }
+
+    private static final class Fixture implements AutoCloseable {
+        final AutoTpmE2EHarness harness;
+        final org.flexlb.balance.scheduler.RequestScheduler service;
+
+        Fixture(String mode) {
+            this(mode, 100);
+        }
+
+        Fixture(String mode, int prefillCapacity) {
+            this(mode, prefillCapacity, 1L);
+        }
+
+        Fixture(String mode, int prefillCapacity, long decodeCapacity) {
+            FlexlbConfig config = new FlexlbConfig();
+            DecisionPolicyConfig decision = new DecisionPolicyConfig();
+            decision.setMaxRequests(1);
+            decision.setMaxCollectionWaitMs(0);
+            if (mode.equals("DIRECT")) {
+                config.setScheduler(ConfigTestSupport.direct());
+                config.setDispatcher(ConfigTestSupport.nonBatch());
+            } else {
+                String[] parts = mode.split("/");
+                config.queueScheduler()
+                        .setOrdering(
+                                parts[0].equals("PRIORITY")
+                                        ? ConfigTestSupport.priority()
+                                        : new QueueOrderingConfig());
+                decision.setType(DecisionPolicyConfig.Type.valueOf(parts[1]));
+                config.queueScheduler().setDecision(decision);
+                config.getDispatcher().setType(DispatcherConfig.Type.valueOf(parts[2]));
+            }
+            config.getRouter()
+                    .getRoles()
+                    .getDecode()
+                    .getAvailability()
+                    .setMaxEngineRequests(decodeCapacity);
+            config.getDispatcher().setMaxInflightPerPrefillWorker(prefillCapacity);
+            harness =
+                    new AutoTpmE2EHarness(
+                            61_500, 1, 1, "1", 1.0, true, false, decision, true, config);
+            service = harness.scheduler;
+        }
+
+        RequestContext context() {
+            return harness.context(REQUEST_ID, 50);
+        }
+
+        Response schedule(RequestContext context) throws Exception {
+            return service.submit(context).get(5, TimeUnit.SECONDS);
+        }
+
+        void reserveDecode(int priority) {
+            var endpoint = harness.decodeEndpoint(0);
+            try (var pin = endpoint.tryPinGeneration()) {
+                assertNotNull(
+                        SchedulerTestSupport.reserveUnqueuedDecode(
+                                endpoint, pin, REQUEST_ID - 1, 0L, 0L, priority));
+            }
+        }
+
+        @Override
+        public void close() throws Exception {
+            harness.close();
+        }
+    }
+}

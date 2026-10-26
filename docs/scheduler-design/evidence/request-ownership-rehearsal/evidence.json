@@ -1,0 +1,39 @@
+{
+  "base_commit": "2b2338ce9a86fbbee6b77203b1d57950dbea3346",
+  "source": "Uncommitted working tree, fingerprints at review time; no production edits made by this review",
+  "sha256": {
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestScheduler.java": "9713e52243d15716f4ed46c23acdc63fd124ad4ffeace84e8a795b435fd43f7f",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BalanceContext.java": "fa93f96f69401644478d16304234061569f879833118dd1ac0a231e094e1b5eb",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DefaultRouter.java": "6f8cb60266a3d1d00e96b38dfe2da8d9ea396e5fb9220834002b07349df4dc1c",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestRoute.java": "f167d2eb6b228ddc34b43bcf32cdc1deaa1b1906bd833b7b391c72aa4074d89c",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ProvisionalRoute.java": "706f534b96a64f636520e5168a4413329b93edb5a5299d366c0bd3cc834cbd06",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ExpirationTimer.java": "f7e584f3eb0343c74b9933010a7cf8404245ce25baf3943e0f3b48e1b5acd90e",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestCompletionPublisher.java": "c305c58349265b4f3932a025098c7b94ca8ab762275be8d0c20b49c1b0374d07",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestContinuationExecutor.java": "061f1a8f0cee05cb0883ca4f8461502449cac85bd4ce433bdc10dc7945582a04",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/EndpointGenerationLifecycle.java": "b0d2944529ece22fcda784ebc84f2d5aca1b57a8769f5df209b3fd05ba4e646e"
+  },
+  "existing_implementation_tests": [
+    {
+      "class": "RequestLifecycleDeliveryLockContractTest",
+      "tests": 19,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "class": "RequestCompletionPublicationRaceTest",
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "class": "QueuedDecodeWithdrawalTest",
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "model_scope": "Hypothesized protocol contracts only; not implementation equivalence or Java concurrency proof"
+}

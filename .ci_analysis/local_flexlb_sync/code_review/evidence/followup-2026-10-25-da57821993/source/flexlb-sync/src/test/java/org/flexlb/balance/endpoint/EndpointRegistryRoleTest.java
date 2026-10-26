@@ -1,0 +1,467 @@
+package org.flexlb.balance.endpoint;
+
+import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.config.ConfigService;
+import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import static org.flexlb.balance.endpoint.EndpointTestSupport.decodeRoutingSnapshot;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+
+class EndpointRegistryRoleTest {
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(
+            value = RoleType.class,
+            names = {"PREFILL", "PDFUSION", "DECODE"})
+    void routingDirectoriesStayOrderedAcrossInsertionRetirementAndReplacement(RoleType role) {
+        var statuses = new java.util.HashMap<Integer, WorkerStatus>();
+        for (int port : new int[] {8003, 8001, 8002}) {
+            var worker = status(role, port);
+            statuses.put(port, worker);
+            EndpointTestSupport.publishEndpoint(registry, role, worker.getIpPort(), worker);
+        }
+        java.util.function.Supplier<List<String>> addresses =
+                () ->
+                        role == RoleType.DECODE
+                                ? decodeRoutingSnapshot(registry, null).stream()
+                                        .map(DecodeResources.DecodeRoutingView::address)
+                                        .toList()
+                                : registry.prefillRoutingSnapshot(role).stream()
+                                        .map(EndpointRegistry.PrefillRoutingEntry::address)
+                                        .toList();
+        var original = addresses.get();
+        assertEquals(List.of("127.0.0.1:8001", "127.0.0.1:8002", "127.0.0.1:8003"), original);
+        retire(role, "127.0.0.1:8002", statuses.get(8002));
+        assertEquals(List.of("127.0.0.1:8001", "127.0.0.1:8003"), addresses.get());
+        var replacement = status(role, 8002);
+        EndpointTestSupport.publishEndpoint(registry, role, replacement.getIpPort(), replacement);
+        assertEquals(original, addresses.get());
+        assertEquals(3, original.size(), "an earlier directory remains an immutable snapshot");
+    }
+
+    private EndpointRegistry registry;
+    private PlacementAvailability availability;
+
+    @BeforeEach
+    void setUp() {
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        Mockito.when(configService.loadBalanceConfig())
+                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        EndpointTestSupport.TestRequestRuntime requestRuntime =
+                EndpointTestSupport.requestRuntime();
+        availability = Mockito.spy(new PlacementAvailability());
+        registry =
+                new EndpointRegistry(
+                        configService,
+                        new org.flexlb.balance.scheduler.RequestRepository(),
+                        Mockito.mock(DeliveryMetricsReporter.class),
+                        EndpointTestSupport.routeStrategy(requestRuntime),
+                        availability);
+    }
+
+    @AfterEach
+    void tearDown() {
+        registry.close();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(
+            value = RoleType.class,
+            names = {"PREFILL", "PDFUSION"})
+    void orphanSweepUsesSchedulerRetentionForEveryPrefillRole(RoleType role) {
+        PrefillEndpoint endpoint =
+                (PrefillEndpoint)
+                        EndpointTestSupport.publishEndpoint(
+                                registry, role, "127.0.0.1:8001", status(role, 8001));
+        EndpointTestSupport.commitUnqueued(endpoint, 91L, 20L);
+        registry.evictExpiredOrphans(0, id -> id == 91L);
+        assertEquals(1, endpoint.ownership.stats().locallyOwnedRequests());
+        registry.evictExpiredOrphans(0, ignored -> false);
+        assertEquals(0, endpoint.ownership.stats().locallyOwnedRequests());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(
+            value = RoleType.class,
+            names = {"PREFILL", "PDFUSION", "DECODE", "VIT"})
+    void notificationFailureWithdrawsPublishedGenerationAndClosesItsResources(RoleType role) {
+        WorkerStatus status = status(role, 8091);
+        String address = status.getIpPort();
+        IllegalStateException failure =
+                new IllegalStateException("publication notification failed");
+        java.util.concurrent.atomic.AtomicReference<WorkerEndpoint> published =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        Mockito.doAnswer(
+                        invocation -> {
+                            WorkerEndpoint candidate = registry.get(role, address);
+                            assertNotNull(candidate, "notification must occur after the map write");
+                            assertEquals(1L, status.appliedStatusCursor().statusVersion());
+                            published.set(candidate);
+                            throw failure;
+                        })
+                .when(availability)
+                .changed(Mockito.eq(role), Mockito.any(), Mockito.eq(address));
+
+        assertSame(
+                failure,
+                assertThrows(
+                        IllegalStateException.class,
+                        () ->
+                                EndpointTestSupport.publishEndpoint(
+                                        registry, role, address, status)));
+
+        assertNull(registry.get(role, address));
+        assertNull(registry.capture(role, address));
+        assertTrue(registry.endpointAddressSnapshot(role).isEmpty());
+        assertNotNull(published.get());
+        published.get().awaitRetirement();
+        assertNull(published.get().tryPinGeneration());
+        registry.close();
+    }
+
+    @Test
+    void should_register_and_resolve_supported_roles_independently() {
+        WorkerEndpoint prefill =
+                EndpointTestSupport.publishEndpoint(
+                        registry,
+                        RoleType.PREFILL,
+                        "127.0.0.1:8001",
+                        status(RoleType.PREFILL, 8001));
+        WorkerEndpoint decode =
+                EndpointTestSupport.publishEndpoint(
+                        registry, RoleType.DECODE, "127.0.0.1:8002", status(RoleType.DECODE, 8002));
+        WorkerEndpoint pdFusion =
+                EndpointTestSupport.publishEndpoint(
+                        registry,
+                        RoleType.PDFUSION,
+                        "127.0.0.1:8003",
+                        status(RoleType.PDFUSION, 8003));
+        WorkerEndpoint vit =
+                EndpointTestSupport.publishEndpoint(
+                        registry, RoleType.VIT, "127.0.0.1:8004", status(RoleType.VIT, 8004));
+
+        assertInstanceOf(PrefillEndpoint.class, prefill);
+        assertInstanceOf(DecodeEndpoint.class, decode);
+        assertInstanceOf(PrefillEndpoint.class, pdFusion);
+        assertEquals(WorkerEndpoint.class, vit.getClass());
+        assertSame(prefill, registry.get(RoleType.PREFILL, "127.0.0.1:8001"));
+        assertSame(decode, registry.get(RoleType.DECODE, "127.0.0.1:8002"));
+        assertSame(pdFusion, registry.get(RoleType.PDFUSION, "127.0.0.1:8003"));
+        assertSame(vit, registry.get(RoleType.VIT, "127.0.0.1:8004"));
+        EndpointRegistry.PrefillRoutingEntry pdFusionRoute =
+                registry.prefillRoutingSnapshot(RoleType.PDFUSION).getFirst();
+        assertEquals("127.0.0.1:8003", pdFusionRoute.address());
+        assertSame(pdFusion, pdFusionRoute.endpoint());
+
+        for (RoleType roleType :
+                new RoleType[] {
+                    RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION, RoleType.VIT
+                }) {
+            assertEquals(1, registry.counts(roleType).published());
+        }
+    }
+
+    @Test
+    void should_not_mix_roles_when_ip_port_is_shared() {
+        String ipPort = "127.0.0.1:8080";
+        WorkerEndpoint prefill =
+                EndpointTestSupport.publishEndpoint(
+                        registry, RoleType.PREFILL, ipPort, status(RoleType.PREFILL, 8080));
+        WorkerEndpoint decode =
+                EndpointTestSupport.publishEndpoint(
+                        registry, RoleType.DECODE, ipPort, status(RoleType.DECODE, 8080));
+
+        assertNotSame(prefill, decode);
+        assertSame(prefill, registry.get(RoleType.PREFILL, ipPort));
+        assertSame(decode, registry.get(RoleType.DECODE, ipPort));
+    }
+
+    @Test
+    void decode_routing_view_refreshes_discovery_topology_without_status_commit() {
+        String address = "decode-route-alias";
+        WorkerStatus status =
+                EndpointTestSupport.workerStatus(
+                        RoleType.DECODE, "group-a", "127.0.0.1", 8010, 8011, "site-a");
+        EndpointTestSupport.publishEndpoint(registry, RoleType.DECODE, address, status);
+
+        DecodeResources.DecodeRoutingView before = decodeRoutingSnapshot(registry, null).getFirst();
+        assertEquals(address, before.address());
+        assertEquals("group-a", before.topology().group());
+        assertEquals("site-a", before.topology().site());
+
+        status.lock.lock();
+        try {
+            status.updateDiscoveryLabels("site-b", "group-b");
+        } finally {
+            status.lock.unlock();
+        }
+
+        DecodeResources.DecodeRoutingView after = decodeRoutingSnapshot(registry, null).getFirst();
+        assertNotSame(before, after, "topology is an independent routing-cache generation");
+        assertSame(before.workerStatus(), after.workerStatus());
+        assertEquals(before.admissionVersion(), after.admissionVersion());
+        assertEquals(address, after.address());
+        assertEquals("group-b", after.topology().group());
+        assertEquals("site-b", after.topology().site());
+    }
+
+    @Test
+    void decode_routing_view_captures_only_its_exact_same_address_generation() {
+        String address = "decode-replacement-alias";
+        WorkerStatus oldStatus = status(RoleType.DECODE, 8020);
+        EndpointTestSupport.publishEndpoint(registry, RoleType.DECODE, address, oldStatus);
+        DecodeResources.DecodeRoutingView oldView =
+                decodeRoutingSnapshot(registry, null).getFirst();
+
+        retire(RoleType.DECODE, address, oldStatus);
+        WorkerStatus replacementStatus = status(RoleType.DECODE, 8020);
+        DecodeEndpoint replacement =
+                (DecodeEndpoint)
+                        EndpointTestSupport.publishEndpoint(
+                                registry, RoleType.DECODE, address, replacementStatus);
+
+        assertNull(
+                registry.captureDecodeGeneration(oldView),
+                "an old view must not pin a same-address replacement");
+        DecodeResources.DecodeRoutingView replacementView =
+                decodeRoutingSnapshot(registry, null).getFirst();
+        assertEquals(address, replacementView.address());
+        assertTrue(oldView.generationId() != replacementView.generationId());
+        try (WorkerEndpoint.GenerationPin pin = registry.captureDecodeGeneration(replacementView)) {
+            assertNotNull(pin);
+            assertSame(replacement, pin.endpoint());
+        }
+    }
+
+    @Test
+    void prefill_routing_directory_tracks_exact_advisory_generations() {
+        String firstAddress = "127.0.0.1:8001";
+        String secondAddress = "127.0.0.1:8002";
+        String thirdAddress = "127.0.0.1:8003";
+        WorkerStatus firstStatus = status(RoleType.PREFILL, 8001);
+        WorkerStatus secondStatus = status(RoleType.PREFILL, 8002);
+        WorkerEndpoint first =
+                EndpointTestSupport.publishEndpoint(
+                        registry, RoleType.PREFILL, firstAddress, firstStatus);
+        EndpointTestSupport.publishEndpoint(
+                registry, RoleType.PREFILL, secondAddress, secondStatus);
+        EndpointTestSupport.publishEndpoint(
+                registry, RoleType.PREFILL, thirdAddress, status(RoleType.PREFILL, 8003));
+
+        List<EndpointRegistry.PrefillRoutingEntry> originalDirectory =
+                registry.prefillRoutingSnapshot(RoleType.PREFILL);
+        assertEquals(
+                List.of(firstAddress, secondAddress, thirdAddress),
+                originalDirectory.stream()
+                        .map(EndpointRegistry.PrefillRoutingEntry::address)
+                        .toList());
+        assertSame(first, originalDirectory.getFirst().endpoint());
+        assertThrows(
+                UnsupportedOperationException.class,
+                () ->
+                        originalDirectory.add(
+                                new EndpointRegistry.PrefillRoutingEntry(
+                                        "127.0.0.1:8004", (PrefillEndpoint) first)));
+
+        retire(RoleType.PREFILL, firstAddress, firstStatus);
+        WorkerEndpoint replacement =
+                EndpointTestSupport.publishEndpoint(
+                        registry, RoleType.PREFILL, firstAddress, status(RoleType.PREFILL, 8001));
+        assertNotSame(first, replacement);
+        List<EndpointRegistry.PrefillRoutingEntry> replacementDirectory =
+                registry.prefillRoutingSnapshot(RoleType.PREFILL);
+        assertEquals(
+                List.of(firstAddress, secondAddress, thirdAddress),
+                replacementDirectory.stream()
+                        .map(EndpointRegistry.PrefillRoutingEntry::address)
+                        .toList(),
+                "the replacement generation retains address ordering");
+        assertSame(
+                first,
+                originalDirectory.getFirst().endpoint(),
+                "an in-flight traversal keeps its advisory old generation");
+        assertSame(
+                replacement,
+                replacementDirectory.stream()
+                        .filter(entry -> entry.address().equals(firstAddress))
+                        .findFirst()
+                        .orElseThrow()
+                        .endpoint());
+        WorkerEndpoint.GenerationPin replacementPin =
+                registry.capture(RoleType.PREFILL, originalDirectory.getFirst().address());
+        assertNotNull(replacementPin);
+        try (replacementPin) {
+            assertSame(replacement, replacementPin.endpoint());
+            assertNotSame(
+                    originalDirectory.getFirst().endpoint(),
+                    replacementPin.endpoint(),
+                    "winner identity validation must reject the stale route");
+        }
+
+        EndpointRegistry.Retirement detached =
+                detachUnderGenerationLock(RoleType.PREFILL, secondAddress, secondStatus);
+        assertNotNull(detached);
+        detached.complete(
+                org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
+                org.slf4j.LoggerFactory.getLogger(getClass()));
+        assertEquals(
+                Set.of(firstAddress, thirdAddress),
+                registry.prefillRoutingSnapshot(RoleType.PREFILL).stream()
+                        .map(EndpointRegistry.PrefillRoutingEntry::address)
+                        .collect(java.util.stream.Collectors.toSet()));
+
+        registry.close();
+        assertTrue(registry.prefillRoutingSnapshot(RoleType.PREFILL).isEmpty());
+    }
+
+    @Test
+    void simple_endpoint_should_report_status_task_count_as_load() {
+        WorkerStatus status = status(RoleType.VIT, 8080);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setAlive(true);
+        response.setRunningTaskInfo(Map.of("1", new TaskInfo(), "2", new TaskInfo()));
+        WorkerEndpoint endpoint =
+                EndpointTestSupport.publishEndpoint(
+                        registry, RoleType.VIT, "127.0.0.1:8080", status, response);
+
+        assertEquals(2L, endpoint.getLoadMetric().orElseThrow());
+    }
+
+    @Test
+    void should_not_remove_new_generation_with_expired_status() {
+        String ipPort = "127.0.0.1:8080";
+        WorkerStatus expired = status(RoleType.VIT, 8080);
+        WorkerEndpoint oldEndpoint =
+                EndpointTestSupport.publishEndpoint(registry, RoleType.VIT, ipPort, expired);
+
+        retire(RoleType.VIT, ipPort, expired);
+        WorkerStatus replacement = status(RoleType.VIT, 8080);
+        WorkerEndpoint newEndpoint =
+                EndpointTestSupport.publishEndpoint(registry, RoleType.VIT, ipPort, replacement);
+
+        assertNotSame(oldEndpoint, newEndpoint);
+        assertNull(oldEndpoint.tryPinGeneration());
+        assertSame(newEndpoint, registry.get(RoleType.VIT, ipPort));
+
+        EndpointRegistry.Retirement detached =
+                detachUnderGenerationLock(RoleType.VIT, ipPort, replacement);
+        assertNotNull(detached);
+        detached.complete(
+                org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
+                org.slf4j.LoggerFactory.getLogger(getClass()));
+        assertNull(registry.get(RoleType.VIT, ipPort));
+    }
+
+    @Test
+    void sameAddressReplacementCannotBindOrReleaseOldDecodeReservation() {
+        String ipPort = "127.0.0.1:8080";
+        DecodeEndpoint oldEndpoint =
+                (DecodeEndpoint)
+                        EndpointTestSupport.publishEndpoint(
+                                registry, RoleType.DECODE, ipPort, status(RoleType.DECODE, 8080));
+        DecodeResources.ReservationHandle oldReservation;
+        try (WorkerEndpoint.GenerationPin pin = oldEndpoint.tryPinGeneration()) {
+            assertTrue(pin != null);
+            oldReservation =
+                    oldEndpoint.tryReserveQueuedRequest(pin, 41L, 100L, 110L, 50, null).handle();
+        }
+
+        retire(RoleType.DECODE, ipPort, oldEndpoint.getStatus());
+        DecodeEndpoint replacement =
+                (DecodeEndpoint)
+                        EndpointTestSupport.publishEndpoint(
+                                registry, RoleType.DECODE, ipPort, status(RoleType.DECODE, 8080));
+
+        assertNotSame(oldEndpoint, replacement);
+        assertTrue(oldEndpoint.isRetired());
+        assertNull(
+                EndpointTestSupport.decodeReservation(oldEndpoint, oldReservation.requestId()),
+                "close must retire A's queued ownership before B is routable");
+        assertNull(EndpointTestSupport.decodeReservation(replacement, oldReservation.requestId()));
+        replacement.release(oldReservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
+        assertTrue(
+                replacement.resourceSnapshot().reservedCount() == 0,
+                "A's exact generation handle must never mutate same-address B");
+    }
+
+    @Test
+    void unpublishedRetirementOwnsFinalizationAndCannotRemoveItsReplacement() throws Exception {
+        WorkerStatus status = status(RoleType.PREFILL, 8300);
+        String address = status.getIpPort();
+        registry.currentOrDiscover(RoleType.PREFILL, address, () -> status);
+        EndpointRegistry.Retirement retirement =
+                detachUnderGenerationLock(RoleType.PREFILL, address, status);
+        assertNotNull(retirement);
+        assertSame(status, retirement.status());
+        assertFalse(status.isActiveGeneration());
+        assertSame(status, registry.statusSnapshot(RoleType.PREFILL).get(address));
+        var cache = mock(org.flexlb.cache.service.CacheAwareService.class);
+        org.mockito.Mockito.doThrow(new IllegalStateException("cache unavailable"))
+                .doNothing()
+                .when(cache)
+                .removeEngineBlockCache(address);
+        var logger = org.slf4j.LoggerFactory.getLogger(getClass());
+        retirement.complete(cache, logger);
+        assertSame(
+                status,
+                registry.statusSnapshot(RoleType.PREFILL).get(address),
+                "failed cache cleanup must keep the old generation fenced");
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3L);
+        while (registry.statusSnapshot(RoleType.PREFILL).containsKey(address)
+                && System.nanoTime() < deadline) {
+            Thread.sleep(5L);
+        }
+        assertFalse(registry.statusSnapshot(RoleType.PREFILL).containsKey(address));
+
+        WorkerStatus replacement = status(RoleType.PREFILL, 8300);
+        registry.currentOrDiscover(RoleType.PREFILL, address, () -> replacement);
+        assertThrows(IllegalStateException.class, () -> retirement.complete(cache, logger));
+        assertSame(replacement, registry.statusSnapshot(RoleType.PREFILL).get(address));
+        org.mockito.Mockito.verify(cache, org.mockito.Mockito.times(2))
+                .removeEngineBlockCache(address);
+        registry.close(); // An unpublished retirement must not leave a detached-endpoint barrier.
+    }
+
+    private static WorkerStatus status(RoleType roleType, int port) {
+        return EndpointTestSupport.workerStatus(roleType, "127.0.0.1", port, port + 1);
+    }
+
+    private EndpointRegistry.Retirement detachUnderGenerationLock(
+            RoleType role, String address, WorkerStatus expectedStatus) {
+        expectedStatus.lock.lock();
+        try {
+            return registry.beginRetirement(role, address, expectedStatus);
+        } finally {
+            expectedStatus.lock.unlock();
+        }
+    }
+
+    private void retire(RoleType role, String address, WorkerStatus status) {
+        EndpointRegistry.Retirement detached = detachUnderGenerationLock(role, address, status);
+        assertNotNull(detached);
+        detached.complete(
+                org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
+                org.slf4j.LoggerFactory.getLogger(getClass()));
+    }
+}

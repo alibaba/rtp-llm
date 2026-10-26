@@ -1,0 +1,203 @@
+#!/bin/bash
+
+java_version() {
+    # maybe 1.8.0_162 , 11-ea
+    local local_java_version
+
+    local IFS=$'\n'
+    # remove \r for Cygwin
+    local lines=$("${JAVA_HOME}"/bin/java -version 2>&1 | tr '\r' '\n')
+    for line in $lines; do
+        if [[ (-z $local_java_version) && ($line = *"version \""*) ]]; then
+            local ver=$(echo $line | sed -e 's/.*version "\(.*\)"\(.*\)/\1/; 1q')
+            # on macOS, sed doesn't support '?'
+            if [[ $ver = "1."* ]]; then
+                local_java_version=$(echo $ver | sed -e 's/1\.\([0-9]*\)\(.*\)/\1/; 1q')
+            else
+                local_java_version=$(echo $ver | sed -e 's/\([0-9]*\)\(.*\)/\1/; 1q')
+            fi
+        fi
+    done
+    echo "$local_java_version"
+}
+
+# SETENV_SETTED promise run this only once.
+if [ -z $SETENV_SETTED ]; then
+    SETENV_SETTED="true"
+
+    # app
+    # set ${APP_NAME}, if empty $(basename "${APP_HOME}") will be used.
+    APP_HOME=$(
+        cd $(dirname ${BASH_SOURCE[0]})/.. || exit
+        pwd
+    )
+    # Force APP_NAME to be FlexLB to match tgz structure
+    APP_NAME=FlexLB
+    echo "setenv.sh setting APP_NAME to: ${APP_NAME}"
+
+    NGINX_HOME=/home/admin/cai
+
+    # 显式export APP_NAME，以规避非K8S HIPPO调度时，无法将docker_file的env传递到进程启动参数的问题
+    export APP_NAME=${APP_NAME}
+    echo "APP_NAME:[${APP_NAME}]"
+
+    export JAVA_HOME=/opt/taobao/java
+    export PATH=${PATH}:${JAVA_HOME}/bin
+    ulimit -c unlimited
+
+    echo "INFO: OS max open files: "$(ulimit -n)
+
+    JAVA_VERSION=$(java_version)
+    echo "INFO: java version: $JAVA_VERSION"
+
+    # when stop spring boot process, will try to stop old tomcat process
+    export CATALINA_HOME=/opt/taobao/tomcat
+    export CATALINA_BASE=$APP_HOME/.default
+    export CATALINA_PID=$CATALINA_BASE/catalina.pid
+
+    # 禁用 glibc的禁用per thread arena，只用main arena
+    export MALLOC_ARENA_MAX=1
+
+    # time to wait tomcat to stop before killing it
+    TOMCAT_STOP_WAIT_TIME=5
+    TOMCAT_PORT=7001
+
+    if [[ ! -f ${APP_HOME}/target/${APP_NAME}/bin/appctl.sh ]]; then
+        # env for service(pandora boot)
+        export LANG=zh_CN.UTF-8
+        export JAVA_FILE_ENCODING=UTF-8
+        export NLS_LANG=AMERICAN_AMERICA.ZHS16GBK
+        export LD_LIBRARY_PATH=/opt/taobao/oracle/lib:/opt/taobao/lib:$LD_LIBRARY_PATH
+        #export CPU_COUNT="$(grep -c 'cpu[0-9][0-9]*' /proc/stat)"
+        CPU_COUNT=$SIGMA_MAX_PROCESSORS_LIMIT
+        if [ ! -n "$CPU_COUNT" ]; then
+            CPU_COUNT=$(grep -c 'cpu[0-9][0-9]*' /proc/stat)
+        fi
+        export CPU_COUNT
+
+        export SERVICE_PID=$APP_HOME/.default/${APP_NAME}.pid
+        export SERVICE_OUT=$APP_HOME/logs/service_stdout.log
+        export MIDDLEWARE_LOGS="${HOME}/logs"
+        export MIDDLEWARE_SNAPSHOTS="${HOME}/snapshots"
+        mkdir -p "$APP_HOME"/.default "$APP_HOME"/logs \
+            "$MIDDLEWARE_LOGS" "$MIDDLEWARE_SNAPSHOTS" || exit 1
+
+        if [ -z "$SERVICE_TMPDIR" ]; then
+            # Define the java.io.tmpdir to use for Service(pandora boot)
+            SERVICE_TMPDIR="${APP_HOME}"/.default/temp
+        fi
+
+        SERVICE_OPTS="${SERVICE_OPTS} -server"
+
+        let memTotal=$(cat /proc/meminfo | grep MemTotal | awk '{printf "%d", $2/1024 }')
+        echo "INFO: OS total memory: "$memTotal"M"
+        # if os memory <= 2G
+        if [ $memTotal -le 2048 ]; then
+            DEFAULT_JVM_XMS="1536m"
+            DEFAULT_JVM_XMX="1536m"
+        else
+            DEFAULT_JVM_XMS="32g"
+            DEFAULT_JVM_XMX="32g"
+        fi
+
+        FLEXLB_HEAP_SIZE=${FLEXLB_JVM_HEAP_SIZE:-${MASTER_JVM_HEAP_SIZE}}
+        SERVICE_JVM_XMS=${FLEXLB_JVM_XMS:-${MASTER_JVM_XMS:-${FLEXLB_HEAP_SIZE:-${DEFAULT_JVM_XMS}}}}
+        SERVICE_JVM_XMX=${FLEXLB_JVM_XMX:-${MASTER_JVM_XMX:-${FLEXLB_HEAP_SIZE:-${DEFAULT_JVM_XMX}}}}
+        echo "INFO: JVM heap config: -Xms${SERVICE_JVM_XMS} -Xmx${SERVICE_JVM_XMX}"
+        SERVICE_OPTS="${SERVICE_OPTS} -Xms${SERVICE_JVM_XMS} -Xmx${SERVICE_JVM_XMX}"
+
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:MetaspaceSize=512m -XX:MaxMetaspaceSize=512m"
+        # gRPC channel pools (hundreds of channels) plus large protobuf messages
+        # legitimately need more netty direct buffers under load; keep 2g default,
+        # allow operators to size it via FLEXLB_JVM_MAX_DIRECT.
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:ReservedCodeCacheSize=512m -XX:MaxDirectMemorySize=${FLEXLB_JVM_MAX_DIRECT:-2g}"
+        # 使用G1GC
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:+UseG1GC"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:+UnlockExperimentalVMOptions"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:MaxGCPauseMillis=${FLEXLB_JVM_GC_PAUSE_MS:-150}"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:InitiatingHeapOccupancyPercent=40"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:G1HeapRegionSize=32M"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:G1NewSizePercent=${FLEXLB_JVM_G1_MIN_YOUNG_PERCENT:-20}"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:+ExplicitGCInvokesConcurrent"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:SurvivorRatio=8"
+        SERVICE_OPTS="${SERVICE_OPTS} -Dsun.rmi.dgc.server.gcInterval=2592000000 -Dsun.rmi.dgc.client.gcInterval=2592000000"
+        SERVICE_OPTS="${SERVICE_OPTS} ${FLEXLB_JVM_GC_OPTS:--XX:ParallelGCThreads=24 -XX:ConcGCThreads=8}"
+        if [[ "$JAVA_VERSION" -lt 9 ]]; then
+            SERVICE_OPTS="${SERVICE_OPTS} -Xloggc:${MIDDLEWARE_LOGS}/gc.log -XX:+PrintGCDetails -XX:+PrintGCDateStamps"
+        else
+            SERVICE_OPTS="${SERVICE_OPTS} -Xlog:gc*:${MIDDLEWARE_LOGS}/gc.log:time"
+        fi
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=${MIDDLEWARE_LOGS}/java.hprof"
+        SERVICE_OPTS="${SERVICE_OPTS} -Djava.awt.headless=true"
+        SERVICE_OPTS="${SERVICE_OPTS} -Dsun.net.client.defaultConnectTimeout=10000"
+        SERVICE_OPTS="${SERVICE_OPTS} -Dsun.net.client.defaultReadTimeout=30000"
+        SERVICE_OPTS="${SERVICE_OPTS} -DJM.LOG.PATH=${MIDDLEWARE_LOGS}"
+        SERVICE_OPTS="${SERVICE_OPTS} -DJM.SNAPSHOT.PATH=${MIDDLEWARE_SNAPSHOTS}"
+        SERVICE_OPTS="${SERVICE_OPTS} -Dfile.encoding=${JAVA_FILE_ENCODING}"
+        SERVICE_OPTS="${SERVICE_OPTS} -Dhsf.publish.delayed=true"
+        SERVICE_OPTS="${SERVICE_OPTS} -Dproject.name=${APP_NAME}"
+        SERVICE_OPTS="${SERVICE_OPTS} -Dlog4j.defaultInitOverride=true"
+        SERVICE_OPTS="${SERVICE_OPTS} -Dserver.port=${TOMCAT_PORT} -Dmanagement.port=7002 -Dmanagement.server.port=7002"
+
+        # JDK17 JMPS opts
+        if [[ "$JAVA_VERSION" -ge 17 ]]; then
+            SERVICE_OPTS="${SERVICE_OPTS} --add-modules ALL-SYSTEM"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.lang=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.lang.invoke=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.util=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.util.concurrent=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/java.nio=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.base/sun.nio.ch=ALL-UNNAMED"
+            SERVICE_OPTS="${SERVICE_OPTS} --add-opens java.instrument/sun.instrument=ALL-UNNAMED"
+        fi
+
+        # debug opts
+
+        # jpda options
+        test -z "$JPDA_ENABLE" && JPDA_ENABLE=0
+        test -z "$JPDA_ADDRESS" && export JPDA_ADDRESS=8000
+        test -z "$JPDA_SUSPEND" && export JPDA_SUSPEND=n
+
+        if [ "$JPDA_ENABLE" -eq 1 ]; then
+            if [ -z "$JPDA_TRANSPORT" ]; then
+                JPDA_TRANSPORT="dt_socket"
+            fi
+            if [ -z "$JPDA_ADDRESS" ]; then
+                JPDA_ADDRESS="8000"
+            fi
+            if [ -z "$JPDA_SUSPEND" ]; then
+                JPDA_SUSPEND="n"
+            fi
+            if [ -z "$JPDA_OPTS" ]; then
+                if [[ "$JAVA_VERSION" -lt 9 ]]; then
+                    JPDA_OPTS="-agentlib:jdwp=transport=$JPDA_TRANSPORT,address=$JPDA_ADDRESS,server=y,suspend=$JPDA_SUSPEND"
+                else
+                    JPDA_OPTS="-agentlib:jdwp=transport=$JPDA_TRANSPORT,address=*:$JPDA_ADDRESS,server=y,suspend=$JPDA_SUSPEND"
+                fi
+            fi
+            SERVICE_OPTS="$SERVICE_OPTS $JPDA_OPTS"
+        fi
+
+        export SERVICE_OPTS
+
+        if [ -z "$NGINX_HOME" ]; then
+            NGINX_HOME=/home/admin/cai
+        fi
+
+        # if set to "1", skip start nginx.
+        test -z "$NGINX_SKIP" && NGINX_SKIP=0
+        # set port for checking status.taobao file. Comment it if no need.
+        STATUS_PORT=80
+        # time to wait for /status.taobao is ready
+        STATUS_TAOBAO_WAIT_TIME=3
+        STATUSROOT_HOME="${APP_HOME}/target/${APP_NAME}/META-INF/resources"
+        # make sure the directory exist, before tomcat start
+        mkdir -p $STATUSROOT_HOME
+        NGINXCTL=$NGINX_HOME/bin/nginxctl
+    else
+        # compatible with the existing jar application
+        export LANG=zh_CN.UTF-8
+    fi
+
+fi
