@@ -71,6 +71,17 @@ py_test(
 )
 
 py_test(
+    name = "vit_rpc_control_test",
+    size = "small",
+    srcs = ["vit_rpc_control_test.py"],
+    deps = [
+        "//rtp_llm:grpcio",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+        "//rtp_llm/server:vit_rpc_control",
+    ],
+)
+
+py_test(
     name = "vit_proxy_server_test",
     srcs = ["vit_proxy_server_test.py"],
     deps = [

@@ -65,6 +65,88 @@ import static org.mockito.Mockito.when;
 
 class GrpcWorkerStatusRunnerTest {
 
+    @Test
+    void vitLoadWireContractMatchesPythonFixture() throws Exception {
+        // Shared with vit_rpc_control_test: field 23, Int64Value(7).
+        byte[] wire = java.util.HexFormat.of().parseHex("ba01020807");
+        var response = EngineRpcService.WorkerStatusPB.parseFrom(wire);
+        assertTrue(response.hasMmInflightInputs());
+        assertEquals(7L, response.getMmInflightInputs().getValue());
+        org.junit.jupiter.api.Assertions.assertArrayEquals(wire, response.toByteArray());
+    }
+
+    @Test
+    void vitLoadUpdatesAtTheSameStatusVersionAndPreservesUnknownVersusZero() {
+        ConfigService config = mock(ConfigService.class);
+        when(config.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(config);
+        WorkerStatus status = RunnerTestSupport.discovered(RoleType.VIT, "g", "127.0.0.1", 8080, 8081, "test");
+        WorkerDirectory directory = directory(registry, status);
+        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        var response = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole("VIT").setStatusVersion(1L).setAlive(true);
+        try {
+            for (int index = 0; index < 2; index++) {
+                long count = index == 0 ? 18L : 3L;
+                when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                        .thenReturn(CompletableFuture.completedFuture(response
+                                .setMmInflightInputs(com.google.protobuf.Int64Value.of(count)).build()));
+                poll(status, directory, grpc, Runnable::run, index + 1L);
+                assertNotNull(status.vitLoad());
+                assertEquals(count, status.vitLoad().inflightInputs());
+                assertEquals(1L, status.appliedStatusCursor().statusVersion());
+            }
+            when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                    .thenReturn(CompletableFuture.completedFuture(response.clearMmInflightInputs().build()));
+            poll(status, directory, grpc, Runnable::run, 3L);
+            assertNull(status.vitLoad(), "legacy or unknown load is not idle");
+            when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                    .thenReturn(CompletableFuture.completedFuture(response
+                            .setMmInflightInputs(com.google.protobuf.Int64Value.of(0L)).build()));
+            poll(status, directory, grpc, Runnable::run, 4L);
+            assertNotNull(status.vitLoad());
+            assertEquals(0L, status.vitLoad().inflightInputs());
+            when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                    .thenReturn(CompletableFuture.completedFuture(response
+                            .setMmInflightInputs(com.google.protobuf.Int64Value.of(-1L)).build()));
+            poll(status, directory, grpc, Runnable::run, 5L);
+            assertNull(status.vitLoad(), "invalid load must not win least-load routing");
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void vitRpcFailureDoesNotRenewLoadAndExplicitNotAliveClearsIt() {
+        ConfigService config = mock(ConfigService.class);
+        when(config.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(config);
+        WorkerStatus status = RunnerTestSupport.discovered(RoleType.VIT, "g", "127.0.0.1", 8080, 8081, "test");
+        WorkerDirectory directory = directory(registry, status);
+        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        var response = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole("VIT").setStatusVersion(1L).setAlive(true)
+                .setMmInflightInputs(com.google.protobuf.Int64Value.of(9L)).build();
+        try {
+            when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                    .thenReturn(CompletableFuture.completedFuture(response));
+            poll(status, directory, grpc, Runnable::run, 1L);
+            var sample = status.vitLoad();
+            assertNotNull(sample);
+            when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                    .thenReturn(CompletableFuture.failedFuture(Status.DEADLINE_EXCEEDED.asRuntimeException()));
+            poll(status, directory, grpc, Runnable::run, 2L);
+            assertSame(sample, status.vitLoad(), "a timeout must not refresh the sample timestamp");
+            assertTrue(status.isAvailableForScheduling());
+            when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                    .thenReturn(CompletableFuture.completedFuture(response.toBuilder().setAlive(false).build()));
+            poll(status, directory, grpc, Runnable::run, 3L);
+            assertNull(status.vitLoad());
+        } finally {
+            registry.close();
+        }
+    }
+
     static Stream<Arguments> rpcFailures() {
         return Stream.of(
                 Arguments.of(

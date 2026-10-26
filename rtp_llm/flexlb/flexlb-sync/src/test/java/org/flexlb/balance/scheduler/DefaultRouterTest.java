@@ -451,6 +451,45 @@ class DefaultRouterTest {
     }
 
     @Test
+    void ordinaryFullRouteUsesInjectedVitLoadSelectorInsteadOfRandomFallback() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.VIT));
+        DefaultRouter router = router();
+        var selector = mock(org.flexlb.service.VitCacheSelector.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(router, "vitCacheSelector", selector);
+        BalanceContext context = context(301L);
+        SelectionFixture prefill = selection(RoleType.PREFILL, 301L, "p", 8001, "selected-group");
+        SelectionFixture vit = selection(RoleType.VIT, 301L, "v", 8002, "selected-group");
+        when(prefillSelector.select(context, RoleType.PREFILL, null))
+                .thenReturn(PlacementResult.success(prefill.selection));
+        when(selector.selectPinned(context, "selected-group")).thenReturn(vit.selection);
+
+        var admitted = router.select(context);
+        assertEquals(PlacementResult.Status.SUCCESS, admitted.status());
+        assertEquals(List.of(prefill.status, vit.status), admitted.value().response().getServerStatus());
+        admitted.value().close();
+        verify(selector).selectPinned(context, "selected-group");
+        verifyNoInteractions(vitSelector);
+        verify(vit.pin).close();
+        verify(prefill.pin).close();
+    }
+
+    @Test
+    void vitOnlyRouteUsesTheSameInjectedSelector() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.VIT));
+        DefaultRouter router = router();
+        var selector = mock(org.flexlb.service.VitCacheSelector.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(router, "vitCacheSelector", selector);
+        BalanceContext context = context(302L);
+        SelectionFixture vit = selection(RoleType.VIT, 302L, "v", 8002, "g");
+        when(selector.select(context, null)).thenReturn(vit.status);
+        var response = router.routeVit(context);
+        assertTrue(response.isSuccess());
+        assertEquals(List.of(vit.status), response.getServerStatus());
+        verify(selector).select(context, null);
+        verifyNoInteractions(vitSelector);
+    }
+
+    @Test
     void firstSelectedGroupChainsToLaterRolesWhenPolicyDidNotForceOne() {
         when(modelMeta.requiredRoles())
                 .thenReturn(List.of(RoleType.PREFILL, RoleType.VIT));

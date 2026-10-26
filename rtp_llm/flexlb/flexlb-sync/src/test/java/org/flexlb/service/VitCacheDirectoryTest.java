@@ -98,6 +98,62 @@ class VitCacheDirectoryTest {
         return context;
     }
 
+    private void load(WorkerStatus worker, Long count) {
+        try (var poll = worker.tryBeginStatusPoll(1)) {
+            worker.recordVitLoad(poll, count);
+        }
+    }
+
+    @Test
+    void defaultsToLeastMediaWorkEvenWhenBusyWorkerHasCache() {
+        var ctx = context("image");
+        ctx.getConfig().getRouter().getRoles().getVit().setCacheAffinityEnabled(false);
+        snapshot(a, "a", "image");
+        load(a, 100L);
+        load(b, 2L);
+        assertEquals(b.getIp(), selector.select(ctx, null).getServerIp());
+        assertEquals(a.getIp(), selector.select(ctx, "one").getServerIp());
+    }
+
+    @Test
+    void optionalAffinityPrecedesLoadAndEqualAffinityUsesLoad() {
+        var ctx = context("image");
+        load(a, 100L);
+        load(b, 2L);
+        snapshot(a, "a", "image");
+        assertEquals(a.getIp(), selector.select(ctx, null).getServerIp());
+        snapshot(b, "b", "image");
+        assertEquals(b.getIp(), selector.select(ctx, null).getServerIp());
+    }
+
+    @Test
+    void unknownAndInvalidLoadsAreNotIdleAndClosedPollCannotOverwriteLoad() {
+        var ctx = context();
+        load(a, 10L);
+        assertEquals(a.getIp(), selector.select(ctx, null).getServerIp());
+        load(b, -1L);
+        assertEquals(a.getIp(), selector.select(ctx, null).getServerIp());
+        var closed = b.tryBeginStatusPoll(2);
+        closed.close();
+        b.recordVitLoad(closed, 0L);
+        assertEquals(a.getIp(), selector.select(ctx, null).getServerIp());
+        load(b, 0L);
+        assertEquals(b.getIp(), selector.select(ctx, null).getServerIp());
+    }
+
+    @Test
+    void staleLoadIsUnknownWithoutChangingWorkerHealth() throws InterruptedException {
+        var ctx = context();
+        ctx.getConfig().getRouter().getRoles().getVit().setLoadMaxAgeMs(1);
+        load(a, 0L);
+        Thread.sleep(20);
+        load(b, 20L);
+        // Increase the age budget after expiring A, leaving B fresh.
+        ctx.getConfig().getRouter().getRoles().getVit().setLoadMaxAgeMs(10);
+        assertEquals(b.getIp(), selector.select(ctx, null).getServerIp());
+        assertTrue(live.containsKey(a.getIpPort()));
+    }
+
     private void snapshot(WorkerStatus worker, String epoch, String... keys) {
         directory.replace(worker, MultimodalCacheStatusPB.newBuilder()
                 .setWorkerInstance(epoch).addAllKeys(List.of(keys)).build());
