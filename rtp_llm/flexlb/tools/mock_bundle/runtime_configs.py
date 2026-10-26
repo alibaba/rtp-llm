@@ -16,6 +16,8 @@ def reject_removed_environment(env):
         "MOCK_VIT_CACHE_BYTES",
         "VIT_MAX_CONCURRENT_REQUESTS",
         "MOCK_HASH_BLOCK_SIZE",
+        "MOCK_VIT_ENABLED",
+        "MOCK_VIT_PORT",
         "MOCK_VIT_HIDDEN_SIZE",
         "MOCK_VIT_CONCURRENCY",
         "MOCK_VIT_QUEUE_CAPACITY",

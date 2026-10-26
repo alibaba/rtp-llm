@@ -49,11 +49,16 @@ final class DiscoveryFileStore {
     private final Path file;
     private final String prefillDomain;
     private final String decodeDomain;
+    private final String vitDomain;
     /** Serializes all writers within this process (cluster-single lock). */
     private final Object writeLock = new Object();
     private volatile boolean warnedNonAtomic = false;
 
     DiscoveryFileStore(String filePath, String prefillDomain, String decodeDomain) {
+        this(filePath, prefillDomain, decodeDomain, "mock.vit.hosts.address");
+    }
+    DiscoveryFileStore(String filePath, String prefillDomain, String decodeDomain, String vitDomain) {
+        this.vitDomain = vitDomain;
         this.file = Path.of(filePath);
         this.prefillDomain = prefillDomain;
         this.decodeDomain = decodeDomain;
@@ -64,26 +69,28 @@ final class DiscoveryFileStore {
      * the add/remove critical section, so the services map is stable while it
      * runs (the inner lock additionally serializes any other writers).
      */
-    void rewrite(Map<Integer, JavaMockEngineCluster.FastRpcService> services) throws IOException {
+    void rewrite(Map<Integer, ? extends MockEngineLifecycle> services) throws IOException {
         synchronized (writeLock) {
             Map<String, List<String>> payload = new LinkedHashMap<>();
             payload.put(prefillDomain, addressList(services, "PREFILL"));
             payload.put(decodeDomain, addressList(services, "DECODE"));
+            var vit = addressList(services, "VIT");
+            if (!vit.isEmpty()) payload.put(vitDomain, vit);
             atomicWriteWithRetry(payload);
         }
     }
 
     /** All engines of one role as {@code ip:httpPort} strings, ordered by gRPC port. */
-    private List<String> addressList(Map<Integer, JavaMockEngineCluster.FastRpcService> services, String role) {
-        List<JavaMockEngineCluster.FastRpcService> engines = new ArrayList<>();
-        for (JavaMockEngineCluster.FastRpcService service : services.values()) {
+    private List<String> addressList(Map<Integer, ? extends MockEngineLifecycle> services, String role) {
+        List<MockEngineLifecycle> engines = new ArrayList<>();
+        for (MockEngineLifecycle service : services.values()) {
             if (role.equals(service.getRoleName())) {
                 engines.add(service);
             }
         }
-        engines.sort(Comparator.comparingInt(JavaMockEngineCluster.FastRpcService::getGrpcPort));
+        engines.sort(Comparator.comparingInt(MockEngineLifecycle::getGrpcPort));
         List<String> addresses = new ArrayList<>(engines.size());
-        for (JavaMockEngineCluster.FastRpcService service : engines) {
+        for (MockEngineLifecycle service : engines) {
             addresses.add(service.getHost() + ":" + (service.getGrpcPort() - 1));
         }
         return addresses;

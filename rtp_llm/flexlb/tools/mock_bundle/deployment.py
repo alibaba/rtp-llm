@@ -66,6 +66,11 @@ def main():
     plan = resolve(os.environ, warn=False)
     if plan.colocated_master:
         from bundle import run
+    elif os.environ.get("ROLE_TYPE") == "VIT":
+        from vit import command
+        args = command(os.environ)
+        os.execv(args[0], args)
+        return
     else:
         from standalone_mock import run
     run()

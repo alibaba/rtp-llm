@@ -35,33 +35,16 @@ class BundleConfigurationTest(unittest.TestCase):
             with self.subTest(override=override), self.assertRaises(ValueError):
                 self.launch_to_process_boundary(override)
 
-    def test_vit_discovery_keeps_dynamic_pd_and_pinned_vit(self):
-        with tempfile.TemporaryDirectory() as directory:
-            source, destination = Path(directory) / "pd.json", Path(directory) / "combined.json"
-            source.write_text(json.dumps({"prefill": ["10.0.0.1:1000"], "decode": []}))
-            bundle.publish_vit_discovery(source, destination, "10.0.0.1:1200")
-            first = destination.stat().st_mtime_ns
-            bundle.publish_vit_discovery(source, destination, "10.0.0.1:1200")
-            self.assertEqual(destination.stat().st_mtime_ns, first)
-            source.write_text(json.dumps({"prefill": [], "decode": ["10.0.0.1:1001"]}))
-            bundle.publish_vit_discovery(source, destination, "10.0.0.1:1200")
-            self.assertEqual(
-                json.loads(destination.read_text()),
-                {"prefill": [], "decode": ["10.0.0.1:1001"], "mock.vit.hosts.address": ["10.0.0.1:1200"]},
-            )
-            source.write_text("broken")
-            with self.assertRaises(ValueError):
-                bundle.publish_vit_discovery(source, destination, "10.0.0.1:1200")
-            self.assertEqual(json.loads(destination.read_text())["decode"], ["10.0.0.1:1001"])
+    def test_vit_count_is_passed_to_the_pd_cluster_process(self):
+        command, _ = self.launch_to_process_boundary({"MOCK_VIT_COUNT": "2"})
+        self.assertEqual(command[command.index("--mock.n_vit") + 1], "2")
+        self.assertEqual(command.count("-jar"), 1)
 
-    def test_vit_rejects_legacy_and_overlapping_port(self):
-        cfg = {"prefill": 2, "decode": 3}
-        with self.assertRaisesRegex(ValueError, "modern Master"):
-            bundle.vit_configuration(cfg, {"MOCK_VIT_ENABLED": "1"}, 1000, True)
-        for port in ("1004", "65536", "-1", "abc"):
-            with self.subTest(port=port), self.assertRaises(ValueError):
-                bundle.vit_configuration(cfg, {"MOCK_VIT_ENABLED": "1", "MOCK_VIT_PORT": port}, 1000, False)
-        self.assertEqual(bundle.vit_configuration(cfg, {"MOCK_VIT_ENABLED": "1"}, 1000, False)["port"], 1005)
+    def test_vit_count_validation_and_removed_independent_port(self):
+        for override in ({"MOCK_VIT_COUNT":"-1"}, {"MOCK_VIT_COUNT":"abc"}, {"MOCK_VIT_COUNT":"65535"},
+                         {"MOCK_VIT_ENABLED":"1"}, {"MOCK_VIT_PORT":"12345"}):
+            with self.subTest(override=override), self.assertRaises(ValueError):
+                self.launch_to_process_boundary(override)
 
     def test_integer_heap_override_reaches_jvm_as_bytes(self):
         command, _ = self.launch_to_process_boundary({"MOCK_BUNDLE_OVERRIDES_YAML": "{mock_heap: 536870912, master_heap: 536870912}"})

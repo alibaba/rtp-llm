@@ -136,8 +136,6 @@ class MockVitMonitorTest {
         try (var monitor = new MockVitMonitor(sink, tags)) {
             assertDoesNotThrow(() -> monitor.sample(Map.of("computations", 0L), System.nanoTime()));
         }
-        assertTrue(MockVitServer.parseKmonitor("true"));
-        assertFalse(MockVitServer.parseKmonitor("false"));
-        assertThrows(IllegalArgumentException.class, () -> MockVitServer.parseKmonitor("typo"));
+        assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(new String[]{"--mock.kmonitor", "typo"}));
     }
 }

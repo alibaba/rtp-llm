@@ -15,6 +15,8 @@ class MockLaunchSpec:
     n_decode: int
     base_grpc_port: int
     jvm_options: tuple[str, ...] = ()
+    n_vit: Optional[int] = None
+    vit_model_path: Optional[PathValue] = None
     whale: Optional[bool] = None
     whale_bundle: Optional[bool] = None
     kmonitor: Optional[bool] = None

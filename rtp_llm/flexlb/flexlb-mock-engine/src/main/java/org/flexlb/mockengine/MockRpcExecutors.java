@@ -176,6 +176,7 @@ final class MockRpcExecutors implements AutoCloseable {
 
         void stop() {
             stopped.set(true);
+            engines.remove(this);
             if (timing != null) timing.close();
             active.values().forEach(admission -> admission.close(Status.UNAVAILABLE
                     .withDescription("mock RPC engine stopping"), new Metadata()));

@@ -105,7 +105,7 @@ public final class JavaMockEngineCluster {
 
     public static void main(String[] args) throws Exception {
         Config config = Config.parse(args);
-        WhaleMockMonitor whaleMonitor = config.kmonitor ? WhaleMockMonitor.create() : null;
+        WhaleMockMonitor whaleMonitor = config.kmonitor && config.nPrefill + config.nDecode > 0 ? WhaleMockMonitor.create() : null;
         MockPerformanceModel performance = MockPerformanceModel.loadCalibration(
                 config.calibrationFile);
         config.engineInitializer = service -> configureWhaleMetrics(service, whaleMonitor);
@@ -130,6 +130,11 @@ public final class JavaMockEngineCluster {
                     0, config.nPrefill, "prefill");
             startRole(config, performance, serversByPort, bossGroup, workerGroup, services, scheduler, stats,
                     config.nPrefill, config.nDecode, "decode");
+            for (int i = 0; i < config.nVit; i++) {
+                int index = config.nPrefill + config.nDecode + i;
+                startVitEngine(config, performance, serversByPort, bossGroup, workerGroup,
+                        "vit-" + i, config.baseGrpcPort + index, index);
+            }
             for (FastRpcService service : services.values()) {
                 service.setEngineEventLog(engineEventLog);
             }
@@ -138,10 +143,10 @@ public final class JavaMockEngineCluster {
             // domain→hosts mapping consumed by LocalServiceDiscovery on the master,
             // kept in sync by /add_engine + /remove_engine at runtime.
             DiscoveryFileStore discoveryFileStore = config.discoveryFile != null
-                    ? new DiscoveryFileStore(config.discoveryFile, config.prefillDomain, config.decodeDomain)
+                    ? new DiscoveryFileStore(config.discoveryFile, config.prefillDomain, config.decodeDomain, config.vitDomain)
                     : null;
             if (discoveryFileStore != null) {
-                discoveryFileStore.rewrite(services);
+                discoveryFileStore.rewrite(config.engines);
             }
             DynamicEngineManager engineManager = new DynamicEngineManager(
                     config, performance, services, serversByPort, bossGroup, workerGroup,
@@ -153,6 +158,7 @@ public final class JavaMockEngineCluster {
         } catch (Throwable error) {
             scheduler.shutdownNow();
             for (FastRpcService s : services.values()) s.shutdown();
+            config.engines.values().stream().filter(service -> service instanceof MockVitEngine).forEach(MockEngineLifecycle::shutdown);
             shutdown(serversByPort, bossGroup, workerGroup, config);
             throw error;
         }
@@ -197,17 +203,19 @@ public final class JavaMockEngineCluster {
             // Drain while completion scheduling still exists, then close each
             // independent owner even when another close operation fails.
             for (FastRpcService service : services.values()) close.add(service::drainAndShutdown);
+            config.engines.values().stream().filter(service -> service instanceof MockVitEngine).forEach(service -> close.add(service::closeAdmission));
             close.add(scheduler::shutdownNow);
             for (FastRpcService service : services.values()) close.add(service::shutdown);
+            config.engines.values().stream().filter(service -> service instanceof MockVitEngine).forEach(service -> close.add(service::shutdown));
             close.add(() -> shutdown(serversByPort, bossGroup, workerGroup, config));
             if (whaleMonitor != null) close.add(whaleMonitor::close);
             if (engineEventLog != null) close.add(engineEventLog::close);
             ShutdownTasks.runAll(close);
         }, "java-mock-engine-shutdown"));
 
-        System.out.printf("Java mock engine ready: prefill=%d decode=%d ports=%d-%d eventLoops=%d performance=%s completionThreads=%d statsIntervalMs=%d%n",
-                config.nPrefill, config.nDecode, config.baseGrpcPort,
-                config.baseGrpcPort + config.nPrefill + config.nDecode - 1,
+        System.out.printf("Java mock engine ready: prefill=%d decode=%d vit=%d ports=%d-%d eventLoops=%d performance=%s completionThreads=%d statsIntervalMs=%d%n",
+                config.nPrefill, config.nDecode, config.nVit, config.baseGrpcPort,
+                config.baseGrpcPort + config.nPrefill + config.nDecode + config.nVit - 1,
                 config.eventLoopThreads, config.calibrationFile, config.completionThreads,
                 config.statsIntervalMs);
         if (config.eventsFile != null) {
@@ -342,11 +350,24 @@ public final class JavaMockEngineCluster {
             // semantics) — the FastRpcService has no other handle on the
             // server it backs.
             service.setGrpcServer(server);
+            config.engines.put(grpcPort, service);
         } catch (IOException e) {
             services.remove(grpcPort);
             throw e;
         }
         return service;
+    }
+
+    static MockVitEngine startVitEngine(Config config, MockPerformanceModel performance, Map<Integer, Server> servers,
+            EventLoopGroup boss, EventLoopGroup workers, String name, int port, int index) throws IOException {
+        var engine = new MockVitEngine(config, performance, name, declaredHost(config, index), port, boss, workers);
+        try {
+            servers.put(port, engine.start());
+            config.engines.put(port, engine);
+            return engine;
+        } catch (IOException | RuntimeException error) {
+            engine.shutdown(); throw error;
+        }
     }
 
     private static void shutdown(Map<Integer, Server> serversByPort,
@@ -473,6 +494,7 @@ public final class JavaMockEngineCluster {
         roleEndpoint.put("group", "mock");
         roleEndpoint.put("prefill_endpoint", prefillEndpoint);
         roleEndpoint.put("decode_endpoint", decodeEndpoint);
+        if (config.nVit > 0 || config.engineConfig != null && config.engineConfig.snapshot().path("roles").has("vit")) roleEndpoint.put("vit_endpoint", Map.of("address", config.vitDomain, "protocol", "http", "path", "/"));
         Map<String, Object> serviceConfig = new LinkedHashMap<>();
         serviceConfig.put("service_id", "aigc.text-generation.generation.engine_service");
         serviceConfig.put("load_balance", true);
@@ -485,10 +507,12 @@ public final class JavaMockEngineCluster {
         List<Map<String, Object>> engines = new ArrayList<>(config.nPrefill + config.nDecode);
         addEngineRecords(engines, config, 0, config.nPrefill, "prefill");
         addEngineRecords(engines, config, config.nPrefill, config.nDecode, "decode");
+        addEngineRecords(engines, config, config.nPrefill + config.nDecode, config.nVit, "vit");
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("prefill_domain", config.prefillDomain);
         payload.put("decode_domain", config.decodeDomain);
+        payload.put("vit_domain", config.vitDomain);
         payload.put("env", env);
         payload.put("engines", engines);
 
@@ -577,7 +601,7 @@ public final class JavaMockEngineCluster {
         }
     }
 
-    static final class FastRpcService extends RpcServiceGrpc.RpcServiceImplBase {
+    static final class FastRpcService extends RpcServiceGrpc.RpcServiceImplBase implements MockEngineLifecycle {
         volatile MockCacheDiagnostics cacheDiagnostics;
         private final MockVitClient vitClient = new MockVitClient();
 
@@ -1746,7 +1770,7 @@ public final class JavaMockEngineCluster {
         private long admittedRpcsAtClose;
         private long rejectedRpcs;
 
-        synchronized void closeAdmission() {
+        public synchronized void closeAdmission() {
             if (!admissionClosed) {
                 admissionClosed = true;
                 admissionClosedEpochMs = System.currentTimeMillis();
@@ -1754,12 +1778,12 @@ public final class JavaMockEngineCluster {
             }
         }
 
-        synchronized void reopenAdmissionAfterFailedRemoval() {
+        public synchronized void reopenAdmissionAfterFailedRemoval() {
             admissionClosed = false;
             admissionClosedEpochMs = 0;
         }
 
-        synchronized Map<String, Object> admissionSnapshot() {
+        public synchronized Map<String, Object> admissionSnapshot() {
             return Map.of("admission_open", admissionClosed ? 0 : 1,
                     "admitted_rpcs_total", admittedRpcs,
                     "rejected_rpcs_total", rejectedRpcs,
@@ -5657,7 +5681,7 @@ public final class JavaMockEngineCluster {
          * touches them, and with {@link #shuttingDown} set they can no longer
          * trip checkLeakDrain.
          */
-        void drainAndShutdown() {
+        public void drainAndShutdown() {
             shuttingDown = true;
             abortWatermarks();
             cache.capacityChanged();
@@ -5900,7 +5924,7 @@ public final class JavaMockEngineCluster {
         /**
          * Shut down the dedicated response-polling executor.
          */
-        void shutdown() {
+        public void shutdown() {
             shuttingDown = true;
             batchAdmissions.values().forEach(slot -> slot.reject(MockRpcErrors.details(14, "Prefill batch server is shutting down")));
             vitClient.close();
@@ -5968,7 +5992,7 @@ public final class JavaMockEngineCluster {
             }
         }
         void resetEnqueueCount() { this.enqueueCount.set(0); }
-        void setStopped(boolean s) {
+        public void setStopped(boolean s) {
             synchronized (decodeQueueLock) {
                 this.stopped = s;
                 if (s && roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
@@ -6005,7 +6029,7 @@ public final class JavaMockEngineCluster {
             }
         }
         void setGrpcServer(Server server) { this.grpcServer = server; }
-        boolean isStopped() { return stopped; }
+        public boolean isStopped() { return stopped; }
         Map<String, String> whaleMetricTags() {
             Map<String, String> tags = WhaleMockMonitor.engineTags(
                     System.getenv(), whaleBundle ? whalePodIp : host, roleType.name());
@@ -6070,19 +6094,19 @@ public final class JavaMockEngineCluster {
             }
             return metrics;
         }
-        int getGrpcPort() { return grpcPort; }
+        public int getGrpcPort() { return grpcPort; }
         int getDownstreamOwnershipCount() { return downstreamDecodeOwners.size(); }
         int getUpstreamOwnershipCount() { return upstreamPrefillOwners.size(); }
         boolean hasDownstreamOwnership(long requestId) { return downstreamDecodeOwners.containsKey(requestId); }
         boolean hasUpstreamOwnership(long requestId) { return upstreamPrefillOwners.containsKey(requestId); }
-        String getRoleName() { return roleName; }
-        String getEngineName() { return engineName; }
-        String getHost() { return host; }
+        public String getRoleName() { return roleName; }
+        public String getEngineName() { return engineName; }
+        public String getHost() { return host; }
         long getTotalKvTokens() { return totalKvTokens; }
 
         MockPerformanceModel getPerformance() { return performance; }
-        int getRunningCount() { return runningTasks.size(); }
-        int getWaitingCount() { return waitingPrefillRequests.get(); }
+        public int getRunningCount() { return runningTasks.size(); }
+        public int getWaitingCount() { return waitingPrefillRequests.get(); }
         int getActivePrefillRequestCount() { return activePrefillRequests.get(); }
         long getAcceptedCount() { return acceptedCount.get(); }
         long getCompletedCount() { return completedCount.get(); }
@@ -6093,7 +6117,7 @@ public final class JavaMockEngineCluster {
         /** Pool availability (free + pure-LRU) clamped to total, minus pressure. */
         long getAvailableKvTokens() { return availableKvTokens(); }
         /** Total pool blocks (ceil(totalKvTokens/spb) or explicit override). */
-        Map<String, Object> effectiveConfiguration() {
+        public Map<String, Object> effectiveConfiguration() {
             Map<String, Object> state = new LinkedHashMap<>();
             state.put("engine", engineName);
             state.put("config", effectiveConfig == null ? Map.of() : effectiveConfig);
@@ -6110,9 +6134,12 @@ public final class JavaMockEngineCluster {
         /** spb — the pool's token<->block conversion factor (reported as block_size). */
         int getSeqSizePerBlock() { return seqSizePerBlock; }
         boolean isLeakDetected() { return leakDetected.get(); }
-        boolean isShuttingDown() { return shuttingDown; }
+        public boolean isShuttingDown() { return shuttingDown; }
         int getActiveDecodeCount() { return activeDecodeRequests.get(); }
         int getActivePrefillBatchCount() { return activePrefillBatches.get(); }
+        @Override public int removalWaitingCount() {
+            return roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE ? getDecodePendingQueueDepth() : getWaitingCount();
+        }
         int getDecodePendingQueueDepth() { return decodePendingQueueSize(); }
         int getPrefillPendingQueueDepth() { return prefillPendingQueueSize(); }
 
@@ -6132,7 +6159,7 @@ public final class JavaMockEngineCluster {
          * Post-completion visibility is the master's scale-in contract, not the
          * engine's.
          */
-        Map<String, Integer> inflightWorkSnapshot() {
+        public Map<String, Integer> inflightWorkSnapshot() {
             Map<String, Integer> work = new LinkedHashMap<>();
             work.put("running_tasks", runningTasks.size());
             work.put("waiting_prefill", waitingPrefillRequests.get());
@@ -6149,7 +6176,7 @@ public final class JavaMockEngineCluster {
             return work;
         }
 
-        boolean hasInflightWork() {
+        public boolean hasInflightWork() {
             return !runningTasks.isEmpty()
                     || waitingPrefillRequests.get() != 0
                     || activePrefillBatches.get() != 0
@@ -6518,14 +6545,14 @@ public final class JavaMockEngineCluster {
          * ~L327-358), followed by the pre-existing Java-only fields. Python field names and
          * nesting must not be renamed.
          */
-        Map<String, Object> getTopologySnapshot() {
+        public Map<String, Object> getTopologySnapshot() {
             return Map.of("name", engineName, "role", roleName.toLowerCase(),
                     "grpc_addr", host + ":" + grpcPort,
                     "http_addr", host + ":" + (grpcPort - 1),
                     "engine_incarnation", engineIncarnation);
         }
 
-        Map<String, Object> getSnapshot() {
+        public Map<String, Object> getSnapshot() {
             return getSnapshot(true);
         }
 
@@ -6944,6 +6971,7 @@ public final class JavaMockEngineCluster {
         private EventLoopGroup rpcTransport;
         synchronized MockRpcExecutors rpcExecutors(EventLoopGroup transport) {
             if (rpcExecutors == null || rpcTransport.isTerminated()) {
+                if (rpcTransport != null && rpcTransport.isTerminated()) engines.clear();
                 rpcExecutors = new MockRpcExecutors(rpcThreads, rpcMaxCalls);
                 rpcTransport = transport;
             }
@@ -6957,6 +6985,9 @@ public final class JavaMockEngineCluster {
         // Package-private for direct assertions in ClusterConfigParamTest.
         int nPrefill = 2;
         int nDecode = 4;
+        int nVit = 0;
+        String vitModelPath;
+        final Map<Integer, MockEngineLifecycle> engines = new ConcurrentHashMap<>();
         int baseGrpcPort = 61_000;
         int eventLoopThreads = 32;
         boolean cacheStatusCompactEncoding = false;
@@ -6969,6 +7000,7 @@ public final class JavaMockEngineCluster {
         String bindHost = "0.0.0.0";
         String prefillDomain = "mock.prefill.hosts.address";
         String decodeDomain = "mock.decode.hosts.address";
+        String vitDomain = "mock.vit.hosts.address";
         String endpointFile;
         String envFile;
         String discoveryFile;
@@ -7019,6 +7051,9 @@ public final class JavaMockEngineCluster {
                 switch (key) {
                     case "--mock.n_prefill" -> config.nPrefill = Integer.parseInt(value);
                     case "--mock.n_decode" -> config.nDecode = Integer.parseInt(value);
+                    case "--mock.n_vit" -> config.nVit = Integer.parseInt(value);
+                    case "--mock.vit_model_path" -> config.vitModelPath = value;
+                    case "--mock.vit_domain" -> config.vitDomain = value;
                     case "--mock.base_grpc_port" -> config.baseGrpcPort = Integer.parseInt(value);
                     case "--mock.event_loop_threads" -> config.eventLoopThreads = Integer.parseInt(value);
                     case "--mock.cache_status_compact_encoding" -> config.cacheStatusCompactEncoding = parseBooleanFlag(value, key);
@@ -7063,7 +7098,7 @@ public final class JavaMockEngineCluster {
                 throw new IllegalArgumentException("--mock.whale_bundle requires --mock.whale true");
             }
             if (config.whale) {
-                if ((!config.whaleBundle && config.nPrefill + config.nDecode != 1)
+                if ((!config.whaleBundle && config.nPrefill + config.nDecode + config.nVit != 1)
                         || config.host.equals("127.0.0.1") || config.host.equals("0.0.0.0")
                         || config.host.isBlank()) {
                     throw new IllegalArgumentException("Whale requires exactly one engine and an advertised Pod IP");
@@ -7081,10 +7116,10 @@ public final class JavaMockEngineCluster {
             }
             // Single-role clusters are allowed (e.g. engine_kill_restart_test victim JVMs
             // hosting only prefill or only decode engines), but at least one engine is required.
-            if (config.nPrefill < 0 || config.nDecode < 0
-                    || config.nPrefill + config.nDecode < 1) {
+            if (config.nPrefill < 0 || config.nDecode < 0 || config.nVit < 0
+                    || config.nPrefill + config.nDecode + config.nVit < 1) {
                 throw new IllegalArgumentException(
-                        "n-prefill/n-decode must be >= 0 with at least one engine in total");
+                        "n_prefill/n_decode/n_vit must be >= 0 with at least one engine in total");
             }
             if (config.eventLoopThreads < 1 || config.completionThreads < 1 || config.rpcThreads < 1 || config.rpcMaxCalls < 1) {
                 throw new IllegalArgumentException("thread counts must be positive");
@@ -7100,6 +7135,9 @@ public final class JavaMockEngineCluster {
             }
             if (config.nPrefill > 0) config.engineConfig.role("prefill");
             if (config.nDecode > 0) config.engineConfig.role("decode");
+            if (config.nVit > 0) config.engineConfig.role("vit");
+            if (config.baseGrpcPort < 2 || (long) config.baseGrpcPort + config.nPrefill + config.nDecode + config.nVit - 1 > 65535)
+                throw new IllegalArgumentException("engine ports must fit [2, 65535]");
             return config;
         }
     }

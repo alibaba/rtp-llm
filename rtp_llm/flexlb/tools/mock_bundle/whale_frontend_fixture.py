@@ -112,7 +112,7 @@ def start_mock_vit(model):
 
     java = str(Path(os.environ.get("JAVA_HOME", "/opt/taobao/java")) / "bin/java")
     jar = Path(os.environ.get("MOCK_BUNDLE_JAR_DIR", "/opt/flexlb-mock/tools/mock_bundle/jars")) / "mock.jar"
-    port = int(os.environ.get("MOCK_VIT_PORT", "22161"))
+    port = int(os.environ.get("MOCK_GRPC_BASE_PORT", "22161"))
     from runtime_configs import calibration_input, engine_input
 
     runtime = Path(os.environ.get("HIPPO_PROC_WORKDIR", "/tmp")) / "mock-vit-config"
@@ -126,10 +126,12 @@ def start_mock_vit(model):
         "-Djava.awt.headless=true",
         "-cp",
         str(jar),
-        "org.flexlb.mockengine.MockVitServer",
-        "--mock.port",
+        "org.flexlb.mockengine.JavaMockEngineCluster",
+        "--mock.n_prefill", "0", "--mock.n_decode", "0", "--mock.n_vit", "1",
+        "--mock.endpoint_file", str(runtime / "vit-endpoints.json"),
+        "--mock.base_grpc_port",
         str(port),
-        "--mock.model_path",
+        "--mock.vit_model_path",
         str(model),
         "--mock.engine_config",
         str(runtime / "engine-config.json"),

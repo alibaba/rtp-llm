@@ -139,6 +139,11 @@ final class MockPerformanceModel {
         if (!forward.path("vit").isMissingNode()) MockEngineConfig.fields(forward.path("vit"), "fixed_ms", "jitter", "pause");
         if (!mock.path("vit").isMissingNode()) MockEngineConfig.fields(mock.path("vit"), "hidden_size", "max_output_bytes");
         number(forward.path("vit"), "fixed_ms", 1);
+        var vit = mock.path("vit");
+        if (vit.has("hidden_size")) MockEngineConfig.integer(vit, "hidden_size", 1);
+        if (vit.has("max_output_bytes") && (!vit.path("max_output_bytes").isIntegralNumber()
+                || !vit.path("max_output_bytes").canConvertToLong() || vit.path("max_output_bytes").longValue() < 1))
+            throw new IllegalArgumentException("mock.vit.max_output_bytes must be a positive int64");
         Calibration calibration = loadCalibration();
         if (node.has("calibration_sha256") && !calibration.sha256().equals(node.path("calibration_sha256").asText()))
             throw new IllegalStateException("calibration_sha256 disagrees with packaged mock calibration");
@@ -467,8 +472,9 @@ final class MockPerformanceModel {
         var mock = patch.path("mock");
         MockEngineConfig.fields(mock, "timing", "forward", "rpc");
         var forward = mock.path("forward");
-        if (!forward.isMissingNode()) MockEngineConfig.fields(forward, "prefill", "decode");
+        if (!forward.isMissingNode()) MockEngineConfig.fields(forward, "prefill", "decode", "vit");
         var pre = forward.path("prefill"); var dec = forward.path("decode");
+        if (forward.has("vit")) MockEngineConfig.fields(forward.path("vit"), "fixed_ms", "jitter", "pause");
         if (!pre.isMissingNode()) MockEngineConfig.fields(pre, "fixed_ms", "jitter", "pause");
         if (!dec.isMissingNode()) MockEngineConfig.fields(dec, "scale", "jitter", "pause");
         var merged = calibrationConfig == null ? new ObjectMapper().createObjectNode() : calibrationConfig.deepCopy();

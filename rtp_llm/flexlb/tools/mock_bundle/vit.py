@@ -25,35 +25,14 @@ def command(env):
         raise ValueError("ViT requires real model metadata")
     runtime = Path(env.get("HIPPO_PROC_WORKDIR", "/tmp")) / "mock-vit-assets"
     model = prepare_assets(source, runtime)
-    java = str(Path(env.get("JAVA_HOME", "/opt/taobao/java")) / "bin/java")
-    jar = Path(env.get("MOCK_BUNDLE_JAR_DIR", str(Path(__file__).parent / "jars"))) / "mock.jar"
-    from runtime_configs import calibration_input, engine_input
+    from standalone_mock import command as cluster_command
 
-    engine = engine_input(env)
-    calibration = calibration_input(env)
-    runtime.mkdir(parents=True, exist_ok=True)
-    (runtime / "engine-config.json").write_text(json.dumps(engine))
-    (runtime / "calibration.json").write_text(json.dumps(calibration))
-    return [
-        java,
-        *shlex.split(env.get("MOCK_VIT_JAVA_OPTS", "-Xms64m -Xmx512m")),
-        "-Djava.awt.headless=true",
-        "-cp",
-        str(jar),
-        "org.flexlb.mockengine.MockVitServer",
-        "--mock.kmonitor",
-        kmonitor,
-        "--mock.http_port",
-        str(port),
-        "--mock.port",
-        str(port + 1),
-        "--mock.model_path",
-        str(model),
-        "--mock.engine_config",
-        str(runtime / "engine-config.json"),
-        "--mock.calibration",
-        str(runtime / "calibration.json"),
-    ]
+    if env.get("MOCK_DEPLOYMENT_MODE", "per_engine") != "per_engine":
+        raise ValueError("VIT role launcher requires MOCK_DEPLOYMENT_MODE=per_engine")
+    return cluster_command({**env, "MOCK_DEPLOYMENT_MODE": "per_engine", "START_PORT": str(port),
+        "MOCK_VIT_MODEL_PATH": str(model), "MOCK_BUNDLE_RUN_DIR": str(runtime),
+        "MOCK_JAVA_OPTS": env.get("MOCK_VIT_JAVA_OPTS", "-Xms64m -Xmx512m -Djava.awt.headless=true"),
+        "MOCK_KMONITOR_ENABLED": kmonitor})
 
 
 if __name__ == "__main__":

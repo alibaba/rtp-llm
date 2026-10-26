@@ -38,31 +38,6 @@ def master_discovery_environment(endpoints, legacy):
     return legacy_discovery(endpoints, file_discovery=True) if legacy else endpoints["env"]
 
 
-def vit_configuration(cfg, env, mock_port, legacy):
-    enabled = env.get("MOCK_VIT_ENABLED", "0")
-    if enabled not in {"0", "1"}:
-        raise ValueError("MOCK_VIT_ENABLED must be 0 or 1")
-    if enabled == "0":
-        return None
-    if legacy:
-        raise ValueError("modern Mock ViT requires the modern Master protocol")
-    values = {"port": int(env.get("MOCK_VIT_PORT", mock_port + cfg["prefill"] + cfg["decode"]))}
-    if not mock_port + cfg["prefill"] + cfg["decode"] <= values["port"] <= 65535:
-        raise ValueError("Mock ViT port overlaps P/D or exceeds 65535")
-    return values
-
-
-def publish_vit_discovery(source, destination, vit_address):
-    # P/D owns the source file and can rewrite it during dynamic scale changes.
-    # Publish a separate atomic combined view rather than racing its writer.
-    hosts = json.loads(source.read_text())
-    hosts["mock.vit.hosts.address"] = [vit_address]
-    payload = json.dumps(hosts, sort_keys=True)
-    if not destination.exists() or destination.read_text() != payload:
-        temporary = destination.with_suffix(".tmp")
-        temporary.write_text(payload)
-        temporary.replace(destination)
-
 
 def run():
     if os.environ.get("RTP_LLM_MOCK_BUNDLE") != "1":
@@ -109,7 +84,11 @@ def run():
     jars = Path(os.environ.get("MOCK_BUNDLE_JAR_DIR", ROOT / "jars"))
     raw = os.environ.get("FLEXLB_CONFIG") or render_env(profile)
     legacy = os.environ.get("MOCK_BUNDLE_LEGACY_MASTER") == "1"
-    vit_cfg = vit_configuration(cfg, os.environ, mock_port, legacy)
+    vit_count = int(os.environ.get("MOCK_VIT_COUNT", "0"))
+    if vit_count < 0 or mock_port + cfg["prefill"] + cfg["decode"] + vit_count - 1 > 65535:
+        raise ValueError("invalid MOCK_VIT_COUNT or engine port range")
+    if legacy and vit_count:
+        raise ValueError("modern Mock ViT requires the modern Master protocol")
     mock_raw = mock_formula_config(raw, legacy, os.environ.get("MOCK_PREFILL_EXECUTION_FORMULA"))
     (runtime / "master-source-config.json").write_text(raw)
     dispatcher = json.loads(raw).get("dispatcher", {}).get("type", "BATCH")
@@ -185,6 +164,8 @@ def run():
                 kmonitor=cfg["kmonitor"],
                 n_prefill=cfg["prefill"],
                 n_decode=cfg["decode"],
+                n_vit=vit_count,
+                vit_model_path=os.environ.get("MOCK_VIT_MODEL_PATH"),
                 base_grpc_port=mock_port,
                 event_loop_threads=cfg["event_loop_threads"],
                 completion_threads=cfg["completion_threads"],
@@ -203,38 +184,6 @@ def run():
         endpoints = json.loads((runtime / "endpoints.json").read_text())
         env.update(master_discovery_environment(endpoints, legacy))
 
-        if vit_cfg is not None:
-            vit = start(
-                "vit",
-                [
-                    java,
-                    "-Xms64m",
-                    "-Xmx512m",
-                    "-Djava.awt.headless=true",
-                    "-cp",
-                    str(jars / "mock.jar"),
-                    "org.flexlb.mockengine.MockVitServer",
-                    "--mock.engine_config",
-                    str(runtime / "engine-config.json"),
-                    "--mock.calibration",
-                    str(performance_path),
-                    *[part for key, value in vit_cfg.items() for part in ("--mock." + key, str(value))],
-                    *(["--mock.model_path", os.environ["MOCK_VIT_MODEL_PATH"]] if os.environ.get("MOCK_VIT_MODEL_PATH") else []),
-                ],
-                env,
-            )
-            ready(vit_cfg["port"], vit, pod_ip)
-            service = json.loads(env["MODEL_SERVICE_CONFIG"])
-            pd_discovery = Path(service["discovery_file"])
-            combined_discovery = runtime / "vit-discovery.json"
-            vit_address = f"{pod_ip}:{vit_cfg['port'] - 1}"
-            publish_vit_discovery(pd_discovery, combined_discovery, vit_address)
-            service["discovery_file"] = str(combined_discovery)
-            for group in service["role_endpoints"]:
-                group["vit_endpoint"] = {"address": "mock.vit.hosts.address", "protocol": "http", "path": "/"}
-            env["MODEL_SERVICE_CONFIG"] = json.dumps(service)
-            (runtime / "model-service.json").write_text(env["MODEL_SERVICE_CONFIG"])
-        env.update(FLEXLB_CONFIG=raw, SERVER_PORT=str(http_port), MANAGEMENT_SERVER_PORT=str(http_port + 1))
         master = start(
             "master",
             [
@@ -278,7 +227,7 @@ def run():
                     "fetch_output_stream": fetch_output_stream == "1",
                     "master_pid": master.pid,
                     "mock_pid": mock.pid,
-                    "vit": vit_cfg,
+                    "vit": {"count": vit_count, "pid": mock.pid},
                     "master_http_port": http_port,
                     "mock_http_port": mock_port - 1,
                     "configuration": cfg,
@@ -290,8 +239,6 @@ def run():
             )
         )
         while not stopping:
-            if vit_cfg is not None:
-                publish_vit_discovery(pd_discovery, combined_discovery, vit_address)
             if any(p.poll() is not None for p in children):
                 raise RuntimeError("bundle child exited; terminate its peer")
             time.sleep(0.2)

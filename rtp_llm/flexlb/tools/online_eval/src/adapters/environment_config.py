@@ -105,6 +105,8 @@ class EnvSpec:
     diagnostic_events: bool = True
     n_prefill: int = 2
     n_decode: int = 4
+    n_vit: int = 0
+    vit_model_path: Optional[str] = None
     mock_heap: str = DEFAULT_MOCK_HEAP
     mock_extra_args: list = field(default_factory=list)
     perf: dict = field(default_factory=default_perf)

@@ -45,28 +45,30 @@ def command(env):
         raise ValueError("RTP_LLM_MOCK_BUNDLE=1 is required for test-only Mock")
     plan = resolve(env, "mock")
     role = env.get("ROLE_TYPE")
-    if role is not None and (plan.mode != "per_engine" or role not in ("PREFILL", "DECODE")):
-        raise ValueError("ROLE_TYPE is PREFILL or DECODE and only applies to per_engine")
-    prefill = integer(env, "MOCK_PREFILL_COUNT", int(role != "DECODE"), minimum=0)
-    decode = integer(env, "MOCK_DECODE_COUNT", int(role != "PREFILL"), minimum=0)
-    if role and (prefill, decode) != ((1, 0) if role == "PREFILL" else (0, 1)):
+    if role is not None and (plan.mode != "per_engine" or role not in ("PREFILL", "DECODE", "VIT")):
+        raise ValueError("ROLE_TYPE is PREFILL, DECODE or VIT and only applies to per_engine")
+    prefill = integer(env, "MOCK_PREFILL_COUNT", int(role in (None, "PREFILL")), minimum=0)
+    decode = integer(env, "MOCK_DECODE_COUNT", int(role in (None, "DECODE")), minimum=0)
+    vit = integer(env, "MOCK_VIT_COUNT", int(role == "VIT"), minimum=0)
+    expected = {"PREFILL": (1,0,0), "DECODE": (0,1,0), "VIT": (0,0,1)}
+    if role and (prefill, decode, vit) != expected[role]:
         raise ValueError("ROLE_TYPE conflicts with Mock engine counts")
-    if prefill + decode == 0:
+    if prefill + decode + vit == 0:
         raise ValueError("At least one Mock engine is required")
     remote_decode = plan.remote_decode
-    if remote_decode and prefill + decode != 1:
+    if remote_decode and prefill + decode + vit != 1:
         raise ValueError("per_engine requires exactly one engine per Pod")
     http_port = integer(env, "START_PORT", 29129, minimum=1, maximum=65534)
     port = integer(env, "MOCK_GRPC_BASE_PORT", http_port + 1, minimum=2, maximum=65535)
     if "START_PORT" in env and port != http_port + 1:
         raise ValueError("MOCK_GRPC_BASE_PORT must equal START_PORT + 1")
-    if port + prefill + decode - 1 > 65535:
+    if port + prefill + decode + vit - 1 > 65535:
         raise ValueError("Mock engine ports exceed 65535")
     host = env.get("POD_IP") or socket.gethostbyname(socket.gethostname())
     address = ipaddress.ip_address(host)
     if address.is_loopback or address.is_unspecified or address.version != 4:
         raise ValueError("POD_IP must be a routable IPv4 pod address")
-    numeric = dict(n_prefill=prefill, n_decode=decode, base_grpc_port=port)
+    numeric = dict(n_prefill=prefill, n_decode=decode, n_vit=vit, base_grpc_port=port)
     for flag, key, default in (
         ("--mock.event_loop_threads", "MOCK_EVENT_LOOP_THREADS", 4),
         ("--mock.completion_threads", "MOCK_COMPLETION_THREADS", 4),
@@ -97,6 +99,7 @@ def command(env):
         endpoint_file=runtime / "endpoints.json",
         discovery_file=None if remote_decode else runtime / "discovery.json",
         calibration=runtime / "calibration.json",
+        vit_model_path=env.get("MOCK_VIT_MODEL_PATH"),
         engine_config=runtime / "engine-config.json",
         **numeric,
     ).argv()
@@ -108,10 +111,11 @@ def command(env):
         runtime,
         prefill=prefill,
         decode=decode,
+        vit=vit,
         host=host,
         grpc_base_port=port,
         vip_grpc_endpoints=[
-            {"role": "prefill" if i < prefill else "decode", "ip": host, "port": port + i} for i in range(prefill + decode)
+            {"role": "prefill" if i < prefill else "decode" if i < prefill+decode else "vit", "ip": host, "port": port + i} for i in range(prefill + decode + vit)
         ],
     )
     return args

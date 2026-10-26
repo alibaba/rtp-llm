@@ -118,3 +118,5 @@ fixture 与真实推理 KV 容量相互独立的边界。Real 的全量响应仍
 构造 protobuf Map；这里的直接编码是 Mock 的负载生成优化，不代表 real 没有这些成本。
 该路径适合验证 Master 的解析、索引和健康隔离，不能用于验收真实引擎侧的大响应
 资源消耗或心跳延迟。实验仍须按实际响应条目/s、bytes/s 验收同步强度。
+
+启用 `--mock.n_vit <数量>` 时，V 与 P/D 由同一个集群入口承载，共用 JVM 和 RPC 运行资源，每个 worker 保留独立的地址、缓存、队列和身份。Whale 的 per_engine 启动器按角色选择 1P、1D 或 1V，并由部署决定独立 JVM/Pod；详细契约见 [ViT 图片链路](../tools/mock_bundle/docs/VIT_API.md)。

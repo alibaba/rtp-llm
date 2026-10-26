@@ -14,8 +14,10 @@ Mock 的行为配置消费 real 完成解析和推导后的值，不再维护另
 校准文件不能包含 block size、FIFO、缓存复用、reserve 或等待队列门禁。
 `mock.forward.prefill.expression` 是 Mock 的执行公式；Master 的预测公式由 Master 配置独立负责。
 旧 `--performance`、容量 CLI、`--master-config` 与 `MOCK_PERFORMANCE_CONFIG*` 不再接受。
-`/set_perf` 接受嵌套的 `mock.timing`、`mock.rpc`、`mock.forward.prefill`（fixed_ms/jitter/pause）和 `mock.forward.decode`（scale/jitter/pause），以及 `engine`/`port` 定位字段；不能修改 real 行为门禁。
+`/set_perf` 接受嵌套的 `mock.timing`、`mock.rpc`、`mock.forward.prefill`（fixed_ms/jitter/pause）、`mock.forward.decode`（scale/jitter/pause）和 V 实例的 `mock.forward.vit`（fixed_ms/jitter/pause），以及 `engine`/`port` 定位字段；不能修改 real 行为门禁。
 故障仍由显式故障接口配置。
+
+V 与 P/D 使用 JavaMockEngineCluster 同一入口；`mock.n_vit` 默认 0，启用后默认共 JVM。`mock.vit_model_path` 提供 prepared V4.1 模型元数据。实例管理与动态发现同样覆盖 V；进程或 Pod 拆分由 Whale 启动器负责。共 JVM 保留独立 gRPC 地址及每个 V 的缓存、队列和容量，不合并为一个全局 V。
 
 ## Mock 命名与时间模型
 
@@ -312,7 +314,7 @@ P/D 同时返回初始校准、当前公式/step/EOS 覆盖与 generation。
 
 此处比较的是最终配置的行为，不能用同名字段、JSON 可读取或 UT 数量代替行为等价。
 real 的字段来自 `cpp/config/ConfigModules.h`、`config/py_config_modules.py` 和对应 server args；
-Mock 的公共入口是 `MockEngineConfig`、`MockVitServer` 和 `JavaMockEngineCluster.Config`。
+Mock 的引擎公共入口是 `JavaMockEngineCluster`，P/D/V 的 real 行为配置由 `MockEngineConfig` 统一读取。
 调度只有 FIFO 一条实现；测试向量也使用 real 的 scheduler 参数名。旧 direct/coalesce/regroup 模式、并发 lane 和可选队列状态模式已删除。
 
 ### 双方都有的配置

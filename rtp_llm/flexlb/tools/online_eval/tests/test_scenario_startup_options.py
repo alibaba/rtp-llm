@@ -20,6 +20,15 @@ def spec(raw):
 
 
 class StartupOptionsTest(unittest.TestCase):
+    def test_vit_count_crosses_the_same_startup_and_reuse_contract(self):
+        actual = spec({"n_vit": 2, "vit_model_path": "/model"})
+        self.assertEqual((actual.n_vit, actual.vit_model_path), (2, "/model"))
+        self.assertEqual(spec({}).n_vit, 0)
+        from dataclasses import replace
+        self.assertNotEqual(actual.fingerprint(), replace(actual, n_vit=1).fingerprint())
+        for invalid in (-1, True, 1.5, "2"):
+            with self.assertRaises(ValueError): spec({"n_vit": invalid})
+
     def test_rpc_limits_cross_declaration_startup_and_reuse_contract(self):
         actual = spec({"event_loop_threads": 7, "rpc_threads": 3, "rpc_max_calls": 19})
         self.assertEqual((actual.event_loop_threads, actual.rpc_threads, actual.rpc_max_calls), (7, 3, 19))

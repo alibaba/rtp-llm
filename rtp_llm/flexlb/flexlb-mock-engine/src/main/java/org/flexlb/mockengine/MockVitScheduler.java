@@ -60,7 +60,7 @@ final class MockVitScheduler implements AutoCloseable {
     private final LinkedBlockingQueue<Chunk> waiting = new LinkedBlockingQueue<>();
     private final int queueSize, batchSize;
     private final long maxImages, waitMs;
-    private final double forwardMs;
+    private volatile double forwardMs;
     private final MockVitWorkEstimate budget;
     private final Thread worker;
     private volatile boolean closed;
@@ -162,6 +162,8 @@ final class MockVitScheduler implements AutoCloseable {
     }
     private MockTiming timing = MockTiming.defaults();
     void timing(MockTiming value) { timing = value; }
+    void forwardMs(double value) { forwardMs = value; }
+    double forwardMs() { return forwardMs; }
 
     private void run() {
         List<Chunk> batch = List.of();

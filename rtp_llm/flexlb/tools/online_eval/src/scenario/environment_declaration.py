@@ -150,6 +150,8 @@ class EnvironmentDeclaration:
     master_stable_window_s: float
     debug_enabled: bool = field(metadata={"scalar": (bool, False, None)})
     master_sync_log: bool = field(metadata={"scalar": (bool, False, None)})
+    n_vit: int | None = scalar_field(int, minimum=0, startup=True, reconfigure=True)
+    vit_model_path: str | None = scalar_field(str, startup=True, reconfigure=True)
     prefill_cache_blocks: int | None = scalar_field(int, minimum=1, startup=True, capture="prefill_kv_pool_blocks")
     decode_cache_blocks: int | None = scalar_field(int, minimum=1, startup=True, capture="decode_kv_pool_blocks")
     mock_auto_fetch: bool | None = scalar_field(bool, minimum=None, startup=True, reconfigure=True)

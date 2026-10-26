@@ -65,6 +65,7 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
     private volatile java.util.function.Consumer<Map<String, Number>> metrics = ignored -> {};
     private final boolean cacheEnabled;
     private volatile boolean closed;
+    java.util.function.BooleanSupplier alive = () -> !closed;
     final AtomicLong computations = new AtomicLong();
 
     MockVitService(Config config, MockV41Image.Config model, com.fasterxml.jackson.databind.JsonNode document) {
@@ -104,6 +105,7 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
     }
 
     void timing(MockTiming timing) { gpuScheduler.timing(timing); }
+    void forwardMs(double value) { gpuScheduler.forwardMs(value); }
 
     void reportTiming(Map<String, Number> values) {
         try { metrics.accept(values); } catch (RuntimeException ignored) { /* telemetry owns no work */ }
@@ -501,7 +503,7 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
     }
     @Override public void getWorkerStatus(EngineRpcService.StatusVersionPB request,
                                           StreamObserver<EngineRpcService.WorkerStatusPB> observer) {
-        observer.onNext(EngineRpcService.WorkerStatusPB.newBuilder().setRole("VIT").setStatusVersion(1).setAlive(true).build());
+        observer.onNext(EngineRpcService.WorkerStatusPB.newBuilder().setRole("VIT").setStatusVersion(1).setAlive(alive.getAsBoolean()).build());
         observer.onCompleted();
     }
     @Override public synchronized void getCacheStatus(EngineRpcService.CacheVersionPB request,
@@ -548,7 +550,7 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
     }
     synchronized Map<String, Object> effectiveConfiguration() {
         return Map.of("config", effectiveConfig,
-                "simulation", Map.of("hidden_size", config.hiddenSize(), "forward_ms", config.computeDelayMs(),
+                "simulation", Map.of("hidden_size", config.hiddenSize(), "forward_ms", gpuScheduler.forwardMs(),
                         "max_output_bytes", config.maxOutputBytes()),
                 "model", Map.of("V41_IMAGE_ENCODE_CACHE_ITEMS", typedCacheCapacity),
                 "limitations", List.of("logical GPU/CPU pools; immutable JVM payloads", "no physical DMA/RDMA or workspace/OOM model", "work estimates require a matching model estimator"));

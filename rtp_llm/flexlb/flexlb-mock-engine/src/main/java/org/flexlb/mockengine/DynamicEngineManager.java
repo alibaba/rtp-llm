@@ -80,7 +80,8 @@ final class DynamicEngineManager {
 
     private final JavaMockEngineCluster.Config config;
     private final MockPerformanceModel performance;
-    private final Map<Integer, JavaMockEngineCluster.FastRpcService> services;
+    private final Map<Integer, JavaMockEngineCluster.FastRpcService> pdServices;
+    private final Map<Integer, MockEngineLifecycle> services;
     private final Map<Integer, Server> serversByPort;
     private final EventLoopGroup bossGroup;
     private final EventLoopGroup workerGroup;
@@ -111,7 +112,7 @@ final class DynamicEngineManager {
     /**
      * Monotonic GLOBAL engine index for unique advertisement IPs
      * ({@code --mock.unique_engine_ips}): initialized to the initial engine count
-     * (prefill + decode) and never decremented — a removed engine's index is
+     * (prefill + decode + vit) and never decremented — a removed engine's index is
      * never reused, so dynamically added engines always get a fresh unique
      * 127.x.y.z advertisement IP (see
      * {@link JavaMockEngineCluster#declaredHost}).
@@ -130,7 +131,9 @@ final class DynamicEngineManager {
                          JavaMockEngineCluster.EngineEventLog engineEventLog) {
         this.config = config;
         this.performance = performance;
-        this.services = services;
+        this.pdServices = services;
+        this.services = config.engines;
+        this.services.putAll(services);
         this.serversByPort = serversByPort;
         this.bossGroup = bossGroup;
         this.workerGroup = workerGroup;
@@ -139,15 +142,32 @@ final class DynamicEngineManager {
         this.discoveryFileStore = discoveryFileStore;
         this.engineEventLog = engineEventLog;
         // The manager is constructed right after the initial roles started, so
-        // services.size() == nPrefill + nDecode — the first dynamic engine takes
+        // services.size() == nPrefill + nDecode + nVit — the first dynamic engine takes
         // the next global index.
-        this.nextEngineIndex = new AtomicInteger(services.size());
+        this.nextEngineIndex = new AtomicInteger(this.services.size());
+    }
+
+    Map<Integer, MockEngineLifecycle> engines() { return services; }
+
+    void restart(MockEngineLifecycle service) throws IOException {
+        if (service instanceof MockVitEngine vit) {
+            synchronized (mutationLock) {
+                if (pendingRemovalPorts.contains(vit.getGrpcPort())) throw new IOException("engine is being removed");
+                var existing = serversByPort.get(vit.getGrpcPort());
+                if (existing != null) {
+                    existing.shutdownNow();
+                    try { if (!existing.awaitTermination(5, TimeUnit.SECONDS)) throw new IOException("V transport did not stop"); }
+                    catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IOException(error); }
+                }
+                serversByPort.put(vit.getGrpcPort(), vit.start());
+            }
+        } else throw new IllegalArgumentException("not a V worker");
     }
 
     /**
      * Create and start a new engine of the given role.
      *
-     * @param role         "prefill" or "decode" (case-insensitive)
+     * @param role         "prefill", "decode" or "vit" (case-insensitive)
      * @param explicitPort requested gRPC port, or null to auto-allocate max+1
      */
     AddedEngine addEngine(String role, Integer explicitPort) throws EngineOperationException, IOException {
@@ -156,11 +176,17 @@ final class DynamicEngineManager {
         synchronized (mutationLock) {
             int grpcPort = resolvePort(explicitPort);
             String engineName = nextEngineName(roleName);
-            JavaMockEngineCluster.FastRpcService service = JavaMockEngineCluster.startEngine(
-                    config, performance, serversByPort, bossGroup, workerGroup,
-                    services, scheduler, stats, roleName, engineName, grpcPort,
-                    nextEngineIndex.getAndIncrement());
-            service.setEngineEventLog(engineEventLog);
+            MockEngineLifecycle service;
+            int index = nextEngineIndex.getAndIncrement();
+            if (roleName.equals("vit")) {
+                service = JavaMockEngineCluster.startVitEngine(config, performance, serversByPort, bossGroup, workerGroup,
+                        engineName, grpcPort, index);
+            } else {
+                var pd = JavaMockEngineCluster.startEngine(config, performance, serversByPort, bossGroup, workerGroup,
+                        pdServices, scheduler, stats, roleName, engineName, grpcPort, index);
+                pd.setEngineEventLog(engineEventLog); service = pd;
+            }
+            services.put(grpcPort, service);
             try {
                 rewriteDiscoveryFileLocked();
             } catch (IOException e) {
@@ -184,7 +210,7 @@ final class DynamicEngineManager {
      * @param drainTimeoutMs graceful drain bound; on expiry the removal
      *                      falls back to the abrupt teardown (drained=false)
      */
-    RemovedEngine removeEngine(JavaMockEngineCluster.FastRpcService service, String mode, long drainTimeoutMs)
+    RemovedEngine removeEngine(MockEngineLifecycle service, String mode, long drainTimeoutMs)
             throws EngineOperationException, IOException {
         if (config.whale && !config.whaleBundle)
             throw new EngineOperationException(409, "Whale scales Pods, not engines inside a Pod");
@@ -260,7 +286,7 @@ final class DynamicEngineManager {
      * then publish the outcome to every awaiting caller.  The "at removal"
      * counters are the drain-START samples taken by {@link #removeEngine}.
      */
-    private void runRemoval(JavaMockEngineCluster.FastRpcService service,
+    private void runRemoval(MockEngineLifecycle service,
                                   CompletableFuture<RemovedEngine> outcome,
                                   String mode, long drainTimeoutMs,
                                   int runningAtRemoval,
@@ -304,7 +330,7 @@ final class DynamicEngineManager {
 
     /** Keep the port reserved and discovery withdrawn until transport shutdown
      * finishes. Blocking service/transport work must never hold mutationLock. */
-    private void detach(JavaMockEngineCluster.FastRpcService service,
+    private void detach(MockEngineLifecycle service,
                         String mode, boolean drained) throws IOException {
         int port = service.getGrpcPort();
         // Same rejection semantics as /stop_engine first, then drain bookkeeping
@@ -349,6 +375,7 @@ final class DynamicEngineManager {
         synchronized (mutationLock) {
             if (server != null) serversByPort.remove(port, server);
             services.remove(port, service);
+            pdServices.remove(port);
             pendingRemovalPorts.remove(port);
             rewriteDiscoveryFileLocked();
         }
@@ -358,21 +385,20 @@ final class DynamicEngineManager {
 
     /** "At removal time" waiting-depth sample, by role (decode parks in its
      * pending queue; prefill parks in the master-composed waiting set). */
-    private static int removalWaitingCount(JavaMockEngineCluster.FastRpcService service) {
-        return "DECODE".equals(service.getRoleName())
-                ? service.getDecodePendingQueueDepth()
-                : service.getWaitingCount();
+    private static int removalWaitingCount(MockEngineLifecycle service) {
+        return service.removalWaitingCount();
     }
 
     private String normalizeRole(String role) throws EngineOperationException {
         if (role == null) {
-            throw new EngineOperationException(400, "request must contain 'role' (prefill|decode)");
+            throw new EngineOperationException(400, "request must contain 'role' (prefill|decode|vit)");
         }
         return switch (role.toLowerCase()) {
             case "prefill" -> "prefill";
             case "decode" -> "decode";
+            case "vit" -> "vit";
             default -> throw new EngineOperationException(400,
-                    "unknown role '" + role + "', expected prefill|decode");
+                    "unknown role '" + role + "', expected prefill|decode|vit");
         };
     }
 
@@ -397,7 +423,7 @@ final class DynamicEngineManager {
     private String nextEngineName(String roleName) {
         int maxIndex = -1;
         String prefix = roleName + "-";
-        for (JavaMockEngineCluster.FastRpcService service : services.values()) {
+        for (MockEngineLifecycle service : services.values()) {
             String name = service.getEngineName();
             if (name.startsWith(prefix)) {
                 try {
@@ -418,7 +444,7 @@ final class DynamicEngineManager {
     }
 
     private boolean engineNameTaken(String name) {
-        for (JavaMockEngineCluster.FastRpcService service : services.values()) {
+        for (MockEngineLifecycle service : services.values()) {
             if (name.equals(service.getEngineName())) {
                 return true;
             }
@@ -426,7 +452,7 @@ final class DynamicEngineManager {
         return false;
     }
 
-    private void rollbackEngine(int grpcPort, JavaMockEngineCluster.FastRpcService service) {
+    private void rollbackEngine(int grpcPort, MockEngineLifecycle service) {
         Server server = serversByPort.remove(grpcPort);
         if (server != null) {
             server.shutdownNow();
@@ -435,6 +461,7 @@ final class DynamicEngineManager {
         service.drainAndShutdown();
         service.shutdown();
         services.remove(grpcPort, service);
+        pdServices.remove(grpcPort);
     }
 
     private void rewriteDiscoveryFileLocked() throws IOException {
@@ -446,7 +473,7 @@ final class DynamicEngineManager {
                 // but must stay invisible to the master's routing view until
                 // the teardown completes — rewrite an EXCLUDED view so a
                 // concurrent add_engine can never resurrect its entry.
-                Map<Integer, JavaMockEngineCluster.FastRpcService> view = new HashMap<>(services);
+                Map<Integer, MockEngineLifecycle> view = new HashMap<>(services);
                 for (int drainingPort : pendingRemovalPorts) {
                     view.remove(drainingPort);
                 }

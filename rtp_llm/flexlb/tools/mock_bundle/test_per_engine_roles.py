@@ -15,6 +15,7 @@ class PerEngineRolesTest(unittest.TestCase):
         env = dict(
             RTP_LLM_MOCK_BUNDLE="1",
             ROLE_TYPE="VIT",
+            POD_IP="10.0.0.1",
             START_PORT="22160",
             TOKENIZER_PATH="oss://actual-model",
             MOCK_ENGINE_CONFIG_JSON=(Path(__file__).parent / "engine-config.json").read_text(),
@@ -22,13 +23,14 @@ class PerEngineRolesTest(unittest.TestCase):
         with patch.object(vit, "prepare_assets", return_value=Path("/model")) as prepare:
             args = vit.command(env)
         prepare.assert_called_once()
-        for key, value in (("--mock.http_port", "22160"), ("--mock.port", "22161"), ("--mock.model_path", "/model")):
+        for key, value in (("--mock.n_prefill", "0"), ("--mock.n_decode", "0"), ("--mock.n_vit", "1"), ("--mock.base_grpc_port", "22161"), ("--mock.vit_model_path", "/model")):
             self.assertEqual(args[args.index(key) + 1], value)
 
     def test_vit_passes_monitoring_toggle(self):
         base = dict(
             RTP_LLM_MOCK_BUNDLE="1",
             ROLE_TYPE="VIT",
+            POD_IP="10.0.0.1",
             TOKENIZER_PATH="/model",
             MOCK_ENGINE_CONFIG_JSON=(Path(__file__).parent / "engine-config.json").read_text(),
         )
@@ -43,6 +45,7 @@ class PerEngineRolesTest(unittest.TestCase):
         base = dict(
             RTP_LLM_MOCK_BUNDLE="1",
             ROLE_TYPE="VIT",
+            POD_IP="10.0.0.1",
             TOKENIZER_PATH="/model",
             MOCK_ENGINE_CONFIG_JSON=(Path(__file__).parent / "engine-config.json").read_text(),
         )

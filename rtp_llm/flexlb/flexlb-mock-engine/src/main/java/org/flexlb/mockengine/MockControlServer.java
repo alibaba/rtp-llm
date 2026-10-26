@@ -81,7 +81,7 @@ final class MockControlServer {
         this.httpServer = HttpServer.create(new InetSocketAddress(host, httpPort), 0);
         httpServer.createContext("/snapshot", this::handleSnapshot);
         httpServer.createContext("/effective_config", exchange -> sendJson(exchange, 200,
-                Map.of("engines", services.values().stream().map(JavaMockEngineCluster.FastRpcService::effectiveConfiguration).toList())));
+                Map.of("engines", orderedEngines().stream().map(MockEngineLifecycle::effectiveConfiguration).toList())));
         httpServer.createContext("/inject", this::handleInject);
         httpServer.createContext("/clear_inject", this::handleClearInject);
         httpServer.createContext("/health", this::handleHealth);
@@ -159,10 +159,23 @@ final class MockControlServer {
      * unknown.
      */
     private JavaMockEngineCluster.FastRpcService resolveService(JsonNode body) throws ApiException {
+        var engine = resolveEngine(body);
+        if (engine instanceof JavaMockEngineCluster.FastRpcService pd) return pd;
+        throw new ApiException(400, "this control operation requires P/D");
+    }
+
+    private Map<Integer, ? extends MockEngineLifecycle> engineMap() {
+        return engineManager == null ? services : engineManager.engines();
+    }
+    private java.util.List<MockEngineLifecycle> orderedEngines() {
+        return engineMap().values().stream().sorted(java.util.Comparator.comparingInt(MockEngineLifecycle::getGrpcPort))
+                .map(engine -> (MockEngineLifecycle)engine).toList();
+    }
+    private MockEngineLifecycle resolveEngine(JsonNode body) throws ApiException {
         JsonNode engineNode = body.path("engine");
         if (engineNode.isTextual() && !engineNode.asText().isEmpty()) {
             String engineName = engineNode.asText();
-            for (JavaMockEngineCluster.FastRpcService service : services.values()) {
+            for (MockEngineLifecycle service : orderedEngines()) {
                 if (engineName.equals(service.getEngineName())) {
                     return service;
                 }
@@ -171,7 +184,7 @@ final class MockControlServer {
         }
         if (body.has("port")) {
             int port = body.path("port").asInt();
-            JavaMockEngineCluster.FastRpcService service = services.get(port);
+            MockEngineLifecycle service = engineMap().get(port);
             if (service == null) {
                 throw new ApiException(404, "engine not found for port " + port);
             }
@@ -208,7 +221,7 @@ final class MockControlServer {
     }
 
     private static Map<String, Object> successResponse(
-            JavaMockEngineCluster.FastRpcService service) {
+            MockEngineLifecycle service) {
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("status", "ok");
         response.put("engine", service.getEngineName());
@@ -226,7 +239,7 @@ final class MockControlServer {
         boolean topologyOnly = "view=topology".equals(exchange.getRequestURI().getQuery());
         // Python cluster.snapshot() shape: {"engines": [...]}
         List<Map<String, Object>> engines = new ArrayList<>();
-        for (JavaMockEngineCluster.FastRpcService service : orderedServices()) {
+        for (MockEngineLifecycle service : orderedEngines()) {
             engines.add(topologyOnly ? service.getTopologySnapshot() : service.getSnapshot());
         }
         Map<String, Object> response = new LinkedHashMap<>();
@@ -372,16 +385,17 @@ final class MockControlServer {
             sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
             return;
         }
-        int total = services.size();
-        long healthy = services.values().stream().filter(s -> !s.isStopped()).count();
+        int total = engineMap().size();
+        long healthy = orderedEngines().stream().filter(s -> !s.isStopped() && !s.isShuttingDown()).count();
         Map<String, Object> response = new LinkedHashMap<>();
         // Python returns {"status": "ok"}; extra fields kept for the existing
         // EngineCrashRecoveryTest and richer diagnostics (superset is compatible).
         response.put("status", "ok");
         response.put("healthy", healthy == total);
         response.put("engines", total);
-        boolean whale = services.values().stream().anyMatch(JavaMockEngineCluster.FastRpcService::isWhaleRemote);
-        boolean ready = total == 1 && services.values().stream()
+        boolean whale = services.values().stream().anyMatch(JavaMockEngineCluster.FastRpcService::isWhaleRemote)
+                || services.isEmpty() && engineManager != null && total == 1;
+        boolean ready = total == 1 && engineMap().values().stream()
                 .allMatch(s -> !s.isStopped() && !s.isShuttingDown());
         if (whale) response.put("status", ready ? "ok" : "unavailable");
         sendJson(exchange, whale && !ready ? 503 : 200, response);
@@ -570,9 +584,13 @@ final class MockControlServer {
     }
 
     private void handleSetPerf(HttpExchange exchange) throws IOException {
-        handleServicePost(exchange, (body, service) -> {
-            MockPerformanceModel perf = service.getPerformance();
-            perf.applyOverrides(body);
+        handleEnginePost(exchange, (body, service) -> {
+            if (service instanceof MockVitEngine vit) vit.setPerformance(body);
+            else {
+                var forward = body.path("mock").path("forward");
+                if (!forward.isMissingNode()) MockEngineConfig.fields(forward,"prefill","decode");
+                ((JavaMockEngineCluster.FastRpcService)service).getPerformance().applyOverrides(body);
+            }
             return successResponse(service);
         });
     }
@@ -684,8 +702,21 @@ final class MockControlServer {
         });
     }
 
+    @FunctionalInterface private interface EngineAction {
+        Map<String,Object> apply(JsonNode body, MockEngineLifecycle engine) throws Exception;
+    }
+    private void handleEnginePost(HttpExchange exchange, EngineAction action) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) { sendJson(exchange,405,Map.of("error","Method Not Allowed")); return; }
+        try {
+            var body = MAPPER.readTree(exchange.getRequestBody());
+            sendJson(exchange,200,action.apply(body,resolveEngine(body)));
+        } catch (ApiException error) { sendJson(exchange,error.status,error.response); }
+        catch (IllegalArgumentException error) { sendJson(exchange,400,Map.of("error",String.valueOf(error.getMessage()))); }
+        catch (Exception error) { sendJson(exchange,500,Map.of("error",String.valueOf(error))); }
+    }
+
     private void handleStopEngine(HttpExchange exchange) throws IOException {
-        handleServicePost(exchange, (body, service) -> {
+        handleEnginePost(exchange, (body, service) -> {
             int port = service.getGrpcPort();
             service.setStopped(true);
             Server server = serversByPort.get(port);
@@ -699,10 +730,15 @@ final class MockControlServer {
     }
 
     private void handleStartEngine(HttpExchange exchange) throws IOException {
-        handleServicePost(exchange, (body, service) -> {
+        handleEnginePost(exchange, (body, service) -> {
             int port = service.getGrpcPort();
-            service.clearFaultConfig();
-            service.resetEnqueueCount();
+            if (service instanceof MockVitEngine) {
+                engineManager.restart(service);
+                var response = successResponse(service); response.put("action","started"); return response;
+            }
+            var pd = (JavaMockEngineCluster.FastRpcService) service;
+            pd.clearFaultConfig();
+            pd.resetEnqueueCount();
             // Release the port fully before rebinding: shut the old server down
             // and await termination, then build+bind the new one. Only after the
             // new server is actually serving do we flip the stopped flag and
@@ -730,7 +766,7 @@ final class MockControlServer {
                         .channelType(NioServerSocketChannel.class)
                         .directExecutor()
                         .maxInboundMessageSize(16 * 1024 * 1024)
-                        .addService(service)
+                        .addService(pd)
                         .build()
                         .start();
             } catch (Exception e) {
@@ -743,7 +779,7 @@ final class MockControlServer {
             // true-crash the old reference is a dead victim; after stop_engine
             // the port simply rebinds. Either way the service must be able to
             // kill THIS server on a future crash.
-            service.setGrpcServer(server);
+            pd.setGrpcServer(server);
             serversByPort.put(port, server);
             Map<String, Object> response = successResponse(service);
             response.put("action", "started");
@@ -950,7 +986,7 @@ final class MockControlServer {
                 return;
             }
             JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+            MockEngineLifecycle service = resolveEngine(body);
             String mode = body.path("mode").asText("graceful");
             if (!"graceful".equalsIgnoreCase(mode) && !"abrupt".equalsIgnoreCase(mode)) {
                 sendJson(exchange, 400, Map.of("error",
@@ -1012,6 +1048,21 @@ final class MockControlServer {
         }
 
         StringBuilder sb = new StringBuilder();
+        var vitTypes = new java.util.HashSet<String>();
+        var vitTotals = new java.util.TreeMap<String, Long>();
+        for (var engine : orderedEngines()) if (engine instanceof MockVitEngine vit) {
+            vit.service.snapshot().forEach((field,value) -> {
+                String metric = "mock_vit_" + (field.equals("computations") ? "computations_total" : field);
+                if (vitTypes.add(metric)) sb.append("# TYPE ").append(metric).append(" gauge\n");
+                if (perEngine) {
+                    sb.append(metric).append("{engine_name=\"").append(vit.getEngineName())
+                            .append("\",grpc_port=\"").append(vit.getGrpcPort()).append("\",role=\"vit\",engine_ip=\"")
+                            .append(vit.getHost()).append("\",engine_incarnation=\"").append(vit.service.instance).append("\"} ")
+                            .append(value).append('\n');
+                } else vitTotals.merge(metric,value,Long::sum);
+            });
+        }
+        vitTotals.forEach((metric,value) -> sb.append(metric).append("{role=\"vit\"} ").append(value).append('\n'));
         appendMetricsMeta(sb);
 
         if (perEngine) {

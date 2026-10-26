@@ -13,20 +13,27 @@ import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
-class MockVitServerTest {
+class MockVitOnlyProcessTest {
+    @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory;
     private static int freePort() throws Exception {
-        try (var socket = new ServerSocket(0)) { return socket.getLocalPort(); }
+        for (;;) {
+            int port=java.util.concurrent.ThreadLocalRandom.current().nextInt(20000,27000);
+            try (var grpc=new ServerSocket(port); var http=new ServerSocket(port-1)) { return port; }
+            catch (java.io.IOException occupied) { }
+        }
     }
 
     @Test void independentVitPublishesHealthAndActualGrpcStatus() throws Exception {
-        int grpc = freePort(), http = freePort();
-        var calibration = java.nio.file.Files.createTempFile("vit-calibration", ".json");
+        int grpc = freePort(), http = grpc - 1;
+        var calibration = directory.resolve("calibration.json");
         java.nio.file.Files.writeString(calibration, "{\"mock\":{\"vit\":{\"hidden_size\":128,\"max_output_bytes\":16777216},\"forward\":{\"vit\":{\"fixed_ms\":1}}}}");
         var child = new ProcessBuilder(System.getProperty("java.home") + "/bin/java", "-cp",
-                System.getProperty("java.class.path"), MockVitServer.class.getName(),
+                System.getProperty("java.class.path"), JavaMockEngineCluster.class.getName(),
                 "--mock.engine_config", "../tools/mock_bundle/engine-config.json", "--mock.calibration", calibration.toString(),
-                "--mock.port", Integer.toString(grpc), "--mock.http_port", Integer.toString(http))
-                .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start();
+                "--mock.n_prefill", "0", "--mock.n_decode", "0", "--mock.n_vit", "1",
+                "--mock.endpoint_file", directory.resolve("endpoints.json").toString(),
+                "--mock.base_grpc_port", Integer.toString(grpc))
+                .redirectErrorStream(true).redirectOutput(directory.resolve("engine.log").toFile()).start();
         var channel = ManagedChannelBuilder.forAddress("127.0.0.1", grpc).usePlaintext().build();
         try {
             var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(1)).build();
@@ -41,7 +48,7 @@ class MockVitServerTest {
                 } catch (java.io.IOException ignored) { }
                 Thread.sleep(50);
             }
-            assertTrue(ready, "independent ViT must publish health after gRPC startup");
+            assertTrue(ready, () -> { try { return java.nio.file.Files.readString(directory.resolve("engine.log")); } catch(Exception error) { return error.toString(); } });
             var status = MultimodalRpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(2, TimeUnit.SECONDS)
                     .getWorkerStatus(EngineRpcService.StatusVersionPB.getDefaultInstance());
             assertTrue(status.getAlive());

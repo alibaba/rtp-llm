@@ -207,14 +207,14 @@ class EnvManager:
 
     # -- env construction --------------------------------------------------
 
-    def _pick_base_grpc_port(self, n_prefill: int, n_decode: int) -> int:
+    def _pick_base_grpc_port(self, n_prefill: int, n_decode: int, n_vit: int = 0) -> int:
         forced = os.environ.get("FLEXLB_FT_MOCK_BASE_GRPC_PORT")
         if forced:
             return int(forced)
         base = 55151
         for _ in range(12):
             # mock http = base-1; engines base .. base+n-1; victim zone base+149..base+151
-            needed = [base - 1] + list(range(base, base + n_prefill + n_decode))
+            needed = [base - 1] + list(range(base, base + n_prefill + n_decode + n_vit))
             needed += [base + offset for offset in VICTIM_OFFSETS]
             # wildcard probe (PROBE_BIND_HOST): the mock binds 0.0.0.0, a
             # loopback-only probe misses foreign binds on other interfaces
@@ -229,7 +229,7 @@ class EnvManager:
         self._env_seq += 1
         run_dir = spec.run_dir or self.run_root / f"env{self._env_seq}_{spec.label}"
         run_dir.mkdir(parents=True, exist_ok=True)
-        base = self._pick_base_grpc_port(spec.n_prefill, spec.n_decode)
+        base = self._pick_base_grpc_port(spec.n_prefill, spec.n_decode, spec.n_vit)
         env = FlexEnv(spec, run_dir, base)
         if self.on_environment is not None:
             self.on_environment(env)
@@ -311,6 +311,8 @@ class EnvManager:
             ),
             n_prefill=spec.n_prefill,
             n_decode=spec.n_decode,
+            n_vit=spec.n_vit,
+            vit_model_path=spec.vit_model_path,
             base_grpc_port=env.base_grpc_port,
             unique_engine_ips=resolve_address_plan(spec.runtime_mode, unique_loopback_supported=sys.platform != "darwin")[
                 "unique_engine_ips"

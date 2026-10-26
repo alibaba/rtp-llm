@@ -1,6 +1,6 @@
 # Mock ViT 图片链路
 
-Mock ViT 是独立 Java gRPC 进程，和 P/D 共用 mock engine JAR。当前实现对齐 main 的通用 URL 图片协议；模型 forward 使用确定性 CPU 数据模拟，图片解码和 Qwen2/2.5-VL token 数量计算实际执行。
+Mock ViT 是 JavaMockEngineCluster 的 VIT 角色，和 P/D 共用入口、JVM、Netty 与 RPC 执行资源。每个 V worker 的服务地址、身份、缓存、队列、并发和 timing 状态独立。当前实现对齐 main 的通用 URL 图片协议；模型 forward 使用确定性 CPU 数据模拟，图片解码和 Qwen2/2.5-VL token 数量计算实际执行。
 
 ## 请求顺序
 
@@ -13,16 +13,22 @@ Mock ViT 是独立 Java gRPC 进程，和 P/D 共用 mock engine JAR。当前实
 ## 启动与连接
 
 ```bash
-java -cp flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar \
-  org.flexlb.mockengine.MockVitServer \
-  --port 62000 --hidden-size 128 --concurrency 4 --queue-capacity 64 \
-  --embedding-cache-bytes 67108864 --hash-cache-bytes 8388608 \
-  --compute-delay-ms 1
+java -jar <mock-engine.jar> \
+  --mock.engine_config <engine-config.json> \
+  --mock.calibration <calibration.json> \
+  --mock.endpoint_file <runtime/endpoints.json> \
+  --mock.n_prefill 1 --mock.n_decode 1 --mock.n_vit 2
 ```
 
-每个 ViT worker 使用独立监听地址，Master 的 `MODEL_SERVICE_CONFIG.role_endpoints` 增加 `vit_endpoint` 并在服务发现中提供 HTTP 端口（gRPC=HTTP+1）。frontend 使用 remote ViT 配置，并传递模型的 multimodal separator 配置。P/D 和 frontend 的 KV block size 必须一致；要模拟原生 token KV key，P/D 使用 whale 模式，可用 `--mock.whale_bundle true` 在独立测试进程内运行。各角色 JAR 应先复制到运行目录，再启动，防止重新打包覆盖正在运行的产物。
+`--mock.n_vit` 默认 0；启用时 V 默认和 P/D 共 JVM，端口连续排列为 P、D、V。需要 prepared V4.1 输入时设置 `--mock.vit_model_path <模型元数据目录>`。real VitConfig、每 worker 的缓存字节预算继续从 engine-config 读取；Mock 假特征宽度、输出保护和计算耗时从 calibration 的 `mock.vit`、`mock.forward.vit` 读取。字段语义统一见 [引擎配置](../../online_eval/docs/architecture/engine-configuration.md)。
 
-ViT 接受 base64 data URL 和 HTTP(S) 图片；按 Qwen2-VL 的 28 像素粒度、min/max pixels、显式宽高计算 token 数。embedding 为 `[rows, hidden_size]` FP32，行 hash 与 main 的 `FeatureHash.h` CPU 算法一致。URL cache key 对齐 Linux libstdc++ `std::hash` 和预处理配置；相同图片重复出现时保留多个输出片段，共享计算。
+各角色保留真实 gRPC 接口，P 仍通过地址访问已选中的 V；共 JVM 不绕过序列化、deadline、取消或 RPC 容量与抖动。缓存预算按 worker 独立计算；实际 heap、GC 和 JVM 故障由同一进程承担，不模拟物理 GPU 内存隔离。
+
+Master 的 `MODEL_SERVICE_CONFIG.role_endpoints` 包含 `vit_endpoint`；动态发现文件统一由集群原子写入。发现地址使用 HTTP 端口约定，gRPC=HTTP+1；集群的统一 HTTP 控制口为 base_grpc_port-1，不为每个逻辑 worker 额外开 HTTP server。
+
+`/snapshot`、`/effective_config`、`/health` 包含 P/D/V。V 的通用 running/waiting 计数分别表示 active/queued 图片计算任务，不把 GPU 队列中的同一任务重复相加；GPU 队列深度在 vit.gpu_queued 中独立展示。`/add_engine {"role":"vit"}`、`/remove_engine`、`/stop_engine`、`/start_engine` 使用与 P/D 相同的目标选择器。优雅移除先关闭新请求门禁并撤下发现地址，再等待已接受的工作和 RPC 回包完成，最后释放 V 缓存与执行资源；失败绑定回滚实例，发现写入失败回滚变更。逻辑 stop/start 保留已有缓存和 worker 身份；移除后重建或重新启动 JVM 创建新身份和空缓存。
+
+`/set_perf` 对 V 接受 `mock.timing`、`mock.rpc`、`mock.forward.vit`，不能更改 P/D 性能或 real 容量配置。`/metrics` 对 V 按角色聚合；`?per_engine=true` 使用与 P/D 一致的 engine_name、role、grpc_port、engine_ip、engine_incarnation 标签。
 
 ## 缓存、状态与错误
 
@@ -52,7 +58,9 @@ python3 rtp_llm/flexlb/tools/mock_bundle/vit_frontend_smoke.py \
 
 ## Whale bundle
 
-`MOCK_VIT_ENABLED=1` 在 bundle 中启动独立 ViT JVM，并与 Master、P/D 一起监管退出。默认使用最后一个 P/D gRPC 端口的下一个端口；可用 `MOCK_VIT_PORT` 显式设置。其他参数对应 `MOCK_VIT_HIDDEN_SIZE`、`MOCK_VIT_CONCURRENCY`、`MOCK_VIT_QUEUE_CAPACITY`、`MOCK_VIT_EMBEDDING_CACHE_BYTES`、`MOCK_VIT_HASH_CACHE_BYTES`、`MOCK_VIT_COMPUTE_DELAY_MS`。Master 的组合服务发现文件保留 P/D 动态更新并加入 ViT；原始 P/D 文件仍由 Mock 独占写入。`identity.json` 记录 ViT 参数，日志在 `vit.log`。旧 Master 模式拒绝启用现代 ViT。
+bundle 使用 `MOCK_VIT_COUNT` 启用 V，并把数量传给同一个 Mock JVM，不启动额外 V JVM、不拼接第二份服务发现文件。模型元数据路径为 `MOCK_VIT_MODEL_PATH`。`identity.json` 记录 V 数量和共用的 Mock PID，日志在 `mock.log`；旧 Master 协议不支持现代 ViT。
+
+Whale 的 `per_engine` 部署按 `ROLE_TYPE=PREFILL|DECODE|VIT` 启动一个 worker。V launcher 准备模型元数据和 JVM 参数，最终同样调用 JavaMockEngineCluster，数量为 0P/0D/1V；P/D/V 的 JVM 和 Pod 边界由部署副本决定。统一入口也允许本地显式启动 V-only JVM，用于进程故障验证，无需第二套 V bootstrap。这里描述的是启动契约，本地回归不代表 Whale 平台部署已验收。
 
 ### 隔离 frontend 测试镜像
 
@@ -64,7 +72,7 @@ python3 rtp_llm/flexlb/tools/mock_bundle/vit_frontend_smoke.py \
 
 ## main V4.1 prepared images
 
-独立 ViT 增加 `--model-path /path/to/checkpoint`；bundle 使用 `MOCK_VIT_MODEL_PATH`。
+V 使用 `--mock.vit_model_path <模型元数据目录>`；bundle 使用 `MOCK_VIT_MODEL_PATH`。
 读取真实 config.json 的 text/vision 元数据，校验与 main `V41ImageProcessorConfig.identity` 相同的处理器身份。
 整批先检查 schema、BF16 patch shape、降采样网格、token types、跨度和资源上限，再提交 CPU 计算。
 输出 `[image span rows, text hidden size]` BF16；包含 start/newline/end 行。
@@ -92,31 +100,6 @@ BATCH 地址和 frontend/C++ 身份编码修复与 Mock 功能分开提交和验
 
 ## Mock ViT KMonitor
 
-Whale `vit.py` reads `MOCK_KMONITOR_ENABLED` (default `true`) and passes
-`--kmonitor true|false` to `MockVitServer`; direct Java launches default to `false`.
-Enabled mode requires a JAR built with the existing internal KMonitor profile;
-missing/no-op adapters fail startup. No Python/Torch metrics runtime is needed.
+`MOCK_KMONITOR_ENABLED` 控制 Whale 的监控开关，launcher 统一生成 `--mock.kmonitor true|false`。本地 Java 默认关闭监控。V 的队列、缓存、计算和 RPC 指标保持各自口径；status/cache polling 不计为图片业务 QPS。标签携带 V 的 engine、engine_ip、engine_port、generation，物理 Pod IP 与逻辑引擎地址分开；同 JVM 多 V 不得只按 host 聚合后判断某个 worker 的行为。
 
-Filter by the exact deployment's ViT `hippo_role`, `hippo_app`, and `container_ip`.
-All series carry `source=mock_vit`; never combine frontend and ViT series as a
-single request count. Real `mm_process_engine.py:mm_embedding_impl` supplies the
-embedding request/terminal boundary; the Mock records it at the gRPC boundary:
-
-- `py_rtp_vit_qps`, `py_rtp_vit_success_qps`, `py_rtp_vit_error_qps`: embedding RPC
-  arrivals and one server terminal result, compatible with existing ViT panels.
-- `mock_vit_rpc_qps`, `mock_vit_rpc_success_qps`, `mock_vit_rpc_error_qps`: image
-  RPCs split by `method` (`RemoteMultimodalEmbedding`, `GetMultimodalHashes`,
-  `AsyncSubmitEmbedding`); terminal metrics also carry gRPC `code`.
-  Status/cache polling, verdict and lease-release RPCs are excluded.
-- `mock_vit_rpc_rt_us`: server RPC lifetime, including queue/cache waits.
-- `mock_vit_computations_total`: successful image computations since process
-  start; `mock_vit_computation_qps`: successive counter delta / elapsed seconds.
-- `mock_vit_active`, `mock_vit_queued`, `mock_vit_pending`,
-  `mock_vit_embedding_bytes`, `mock_vit_hash_bytes`: one-second gauges, including
-  idle zeros. These describe Mock executor/cache state, not GPU load.
-
-Hash RPC success can mean a directory lookup; async success means submission was
-accepted. Neither proves a new computation completed. Multiple images, cache
-hits, shared work and producer work surviving caller cancellation make RPC rate
-and computation rate different. These metrics do not classify frontend text
-versus multimodal arrivals and do not prove downstream P/D completion.
+`source=mock_vit` 的指标与 frontend 同名指标分开查询。`py_rtp_vit_qps/success_qps/error_qps` 表示 embedding 请求入口和终态；`mock_vit_computations_total` 表示实际计算次数，缓存命中不增加它。forward/RPC timing 指标独立记录缩放后的计划时间、停顿与调度迟到，不能替代实际墙钟延迟。

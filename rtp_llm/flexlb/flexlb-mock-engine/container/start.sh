@@ -20,12 +20,12 @@ set -eu
 [ "${MOCK_BUNDLE_FILE_DISCOVERY:-0}" = 0 ] || {
     echo "Legacy placement flags conflict with per_engine" >&2; exit 2
 }
-[ -z "${MOCK_PREFILL_COUNT+x}${MOCK_DECODE_COUNT+x}${MOCK_BUNDLE_OVERRIDES_YAML+x}${MOCK_BUNDLE_CONFIG_PATH+x}${MOCK_BUNDLE_LEGACY_MASTER+x}" ] || {
+[ -z "${MOCK_PREFILL_COUNT+x}${MOCK_DECODE_COUNT+x}${MOCK_VIT_COUNT+x}${MOCK_BUNDLE_OVERRIDES_YAML+x}${MOCK_BUNDLE_CONFIG_PATH+x}${MOCK_BUNDLE_LEGACY_MASTER+x}" ] || {
     echo "This image uses ROLE_TYPE; bundle configuration and count overrides are unsupported" >&2; exit 2
 }
 for argument in "$@"; do
     case "$argument" in
-        --mock.whale|--mock.whale_bundle|--mock.n_prefill|--mock.n_decode|--mock.host|--mock.unique_engine_ips|--mock.base_grpc_port|--mock.discovery_file|--mock.endpoint_file|--mock.engine_config|--mock.calibration)
+        --mock.whale|--mock.whale_bundle|--mock.n_prefill|--mock.n_decode|--mock.n_vit|--mock.host|--mock.unique_engine_ips|--mock.base_grpc_port|--mock.discovery_file|--mock.endpoint_file|--mock.engine_config|--mock.calibration)
             echo "Placement argument $argument is owned by MOCK_DEPLOYMENT_MODE and ROLE_TYPE" >&2; exit 2;;
     esac
 done
@@ -55,9 +55,10 @@ fi
 case "$START_PORT" in ''|*[!0-9]*) echo "Invalid START_PORT" >&2; exit 2;; esac
 [ "$START_PORT" -gt 0 ] && [ "$START_PORT" -lt 65535 ] || exit 2
 case "${ROLE_TYPE:-}" in
-    PREFILL) prefill=1; decode=0;;
-    DECODE) prefill=0; decode=1;;
-    *) echo "ROLE_TYPE must be PREFILL or DECODE" >&2; exit 2;;
+    PREFILL) prefill=1; decode=0; vit=0;;
+    DECODE) prefill=0; decode=1; vit=0;;
+    VIT) prefill=0; decode=0; vit=1;;
+    *) echo "ROLE_TYPE must be PREFILL, DECODE or VIT" >&2; exit 2;;
 esac
 case "${FETCH_OUTPUT_STREAM:-1}" in
     1) automatic=false;;
@@ -69,6 +70,9 @@ case "${MOCK_EVENT_LOG_ENABLED:-$MOCK_MODE_JSONL_DEFAULT}" in
     0) ;;
     *) echo "MOCK_EVENT_LOG_ENABLED must be 0 or 1" >&2; exit 2;;
 esac
+if [ -n "${MOCK_VIT_MODEL_PATH:-}" ]; then
+    set -- --mock.vit_model_path "$MOCK_VIT_MODEL_PATH" "$@"
+fi
 if ! command -v java >/dev/null 2>&1 && [ -x /opt/taobao/java/bin/java ]; then
     PATH="/opt/taobao/java/bin:$PATH"
     export PATH
@@ -77,7 +81,7 @@ printf '{"mode":"per_engine","entrypoint":"mock","master_discovery":"vipserver",
 cat "$run_dir/deployment.json"
 # exec preserves SIGTERM ownership: one engine JVM, no bundled master process.
 exec java -jar "${MOCK_ENGINE_JAR:-/opt/flexlb/mock-engine.jar}" \
-    --mock.whale true --mock.n_prefill "$prefill" --mock.n_decode "$decode" \
+    --mock.whale true --mock.n_prefill "$prefill" --mock.n_decode "$decode" --mock.n_vit "$vit" \
     --mock.host "$POD_IP" --mock.bind_host "${MOCK_BIND_HOST:-0.0.0.0}" \
     --mock.unique_engine_ips false \
     --mock.base_grpc_port "$((START_PORT + 1))" --mock.auto_fetch "$automatic" \

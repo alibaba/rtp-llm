@@ -55,6 +55,14 @@ class DeploymentTest(unittest.TestCase):
                 deployment.main()
                 run.assert_called_once_with()
 
+    def test_vit_deployment_uses_role_metadata_launcher_then_same_cluster_entry(self):
+        import vit
+        with patch.dict(os.environ, {"MOCK_DEPLOYMENT_MODE":"per_engine", "ROLE_TYPE":"VIT"}, clear=True), \
+                patch.object(vit,"command",return_value=["java","cluster"]) as command, patch("os.execv") as execute:
+            deployment.main()
+        command.assert_called_once()
+        execute.assert_called_once_with("java",["java","cluster"])
+
     def test_wrong_direct_entrypoint_fails_before_launch(self):
         with (
             patch.dict(os.environ, {"RTP_LLM_MOCK_BUNDLE": "1", "MOCK_DEPLOYMENT_MODE": "single_pod"}, clear=True),
@@ -82,7 +90,7 @@ class DeploymentTest(unittest.TestCase):
                 "START_PORT": "7001",
                 "MOCK_ENGINE_CONFIG_JSON": (Path(__file__).parent / "engine-config.json").read_text(),
             }
-            for role in ("PREFILL", "DECODE"):
+            for role in ("PREFILL", "DECODE", "VIT"):
                 args = standalone_mock.command({**base, "MOCK_DEPLOYMENT_MODE": "per_engine", "ROLE_TYPE": role})
                 self.assertEqual(args[args.index("--mock.whale_bundle") + 1], "false")
                 self.assertNotIn("--mock.discovery_file", args)
