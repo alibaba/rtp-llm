@@ -12,6 +12,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
@@ -22,6 +23,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -899,6 +901,138 @@ class DefaultBatchDispatcherTest {
         assertEquals(EngineRpcService.RoleAddrPB.RoleType.PREFILL, addr.getRole());
         assertEquals("PREFILL", addr.getRoleStr());
         assertEquals(RoleType.PREFILL, RoleTypeProtoConverter.fromRoleAddr(addr));
+    }
+
+    @Test
+    void dispatchForwardsSelectedVitInsteadOfIncomingAddress() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        ServerStatus vit = selectedServer(RoleType.VIT, "10.0.0.11", 27060, 27061);
+        ServerStatus decode = selectedServer(RoleType.DECODE, "10.0.0.12", 28060, 28061);
+        ScheduledRequest item = withSelectedRoles(
+                createScheduledRequest(1L, 500, 200, prefillEp), vit, decode);
+        // An old address in the frontend payload must not override the route decision.
+        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB
+                .parseFrom(item.ctx().getGenerateInputPb()).toBuilder();
+        input.getGenerateConfigBuilder().addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
+                .setRole(EngineRpcService.RoleAddrPB.RoleType.VIT)
+                .setRoleStr("VIT")
+                .setIp("10.0.0.99")
+                .setHttpPort(9000)
+                .setGrpcPort(9001));
+        item.ctx().setGenerateInputPb(input.build().toByteString());
+
+        List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+                .thenAnswer(inv -> {
+                    sent.add(inv.getArgument(2));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
+                });
+
+        submit(List.of(item), 1L, 100, "selected_vit", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        var addrs = sentInput(sent.getFirst()).getGenerateConfig().getRoleAddrsList();
+        assertEquals(3, addrs.size());
+        assertEquals(List.of(RoleType.PREFILL, RoleType.DECODE, RoleType.VIT),
+                addrs.stream().map(RoleTypeProtoConverter::fromRoleAddr).toList());
+        assertEquals("127.0.0.1", addrs.get(0).getIp());
+        assertEquals(8090, addrs.get(0).getGrpcPort());
+        assertEquals("10.0.0.12", addrs.get(1).getIp());
+        assertEquals(28061, addrs.get(1).getGrpcPort());
+        assertEquals(EngineRpcService.RoleAddrPB.RoleType.VIT, addrs.get(2).getRole());
+        assertEquals("VIT", addrs.get(2).getRoleStr());
+        assertEquals("10.0.0.11", addrs.get(2).getIp());
+        assertEquals(27060, addrs.get(2).getHttpPort());
+        assertEquals(27061, addrs.get(2).getGrpcPort());
+    }
+
+    @Test
+    void dispatchKeepsVitSelectionPerRequestWithinBatch() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        ScheduledRequest first = withSelectedRoles(
+                createScheduledRequest(1L, 500, 200, prefillEp),
+                selectedServer(RoleType.VIT, "10.0.0.11", 27060, 27061));
+        ScheduledRequest second = withSelectedRoles(
+                createScheduledRequest(2L, 500, 200, prefillEp),
+                selectedServer(RoleType.VIT, "10.0.0.12", 28060, 28061));
+        ScheduledRequest textOnly = withSelectedRoles(
+                createScheduledRequest(3L, 500, 200, prefillEp));
+        List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+                .thenAnswer(inv -> {
+                    sent.add(inv.getArgument(2));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L, 2L, 3L)));
+                });
+        CountDownLatch delivered = new CountDownLatch(3);
+        List<DeliveryResult.Status> outcomes = new CopyOnWriteArrayList<>();
+
+        submit(List.of(first, second, textOnly), 1L, 100, "mixed_vit", (item, result) -> {
+            outcomes.add(result.status());
+            delivered.countDown();
+        });
+
+        assertTrue(delivered.await(5, TimeUnit.SECONDS));
+        assertEquals(List.of(DeliveryResult.Status.DELIVERED, DeliveryResult.Status.DELIVERED,
+                DeliveryResult.Status.DELIVERED), outcomes);
+        assertEquals(1, sent.size());
+        var requests = sent.getFirst().getDpSlotsList().getFirst().getRequestsList();
+        assertEquals(3, requests.size());
+        var expectedIps = List.of("10.0.0.11", "10.0.0.12");
+        var expectedPorts = List.of(27061, 28061);
+        for (int i = 0; i < 2; i++) {
+            var input = requests.get(i).getInput();
+            assertEquals(i + 1L, input.getRequestId());
+            var addrs = input.getGenerateConfig().getRoleAddrsList();
+            assertEquals(2, addrs.size());
+            assertEquals(RoleType.VIT, RoleTypeProtoConverter.fromRoleAddr(addrs.get(1)));
+            assertEquals(expectedIps.get(i), addrs.get(1).getIp());
+            assertEquals(expectedPorts.get(i).intValue(), addrs.get(1).getGrpcPort());
+        }
+        assertEquals(3L, requests.get(2).getInput().getRequestId());
+        var textAddrs = requests.get(2).getInput().getGenerateConfig().getRoleAddrsList();
+        assertEquals(1, textAddrs.size(), "text-only requests must not inherit another request's ViT");
+        assertEquals(RoleType.PREFILL, RoleTypeProtoConverter.fromRoleAddr(textAddrs.getFirst()));
+    }
+
+    @Test
+    void inflightByteBudgetIncludesSelectedVitAddress() throws Exception {
+        ScheduledRequest textOnly = createScheduledRequest(1L, 500, 200, createPrefillEndpoint());
+        // This budget fits the request without ViT, including the batch envelope.
+        long budgetWithoutVit = 16L + textOnly.batchPayloadSizeUpperBound();
+        ScheduledRequest item = withSelectedRoles(textOnly,
+                selectedServer(RoleType.VIT, "2001:db8:85a3:0000:0000:8a2e:0370:7334", 27060, 27061));
+        dispatcher.shutdown();
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null,
+                1, 0, budgetWithoutVit);
+        CompletableFuture<DeliveryResult> result = new CompletableFuture<>();
+
+        submit(List.of(item), 1L, 100, "vit_byte_budget",
+                (exactItem, completion) -> result.complete(completion));
+
+        assertEquals(DeliveryResult.Status.NOT_SENT, result.get(5, TimeUnit.SECONDS).status());
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
+    }
+
+    private static ServerStatus selectedServer(RoleType role, String ip, int httpPort, int grpcPort) {
+        ServerStatus status = new ServerStatus();
+        status.setRole(role);
+        status.setServerIp(ip);
+        status.setHttpPort(httpPort);
+        status.setGrpcPort(grpcPort);
+        return status;
+    }
+
+    private static ScheduledRequest withSelectedRoles(ScheduledRequest item, ServerStatus... roles) {
+        List<ServerStatus> statuses = new ArrayList<>();
+        statuses.add(item.prefill());
+        statuses.addAll(List.of(roles));
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setServerStatus(statuses);
+        ServerStatus decode = statuses.stream()
+                .filter(status -> status.getRole() == RoleType.DECODE).findFirst().orElse(null);
+        return new ScheduledRequest(item.ctx(), item.future(), response, item.prefill(), decode,
+                item.prefillEp(), item.decodeEp(), item.decodeReservation(), item.enqueuedAtMs());
     }
 
     private static EngineRpcService.GenerateInputPB sentInput(EngineRpcService.EnqueueBatchRequestPB request) {
