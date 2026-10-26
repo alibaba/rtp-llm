@@ -129,6 +129,7 @@ cc_test(
     deps = test_deps + [
         ":block_tree_cache_test_utils",
         "//rtp_llm/cpp/cache:cache_async_context",
+        "//rtp_llm/cpp/testing:test_log_capture",
     ],
     env = {},
 )

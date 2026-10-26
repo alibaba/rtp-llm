@@ -732,6 +732,7 @@ class HybridAttentionType:
 class KVCacheConfig:
     enable_crc: bool
     enable_prefill_partial_tail_reuse: bool
+    enable_prefill_common_prefix_recovery: bool
     enable_device_cache: bool
     enable_memory_cache: bool
     enable_disk_cache: bool

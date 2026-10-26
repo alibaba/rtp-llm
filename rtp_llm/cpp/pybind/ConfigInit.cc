@@ -475,6 +475,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
         .def_readwrite("enable_prefill_partial_tail_reuse", &KVCacheConfig::enable_prefill_partial_tail_reuse)
+        .def_readwrite("enable_prefill_common_prefix_recovery", &KVCacheConfig::enable_prefill_common_prefix_recovery)
         .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
         .def_readwrite("enable_crc", &KVCacheConfig::enable_crc)
@@ -578,7 +579,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      10,
+                                      11,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -648,23 +649,43 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_host_ip_port,
                                       self.enable_crc,
                                       self.enable_prefill_partial_tail_reuse,
+                                      self.enable_prefill_common_prefix_recovery,
                                       self.linear_pool_blocks,
                                       self.swa_pool_blocks);
             },
             [](py::tuple t) {
                 const py::tuple tail_state = t;
-                // v10 appends enable_prefill_partial_tail_reuse (size 71 without,
-                // size 73 with the upstream proportional pool blocks); the
-                // upstream v9 tail carries only the pool blocks. Both unwind to v8.
+                // v11 appends enable_prefill_common_prefix_recovery after the
+                // partial-tail flag (size 72 in this branch's pushed layout,
+                // size 74 with the upstream proportional pool blocks); v10
+                // carries the partial-tail flag (size 71 without, size 73 with
+                // the pool blocks); the upstream v9 tail (size 72) carries only
+                // the pool blocks. A size-71 v9 tuple is this branch's legacy
+                // recovery layout. All tail generations unwind to v8.
+                const bool has_recovery_field =
+                    (t.size() == 72 || t.size() == 74) && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
+                const bool has_legacy_recovery_fields =
+                    t.size() == 71 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
+                const bool enable_prefill_common_prefix_recovery = has_recovery_field ? t[71].cast<bool>() :
+                                                                   has_legacy_recovery_fields ?
+                                                                                        t[t.size() - 1].cast<bool>() :
+                                                                                        false;
                 const bool has_partial_tail_field =
                     (t.size() == 71 || t.size() == 73) && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
-                const bool enable_prefill_partial_tail_reuse =
-                    has_partial_tail_field ? t[70].cast<bool>() : false;
-                const bool has_tail_fields = has_partial_tail_field
+                const bool enable_prefill_partial_tail_reuse = has_recovery_field         ? t[70].cast<bool>() :
+                                                               has_partial_tail_field     ? t[70].cast<bool>() :
+                                                               has_legacy_recovery_fields ? t[69].cast<bool>() :
+                                                                                            false;
+                const bool has_tail_fields =
+                    has_recovery_field || has_partial_tail_field
                     || (t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9);
                 if (has_tail_fields) {
                     t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
                     t[1] = py::int_(8);
+                }
+                if (has_legacy_recovery_fields) {
+                    t    = t[py::slice(0, 69, 1)].cast<py::tuple>();
+                    t[1] = py::int_(7);
                 }
                 const py::tuple crc_state = t;
                 const bool has_crc_field  = t.size() == 70 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
@@ -708,22 +729,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 const auto value = [&](size_t index) {
                     return t[index + 2 - (version >= 4 && index > 18 ? 1 : 0) - (version >= 5 && index > 49 ? 1 : 0)];
                 };
-                c.reuse_cache                          = value(0).cast<bool>();
-                c.multi_task_prompt                    = value(1).cast<std::string>();
-                c.multi_task_prompt_str                = value(2).cast<std::string>();
-                c.multi_task_prompt_tokens             = value(3).cast<std::map<std::string, std::vector<int>>>();
-                c.reserve_block_ratio                  = value(4).cast<int64_t>();
-                c.max_block_size_per_item              = value(5).cast<int>();
-                c.memory_cache_size_mb                 = value(6).cast<int64_t>();
-                c.memory_cache_sync_timeout_ms         = value(7).cast<int64_t>();
+                c.reuse_cache                  = value(0).cast<bool>();
+                c.multi_task_prompt            = value(1).cast<std::string>();
+                c.multi_task_prompt_str        = value(2).cast<std::string>();
+                c.multi_task_prompt_tokens     = value(3).cast<std::map<std::string, std::vector<int>>>();
+                c.reserve_block_ratio          = value(4).cast<int64_t>();
+                c.max_block_size_per_item      = value(5).cast<int>();
+                c.memory_cache_size_mb         = value(6).cast<int64_t>();
+                c.memory_cache_sync_timeout_ms = value(7).cast<int64_t>();
                 if (has_tail_fields) {
                     c.reuse_cache_tail_blocks = tail_state[10].cast<int>();
-                    if (tail_state.size() == 72) {
+                    const int tail_version    = tail_state[1].cast<int>();
+                    if (tail_state.size() == 72 && tail_version == 9) {
                         c.linear_pool_blocks = tail_state[70].cast<uint32_t>();
                         c.swa_pool_blocks    = tail_state[71].cast<uint32_t>();
-                    } else if (tail_state.size() == 73) {
+                    } else if (tail_state.size() == 73 && tail_version == 10) {
                         c.linear_pool_blocks = tail_state[71].cast<uint32_t>();
                         c.swa_pool_blocks    = tail_state[72].cast<uint32_t>();
+                    } else if (tail_state.size() == 74 && tail_version == 11) {
+                        c.linear_pool_blocks = tail_state[72].cast<uint32_t>();
+                        c.swa_pool_blocks    = tail_state[73].cast<uint32_t>();
                     }
                     if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
                         || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())
@@ -731,45 +756,45 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         throw std::runtime_error("invalid KVCacheConfig tail or pool blocks");
                     }
                 }
-                c.fp8_kv_cache                         = value(9).cast<int>();
-                c.ssm_state_dtype                      = value(10).cast<std::string>();
-                c.kv_cache_mem_mb                      = value(11).cast<int64_t>();
-                c.seq_size_per_block                   = value(12).cast<int>();
-                c.kernel_seq_size_per_block            = value(13).cast<int>();
-                c.test_block_num                       = value(14).cast<int>();
-                c.use_block_cache                      = value(15).cast<int>();
-                c.enable_device_cache                  = value(16).cast<bool>();
-                c.enable_memory_cache                  = value(17).cast<bool>();
-                c.enable_disk_cache                    = value(19).cast<bool>();
-                c.enable_remote_cache                  = value(20).cast<bool>();
-                c.disk_cache_paths                     = value(21).cast<std::string>();
-                c.disk_cache_size_mb                   = value(22).cast<int64_t>();
-                c.disk_cache_buffered_io               = value(23).cast<bool>();
-                c.disk_cache_sync_timeout_ms           = value(24).cast<int64_t>();
-                c.disk_cache_staging_block_count       = value(25).cast<int64_t>();
-                c.device_eviction_policy               = value(26).cast<std::string>();
-                c.memory_eviction_policy               = value(27).cast<std::string>();
-                c.disk_eviction_policy                 = value(28).cast<std::string>();
-                c.kvcm_enable_vipserver                = value(29).cast<bool>();
-                c.kvcm_vipserver_domain                = value(30).cast<std::string>();
-                c.kvcm_server_address                  = value(31).cast<std::string>();
-                c.kvcm_instance_group                  = value(32).cast<std::string>();
-                c.kvcm_meta_channel_retry_time         = value(33).cast<uint32_t>();
-                c.kvcm_meta_channel_connection_timeout = value(34).cast<uint32_t>();
-                c.kvcm_meta_channel_call_timeout       = value(35).cast<uint32_t>();
-                c.kvcm_storage_thread_num              = value(36).cast<uint32_t>();
-                c.kvcm_storage_queue_size              = value(37).cast<uint32_t>();
-                c.kvcm_put_timeout_ms                  = value(38).cast<int>();
-                c.kvcm_get_timeout_ms                  = value(39).cast<int>();
-                c.kvcm_model_sdk_config                = value(40).cast<std::string>();
-                c.kvcm_model_user_data                 = value(41).cast<std::string>();
-                c.kvcm_model_extra_info                = value(42).cast<std::string>();
-                c.kvcm_instance_id_salt                = value(43).cast<std::string>();
-                c.kvcm_asyncwrapper_thread_num         = value(44).cast<size_t>();
-                c.kvcm_asyncwrapper_queue_size         = value(45).cast<size_t>();
-                c.kvcm_get_broadcast_timeout           = value(46).cast<int>();
-                c.kvcm_put_broadcast_timeout           = value(47).cast<int>();
-                c.kvcm_client_config                   = value(48).cast<std::string>();
+                c.fp8_kv_cache                                    = value(9).cast<int>();
+                c.ssm_state_dtype                                 = value(10).cast<std::string>();
+                c.kv_cache_mem_mb                                 = value(11).cast<int64_t>();
+                c.seq_size_per_block                              = value(12).cast<int>();
+                c.kernel_seq_size_per_block                       = value(13).cast<int>();
+                c.test_block_num                                  = value(14).cast<int>();
+                c.use_block_cache                                 = value(15).cast<int>();
+                c.enable_device_cache                             = value(16).cast<bool>();
+                c.enable_memory_cache                             = value(17).cast<bool>();
+                c.enable_disk_cache                               = value(19).cast<bool>();
+                c.enable_remote_cache                             = value(20).cast<bool>();
+                c.disk_cache_paths                                = value(21).cast<std::string>();
+                c.disk_cache_size_mb                              = value(22).cast<int64_t>();
+                c.disk_cache_buffered_io                          = value(23).cast<bool>();
+                c.disk_cache_sync_timeout_ms                      = value(24).cast<int64_t>();
+                c.disk_cache_staging_block_count                  = value(25).cast<int64_t>();
+                c.device_eviction_policy                          = value(26).cast<std::string>();
+                c.memory_eviction_policy                          = value(27).cast<std::string>();
+                c.disk_eviction_policy                            = value(28).cast<std::string>();
+                c.kvcm_enable_vipserver                           = value(29).cast<bool>();
+                c.kvcm_vipserver_domain                           = value(30).cast<std::string>();
+                c.kvcm_server_address                             = value(31).cast<std::string>();
+                c.kvcm_instance_group                             = value(32).cast<std::string>();
+                c.kvcm_meta_channel_retry_time                    = value(33).cast<uint32_t>();
+                c.kvcm_meta_channel_connection_timeout            = value(34).cast<uint32_t>();
+                c.kvcm_meta_channel_call_timeout                  = value(35).cast<uint32_t>();
+                c.kvcm_storage_thread_num                         = value(36).cast<uint32_t>();
+                c.kvcm_storage_queue_size                         = value(37).cast<uint32_t>();
+                c.kvcm_put_timeout_ms                             = value(38).cast<int>();
+                c.kvcm_get_timeout_ms                             = value(39).cast<int>();
+                c.kvcm_model_sdk_config                           = value(40).cast<std::string>();
+                c.kvcm_model_user_data                            = value(41).cast<std::string>();
+                c.kvcm_model_extra_info                           = value(42).cast<std::string>();
+                c.kvcm_instance_id_salt                           = value(43).cast<std::string>();
+                c.kvcm_asyncwrapper_thread_num                    = value(44).cast<size_t>();
+                c.kvcm_asyncwrapper_queue_size                    = value(45).cast<size_t>();
+                c.kvcm_get_broadcast_timeout                      = value(46).cast<int>();
+                c.kvcm_put_broadcast_timeout                      = value(47).cast<int>();
+                c.kvcm_client_config                              = value(48).cast<std::string>();
                 c.memory_cache_max_descriptors_per_transfer_batch = value(50).cast<int64_t>();
                 c.dsv4_fixed_pool_blocks                          = value(51).cast<uint32_t>();
                 c.dsv4_hca_state_pool_blocks                      = value(52).cast<uint32_t>();
@@ -798,7 +823,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 if (has_crc_field) {
                     c.enable_crc = crc_state[69].cast<bool>();
                 }
-                c.enable_prefill_partial_tail_reuse = enable_prefill_partial_tail_reuse;
+                c.enable_prefill_partial_tail_reuse     = enable_prefill_partial_tail_reuse;
+                c.enable_prefill_common_prefix_recovery = enable_prefill_common_prefix_recovery;
                 return c;
             }));
 
@@ -1942,7 +1968,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_prefix_reuse", &CacheReusePolicyDesc::enable_prefix_reuse)
         .def_readwrite("local_only_state", &CacheReusePolicyDesc::local_only_state)
         .def(py::pickle(
-            [](const CacheReusePolicyDesc& self) { return py::make_tuple(self.enable_prefix_reuse, self.local_only_state); },
+            [](const CacheReusePolicyDesc& self) {
+                return py::make_tuple(self.enable_prefix_reuse, self.local_only_state);
+            },
             [](py::tuple t) {
                 CacheReusePolicyDesc c;
                 if (t.size() != 2)

@@ -262,12 +262,13 @@ protected:
                                        role_type);
     }
 
-    void prepareResourceWithCacheConfig(const CacheConfig&      cache_config,
-                                        const std::vector<int>& input_tokens,
-                                        bool                    reuse_cache,
-                                        RoleType                role_type,
-                                        const KVCacheConfig&    kv_cache_config = {},
-                                        int                     tp_rank         = 0) {
+    void prepareResourceWithCacheConfig(const CacheConfig&                cache_config,
+                                        const std::vector<int>&           input_tokens,
+                                        bool                              reuse_cache,
+                                        RoleType                          role_type,
+                                        const KVCacheConfig&              kv_cache_config = {},
+                                        int                               tp_rank         = 0,
+                                        std::shared_ptr<V41RequestInputs> v41_inputs      = nullptr) {
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type = role_type;
         ParallelismConfig parallelism_config;
@@ -297,6 +298,7 @@ protected:
         generate_input->input_ids =
             torch::tensor(std::vector<int32_t>(input_tokens.begin(), input_tokens.end()), torch::kInt32);
         generate_input->generate_config = generate_config;
+        generate_input->v41_inputs      = std::move(v41_inputs);
         ModelConfig model_config;
         model_config.attn_config.tokens_per_block = 2;
         RuntimeConfig runtime_config;
@@ -675,6 +677,597 @@ TEST_F(StreamCacheResourceTest, PartialTailRegistrationIsGatedAndIndependentOfOb
     }
 }
 
+TEST_F(StreamCacheResourceTest, InternalForkRegistrationIsIndependentAndAppendedAfterTail) {
+    for (const bool tail : {false, true}) {
+        for (const bool internal : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "tail=" << tail << " internal=" << internal);
+            prepareResourceWithInputTokens({1, 2, 3, 9, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+            auto& resource                                                   = stream_->streamCacheResource();
+            resource.resource_context_.ignore_request_cache_switches         = true;
+            resource.resource_context_.enable_prefill_partial_tail_reuse     = tail;
+            resource.resource_context_.enable_prefill_common_prefix_recovery = internal;
+
+            auto       tokens     = stream_->completeTokenIdsPtr();
+            const auto prefix_key = cacheKeyAtTokenEnd(*tokens, 0, 2, 2, 0);
+            const auto source_key = cacheKeyForSourceSegment(*tokens, {3, 4}, 2, 2, prefix_key);
+            auto       cache      = cache_manager_->blockTreeCache();
+            std::vector<std::vector<GroupSetResource>> empty(2,
+                                                             std::vector<GroupSetResource>(cache->groupSets().size()));
+            const std::vector<std::vector<int>>        segments{{1, 2}, {3, 4}};
+            const std::vector<size_t>                  ends{2, 4};
+            ASSERT_EQ(cache->tree()
+                          ->insertNode({prefix_key, source_key}, empty, false, false, &segments, &ends)
+                          .inserted_nodes.size(),
+                      2u);
+
+            ASSERT_TRUE(resource.initKVBlock().ok());
+            const auto& registration = resource.prefixCacheRegistration();
+            if (!tail && !internal) {
+                EXPECT_FALSE(registration.has_value());
+            } else {
+                ASSERT_TRUE(registration.has_value());
+                const auto& points = registration->points;
+                ASSERT_EQ(points.size(), (tail ? 3u : 2u) + (internal ? 1u : 0u));
+                EXPECT_EQ(points.front().endpoint.pos, 2u);
+                EXPECT_EQ(points[1].endpoint.pos, 4u);
+                if (tail) {
+                    EXPECT_EQ(points[2].endpoint.pos, 5u);
+                    EXPECT_FALSE(points[2].internal_only);
+                }
+                if (internal) {
+                    EXPECT_EQ(points.back().endpoint.pos, 3u);
+                    EXPECT_TRUE(points.back().internal_only);
+                    EXPECT_EQ(points.back().endpoint.key, cacheKeyAtTokenEnd(*tokens, 0, 2, 3, 0));
+                }
+            }
+            stream_->releaseResource();
+        }
+    }
+}
+
+TEST_F(StreamCacheResourceTest, FarthestInternalForkAfterEarlierReuseIsTheOnlyExtraPoint) {
+    constexpr size_t block_tokens = 256;
+    std::vector<int> b(2000, 1);
+    std::fill(b.begin() + 800, b.begin() + 1300, 3);
+    std::fill(b.begin() + 1300, b.end(), 5);
+    prepareResourceWithCacheConfig(test::makeSimpleMhaCacheConfig(3, 32, block_tokens, DataType::TYPE_INT8),
+                                   b,
+                                   /*reuse_cache=*/true,
+                                   RoleType::PREFILL);
+    auto& resource                                                   = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches         = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse     = true;
+    resource.resource_context_.enable_prefill_common_prefix_recovery = true;
+    auto ids                                                         = stream_->completeTokenIdsPtr();
+    auto cache                                                       = cache_manager_->blockTreeCache();
+
+    std::vector<int> a(1536, 1);
+    std::fill(a.begin() + 800, a.end(), 2);
+    std::vector<int> c(1536, 1);
+    std::fill(c.begin() + 800, c.begin() + 1300, 3);
+    std::fill(c.begin() + 1300, c.end(), 4);
+    const auto insert_source = [&](const std::vector<int>&    source,
+                                   const std::vector<size_t>& ends,
+                                   const BlockIdList&         ready_blocks) {
+        CacheKeysType                              keys;
+        std::vector<std::vector<int>>              segments;
+        std::vector<std::vector<GroupSetResource>> resources(ends.size(), std::vector<GroupSetResource>(1));
+        size_t                                     previous    = 0;
+        CacheKeyType                               rolling_key = 0;
+        for (size_t i = 0; i < ends.size(); ++i) {
+            segments.emplace_back(source.begin() + previous, source.begin() + ends[i]);
+            rolling_key =
+                cacheKeyForSourceSegment(*ids, segments.back(), static_cast<int>(previous), block_tokens, rolling_key);
+            keys.push_back(rolling_key);
+            if (!ready_blocks.empty()) {
+                resources[i][0].device_blocks = {ready_blocks[i]};
+            }
+            previous = ends[i];
+        }
+        return cache->tree()->insertNode(keys, resources, false, false, &segments, &ends);
+    };
+    const std::vector<size_t> long_ends{256, 512, 768, 1024, 1280, 1536};
+    ASSERT_EQ(insert_source(c, long_ends, {}).inserted_nodes.size(), 6u);
+    ASSERT_EQ(insert_source(a, {256, 512, 768, 1024}, {}).inserted_nodes.size(), 1u);
+    auto       pool  = cache->groupSets().front()->devicePools().front();
+    const auto ready = pool->malloc(5);
+    ASSERT_TRUE(ready.has_value());
+    pool->incRef(*ready);
+    const auto short_insert = insert_source(c, {256, 512, 768, 1024, 1100}, *ready);
+    ASSERT_EQ(short_insert.inserted_nodes.size(), 1u);
+    ASSERT_EQ(short_insert.adopted_nodes.size(), 4u);
+    pool->decRef(*ready);
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    EXPECT_EQ(stream_->initialReuseLength(), 1100);
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    resource.prepareRegisteredSave();
+    const auto& registration = *resource.prefixCacheRegistration();
+    ASSERT_TRUE(registration.prepared);
+    ASSERT_EQ(registration.points.size(), 9u);
+    for (size_t i = 0; i < 7; ++i) {
+        EXPECT_EQ(registration.points[i].endpoint.pos, (i + 1) * block_tokens);
+        EXPECT_FALSE(registration.points[i].internal_only);
+    }
+    EXPECT_EQ(registration.points[7].endpoint.pos, 2000u);
+    EXPECT_FALSE(registration.points[7].internal_only);
+    EXPECT_EQ(registration.points[8].endpoint.pos, 1300u);
+    EXPECT_EQ(registration.points[8].endpoint.key, cacheKeyAtTokenEnd(*ids, 0, block_tokens, 1300, 0));
+    EXPECT_TRUE(registration.points[8].internal_only);
+    EXPECT_EQ(std::count_if(registration.points.begin(),
+                            registration.points.end(),
+                            [](const auto& point) { return point.internal_only; }),
+              1);
+    EXPECT_EQ(std::count_if(registration.points.begin(),
+                            registration.points.end(),
+                            [](const auto& point) { return point.endpoint.pos == 800; }),
+              0);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, InternalForkFullAliasPublishesForLaterMatchingRequest) {
+    prepareResourceWithInputTokens({1, 2, 3, 9, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource                                                   = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches         = true;
+    resource.resource_context_.enable_prefill_common_prefix_recovery = true;
+    auto                                       tokens                = stream_->completeTokenIdsPtr();
+    const auto                                 prefix_key            = cacheKeyAtTokenEnd(*tokens, 0, 2, 2, 0);
+    const auto                                 source_key = cacheKeyForSourceSegment(*tokens, {3, 4}, 2, 2, prefix_key);
+    auto                                       cache      = cache_manager_->blockTreeCache();
+    std::vector<std::vector<GroupSetResource>> empty(2, std::vector<GroupSetResource>(cache->groupSets().size()));
+    const std::vector<std::vector<int>>        source_segments{{1, 2}, {3, 4}};
+    const std::vector<size_t>                  source_ends{2, 4};
+    ASSERT_EQ(cache->tree()
+                  ->insertNode({prefix_key, source_key}, empty, false, false, &source_segments, &source_ends)
+                  .inserted_nodes.size(),
+              2u);
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_EQ(stream_->initialReuseLength(), 0);
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    const auto fork = resource.prefixCacheRegistration()->points.back().endpoint;
+    ASSERT_EQ(fork.pos, 3u);
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    resource.prepareRegisteredSave();
+    ASSERT_TRUE(resource.prefixCacheRegistration()->prepared);
+    // Unit-level completion handoff; real producer bytes are gated separately by model tests.
+    resource.completeRegisteredSave(5);
+    InsertInfo info{resource.batch_kv_cache_resource_, tokens, false, Tier::DEVICE};
+    info.prefix_cache_registration = &*resource.prefixCacheRegistration();
+    size_t resident                = 0;
+    cache_manager_->insertIntoCache(info, resident);
+    const auto saved_fork = cache->tree()->findNode({prefix_key, fork.key});
+    ASSERT_EQ(saved_fork.size(), 2u);
+    EXPECT_EQ(saved_fork.back()->token_end, 3u);
+    EXPECT_TRUE(cache->tree()->isShortLeaf(saved_fork.back()));
+    EXPECT_TRUE(cache->tree()->findNode({prefix_key, fork.key, source_key}).size() < 3u);
+
+    std::vector<int>        later_tokens{1, 2, 3, 8, 6};
+    PartialTailMatchRequest later;
+    later.tokens          = &later_tokens;
+    later.endpoint_key    = [tokens](size_t end) { return cacheKeyAtTokenEnd(*tokens, 0, 2, end, 0); };
+    later.source_identity = [tokens, prefix_key](size_t begin, const std::vector<int>& source, CacheKeyType key) {
+        const CacheKeyType seed = begin == 0 ? 0 : prefix_key;
+        return cacheKeyForSourceSegment(*tokens, source, static_cast<int>(begin), 2, seed) == key;
+    };
+    later.valid_endpoint           = [](size_t end) { return end > 0 && end < 5; };
+    later.preceding_valid_endpoint = [](size_t upper) { return std::min(upper, size_t{4}); };
+    later.reuse_unit_tokens        = 2;
+    auto later_match               = cache->match({}, {}, &later);
+    EXPECT_EQ(later_match.matched_device_endpoint, 3u);
+    for (const auto& pinned : later_match.matched_device_resources) {
+        cache->groupSets()[pinned.group_set_id]->unreferenceBlocks(pinned);
+    }
+
+    // The same published F is the request endpoint here, so G=F would leave
+    // no token to compute. The ordinary G<N gate must still apply to F.
+    std::vector<int> ends_at_fork{1, 2, 3};
+    later.tokens                   = &ends_at_fork;
+    later.valid_endpoint           = [](size_t end) { return end > 0 && end < 3; };
+    later.preceding_valid_endpoint = [](size_t upper) { return std::min(upper, size_t{2}); };
+    auto exact_end_match           = cache->match({}, {}, &later);
+    EXPECT_LT(exact_end_match.matched_device_endpoint, fork.pos);
+    for (const auto& pinned : exact_end_match.matched_device_resources) {
+        cache->groupSets()[pinned.group_set_id]->unreferenceBlocks(pinned);
+    }
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, FirstBlockLinearForkSavesOneTokenBeyondResume) {
+    auto config = test::makeSimpleLinearCacheConfig(3, 16, 2, DataType::TYPE_FP16);
+    prepareResourceWithCacheConfig(config, {1, 9, 3, 5, 6}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource                                                   = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches         = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse     = true;
+    resource.resource_context_.enable_prefill_common_prefix_recovery = true;
+    auto                                       tokens                = stream_->completeTokenIdsPtr();
+    auto                                       cache                 = cache_manager_->blockTreeCache();
+    const auto                                 source_key = cacheKeyForSourceSegment(*tokens, {1, 4}, 0, 2, 0);
+    std::vector<std::vector<GroupSetResource>> empty(1, std::vector<GroupSetResource>(cache->groupSets().size()));
+    const std::vector<std::vector<int>>        source_segments{{1, 4}};
+    const std::vector<size_t>                  source_ends{2};
+    ASSERT_EQ(cache->tree()
+                  ->insertNode({source_key}, empty, false, false, &source_segments, &source_ends)
+                  .inserted_nodes.size(),
+              1u);
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_EQ(stream_->initialReuseLength(), 0);
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    const auto& registration = *resource.prefixCacheRegistration();
+    ASSERT_TRUE(registration.farthest_fork.has_value());
+    ASSERT_EQ(registration.farthest_fork->pos, 1u);
+    ASSERT_EQ(registration.points.size(), 4u);
+    ASSERT_TRUE(registration.points.back().internal_only);
+    const auto fork = registration.points.back().endpoint;
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    resource.prepareRegisteredSave();
+    ASSERT_EQ(registration.points.back().group_bindings.front().state, PrefixCacheSaveState::REGISTERED);
+    ASSERT_TRUE(registration.points.back().group_bindings.front().resource.hasCompleteDeviceValue());
+    resource.completeRegisteredSave(5);
+    InsertInfo info{resource.batch_kv_cache_resource_, tokens, false, Tier::DEVICE};
+    info.prefix_cache_registration = &*resource.prefixCacheRegistration();
+    size_t resident                = 0;
+    cache_manager_->insertIntoCache(info, resident);
+    const auto saved = cache->tree()->findNode({fork.key});
+    ASSERT_EQ(saved.size(), 1u);
+    EXPECT_EQ(saved.back()->token_end, 1u);
+    EXPECT_TRUE(cache->tree()->isShortLeaf(saved.back()));
+    EXPECT_TRUE(saved.back()->group_set_resources[0].hasCompleteDeviceValue());
+
+    std::vector<int>        later_tokens{1, 8, 7};
+    PartialTailMatchRequest later;
+    later.tokens          = &later_tokens;
+    later.endpoint_key    = [tokens](size_t end) { return cacheKeyAtTokenEnd(*tokens, 0, 2, end, 0); };
+    later.source_identity = [tokens](size_t begin, const std::vector<int>& source, CacheKeyType key) {
+        return cacheKeyForSourceSegment(*tokens, source, static_cast<int>(begin), 2, 0) == key;
+    };
+    later.valid_endpoint           = [](size_t end) { return end > 0 && end < 3; };
+    later.preceding_valid_endpoint = [](size_t upper) { return std::min(upper, size_t{2}); };
+    later.reuse_unit_tokens        = 2;
+    auto later_match               = cache->match({}, {}, &later);
+    EXPECT_EQ(later_match.matched_device_endpoint, 1u);
+    for (const auto& pinned : later_match.matched_device_resources) {
+        cache->groupSets()[pinned.group_set_id]->unreferenceBlocks(pinned);
+    }
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, InternalForkAtOrBeforeResumeHasNoSelectedSave) {
+    auto config = test::makeSimpleLinearCacheConfig(3, 12, 2, DataType::TYPE_FP16);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 9, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource                                                   = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches         = true;
+    resource.resource_context_.enable_prefill_common_prefix_recovery = true;
+    auto                                       tokens                = stream_->completeTokenIdsPtr();
+    const auto                                 prefix_key            = cacheKeyAtTokenEnd(*tokens, 0, 2, 2, 0);
+    const auto                                 source_key = cacheKeyForSourceSegment(*tokens, {3, 4}, 2, 2, prefix_key);
+    auto                                       cache      = cache_manager_->blockTreeCache();
+    std::vector<std::vector<GroupSetResource>> empty(2, std::vector<GroupSetResource>(cache->groupSets().size()));
+    const std::vector<std::vector<int>>        segments{{1, 2}, {3, 4}};
+    const std::vector<size_t>                  ends{2, 4};
+    ASSERT_EQ(cache->tree()
+                  ->insertNode({prefix_key, source_key}, empty, false, false, &segments, &ends)
+                  .inserted_nodes.size(),
+              2u);
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    const auto original = *resource.prefixCacheRegistration();
+    ASSERT_EQ(original.points.back().endpoint.pos, 3u);
+    ASSERT_TRUE(original.points.back().internal_only);
+    auto pool = cache->groupSets().front()->devicePools().front();
+    for (const size_t resume : {3u, 4u}) {
+        SCOPED_TRACE(::testing::Message() << "resume=" << resume);
+        auto         registration = original;
+        const size_t free_before  = pool->freeBlocksNum();
+        cache_manager_->prepareRegisteredSave(registration, *resource.batch_kv_cache_resource_, resume, tokens.get());
+        ASSERT_TRUE(registration.prepared);
+        const auto& fork = registration.points.back().group_bindings.front();
+        EXPECT_EQ(fork.state, PrefixCacheSaveState::UNFULFILLED);
+        EXPECT_EQ(fork.unfulfilled_reason, "resume_at_or_past_fork");
+        EXPECT_EQ(fork.ownership, PrefixCacheSaveOwnership::NONE);
+        EXPECT_TRUE(fork.resource.is_empty());
+        cache_manager_->releaseRegisteredSave(registration);
+        EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    }
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, CancelledInternalForkAndTailReleaseBeforeRetry) {
+    auto config = test::makeSimpleLinearCacheConfig(3, 32, 2, DataType::TYPE_FP16);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 9, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource                                                   = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches         = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse     = true;
+    resource.resource_context_.enable_prefill_common_prefix_recovery = true;
+    auto                                       tokens                = stream_->completeTokenIdsPtr();
+    const auto                                 prefix_key            = cacheKeyAtTokenEnd(*tokens, 0, 2, 2, 0);
+    const auto                                 source_key = cacheKeyForSourceSegment(*tokens, {3, 4}, 2, 2, prefix_key);
+    auto                                       cache      = cache_manager_->blockTreeCache();
+    std::vector<std::vector<GroupSetResource>> empty(2, std::vector<GroupSetResource>(cache->groupSets().size()));
+    const std::vector<std::vector<int>>        source_segments{{1, 2}, {3, 4}};
+    const std::vector<size_t>                  source_ends{2, 4};
+    ASSERT_EQ(cache->tree()
+                  ->insertNode({prefix_key, source_key}, empty, false, false, &source_segments, &source_ends)
+                  .inserted_nodes.size(),
+              2u);
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    auto cancelled = *resource.prefixCacheRegistration();
+    ASSERT_EQ(cancelled.points.size(), 4u);
+    ASSERT_EQ(cancelled.points[2].endpoint.pos, 5u);
+    ASSERT_EQ(cancelled.points[3].endpoint.pos, 3u);
+    ASSERT_TRUE(cancelled.points[3].internal_only);
+    auto         pool        = cache->groupSets().front()->devicePools().front();
+    const size_t free_before = pool->freeBlocksNum();
+    cache_manager_->prepareRegisteredSave(cancelled, *resource.batch_kv_cache_resource_, 0, tokens.get());
+    ASSERT_TRUE(cancelled.prepared);
+    const auto& tail = cancelled.points[2].group_bindings.front();
+    const auto& fork = cancelled.points[3].group_bindings.front();
+    ASSERT_EQ(tail.state, PrefixCacheSaveState::REGISTERED);
+    ASSERT_EQ(fork.state, PrefixCacheSaveState::REGISTERED);
+    ASSERT_TRUE(tail.resource.hasCompleteDeviceValue());
+    ASSERT_TRUE(fork.resource.hasCompleteDeviceValue());
+    const auto tail_block = tail.resource.device_blocks.front();
+    const auto fork_block = fork.resource.device_blocks.front();
+    EXPECT_NE(tail_block, fork_block);
+    InsertInfo info{resource.batch_kv_cache_resource_, tokens, false, Tier::DEVICE};
+    info.prefix_cache_registration = &cancelled;
+    size_t resident                = 0;
+    cache_manager_->insertIntoCache(info, resident);
+    EXPECT_TRUE(cache->tree()->findNode({prefix_key, cancelled.points[3].endpoint.key}).size() < 2u);
+    cache_manager_->releaseRegisteredSave(cancelled);
+    cache_manager_->releaseRegisteredSave(cancelled);
+    EXPECT_FALSE(pool->isAllocated(tail_block));
+    EXPECT_FALSE(pool->isAllocated(fork_block));
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+
+    resource.prepareRegisteredSave();
+    ASSERT_TRUE(resource.prefixCacheRegistration()->prepared);
+    resource.completeRegisteredSave(5);  // Existing post-writer completion handoff.
+    info.prefix_cache_registration = &*resource.prefixCacheRegistration();
+    cache_manager_->insertIntoCache(info, resident);
+    EXPECT_EQ(cache->tree()->findNode({prefix_key, resource.prefixCacheRegistration()->points[3].endpoint.key}).size(),
+              2u);
+    EXPECT_EQ(cache->tree()
+                  ->findNode({prefix_key,
+                              resource.prefixCacheRegistration()->points[1].endpoint.key,
+                              resource.prefixCacheRegistration()->points[2].endpoint.key})
+                  .size(),
+              3u);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, InternalForkObservationMarksOriginalPointDeduplication) {
+    prepareResourceWithInputTokens({1, 2, 3, 9, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource                                                   = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches         = true;
+    resource.resource_context_.enable_prefill_common_prefix_recovery = true;
+    auto                                       tokens                = stream_->completeTokenIdsPtr();
+    const auto                                 prefix_key            = cacheKeyAtTokenEnd(*tokens, 0, 2, 2, 0);
+    const auto                                 source_key = cacheKeyForSourceSegment(*tokens, {8, 4}, 2, 2, prefix_key);
+    auto                                       cache      = cache_manager_->blockTreeCache();
+    std::vector<std::vector<GroupSetResource>> empty(2, std::vector<GroupSetResource>(cache->groupSets().size()));
+    const std::vector<std::vector<int>>        source_segments{{1, 2}, {8, 4}};
+    const std::vector<size_t>                  source_ends{2, 4};
+    ASSERT_EQ(cache->tree()
+                  ->insertNode({prefix_key, source_key}, empty, false, false, &source_segments, &source_ends)
+                  .inserted_nodes.size(),
+              2u);
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    const auto& registration = *resource.prefixCacheRegistration();
+    ASSERT_TRUE(registration.farthest_fork.has_value());
+    EXPECT_EQ(registration.farthest_fork->pos, 2u);
+    EXPECT_EQ(std::count_if(registration.points.begin(),
+                            registration.points.end(),
+                            [](const auto& point) { return point.internal_only; }),
+              0);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, ImageInteriorForkIsNotSavedOrReplacedByAlignedPoint) {
+    auto          multimodal = std::make_shared<V41RequestInputs>();
+    V41ImageInput image;
+    image.start              = 2;
+    image.types              = torch::zeros({2}, torch::kInt32);
+    image.n_vit_h            = 1;
+    image.n_vit_w            = 2;
+    image.content_sha256     = std::string(64, 'a');
+    image.processor_identity = std::string(64, 'b');
+    multimodal->images.push_back(image);
+    auto config = test::makeSimpleLinearCacheConfig(3, 12, 2, DataType::TYPE_FP16);
+    prepareResourceWithCacheConfig(config,
+                                   {1, 2, 3, 9, 5},
+                                   /*reuse_cache=*/true,
+                                   RoleType::PREFILL,
+                                   KVCacheConfig{},
+                                   /*tp_rank=*/0,
+                                   multimodal);
+    auto& resource                                                   = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches         = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse     = true;
+    resource.resource_context_.enable_prefill_common_prefix_recovery = true;
+    auto tokens                                                      = stream_->completeTokenIdsPtr();
+    ASSERT_FALSE(tokens->imageCacheIdentity(2, 2).empty());
+    ASSERT_FALSE(tokens->isValidReuseLength(3, 0));
+    ASSERT_TRUE(tokens->isValidReuseLength(4, 0));
+    const auto                                 prefix_key = cacheKeyAtTokenEnd(*tokens, 0, 2, 2, 0);
+    const auto                                 source_key = cacheKeyForSourceSegment(*tokens, {3, 4}, 2, 2, prefix_key);
+    auto                                       cache      = cache_manager_->blockTreeCache();
+    std::vector<std::vector<GroupSetResource>> empty(2, std::vector<GroupSetResource>(cache->groupSets().size()));
+    const std::vector<std::vector<int>>        source_segments{{1, 2}, {3, 4}};
+    const std::vector<size_t>                  source_ends{2, 4};
+    ASSERT_EQ(cache->tree()
+                  ->insertNode({prefix_key, source_key}, empty, false, false, &source_segments, &source_ends)
+                  .inserted_nodes.size(),
+              2u);
+    auto         pool        = cache->groupSets().front()->devicePools().front();
+    const size_t free_before = pool->freeBlocksNum();
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    const auto& registration = *resource.prefixCacheRegistration();
+    ASSERT_TRUE(registration.farthest_fork.has_value());
+    EXPECT_EQ(registration.farthest_fork->pos, 3u);
+    EXPECT_EQ(stream_->initialReuseLength(), 0);
+    ASSERT_EQ(registration.points.size(), 3u);
+    EXPECT_EQ(registration.points[0].endpoint.pos, 2u);
+    EXPECT_EQ(registration.points[1].endpoint.pos, 4u);
+    EXPECT_EQ(registration.points[2].endpoint.pos, 5u);
+    EXPECT_EQ(std::count_if(registration.points.begin(),
+                            registration.points.end(),
+                            [](const auto& point) { return point.internal_only; }),
+              0);
+
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    resource.prepareRegisteredSave();
+    ASSERT_TRUE(registration.prepared);
+    EXPECT_EQ(registration.points.size(), 3u);
+    EXPECT_LT(cache->tree()->findNode({prefix_key, registration.farthest_fork->key}).size(), 2u);
+    stream_->releaseResource();
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+}
+
+TEST_F(StreamCacheResourceTest, InternalForkOptionalStateYieldsAfterOriginalTail) {
+    auto config = test::makeSimpleLinearCacheConfig(3, 12, 2, DataType::TYPE_FP16);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 9, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource                                                   = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches         = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse     = true;
+    resource.resource_context_.enable_prefill_common_prefix_recovery = true;
+    auto                                       tokens                = stream_->completeTokenIdsPtr();
+    const auto                                 prefix_key            = cacheKeyAtTokenEnd(*tokens, 0, 2, 2, 0);
+    const auto                                 source_key = cacheKeyForSourceSegment(*tokens, {3, 4}, 2, 2, prefix_key);
+    auto                                       cache      = cache_manager_->blockTreeCache();
+    std::vector<std::vector<GroupSetResource>> empty(2, std::vector<GroupSetResource>(cache->groupSets().size()));
+    const std::vector<std::vector<int>>        source_segments{{1, 2}, {3, 4}};
+    const std::vector<size_t>                  source_ends{2, 4};
+    ASSERT_EQ(cache->tree()
+                  ->insertNode({prefix_key, source_key}, empty, false, false, &source_segments, &source_ends)
+                  .inserted_nodes.size(),
+              2u);
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    ASSERT_EQ(resource.prefixCacheRegistration()->points.back().endpoint.pos, 3u);
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    auto         pool      = cache->groupSets().front()->devicePools().front();
+    const size_t available = pool->freeBlocksNum();
+    // Both original aligned points and N need independent destinations here.
+    // Leave all three available so only the appended F loses allocation.
+    ASSERT_GT(available, 3u);
+    const auto held = pool->malloc(available - 3);
+    ASSERT_TRUE(held.has_value());
+    pool->incRef(*held);
+    resource.prepareRegisteredSave();
+    const auto& registration = *resource.prefixCacheRegistration();
+    ASSERT_TRUE(registration.prepared);
+    ASSERT_EQ(registration.points.size(), 4u);
+    const auto& tail = registration.points[2].group_bindings.front();
+    const auto& fork = registration.points[3].group_bindings.front();
+    EXPECT_EQ(registration.points[2].endpoint.pos, 5u);
+    EXPECT_EQ(tail.ownership, PrefixCacheSaveOwnership::OPTIONAL_REQUEST);
+    EXPECT_EQ(tail.state, PrefixCacheSaveState::REGISTERED);
+    EXPECT_TRUE(registration.points[3].internal_only);
+    EXPECT_EQ(fork.state, PrefixCacheSaveState::UNFULFILLED);
+    EXPECT_EQ(fork.unfulfilled_reason, "optional_device_capacity");
+    EXPECT_TRUE(fork.resource.is_empty());
+    pool->decRef(*held);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, InternalForkYieldsAfterEvictionFundsOriginalAndTail) {
+    auto config = test::makeSimpleLinearCacheConfig(3, 12, 2, DataType::TYPE_FP16);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 9, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource                                                   = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches         = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse     = true;
+    resource.resource_context_.enable_prefill_common_prefix_recovery = true;
+    auto                                       tokens                = stream_->completeTokenIdsPtr();
+    const auto                                 prefix_key            = cacheKeyAtTokenEnd(*tokens, 0, 2, 2, 0);
+    const auto                                 source_key = cacheKeyForSourceSegment(*tokens, {3, 4}, 2, 2, prefix_key);
+    auto                                       cache      = cache_manager_->blockTreeCache();
+    std::vector<std::vector<GroupSetResource>> empty(2, std::vector<GroupSetResource>(cache->groupSets().size()));
+    const std::vector<std::vector<int>>        source_segments{{1, 2}, {3, 4}};
+    const std::vector<size_t>                  source_ends{2, 4};
+    ASSERT_EQ(cache->tree()
+                  ->insertNode({prefix_key, source_key}, empty, false, false, &source_segments, &source_ends)
+                  .inserted_nodes.size(),
+              2u);
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    ASSERT_EQ(resource.prefixCacheRegistration()->points.size(), 4u);
+    ASSERT_TRUE(resource.prefixCacheRegistration()->points.back().internal_only);
+    auto pool = cache->groupSets().front()->devicePools().front();
+
+    // One unrelated cached block is the only evictable capacity. The two
+    // initially free blocks fund original points; eviction must fund N, and F
+    // must yield when no more cache-owned block can be reclaimed.
+    const auto cached = pool->malloc();
+    ASSERT_TRUE(cached.has_value());
+    pool->incRef(*cached);
+    constexpr CacheKeyType                     unrelated_key = 987654321;
+    std::vector<std::vector<GroupSetResource>> cached_resource(
+        1, std::vector<GroupSetResource>(cache->groupSets().size()));
+    cached_resource[0][0].device_blocks = {*cached};
+    const std::vector<std::vector<int>> unrelated_segments{{42, 43}};
+    const std::vector<size_t>           unrelated_ends{2};
+    cache->insert({unrelated_key}, cached_resource, Tier::DEVICE, false, &unrelated_segments, &unrelated_ends);
+    pool->decRef(*cached);
+    ASSERT_TRUE(pool->isAllocated(*cached));
+    ASSERT_EQ(pool->refCount(*cached), 1u);
+
+    const size_t available = pool->freeBlocksNum();
+    ASSERT_GT(available, 2u);
+    const auto held = pool->malloc(available - 2);
+    ASSERT_TRUE(held.has_value());
+    pool->incRef(*held);
+    ASSERT_EQ(pool->freeBlocksNum(), 2u);
+
+    resource.prepareRegisteredSave();
+    const auto& registration = *resource.prefixCacheRegistration();
+    ASSERT_TRUE(registration.prepared);
+    ASSERT_EQ(registration.points.size(), 4u);
+    for (size_t index = 0; index < 3; ++index) {
+        EXPECT_EQ(registration.points[index].group_bindings.front().state, PrefixCacheSaveState::REGISTERED);
+    }
+    const auto& tail = registration.points[2].group_bindings.front();
+    const auto& fork = registration.points[3].group_bindings.front();
+    ASSERT_EQ(registration.points[2].endpoint.pos, 5u);
+    ASSERT_TRUE(tail.resource.hasCompleteDeviceValue());
+    EXPECT_EQ(fork.state, PrefixCacheSaveState::UNFULFILLED);
+    EXPECT_EQ(fork.unfulfilled_reason, "optional_device_capacity");
+    EXPECT_TRUE(fork.resource.is_empty());
+    const auto unrelated_path = cache->tree()->findNode({unrelated_key});
+    EXPECT_TRUE(unrelated_path.empty() || !unrelated_path.back()->group_set_resources[0].hasCompleteDeviceValue());
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+
+    const auto tail_block = tail.resource.device_blocks.front();
+    pool->decRef(*held);
+    resource.completeRegisteredSave(5);
+    InsertInfo info{resource.batch_kv_cache_resource_, tokens, false, Tier::DEVICE};
+    info.prefix_cache_registration = &*resource.prefixCacheRegistration();
+    size_t resident                = 0;
+    cache_manager_->insertIntoCache(info, resident);
+    EXPECT_EQ(cache->tree()
+                  ->findNode({prefix_key, registration.points[1].endpoint.key, registration.points[2].endpoint.key})
+                  .size(),
+              3u);
+    EXPECT_LT(cache->tree()->findNode({prefix_key, registration.points[3].endpoint.key}).size(), 2u);
+    stream_->releaseResource();
+    EXPECT_TRUE(pool->isAllocated(tail_block));
+    EXPECT_EQ(pool->refCount(tail_block), 1u);
+}
+
 TEST_F(StreamCacheResourceTest, RegisteredShortSaveOwnsOptionalBlockUntilReleased) {
     auto config = test::makeSimpleLinearCacheConfig(3, 12, 2, DataType::TYPE_FP16);
     prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
@@ -773,10 +1366,11 @@ TEST_F(StreamCacheResourceTest, LegacyDenseSwaContinuationPreservesLaterCachedPa
         cache_manager_->insertIntoCache(insert, resident);
         cache_manager_->releaseRegisteredSave(saved);
         cache_manager_->free(FreeInfo{source, tokens});
-        auto& resource                                               = stream_->streamCacheResource();
-        resource.resource_context_.ignore_request_cache_switches     = true;
-        resource.resource_context_.enable_prefill_partial_tail_reuse = registered_snapshot;
-        stream_->generate_status_->status                            = StreamState::WAITING;
+        auto& resource                                                   = stream_->streamCacheResource();
+        resource.resource_context_.ignore_request_cache_switches         = true;
+        resource.resource_context_.enable_prefill_partial_tail_reuse     = registered_snapshot;
+        resource.resource_context_.enable_prefill_common_prefix_recovery = false;
+        stream_->generate_status_->status                                = StreamState::WAITING;
         stream_->reportEvent(StreamEvents::CanRun);
         ASSERT_EQ(stream_->moveToNext(), StreamState::RUNNING);
         EXPECT_EQ(resource.prefixCacheRegistration().has_value(), registered_snapshot);

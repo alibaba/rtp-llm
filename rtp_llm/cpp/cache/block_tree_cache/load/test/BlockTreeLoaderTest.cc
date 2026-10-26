@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -56,6 +58,40 @@ protected:
         throw std::runtime_error("injected remote read failure");
     }
     void writeImpl(const StorageRequest&) override {}
+};
+
+class ForkRemoteBackend final: public StorageBackend {
+public:
+    explicit ForkRemoteBackend(bool fail_read): fail_read_(fail_read) {}
+    ~ForkRemoteBackend() override {
+        shutdown();
+    }
+
+    std::atomic<size_t> read_calls{0};
+
+protected:
+    bool initImpl() override {
+        return true;
+    }
+    StorageMatchResult matchImpl(const StorageRequest& request) override {
+        if (request.keys->empty() || request.local_matched_blocks_num != 0) {
+            throw std::runtime_error("expected remote first-block match");
+        }
+        return {1, nullptr};
+    }
+    void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+        ++read_calls;
+        if (request.handles.size() != 1 || request.handles.front().empty()) {
+            throw std::runtime_error("expected remote first-block read");
+        }
+        if (fail_read_) {
+            throw std::runtime_error("injected remote F ancestor read failure");
+        }
+    }
+    void writeImpl(const StorageRequest&) override {}
+
+private:
+    const bool fail_read_;
 };
 
 TEST(BlockTreeLoaderTest, CrcDeviceReuseDoesNotPromoteUnprotectedBackendFailure) {
@@ -499,6 +535,458 @@ TEST(BlockTreeLoaderTest, MatchObservationSkipsIncompleteTokenMetadata) {
     EXPECT_EQ(result.matched_device_blocks, 2u);
 }
 
+TEST(BlockTreeLoaderTest, RemoteCompetitionReportsAuthenticatedLocalContent) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    FullSWAEnvironmentOptions options;
+    options.path_length = 2;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+    environment->insertRequestPath();  // Allocate request-owned blocks before rebuilding the observable tree.
+
+    BlockTreeCacheConfig config;
+    config.enable_device_cache = true;
+    environment->cache.reset();
+    environment->cache =
+        block_tree_cache_test::makeBlockTreeCacheForTest(environment->groups, config, nullptr, nullptr, nullptr, 256);
+    ASSERT_NE(environment->cache, nullptr);
+
+    const std::vector<std::vector<int>>        source_segments{std::vector<int>(256, 1), std::vector<int>(256, 2)};
+    const std::vector<size_t>                  source_ends{256, 512};
+    std::vector<std::vector<GroupSetResource>> source_resources(2, std::vector<GroupSetResource>(2));
+    for (size_t path = 0; path < 2; ++path) {
+        for (size_t group = 0; group < 2; ++group) {
+            source_resources[path][group].device_blocks = environment->request_blocks[group][path];
+        }
+    }
+    environment->cache->insert(
+        environment->keys, source_resources, Tier::DEVICE, false, &source_segments, &source_ends);
+    // A different first-block identity has equal tokens and a longer token-only
+    // match. It must not contribute to authenticated M or the strict F value.
+    const CacheKeysType           foreign_keys{environment->keys[0] + 100000, environment->keys[1] + 100000};
+    std::vector<std::vector<int>> foreign_segments{std::vector<int>(256, 1), std::vector<int>(256, 2)};
+    std::fill(foreign_segments[1].begin() + 144, foreign_segments[1].end(), 3);
+    std::vector<std::vector<GroupSetResource>> empty(2, std::vector<GroupSetResource>(2));
+    environment->cache->tree()->insertNode(foreign_keys, empty, false, false, &foreign_segments, &source_ends);
+    environment->releaseRequestRefs();
+
+    auto                       backend = std::make_shared<ReadFailureBackend>();
+    StorageBackend::PoolsByTag pools;
+    for (const auto& group : environment->groups) {
+        for (size_t member = 0; member < group->groupTags().size(); ++member) {
+            pools.emplace(group->groupTags()[member], group->devicePools()[member]);
+        }
+    }
+    ASSERT_TRUE(backend->init(
+        environment->topology, pools, [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }, 1));
+    environment->cache->loader_.storage_backend_ = backend;
+
+    std::vector<int> tokens(600, 1);
+    std::fill(tokens.begin() + 256, tokens.begin() + 400, 2);
+    std::fill(tokens.begin() + 400, tokens.begin() + 512, 3);
+    std::fill(tokens.begin() + 512, tokens.end(), 9);
+    PartialTailMatchRequest request;
+    request.tokens       = &tokens;
+    request.endpoint_key = [&](size_t end) {
+        return end == 256 ? environment->keys[0] : static_cast<CacheKeyType>(end);
+    };
+    request.source_identity = [&](size_t begin, const std::vector<int>& segment, CacheKeyType key) {
+        return (begin == 0 && key == environment->keys[0] && segment == source_segments[0])
+               || (begin == 256 && key == environment->keys[1] && segment == source_segments[1]);
+    };
+    request.valid_endpoint           = [](size_t end) { return end > 0 && end < 600; };
+    request.preceding_valid_endpoint = [](size_t upper) { return upper; };
+    request.reuse_unit_tokens        = 256;
+    request.remote_ceiling           = 512;
+
+    const CacheKeysType request_keys{environment->keys[0], 512};
+    auto                result = environment->cache->match(request_keys, {}, &request);
+    ASSERT_TRUE(result.farthest_fork.has_value());
+    EXPECT_EQ(result.farthest_fork->pos, 400u);
+    ASSERT_NE(result.async_context, nullptr);
+    EXPECT_TRUE(result.async_context->needBackendMatch());
+    EXPECT_TRUE(result.async_context->abortPending());
+    result.async_context.reset();
+    environment->releaseMatch(result);
+    backend->shutdown();
+    // The foreign content-only branch owns no blocks and cannot be evicted by
+    // resource pressure. Destroy its tree, then check all request/cache refs.
+    environment->cache.reset();
+    for (const auto& pool : environment->device_pools) {
+        EXPECT_EQ(pool->freeBlocksNum(), options.usable_device_blocks);
+    }
+}
+
+class BlockTreeLoaderRemoteForkTest: public ::testing::TestWithParam<bool> {};
+
+TEST_P(BlockTreeLoaderRemoteForkTest, RemoteAncestorBelowAuthenticatedForkSettlesOrFailsWithoutLeakingState) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    const bool                fail_read = GetParam();
+    FullSWAEnvironmentOptions options;
+    options.path_length = 2;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+    // The helper creates a topology from an uninitialized GroupSet and binds
+    // the backend once. Its topology and pool map must describe the same tags.
+    auto full =
+        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{environment->device_pools[0]}, nullptr, nullptr);
+
+    auto                 backend = std::make_shared<ForkRemoteBackend>(fail_read);
+    BlockTreeCacheConfig config;
+    config.enable_device_cache = true;
+    config.enable_remote_cache = true;
+    auto cache = block_tree_cache_test::makeBlockTreeCacheForTest({full}, config, backend, nullptr, nullptr, 256);
+    ASSERT_NE(cache, nullptr);
+
+    // A retained local content path identifies the true F400, but has no
+    // resident group state. The unchanged complete-key backend supplies G256.
+    const std::vector<std::vector<int>> source_segments{std::vector<int>(256, 1), std::vector<int>(256, 2)};
+    const std::vector<size_t>           source_ends{256, 512};
+    const std::vector<std::vector<GroupSetResource>> empty_resources(2, std::vector<GroupSetResource>(1));
+    ASSERT_EQ(cache->tree()
+                  ->insertNode(environment->keys, empty_resources, false, false, &source_segments, &source_ends)
+                  .inserted_nodes.size(),
+              2u);
+
+    std::vector<int> tokens(600, 1);
+    std::fill(tokens.begin() + 256, tokens.begin() + 400, 2);
+    std::fill(tokens.begin() + 400, tokens.end(), 9);
+    PartialTailMatchRequest request;
+    request.tokens       = &tokens;
+    request.endpoint_key = [&](size_t end) {
+        return end == 256 ? environment->keys[0] : static_cast<CacheKeyType>(end);
+    };
+    request.source_identity = [&](size_t begin, const std::vector<int>& segment, CacheKeyType key) {
+        return (begin == 0 && key == environment->keys[0] && segment == source_segments[0])
+               || (begin == 256 && key == environment->keys[1] && segment == source_segments[1])
+               || (begin == 256 && key == 400 && segment == std::vector<int>(144, 2));
+    };
+    request.valid_endpoint           = [](size_t end) { return end > 0 && end < 600; };
+    request.preceding_valid_endpoint = [](size_t upper) { return upper; };
+    request.reuse_unit_tokens        = 256;
+    request.remote_ceiling           = 512;
+
+    const CacheKeysType request_keys{environment->keys[0], 400};
+    auto                result = cache->match(request_keys, {}, &request);
+    EXPECT_EQ(result.matched_device_endpoint, 0u);
+    ASSERT_TRUE(result.farthest_fork.has_value());
+    EXPECT_EQ(result.farthest_fork->pos, 400u);
+    EXPECT_EQ(result.farthest_fork->key, 400);
+    auto context = result.async_context;
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(context->needBackendMatch());
+    EXPECT_TRUE(context->loadDescs().empty());
+
+    const auto remote_blocks = allocateDeviceBlocksForTest(*full, 1);
+    ASSERT_EQ(remote_blocks.size(), 1u);
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
+        EXPECT_EQ(matched, 1u);
+        const auto& handles = current.backendHandles();
+        EXPECT_EQ(handles.size(), 1u);
+        if (handles.size() == 1) {
+            EXPECT_EQ(handles.front().size(), remote_blocks.front().size());
+            for (size_t member = 0; member < std::min(handles.front().size(), remote_blocks.front().size()); ++member) {
+                EXPECT_EQ(handles.front()[member].tag, full->groupTags()[member]);
+                current.setBackendTargetBlock(0, member, remote_blocks.front()[member]);
+            }
+        }
+        return current.commit();
+    });
+    context->startBackendMatch();
+    context->waitDone();
+    EXPECT_EQ(backend->read_calls.load(), 1u);
+    EXPECT_EQ(context->success(), !fail_read);
+    EXPECT_EQ(context->matchedTokenEndpoint(256), fail_read ? 0u : 256u);
+    EXPECT_EQ(cache->tree()->findNode({environment->keys[0], 400}).size(), 1u);
+
+    if (!fail_read && context->success()) {
+        // The Loader supplies G and the authenticated F value. Simulate the
+        // existing original-point and optional-F publication using request-owned
+        // blocks; this layer has no model writer or numerical state producer.
+        std::vector<std::vector<GroupSetResource>> ancestor_resources(1, std::vector<GroupSetResource>(1));
+        ancestor_resources[0][0].device_blocks = remote_blocks.front();
+        const std::vector<std::vector<int>> ancestor_segments{source_segments[0]};
+        const std::vector<size_t>           ancestor_ends{256};
+        cache->insert(
+            {environment->keys[0]}, ancestor_resources, Tier::DEVICE, false, &ancestor_segments, &ancestor_ends);
+
+        const auto fork_blocks = allocateDeviceBlocksForTest(*full, 1);
+        ASSERT_EQ(fork_blocks.size(), 1u);
+        std::vector<std::vector<GroupSetResource>> fork_resources(2, std::vector<GroupSetResource>(1));
+        fork_resources[0][0].device_blocks = remote_blocks.front();
+        fork_resources[1][0].device_blocks = fork_blocks.front();
+        const std::vector<std::vector<int>> fork_segments{source_segments[0], std::vector<int>(144, 2)};
+        const std::vector<size_t>           fork_ends{256, 400};
+        bool                                ready_after_insert = false;
+        cache->insert({environment->keys[0], 400},
+                      fork_resources,
+                      Tier::DEVICE,
+                      false,
+                      &fork_segments,
+                      &fork_ends,
+                      /*internal_fork=*/true,
+                      &ready_after_insert);
+        unreferenceDeviceBlocksForTest(*full, fork_blocks);
+        EXPECT_TRUE(ready_after_insert);
+        EXPECT_EQ(cache->tree()->findNode({environment->keys[0], 400}).size(), 2u);
+
+        if (ready_after_insert) {
+            std::vector<int> later_tokens = tokens;
+            std::fill(later_tokens.begin() + 400, later_tokens.end(), 8);
+            request.tokens = &later_tokens;
+            auto later     = cache->match({environment->keys[0], 400}, {}, &request);
+            ASSERT_NE(later.local_fallback, nullptr);
+            ASSERT_NE(later.async_context, nullptr);
+            EXPECT_EQ(later.local_fallback->endpoint, 400u);
+            EXPECT_TRUE(later.async_context->needBackendMatch());
+            later.async_context->setMatchCallback([](LoadAsyncContext& current, size_t matched) {
+                EXPECT_EQ(matched, 0u);
+                EXPECT_TRUE(current.localFallbackSelected());
+                return current.commit();
+            });
+            later.async_context->startBackendMatch();
+            later.async_context->waitDone();
+            EXPECT_TRUE(later.async_context->success());
+            EXPECT_EQ(later.async_context->matchedTokenEndpoint(256), 400u);
+            EXPECT_EQ(backend->read_calls.load(), 1u);  // B only; C chose its farther local F.
+            later.local_fallback.reset();
+            later.async_context.reset();
+            block_tree_cache_test::releaseRequestRefsForTest(*cache, later.matched_device_resources);
+        }
+    }
+
+    result.async_context.reset();
+    context.reset();
+    unreferenceDeviceBlocksForTest(*full, remote_blocks);
+    cache.reset();
+    backend->shutdown();
+    for (const auto& pool : full->devicePools()) {
+        EXPECT_EQ(pool->freeBlocksNum(), options.usable_device_blocks);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(ReadSuccessAndFailure, BlockTreeLoaderRemoteForkTest, ::testing::Bool());
+
+TEST(BlockTreeLoaderTest, StrictForkSurvivesMatchWithoutReadyDevicePrefix) {
+    auto full =
+        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)}, nullptr, nullptr);
+    BlockTreeCacheConfig config;
+    config.enable_device_cache = true;
+    auto cache = block_tree_cache_test::makeBlockTreeCacheForTest({full}, config, nullptr, nullptr, nullptr, 256);
+    ASSERT_NE(cache, nullptr);
+
+    const std::vector<std::vector<int>>        segments{std::vector<int>(256, 1), std::vector<int>(256, 2)};
+    const std::vector<size_t>                  ends{256, 512};
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    const auto inserted = cache->tree()->insertNode({256, 512}, resources, false, false, &segments, &ends);
+    ASSERT_EQ(inserted.inserted_nodes.size(), 2u);
+
+    std::vector<int> request_tokens(600, 1);
+    std::fill(request_tokens.begin() + 256, request_tokens.begin() + 400, 2);
+    std::fill(request_tokens.begin() + 400, request_tokens.end(), 9);
+    PartialTailMatchRequest request;
+    request.tokens          = &request_tokens;
+    request.endpoint_key    = [](size_t end) { return static_cast<CacheKeyType>(end); };
+    request.source_identity = [](size_t begin, const std::vector<int>& source, CacheKeyType source_key) {
+        return source_key == static_cast<CacheKeyType>(begin + source.size());
+    };
+    request.valid_endpoint           = [](size_t) { return true; };
+    request.preceding_valid_endpoint = [](size_t upper) { return upper; };
+    request.reuse_unit_tokens        = 256;
+
+    const auto result = cache->match({}, {}, &request);
+    EXPECT_EQ(result.matched_device_endpoint, 0u);
+    ASSERT_TRUE(result.farthest_fork.has_value());
+    EXPECT_EQ(result.farthest_fork->pos, 400u);
+    EXPECT_EQ(result.farthest_fork->key, 400);
+    EXPECT_EQ(result.farthest_fork->index, 1u);
+}
+
+TEST(BlockTreeLoaderTest, InvalidReuseEndpointForkIsNotReplacedByLegalEarlierEndpoint) {
+    auto                 pool = makeStructuralDevicePool(0);
+    auto                 full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool}, nullptr, nullptr);
+    BlockTreeCacheConfig config;
+    config.enable_device_cache = true;
+    auto cache = block_tree_cache_test::makeBlockTreeCacheForTest({full}, config, nullptr, nullptr, nullptr, 256);
+    ASSERT_NE(cache, nullptr);
+
+    const std::vector<std::vector<int>>        source_segments{std::vector<int>(256, 1), std::vector<int>(256, 2)};
+    const std::vector<size_t>                  source_ends{256, 512};
+    std::vector<std::vector<GroupSetResource>> empty(2, std::vector<GroupSetResource>(1));
+    ASSERT_EQ(cache->tree()
+                  ->insertNode({256, 512}, empty, false, false, &source_segments, &source_ends)
+                  .inserted_nodes.size(),
+              2u);
+
+    // A previously saved legal endpoint at 384 can restore G, but is not a
+    // substitute save intent when the endpoint validator rejects F400 (as for an image interior).
+    const std::vector<std::vector<int>>        legal_segments{std::vector<int>(256, 1), std::vector<int>(128, 2)};
+    const std::vector<size_t>                  legal_ends{256, 384};
+    std::vector<std::vector<GroupSetResource>> ready(2, std::vector<GroupSetResource>(1));
+    pool->incRef(BlockIndicesType{42, 43});
+    ready[0][0].device_blocks = {42};
+    ready[1][0].device_blocks = {43};
+    ASSERT_EQ(
+        cache->tree()->insertNode({256, 384}, ready, false, false, &legal_segments, &legal_ends).inserted_nodes.size(),
+        1u);
+    pool->decRef(BlockIndicesType{42, 43});
+
+    std::vector<int> tokens(600, 1);
+    std::fill(tokens.begin() + 256, tokens.begin() + 400, 2);
+    std::fill(tokens.begin() + 400, tokens.end(), 9);
+    PartialTailMatchRequest request;
+    request.tokens          = &tokens;
+    request.endpoint_key    = [](size_t end) { return static_cast<CacheKeyType>(end); };
+    request.source_identity = [](size_t begin, const std::vector<int>& source, CacheKeyType key) {
+        return key == static_cast<CacheKeyType>(begin + source.size());
+    };
+    request.valid_endpoint           = [](size_t end) { return end > 0 && end <= 384; };
+    request.preceding_valid_endpoint = [](size_t upper) { return std::min(upper, size_t{384}); };
+    request.reuse_unit_tokens        = 256;
+    const auto result                = cache->match({256, 384}, {}, &request);
+    EXPECT_EQ(result.matched_device_endpoint, 384u);
+    ASSERT_TRUE(result.farthest_fork.has_value());
+    EXPECT_EQ(result.farthest_fork->pos, 400u);
+    EXPECT_EQ(result.farthest_fork->key, 400);
+    for (const auto& pinned : result.matched_device_resources) {
+        cache->groupSets()[pinned.group_set_id]->unreferenceBlocks(pinned);
+    }
+}
+
+TEST(BlockTreeLoaderTest, FarthestStrictForkSurvivesEarlierForkAndEarlierReadyState) {
+    auto full_pool   = makeStructuralDevicePool(0);
+    auto linear_pool = makeStructuralDevicePool(1);
+    auto full        = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{full_pool}, nullptr, nullptr);
+    auto linear      = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{linear_pool}, nullptr, nullptr);
+    BlockTreeCacheConfig config;
+    config.enable_device_cache = true;
+    auto cache =
+        block_tree_cache_test::makeBlockTreeCacheForTest({full, linear}, config, nullptr, nullptr, nullptr, 256);
+    ASSERT_NE(cache, nullptr);
+
+    std::vector<int> a(1536, 1);
+    std::fill(a.begin() + 800, a.end(), 2);
+    std::vector<int> c(1536, 1);
+    std::fill(c.begin() + 800, c.begin() + 1300, 3);
+    std::fill(c.begin() + 1300, c.end(), 4);
+    std::vector<int> b(2000, 1);
+    std::fill(b.begin() + 800, b.begin() + 1300, 3);
+    std::fill(b.begin() + 1300, b.end(), 5);
+    const auto key_for = [](const std::vector<int>& tokens, size_t end) {
+        uint64_t key = 0;
+        for (size_t i = 0; i < end; ++i) {
+            key = key * 31 + static_cast<uint64_t>(tokens[i]);
+        }
+        return static_cast<CacheKeyType>(key);
+    };
+    const auto insert_path =
+        [&](const std::vector<int>& tokens, const std::vector<size_t>& ends, bool complete_full, bool ready_linear) {
+            CacheKeysType                              keys;
+            std::vector<std::vector<int>>              segments;
+            std::vector<std::vector<GroupSetResource>> resources(ends.size(), std::vector<GroupSetResource>(2));
+            size_t                                     previous = 0;
+            for (size_t i = 0; i < ends.size(); ++i) {
+                keys.push_back(key_for(tokens, ends[i]));
+                segments.emplace_back(tokens.begin() + previous, tokens.begin() + ends[i]);
+                previous = ends[i];
+                if (complete_full || (ready_linear && i + 1 == ends.size())) {
+                    const BlockIdxType block = static_cast<BlockIdxType>(42 + i);
+                    full_pool->incRef(block);
+                    resources[i][0].device_blocks = {block};
+                }
+            }
+            if (ready_linear) {
+                linear_pool->incRef(42);
+                resources.back()[1].device_blocks = {42};
+            }
+            const auto inserted = cache->tree()->insertNode(keys, resources, false, false, &segments, &ends);
+            for (const auto& row : resources) {
+                if (row[0].hasTier(Tier::DEVICE)) {
+                    full_pool->decRef(row[0].device_blocks);
+                }
+                if (row[1].hasTier(Tier::DEVICE)) {
+                    linear_pool->decRef(row[1].device_blocks);
+                }
+            }
+            return inserted.inserted_nodes.size();
+        };
+    ASSERT_EQ(insert_path(c, {256, 512, 768, 1024, 1280, 1536}, true, false), 6u);
+    ASSERT_EQ(insert_path(a, {256, 512, 768, 1024}, false, false), 1u);
+    ASSERT_EQ(insert_path(c, {256, 512, 768, 1024, 1100}, false, true), 1u);
+
+    PartialTailMatchRequest request;
+    request.tokens          = &b;
+    request.endpoint_key    = [&](size_t end) { return key_for(b, end); };
+    request.source_identity = [&](size_t begin, const std::vector<int>& segment, CacheKeyType source_key) {
+        std::vector<int> source(b.begin(), b.begin() + begin);
+        source.insert(source.end(), segment.begin(), segment.end());
+        return key_for(source, source.size()) == source_key;
+    };
+    request.valid_endpoint           = [](size_t end) { return end > 0 && end < 2000; };
+    request.preceding_valid_endpoint = [](size_t upper) { return upper; };
+    request.reuse_unit_tokens        = 256;
+    const auto result                = cache->match({}, {}, &request);
+    EXPECT_EQ(result.matched_device_endpoint, 1100u);
+    ASSERT_TRUE(result.farthest_fork.has_value());
+    EXPECT_EQ(result.farthest_fork->pos, 1300u);
+    EXPECT_EQ(result.farthest_fork->index, 5u);
+    EXPECT_EQ(result.farthest_fork->key, key_for(b, 1300));
+    for (const auto& pinned : result.matched_device_resources) {
+        cache->groupSets()[pinned.group_set_id]->unreferenceBlocks(pinned);
+    }
+}
+
+TEST(BlockTreeLoaderTest, ReadyContinuationBeyondForkReportsBothEndpoints) {
+    auto                 pool = makeStructuralDevicePool(0);
+    auto                 full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool}, nullptr, nullptr);
+    BlockTreeCacheConfig config;
+    config.enable_device_cache = true;
+    auto cache = block_tree_cache_test::makeBlockTreeCacheForTest({full}, config, nullptr, nullptr, nullptr, 256);
+    ASSERT_NE(cache, nullptr);
+
+    const std::vector<std::vector<int>>        ready_segments{std::vector<int>(256, 1), std::vector<int>(256, 3)};
+    const std::vector<size_t>                  ends{256, 512};
+    std::vector<std::vector<GroupSetResource>> ready(2, std::vector<GroupSetResource>(1));
+    pool->incRef(BlockIndicesType{42, 43});
+    ready[0][0].device_blocks = {42};
+    ready[1][0].device_blocks = {43};
+    ASSERT_EQ(cache->tree()->insertNode({256, 512}, ready, false, false, &ready_segments, &ends).inserted_nodes.size(),
+              2u);
+    pool->decRef(BlockIndicesType{42, 43});
+
+    std::vector<int> earlier_branch(256, 3);
+    std::fill(earlier_branch.begin() + 144, earlier_branch.end(), 2);
+    const std::vector<std::vector<int>>        fork_segments{std::vector<int>(256, 1), earlier_branch};
+    std::vector<std::vector<GroupSetResource>> empty(2, std::vector<GroupSetResource>(1));
+    ASSERT_EQ(cache->tree()->insertNode({256, 9000}, empty, false, false, &fork_segments, &ends).inserted_nodes.size(),
+              1u);
+
+    std::vector<int> request_tokens(600, 1);
+    std::fill(request_tokens.begin() + 256, request_tokens.begin() + 512, 3);
+    std::fill(request_tokens.begin() + 512, request_tokens.end(), 9);
+    PartialTailMatchRequest request;
+    request.tokens          = &request_tokens;
+    request.endpoint_key    = [](size_t end) { return static_cast<CacheKeyType>(end); };
+    request.source_identity = [](size_t begin, const std::vector<int>& source, CacheKeyType key) {
+        return key == 9000 ? begin == 256 && source.size() == 256 && source[144] == 2 :
+                             key == static_cast<CacheKeyType>(begin + source.size());
+    };
+    request.valid_endpoint           = [](size_t end) { return end > 0 && end < 600; };
+    request.preceding_valid_endpoint = [](size_t upper) { return upper; };
+    request.reuse_unit_tokens        = 256;
+    const auto result                = cache->match({256, 512}, {}, &request);
+    EXPECT_EQ(result.matched_device_endpoint, 512u);
+    ASSERT_TRUE(result.farthest_fork.has_value());
+    EXPECT_EQ(result.farthest_fork->pos, 400u);
+    EXPECT_GT(result.matched_device_endpoint, result.farthest_fork->pos);
+    for (const auto& pinned : result.matched_device_resources) {
+        cache->groupSets()[pinned.group_set_id]->unreferenceBlocks(pinned);
+    }
+}
+
 TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
@@ -751,6 +1239,151 @@ void releaseTargets(const RequestRefs& refs) {
         pool->decRef(block);
     }
 }
+
+class BlockTreeLoaderInternalForkLowerTierTest: public ::testing::TestWithParam<std::tuple<Tier, bool>> {};
+
+TEST_P(BlockTreeLoaderInternalForkLowerTierTest, AuthenticatedForkSurvivesAncestorLoadOrFailure) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    const auto [source_tier, fail_transfer] = GetParam();
+    FullSWAEnvironmentOptions options;
+    options.path_length = 2;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+
+    // Use the existing physical pools and transfer engine with real 256-token
+    // nodes, so F400 is inside the second source node rather than a complete key.
+    BlockTreeCacheConfig config;
+    config.enable_device_cache = true;
+    config.enable_host_cache   = true;
+    config.enable_disk_cache   = true;
+    environment->cache.reset();
+    environment->cache =
+        block_tree_cache_test::makeBlockTreeCacheForTest(environment->groups, config, nullptr, nullptr, nullptr, 256);
+    ASSERT_NE(environment->cache, nullptr);
+    block_tree_cache_test::BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(
+        *environment->cache, environment->scripted_per_rank_transfer_engine);
+    environment->insertRequestPath();
+    const std::vector<std::vector<int>>        source_segments{std::vector<int>(256, 1), std::vector<int>(256, 2)};
+    const std::vector<size_t>                  source_ends{256, 512};
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(2));
+    for (size_t path_index = 0; path_index < 2; ++path_index) {
+        for (size_t group_id = 0; group_id < 2; ++group_id) {
+            resources[path_index][group_id].device_blocks = environment->request_blocks[group_id][path_index];
+        }
+    }
+    EXPECT_EQ(
+        environment->cache->insert(environment->keys, resources, Tier::DEVICE, false, &source_segments, &source_ends),
+        0u);  // Non-resident insert reports resident prefix length, not node count.
+    const auto inserted = environment->cache->tree()->findNode(environment->keys);
+    ASSERT_EQ(inserted.size(), 2u);
+    EXPECT_EQ(inserted[0]->token_ids, source_segments[0]);
+    EXPECT_EQ(inserted[1]->token_ids, source_segments[1]);
+    environment->releaseRequestRefs();
+    environment->demoteAll(Tier::DEVICE);
+    if (source_tier == Tier::DISK) {
+        environment->demoteAll(Tier::HOST);
+    }
+    ASSERT_TRUE(environment->allResourcesAtTier(source_tier));
+
+    std::vector<int> request_tokens(600, 1);
+    std::fill(request_tokens.begin() + 256, request_tokens.begin() + 400, 2);
+    std::fill(request_tokens.begin() + 400, request_tokens.end(), 9);
+    PartialTailMatchRequest request;
+    request.tokens       = &request_tokens;
+    request.endpoint_key = [&](size_t end) {
+        return end == 256 ? environment->keys[0] : static_cast<CacheKeyType>(end);
+    };
+    request.source_identity = [&](size_t begin, const std::vector<int>& segment, CacheKeyType key) {
+        return (begin == 0 && key == environment->keys[0] && segment == source_segments[0])
+               || (begin == 256 && key == environment->keys[1] && segment == source_segments[1])
+               || (begin == 256 && key == 400 && segment == std::vector<int>(144, 2));
+    };
+    request.valid_endpoint           = [](size_t end) { return end > 0 && end < 600; };
+    request.preceding_valid_endpoint = [](size_t upper) { return upper; };
+    request.reuse_unit_tokens        = 256;
+
+    auto result = environment->cache->match({environment->keys[0]}, {}, &request);
+    ASSERT_TRUE(result.farthest_fork.has_value());
+    EXPECT_EQ(result.farthest_fork->pos, 400u);
+    EXPECT_EQ(result.farthest_fork->key, 400);
+    EXPECT_EQ(result.matched_device_endpoint, 0u);
+    auto context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    ASSERT_NE(context, nullptr);
+    EXPECT_EQ(context->matchedBlocks(), 1u);
+    ASSERT_EQ(context->loadDescs().size(), 2u);
+    for (const auto& desc : context->loadDescs()) {
+        EXPECT_EQ(desc.path_index, 0u);
+        EXPECT_EQ(desc.source_tier, source_tier);
+    }
+    const auto request_targets = bindTargets(*environment, context);
+    if (fail_transfer) {
+        environment->scripted_per_rank_transfer_engine->enqueueForGroupSet(1, false);
+    }
+    ASSERT_TRUE(context->commit());
+    context->waitDone();
+    EXPECT_EQ(context->success(), !fail_transfer);
+    EXPECT_EQ(environment->cache->tree()->findNode({environment->keys[0], 400}).size(), 1u);
+    EXPECT_EQ(environment->cache->tree()->size(), 2u);
+    const auto first_resources = environment->resourcesForPathNode(0);
+    ASSERT_EQ(first_resources.size(), 2u);
+    for (const auto& resource : first_resources) {
+        EXPECT_EQ(resource.hasTier(Tier::DEVICE), !fail_transfer);
+        if (fail_transfer) {
+            EXPECT_TRUE(resource.hasTier(source_tier));
+        }
+    }
+    if (fail_transfer) {
+        auto failed_retry = environment->cache->match({}, {}, &request);
+        EXPECT_EQ(failed_retry.matched_device_endpoint, 0u);
+        ASSERT_TRUE(failed_retry.farthest_fork.has_value());
+        EXPECT_EQ(failed_retry.farthest_fork->pos, 400u);
+    } else {
+        environment->expectPayloads();
+        const auto full_f = allocateDeviceBlocksForTest(*environment->groups[0], 1);
+        const auto swa_f  = allocateDeviceBlocksForTest(*environment->groups[1], 1);
+        ASSERT_EQ(full_f.size(), 1u);
+        ASSERT_EQ(swa_f.size(), 1u);
+        std::vector<std::vector<GroupSetResource>> fork_resources(2, std::vector<GroupSetResource>(2));
+        fork_resources[1][0].device_blocks = full_f.front();
+        fork_resources[1][1].device_blocks = swa_f.front();
+        const std::vector<std::vector<int>> fork_segments{source_segments[0], std::vector<int>(144, 2)};
+        const std::vector<size_t>           fork_ends{256, 400};
+        bool                                ready_after_insert = false;
+        environment->cache->insert({environment->keys[0], 400},
+                                   fork_resources,
+                                   Tier::DEVICE,
+                                   false,
+                                   &fork_segments,
+                                   &fork_ends,
+                                   /*internal_fork=*/true,
+                                   &ready_after_insert);
+        unreferenceDeviceBlocksForTest(*environment->groups[0], full_f);
+        unreferenceDeviceBlocksForTest(*environment->groups[1], swa_f);
+        EXPECT_TRUE(ready_after_insert);
+        EXPECT_EQ(environment->cache->tree()->findNode({environment->keys[0], 400}).size(), 2u);
+        if (ready_after_insert) {
+            std::vector<int> later_tokens = request_tokens;
+            std::fill(later_tokens.begin() + 400, later_tokens.end(), 8);
+            request.tokens = &later_tokens;
+            auto later     = environment->cache->match({environment->keys[0], 400}, {}, &request);
+            EXPECT_EQ(later.matched_device_endpoint, 400u);
+            environment->releaseMatch(later);
+        }
+    }
+
+    result.async_context.reset();
+    context.reset();
+    environment->reclaimAll();
+    releaseTargets(request_targets);
+    environment->reclaimAll();
+    environment->expectFullyReclaimed();
+}
+
+INSTANTIATE_TEST_SUITE_P(HostAndDisk,
+                         BlockTreeLoaderInternalForkLowerTierTest,
+                         ::testing::Combine(::testing::Values(Tier::HOST, Tier::DISK), ::testing::Bool()));
 
 TEST(BlockTreeLoaderTest, SwaCorruptionDropsNonLeafResourceAndPreservesFullPath) {
     if (!cudaAvailable())

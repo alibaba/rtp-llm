@@ -337,6 +337,8 @@ bool KVCacheManager::init() {
     KVCacheConfig tree_kv_cache_config = kv_cache_config_;
     tree_kv_cache_config.enable_prefill_partial_tail_reuse =
         kv_cache_config_.enable_prefill_partial_tail_reuse && pd_sep_config_.role_type == RoleType::PREFILL;
+    tree_kv_cache_config.enable_prefill_common_prefix_recovery =
+        kv_cache_config_.enable_prefill_common_prefix_recovery && pd_sep_config_.role_type == RoleType::PREFILL;
     block_tree_cache_ = createBlockTreeCache(config_,
                                              tree_kv_cache_config,
                                              coordinator_manager_,
@@ -526,9 +528,10 @@ void KVCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resi
 
 void KVCacheManager::prepareRegisteredSave(PrefixCacheRegistration& registration,
                                            BatchKVCacheResource&    runtime,
-                                           size_t                   resume_endpoint) {
+                                           size_t                   resume_endpoint,
+                                           const CompleteTokenIds*  original_ids) {
     RTP_LLM_CHECK(coordinator_manager_ != nullptr);
-    coordinator_manager_->prepareRegisteredSave(registration, runtime, resume_endpoint);
+    coordinator_manager_->prepareRegisteredSave(registration, runtime, resume_endpoint, original_ids);
 }
 
 MallocStatus KVCacheManager::prepareRequiredContinuation(PrefixCacheRegistration& registration,
@@ -548,9 +551,9 @@ void KVCacheManager::releaseRegisteredSourcePins(PrefixCacheRegistration& regist
     coordinator_manager_->releaseRegisteredSourcePins(registration);
 }
 
-bool KVCacheManager::relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration) {
+bool KVCacheManager::relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration, bool internal_only_only) {
     RTP_LLM_CHECK(coordinator_manager_ != nullptr);
-    return coordinator_manager_->relinquishOptionalRegisteredSave(registration);
+    return coordinator_manager_->relinquishOptionalRegisteredSave(registration, internal_only_only);
 }
 
 int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,

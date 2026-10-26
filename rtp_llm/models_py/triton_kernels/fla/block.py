@@ -406,13 +406,15 @@ def store_selected_conv_states_to_block_map(
     save_block_ids: torch.Tensor,
     runtime_block_map: torch.Tensor,
     seq_size_per_block: int,
+    raw_inputs: torch.Tensor | None = None,
+    initial_states: torch.Tensor | None = None,
 ) -> None:
-    """Copy conv states at global complete endpoints to sparse destinations.
+    """Save conv history at exact global endpoints to sparse destinations.
 
-    The ordinary conv producer has already written the endpoint state to the
-    runtime block. This scatter only materializes an independent destination;
-    an alias destination is left untouched. It never computes conv history and
-    therefore never rewrites an immutable source block.
+    With raw inputs, form interior history from the input tokens and the
+    immutable prefix history captured before the ordinary conv producer ran.
+    Existing callers without raw inputs keep the boundary/final-state copy.
+    An alias destination is left untouched.
     """
     if seq_size_per_block <= 0:
         raise ValueError("seq_size_per_block must be positive")
@@ -440,7 +442,7 @@ def store_selected_conv_states_to_block_map(
     endpoints = prefix + input_lengths
     boundary = (positions % seq_size_per_block == 0) | (positions == endpoints[:, None])
     valid = (
-        boundary
+        (boundary if raw_inputs is None else torch.ones_like(boundary))
         & (block_ids >= 0)
         & (positions > prefix[:, None])
         & (positions <= endpoints[:, None])
@@ -454,11 +456,47 @@ def store_selected_conv_states_to_block_map(
         source_columns.unsqueeze(-1),
     ).squeeze(-1)
     copy = valid & (source_block_ids >= 0) & (block_ids != source_block_ids)
-    source_ids = source_block_ids[copy].to(torch.int64)
     destination_ids = block_ids[copy].to(torch.int64)
     if destination_ids.numel() != 0:
+        if raw_inputs is not None:
+            if (
+                initial_states is None
+                or raw_inputs.ndim != 2
+                or raw_inputs.shape[1] != conv_states.shape[1]
+                or initial_states.shape
+                != (prefix.numel(), conv_states.shape[1], conv_states.shape[2])
+            ):
+                raise ValueError(
+                    "selected interior conv states require raw inputs and initial history"
+                )
+            history = conv_states.shape[2]
+            offsets = (
+                positions[:, :, None]
+                - prefix[:, None, None]
+                - history
+                + torch.arange(history, device=device)
+            )
+            raw_indices = (cu[:-1, None, None] + offsets).clamp(
+                0, raw_inputs.shape[0] - 1
+            )
+            fresh = (
+                raw_inputs.index_select(0, raw_indices.flatten())
+                .reshape(*positions.shape, history, conv_states.shape[1])
+                .permute(0, 1, 3, 2)
+            )
+            prior_indices = (offsets + history).clamp(0, history - 1)
+            prior = torch.gather(
+                initial_states[:, None].expand(-1, positions.shape[1], -1, -1),
+                3,
+                prior_indices[:, :, None].expand(-1, -1, conv_states.shape[1], -1),
+            )
+            selected = torch.where(offsets[:, :, None] >= 0, fresh, prior)
+            conv_states.index_copy_(
+                0, destination_ids, selected[copy].to(conv_states.dtype)
+            )
+            return
         conv_states.index_copy_(
             0,
             destination_ids,
-            conv_states.index_select(0, source_ids),
+            conv_states.index_select(0, source_block_ids[copy].to(torch.int64)),
         )

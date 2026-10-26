@@ -154,6 +154,10 @@ struct MallocResult {
         status(success ? MallocStatus::NONE : MallocStatus::INTERNAL_ERROR),
         async_context(std::move(async_context)) {}
 
+    // Authenticated local content divergence discovered during the initial
+    // matching attempt. It is independent of the eventual usable G.
+    std::optional<PrefixCachePlanPoint> farthest_fork;
+
     bool         success            = false;
     int          reuse_len          = 0;
     int64_t      match_cost_time_us = 0;

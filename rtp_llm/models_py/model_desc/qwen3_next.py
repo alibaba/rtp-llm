@@ -547,6 +547,17 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         initial_states = _private_conv_initial_states(
             conv_states, attn_inputs, seq_size_per_block
         )
+        save_positions, save_block_ids = _sparse_save_inputs(attn_inputs)
+        selected_initial = (
+            gather_conv_initial_states(
+                conv_states,
+                attn_inputs.prefix_lengths_device,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                seq_size_per_block,
+            )
+            if conv_states is not None and save_positions is not None
+            else None
+        )
         out = causal_conv1d_fn(
             x=mixed_qkv.transpose(0, 1),
             weight=self.conv_weights,
@@ -559,6 +570,18 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             metadata=metadata,
             initial_states=initial_states,
         ).transpose(0, 1)
+        if selected_initial is not None:
+            store_selected_conv_states_to_block_map(
+                conv_states,
+                attn_inputs.prefix_lengths_device,
+                cu_seqlen_without_padding,
+                save_positions,
+                save_block_ids,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                seq_size_per_block,
+                raw_inputs=mixed_qkv,
+                initial_states=selected_initial,
+            )
         return out
 
     def _fla(
@@ -730,16 +753,6 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 use_qk_l2norm_in_kernel=True,
                 state_positions=state_positions,
                 selected_states=selected_states,
-            )
-        if selected_states is not None:
-            store_selected_conv_states_to_block_map(
-                self._get_conv_states(kv_cache_tensor).transpose(1, 2),
-                attn_inputs.prefix_lengths_device,
-                cu_seqlens_without_padding,
-                save_positions,
-                save_block_ids,
-                attn_inputs.kv_cache_kernel_block_id_device,
-                seq_size_per_block,
             )
         if ssm_states is not None and not use_flydsl_chunk_gdn:
             store_ssm_state_to_block_map(
@@ -1303,6 +1316,18 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         private_initial_states = _private_conv_initial_states(
             conv_states, attention_inputs, seq_size_per_block
         )
+        save_positions, save_block_ids = _sparse_save_inputs(attention_inputs)
+        selected_initial = (
+            gather_conv_initial_states(
+                conv_states,
+                attention_inputs.prefix_lengths_device,
+                attention_inputs.kv_cache_kernel_block_id_device,
+                seq_size_per_block,
+            )
+            if conv_states is not None and save_positions is not None
+            else None
+        )
+        raw_mixed_qkv = full_mixed_qkv
         full_mixed_qkv = causal_conv1d_fn(
             x=full_mixed_qkv.transpose(0, 1),
             weight=gdn.conv_weights,
@@ -1315,6 +1340,18 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             metadata=full_conv_meta,
             initial_states=private_initial_states,
         ).transpose(0, 1)
+        if selected_initial is not None:
+            store_selected_conv_states_to_block_map(
+                conv_states,
+                attention_inputs.prefix_lengths_device,
+                full_cu,
+                save_positions,
+                save_block_ids,
+                attention_inputs.kv_cache_kernel_block_id_device,
+                seq_size_per_block,
+                raw_inputs=raw_mixed_qkv,
+                initial_states=selected_initial,
+            )
 
         g, beta = fused_gdn_gating(gdn.alog, full_a, full_b, gdn.dt_bias)
         ssm_states = (
@@ -1433,17 +1470,6 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 state_positions=state_positions,
                 selected_states=selected_states,
             )
-        if selected_states is not None:
-            store_selected_conv_states_to_block_map(
-                gdn._get_conv_states(kv_cache_tensor).transpose(1, 2),
-                attention_inputs.prefix_lengths_device,
-                full_cu,
-                save_positions,
-                save_block_ids,
-                attention_inputs.kv_cache_kernel_block_id_device,
-                seq_size_per_block,
-            )
-
         if ssm_states is not None and not use_flydsl_chunk_gdn:
             store_ssm_state_to_block_map(
                 h,

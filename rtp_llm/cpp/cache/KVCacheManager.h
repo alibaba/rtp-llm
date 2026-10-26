@@ -63,15 +63,17 @@ public:
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     bool         detachSharedBlocksForRecompute(const BatchKVCacheResourcePtr& resource, int device_ready_reuse_length);
     // Outputs the resident key-prefix count; ordinary inserts report zero.
-    void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
-    void
-    prepareRegisteredSave(PrefixCacheRegistration& registration, BatchKVCacheResource& runtime, size_t resume_endpoint);
+    void         insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
+    void         prepareRegisteredSave(PrefixCacheRegistration& registration,
+                                       BatchKVCacheResource&    runtime,
+                                       size_t                   resume_endpoint,
+                                       const CompleteTokenIds*  original_ids = nullptr);
     MallocStatus prepareRequiredContinuation(PrefixCacheRegistration& registration,
                                              BatchKVCacheResource&    runtime,
                                              size_t                   resume_endpoint);
     void         releaseRegisteredSave(PrefixCacheRegistration& registration);
     void         releaseRegisteredSourcePins(PrefixCacheRegistration& registration);
-    bool         relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration);
+    bool relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration, bool internal_only_only = false);
 
     // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
     // temporarily full, waiters use this generation instead of polling malloc in a tight loop.

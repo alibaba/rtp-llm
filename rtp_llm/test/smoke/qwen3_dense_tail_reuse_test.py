@@ -140,7 +140,13 @@ class Qwen3DenseTailReuseTest(unittest.TestCase):
             smoke_args_str=(
                 common
                 + f" --tp_size {self.cp_size} --ep_size 1 --dp_size 1 --world_size {self.cp_size}"
-                " --role_type PREFILL --enable_prefill_partial_tail_reuse 1"
+                " --role_type PREFILL"
+                + (
+                    " --enable_prefill_common_prefix_recovery 1"
+                    if self._testMethodName
+                    == "test_internal_flag_full_already_coverable"
+                    else " --enable_prefill_partial_tail_reuse 1"
+                )
                 + (
                     " --use_all_gather 1 --prefill_cp_kv_cache_sharded 1"
                     " --prefill_cp_size 2 --cp_rotate_method ALL_GATHER"
@@ -238,7 +244,7 @@ class Qwen3DenseTailReuseTest(unittest.TestCase):
                         f"rank{rank} {key}: shared CP tail was not privatized",
                     )
 
-    def _assert_alias_cow_and_immutable(self, source, reused, prefix):
+    def _assert_alias_cow_and_immutable(self, source, reused, prefix, source_end=700):
         if self.cp_size == 2:
             self._assert_cp_logical_ids(source, reused, prefix)
         for rank in range(self.cp_size):
@@ -253,13 +259,13 @@ class Qwen3DenseTailReuseTest(unittest.TestCase):
                     src["kernel_seq_size_per_block"],
                 )
                 pages = base // kernel
-                for global_block in range((700 + base - 1) // base):
+                for global_block in range((source_end + base - 1) // base):
                     if global_block % self.cp_size != rank:
                         continue
                     slot = global_block // self.cp_size
                     for offset in range(pages):
                         token_start = global_block * base + offset * kernel
-                        count = min(kernel, 700 - token_start)
+                        count = min(kernel, source_end - token_start)
                         if count <= 0:
                             continue
                         index = slot * pages + offset
@@ -451,6 +457,82 @@ class Qwen3DenseTailReuseTest(unittest.TestCase):
                     label + "_independent",
                     reference="independent no-store A700 then forked dense prefix",
                 )
+
+    def test_internal_flag_full_already_coverable(self):
+        self.assertEqual(self.cp_size, 1)
+        prefix = self._extend_prompt("Dense FULL internal-only fork:", 650)
+        source_prompt = self._extend_prompt(prefix, 768)
+        source_ids = self.tokenizer.encode(source_prompt)
+        branches = []
+        for suffix in (" branch", " amber", " violet", " silver", " orange"):
+            candidate = self.tokenizer.encode(prefix + suffix)
+            if (
+                len(candidate) > 650
+                and candidate[:650] == source_ids[:650]
+                and candidate[650] != source_ids[650]
+                and all(candidate[650] != other[0] for other in branches)
+            ):
+                branches.append(
+                    (candidate[650], self._extend_prompt(prefix + suffix, 900))
+                )
+            if len(branches) == 2:
+                break
+        self.assertEqual(len(branches), 2, "two strict FULL branches at F650")
+        source, source_probes = self._request("full_internal_source768", source_prompt)
+        self.assertEqual((source["input_len"], source["reuse_len"]), (768, 0))
+        self._assert_no_sparse_writer(source_probes)
+        results = {"A": source}
+        for label, prompt in (("b", branches[0][1]), ("c", branches[1][1])):
+            result, probes = self._request(f"full_internal_{label}900", prompt)
+            self.assertEqual((result["input_len"], result["reuse_len"]), (900, 650))
+            self._assert_no_sparse_writer(probes)
+            self._assert_alias_cow_and_immutable(
+                source_probes, probes, 650, source_end=768
+            )
+            cold, cold_probes = self._request(
+                f"full_internal_{label}900_cold", prompt, reuse=False
+            )
+            self.assertEqual(cold["reuse_len"], 0)
+            self.assertEqual(result["output_ids"], cold["output_ids"])
+            self._assert_hidden(probes, cold_probes, 650, f"full_internal_{label}900")
+            results[label.upper()] = result
+            results[label.upper() + "_cold"] = cold
+        (self.output_dir / "full_internal_summary.json").write_text(
+            json.dumps({"flags": {"F": 1, "N": 0}, "requests": results}, indent=2)
+            + "\n"
+        )
+
+
+class Qwen3DenseCommonPrefixPDTest(Qwen3DenseTailReuseTest):
+    def _request(self, label, prompt, reuse=True):
+        record, probes = hybrid_smoke.Qwen35TailReuseCPTest._request(
+            self,
+            label,
+            prompt,
+            reuse,
+            pd_separation=True,
+            max_new_tokens=2,
+        )
+        self.assertIs(record["pd_sep"], True, "actual P-to-D execution is required")
+        self.assertEqual(len(record["output_ids"][0]), 2)
+        self.assertIsInstance(record["prefill_reuse_len"], int)
+        self.assertIsInstance(record["decode_reuse_len"], int)
+        # Single-group FULL does not add transferred blocks to decode reuse
+        # accounting (DecodeRpcServer::markLoadedCacheReuse). Verify the actual
+        # serving endpoint instead of treating that counter as transfer proof.
+        self.assertTrue(
+            any(
+                role["role"] == "DECODE" and role["http_port"] == self.decode.port
+                for role in record["role_addrs"]
+            ),
+            "response must come from this test's DECODE service",
+        )
+        record["aggregate_reuse_len"] = record["reuse_len"]
+        record["reuse_len"] = record["prefill_reuse_len"]
+        (self.output_dir / f"{label}.json").write_text(
+            json.dumps(record, indent=2) + "\n"
+        )
+        return record, probes
 
 
 class Qwen3DenseTailReuseCPTest(Qwen3DenseTailReuseTest):

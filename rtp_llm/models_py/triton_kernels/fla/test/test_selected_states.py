@@ -289,6 +289,19 @@ class SelectedStatesTest(unittest.TestCase):
             selected, prefix_oracle(args, [512], [requests]), rtol=0, atol=0
         )
 
+    def test_interior_boundary_reuses_main_state(self):
+        lengths = [192, 129]
+        requests = [[128, 64, 192, 64], [64, 128, 129, 64]]
+        args, _ = make_inputs(lengths, packed=True, heads=2, key_heads=1)
+        positions = torch.tensor(requests, device="cuda", dtype=torch.int64)
+        selected = selected_buffer(args, positions)
+        self.assert_outputs_equal(
+            BASELINE(**args), run_selected(args, positions, selected)
+        )
+        torch.testing.assert_close(
+            selected, prefix_oracle(args, lengths, requests), rtol=0, atol=0
+        )
+
     def test_dense_complete_boundary_requests(self):
         for slots in (16, 32, 64, 128):
             length = slots * 64
@@ -480,6 +493,9 @@ def benchmark(output_path):
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    position_mode = os.environ.get("RTP_GDN_PERF_POSITION_MODE", "random")
+    if position_mode not in ("random", "interior_boundary"):
+        raise ValueError(f"Unknown GDN position mode: {position_mode}")
     # Qwen3.5-27B TP1: 16 key heads, 48 value heads, K=V=128. Include one
     # no-request control per length alongside the 24 requested snapshot cases.
     tokens_values = tuple(
@@ -509,7 +525,7 @@ def benchmark(output_path):
         "input_allocation_outside_measurement": True,
         "output_allocation": "wrapper allocates regular outputs; CUDA allocation is not kernel time",
         "position_seed_base": base_seed,
-        "position_sampling": "Python random.Random(base_seed + T).sample(range(1,T), 8), prefix S",
+        "position_sampling": position_mode,
         "comparison": "identical prepared k/w/u/g/h0; original computes regular outputs; candidate also returns S states",
         "gpu": torch.cuda.get_device_name(),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
@@ -520,8 +536,14 @@ def benchmark(output_path):
     for index, (tokens, slots) in enumerate(cases):
         args, _ = make_inputs([tokens], heads=48, key_heads=16, kdim=128, vdim=128)
         seed = base_seed + tokens
-        sample_size = max(8, slots)
-        requests = random.Random(seed).sample(range(1, tokens), sample_size)[:slots]
+        if position_mode == "interior_boundary":
+            boundaries = range(64, tokens, 64)
+            if slots > len(boundaries):
+                raise ValueError("Not enough interior boundaries for requested slots")
+            requests = random.Random(seed).sample(boundaries, slots)
+        else:
+            sample_size = max(8, slots)
+            requests = random.Random(seed).sample(range(1, tokens), sample_size)[:slots]
         positions = torch.tensor([requests], device="cuda", dtype=torch.int64)
         selected = selected_buffer(args, positions)
         torch.cuda.reset_peak_memory_stats()

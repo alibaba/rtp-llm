@@ -21,6 +21,7 @@ struct ResourceContext {
 
     bool reuse_cache{false};
     bool enable_prefill_partial_tail_reuse{false};
+    bool enable_prefill_common_prefix_recovery{false};
     bool enable_device_cache{true};
     bool enable_memory_cache{false};
     bool enable_disk_cache{false};

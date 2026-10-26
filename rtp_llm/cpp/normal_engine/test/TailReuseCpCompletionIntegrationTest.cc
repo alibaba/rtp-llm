@@ -73,9 +73,9 @@ public:
     bool supportsSparseCacheSave() const override { return true; }
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
-        RTP_LLM_CHECK_WITH_INFO(inputs.cache_save_positions.defined() && inputs.cache_save_positions.numel() > 0,
-                                "CP completion fixture lost sparse save positions");
-        RTP_LLM_CHECK_WITH_INFO(inputs.cache_save_block_ids.defined() && inputs.cache_save_block_ids.numel() > 0,
+        const bool sparse_save = inputs.cache_save_positions.defined() && inputs.cache_save_positions.numel() > 0;
+        RTP_LLM_CHECK_WITH_INFO(!sparse_save
+                                    || (inputs.cache_save_block_ids.defined() && inputs.cache_save_block_ids.numel() > 0),
                                 "CP completion fixture lost sparse save destinations");
         RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_update_mapping.defined()
                                     && inputs.kv_cache_update_mapping.size(0) >= 1,
@@ -122,8 +122,8 @@ public:
         if (rank_ == 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             const auto& registration = *stream_->streamCacheResource().prefixCacheRegistration();
-            RTP_LLM_CHECK_WITH_INFO(!registration.content_completed && !registration.source_pins.empty(),
-                                    "owner released cache work before rank 1 writer");
+            RTP_LLM_CHECK_WITH_INFO(!registration.source_pins.empty(),
+                                    "owner released required copy source before rank 1 writer");
             const auto& tail = registration.points.back();
             RTP_LLM_CHECK_WITH_INFO(tail.endpoint.pos == 9, "CP fixture lost frozen N=9");
             for (const auto& binding : tail.group_bindings) {
@@ -142,12 +142,45 @@ public:
         if (rank_ == 1) {
             std::this_thread::sleep_for(std::chrono::milliseconds(600));
         }
-        const auto save_ids = inputs.cache_save_block_ids.cpu().contiguous();
-        for (int64_t tag_row = 0; tag_row < save_ids.size(0); ++tag_row) {
-            const auto& tag = tags[tag_row];
-            for (int64_t col = 0; col < save_ids.size(2); ++col) {
-                const int dst = save_ids.index({tag_row, 0, col}).item<int32_t>();
-                if (dst < 0) continue;
+        if (sparse_save) {
+            const auto save_ids = inputs.cache_save_block_ids.cpu().contiguous();
+            for (int64_t tag_row = 0; tag_row < save_ids.size(0); ++tag_row) {
+                const auto& tag = tags[tag_row];
+                for (int64_t col = 0; col < save_ids.size(2); ++col) {
+                    const int dst = save_ids.index({tag_row, 0, col}).item<int32_t>();
+                    if (dst < 0) continue;
+                    for (int layer = 0; layer < manager_->cacheConfig().layer_num; ++layer) {
+                        blockBytes(*manager_, layer, tag, dst, false).fill_(200 + rank_);
+                        if (manager_->cacheConfig().group(tag).kvScaleStrideBytes() > 0) {
+                            blockBytes(*manager_, layer, tag, dst, true).fill_(220 + rank_);
+                        }
+                    }
+                }
+            }
+        } else {
+            // FULL uses the stable runtime block as N's saved value. There is
+            // no sparse destination, but the forward still gates publication.
+            RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_block_id.defined(),
+                                    "CP completion fixture lost FULL runtime aliases");
+            if (rank_ == 0) {
+                const auto& tail = stream_->streamCacheResource().prefixCacheRegistration()->points.back();
+                RTP_LLM_CHECK_WITH_INFO(tail.endpoint.pos == 9
+                                            && std::all_of(tail.group_bindings.begin(), tail.group_bindings.end(),
+                                                           [](const auto& binding) {
+                                                               return binding.state == PrefixCacheSaveState::REGISTERED
+                                                                      && binding.ownership == PrefixCacheSaveOwnership::REQUIRED_RUNTIME
+                                                                      && binding.resource.hasCompleteDeviceValue();
+                                                           }),
+                                        "CP completion fixture lacks a registered FULL runtime alias");
+            }
+            const auto runtime_ids = inputs.kv_cache_block_id.cpu().contiguous();
+            for (int64_t tag_row = 0; tag_row < runtime_ids.size(0); ++tag_row) {
+                const auto& tag = tags[tag_row];
+                const auto slot = manager_->cacheConfig().endpointBlockPosition(tag, 9);
+                RTP_LLM_CHECK_WITH_INFO(slot < static_cast<size_t>(runtime_ids.size(2)),
+                                        "CP completion fixture lost N's runtime slot");
+                const int dst = runtime_ids.index({tag_row, 0, static_cast<int64_t>(slot)}).item<int32_t>();
+                RTP_LLM_CHECK_WITH_INFO(dst > 0, "CP completion fixture lost N's runtime block");
                 for (int layer = 0; layer < manager_->cacheConfig().layer_num; ++layer) {
                     blockBytes(*manager_, layer, tag, dst, false).fill_(200 + rank_);
                     if (manager_->cacheConfig().group(tag).kvScaleStrideBytes() > 0) {

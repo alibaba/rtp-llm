@@ -117,6 +117,7 @@ std::string KVCacheConfig::to_string() const {
     std::ostringstream oss;
     oss << "reuse_cache: " << reuse_cache << "\n"
         << "enable_prefill_partial_tail_reuse: " << enable_prefill_partial_tail_reuse << "\n"
+        << "enable_prefill_common_prefix_recovery: " << enable_prefill_common_prefix_recovery << "\n"
         << "multi_task_prompt: " << multi_task_prompt << "\n"
         << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
         << "multi_task_prompt_tokens: " << (multi_task_prompt_tokens.empty() ? "empty" : "non-empty") << "\n"

@@ -21,6 +21,7 @@ class BlockTransferDispatcher;
 class BlockTreeTaskPool;
 
 struct BlockTreeMatchResult {
+    std::optional<PrefixCachePlanPoint>                farthest_fork;
     size_t                                              matched_device_blocks{0};
     size_t                                              matched_device_endpoint{0};
     bool                                                precise_local{false};
@@ -88,7 +89,8 @@ public:
     void                 shutdown();
 
 private:
-    std::optional<BlockTreeMatchResult>                preciseLocalMatchLocked(const PartialTailMatchRequest& request);
+    std::optional<BlockTreeMatchResult>                preciseLocalMatchLocked(
+        const PartialTailMatchRequest& request, const std::vector<BlockTreeContentRange>& ranges);
     bool                                                validMatch(std::vector<TreeNode*>&            path,
                                                                    std::vector<bool>&                 candidate_valid,
                                                                    const std::function<bool(size_t)>& valid_prefix) const;

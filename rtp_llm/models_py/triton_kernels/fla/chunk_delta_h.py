@@ -496,9 +496,12 @@ def _chunk_gated_delta_rule_selected_kernel(
         prefix = tl.load(state_positions + i_n * NUM_STATE_POSITIONS + i_s)
         valid_prefix = (prefix >= 0) & (prefix <= T)
         prefix = tl.where(valid_prefix, prefix, 0).to(tl.int32)
-        # At chunk boundaries replay the preceding complete chunk. This also
-        # covers the sequence end when no following chunk-start state exists.
-        chunk_start = (tl.maximum(prefix, 1) - 1) // BT * BT
+        # An interior boundary already has an exact FP32 chunk-start state in
+        # h. Only the sequence end needs the preceding complete-chunk replay.
+        aligned_interior = (prefix > 0) & (prefix < T) & (prefix % BT == 0)
+        chunk_start = tl.where(
+            aligned_interior, prefix, (tl.maximum(prefix, 1) - 1) // BT * BT
+        )
         boh += chunk_start // BT
         bos += chunk_start
         T = prefix - chunk_start

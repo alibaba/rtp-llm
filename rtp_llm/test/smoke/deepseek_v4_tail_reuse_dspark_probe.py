@@ -21,6 +21,7 @@ from rtp_llm.test.smoke import deepseek_v4_tail_reuse_probe as target_probe
 
 _pending = threading.local()
 _commit_source = {}
+_commit_rows_history = []
 _target_aux = None
 _commit_sequence = 0
 _decode_sequence = 0
@@ -89,7 +90,16 @@ def _swa_rows(cache, inputs, include_save=False, endpoint=None):
                 raise AssertionError(
                     "DSpARK source snapshot needs an exact save endpoint"
                 )
-            selected = save_positions.reshape(-1).to(save_block_ids.device) == endpoint
+            # The replay re-runs the product commit, which writes every sparse
+            # destination registered on the request: canonical points stay -1
+            # aliases, but the tail N and an internal F fork each own an
+            # independent block.  The snapshot pool is sized by max(ids)+1, so
+            # every real save block must join the snapshot ids; selecting only
+            # this commit's endpoint leaves the F destination outside the pool
+            # and the Triton writer traps (block_idx >= num_cache_blocks).
+            selected = (save_positions.reshape(-1).to(save_block_ids.device) >= 0) & (
+                save_block_ids.reshape(-1) >= 0
+            )
             logical = save_block_ids.reshape(-1)[selected]
             logical = logical.to(device=ids.device, dtype=torch.long)
             logical = logical[logical >= 0]
@@ -284,6 +294,7 @@ def after_forward_commit(ctx):
     if resume == 0:
         _commit_source.clear()
         _commit_source.update(current)
+        _commit_rows_history.clear()
     else:
         for key, row in current.items():
             old = _commit_source[key]
@@ -314,11 +325,36 @@ def after_forward_commit(ctx):
             old_save = old["save_block_ids"].reshape(-1)[
                 old["save_positions"].reshape(-1) == resume
             ]
-            if old_save.numel() != 1 or int(old_save[0]) <= 0:
-                raise AssertionError(f"DSpARK short source missing: {key} G={resume}")
-            old_ids = int(old_save[0]) * pages + torch.arange(
-                pages, device=old["ids"].device
-            )
+            if resume % physical == 0:
+                # A canonical G is a stable runtime alias and has no sparse
+                # save destination. Read its exact retained source page.
+                old_ids = old["runtime_table"].reshape(-1)[
+                    last_slot * pages : (last_slot + 1) * pages
+                ]
+            else:
+                if old_save.numel() != 1 or int(old_save[0]) <= 0:
+                    # An internal F fork restores from the intermediate commit
+                    # that published it (e.g. B's F800), not from the base
+                    # request's own saves; scan verified commit rows in order.
+                    for past in _commit_rows_history:
+                        past_row = past.get(key)
+                        if past_row is None:
+                            continue
+                        old_save = past_row["save_block_ids"].reshape(-1)[
+                            past_row["save_positions"].reshape(-1) == resume
+                        ]
+                        if old_save.numel() == 1 and int(old_save[0]) > 0:
+                            old = past_row
+                            break
+                    else:
+                        raise AssertionError(
+                            f"DSpARK short source missing: {key} G={resume}"
+                        )
+                old_ids = int(old_save[0]) * pages + torch.arange(
+                    pages, device=old["ids"].device
+                )
+            if old_ids.numel() != pages or bool((old_ids <= 0).any()):
+                raise AssertionError(f"DSpARK source page absent: {key} G={resume}")
             new_ids = row["runtime_table"].reshape(-1)[
                 last_slot * pages : (last_slot + 1) * pages
             ]
@@ -395,6 +431,7 @@ def after_forward_commit(ctx):
             raise AssertionError(f"DSpARK commit source/copy mismatch: {result}")
     name = f"dspark_commit_prefill_rank{target_probe._rank()}_{_commit_sequence:03d}_end{end}.pt"
     torch.save(result, _save_path(name))
+    _commit_rows_history.append(current)
     _commit_sequence += 1
     _pending.commit = None
 

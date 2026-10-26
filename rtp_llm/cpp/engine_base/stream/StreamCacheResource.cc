@@ -73,7 +73,7 @@ void StreamCacheResource::prepareRegisteredSave() {
     }
     const size_t resume_endpoint = static_cast<size_t>(std::max(0, stream_->initialReuseLength()));
     resource_context_.cache_manager->prepareRegisteredSave(
-        *prefix_cache_registration_, *batch_kv_cache_resource_, resume_endpoint);
+        *prefix_cache_registration_, *batch_kv_cache_resource_, resume_endpoint, stream_->completeTokenIdsPtr().get());
 }
 
 absl::Status StreamCacheResource::prepareRequiredContinuation() {
@@ -360,7 +360,7 @@ absl::Status StreamCacheResource::initKVBlock() {
             RTP_LLM_CHECK_WITH_INFO(index < registration.base_keys.size(), "missing full checkpoint key");
             registration.points.push_back({{index, registration.base_keys[index], pos}, {}});
         }
-        if (registration.original_input_tokens > 0
+        if (resource_context_.enable_prefill_partial_tail_reuse && registration.original_input_tokens > 0
             && (registration.points.empty()
                 || registration.points.back().endpoint.pos != registration.original_input_tokens)) {
             const size_t index = (registration.original_input_tokens - 1) / base_tokens;
@@ -376,6 +376,31 @@ absl::Status StreamCacheResource::initKVBlock() {
             }
         }
         prefix_cache_registration_ = std::move(registration);
+    }
+
+    if (is_first_malloc && prefix_cache_registration_ && resource_context_.enable_prefill_common_prefix_recovery
+        && result.farthest_fork) {
+        auto&       registration = *prefix_cache_registration_;
+        const auto& fork         = *result.farthest_fork;
+        // The original checkpoint can already own F. Keep the value for the
+        // request summary even when no internal-only point is appended.
+        registration.farthest_fork = fork;
+        if (fork.pos > 0 && fork.pos < registration.original_input_tokens
+            && fork.pos <= static_cast<size_t>(std::numeric_limits<int>::max())
+            && malloc_info.complete_token_ids->isValidReuseLength(static_cast<int>(fork.pos), 0)
+            && std::none_of(registration.points.begin(), registration.points.end(), [&](const auto& point) {
+                   return point.endpoint.pos == fork.pos;
+               })) {
+            PrefixCacheRegistrationPoint point;
+            point.endpoint      = fork;
+            point.internal_only = true;
+            for (const auto& group_set : resource_context_.cache_manager->blockTreeCache()->groupSets()) {
+                PrefixCacheGroupSaveBinding binding;
+                binding.group_set_id = group_set->groupSetId();
+                point.group_bindings.push_back(std::move(binding));
+            }
+            registration.points.push_back(std::move(point));
+        }
     }
 
     // HOST/DISK reuse is published after the asynchronous load completes.
@@ -574,9 +599,14 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success && prefix_cache_registration_
+        && resource_context_.cache_manager->relinquishOptionalRegisteredSave(*prefix_cache_registration_, true)) {
+        // A newly appended F destination yields before original/N points.
+        result = resource_context_.cache_manager->malloc(malloc_info);
+    }
+    if (!result.success && prefix_cache_registration_
         && resource_context_.cache_manager->relinquishOptionalRegisteredSave(*prefix_cache_registration_)) {
-        // The original running allocation retains its status semantics; optional
-        // save blocks yield once before declaring an incremental shortfall.
+        // The original running allocation retains its status semantics; remaining
+        // optional save blocks yield before declaring an incremental shortfall.
         result = resource_context_.cache_manager->malloc(malloc_info);
     }
     if (!result.success) {
@@ -700,8 +730,10 @@ bool StreamCacheResource::reuseCache() const {
 }
 
 bool StreamCacheResource::partialTailReuseEnabled() const {
-    if (!resource_context_.enable_prefill_partial_tail_reuse || resource_context_.role_type != RoleType::PREFILL
-        || !resource_context_.enable_device_cache || resource_context_.cache_manager == nullptr || !reuseCache()
+    if (!(resource_context_.enable_prefill_partial_tail_reuse
+          || resource_context_.enable_prefill_common_prefix_recovery)
+        || resource_context_.role_type != RoleType::PREFILL || !resource_context_.enable_device_cache
+        || resource_context_.cache_manager == nullptr || !reuseCache()
         || resource_context_.cache_manager->blockTreeCache() == nullptr || !stream_->isContextStream()) {
         return false;
     }
