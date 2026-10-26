@@ -83,13 +83,8 @@ class GrpcExecutorOverloadTest {
             assertEquals(Status.Code.RESOURCE_EXHAUSTED, result.get(5, TimeUnit.SECONDS).getCode());
             assertEquals(0, f.calls.get());
             f.release.countDown();
-            long idleDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-            while ((f.executor.getActiveCount() != 0 || !f.executor.getQueue().isEmpty())
-                    && System.nanoTime() < idleDeadline) {
-                Thread.sleep(5);
-            }
-            assertEquals(0, f.executor.getActiveCount());
-            assertTrue(f.executor.getQueue().isEmpty());
+            // gRPC cleanup may still execute after the artificial saturation has drained.
+            assertTrue(f.saturationDrained.await(5, TimeUnit.SECONDS));
             var recovered = new CompletableFuture<Status>();
             var next = f.newCall();
             next.start(listener(recovered), new Metadata());
@@ -164,6 +159,7 @@ class GrpcExecutorOverloadTest {
         final PooledByteBufAllocator allocator = new PooledByteBufAllocator(true);
         final CountDownLatch started = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
+        final CountDownLatch saturationDrained = new CountDownLatch(1);
         final AtomicInteger calls = new AtomicInteger();
         final AtomicInteger receivedBytes = new AtomicInteger();
         final Server server;
@@ -228,7 +224,7 @@ class GrpcExecutorOverloadTest {
                         }
                     });
             assertTrue(running.await(5, TimeUnit.SECONDS));
-            executor.execute(() -> {});
+            executor.execute(saturationDrained::countDown);
             assertEquals(0, executor.getQueue().remainingCapacity());
         }
 

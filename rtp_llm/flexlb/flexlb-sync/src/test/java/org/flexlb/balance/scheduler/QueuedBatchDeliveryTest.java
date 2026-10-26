@@ -9,6 +9,8 @@ import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.scheduler.ExpirationTimer.Token;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DecisionPolicyConfig;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -27,6 +29,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
@@ -62,7 +65,7 @@ class QueuedBatchDeliveryTest {
     private final CountDownLatch releaseExecutor = new CountDownLatch(1);
     private final CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> reply =
             new CompletableFuture<>();
-    private final DeliverySettlementTestSupport ledger = new DeliverySettlementTestSupport();
+    private DeliverySettlementTestSupport ledger = new DeliverySettlementTestSupport();
     private FlexlbConfig config;
     private AbstractRequestScheduler registry;
     private DeliveryDispatcher dispatcher;
@@ -959,6 +962,11 @@ class QueuedBatchDeliveryTest {
     }
 
     private void enableBypass(boolean priorityOrdering) {
+        enableBypass(priorityOrdering, DecisionPolicyConfig.Type.FIXED_WINDOW, 2);
+    }
+
+    private void enableBypass(
+            boolean priorityOrdering, DecisionPolicyConfig.Type grouping, int maxRequests) {
         ReflectionTestUtils.setField(prefill, "predictor", new FormulaPredictor("1"));
         ReflectionTestUtils.setField(
                 registry.runtime.deliveries(),
@@ -972,13 +980,170 @@ class QueuedBatchDeliveryTest {
                                 new QueueExecutionSettings(
                                         priorityOrdering,
                                         config.getDispatcher().getType(),
-                                        org.flexlb.config.DecisionPolicyConfig.Type.FIXED_WINDOW,
-                                        2,
+                                        grouping,
+                                        maxRequests,
                                         0L,
                                         0L),
                                 dispatcher,
                                 ledger.prefill));
         ReflectionTestUtils.setField(prefill, "queueRunner", worker);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "false,SINGLE,1", "true,SINGLE,1",
+        "false,FIXED_WINDOW,1", "true,FIXED_WINDOW,1",
+        "false,FIXED_WINDOW,2", "true,FIXED_WINDOW,2",
+        "false,FIXED_WINDOW,8", "true,FIXED_WINDOW,8"
+    })
+    void batchQueueBoundsOvertaking(
+            boolean priority, DecisionPolicyConfig.Type grouping, int maxRequests)
+            throws Exception {
+        assertBoundedOvertaking(priority, grouping, maxRequests);
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.api.Tag("non-batch")
+    @CsvSource({
+        "false,SINGLE,1", "true,SINGLE,1",
+        "false,FIXED_WINDOW,1", "true,FIXED_WINDOW,1",
+        "false,FIXED_WINDOW,2", "true,FIXED_WINDOW,2",
+        "false,FIXED_WINDOW,8", "true,FIXED_WINDOW,8"
+    })
+    void nonBatchQueueBoundsOvertaking(
+            boolean priority, DecisionPolicyConfig.Type grouping, int maxRequests)
+            throws Exception {
+        assertBoundedOvertaking(priority, grouping, maxRequests);
+    }
+
+    private void assertBoundedOvertaking(
+            boolean priority, DecisionPolicyConfig.Type grouping, int maxRequests)
+            throws Exception {
+        configureOrderedQueue(priority, grouping, maxRequests);
+        var head = item(100L);
+        var candidates = new ArrayList<RequestRoute>();
+        for (int i = 0; i < maxRequests + 1; i++) {
+            candidates.add(item(90L - i, null, anotherDecode(i + 2), 50));
+        }
+        var blocker = blockDecode();
+        int overtaken = priority ? Math.max(1, maxRequests - 1) : 0;
+        boolean batch = config.getDispatcher().getType() == DispatcherConfig.Type.BATCH;
+        try {
+            cycle();
+            var remaining = new ArrayList<>(List.of(head));
+            remaining.addAll(candidates.subList(overtaken, candidates.size()));
+            assertEquals(remaining, ledger.prefill.captureQueue(100).items());
+            assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
+            for (int i = 0; i < candidates.size(); i++) {
+                if (!batch) {
+                    assertEquals(i < overtaken, candidates.get(i).future().isDone());
+                    if (i < overtaken) {
+                        var response = candidates.get(i).future().get();
+                        assertTrue(response.isSuccess(), response.toString());
+                    }
+                }
+                var resources = candidates.get(i).decodeEp().resourceSnapshot();
+                assertEquals(i < overtaken ? 1 : 0, resources.engineCapacityUsed());
+                assertEquals(batch && i < overtaken ? 1 : 0, resources.activeDispatchPermits());
+            }
+            assertEquals(batch && priority ? 1 : 0, ledger.prefill.stats().batchCount());
+            releaseExecutor.countDown();
+            awaitDispatchTasks();
+            if (batch && priority) {
+                assertEquals(1, sent.size());
+                assertEquals(
+                        candidates.subList(0, overtaken).stream()
+                                .map(RequestRoute::requestId)
+                                .toList(),
+                        sent.getFirst().getDpSlotsList().stream()
+                                .flatMap(dp -> dp.getRequestsList().stream())
+                                .map(request -> request.getInput().getRequestId())
+                                .toList());
+            } else {
+                assertTrue(sent.isEmpty());
+            }
+            var later = item(1L, null, anotherDecode(20), 50);
+            remaining.add(later);
+            for (int i = 0; i < 3; i++) {
+                worker.signal(false);
+                cycle();
+            }
+            assertEquals(remaining, ledger.prefill.captureQueue(100).items());
+            assertFalse(worker.canBypass(head, later));
+            assertEquals(0, later.decodeEp().resourceSnapshot().activeDispatchPermits());
+            assertFalse(head.future().isDone());
+            if (!batch) {
+                verify(registry.runtime.deliveries(), org.mockito.Mockito.never())
+                        .tryReserveDelivery();
+                verify(prefill, org.mockito.Mockito.never())
+                        .reserveBatch(any(), anyLong(), anyInt());
+                verifyNoInteractions(grpc);
+            }
+            if (!priority) {
+                decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+                blocker = null;
+                cycle();
+                assertEquals(
+                        remaining.subList(maxRequests, remaining.size()),
+                        ledger.prefill.captureQueue(100).items());
+                assertEquals(1, decode.resourceSnapshot().engineCapacityUsed());
+            }
+        } finally {
+            if (blocker != null) {
+                decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+            }
+        }
+    }
+
+    @Test
+    void fifoReofferAndArrivalDuringCommitPreserveSelectedPrefix() throws Exception {
+        configureOrderedQueue(false, DecisionPolicyConfig.Type.FIXED_WINDOW, 2);
+        var first = item(100L);
+        var second = item(10L, null, anotherDecode(2), 50);
+        var third = item(50L, null, anotherDecode(3), 50);
+        ledger.prefill.updateQueue(
+                PrefillState.QueueChange.REMOVE, first, System.currentTimeMillis());
+        ledger.enqueue(first);
+        assertEquals(List.of(first, second, third), ledger.prefill.captureQueue(10).items());
+        var arrival = new CompletableFuture<RequestRoute>();
+        doAnswer(
+                        call -> {
+                            arrival.complete(
+                                    CompletableFuture.supplyAsync(
+                                                    () -> item(1L, null, anotherDecode(4), 90))
+                                            .get(5, TimeUnit.SECONDS));
+                            return call.callRealMethod();
+                        })
+                .when(worker)
+                .commitSelection(any());
+        cycle();
+        assertEquals(
+                List.of(third, arrival.get(5, TimeUnit.SECONDS)),
+                ledger.prefill.captureQueue(10).items());
+        releaseExecutor.countDown();
+        awaitDispatchTasks();
+        assertEquals(1, sent.size());
+        assertEquals(
+                List.of(100L, 10L),
+                sent.getFirst().getDpSlotsList().stream()
+                        .flatMap(dp -> dp.getRequestsList().stream())
+                        .map(request -> request.getInput().getRequestId())
+                        .toList());
+        assertEquals(0, third.decodeEp().resourceSnapshot().activeDispatchPermits());
+        assertEquals(0, arrival.get().decodeEp().resourceSnapshot().activeDispatchPermits());
+    }
+
+    private void configureOrderedQueue(
+            boolean priority, DecisionPolicyConfig.Type grouping, int maxRequests) {
+        ledger =
+                new DeliverySettlementTestSupport(
+                        priority
+                                ? PrefillQueueRunner.PRIORITY_QUEUE_ORDER
+                                : PrefillQueueRunner.FIFO_QUEUE_ORDER);
+        ReflectionTestUtils.setField(prefill, "ownership", ledger.prefill);
+        var execution = registry.runtime.deliveries();
+        org.mockito.Mockito.doCallRealMethod().when(execution).nextBatchId();
+        enableBypass(priority, grouping, maxRequests);
     }
 
     @Test
@@ -1157,8 +1322,13 @@ class QueuedBatchDeliveryTest {
     }
 
     private DecodeEndpoint anotherDecode() {
+        return anotherDecode(2);
+    }
+
+    private DecodeEndpoint anotherDecode(int address) {
         return EndpointTestSupport.decode(
-                WorkerStatus.createDiscovered(RoleType.DECODE, null, "127.0.0.2", 8080, 8081, null),
+                WorkerStatus.createDiscovered(
+                        RoleType.DECODE, null, "127.0.0." + address, 8080, 8081, null),
                 SchedulerTestSupport.repository(registry));
     }
 
