@@ -221,9 +221,10 @@ void StorageBackend::shutdown() {
     {
         std::lock_guard<std::mutex> lock(quarantine_mutex_);
         quarantined_task_count_ = 0;
+        quarantined_breakdown_ = {};
         quarantine_generation   = ++quarantine_generation_;
     }
-    onQuarantineChanged(quarantine_generation, /*task_count=*/0, /*block_count=*/0);
+    onQuarantineChanged(quarantine_generation, /*task_count=*/0, /*block_count=*/0, {});
     // FROZEN references remain until the block pools are destroyed.
     {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
@@ -246,6 +247,7 @@ void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail
     size_t   task_count;
     size_t   block_count;
     uint64_t generation;
+    StorageQuarantineBreakdown breakdown;
     {
         std::lock_guard<std::mutex> lock(quarantine_mutex_);
         task_count  = ++quarantined_task_count_;
@@ -255,6 +257,10 @@ void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail
         for (const auto& [tag, pool] : pools_by_tag_) {
             block_count += pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
         }
+        auto& counts = quarantined_breakdown_[is_write ? 1 : 0][static_cast<size_t>(reason)];
+        ++counts.task_count;
+        counts.block_count += pinned_block_count;
+        breakdown = quarantined_breakdown_;
         generation = ++quarantine_generation_;
     }
     RTP_LLM_LOG_WARNING("quarantine storage request after transfer completion became unknown: tasks=%zu blocks=%zu",
@@ -263,7 +269,7 @@ void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail
     // Count each operation even if its state snapshot is superseded, and before
     // onQuarantineChanged may abort due to the configured capacity limit.
     onQuarantined(is_write, reason, pinned_block_count);
-    onQuarantineChanged(generation, task_count, block_count);
+    onQuarantineChanged(generation, task_count, block_count, breakdown);
 }
 
 std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepare(StorageRequest request) {
