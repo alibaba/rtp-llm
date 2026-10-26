@@ -384,7 +384,7 @@ void BlockTree::setEventPublisher(KVCacheEventPublisherPtr        publisher,
     publication_groups_ = std::move(locations);
     published_groups_.clear();
     // Initialization only. Normal mutations update a single affected key.
-    // The publisher starts after attachment and reconciles this initial snapshot.
+    // The publisher starts after attachment and captures this initial state.
     for (const auto& node : node_pool_) {
         refreshPublishedState(node.get());
     }
