@@ -1,4 +1,4 @@
-"""Opt-in native SM103 merged-QB / SWA producer; import remains CUDA-lazy."""
+"""Opt-in DeepGEMM SM103 merged-QB / SWA producer; import remains CUDA-lazy."""
 
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ _READY_CONFIGS = {128: (0, 64), 192: (1, 64), 256: (2, 74), 384: (1, 64), 512: (
 
 
 def _ops():
-    from rtp_llm.ops.compute_ops import rtp_llm_ops
+    import deep_gemm
 
-    return rtp_llm_ops
+    return deep_gemm
 
 
 @lru_cache(maxsize=None)
@@ -66,8 +66,7 @@ def _config(merged, data, scales):
         and _device_supported(data.device)
     ):
         return None
-    available = getattr(_ops(), "dsv41_qb_kv_available", None)
-    return config if available is not None and available() else None
+    return config if callable(getattr(_ops(), "dsv41_qb_out", None)) else None
 
 
 def try_project(merged, data, scales, *, wait_pdl=False):

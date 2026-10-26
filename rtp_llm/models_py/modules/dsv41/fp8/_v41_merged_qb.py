@@ -51,9 +51,9 @@ class MergedQB(torch.nn.Module):
         self._postprocess_op = None
         props = torch.cuda.get_device_properties(weight.device)
         if (props.major, props.minor, props.multi_processor_count) == (10, 3, 148):
-            from rtp_llm.ops.compute_ops import rtp_llm_ops
+            import deep_gemm
 
-            self._postprocess_op = getattr(rtp_llm_ops, "v41_qb_gemm", None)
+            self._postprocess_op = getattr(deep_gemm, "dsv41_qb_indexer", None)
 
     def try_forward_prepared(self, data, scales, weights, frequencies, positions):
         """Decode-only; retain resident weights/SF and the original fallback.

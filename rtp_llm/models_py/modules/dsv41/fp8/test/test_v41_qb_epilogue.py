@@ -5,7 +5,9 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.dsv41.fp8._v41_decode_indexer import prepare_indexer_q_and_weights
+from rtp_llm.models_py.modules.dsv41.fp8._v41_decode_indexer import (
+    prepare_indexer_q_and_weights,
+)
 from rtp_llm.models_py.modules.dsv41.fp8._v41_merged_qb import MergedQB
 from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_merged_qb import fixture, linear
 from rtp_llm.utils.model_weight import W
@@ -16,8 +18,12 @@ class QBEpilogueTest(unittest.TestCase):
     @torch.inference_mode()
     def test_reindex_projection_chain_reload_graph(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_front_gemm as front
-        from rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv import decode_compute_qkv
-        from rtp_llm.models_py.modules.dsv41.test.test_v41_front_gemm import FrontGemmTest
+        from rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv import (
+            decode_compute_qkv,
+        )
+        from rtp_llm.models_py.modules.dsv41.test.test_v41_front_gemm import (
+            FrontGemmTest,
+        )
 
         with patch.dict(os.environ, {
             "DSV41_FUSED_FRONT_PROJECTION": "1",
@@ -77,7 +83,9 @@ class QBEpilogueTest(unittest.TestCase):
     @torch.inference_mode()
     def test_prepared_consumers_and_fallback(self):
         from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
-        from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_decode_attention_fusion import _fixture
+        from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_decode_attention_fusion import (
+            _fixture,
+        )
 
         for mode in ("dense", "sparse", "nonpaged"):
             attn, keys, x, qr, positions = _fixture("cuda", 1)
@@ -111,7 +119,9 @@ class QBEpilogueTest(unittest.TestCase):
                 for pos_dtype in (torch.int32, torch.int64):
                     attn, state, owner = fixture()
                     merged = state.merged_qb = MergedQB.create(attn, state, owner)
-                    self.assertIsNotNone(merged._postprocess_op, "new native binding required")
+                    import deep_gemm
+
+                    self.assertIs(merged._postprocess_op, deep_gemm.dsv41_qb_indexer)
                     data = torch.randn(m // 2, 2, 1280, device="cuda", dtype=torch.bfloat16)
                     quantized = attn.wq_b._quantize_input(data)
                     head = torch.randn(m // 2, 2, 32, device="cuda", dtype=torch.bfloat16)
