@@ -29,7 +29,9 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
      *
      * @see ServiceType
      */
-    protected final Map<String/*ip:port:serviceType*/, Invoker> channelPool = new ConcurrentHashMap<>();
+    protected final Map<String /*ip:port:serviceType*/, Invoker> channelPool =
+            new ConcurrentHashMap<>();
+
     protected final GrpcReporter grpcReporter;
 
     protected AbstractGrpcClient(GrpcReporter grpcReporter) {
@@ -43,7 +45,7 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
      * @param ipPortList Latest worker address list in format ip:httpPort
      */
     @Override
-    public void onAddressUpdate(List<String/*ip:port*/> ipPortList) {
+    public void onAddressUpdate(List<String /*ip:port*/> ipPortList) {
         if (ipPortList == null) {
             Logger.error("received null ipPort list");
             return;
@@ -51,7 +53,6 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
 
         // Update gRPC channel pool
         updateGrpcChannelPool(ipPortList);
-
     }
 
     /**
@@ -61,8 +62,8 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
      * @param ipPortList Latest worker address list in format ip:httpPort
      */
     private void updateGrpcChannelPool(List<String> ipPortList) {
-        Set<String/*ip:port:serviceType*/> currentKeys = new HashSet<>(channelPool.keySet());
-        List<String/*ip:port:serviceType*/> addedKeys = new ArrayList<>();
+        Set<String /*ip:port:serviceType*/> currentKeys = new HashSet<>(channelPool.keySet());
+        List<String /*ip:port:serviceType*/> addedKeys = new ArrayList<>();
 
         // Identify new and retained workers, mark channels to be removed
         for (String ipPort : ipPortList) {
@@ -107,13 +108,18 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
                 try {
                     invoker.shutdown();
                 } catch (Exception e) {
-                    Logger.error("shutdown channel for ipPort {} failed", invoker.getChannelKey(), e);
+                    Logger.error(
+                            "shutdown channel for ipPort {} failed", invoker.getChannelKey(), e);
                 }
             }
         }
 
-        Logger.info("gRPC channel pool changed: hosts={}, addedChannels={}, removedChannels={}, totalChannels={}",
-                ipPortList.size(), addedChannelCount, removedChannelCount, channelPool.size());
+        Logger.info(
+                "gRPC channel pool changed: hosts={}, addedChannels={}, removedChannels={}, totalChannels={}",
+                ipPortList.size(),
+                addedChannelCount,
+                removedChannelCount,
+                channelPool.size());
     }
 
     @Scheduled(fixedRate = 2000)
@@ -139,7 +145,8 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
         return newInvoker;
     }
 
-    protected Invoker replaceInvoker(String channelKey, Invoker expectedInvoker, ManagedChannel managedChannel) {
+    protected Invoker replaceInvoker(
+            String channelKey, Invoker expectedInvoker, ManagedChannel managedChannel) {
         Invoker newInvoker = new Invoker(channelKey, managedChannel);
         if (expectedInvoker == null) {
             Invoker existing = channelPool.putIfAbsent(channelKey, newInvoker);
@@ -169,7 +176,8 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
                 try {
                     invoker.shutdown();
                 } catch (Exception e) {
-                    Logger.error("shutdown channel for ipPort {} failed in pre-destroy", channelKey, e);
+                    Logger.error(
+                            "shutdown channel for ipPort {} failed in pre-destroy", channelKey, e);
                 }
             }
         }
@@ -185,7 +193,7 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
     protected static String[] parseServiceKey(String serviceKey) {
         String[] parts = serviceKey.split(":");
         if (parts.length == 3) {
-            return new String[]{parts[0], parts[1], parts[2]};
+            return new String[] {parts[0], parts[1], parts[2]};
         }
 
         throw new IllegalArgumentException("Invalid service key format: " + serviceKey);
@@ -198,8 +206,9 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
         private final RpcServiceGrpc.RpcServiceFutureStub rpcServiceFutureStub;
         private final MultimodalRpcServiceGrpc.MultimodalRpcServiceFutureStub multimodalFutureStub;
 
-        public GrpcFutureStubWrapper(RpcServiceGrpc.RpcServiceFutureStub rpcServiceFutureStub,
-                                     MultimodalRpcServiceGrpc.MultimodalRpcServiceFutureStub multimodalFutureStub) {
+        public GrpcFutureStubWrapper(
+                RpcServiceGrpc.RpcServiceFutureStub rpcServiceFutureStub,
+                MultimodalRpcServiceGrpc.MultimodalRpcServiceFutureStub multimodalFutureStub) {
             this.rpcServiceFutureStub = rpcServiceFutureStub;
             this.multimodalFutureStub = multimodalFutureStub;
         }
@@ -215,8 +224,7 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
         public GrpcFutureStubWrapper withDeadlineAfter(long timeout, TimeUnit unit) {
             return new GrpcFutureStubWrapper(
                     rpcServiceFutureStub.withDeadlineAfter(timeout, unit),
-                    multimodalFutureStub.withDeadlineAfter(timeout, unit)
-            );
+                    multimodalFutureStub.withDeadlineAfter(timeout, unit));
         }
     }
 
@@ -276,7 +284,6 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
      * @see EngineGrpcClient
      */
     public enum ServiceType {
-
         WORKER_STATUS("worker", "GetWorkerStatus"),
         CACHE_STATUS("cache", "GetCacheStatus"),
         MULTIMODAL_WORKER_STATUS("multimodal_worker", "GetWorkerStatus"),
@@ -286,10 +293,8 @@ public abstract class AbstractGrpcClient implements CustomNameResolver.Listener 
         // the pooled channel of the target engine worker.
         ENGINE_CANCEL("engine_cancel", "Cancel");
 
-        @Getter
-        private final String suffix;
-        @Getter
-        private final String operationName;
+        @Getter private final String suffix;
+        @Getter private final String operationName;
 
         ServiceType(String suffix, String operationName) {
             this.suffix = suffix;

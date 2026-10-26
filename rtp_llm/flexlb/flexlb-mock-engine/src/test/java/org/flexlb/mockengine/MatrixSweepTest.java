@@ -28,16 +28,15 @@ class MatrixSweepTest {
 
     private static final int BASE_PORT = 62100;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     @ParameterizedTest(name = "{0}P/{1}D concurrency={2}")
     @CsvSource({
-            "1, 1, 10", "1, 1, 50", "1, 1, 100",
-            "1, 2, 10", "1, 2, 50", "1, 2, 100",
-            "2, 2, 10", "2, 2, 50", "2, 2, 100",
-            "2, 4, 10", "2, 4, 50", "2, 4, 100",
-            "1, 4, 10", "1, 4, 50", "1, 4, 100"
+        "1, 1, 10", "1, 1, 50", "1, 1, 100",
+        "1, 2, 10", "1, 2, 50", "1, 2, 100",
+        "2, 2, 10", "2, 2, 50", "2, 2, 100",
+        "2, 4, 10", "2, 4, 50", "2, 4, 100",
+        "1, 4, 10", "1, 4, 50", "1, 4, 100"
     })
     void matrixSweep(int nPrefill, int nDecode, int concurrency) throws Exception {
         MockPerformanceModel model = model("10");
@@ -46,10 +45,11 @@ class MatrixSweepTest {
 
     // ──────────── Scenario runner ────────────
 
-    private void runScenario(MockPerformanceModel model, int nPrefill, int nDecode,
-                             int concurrency, int basePort) throws Exception {
+    private void runScenario(
+            MockPerformanceModel model, int nPrefill, int nDecode, int concurrency, int basePort)
+            throws Exception {
         try (MockEngineTestCluster cluster =
-                     MockEngineTestCluster.create(model, basePort, nPrefill, nDecode)) {
+                MockEngineTestCluster.create(model, basePort, nPrefill, nDecode)) {
             Map<Integer, JavaMockEngineCluster.FastRpcService> services = cluster.services();
             List<JavaMockEngineCluster.FastRpcService> prefillServices = cluster.prefills();
             List<JavaMockEngineCluster.FastRpcService> decodeServices = cluster.decodes();
@@ -69,8 +69,7 @@ class MatrixSweepTest {
                 EngineRpcService.GenerateInputPB[] inputs =
                         new EngineRpcService.GenerateInputPB[count];
                 for (int j = 0; j < count; j++) {
-                    int decodePort = decodeServices.get(
-                            (i * count + j) % nDecode).getGrpcPort();
+                    int decodePort = decodeServices.get((i * count + j) % nDecode).getGrpcPort();
                     inputs[j] = inputWithDecode(startRequestId + j, 10, decodePort);
                 }
                 EngineRpcService.EnqueueBatchResponsePB response =
@@ -82,9 +81,10 @@ class MatrixSweepTest {
             cluster.awaitCompleted(concurrency, 10_000);
 
             assertEquals(0, totalErrors, "enqueue errors");
-            long completedCount = services.values().stream()
-                    .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
-                    .sum();
+            long completedCount =
+                    services.values().stream()
+                            .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
+                            .sum();
             assertEquals(concurrency, completedCount, "completed requests");
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
                 assertEquals(0, service.getInflightCount(), "inflight requests");
@@ -98,5 +98,4 @@ class MatrixSweepTest {
     private MockPerformanceModel model(String formula) throws Exception {
         return MockEngineTestSupport.performanceModel(tempDir, formula);
     }
-
 }

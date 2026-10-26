@@ -21,21 +21,18 @@ class DefaultCacheAwareServiceTest {
     void cacheLookupFailureIsNotConvertedIntoACacheMiss() {
         KvCacheManager cache = mock(KvCacheManager.class);
         CacheMetricsReporter metrics = mock(CacheMetricsReporter.class);
-        DefaultCacheAwareService service =
-                new DefaultCacheAwareService(cache, metrics);
-        IllegalStateException failure =
-                new IllegalStateException("index unavailable");
+        DefaultCacheAwareService service = new DefaultCacheAwareService(cache, metrics);
+        IllegalStateException failure = new IllegalStateException("index unavailable");
         List<Long> keys = List.of(1L);
         List<String> candidates = List.of("127.0.0.1:8080");
         when(cache.findMatchingEngines(keys, candidates)).thenThrow(failure);
 
-        IllegalStateException actual = assertThrows(
-                IllegalStateException.class,
-                () -> service.findMatchingEngines(
-                        keys, RoleType.PREFILL, candidates));
+        IllegalStateException actual =
+                assertThrows(
+                        IllegalStateException.class,
+                        () -> service.findMatchingEngines(keys, RoleType.PREFILL, candidates));
 
         assertSame(failure, actual);
-        verify(metrics).reportFindMatchingEnginesRT(
-                eq(RoleType.PREFILL), anyLong(), eq("1"));
+        verify(metrics).reportFindMatchingEnginesRT(eq(RoleType.PREFILL), anyLong(), eq("1"));
     }
 }

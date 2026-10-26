@@ -27,19 +27,20 @@ public class HealthCheckServer {
      */
     @Bean
     public RouterFunction<ServerResponse> healthCheck() {
-        return route()
-                .path("/health", b -> b.GET(accept(MediaType.APPLICATION_JSON, MediaType.TEXT_PLAIN),
-                        serverRequest -> this.healthHandler()))
+        return route().path(
+                        "/health",
+                        b ->
+                                b.GET(
+                                        accept(MediaType.APPLICATION_JSON, MediaType.TEXT_PLAIN),
+                                        serverRequest -> this.healthHandler()))
                 .build();
     }
 
     public Mono<ServerResponse> healthHandler() {
         if (!applicationLifecycle.isHealthy()) {
             log.info("health check failed: application is warming up or shutting down");
-            return ServerResponse.status(404)
-                    .body(Mono.just("not ready"), String.class);
+            return ServerResponse.status(404).body(Mono.just("not ready"), String.class);
         }
         return ServerResponse.ok().body(Mono.just("success"), String.class);
     }
-
 }

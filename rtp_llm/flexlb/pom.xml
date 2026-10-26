@@ -1,317 +1,327 @@
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
-    <modelVersion>4.0.0</modelVersion>
+<project
+  xmlns="http://maven.apache.org/POM/4.0.0"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd"
+>
+  <modelVersion>4.0.0</modelVersion>
 
-    <parent>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-parent</artifactId>
-        <version>2.7.18</version>
-        <relativePath/>
-    </parent>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>2.7.18</version>
+    <relativePath />
+  </parent>
 
+  <groupId>org.flexlb</groupId>
+  <artifactId>flexlb</artifactId>
+  <packaging>pom</packaging>
+  <version>1.0.0-SNAPSHOT</version>
+  <name>FlexLB</name>
+  <description
+  >FlexLB - Intelligent Load Balancer for AI Model Inference</description>
+  <url>https://github.com/flexlb/flexlb</url>
 
-    <groupId>org.flexlb</groupId>
-    <artifactId>flexlb</artifactId>
-    <packaging>pom</packaging>
-    <version>1.0.0-SNAPSHOT</version>
-    <name>FlexLB</name>
-    <description>FlexLB - Intelligent Load Balancer for AI Model Inference</description>
-    <url>https://github.com/flexlb/flexlb</url>
+  <properties>
+    <maven.compiler.target>21</maven.compiler.target>
+    <maven.compiler.source>21</maven.compiler.source>
+    <java.version>21</java.version>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
-    <properties>
-        <maven.compiler.target>21</maven.compiler.target>
-        <maven.compiler.source>21</maven.compiler.source>
-        <java.version>21</java.version>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+    <maven-antrun.version>3.1.0</maven-antrun.version>
+    <maven-resources.version>3.3.1</maven-resources.version>
+    <spring-boot.version>2.7.18</spring-boot.version>
+    <grpc.version>1.65.0</grpc.version>
+    <protoc.version>3.25.1</protoc.version>
+    <protobuf.version>3.25.1</protobuf.version>
+    <curator.version>5.4.0</curator.version>
+    <opentelemetry.version>1.51.0</opentelemetry.version>
+    <micrometer.version>1.10.13</micrometer.version>
+    <!-- 高版本 Mockito，摆脱 powermock 和 JUnit4 的限制 -->
+    <mockito.version>5.20.0</mockito.version>
+    <byte-buddy.version>1.17.6</byte-buddy.version>
+    <!-- 5.3.x 的最新小版本，提供了一些 BUG 修复 -->
+    <spring-framework.version>5.3.39</spring-framework.version>
+    <commons-collections4.version>4.4</commons-collections4.version>
+  </properties>
 
-        <maven-antrun.version>3.1.0</maven-antrun.version>
-        <maven-resources.version>3.3.1</maven-resources.version>
-        <spring-boot.version>2.7.18</spring-boot.version>
-        <grpc.version>1.65.0</grpc.version>
-        <protoc.version>3.25.1</protoc.version>
-        <protobuf.version>3.25.1</protobuf.version>
-        <curator.version>5.4.0</curator.version>
-        <opentelemetry.version>1.51.0</opentelemetry.version>
-        <micrometer.version>1.10.13</micrometer.version>
-        <!-- 高版本 Mockito，摆脱 powermock 和 JUnit4 的限制 -->
-        <mockito.version>5.20.0</mockito.version>
-        <byte-buddy.version>1.17.6</byte-buddy.version>
-        <!-- 5.3.x 的最新小版本，提供了一些 BUG 修复 -->
-        <spring-framework.version>5.3.39</spring-framework.version>
-        <commons-collections4.version>4.4</commons-collections4.version>
-    </properties>
+  <modules>
+    <module>flexlb-api</module>
+    <module>flexlb-sync</module>
+    <module>flexlb-common</module>
+    <module>flexlb-grpc</module>
+    <module>flexlb-cache</module>
+    <module>flexlb-mock-engine</module>
+  </modules>
 
-    <modules>
-        <module>flexlb-api</module>
-        <module>flexlb-sync</module>
-        <module>flexlb-common</module>
-        <module>flexlb-grpc</module>
-        <module>flexlb-cache</module>
-        <module>flexlb-mock-engine</module>
-    </modules>
+  <!-- 此处定义所有模块都依赖的 -->
+  <dependencies>
+    <!-- Spring managed modules. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-configuration-processor</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <optional>true</optional>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.squareup.okhttp3</groupId>
+      <artifactId>mockwebserver</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+    </dependency>
+  </dependencies>
 
-    <!-- 此处定义所有模块都依赖的 -->
+  <dependencyManagement>
     <dependencies>
-        <!-- Spring managed modules. -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-configuration-processor</artifactId>
-            <optional>true</optional>
-        </dependency>
-        <dependency>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok</artifactId>
-            <optional>true</optional>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-test</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.squareup.okhttp3</groupId>
-            <artifactId>mockwebserver</artifactId>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-actuator</artifactId>
-            <optional>true</optional>
-        </dependency>
-        <dependency>
-            <groupId>io.micrometer</groupId>
-            <artifactId>micrometer-registry-prometheus</artifactId>
-        </dependency>
+      <!-- 自定义管理 micrometer 的版本 -->
+      <!-- 主要是为了版本高可能有一些特性的修复 -->
+      <dependency>
+        <groupId>io.micrometer</groupId>
+        <artifactId>micrometer-bom</artifactId>
+        <version>${micrometer.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>net.bytebuddy</groupId>
+        <artifactId>byte-buddy-parent</artifactId>
+        <version>${byte-buddy.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.mockito</groupId>
+        <artifactId>mockito-bom</artifactId>
+        <version>${mockito.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.mockito</groupId>
+        <artifactId>mockito-core</artifactId>
+        <version>${mockito.version}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>io.opentelemetry</groupId>
+        <artifactId>opentelemetry-bom</artifactId>
+        <version>${opentelemetry.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>io.grpc</groupId>
+        <artifactId>grpc-bom</artifactId>
+        <version>${grpc.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.springframework</groupId>
+        <artifactId>spring-framework-bom</artifactId>
+        <version>${spring-framework.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.commons</groupId>
+        <artifactId>commons-collections4</artifactId>
+        <version>${commons-collections4.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.flexlb</groupId>
+        <artifactId>flexlb-common</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.flexlb</groupId>
+        <artifactId>flexlb-cache</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.flexlb</groupId>
+        <artifactId>flexlb-sync</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.flexlb</groupId>
+        <artifactId>flexlb-grpc</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+
+      <!-- Internal dependencies - only available when internal profile is activated -->
+      <dependency>
+        <groupId>org.flexlb</groupId>
+        <artifactId>kmonitor</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.flexlb</groupId>
+        <artifactId>vipserver</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+
+      <!-- util tools 依赖 start -->
+      <dependency>
+        <groupId>com.google.guava</groupId>
+        <artifactId>guava</artifactId>
+        <version>33.4.8-jre</version>
+      </dependency>
+      <dependency>
+        <groupId>com.github.ben-manes.caffeine</groupId>
+        <artifactId>caffeine</artifactId>
+        <version>2.9.3</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.curator</groupId>
+        <artifactId>curator-framework</artifactId>
+        <version>${curator.version}</version>
+        <exclusions>
+          <exclusion>
+            <groupId>org.apache.zookeeper</groupId>
+            <artifactId>zookeeper</artifactId>
+          </exclusion>
+        </exclusions>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.curator</groupId>
+        <artifactId>curator-client</artifactId>
+        <version>${curator.version}</version>
+        <exclusions>
+          <exclusion>
+            <groupId>org.apache.zookeeper</groupId>
+            <artifactId>zookeeper</artifactId>
+          </exclusion>
+        </exclusions>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.curator</groupId>
+        <artifactId>curator-recipes</artifactId>
+        <version>${curator.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.zookeeper</groupId>
+        <artifactId>zookeeper</artifactId>
+        <version>3.6.3</version>
+        <exclusions>
+          <exclusion>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-log4j12</artifactId>
+          </exclusion>
+          <exclusion>
+            <groupId>log4j</groupId>
+            <artifactId>log4j</artifactId>
+          </exclusion>
+        </exclusions>
+      </dependency>
+      <!-- util tools 依赖 end -->
+      <dependency>
+        <groupId>uk.org.webcompere</groupId>
+        <artifactId>system-stubs-jupiter</artifactId>
+        <version>2.1.6</version>
+        <scope>test</scope>
+      </dependency>
     </dependencies>
+  </dependencyManagement>
 
-    <dependencyManagement>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.openrewrite.maven</groupId>
+        <artifactId>rewrite-maven-plugin</artifactId>
+        <version>6.21.1</version>
+        <configuration>
+          <exportDatatables>true</exportDatatables>
+          <activeRecipes>
+            <!-- 升级到 JDK21 -->
+            <recipe>org.openrewrite.java.migrate.UpgradeToJava21</recipe>
+            <!-- SLF4J 的日志记录使用参数化格式 -->
+            <recipe
+            >org.openrewrite.java.logging.slf4j.ParameterizedLogging</recipe>
+            <!-- 一些静态分析 -->
+            <recipe>org.openrewrite.staticanalysis.CommonStaticAnalysis</recipe>
+            <!-- Lombok 最佳实践 -->
+            <recipe
+            >org.openrewrite.java.migrate.lombok.LombokBestPractices</recipe>
+            <!-- Mockito 最佳实践 -->
+            <recipe
+            >org.openrewrite.java.testing.mockito.MockitoBestPractices</recipe>
+            <!-- 用 List/Map/Set.of() -->
+            <recipe
+            >org.openrewrite.java.migrate.util.MigrateCollectionsSingletonList</recipe>
+            <recipe
+            >org.openrewrite.java.migrate.util.MigrateCollectionsSingletonMap</recipe>
+            <recipe
+            >org.openrewrite.java.migrate.util.MigrateCollectionsSingletonSet</recipe>
+            <recipe
+            >org.openrewrite.java.migrate.util.MigrateCollectionsUnmodifiableList</recipe>
+          </activeRecipes>
+        </configuration>
         <dependencies>
-            <!-- 自定义管理 micrometer 的版本 -->
-            <!-- 主要是为了版本高可能有一些特性的修复 -->
-            <dependency>
-                <groupId>io.micrometer</groupId>
-                <artifactId>micrometer-bom</artifactId>
-                <version>${micrometer.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-            <dependency>
-                <groupId>net.bytebuddy</groupId>
-                <artifactId>byte-buddy-parent</artifactId>
-                <version>${byte-buddy.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-            <dependency>
-                <groupId>org.mockito</groupId>
-                <artifactId>mockito-bom</artifactId>
-                <version>${mockito.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-            <dependency>
-                <groupId>org.mockito</groupId>
-                <artifactId>mockito-core</artifactId>
-                <version>${mockito.version}</version>
-                <scope>test</scope>
-            </dependency>
-            <dependency>
-                <groupId>io.opentelemetry</groupId>
-                <artifactId>opentelemetry-bom</artifactId>
-                <version>${opentelemetry.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-            <dependency>
-                <groupId>io.grpc</groupId>
-                <artifactId>grpc-bom</artifactId>
-                <version>${grpc.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-            <dependency>
-                <groupId>org.springframework</groupId>
-                <artifactId>spring-framework-bom</artifactId>
-                <version>${spring-framework.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.commons</groupId>
-                <artifactId>commons-collections4</artifactId>
-                <version>${commons-collections4.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.flexlb</groupId>
-                <artifactId>flexlb-common</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.flexlb</groupId>
-                <artifactId>flexlb-cache</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.flexlb</groupId>
-                <artifactId>flexlb-sync</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.flexlb</groupId>
-                <artifactId>flexlb-grpc</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-
-            <!-- Internal dependencies - only available when internal profile is activated -->
-            <dependency>
-                <groupId>org.flexlb</groupId>
-                <artifactId>kmonitor</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.flexlb</groupId>
-                <artifactId>vipserver</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-
-            <!-- util tools 依赖 start -->
-            <dependency>
-                <groupId>com.google.guava</groupId>
-                <artifactId>guava</artifactId>
-                <version>33.4.8-jre</version>
-            </dependency>
-            <dependency>
-                <groupId>com.github.ben-manes.caffeine</groupId>
-                <artifactId>caffeine</artifactId>
-                <version>2.9.3</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.curator</groupId>
-                <artifactId>curator-framework</artifactId>
-                <version>${curator.version}</version>
-                <exclusions>
-                    <exclusion>
-                        <groupId>org.apache.zookeeper</groupId>
-                        <artifactId>zookeeper</artifactId>
-                    </exclusion>
-                </exclusions>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.curator</groupId>
-                <artifactId>curator-client</artifactId>
-                <version>${curator.version}</version>
-                <exclusions>
-                    <exclusion>
-                        <groupId>org.apache.zookeeper</groupId>
-                        <artifactId>zookeeper</artifactId>
-                    </exclusion>
-                </exclusions>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.curator</groupId>
-                <artifactId>curator-recipes</artifactId>
-                <version>${curator.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.zookeeper</groupId>
-                <artifactId>zookeeper</artifactId>
-                <version>3.6.3</version>
-                <exclusions>
-                    <exclusion>
-                        <groupId>org.slf4j</groupId>
-                        <artifactId>slf4j-log4j12</artifactId>
-                    </exclusion>
-                    <exclusion>
-                        <groupId>log4j</groupId>
-                        <artifactId>log4j</artifactId>
-                    </exclusion>
-                </exclusions>
-            </dependency>
-            <!-- util tools 依赖 end -->
-            <dependency>
-                <groupId>uk.org.webcompere</groupId>
-                <artifactId>system-stubs-jupiter</artifactId>
-                <version>2.1.6</version>
-                <scope>test</scope>
-            </dependency>
+          <dependency>
+            <groupId>org.openrewrite.recipe</groupId>
+            <artifactId>rewrite-migrate-java</artifactId>
+            <version>3.12.0</version>
+          </dependency>
+          <dependency>
+            <groupId>org.openrewrite.recipe</groupId>
+            <artifactId>rewrite-logging-frameworks</artifactId>
+            <version>3.10.0</version>
+          </dependency>
+          <dependency>
+            <groupId>org.openrewrite.recipe</groupId>
+            <artifactId>rewrite-static-analysis</artifactId>
+            <version>2.19.0</version>
+          </dependency>
+          <dependency>
+            <groupId>org.openrewrite.recipe</groupId>
+            <artifactId>rewrite-testing-frameworks</artifactId>
+            <version>3.19.0</version>
+          </dependency>
         </dependencies>
-    </dependencyManagement>
-
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.openrewrite.maven</groupId>
-                <artifactId>rewrite-maven-plugin</artifactId>
-                <version>6.21.1</version>
-                <configuration>
-                    <exportDatatables>true</exportDatatables>
-                    <activeRecipes>
-                        <!-- 升级到 JDK21 -->
-                        <recipe>org.openrewrite.java.migrate.UpgradeToJava21</recipe>
-                        <!-- SLF4J 的日志记录使用参数化格式 -->
-                        <recipe>org.openrewrite.java.logging.slf4j.ParameterizedLogging</recipe>
-                        <!-- 一些静态分析 -->
-                        <recipe>org.openrewrite.staticanalysis.CommonStaticAnalysis</recipe>
-                        <!-- Lombok 最佳实践 -->
-                        <recipe>org.openrewrite.java.migrate.lombok.LombokBestPractices</recipe>
-                        <!-- Mockito 最佳实践 -->
-                        <recipe>org.openrewrite.java.testing.mockito.MockitoBestPractices</recipe>
-                        <!-- 用 List/Map/Set.of() -->
-                        <recipe>org.openrewrite.java.migrate.util.MigrateCollectionsSingletonList</recipe>
-                        <recipe>org.openrewrite.java.migrate.util.MigrateCollectionsSingletonMap</recipe>
-                        <recipe>org.openrewrite.java.migrate.util.MigrateCollectionsSingletonSet</recipe>
-                        <recipe>org.openrewrite.java.migrate.util.MigrateCollectionsUnmodifiableList</recipe>
-                    </activeRecipes>
-                </configuration>
-                <dependencies>
-                    <dependency>
-                        <groupId>org.openrewrite.recipe</groupId>
-                        <artifactId>rewrite-migrate-java</artifactId>
-                        <version>3.12.0</version>
-                    </dependency>
-                    <dependency>
-                        <groupId>org.openrewrite.recipe</groupId>
-                        <artifactId>rewrite-logging-frameworks</artifactId>
-                        <version>3.10.0</version>
-                    </dependency>
-                    <dependency>
-                        <groupId>org.openrewrite.recipe</groupId>
-                        <artifactId>rewrite-static-analysis</artifactId>
-                        <version>2.19.0</version>
-                    </dependency>
-                    <dependency>
-                        <groupId>org.openrewrite.recipe</groupId>
-                        <artifactId>rewrite-testing-frameworks</artifactId>
-                        <version>3.19.0</version>
-                    </dependency>
-                </dependencies>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <executions>
-                    <execution>
-                        <id>default-test</id>
-                        <configuration>
-                            <excludedGroups>performance-regression</excludedGroups>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-        </plugins>
-        <pluginManagement>
-            <plugins>
-                <plugin>
-                    <groupId>org.springframework.boot</groupId>
-                    <artifactId>spring-boot-maven-plugin</artifactId>
-                    <configuration>
-                        <jvmArguments>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>default-test</id>
+            <configuration>
+              <excludedGroups>performance-regression</excludedGroups>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.springframework.boot</groupId>
+          <artifactId>spring-boot-maven-plugin</artifactId>
+          <configuration>
+            <jvmArguments>
                             --add-modules ALL-SYSTEM
                             --add-opens java.base/java.lang=ALL-UNNAMED
                             --add-opens java.base/java.lang.invoke=ALL-UNNAMED
@@ -322,22 +332,22 @@
                             --add-opens java.base/sun.nio.ch=ALL-UNNAMED
                             --add-opens java.instrument/sun.instrument=ALL-UNNAMED
                         </jvmArguments>
-                    </configuration>
-                </plugin>
-                <plugin>
-                    <artifactId>maven-antrun-plugin</artifactId>
-                    <version>${maven-antrun.version}</version>
-                </plugin>
-                <plugin>
-                    <groupId>org.apache.maven.plugins</groupId>
-                    <artifactId>maven-resources-plugin</artifactId>
-                    <version>${maven-resources.version}</version>
-                </plugin>
-                <plugin>
-                    <groupId>org.apache.maven.plugins</groupId>
-                    <artifactId>maven-surefire-plugin</artifactId>
-                    <configuration>
-                        <argLine>
+          </configuration>
+        </plugin>
+        <plugin>
+          <artifactId>maven-antrun-plugin</artifactId>
+          <version>${maven-antrun.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-resources-plugin</artifactId>
+          <version>${maven-resources.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <configuration>
+            <argLine>
                             --add-modules ALL-SYSTEM
                             --add-opens java.base/java.lang=ALL-UNNAMED
                             --add-opens java.base/java.lang.invoke=ALL-UNNAMED
@@ -348,70 +358,72 @@
                             --add-opens java.base/sun.nio.ch=ALL-UNNAMED
                             --add-opens java.instrument/sun.instrument=ALL-UNNAMED
                         </argLine>
-                    </configuration>
-                    <executions>
-                        <execution>
-                            <id>default-test</id>
-                            <configuration>
-                                <excludedGroups>performance-regression</excludedGroups>
-                            </configuration>
-                        </execution>
-                    </executions>
-                </plugin>
-            </plugins>
-        </pluginManagement>
-    </build>
+          </configuration>
+          <executions>
+            <execution>
+              <id>default-test</id>
+              <configuration>
+                <excludedGroups>performance-regression</excludedGroups>
+              </configuration>
+            </execution>
+          </executions>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
 
-    <profiles>
-        <!-- Run FlexLB Sync performance regressions in a dedicated Maven invocation. -->
-        <profile>
-            <id>sync-performance-regression</id>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-surefire-plugin</artifactId>
-                        <executions>
-                            <execution>
-                                <id>default-test</id>
-                                <configuration combine.self="override">
-                                    <includes>
-                                        <include>**/WorkerBatcherPerformanceTest.java</include>
-                                    </includes>
-                                    <groups>performance-regression</groups>
-                                    <forkCount>1</forkCount>
-                                    <reuseForks>false</reuseForks>
-                                    <failIfNoTests>false</failIfNoTests>
-                                    <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
-                                </configuration>
-                            </execution>
-                        </executions>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
+  <profiles>
+    <!-- Run FlexLB Sync performance regressions in a dedicated Maven invocation. -->
+    <profile>
+      <id>sync-performance-regression</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>default-test</id>
+                <configuration combine.self="override">
+                  <includes>
+                    <include>**/WorkerBatcherPerformanceTest.java</include>
+                  </includes>
+                  <groups>performance-regression</groups>
+                  <forkCount>1</forkCount>
+                  <reuseForks>false</reuseForks>
+                  <failIfNoTests>false</failIfNoTests>
+                  <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
 
-        <!-- Run FlexLB API performance regressions in a separate Maven invocation. -->
-        <profile>
-            <id>api-performance-regression</id>
-            <properties>
-                <flexlb.perf.heap>2g</flexlb.perf.heap>
-            </properties>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-surefire-plugin</artifactId>
-                        <executions>
-                            <execution>
-                                <id>default-test</id>
-                                <configuration combine.self="override">
-                                    <includes>
-                                        <include>**/MasterBatchEndToEndPerformanceTest.java</include>
-                                        <include>**/TransientCapacityQueueContractTest.java</include>
-                                    </includes>
-                                    <groups>performance-regression</groups>
-                                    <!--
+    <!-- Run FlexLB API performance regressions in a separate Maven invocation. -->
+    <profile>
+      <id>api-performance-regression</id>
+      <properties>
+        <flexlb.perf.heap>2g</flexlb.perf.heap>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>default-test</id>
+                <configuration combine.self="override">
+                  <includes>
+                    <include
+                    >**/MasterBatchEndToEndPerformanceTest.java</include>
+                    <include
+                    >**/TransientCapacityQueueContractTest.java</include>
+                  </includes>
+                  <groups>performance-regression</groups>
+                  <!--
                                       The real-payload E2E burst serializes more than 50 million
                                       token ids in one fresh fork. Fix the heap size so the gate
                                       measures gRPC/scheduling throughput instead of JVM heap
@@ -419,7 +431,7 @@
                                       Larger fleet runs retain more RPC payloads for assertions
                                       and can set -Dflexlb.perf.heap=8g without relaxing SLOs.
                                     -->
-                                    <argLine>
+                  <argLine>
                                         -Xms${flexlb.perf.heap} -Xmx${flexlb.perf.heap}
                                         --add-modules ALL-SYSTEM
                                         --add-opens java.base/java.lang=ALL-UNNAMED
@@ -431,103 +443,84 @@
                                         --add-opens java.base/sun.nio.ch=ALL-UNNAMED
                                         --add-opens java.instrument/sun.instrument=ALL-UNNAMED
                                     </argLine>
-                                    <forkCount>1</forkCount>
-                                    <reuseForks>false</reuseForks>
-                                    <failIfNoTests>false</failIfNoTests>
-                                    <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
-                                </configuration>
-                            </execution>
-                        </executions>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
+                  <forkCount>1</forkCount>
+                  <reuseForks>false</reuseForks>
+                  <failIfNoTests>false</failIfNoTests>
+                  <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
 
-        <!-- Internal profile - automatically activated when internal dependencies exists -->
-        <profile>
-            <id>internal</id>
-            <activation>
-                <file>
-                    <exists>../../../internal_source</exists>
-                </file>
-            </activation>
-            <properties>
-                <internal.modules.enabled>true</internal.modules.enabled>
-            </properties>
-        </profile>
+    <!-- Internal profile - automatically activated when internal dependencies exists -->
+    <profile>
+      <id>internal</id>
+      <activation>
+        <file>
+          <exists>../../../internal_source</exists>
+        </file>
+      </activation>
+      <properties>
+        <internal.modules.enabled>true</internal.modules.enabled>
+      </properties>
+    </profile>
 
-        <!-- Default profile -->
-        <profile>
-            <id>opensource</id>
-            <activation>
-                <activeByDefault>true</activeByDefault>
-            </activation>
-            <properties>
-                <internal.modules.enabled>false</internal.modules.enabled>
-            </properties>
-        </profile>
+    <!-- Default profile -->
+    <profile>
+      <id>opensource</id>
+      <activation>
+        <activeByDefault>true</activeByDefault>
+      </activation>
+      <properties>
+        <internal.modules.enabled>false</internal.modules.enabled>
+      </properties>
+    </profile>
 
-        <!-- Spotless code formatting profile -->
-        <profile>
-            <id>spotless-check</id>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>com.diffplug.spotless</groupId>
-                        <artifactId>spotless-maven-plugin</artifactId>
-                        <version>3.0.0</version>
-                        <configuration>
-                            <java>
-                                <!-- 移除无用的 import -->
-                                <removeUnusedImports/>
-                                <importOrder>
-                                    <!-- import 顺序：先第三方，然后 java|javax，之后是静态导入 -->
-                                    <order>,|,javax|java,|,\#</order>
-                                </importOrder>
-                                <forbidWildcardImports/>
-
-                                <replaceRegex>
-                                    <name>多个空行替换为单个空行</name>
-                                    <searchRegex>(\n\s*\n)\s*\n+</searchRegex>
-                                    <replacement>$1</replacement>
-                                </replaceRegex>
-                                <replaceRegex>
-                                    <name>控制语句括号前空格（只在行首匹配）</name>
-                                    <searchRegex>^(\s*)(if|for|while|switch|catch|synchronized)\s*\(</searchRegex>
-                                    <replacement>$1$2 (</replacement>
-                                </replaceRegex>
-                                <replaceRegex>
-                                    <name>类和接口声明大括号前空格</name>
-                                    <searchRegex>^(\s*(?:public|private|protected|abstract|final|static)?\s*(?:class|interface|enum)\s+\w+[^{]*?)\s*\{</searchRegex>
-                                    <replacement>$1 {</replacement>
-                                </replaceRegex>
-                                <replaceRegex>
-                                    <name>try语句大括号前空格</name>
-                                    <searchRegex>^(\s*(?:try|catch|finally)(?:\s*\([^)]*\))?)\s*\{</searchRegex>
-                                    <replacement>$1 {</replacement>
-                                </replaceRegex>
-                                <replaceRegex>
-                                    <name>else语句大括号前空格</name>
-                                    <searchRegex>\}\s*else\s*\{</searchRegex>
-                                    <replacement>} else {</replacement>
-                                </replaceRegex>
-                                <replaceRegex>
-                                    <name>方法声明的大括号前空格</name>
-                                    <searchRegex>^(\s*(?:public|private|protected|static|final|synchronized|native|abstract)*.*?\))\s*\{</searchRegex>
-                                    <replacement>$1 {</replacement>
-                                </replaceRegex>
-                            </java>
-                        </configuration>
-                        <executions>
-                            <execution>
-                                <goals>
-                                    <goal>check</goal>
-                                </goals>
-                            </execution>
-                        </executions>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-    </profiles>
+    <!-- Spotless code formatting profile -->
+    <profile>
+      <id>spotless-check</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>com.diffplug.spotless</groupId>
+            <artifactId>spotless-maven-plugin</artifactId>
+            <version>3.0.0</version>
+            <configuration>
+              <java>
+                <includes>
+                  <include>src/main/java/**/*.java</include>
+                  <include>src/test/java/**/*.java</include>
+                  <include>tools/**/*.java</include>
+                </includes>
+                <googleJavaFormat>
+                  <version>1.28.0</version>
+                  <style>AOSP</style>
+                  <reorderImports>false</reorderImports>
+                  <formatJavadoc>false</formatJavadoc>
+                  <reflowLongStrings>false</reflowLongStrings>
+                </googleJavaFormat>
+                <!-- 移除无用的 import -->
+                <removeUnusedImports />
+                <importOrder>
+                  <!-- import 顺序：先第三方，然后 java|javax，之后是静态导入 -->
+                  <order>,|,javax|java,|,\#</order>
+                </importOrder>
+                <forbidWildcardImports />
+              </java>
+            </configuration>
+            <executions>
+              <execution>
+                <goals>
+                  <goal>check</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

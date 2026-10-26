@@ -18,16 +18,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 public final class InflightAssertions {
 
-    private InflightAssertions() {
-    }
+    private InflightAssertions() {}
 
     /**
      * Assert that the PrefillEndpoint for the given ip:port has no inflight batches.
      */
     public static void assertPrefillInflightEmpty(PrefillEndpoint prefillEp) {
         int batchCount = prefillEp.getInflightBatchCount();
-        assertEquals(0, batchCount,
-                "PrefillEndpoint inflightBatches should be empty but has " + batchCount + " batches");
+        assertEquals(
+                0,
+                batchCount,
+                "PrefillEndpoint inflightBatches should be empty but has "
+                        + batchCount
+                        + " batches");
     }
 
     /**
@@ -35,14 +38,17 @@ public final class InflightAssertions {
      */
     public static void assertDecodeInflightEmpty(DecodeEndpoint decodeEp) {
         int count = decodeEp.getInflightCount();
-        assertEquals(0, count,
+        assertEquals(
+                0,
+                count,
                 "DecodeEndpoint inflightRequests should be empty but has " + count + " requests");
     }
 
     /**
      * Assert that both prefill and decode endpoints have released all resources.
      */
-    public static void assertAllResourcesReleased(PrefillEndpoint prefillEp, DecodeEndpoint decodeEp) {
+    public static void assertAllResourcesReleased(
+            PrefillEndpoint prefillEp, DecodeEndpoint decodeEp) {
         assertPrefillInflightEmpty(prefillEp);
         assertDecodeInflightEmpty(decodeEp);
     }
@@ -56,9 +62,8 @@ public final class InflightAssertions {
      * @param pollMs     poll interval
      * @return true if all resources were released within the timeout
      */
-    public static boolean waitForResourcesReleased(PrefillEndpoint prefillEp,
-                                                    DecodeEndpoint decodeEp,
-                                                    long timeoutMs, long pollMs) {
+    public static boolean waitForResourcesReleased(
+            PrefillEndpoint prefillEp, DecodeEndpoint decodeEp, long timeoutMs, long pollMs) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
             boolean prefillOk = prefillEp == null || prefillEp.getInflightBatchCount() == 0;
@@ -79,12 +84,17 @@ public final class InflightAssertions {
     /**
      * Assert that all inflight resources are released within the given timeout.
      */
-    public static void assertResourcesReleasedWithin(PrefillEndpoint prefillEp,
-                                                     DecodeEndpoint decodeEp,
-                                                     long timeoutMs) {
-        assertTrue(waitForResourcesReleased(prefillEp, decodeEp, timeoutMs, 50),
-                "Inflight resources not released within " + timeoutMs + "ms"
-                        + " (prefill batches=" + (prefillEp != null ? prefillEp.getInflightBatchCount() : "null")
-                        + ", decode inflight=" + (decodeEp != null ? decodeEp.getInflightCount() : "null") + ")");
+    public static void assertResourcesReleasedWithin(
+            PrefillEndpoint prefillEp, DecodeEndpoint decodeEp, long timeoutMs) {
+        assertTrue(
+                waitForResourcesReleased(prefillEp, decodeEp, timeoutMs, 50),
+                "Inflight resources not released within "
+                        + timeoutMs
+                        + "ms"
+                        + " (prefill batches="
+                        + (prefillEp != null ? prefillEp.getInflightBatchCount() : "null")
+                        + ", decode inflight="
+                        + (decodeEp != null ? decodeEp.getInflightCount() : "null")
+                        + ")");
     }
 }

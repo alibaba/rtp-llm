@@ -6,14 +6,12 @@ import lombok.Getter;
 
 @Getter
 public enum TaskPhase {
-
     PENDING("pending"),
     RECEIVED("received"),
     KV_ALLOCATED("kv_allocated"),
     RUNNING("running");
 
-    @JsonValue
-    private final String value;
+    @JsonValue private final String value;
 
     TaskPhase(String value) {
         this.value = value;

@@ -25,17 +25,14 @@ import java.util.Set;
 @Component
 public class KvCacheManager {
 
-    @Autowired
-    private GlobalCacheIndex globalCacheIndex;
+    @Autowired private GlobalCacheIndex globalCacheIndex;
 
-    @Autowired
-    private EngineLocalView engineLocalView;
+    @Autowired private EngineLocalView engineLocalView;
 
     /**
      * Cache metrics reporter
      */
-    @Autowired
-    private CacheMetricsReporter cacheMetricsReporter;
+    @Autowired private CacheMetricsReporter cacheMetricsReporter;
 
     @PostConstruct
     public void init() {
@@ -55,9 +52,8 @@ public class KvCacheManager {
      * @param candidateEngineIpPorts exact live candidate addresses
      * @return Engine matching result map, key: engineIpPort, value: prefixMatchLength
      */
-    public Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(
-            List<Long> blockCacheKeys,
-            List<String> candidateEngineIpPorts) {
+    public Map<String /*engineIpPort*/, Integer /*prefixMatchLength*/> findMatchingEngines(
+            List<Long> blockCacheKeys, List<String> candidateEngineIpPorts) {
 
         if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return Collections.emptyMap();
@@ -108,7 +104,8 @@ public class KvCacheManager {
         // Report metrics
         cacheMetricsReporter.reportEngineLocalMetrics(
                 engineIPort.split(":")[0], role, engineLocalView.size(engineIPort));
-        cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
+        cacheMetricsReporter.reportGlobalCacheMetrics(
+                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
     }
 
@@ -120,8 +117,7 @@ public class KvCacheManager {
         engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
         globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort);
         cacheMetricsReporter.reportGlobalCacheMetrics(
-                globalCacheIndex.totalBlocks(),
-                globalCacheIndex.totalMappings());
+                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
     }
 
     /**
@@ -133,7 +129,8 @@ public class KvCacheManager {
         engineLocalView.clear();
 
         // Report
-        cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
+        cacheMetricsReporter.reportGlobalCacheMetrics(
+                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
 
         log.info("Cleared all cache data");
     }

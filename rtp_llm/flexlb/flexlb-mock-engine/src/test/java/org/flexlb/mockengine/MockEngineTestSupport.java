@@ -31,8 +31,7 @@ final class MockEngineTestSupport {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
 
-    private MockEngineTestSupport() {
-    }
+    private MockEngineTestSupport() {}
 
     static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
         return input(requestId, inputTokens, 1, null);
@@ -58,9 +57,11 @@ final class MockEngineTestSupport {
             long requestId, int inputTokens, List<Long> blockKeys) {
         String uniqueKey;
         try {
-            uniqueKey = MAPPER.writeValueAsString(Map.of(
-                    "input_len", inputTokens,
-                    "block_cache_keys", blockKeys));
+            uniqueKey =
+                    MAPPER.writeValueAsString(
+                            Map.of(
+                                    "input_len", inputTokens,
+                                    "block_cache_keys", blockKeys));
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -83,11 +84,12 @@ final class MockEngineTestSupport {
         EngineRpcService.GenerateConfigPB.Builder config =
                 EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(outputTokens);
         if (decodePort != null) {
-            config.addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                    .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
-                    .setRoleStr("DECODE")
-                    .setGrpcPort(decodePort)
-                    .build());
+            config.addRoleAddrs(
+                    EngineRpcService.RoleAddrPB.newBuilder()
+                            .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
+                            .setRoleStr("DECODE")
+                            .setGrpcPort(decodePort)
+                            .build());
         }
         EngineRpcService.GenerateInputPB.Builder input =
                 EngineRpcService.GenerateInputPB.newBuilder()
@@ -104,9 +106,10 @@ final class MockEngineTestSupport {
         EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
                 EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(dpRank);
         for (EngineRpcService.GenerateInputPB input : inputs) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(input)
-                    .build());
+            slot.addRequests(
+                    EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
+                            .setInput(input)
+                            .build());
         }
         return slot.build();
     }
@@ -127,11 +130,13 @@ final class MockEngineTestSupport {
 
     static EngineRpcService.WorkerStatusPB workerStatus(
             JavaMockEngineCluster.FastRpcService service, long sinceVersion) {
-        return unary(observer -> service.getWorkerStatus(
-                EngineRpcService.StatusVersionPB.newBuilder()
-                        .setLatestFinishedVersion(sinceVersion)
-                        .build(),
-                observer));
+        return unary(
+                observer ->
+                        service.getWorkerStatus(
+                                EngineRpcService.StatusVersionPB.newBuilder()
+                                        .setLatestFinishedVersion(sinceVersion)
+                                        .build(),
+                                observer));
     }
 
     static MockPerformanceModel performanceModel(Path tempDir, String prefillFormula)
@@ -141,8 +146,7 @@ final class MockEngineTestSupport {
 
     static MockPerformanceModel performanceModel(
             Path tempDir, String prefillFormula, double sleepScale) throws IOException {
-        return performanceModel(
-                tempDir, prefillFormula, sleepScale, 1.0, Map.of(), Map.of());
+        return performanceModel(tempDir, prefillFormula, sleepScale, 1.0, Map.of(), Map.of());
     }
 
     static MockPerformanceModel performanceModel(
@@ -158,7 +162,8 @@ final class MockEngineTestSupport {
             double sleepScale,
             double decodeStepMs,
             Map<String, ?> prefillOverrides,
-            Map<String, ?> decodeOverrides) throws IOException {
+            Map<String, ?> decodeOverrides)
+            throws IOException {
         Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
         Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
         Map<String, Object> prefill = new LinkedHashMap<>();
@@ -168,19 +173,20 @@ final class MockEngineTestSupport {
         decode.put("scale", 1.0);
         decode.put("step_ms_by_batch", List.of(List.of(1, decodeStepMs)));
         decode.putAll(decodeOverrides);
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", sleepScale,
-                "jitter_pct", 0.0,
-                "prefill", prefill,
-                "decode", decode));
+        MAPPER.writeValue(
+                performance.toFile(),
+                Map.of(
+                        "block_size", 1024,
+                        "sleep_scale", sleepScale,
+                        "jitter_pct", 0.0,
+                        "prefill", prefill,
+                        "decode", decode));
         MockMasterConfig.writeWithPrefillExpression(master, prefillFormula);
         return MockPerformanceModel.load(performance.toString(), master.toString());
     }
 
     static MockPerformanceModel decodeModel(
-            Path tempDir, double decodeStepMs, Integer maxPendingRequests)
-            throws IOException {
+            Path tempDir, double decodeStepMs, Integer maxPendingRequests) throws IOException {
         return decodeModel(tempDir, decodeStepMs, maxPendingRequests, false);
     }
 
@@ -188,7 +194,8 @@ final class MockEngineTestSupport {
             Path tempDir,
             double decodeStepMs,
             Integer maxPendingRequests,
-            boolean reportQueuedAsKvAllocated) throws IOException {
+            boolean reportQueuedAsKvAllocated)
+            throws IOException {
         Map<String, Object> decodeConfig = new LinkedHashMap<>();
         if (maxPendingRequests != null) {
             decodeConfig.put("max_pending_requests", maxPendingRequests);
@@ -196,17 +203,17 @@ final class MockEngineTestSupport {
         if (reportQueuedAsKvAllocated) {
             decodeConfig.put("report_queued_as_kv_allocated", true);
         }
-        return performanceModel(
-                tempDir, "10", 0.1, decodeStepMs, Map.of(), decodeConfig);
+        return performanceModel(tempDir, "10", 0.1, decodeStepMs, Map.of(), decodeConfig);
     }
 
     static String httpGet(int port, String path) throws IOException, InterruptedException {
-        HttpResponse<String> response = HTTP_CLIENT.send(
-                HttpRequest.newBuilder()
-                        .uri(URI.create("http://127.0.0.1:" + port + path))
-                        .GET()
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response =
+                HTTP_CLIENT.send(
+                        HttpRequest.newBuilder()
+                                .uri(URI.create("http://127.0.0.1:" + port + path))
+                                .GET()
+                                .build(),
+                        HttpResponse.BodyHandlers.ofString());
         requireHttpOk(response, "GET " + path);
         return response.body();
     }
@@ -264,8 +271,7 @@ final class MockEngineTestSupport {
         return service;
     }
 
-    static void awaitDecodeQuiescence(
-            JavaMockEngineCluster.FastRpcService service, long timeoutMs)
+    static void awaitDecodeQuiescence(JavaMockEngineCluster.FastRpcService service, long timeoutMs)
             throws ReflectiveOperationException, InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
@@ -277,16 +283,20 @@ final class MockEngineTestSupport {
             Thread.sleep(10);
         }
         throw new AssertionError(
-                "engine did not quiesce: inflight=" + service.getInflightCount()
-                        + " running=" + service.getRunningCount()
-                        + " activeDecode=" + activeDecodeRequests(service)
-                        + " kv=" + service.getActiveKvTokens());
+                "engine did not quiesce: inflight="
+                        + service.getInflightCount()
+                        + " running="
+                        + service.getRunningCount()
+                        + " activeDecode="
+                        + activeDecodeRequests(service)
+                        + " kv="
+                        + service.getActiveKvTokens());
     }
 
-    static AtomicInteger activeDecodeRequestsRef(
-            JavaMockEngineCluster.FastRpcService service) throws ReflectiveOperationException {
-        Field field = JavaMockEngineCluster.FastRpcService.class
-                .getDeclaredField("activeDecodeRequests");
+    static AtomicInteger activeDecodeRequestsRef(JavaMockEngineCluster.FastRpcService service)
+            throws ReflectiveOperationException {
+        Field field =
+                JavaMockEngineCluster.FastRpcService.class.getDeclaredField("activeDecodeRequests");
         field.setAccessible(true);
         return (AtomicInteger) field.get(service);
     }
@@ -298,8 +308,8 @@ final class MockEngineTestSupport {
 
     static int decodePendingQueueSize(JavaMockEngineCluster.FastRpcService service)
             throws ReflectiveOperationException {
-        Field field = JavaMockEngineCluster.FastRpcService.class
-                .getDeclaredField("decodePendingQueue");
+        Field field =
+                JavaMockEngineCluster.FastRpcService.class.getDeclaredField("decodePendingQueue");
         field.setAccessible(true);
         return ((ArrayDeque<?>) field.get(service)).size();
     }
@@ -310,11 +320,12 @@ final class MockEngineTestSupport {
             long batchId,
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue)
             throws ReflectiveOperationException {
-        Method method = JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod(
-                "scheduleDecodeCompletion",
-                MockPerformanceModel.RequestShape.class,
-                long.class,
-                LinkedBlockingQueue.class);
+        Method method =
+                JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod(
+                        "scheduleDecodeCompletion",
+                        MockPerformanceModel.RequestShape.class,
+                        long.class,
+                        LinkedBlockingQueue.class);
         method.setAccessible(true);
         return (Boolean) method.invoke(service, shape, batchId, responseQueue);
     }
@@ -323,23 +334,24 @@ final class MockEngineTestSupport {
         AtomicReference<T> response = new AtomicReference<>();
         AtomicReference<Throwable> error = new AtomicReference<>();
         CountDownLatch latch = new CountDownLatch(1);
-        invocation.accept(new StreamObserver<>() {
-            @Override
-            public void onNext(T value) {
-                response.set(value);
-            }
+        invocation.accept(
+                new StreamObserver<>() {
+                    @Override
+                    public void onNext(T value) {
+                        response.set(value);
+                    }
 
-            @Override
-            public void onError(Throwable throwable) {
-                error.set(throwable);
-                latch.countDown();
-            }
+                    @Override
+                    public void onError(Throwable throwable) {
+                        error.set(throwable);
+                        latch.countDown();
+                    }
 
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
+                    @Override
+                    public void onCompleted() {
+                        latch.countDown();
+                    }
+                });
         try {
             if (!latch.await(5, TimeUnit.SECONDS)) {
                 throw new AssertionError("unary response timeout");

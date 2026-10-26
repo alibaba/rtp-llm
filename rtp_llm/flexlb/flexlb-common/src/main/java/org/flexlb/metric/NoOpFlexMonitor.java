@@ -16,16 +16,14 @@ public class NoOpFlexMonitor implements FlexMonitor {
     }
 
     @Override
-    public void register(String metricName, FlexMetricType metricType) {
-    }
+    public void register(String metricName, FlexMetricType metricType) {}
 
     @Override
-    public void register(String metricName, FlexMetricType metricType, FlexPriorityType priorityType) {
-    }
+    public void register(
+            String metricName, FlexMetricType metricType, FlexPriorityType priorityType) {}
 
     @Override
-    public void register(String metricName, FlexMetricType metricType, int statisticsType) {
-    }
+    public void register(String metricName, FlexMetricType metricType, int statisticsType) {}
 
     @Override
     public void report(String metricName, double value) {

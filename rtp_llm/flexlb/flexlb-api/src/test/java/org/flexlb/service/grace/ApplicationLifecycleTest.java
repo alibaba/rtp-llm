@@ -14,9 +14,16 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class ApplicationLifecycleTest {
     @Test
@@ -25,18 +32,27 @@ class ApplicationLifecycleTest {
         var grpc = mock(FlexlbGrpcServer.class);
         var draining = new CountDownLatch(1);
         var complete = new CountDownLatch(1);
-        doAnswer(invocation -> {
-            verify(consistency).offline();
-            draining.countDown();
-            assertTrue(complete.await(3, TimeUnit.SECONDS));
-            return null;
-        }).when(grpc).drain();
+        doAnswer(
+                        invocation -> {
+                            verify(consistency).offline();
+                            draining.countDown();
+                            assertTrue(complete.await(3, TimeUnit.SECONDS));
+                            return null;
+                        })
+                .when(grpc)
+                .drain();
         var destroyed = new AtomicBoolean();
         var context = new AnnotationConfigApplicationContext();
-        var lifecycle = new ApplicationLifecycle(consistency, grpc,
-                mock(GracefulLifecycleReporter.class), context.getEnvironment(), 0L);
+        var lifecycle =
+                new ApplicationLifecycle(
+                        consistency,
+                        grpc,
+                        mock(GracefulLifecycleReporter.class),
+                        context.getEnvironment(),
+                        0L);
         context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
-        context.registerBean("servingResource", DisposableBean.class, () -> () -> destroyed.set(true));
+        context.registerBean(
+                "servingResource", DisposableBean.class, () -> () -> destroyed.set(true));
         context.refresh();
         var closing = CompletableFuture.runAsync(context::close);
         try {
@@ -56,9 +72,14 @@ class ApplicationLifecycleTest {
         var consistency = mock(LBStatusConsistencyService.class);
         var grpc = mock(FlexlbGrpcServer.class);
         try (var context = new AnnotationConfigApplicationContext();
-             var child = new AnnotationConfigApplicationContext()) {
-            var lifecycle = new ApplicationLifecycle(consistency, grpc,
-                    mock(GracefulLifecycleReporter.class), context.getEnvironment(), 0L);
+                var child = new AnnotationConfigApplicationContext()) {
+            var lifecycle =
+                    new ApplicationLifecycle(
+                            consistency,
+                            grpc,
+                            mock(GracefulLifecycleReporter.class),
+                            context.getEnvironment(),
+                            0L);
             context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
             context.refresh();
             context.publishEvent(new ContextClosedEvent(child));
@@ -71,11 +92,11 @@ class ApplicationLifecycleTest {
     @Test
     void springCanWireProductionConstructor() {
         try (var context = new AnnotationConfigApplicationContext()) {
-            context.registerBean(LBStatusConsistencyService.class,
-                    () -> mock(LBStatusConsistencyService.class));
+            context.registerBean(
+                    LBStatusConsistencyService.class, () -> mock(LBStatusConsistencyService.class));
             context.registerBean(FlexlbGrpcServer.class, () -> mock(FlexlbGrpcServer.class));
-            context.registerBean(GracefulLifecycleReporter.class,
-                    () -> mock(GracefulLifecycleReporter.class));
+            context.registerBean(
+                    GracefulLifecycleReporter.class, () -> mock(GracefulLifecycleReporter.class));
             context.register(ApplicationLifecycle.class);
             context.refresh();
             assertNotNull(context.getBean(ApplicationLifecycle.class));

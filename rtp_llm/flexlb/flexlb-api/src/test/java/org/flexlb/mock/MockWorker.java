@@ -51,20 +51,24 @@ public abstract class MockWorker {
      * @throws IOException if the server cannot start
      */
     public void start(int port) throws IOException {
-        server = NettyServerBuilder.forPort(port)
-                .addService(rpcService)
-                .maxInboundMessageSize(16 * 1024 * 1024)
-                // Match EngineGrpcClient's production keepalive contract.  The
-                // gRPC server default rejects the client's two-second idle ping
-                // interval, which turns large loopback fleets into GOAWAY storms
-                // before the scheduling benchmark reaches steady state.
-                .permitKeepAliveTime(1, TimeUnit.SECONDS)
-                .permitKeepAliveWithoutCalls(true)
-                .build()
-                .start();
+        server =
+                NettyServerBuilder.forPort(port)
+                        .addService(rpcService)
+                        .maxInboundMessageSize(16 * 1024 * 1024)
+                        // Match EngineGrpcClient's production keepalive contract.  The
+                        // gRPC server default rejects the client's two-second idle ping
+                        // interval, which turns large loopback fleets into GOAWAY storms
+                        // before the scheduling benchmark reaches steady state.
+                        .permitKeepAliveTime(1, TimeUnit.SECONDS)
+                        .permitKeepAliveWithoutCalls(true)
+                        .build()
+                        .start();
         actualPort = server.getPort();
-        log.info("{} started on gRPC port {} (http port would be {})",
-                getClass().getSimpleName(), actualPort, actualPort - 1);
+        log.info(
+                "{} started on gRPC port {} (http port would be {})",
+                getClass().getSimpleName(),
+                actualPort,
+                actualPort - 1);
     }
 
     /**

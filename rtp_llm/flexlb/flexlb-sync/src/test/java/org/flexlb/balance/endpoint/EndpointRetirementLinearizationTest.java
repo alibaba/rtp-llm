@@ -23,28 +23,31 @@ import static org.mockito.Mockito.when;
 class EndpointRetirementLinearizationTest {
 
     @Test
-    void detachClosesEveryStatefulAdmissionGateBeforeFinalDrain()
-            throws Exception {
+    void detachClosesEveryStatefulAdmissionGateBeforeFinalDrain() throws Exception {
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        when(configService.loadBalanceConfig())
+                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointTestSupport.TestRequestRuntime requestRuntime =
                 EndpointTestSupport.requestRuntime();
-        EndpointRegistry registry = new EndpointRegistry(
-                configService,
-                requestRuntime.events(),
-                mock(BatchSchedulerReporter.class),
-                EndpointTestSupport.routeStrategy(requestRuntime),
-                new PlacementAvailability());
+        EndpointRegistry registry =
+                new EndpointRegistry(
+                        configService,
+                        requestRuntime.events(),
+                        mock(BatchSchedulerReporter.class),
+                        EndpointTestSupport.routeStrategy(requestRuntime),
+                        new PlacementAvailability());
         String prefillAddress = "127.0.0.1:8100";
         String decodeAddress = "127.0.0.1:8200";
         WorkerStatus prefillStatus = status(RoleType.PREFILL, 8100);
         WorkerStatus decodeStatus = status(RoleType.DECODE, 8200);
-        PrefillEndpoint capturedPrefill = (PrefillEndpoint)
-                EndpointTestSupport.publishEndpoint(registry,
-                        RoleType.PREFILL, prefillAddress, prefillStatus);
-        DecodeEndpoint capturedDecode = (DecodeEndpoint)
-                EndpointTestSupport.publishEndpoint(registry,
-                        RoleType.DECODE, decodeAddress, decodeStatus);
+        PrefillEndpoint capturedPrefill =
+                (PrefillEndpoint)
+                        EndpointTestSupport.publishEndpoint(
+                                registry, RoleType.PREFILL, prefillAddress, prefillStatus);
+        DecodeEndpoint capturedDecode =
+                (DecodeEndpoint)
+                        EndpointTestSupport.publishEndpoint(
+                                registry, RoleType.DECODE, decodeAddress, decodeStatus);
 
         CountDownLatch referencesCaptured = new CountDownLatch(1);
         CountDownLatch resumeAdmission = new CountDownLatch(1);
@@ -52,38 +55,38 @@ class EndpointRetirementLinearizationTest {
         EndpointRegistry.DetachedGeneration detachedPrefill = null;
         EndpointRegistry.DetachedGeneration detachedDecode = null;
         try {
-            Future<AdmissionAttempt> delayedAdmission = executor.submit(() -> {
-                // These references intentionally outlive their registry mappings.
-                PrefillEndpoint prefill = capturedPrefill;
-                DecodeEndpoint decode = capturedDecode;
-                referencesCaptured.countDown();
-                assertTrue(resumeAdmission.await(2, TimeUnit.SECONDS));
+            Future<AdmissionAttempt> delayedAdmission =
+                    executor.submit(
+                            () -> {
+                                // These references intentionally outlive their registry mappings.
+                                PrefillEndpoint prefill = capturedPrefill;
+                                DecodeEndpoint decode = capturedDecode;
+                                referencesCaptured.countDown();
+                                assertTrue(resumeAdmission.await(2, TimeUnit.SECONDS));
 
-                boolean queueOfferAccepted = EndpointTestSupport.offer(
-                        prefill, mock(ScheduledRequest.class));
-                boolean directPinAvailable;
-                try (WorkerEndpoint.GenerationPin pin =
-                             prefill.tryPinGeneration()) {
-                    directPinAvailable = pin != null;
-                }
-                boolean decodePinAvailable;
-                try (WorkerEndpoint.GenerationPin pin =
-                             decode.tryPinGeneration()) {
-                    decodePinAvailable = pin != null;
-                }
-                return new AdmissionAttempt(
-                        queueOfferAccepted,
-                        directPinAvailable,
-                        decodePinAvailable);
-            });
+                                boolean queueOfferAccepted =
+                                        EndpointTestSupport.offer(
+                                                prefill, mock(ScheduledRequest.class));
+                                boolean directPinAvailable;
+                                try (WorkerEndpoint.GenerationPin pin =
+                                        prefill.tryPinGeneration()) {
+                                    directPinAvailable = pin != null;
+                                }
+                                boolean decodePinAvailable;
+                                try (WorkerEndpoint.GenerationPin pin = decode.tryPinGeneration()) {
+                                    decodePinAvailable = pin != null;
+                                }
+                                return new AdmissionAttempt(
+                                        queueOfferAccepted, directPinAvailable, decodePinAvailable);
+                            });
 
             assertTrue(referencesCaptured.await(2, TimeUnit.SECONDS));
-            detachedPrefill = detachUnderGenerationLock(
-                    registry,
-                    RoleType.PREFILL, prefillAddress, prefillStatus);
-            detachedDecode = detachUnderGenerationLock(
-                    registry,
-                    RoleType.DECODE, decodeAddress, decodeStatus);
+            detachedPrefill =
+                    detachUnderGenerationLock(
+                            registry, RoleType.PREFILL, prefillAddress, prefillStatus);
+            detachedDecode =
+                    detachUnderGenerationLock(
+                            registry, RoleType.DECODE, decodeAddress, decodeStatus);
 
             assertTrue(detachedPrefill.ownsEndpoint(capturedPrefill));
             assertTrue(detachedDecode.ownsEndpoint(capturedDecode));
@@ -99,8 +102,7 @@ class EndpointRetirementLinearizationTest {
             assertFalse(attempt.queueOfferAccepted());
             assertFalse(attempt.directPinAvailable());
             assertFalse(attempt.decodePinAvailable());
-            assertTrue(capturedDecode.resourceSnapshot()
-                    .reserved().isEmpty());
+            assertTrue(capturedDecode.resourceSnapshot().reserved().isEmpty());
         } finally {
             resumeAdmission.countDown();
             if (detachedPrefill != null) {
@@ -115,28 +117,19 @@ class EndpointRetirementLinearizationTest {
     }
 
     private static WorkerStatus status(RoleType role, int port) {
-        return EndpointTestSupport.workerStatus(
-                role, "127.0.0.1", port, port + 1);
+        return EndpointTestSupport.workerStatus(role, "127.0.0.1", port, port + 1);
     }
 
-    private static EndpointRegistry.DetachedGeneration
-            detachUnderGenerationLock(
-                    EndpointRegistry registry,
-                    RoleType role,
-                    String address,
-                    WorkerStatus expectedStatus) {
+    private static EndpointRegistry.DetachedGeneration detachUnderGenerationLock(
+            EndpointRegistry registry, RoleType role, String address, WorkerStatus expectedStatus) {
         expectedStatus.lock.lock();
         try {
-            return registry.detachAndBeginRetirement(
-                    role, address, expectedStatus);
+            return registry.detachAndBeginRetirement(role, address, expectedStatus);
         } finally {
             expectedStatus.lock.unlock();
         }
     }
 
     private record AdmissionAttempt(
-            boolean queueOfferAccepted,
-            boolean directPinAvailable,
-            boolean decodePinAvailable) {
-    }
+            boolean queueOfferAccepted, boolean directPinAvailable, boolean decodePinAvailable) {}
 }

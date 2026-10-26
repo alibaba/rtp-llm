@@ -51,8 +51,7 @@ class LearningPredictorTest {
     @DisplayName("predictBatchMs aggregates correctly")
     void predictBatchMsAggregation() {
         LearningPredictor p = new LearningPredictor();
-        PrefillBatchFeatures features = batchFeatures(
-                item(500, 200), item(300, 100));
+        PrefillBatchFeatures features = batchFeatures(item(500, 200), item(300, 100));
         assertTrue(p.evaluator().predictBatchMs(features) >= 0);
     }
 
@@ -67,14 +66,14 @@ class LearningPredictorTest {
     @DisplayName("learn accepts completed batches")
     void learnAcceptsCompletedBatches() {
         LearningPredictor p = new LearningPredictor();
-        PrefillBatchFeatures features = batchFeatures(
-                item(500, 200), item(300, 100), item(1000, 500));
+        PrefillBatchFeatures features =
+                batchFeatures(item(500, 200), item(300, 100), item(1000, 500));
         PrefillTimePredictor.Evaluator initial = p.evaluator();
         for (int i = 0; i < 4; i++) {
             assertDoesNotThrow(() -> p.learn(features, 300, 400));
         }
-        assertNotSame(initial, p.evaluator(),
-                "four samples must publish one replacement evaluator");
+        assertNotSame(
+                initial, p.evaluator(), "four samples must publish one replacement evaluator");
     }
 
     @Test
@@ -106,11 +105,13 @@ class LearningPredictorTest {
         PrefillTimePredictor.Evaluator after = p.evaluator();
         double[] afterWeights = snapshotWeights(after);
 
-        assertNotSame(before, after,
-                "an update must publish a new immutable snapshot");
-        assertFalse(Arrays.equals(beforeWeights, afterWeights),
+        assertNotSame(before, after, "an update must publish a new immutable snapshot");
+        assertFalse(
+                Arrays.equals(beforeWeights, afterWeights),
                 "the replacement evaluator must carry updated weights");
-        assertArrayEquals(beforeWeights, snapshotWeights(before),
+        assertArrayEquals(
+                beforeWeights,
+                snapshotWeights(before),
                 "publishing the next model must not mutate the old snapshot");
     }
 
@@ -118,8 +119,7 @@ class LearningPredictorTest {
     @DisplayName("concurrent readers observe immutable evaluator snapshots")
     void concurrentReadersObserveAtomicModelSnapshots() throws Exception {
         LearningPredictor p = new LearningPredictor();
-        PrefillBatchFeatures features = batchFeatures(
-                item(500, 200), item(1000, 500));
+        PrefillBatchFeatures features = batchFeatures(item(500, 200), item(1000, 500));
         int updateCount = 128;
         int readerCount = 4;
         ExecutorService executor = Executors.newFixedThreadPool(readerCount + 1);
@@ -133,31 +133,35 @@ class LearningPredictorTest {
             PrefillTimePredictor.Evaluator initial = p.evaluator();
             weightsByEvaluator.put(initial, snapshotWeights(initial));
             published.add(initial);
-            futures.add(executor.submit(() -> {
-                start.await();
-                try {
-                    for (int update = 0; update < updateCount; update++) {
-                        for (int sample = 0; sample < 4; sample++) {
-                            p.learn(features, 300, 400 + update);
-                        }
-                        published.add(p.evaluator());
-                        Thread.yield();
-                    }
-                } finally {
-                    writerDone.set(true);
-                }
-                return null;
-            }));
+            futures.add(
+                    executor.submit(
+                            () -> {
+                                start.await();
+                                try {
+                                    for (int update = 0; update < updateCount; update++) {
+                                        for (int sample = 0; sample < 4; sample++) {
+                                            p.learn(features, 300, 400 + update);
+                                        }
+                                        published.add(p.evaluator());
+                                        Thread.yield();
+                                    }
+                                } finally {
+                                    writerDone.set(true);
+                                }
+                                return null;
+                            }));
             for (int reader = 0; reader < readerCount; reader++) {
-                futures.add(executor.submit(() -> {
-                    start.await();
-                    do {
-                        PrefillTimePredictor.Evaluator evaluator = p.evaluator();
-                        recordSnapshot(weightsByEvaluator, evaluator);
-                    } while (!writerDone.get());
-                    recordSnapshot(weightsByEvaluator, p.evaluator());
-                    return null;
-                }));
+                futures.add(
+                        executor.submit(
+                                () -> {
+                                    start.await();
+                                    do {
+                                        PrefillTimePredictor.Evaluator evaluator = p.evaluator();
+                                        recordSnapshot(weightsByEvaluator, evaluator);
+                                    } while (!writerDone.get());
+                                    recordSnapshot(weightsByEvaluator, p.evaluator());
+                                    return null;
+                                }));
             }
             start.countDown();
             for (Future<?> future : futures) {
@@ -168,11 +172,13 @@ class LearningPredictorTest {
         }
 
         PrefillTimePredictor.Evaluator finalEvaluator = p.evaluator();
-        assertEquals(updateCount + 1L, published.stream().distinct().count(),
+        assertEquals(
+                updateCount + 1L,
+                published.stream().distinct().count(),
                 "every completed learning batch must publish a fresh evaluator");
-        assertArrayEquals(snapshotWeights(finalEvaluator),
-                weightsByEvaluator.get(finalEvaluator));
-        assertTrue(weightsByEvaluator.size() >= 2,
+        assertArrayEquals(snapshotWeights(finalEvaluator), weightsByEvaluator.get(finalEvaluator));
+        assertTrue(
+                weightsByEvaluator.size() >= 2,
                 "the stress run must observe both the initial and learned models");
     }
 
@@ -180,8 +186,7 @@ class LearningPredictorTest {
     @DisplayName("concurrent completion learning serializes Adam state")
     void concurrentLearnSerializesOptimizerState() throws Exception {
         LearningPredictor p = new LearningPredictor();
-        PrefillBatchFeatures features = batchFeatures(
-                item(500, 200), item(1000, 500));
+        PrefillBatchFeatures features = batchFeatures(item(500, 200), item(1000, 500));
         PrefillTimePredictor.Evaluator initial = p.evaluator();
         int sampleCount = 64;
         ExecutorService executor = Executors.newFixedThreadPool(8);
@@ -189,11 +194,13 @@ class LearningPredictorTest {
         List<Future<?>> futures = new ArrayList<>();
         try {
             for (int i = 0; i < sampleCount; i++) {
-                futures.add(executor.submit(() -> {
-                    start.await();
-                    p.learn(features, 300, 400);
-                    return null;
-                }));
+                futures.add(
+                        executor.submit(
+                                () -> {
+                                    start.await();
+                                    p.learn(features, 300, 400);
+                                    return null;
+                                }));
             }
             start.countDown();
             for (Future<?> future : futures) {
@@ -205,14 +212,15 @@ class LearningPredictorTest {
 
         Field step = LearningPredictor.class.getDeclaredField("t");
         step.setAccessible(true);
-        assertEquals(1 + sampleCount / 4, step.getLong(p),
+        assertEquals(
+                1 + sampleCount / 4,
+                step.getLong(p),
                 "every four samples must produce exactly one serialized Adam update");
-        assertNotSame(initial, p.evaluator(),
-                "serialized updates must publish a replacement evaluator");
+        assertNotSame(
+                initial, p.evaluator(), "serialized updates must publish a replacement evaluator");
     }
 
-    private static double[] snapshotWeights(
-            PrefillTimePredictor.Evaluator evaluator)
+    private static double[] snapshotWeights(PrefillTimePredictor.Evaluator evaluator)
             throws ReflectiveOperationException {
         Field weights = evaluator.getClass().getDeclaredField("weights");
         weights.setAccessible(true);
@@ -224,18 +232,21 @@ class LearningPredictorTest {
             PrefillTimePredictor.Evaluator evaluator)
             throws ReflectiveOperationException {
         double[] observed = snapshotWeights(evaluator);
-        weightsByEvaluator.compute(evaluator, (ignored, existing) -> {
-            if (existing != null) {
-                assertArrayEquals(existing, observed,
-                        "one evaluator must identify exactly one immutable weight set");
-                return existing;
-            }
-            return observed;
-        });
+        weightsByEvaluator.compute(
+                evaluator,
+                (ignored, existing) -> {
+                    if (existing != null) {
+                        assertArrayEquals(
+                                existing,
+                                observed,
+                                "one evaluator must identify exactly one immutable weight set");
+                        return existing;
+                    }
+                    return observed;
+                });
     }
 
-    private static PrefillBatchFeatures batchFeatures(
-            PrefillBatchFeatures.Item... items) {
+    private static PrefillBatchFeatures batchFeatures(PrefillBatchFeatures.Item... items) {
         return new PrefillBatchFeatures(List.of(items));
     }
 
