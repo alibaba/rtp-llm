@@ -1182,18 +1182,6 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
             replayPrefill(state.current_real_graph_seq_len);
         }
-        if (isEmbeddingStylePrefillCudaGraph()) {
-            const uint64_t count = embedding_prefill_replay_log_count_.fetch_add(1, std::memory_order_relaxed) + 1;
-            if ((count & (count - 1)) == 0) {
-                RTP_LLM_LOG_INFO("embedding Transformer graph replay: requests=%d capacity=%zu tokens=%d "
-                                 "bucket=%d replay_count=%llu",
-                                 state.current_batch_size,
-                                 max_bs_,
-                                 state.current_seq_len,
-                                 state.current_real_graph_seq_len,
-                                 static_cast<unsigned long long>(count));
-            }
-        }
         if (isGenerationPrefillCudaGraph()) {
             const uint64_t replay_count =
                 generation_prefill_cuda_graph_replay_log_count_.fetch_add(1, std::memory_order_relaxed) + 1;

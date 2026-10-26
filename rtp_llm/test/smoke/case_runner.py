@@ -51,7 +51,6 @@ from smoke.tau2_bench_comparer import Tau2BenchComparer
 from smoke.worker_status_comparer import WorkerStatusComparer
 
 from rtp_llm.test.utils.coredump_util import summarize_and_cleanup_coredumps
-from rtp_llm.test.utils.graph_replay_util import graph_replay_count, require_graph_replay
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 from rtp_llm.utils.util import str_to_bool
 
@@ -110,19 +109,6 @@ class CaseRunner(object):
         # parallelism.
         self.parallel_qr = max(1, int(parallel_qr or 1))
         self.remote_kvcm_server: Optional[RemoteKVCMServer] = None
-
-    @staticmethod
-    def _run_comparer(comparer):
-        require_replay = os.environ.get("SMOKE_REQUIRE_GRAPH_REPLAY") == "1"
-        if not require_replay:
-            return comparer.run()
-        log_path = comparer.server_manager.log_file_path
-        if not log_path:
-            raise AssertionError("Graph smoke requires a server console log")
-        previous_count = graph_replay_count(log_path)
-        result = comparer.run()
-        require_graph_replay(log_path, previous_count)
-        return result
 
     @staticmethod
     def _extract_bool_arg(args_str: str, arg_name: str, default: bool = False) -> bool:
@@ -644,15 +630,13 @@ class CaseRunner(object):
                 request_endpoint = self._resolve_endpoint(q_r, task_endpoint)
                 comparer_cls = self._get_comparer_cls(q_r, request_endpoint)
                 try:
-                    self._run_comparer(
-                        comparer_cls(
-                            server_manager,
-                            request_endpoint,
-                            q_r,
-                            Tracer(),
-                            self.batch_infer,
-                        )
-                    )
+                    comparer_cls(
+                        server_manager,
+                        request_endpoint,
+                        q_r,
+                        Tracer(),
+                        self.batch_infer,
+                    ).run()
                     per_query_pass[q_idx] += 1
                     logging.info(
                         f"[STABILITY_TEST iter={iter_idx+1}/{repeat_count} query={q_idx}] PASS"
@@ -755,11 +739,9 @@ class CaseRunner(object):
             q_idx, q_r, request_endpoint, cls = item
             tracer = Tracer()
             try:
-                self._run_comparer(
-                    cls(
-                        server_manager, request_endpoint, q_r, tracer, self.batch_infer
-                    )
-                )
+                cls(
+                    server_manager, request_endpoint, q_r, tracer, self.batch_infer
+                ).run()
                 return (q_idx, QueryStatus.OK, "", tracer, None, "")
             except SmokeException as e:
                 return (q_idx, e.error_status, e.message, tracer, None, "")

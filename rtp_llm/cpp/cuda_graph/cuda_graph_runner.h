@@ -288,7 +288,6 @@ private:
     mutable std::array<std::atomic<uint64_t>, kGenerationPrefillCudaGraphStatusCount>
                                   generation_prefill_cuda_graph_fallback_log_counts_;
     mutable std::atomic<uint64_t> generation_prefill_cuda_graph_replay_log_count_{0};
-    mutable std::atomic<uint64_t> embedding_prefill_replay_log_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

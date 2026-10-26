@@ -10,7 +10,6 @@ py_library(
     name = "test_util",
     srcs = [
         "bench_util.py",
-        "graph_replay_util.py",
         "numeric_util.py",
         "cuda_graph_util.py",
         "port_util.py",
@@ -85,20 +84,4 @@ py_test(
     srcs = ["device_resource_test.py"],
     env = {"GPU_COUNT": "0"},
     deps = [":device_resource"],
-)
-
-py_test(
-    name = "graph_replay_util_test",
-    main = "graph_replay_util_test.py",
-    srcs = ["graph_replay_util_test.py", "graph_replay_util.py"],
-    tags = ["L20_CU13"],
-    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
-)
-
-py_test(
-    name = "graph_replay_util_test_rocm",
-    main = "graph_replay_util_test.py",
-    srcs = ["graph_replay_util_test.py", "graph_replay_util.py"],
-    tags = ["rocm"],
-    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
 )

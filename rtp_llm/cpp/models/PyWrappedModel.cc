@@ -1169,7 +1169,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
-            RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
