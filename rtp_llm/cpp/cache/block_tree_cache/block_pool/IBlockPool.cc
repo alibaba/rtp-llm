@@ -177,6 +177,14 @@ uint32_t IBlockPool::treeRefCount(BlockIdxType block) const {
     return tree_refcounts_[block];
 }
 
+bool IBlockPool::canReclaimCacheBlock(BlockIdxType block) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    checkAllocatedNoLock(block);
+    return tree_refcounts_[block] == 1 && treeRefCountNoLock(block, BlockTreeRefType::CACHE) == 1
+           && !hasExternalRefNoLock(block);
+}
+
 size_t IBlockPool::referencedBlocksNum(BlockTreeRefType ref_type) const {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();

@@ -191,7 +191,11 @@ int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks)
     size_t       reclaimed          = 0;
     bool         eviction_triggered = false;
     while (reclaimed < num_blocks) {
-        if (!evictor_.dropLocked(location->group_set_id, Tier::DEVICE, true)) {
+        if (!evictor_.dropLocked(location->group_set_id,
+                                 Tier::DEVICE,
+                                 /*notify_settled=*/true,
+                                 "force_drop",
+                                 /*require_reclaimable_device=*/true)) {
             break;
         }
         eviction_triggered        = true;

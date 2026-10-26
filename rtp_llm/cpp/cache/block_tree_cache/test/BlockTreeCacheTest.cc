@@ -1632,6 +1632,120 @@ TEST_F(BlockTreeCacheTest, ConcurrentDoubleMatch_EvictsBeforeLastRelease) {
     EXPECT_FALSE(pool->isAllocated(42));
 }
 
+TEST_F(BlockTreeCacheTest, ForceDropSkipsHeldLruCandidateUntilLastRequestReleasesIt) {
+    const auto& pool = cache_->groupSets()[0]->devicePools()[0];
+    pool->incRef(42);
+    pool->incRef(42);
+    std::vector<std::vector<GroupSetResource>> held(1, std::vector<GroupSetResource>(1));
+    held[0][0].device_blocks = {42};
+    cache_->insert({100}, held, Tier::DEVICE);
+    std::vector<std::vector<GroupSetResource>> idle(1, std::vector<GroupSetResource>(1));
+    idle[0][0].device_blocks = {43};
+    cache_->insert({200}, idle, Tier::DEVICE);
+
+    const size_t initial_free = pool->freeBlocksNum();
+    EXPECT_EQ(cache_->evictForGroup("group0", 1), 1);
+    EXPECT_EQ(pool->freeBlocksNum(), initial_free + 1);
+    EXPECT_FALSE(pool->isAllocated(43));
+    EXPECT_FALSE(cache_->tree()->findNode({100}).empty());
+    EXPECT_TRUE(cache_->tree()->findNode({200}).empty());
+    EXPECT_EQ(pool->refCount(42), 3u);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);
+
+    const auto version = cache_->getKeySnapshot().version;
+    EXPECT_EQ(cache_->evictForGroup("group0", 1), 0);
+    EXPECT_EQ(cache_->getKeySnapshot().version, version);
+    pool->decRef(42);
+    EXPECT_EQ(cache_->evictForGroup("group0", 1), 0);
+    EXPECT_EQ(pool->refCount(42), 2u);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);
+
+    pool->decRef(42);
+    EXPECT_EQ(cache_->evictForGroup("group0", 1), 1);
+    EXPECT_FALSE(pool->isAllocated(42));
+    EXPECT_EQ(pool->freeBlocksNum(), initial_free + 2);
+    EXPECT_TRUE(cache_->tree()->findNode({100}).empty());
+}
+
+TEST_F(BlockTreeCacheTest, ForceDropSkipsDeviceBlockWithTreeOperationReference) {
+    const auto& pool = cache_->groupSets()[0]->devicePools()[0];
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    cache_->insert({100}, resources, Tier::DEVICE);
+    for (const BlockTreeRefType type :
+         {BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE, BlockTreeRefType::FROZEN}) {
+        pool->incTreeRef(42, type);
+        const size_t initial_free = pool->freeBlocksNum();
+        EXPECT_EQ(cache_->evictForGroup("group0", 1), 0);
+        EXPECT_EQ(pool->freeBlocksNum(), initial_free);
+        EXPECT_FALSE(cache_->tree()->findNode({100}).empty());
+        EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);
+        pool->decTreeRef(42, type);
+    }
+    EXPECT_EQ(cache_->evictForGroup("group0", 1), 1);
+    EXPECT_FALSE(pool->isAllocated(42));
+}
+
+TEST_F(BlockTreeCacheTest, ForceDropRequiresEveryDevicePoolMemberToBeReclaimable) {
+    const auto pools = makeStructuralDevicePools(2, "force_drop_members");
+    auto full = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);
+    initializeTestGroupSet(full, pools);
+    auto cache = makeBlockTreeCacheForTest({full});
+    ASSERT_NE(cache, nullptr);
+
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    for (const auto& pool : pools) {
+        resources[0][0].device_blocks.push_back(pool->malloc().value());
+    }
+    const auto blocks = resources[0][0].device_blocks;
+    pools[1]->incRef(blocks[1]);
+    cache->insert({100}, resources, Tier::DEVICE);
+    const size_t initial_free = pools[0]->freeBlocksNum();
+
+    // Even the unheld member's pool must not evict the joint cache entry.
+    EXPECT_EQ(cache->evictForGroup(full->groupTags()[0], 1), 0);
+    EXPECT_EQ(pools[0]->freeBlocksNum(), initial_free);
+    EXPECT_EQ(pools[0]->refCount(blocks[0]), 1u);
+    EXPECT_EQ(pools[1]->refCount(blocks[1]), 2u);
+    EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
+
+    pools[1]->decRef(blocks[1]);
+    EXPECT_EQ(cache->evictForGroup(full->groupTags()[0], 1), 1);
+    for (size_t i = 0; i < pools.size(); ++i) {
+        EXPECT_FALSE(pools[i]->isAllocated(blocks[i]));
+        EXPECT_EQ(pools[i]->freeBlocksNum(), initial_free + 1);
+    }
+}
+
+TEST_F(BlockTreeCacheTest, ForceDropPreservesRequestHeldCascadeResource) {
+    const std::vector<DeviceBlockPoolPtr> pools = {makeStructuralDevicePool(0), makeStructuralDevicePool(1)};
+    std::vector<GroupSetPtr> groups;
+    for (const auto& pool : pools) {
+        groups.push_back(std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool}, nullptr, nullptr));
+    }
+    initializeSingleMemberGroupSets(groups, pools);
+    auto cache = makeBlockTreeCacheForTest(std::move(groups));
+    ASSERT_NE(cache, nullptr);
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
+    resources[0][0].device_blocks = {42};
+    resources[0][1].device_blocks = {42};
+    pools[1]->incRef(42);
+    cache->insert({100}, resources, Tier::DEVICE);
+
+    const size_t initial_free = pools[0]->freeBlocksNum();
+    EXPECT_EQ(cache->evictForGroup("group0", 1), 0);
+    EXPECT_EQ(pools[0]->freeBlocksNum(), initial_free);
+    EXPECT_EQ(pools[0]->refCount(42), 1u);
+    EXPECT_EQ(pools[1]->refCount(42), 2u);
+    EXPECT_FALSE(cache->tree()->findNode({100}).empty());
+
+    pools[1]->decRef(42);
+    EXPECT_EQ(cache->evictForGroup("group0", 1), 1);
+    EXPECT_FALSE(pools[0]->isAllocated(42));
+    EXPECT_FALSE(pools[1]->isAllocated(42));
+    EXPECT_TRUE(cache->tree()->findNode({100}).empty());
+}
+
 TEST_F(BlockTreeCacheTest, ExtraReferencesDoNotChangeCandidateMembership) {
     const GroupSetPtr&        group_set = cache_->groupSets()[0];
     const DeviceBlockPoolPtr& pool      = group_set->devicePools()[0];
