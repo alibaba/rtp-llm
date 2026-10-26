@@ -822,6 +822,41 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.assertEqual(delta.reasoning_content, "reasoning")
         self.assertEqual(delta.content, "answer")
 
+    async def test_promoted_adaptive_extra_config_uses_resolved_thinking_state(self):
+        tokenizer, renderer, endpoint = self._create_base_thinking_endpoint("adaptive")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            extra_configs=GenerateConfig(thinking_mode=ThinkingMode.ADAPTIVE),
+            stream=True,
+        )
+        request.set_prompt_has_think_anchor(True)
+        anchor_ids = tokenizer.encode("<think>", add_special_tokens=False)
+        config = endpoint._extract_generation_config(
+            request, input_ids=anchor_ids, renderer=renderer
+        )
+        self.assertEqual(config.thinking_mode, ThinkingMode.ENABLED)
+        self.assertEqual(request.extra_configs.thinking_mode, ThinkingMode.ADAPTIVE)
+        output_ids = tokenizer.encode(
+            "reasoning</think>answer", add_special_tokens=False
+        )
+        stream = renderer.render_response_stream(
+            fake_output_generator_mtp(
+                output_ids,
+                MAX_SEQ_LEN,
+                tokenizer.eos_token_id or 0,
+                10,
+                tokens_per_chunk=3,
+            ),
+            request,
+            config,
+        )
+        chunks = [
+            chunk
+            async for chunk in OpenaiEndpoint._complete_stream_response(stream, None)
+        ]
+        delta = merge_stream_responses(chunks).choices[0].delta
+        self.assertEqual(delta.reasoning_content, "reasoning")
+        self.assertEqual(delta.content, "answer")
 
     async def test_request_disabled_overrides_enabled_env_for_response_split(self):
         config, delta = await self._render_fixed_thinking_override(
