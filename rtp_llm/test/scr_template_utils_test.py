@@ -134,18 +134,39 @@ class ScrTemplateUtilsTest(unittest.TestCase):
                     worker_id=0, worker_num=1, fail_closed=True
                 )
 
-    def test_fail_closed_late_success_is_treated_as_timeout(self):
+    def test_late_success_is_not_treated_as_a_local_timeout(self):
+        # A resumed process keeps its own monotonic origin, which is unrelated
+        # to the checkpoint host's, so a local elapsed time cannot gate the
+        # arrival. Epsilon owns the timeout budget.
         epsilon = _EpsilonDouble(result=0)
         with self._enabled(), mock.patch.object(
             scr, "_load_epsilon", return_value=epsilon
-        ), mock.patch.object(scr.time, "monotonic", side_effect=[0.0, 2.0, 2.0]):
-            with self.assertRaisesRegex(scr.ScrArrivalError, "exceeded timeout"):
+        ), mock.patch.object(scr.time, "monotonic", return_value=100000.0):
+            self.assertEqual(
                 scr.arrive_scr_checkpoint_barrier(
                     worker_id=0,
                     worker_num=1,
                     timeout=1,
                     fail_closed=True,
+                ),
+                0,
+            )
+        self.assertEqual(scr.get_scr_barrier_return_time(), 100000.0)
+
+    def test_failed_arrival_clears_previous_return_time(self):
+        with self._enabled(), mock.patch.object(
+            scr, "_load_epsilon", return_value=_EpsilonDouble()
+        ):
+            scr.arrive_scr_checkpoint_barrier(worker_id=0, worker_num=1)
+            self.assertIsNotNone(scr.get_scr_barrier_return_time())
+        with self._enabled(), mock.patch.object(
+            scr, "_load_epsilon", return_value=_EpsilonDouble(error=TimeoutError())
+        ):
+            with self.assertRaises(scr.ScrArrivalError):
+                scr.arrive_scr_checkpoint_barrier(
+                    worker_id=0, worker_num=1, fail_closed=True
                 )
+        self.assertIsNone(scr.get_scr_barrier_return_time())
 
     def test_timeout_budget_accepts_controller_values_and_rejects_invalid_values(self):
         with mock.patch.dict(
