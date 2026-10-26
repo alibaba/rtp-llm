@@ -86,7 +86,7 @@ class RequestReconciliationFailureOwnershipTest {
         assertTrue(owner.tryStartSend(delivery));
         RequestProtocolTestSupport.transport(
                 owner, delivery, DeliveryResult.uncertain(new IllegalStateException("reply lost")));
-        var registration = owner.tryClaim(reservation, 4L, "victim").orElseThrow();
+        var registration = owner.tryClaim(reservation, 4L).orElseThrow();
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         owner, registration, PreemptionCancelPhase.CANCEL_IN_FLIGHT));

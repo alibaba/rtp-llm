@@ -123,11 +123,7 @@ class RequestTerminalSettlementTest {
     void decodeRetirementPublishesTheOriginalPreemptionResolution(boolean cancelAlreadyUnknown) {
         Fixture f = fixture(true);
         PreemptionRegistration claim =
-                f.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 40L, "victim")
-                        .orElse(null);
+                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 40L).orElse(null);
         assertNotNull(claim);
         if (cancelAlreadyUnknown) {
             assertTrue(
@@ -161,11 +157,7 @@ class RequestTerminalSettlementTest {
     void unknownCancelOutcomeKeepsTheAcknowledgedCancellationVisible() {
         Fixture f = fixture(true, true);
         PreemptionRegistration claim =
-                f.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 4L, "victim")
-                        .orElse(null);
+                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
         assertNotNull(claim);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
@@ -190,11 +182,7 @@ class RequestTerminalSettlementTest {
     void queuedCancellationResumesAfterExactPreemptionRelease() {
         Fixture f = fixture(true, true);
         PreemptionRegistration claim =
-                f.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 4L, "victim")
-                        .orElse(null);
+                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
         assertNotNull(claim);
         assertEquals(
                 RequestState.Phase.CANCEL_REQUESTED,
@@ -253,11 +241,7 @@ class RequestTerminalSettlementTest {
                 sender,
                 DeliveryResult.uncertain(new IllegalStateException("reply lost")));
         PreemptionRegistration claim =
-                f.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 4L, "victim")
-                        .orElse(null);
+                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -292,11 +276,7 @@ class RequestTerminalSettlementTest {
                                 RequestProtocolTestSupport.handoff(() -> true));
         assertNotNull(delivery);
         PreemptionRegistration preemption =
-                f.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 9L, "victim")
-                        .orElse(null);
+                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 9L).orElse(null);
         assertNotNull(preemption);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
@@ -412,11 +392,7 @@ class RequestTerminalSettlementTest {
                 sender,
                 DeliveryResult.uncertain(new IllegalStateException("reply lost")));
         PreemptionRegistration claim =
-                f.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 4L, "victim")
-                        .orElse(null);
+                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -493,11 +469,7 @@ class RequestTerminalSettlementTest {
         Fixture f = fixture(true);
         var assignedDecode = f.item().decodeEp();
         var claim =
-                f.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 31L, "victim")
-                        .orElse(null);
+                f.requestContext().data().getScheduler().tryClaim(RESERVATION, 31L).orElse(null);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -594,11 +566,7 @@ class RequestTerminalSettlementTest {
                                 7L,
                                 RequestProtocolTestSupport.handoff(() -> true));
         PreemptionRegistration claim =
-                requestContext
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 9L, "victim")
-                        .orElse(null);
+                requestContext.data().getScheduler().tryClaim(RESERVATION, 9L).orElse(null);
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -732,11 +700,7 @@ class RequestTerminalSettlementTest {
                                 RequestProtocolTestSupport.handoff(() -> true));
         if (preempting) {
             PreemptionRegistration claim =
-                    requestContext
-                            .data()
-                            .getScheduler()
-                            .tryClaim(RESERVATION, 9L, "victim")
-                            .orElse(null);
+                    requestContext.data().getScheduler().tryClaim(RESERVATION, 9L).orElse(null);
             assertTrue(
                     RequestProtocolTestSupport.preemptionPhase(
                             f.scheduler(), claim, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -861,11 +825,7 @@ class RequestTerminalSettlementTest {
         Fixture owner = fixture(true, true);
         Fixture other = fixture(true, true);
         PreemptionRegistration claim =
-                owner.requestContext()
-                        .data()
-                        .getScheduler()
-                        .tryClaim(RESERVATION, 4L, "victim")
-                        .orElse(null);
+                owner.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
         assertNotNull(claim);
         var before = owner.requestContext().snapshot();
         assertFalse(
@@ -888,7 +848,7 @@ class RequestTerminalSettlementTest {
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void cleanupProofSettlesDecodeBeforeAdvancingRequest(boolean resourceSettled) {
         Fixture f = fixture(true, true);
-        var claim = f.scheduler().tryClaim(RESERVATION, 4L, "victim").orElseThrow();
+        var claim = f.scheduler().tryClaim(RESERVATION, 4L).orElseThrow();
         var proof = DecodeResources.PreemptionUpdate.fenced(RESERVATION);
         when(f.item().decodeEp().updatePreemption(4L, proof))
                 .thenAnswer(
@@ -929,7 +889,7 @@ class RequestTerminalSettlementTest {
     @Test
     void cleanupProofCannotMixVictimsFromTheSamePreemptionAttempt() {
         Fixture f = fixture(true, true);
-        var claim = f.scheduler().tryClaim(RESERVATION, 4L, "victim").orElseThrow();
+        var claim = f.scheduler().tryClaim(RESERVATION, 4L).orElseThrow();
         var wrongVictim =
                 new DecodeResources.ReservationHandle(
                         RESERVATION.endpointGenerationId(),

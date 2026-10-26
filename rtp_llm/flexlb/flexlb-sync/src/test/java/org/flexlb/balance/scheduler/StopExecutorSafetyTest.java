@@ -203,7 +203,8 @@ class StopExecutorSafetyTest {
                                 new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
                                         1, i + 1, i + 1),
                                 new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
-                answers.add(cleanup.preempt(claim, client, runtime, 500L));
+                answers.add(
+                        cleanup.preempt(claim, client, runtime, 500L, null, "priority preemption"));
             }
             assertTrue(
                     entered.await(2, TimeUnit.SECONDS),

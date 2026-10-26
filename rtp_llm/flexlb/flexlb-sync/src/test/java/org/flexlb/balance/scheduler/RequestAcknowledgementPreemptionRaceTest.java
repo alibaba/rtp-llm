@@ -95,8 +95,7 @@ class RequestAcknowledgementPreemptionRaceTest {
             assertTrue(context.snapshot().delivery().acknowledged());
             assertNull(context.snapshot().selectedResponse());
             assertFalse(context.data().getFuture().isDone());
-            var registration =
-                    owner.tryClaim(reservation, 4L, "victim after confirmation").orElseThrow();
+            var registration = owner.tryClaim(reservation, 4L).orElseThrow();
             assertTrue(
                     RequestProtocolTestSupport.preemptionPhase(
                             owner, registration, PreemptionCancelPhase.CANCEL_IN_FLIGHT));

@@ -34,10 +34,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.anyLong;
-import static org.mockito.Mockito.argThat;
-import static org.mockito.Mockito.calls;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.eq;
@@ -54,41 +51,21 @@ import static org.mockito.Mockito.when;
 
 class DeliveryClaimTest {
     @Test
-    void ownershipDeliveredAckUpdatesDeadlineOnce() throws Exception {
+    void deliveredAckUpdatesDeadlineOnceAndReplayHasNoEffects() throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
             var original = f.owner.runtime.deadlines();
             var timer = org.mockito.Mockito.spy(original);
             ReflectionTestUtils.setField(f.owner.runtime, "timer", timer);
-            try {
-                f.owner.onDeliveryEvidence(
-                        f.claim,
-                        new ContextResult.TransportResult(
-                                f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
-                f.context.data().getFuture().get(2, TimeUnit.SECONDS);
-                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
-                verify(timer, times(1)).update(eq(f.context), any());
-            } finally {
-                ReflectionTestUtils.setField(f.owner.runtime, "timer", original);
-                finishOwnershipRequest(f);
-            }
-        }
-    }
-
-    @Test
-    void ownershipCompletedDeliveryReplayDoesNotUpdateDeadline() throws Exception {
-        try (var f = new Fixture()) {
-            assertTrue(f.owner.tryStartSend(f.claim));
             var delivered =
                     new ContextResult.TransportResult(
                             f.claim, DeliveryResult.delivered(), System.currentTimeMillis());
-            f.owner.onDeliveryEvidence(f.claim, delivered);
-            f.context.data().getFuture().get(2, TimeUnit.SECONDS);
-            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
-            var original = f.owner.runtime.deadlines();
-            var timer = org.mockito.Mockito.spy(original);
-            ReflectionTestUtils.setField(f.owner.runtime, "timer", timer);
             try {
+                f.owner.onDeliveryEvidence(f.claim, delivered);
+                f.context.data().getFuture().get(2, TimeUnit.SECONDS);
+                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+                verify(timer, times(1)).update(eq(f.context), any());
+                org.mockito.Mockito.clearInvocations(timer);
                 var before = f.context.snapshot();
                 f.owner.onDeliveryEvidence(f.claim, delivered);
                 SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
@@ -1929,7 +1906,8 @@ class DeliveryClaimTest {
                             new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
             var registration = ((ContextResult.Granted<PreemptionRegistration>) granted).value();
             var preemptionReply =
-                    SchedulerTestSupport.dispatcher(f.owner.runtime).preempt(registration, 500L);
+                    SchedulerTestSupport.dispatcher(f.owner.runtime)
+                            .preempt(registration, f.decode, "priority preemption", 500L);
             verify(f.channel, timeout(2000)).cancelAsync(any(), anyInt(), any(), anyLong());
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryEvidence(
@@ -1985,7 +1963,7 @@ class DeliveryClaimTest {
             try {
                 var response =
                         SchedulerTestSupport.dispatcher(f.owner.runtime)
-                                .preempt(registration, 1000L);
+                                .preempt(registration, f.decode, "priority preemption", 1000L);
                 verify(f.channel, timeout(2000)).cancelAsync(any(), anyInt(), any(), anyLong());
                 f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
                 assertEquals(
@@ -2026,7 +2004,9 @@ class DeliveryClaimTest {
                             91L,
                             f.reservation,
                             new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
-            var response = SchedulerTestSupport.dispatcher(f.owner.runtime).preempt(stale, 1000L);
+            var response =
+                    SchedulerTestSupport.dispatcher(f.owner.runtime)
+                            .preempt(stale, f.decode, "priority preemption", 1000L);
             verify(f.channel, timeout(2000)).cancelAsync(any(), anyInt(), any(), anyLong());
             f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             assertEquals(PreemptionRegistration.Reply.UNKNOWN, response.get(2, TimeUnit.SECONDS));
@@ -2074,7 +2054,7 @@ class DeliveryClaimTest {
                                 f.reservation,
                                 new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
                 var dispatcher = SchedulerTestSupport.dispatcher(f.owner.runtime);
-                dispatcher.preempt(registration, 500L);
+                dispatcher.preempt(registration, f.decode, "priority preemption", 500L);
                 var record = f.stopRecord();
                 f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
                 var stopping = f.driver();
@@ -2119,8 +2099,11 @@ class DeliveryClaimTest {
             var dispatcher = SchedulerTestSupport.dispatcher(f.owner.runtime);
             var result =
                     dispatcher
-                            .preempt(first, 500L)
-                            .thenCompose(reply -> dispatcher.preempt(next, 500L));
+                            .preempt(first, f.decode, "priority preemption", 500L)
+                            .thenCompose(
+                                    reply ->
+                                            dispatcher.preempt(
+                                                    next, f.decode, "priority preemption", 500L));
             var record = f.stopRecord();
             f.cancel.complete(EngineGrpcClient.CancelReply.NOT_FOUND);
             assertEquals(PreemptionRegistration.Reply.UNKNOWN, result.get(2, TimeUnit.SECONDS));

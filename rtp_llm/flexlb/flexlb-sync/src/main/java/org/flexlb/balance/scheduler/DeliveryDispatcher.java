@@ -489,16 +489,6 @@ public class DeliveryDispatcher {
     }
 
     public CompletableFuture<PreemptionRegistration.Reply> preempt(
-            PreemptionRegistration registration, long timeoutMs) {
-        var route = registration.owner().snapshot().route();
-        return preempt(
-                registration,
-                route == null ? null : route.decodeEp(),
-                "preempted by higher-priority request",
-                timeoutMs);
-    }
-
-    public CompletableFuture<PreemptionRegistration.Reply> preempt(
             PreemptionRegistration registration,
             DecodeEndpoint endpoint,
             String detail,
@@ -607,14 +597,6 @@ public class DeliveryDispatcher {
     }
 
     CompletableFuture<PreemptionRegistration.Reply> preempt(
-            PreemptionRegistration registration,
-            EngineGrpcClient client,
-            SchedulerRuntime runtime,
-            long timeoutMs) {
-        return preempt(registration, client, runtime, timeoutMs, null, "priority preemption");
-    }
-
-    private CompletableFuture<PreemptionRegistration.Reply> preempt(
             PreemptionRegistration registration,
             EngineGrpcClient client,
             SchedulerRuntime runtime,

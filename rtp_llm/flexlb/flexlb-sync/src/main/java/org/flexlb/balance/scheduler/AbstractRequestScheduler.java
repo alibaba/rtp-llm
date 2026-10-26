@@ -882,7 +882,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     public Optional<PreemptionRegistration> tryClaim(
-            DecodeResources.ReservationHandle reservation, long attempt, String detail) {
+            DecodeResources.ReservationHandle reservation, long attempt) {
         var ctx = requests.findActive(reservation.requestId());
         if (ctx == null || ctx.data().getScheduler() != this) {
             return Optional.empty();

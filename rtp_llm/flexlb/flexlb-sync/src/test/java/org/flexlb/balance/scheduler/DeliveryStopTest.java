@@ -16,14 +16,13 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
-import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-class DeliveryCleanupTest {
+class DeliveryStopTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(ints = {1, 3})
     void cleanupApplicationRetriesPreserveProofWithoutInventingLocalSettlement(int failures)
@@ -151,7 +150,9 @@ class DeliveryCleanupTest {
                                 1L, 41L, 1L),
                         new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
         try {
-            var preemption = dispatcher.preempt(registration, client, runtime, 25L);
+            var preemption =
+                    dispatcher.preempt(
+                            registration, client, runtime, 25L, null, "priority preemption");
             var stop = dispatcher.stop(claim, client, runtime);
             assertEquals(PreemptionRegistration.Reply.UNKNOWN, preemption.get(2, TimeUnit.SECONDS));
             Runnable task;
@@ -221,7 +222,13 @@ class DeliveryCleanupTest {
             assertEquals(
                     PreemptionRegistration.Reply.WAITING,
                     dispatcher
-                            .preempt(registration, client, runtime, 1000L)
+                            .preempt(
+                                    registration,
+                                    client,
+                                    runtime,
+                                    1000L,
+                                    null,
+                                    "priority preemption")
                             .get(2, TimeUnit.SECONDS));
             SchedulerTestSupport.awaitRequestWork(runtime);
             org.mockito.Mockito.verify(scheduler, org.mockito.Mockito.times(2))
@@ -271,7 +278,9 @@ class DeliveryCleanupTest {
                             null,
                             DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
                             new DeliveryMetricsReporter(null));
-            var answer = dispatcher.preempt(registration, client, runtime, 25L);
+            var answer =
+                    dispatcher.preempt(
+                            registration, client, runtime, 25L, null, "priority preemption");
             assertEquals(PreemptionRegistration.Reply.UNKNOWN, answer.get(2, TimeUnit.SECONDS));
             Runnable task;
             while ((task = queued.poll()) != null) {
@@ -356,7 +365,7 @@ class DeliveryCleanupTest {
     }
 
     @Test
-    void exactIdentityDedupEndsAtPhysicalSignalRatherThanSessionStart() throws Exception {
+    void stopDeduplicatesTheExactClaimAndRejectsAnEqualValuedClaim() throws Exception {
         var runtime = runtime();
         try {
             var channel = mock(EngineGrpcClient.class);
@@ -375,17 +384,16 @@ class DeliveryCleanupTest {
                             new DeliveryMetricsReporter(null));
             var first = cleanup.stop(claim, channel, runtime);
             assertSame(first, cleanup.stop(claim, channel, runtime));
-            var separate = cleanup.stop(equalValue, channel, runtime);
-            assertNotSame(
-                    first, separate, "same record value does not identify the same operation");
+            assertEquals(
+                    DeliveryDispatcher.StopResult.STALE,
+                    cleanup.stop(equalValue, channel, runtime).get(2, TimeUnit.SECONDS));
+            assertFalse(first.isDone(), "rejecting a stale claim must not finish the current stop");
             assertFalse(runtime.signals().delivery(claim).toCompletableFuture().isDone());
             runtime.signals().completeDelivery(claim);
             first.get(2, TimeUnit.SECONDS);
             assertFalse(
                     runtime.signals().delivery(equalValue).toCompletableFuture().isDone(),
                     "physical settlement belongs only to the exact claim");
-            runtime.signals().completeDelivery(equalValue);
-            separate.get(2, TimeUnit.SECONDS);
             verifyNoInteractions(channel);
         } finally {
             runtime.shutdown();
@@ -449,7 +457,9 @@ class DeliveryCleanupTest {
                             new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
                                     1L, 41L, 1L),
                             new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
-            var answer = cleanup.preempt(registration, client, runtime, 500L);
+            var answer =
+                    cleanup.preempt(
+                            registration, client, runtime, 500L, null, "priority preemption");
             Runnable task;
             while ((task = queued.poll()) != null) {
                 task.run();
