@@ -92,6 +92,10 @@ _LOCAL_PROJECT_MIN_SAVED_BYTES = (
 # hidden=5120), plus three group-sized int64 index temporaries (1.5 MiB).
 _CP_X_GROUP_MAX_ROWS = 65536
 _CP_X_GROUP_MAX_BYTES = 2 * 65536 * 5120 * 2 + 3 * 65536 * 8
+# Large owner groups yield views of rank-major FP32 storage instead of restoring
+# another full tensor. Bound send + gather by the existing 128K raw gather's
+# gather + restore peak (2.5 GiB at hidden=5120).
+_CP_PROJECTED_OWNER_MAX_BYTES = 2 * 131072 * 5120 * 2
 
 
 def _use_small_cp_x_gather(cp_ctx) -> bool:
@@ -150,13 +154,22 @@ def _prefill_projected_group_fits(cp_ctx, local_rows, real_rows, output_width):
     )
 
 
+def _prefill_projected_owner_group_fits(cp_ctx, local_rows, output_width):
+    return (
+        output_width > 0
+        and (1 + cp_ctx.cp_size) * local_rows * output_width * torch.float32.itemsize
+        <= _CP_PROJECTED_OWNER_MAX_BYTES
+    )
+
+
 def _prefill_x_group_plan(x, cp_ctx, *, allow_owner_tiles=False, output_width=None):
     """Keep short groups; fit long requests or their CP halves by FP32 bytes.
 
     Each tuple is (local_start, local_end, real_start, real_end). A half
     contains the same front/back local slice on every rank, so its boundary
-    never cuts an original owner GEMM or producer tile. Halves exceeding the
-    budget retain bounded owner broadcasts.
+    never cuts an original owner GEMM or producer tile. Large groups can consume
+    rank-major views within a separate send + gather budget, without a restore
+    copy; groups exceeding both budgets retain bounded owner broadcasts.
     """
     lengths = getattr(cp_ctx, "input_lengths_global_host", None)
     chunks = getattr(cp_ctx, "chunk_lengths_per_req", None)
@@ -212,17 +225,32 @@ def _prefill_x_group_plan(x, cp_ctx, *, allow_owner_tiles=False, output_width=No
             ):
                 half = chunk // 2
                 front_rows = min(length, cp_ctx.cp_size * half)
-                groups.append(
-                    (local_end, local_end + half, real_end, real_end + front_rows)
-                )
-                groups.append(
-                    (
-                        local_end + half,
-                        local_end + chunk,
-                        real_end + front_rows,
-                        real_end + length,
+                if (
+                    not _prefill_projected_group_fits(
+                        cp_ctx, half, front_rows, output_width
                     )
-                )
+                    and not _prefill_projected_group_fits(
+                        cp_ctx, half, length - front_rows, output_width
+                    )
+                    and _prefill_projected_owner_group_fits(cp_ctx, chunk, output_width)
+                ):
+                    # Only coalesce when both halves previously needed owner
+                    # broadcasts; preserve the established mixed-batch groups.
+                    groups.append(
+                        (local_end, local_end + chunk, real_end, real_end + length)
+                    )
+                else:
+                    groups.append(
+                        (local_end, local_end + half, real_end, real_end + front_rows)
+                    )
+                    groups.append(
+                        (
+                            local_end + half,
+                            local_end + chunk,
+                            real_end + front_rows,
+                            real_end + length,
+                        )
+                    )
             else:
                 groups.append(
                     (local_end, local_end + chunk, real_end, real_end + length)
@@ -242,7 +270,10 @@ def _prefill_x_group_plan(x, cp_ctx, *, allow_owner_tiles=False, output_width=No
         (
             fits(l1 - l0, r1 - r0)
             if output_width is None
-            else _prefill_projected_group_fits(cp_ctx, l1 - l0, r1 - r0, output_width)
+            else (
+                _prefill_projected_group_fits(cp_ctx, l1 - l0, r1 - r0, output_width)
+                or _prefill_projected_owner_group_fits(cp_ctx, l1 - l0, output_width)
+            )
         )
         for l0, l1, r0, r1 in groups
     ):
@@ -282,11 +313,14 @@ def _prefill_raw_x_groups(x, cp_ctx, groups):
 
 
 def _prefill_projected_x_groups(x, cp_ctx, groups, weights, *, whole_groups=False):
-    """Gather bounded FP32 groups; oversized halves retain owner broadcasts."""
+    """Gather FP32 groups; stream large rank-major groups in original tile order."""
     from rtp_llm.models_py.modules.dsv41.fp8.compressor import _linear_bf16_bf16_fp32
 
     if whole_groups and any(
         not _prefill_x_group_fits(x, cp_ctx, l1 - l0, r1 - r0)
+        or not _prefill_projected_group_fits(
+            cp_ctx, l1 - l0, r1 - r0, weights[0].shape[0] * len(weights)
+        )
         for l0, l1, r0, r1 in groups
     ):
         raise ValueError("Owner-tile requests cannot use whole-group production")
@@ -299,8 +333,11 @@ def _prefill_projected_x_groups(x, cp_ctx, groups, weights, *, whole_groups=Fals
     t0 = 0
     for local_start, local_end, real_start, real_end in groups:
         local_rows = local_end - local_start
-        if not _prefill_projected_group_fits(
+        owner_views = not _prefill_projected_group_fits(
             cp_ctx, local_rows, real_end - real_start, head * len(weights)
+        )
+        if owner_views and not _prefill_projected_owner_group_fits(
+            cp_ctx, local_rows, head * len(weights)
         ):
             owner_tiles = []
             while t0 < real_end:
@@ -338,7 +375,7 @@ def _prefill_projected_x_groups(x, cp_ctx, groups, weights, *, whole_groups=Fals
         offsets, columns = [], []
         while t0 < real_end:
             owner, start, rows = next(segments)
-            group_tiles.append((t0, rows))
+            group_tiles.append((t0, rows, owner, start))
             if owner == cp_ctx.cp_rank:
                 offset = start - local_start
                 for column, weight in enumerate(weights):
@@ -365,8 +402,11 @@ def _prefill_projected_x_groups(x, cp_ctx, groups, weights, *, whole_groups=Fals
             send, cp_ctx, (None, 0, buffer.shape[0]), buffer
         )
         gathered = _wait_prefill_x_gather(pending)
-        full = None
-        if batched is not None:
+        # The tile plan already specifies global order, including reversed CP
+        # back-half owners and partial tails. Views preserve the exact original
+        # GEMMs and producer carry boundaries without a second full allocation.
+        full = gathered if owner_views else None
+        if full is None and batched is not None:
             full = batched.restore_projected_group(
                 gathered,
                 cp_ctx.unpad_restore,
@@ -390,8 +430,12 @@ def _prefill_projected_x_groups(x, cp_ctx, groups, weights, *, whole_groups=Fals
             if whole_groups:
                 yield real_start, full
             else:
-                for start, rows in group_tiles:
-                    offset = start - real_start
+                for start, rows, owner, local_offset in group_tiles:
+                    offset = (
+                        owner * local_rows + local_offset - local_start
+                        if owner_views
+                        else start - real_start
+                    )
                     yield start, full[offset : offset + rows]
         finally:
             del full

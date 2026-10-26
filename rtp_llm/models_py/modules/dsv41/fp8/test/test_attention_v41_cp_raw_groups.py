@@ -25,6 +25,7 @@ def _load_attention():
         "_use_small_cp_x_gather",
         "_prefill_x_group_fits",
         "_prefill_projected_group_fits",
+        "_prefill_projected_owner_group_fits",
         "_prefill_x_group_plan",
         "_prefill_raw_x_groups",
         "_prefill_projected_x_groups",
@@ -40,6 +41,7 @@ def _load_attention():
         "_SMALL_CP_X_GATHER_MAX_ROWS",
         "_CP_X_GROUP_MAX_ROWS",
         "_CP_X_GROUP_MAX_BYTES",
+        "_CP_PROJECTED_OWNER_MAX_BYTES",
     }
     nodes = [
         node
@@ -162,6 +164,9 @@ class CPRawGroupsCPU(unittest.TestCase):
             for group in groups or ()
             if ATTENTION._prefill_projected_group_fits(
                 cp, group[1] - group[0], group[3] - group[2], 4 * ratio
+            )
+            or ATTENTION._prefill_projected_owner_group_fits(
+                cp, group[1] - group[0], 4 * ratio
             )
         )
 
@@ -408,7 +413,9 @@ class CPRawGroupsCPU(unittest.TestCase):
         cp, local, _ = _case([5, 6, 65, 7, 2])
         with patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 32), patch.object(
             ATTENTION, "_PRODUCE_GLOBAL_TILE_ROWS", 3
-        ), patch.object(ATTENTION, "_CP_X_GROUP_MAX_BYTES", 2000):
+        ), patch.object(ATTENTION, "_CP_X_GROUP_MAX_BYTES", 2000), patch.object(
+            ATTENTION, "_CP_PROJECTED_OWNER_MAX_BYTES", 0
+        ):
             plan = ATTENTION._prefill_x_group_plan(
                 local[0], cp, allow_owner_tiles=True, output_width=8
             )
@@ -454,8 +461,11 @@ class CPRawGroupsCPU(unittest.TestCase):
             ([159357], 512, 1),
             ([159357, 159361], 1024, 4),
             ([264001], 1024, 2),
-            ([400001], 1024, None),
+            ([400001], 1024, 1),
             ([400001], 512, 2),
+            ([1048448], 1024, 2),
+            ([1048448], 512, 1),
+            ([1048577], 1024, None),
         ):
             cp, local, _ = _case(lengths)
             plans = []
@@ -477,11 +487,14 @@ class CPRawGroupsCPU(unittest.TestCase):
                         ATTENTION._prefill_projected_group_fits(
                             cp, l1 - l0, r1 - r0, width
                         )
+                        or ATTENTION._prefill_projected_owner_group_fits(
+                            cp, l1 - l0, width
+                        )
                     )
                 self.assertEqual(cursor, (cp.chunk_length, cp.seq_len_full))
             self.assertTrue(all(plan == plans[0] for plan in plans))
 
-        # A huge request may retain broadcasts without penalizing its neighbors.
+        # Large owner-view groups leave the neighboring short groups unchanged.
         cp, local, _ = _case([5, 6, 400001, 7, 2])
         plan = ATTENTION._prefill_x_group_plan(
             local[0], cp, allow_owner_tiles=True, output_width=1024
@@ -491,8 +504,102 @@ class CPRawGroupsCPU(unittest.TestCase):
                 ATTENTION._prefill_projected_group_fits(cp, b - a, d - c, 1024)
                 for a, b, c, d in plan
             ],
-            [True, False, False, True],
+            [True, False, True],
         )
+
+    def test_owner_views_preserve_ragged_order_producer_and_release_storage(self):
+        for lengths in ([65], [5, 6, 65, 7, 2], [65, 81]):
+            cp, local, _ = _case(lengths)
+            with patch.object(
+                ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 32
+            ), patch.object(ATTENTION, "_PRODUCE_GLOBAL_TILE_ROWS", 3), patch.object(
+                ATTENTION, "_CP_X_GROUP_MAX_BYTES", 1000
+            ), patch.object(
+                ATTENTION, "_CP_PROJECTED_OWNER_MAX_BYTES", 3000
+            ):
+                for ratio in (1, 2):
+                    plan = ATTENTION._prefill_x_group_plan(
+                        local[0], cp, allow_owner_tiles=True, output_width=4 * ratio
+                    )
+                    self.assertIsNotNone(plan)
+                    for rank in range(4):
+                        cp.cp_rank = rank
+                        with self._projected_transport(cp, local, ratio) as (
+                            tiles,
+                            _,
+                            shapes,
+                        ):
+                            baseline = [
+                                (offset, tile.clone()) for offset, tile in tiles
+                            ]
+                            original_shapes = list(shapes)
+                        references = []
+                        with self._projected_transport(cp, local, ratio, plan) as (
+                            tiles,
+                            calls,
+                            shapes,
+                        ):
+                            actual = []
+                            for offset, tile in tiles:
+                                references.append(weakref.ref(tile._base))
+                                actual.append((offset, tile.clone()))
+                                del tile
+                            self.assertTrue(all(call[0] is None for call in calls))
+                            self.assertEqual(shapes, original_shapes)
+                        self.assertTrue(all(ref() is None for ref in references))
+                        torch.testing.assert_close(actual, baseline, rtol=0, atol=0)
+                        with self._projected_transport(cp, local, ratio) as (
+                            tiles,
+                            _,
+                            _,
+                        ):
+                            expected = self._produce(
+                                cp, local[rank], ratio, projected=tiles
+                            )
+                        with self._projected_transport(cp, local, ratio, plan) as (
+                            tiles,
+                            _,
+                            _,
+                        ):
+                            actual = self._produce(
+                                cp, local[rank], ratio, projected=tiles
+                            )
+                        torch.testing.assert_close(
+                            actual[:2], expected[:2], rtol=0, atol=0
+                        )
+                        self.assertEqual(actual[3], expected[3])
+
+    def test_owner_view_budget_boundary_and_early_close(self):
+        cp, local, _ = _case([65])
+        required = (1 + cp.cp_size) * cp.chunk_length * 8 * 4
+        for budget, fits in ((required - 1, False), (required, True)):
+            with patch.object(ATTENTION, "_CP_PROJECTED_OWNER_MAX_BYTES", budget):
+                self.assertEqual(
+                    ATTENTION._prefill_projected_owner_group_fits(
+                        cp, cp.chunk_length, 8
+                    ),
+                    fits,
+                )
+        with patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 32), patch.object(
+            ATTENTION, "_CP_X_GROUP_MAX_BYTES", 1000
+        ), patch.object(ATTENTION, "_CP_PROJECTED_OWNER_MAX_BYTES", required):
+            plan = ATTENTION._prefill_x_group_plan(
+                local[0], cp, allow_owner_tiles=True, output_width=8
+            )
+            self.assertEqual(plan, ((0, cp.chunk_length, 0, 65),))
+            for throw in (False, True):
+                with self._projected_transport(cp, local, 2, plan) as (tiles, calls, _):
+                    _, tile = next(tiles)
+                    self.assertEqual(tuple(tile._base.shape), (cp.padded_seq_len, 8))
+                    ref = weakref.ref(tile._base)
+                    del tile
+                    if throw:
+                        with self.assertRaisesRegex(RuntimeError, "consumer failed"):
+                            tiles.throw(RuntimeError("consumer failed"))
+                    else:
+                        tiles.close()
+                    self.assertIsNone(ref())
+                    self.assertEqual(len(calls), 1)
 
     def test_projected_budget_exact_boundary_and_disable(self):
         cp, local, _ = _case([159357])
