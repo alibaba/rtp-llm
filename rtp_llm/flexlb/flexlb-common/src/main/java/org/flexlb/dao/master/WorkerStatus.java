@@ -47,6 +47,27 @@ public class WorkerStatus {
 
     private final EndpointTrace trace = new EndpointTrace();
 
+    /** ViT scalar telemetry is independent of the LLM status-version reducer. */
+    public record VitLoad(long inflightInputs, long receivedNanos) {}
+
+    private volatile VitLoad vitLoad;
+
+    @JsonIgnore
+    public VitLoad vitLoad() {
+        return vitLoad;
+    }
+
+    public void recordVitLoad(PollLease lease, Long inflightInputs) {
+        synchronized (workerHealth) {
+            if (lease == null || statusPollLease.get() != lease
+                    || workerHealth.retiring || workerHealth.unavailableReason != null) {
+                return;
+            }
+            vitLoad = inflightInputs == null || inflightInputs < 0 ? null
+                    : new VitLoad(inflightInputs, System.nanoTime());
+        }
+    }
+
     @JsonIgnore
     public EndpointTrace trace() {
         return trace;

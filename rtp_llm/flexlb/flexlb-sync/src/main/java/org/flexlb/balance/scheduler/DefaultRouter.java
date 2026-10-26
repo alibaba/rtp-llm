@@ -195,7 +195,8 @@ public class DefaultRouter {
                         result.diagnostics());
             }
             case VIT -> selectedOrBlocked(
-                    vitSelector.select(context, role, group), role, group);
+                    vitCacheSelector != null ? vitCacheSelector.selectPinned(context, group)
+                            : vitSelector.select(context, role, group), role, group);
             case FRONTEND -> throw new IllegalArgumentException(
                     "Endpoint selection is not supported for FRONTEND");
         };

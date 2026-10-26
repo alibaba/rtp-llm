@@ -1,7 +1,6 @@
 import logging
 import threading
 import time
-from concurrent import futures
 
 import grpc
 
@@ -52,6 +51,7 @@ from rtp_llm.server.request_headers import (
     extract_request_headers,
 )
 from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
+from rtp_llm.server.vit_rpc_control import create_vit_rpc_server
 
 
 def _now_us() -> int:
@@ -436,6 +436,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         worker_status.role = "VIT"
         worker_status.status_version = 1
         worker_status.alive = True
+        worker_status.mm_inflight_inputs.value = self.engine.get_inflight_input_count()
         return worker_status
 
     def GetCacheStatus(self, request: CacheVersionPB, context):
@@ -460,14 +461,4 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
 
 
 def create_rpc_server():
-    server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=200),
-        options=[
-            ("grpc.max_send_message_length", 1024 * 1024 * 1024),
-            ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
-            ("grpc.max_concurrent_streams", -1),
-            ("grpc.http2.min_ping_interval_without_data_ms", 1000),
-            ("grpc.http2.max_ping_strikes", 1000),
-        ],
-    )
-    return server
+    return create_vit_rpc_server()
