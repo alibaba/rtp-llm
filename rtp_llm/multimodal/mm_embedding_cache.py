@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import uuid
+from bisect import bisect_left
 from collections import OrderedDict
 from concurrent.futures import CancelledError
 from itertools import chain, islice
@@ -72,16 +73,18 @@ class _TensorMemoryPool:
     def _insert_free_locked(self, offset: int, size: int) -> None:
         if size == 0:
             return
-        self._free.append((offset, size))
-        self._free.sort()
-        merged = []
-        for current_offset, current_size in self._free:
-            if merged and merged[-1][0] + merged[-1][1] == current_offset:
-                previous_offset, previous_size = merged[-1]
-                merged[-1] = (previous_offset, previous_size + current_size)
-            else:
-                merged.append((current_offset, current_size))
-        self._free = merged
+        # The list stays address-ordered and fully coalesced. Only the two
+        # neighbors can touch a newly freed block; list insertion is still O(n).
+        index = bisect_left(self._free, (offset,))
+        end = index
+        if index and sum(self._free[index - 1]) == offset:
+            index -= 1
+            offset, previous_size = self._free[index]
+            size += previous_size
+        if end < len(self._free) and offset + size == self._free[end][0]:
+            size += self._free[end][1]
+            end += 1
+        self._free[index:end] = [(offset, size)]
 
     def _reclaim_ready_locked(self) -> None:
         waiting = []
@@ -113,11 +116,18 @@ class _TensorMemoryPool:
                     if free_size - prefix_size < size:
                         continue
                     block = _PoolBlock(aligned_offset, size)
-                    self._free.pop(index)
-                    self._insert_free_locked(offset, prefix_size)
                     suffix_offset = aligned_offset + size
                     suffix_size = offset + free_size - suffix_offset
-                    self._insert_free_locked(suffix_offset, suffix_size)
+                    # Splitting one free block preserves order and cannot
+                    # introduce adjacent free blocks outside this slice.
+                    self._free[index : index + 1] = [
+                        (part_offset, part_size)
+                        for part_offset, part_size in (
+                            (offset, prefix_size),
+                            (suffix_offset, suffix_size),
+                        )
+                        if part_size
+                    ]
                     self._used_bytes += size
                     return block
                 if self._pending:
@@ -572,7 +582,9 @@ class MMEmbeddingCacheEntry:
         if self.error is not None:
             raise self.error
 
-    def complete(self, result: Any) -> bool:
+    def complete(
+        self, result: Any, *, before_publish: Optional[Callable[[], None]] = None
+    ) -> bool:
         with self._state_lock:
             if self._terminal:
                 return False
@@ -581,6 +593,11 @@ class MMEmbeddingCacheEntry:
         try:
             if self._on_complete is not None:
                 self._on_complete(self, result)
+            # Publish dependent metadata only after storage succeeds, but
+            # before any waiter can observe ready. Duplicate completion never
+            # executes this hook. Exceptions use the same rollback as storage.
+            if before_publish is not None:
+                before_publish()
         except Exception as error:
             # fail() cannot take over this already-claimed transition. Roll it
             # back here so waiters never see a failed insertion as a cache hit.
@@ -650,6 +667,29 @@ class MMEmbeddingCacheEntry:
         return self._greennet_event.is_set()
 
 
+class _HashCacheValue:
+    # All lifecycle fields use the owning hash cache's index lock. A lease
+    # prevents explicit pool release; a Tensor reference alone does not.
+    __slots__ = (
+        "hashes",
+        "generation",
+        "charge_bytes",
+        "owners",
+        "greennet_passed",
+        "readers",
+        "retired",
+    )
+
+    def __init__(self, generation, charge_bytes, greennet_passed):
+        self.hashes = []
+        self.generation = generation
+        self.charge_bytes = charge_bytes
+        self.owners = []
+        self.greennet_passed = bool(greennet_passed)
+        self.readers = 0
+        self.retired = False
+
+
 class MMHashKeyCache:
     """Byte-bounded CPU-pool cache for multimodal feature-hash token ids.
 
@@ -666,9 +706,14 @@ class MMHashKeyCache:
         if max_bytes < 0:
             raise ValueError("hash cache max_bytes must be non-negative")
         self._lock = threading.Lock()
+        self._drained = threading.Condition(self._lock)
         self._entries = OrderedDict()
+        self._pending = {}
         self._max_bytes = max_bytes
         self._resident_bytes = 0
+        self._building_bytes = 0
+        self._retired_bytes = 0
+        self._resizing = False
         self._pool = _TensorMemoryPool(max_bytes, torch.device("cpu"))
         self.instance_id = uuid.uuid4().hex
 
@@ -683,86 +728,210 @@ class MMHashKeyCache:
         generation: Optional[str] = None,
         greennet_passed: bool = False,
     ) -> None:
+        self._put(cache_key, feature_hashes, generation, greennet_passed)
+
+    def put_for_entry(
+        self,
+        cache_key: str,
+        feature_hashes: List[torch.Tensor],
+        entry: MMEmbeddingCacheEntry,
+        embedding_cache: "MMEmbeddingCache",
+    ) -> None:
+        """Publish once per live generation; never replace it with a stale writer."""
+        self._put(
+            cache_key,
+            feature_hashes,
+            entry.generation,
+            entry.greennet_passed,
+            entry=entry,
+            embedding_cache=embedding_cache,
+        )
+
+    def _used_bytes_locked(self) -> int:
+        return self._resident_bytes + self._building_bytes + self._retired_bytes
+
+    def _put(
+        self,
+        cache_key: str,
+        feature_hashes: List[torch.Tensor],
+        generation: Optional[str],
+        greennet_passed: bool,
+        *,
+        entry: Optional[MMEmbeddingCacheEntry] = None,
+        embedding_cache: Optional["MMEmbeddingCache"] = None,
+    ) -> None:
         if not cache_key or not self.enabled:
             return
-        # Reject oversized values before making CPU copies. Replacing a key
-        # must also discard its previous generation, even when the new value
-        # cannot fit. Do not evict unrelated entries for such a value.
-        tensor_bytes = sum(h.numel() * 4 for h in feature_hashes)
-        pool_bytes = tensor_bytes
-        if pool_bytes > self._max_bytes:
-            with self._lock:
-                self._remove_locked(cache_key)
-            return
-        # Hashes are small CPU int32 token-id tensors. Store an owned CPU copy
-        # so the sidecar does not retain embedding storage or a GPU tensor.
-        with cuda_graph_gate.operation():
-            hashes = [
-                hash_tensor.detach().to(device="cpu", dtype=torch.int32).clone()
-                for hash_tensor in feature_hashes
-            ]
         generation = generation or ""
+        # Estimate the final owned int32 value before allocating/copying it.
+        # Staging and pool reservations are bounded by the in-flight charge.
         charge_bytes = (
-            pool_bytes
+            sum(h.numel() * 4 for h in feature_hashes)
             + sys.getsizeof(cache_key)
             + sys.getsizeof(generation)
-            + sys.getsizeof(hashes)
-            + sum(sys.getsizeof(h) for h in hashes)
-            + sys.getsizeof((hashes, generation, 0, [], False))
+            + sys.getsizeof([None for _ in feature_hashes])
+            + sum(sys.getsizeof(h) for h in feature_hashes)
+            + sys.getsizeof(_HashCacheValue(generation, 0, False))
             + sys.getsizeof(0)
             + self._ENTRY_OVERHEAD
         )
-        with self._lock:
-            self._remove_locked(cache_key)
-            if charge_bytes > self._max_bytes:
+
+        def current(action):
+            # The only nested index order is embedding -> hash, and these
+            # callbacks only update metadata: no tensor/pool work or waits.
+            if entry is None:
+                return action()
+            return embedding_cache._with_current_entry(cache_key, entry, action)
+
+        retired = []
+        value = _HashCacheValue(generation, charge_bytes, greennet_passed)
+
+        def begin():
+            with self._lock:
+                if self._resizing or not self.enabled:
+                    return False
+                if entry is not None:
+                    existing = self._pending.get(cache_key) or self._entries.get(
+                        cache_key
+                    )
+                    if existing is not None and existing.generation == generation:
+                        existing.greennet_passed |= bool(greennet_passed)
+                        return False
+                # A replacement supersedes even a still-building older value.
+                self._pending.pop(cache_key, None)
+                self._remove_locked(cache_key, retired)
+                if charge_bytes > self._max_bytes:
+                    return False  # Oversized writes do not evict other keys.
+                reclaimable = sum(item.charge_bytes for item in retired)
+                while (
+                    self._used_bytes_locked() + charge_bytes - reclaimable
+                    > self._max_bytes
+                    and self._entries
+                ):
+                    reclaimable += self._remove_locked(
+                        next(iter(self._entries)), retired
+                    )
+                self._pending[cache_key] = value
+                return True
+
+        started = current(begin)
+        self._release_retired(retired)
+        if not started:
+            return
+
+        def reserve():
+            with self._lock:
+                if self._pending.get(cache_key) is not value:
+                    return None
+                if self._used_bytes_locked() + charge_bytes > self._max_bytes:
+                    return None  # Pinned readers/builders still own this budget.
+                self._building_bytes += charge_bytes
+                return self._pool
+
+        pool = current(reserve)
+        published = False
+        try:
+            if pool is None:
                 return
-            # Evict before insertion so resident accounting never exceeds the
-            # budget, including when a key is replaced by a larger value.
-            while self._resident_bytes + charge_bytes > self._max_bytes:
-                self._remove_locked(next(iter(self._entries)))
+            with cuda_graph_gate.operation():
+                hashes = [
+                    h.detach().to(device="cpu", dtype=torch.int32).clone()
+                    for h in feature_hashes
+                ]
             devices = _map_tensors(hashes, lambda _: torch.device("cpu"))
             try:
-                pooled, owners, _, _, _ = _pool_result(
-                    hashes, devices, None, self._pool
+                value.hashes, value.owners, _, _, _ = _pool_result(
+                    hashes, devices, None, pool
                 )
             except _PoolCapacityError:
                 logging.warning(
                     "Hash-key cache CPU pool is full; bypassing key %s", cache_key
                 )
                 return
-            self._entries[cache_key] = (
-                pooled,
-                generation,
-                charge_bytes,
-                owners,
-                bool(greennet_passed),
-            )
-            self._resident_bytes += charge_bytes
 
-    def _remove_locked(self, cache_key: str) -> None:
+            def publish():
+                with self._lock:
+                    if (
+                        self._pending.get(cache_key) is not value
+                        or self._used_bytes_locked() > self._max_bytes
+                    ):
+                        return False
+                    self._pending.pop(cache_key)
+                    self._entries[cache_key] = value
+                    self._building_bytes -= charge_bytes
+                    self._resident_bytes += charge_bytes
+                    return True
+
+            published = bool(current(publish))
+        finally:
+            if not published:
+                # Releasing may enter the CUDA graph gate: never hold an index
+                # lock. Keep the charge until the block is actually reusable.
+                for owner in value.owners:
+                    owner.release()
+                with self._lock:
+                    if self._pending.get(cache_key) is value:
+                        self._pending.pop(cache_key)
+                    if pool is not None:
+                        self._building_bytes -= charge_bytes
+                    self._drained.notify_all()
+
+    def _remove_locked(self, cache_key: str, retired: List[_HashCacheValue]) -> int:
         value = self._entries.pop(cache_key, None)
         if value is not None:
-            self._resident_bytes -= value[2]
-            for owner in value[3]:
+            self._resident_bytes -= value.charge_bytes
+            self._retired_bytes += value.charge_bytes
+            value.retired = True
+            if not value.readers:
+                retired.append(value)
+                return value.charge_bytes
+        return 0
+
+    def _release_retired(self, values: List[_HashCacheValue]) -> None:
+        for value in values:
+            for owner in value.owners:
                 owner.release()
+            with self._lock:
+                self._retired_bytes -= value.charge_bytes
+                self._drained.notify_all()
+
+    def _snapshot(self, cache_key, generation=None, *, touch=False):
+        with self._lock:
+            value = self._entries.get(cache_key)
+            if value is None or (
+                generation is not None and value.generation != generation
+            ):
+                return None
+            if touch:
+                self._entries.move_to_end(cache_key)
+            value.readers += 1
+            approval = value.greennet_passed
+        try:
+            # Same copy as before, now protected by a lease rather than holding
+            # the global index lock. Pool views still never escape this cache.
+            return (
+                [tensor.clone() for tensor in value.hashes],
+                value.generation,
+                approval,
+            )
+        finally:
+            with self._lock:
+                value.readers -= 1
+                retired = value.retired and value.readers == 0
+            if retired:
+                self._release_retired([value])
 
     def get(
         self, cache_key: str, generation: Optional[str] = None
     ) -> Optional[List[torch.Tensor]]:
-        with self._lock:
-            value = self._entries.get(cache_key)
-            if value is None or (generation is not None and value[1] != generation):
-                return None
-            self._entries.move_to_end(cache_key)
-            # Pool views never escape the cache; otherwise eviction could reuse
-            # their storage while an active request is still reading it.
-            return [tensor.clone() for tensor in value[0]]
+        value = self._snapshot(cache_key, generation, touch=True)
+        return None if value is None else value[0]
 
     def greennet_passed(self, cache_key: str) -> bool:
         """An approval survives embedding eviction, but never hash eviction."""
         with self._lock:
             value = self._entries.get(cache_key)
-            return value is not None and value[4]
+            return value is not None and value.greennet_passed
 
     def contains(self, cache_key: str) -> bool:
         with self._lock:
@@ -781,32 +950,58 @@ class MMHashKeyCache:
         return self.keys()
 
     def clear(self) -> None:
+        retired = []
         with self._lock:
+            self._pending.clear()
             for key in list(self._entries):
-                self._remove_locked(key)
+                self._remove_locked(key, retired)
+        self._release_retired(retired)
 
     def resize(self, max_bytes: int) -> None:
         if max_bytes < 0:
             raise ValueError("hash cache max_bytes must be non-negative")
-        with self._lock:
-            if max_bytes > self._pool.capacity_bytes:
-                for key in list(self._entries):
-                    self._remove_locked(key)
-                self._pool = _TensorMemoryPool(max_bytes, torch.device("cpu"))
+        retired = []
+        with self._drained:
+            while self._resizing:
+                self._drained.wait()
+            grow = max_bytes > self._pool.capacity_bytes
+            self._resizing = grow
+            self._pending.clear()
             self._max_bytes = max_bytes
-            while self._resident_bytes > max_bytes:
-                self._remove_locked(next(iter(self._entries)))
+            reclaimable = 0
+            while self._entries and (
+                grow or self._used_bytes_locked() - reclaimable > max_bytes
+            ):
+                reclaimable += self._remove_locked(next(iter(self._entries)), retired)
+        self._release_retired(retired)
+        if grow:
+            try:
+                # Do not create accumulating retired arenas. Readers/writers
+                # drain with the index unlocked; new puts bypass during growth.
+                with self._drained:
+                    while self._used_bytes_locked():
+                        self._drained.wait()
+                pool = _TensorMemoryPool(max_bytes, torch.device("cpu"))
+                with self._lock:
+                    self._pool = pool
+            finally:
+                with self._drained:
+                    self._resizing = False
+                    self._drained.notify_all()
 
     def stats(self) -> Dict[str, int]:
         with self._lock:
             stats = {
                 "resident_entries": len(self._entries),
                 "resident_bytes": self._resident_bytes,
+                "building_bytes": self._building_bytes,
+                "retired_bytes": self._retired_bytes,
                 "max_bytes": self._max_bytes,
             }
-            pool_stats = self._pool.stats()
-            stats.update({f"pool_{key}": value for key, value in pool_stats.items()})
-            return stats
+            pool = self._pool
+        pool_stats = pool.stats()
+        stats.update({f"pool_{key}": value for key, value in pool_stats.items()})
+        return stats
 
     def metadata(
         self,
@@ -819,16 +1014,7 @@ class MMHashKeyCache:
         total_rows = 0
         tiers = embedding_cache.resident_tiers(keys)
         for key in keys:
-            with self._lock:
-                value = self._entries.get(key)
-                if value is not None:
-                    value = (
-                        [tensor.clone() for tensor in value[0]],
-                        value[1],
-                        value[2],
-                        [],
-                        value[4],
-                    )
+            value = self._snapshot(key)
             hash_hit = (
                 value is not None
                 and bool(value[0])
@@ -838,7 +1024,7 @@ class MMHashKeyCache:
                 "key": key,
                 "hit": hash_hit,
                 "hash_hit": hash_hit,
-                "greennet_passed": bool(hash_hit and value[4]),
+                "greennet_passed": bool(hash_hit and value[2]),
                 "embedding_hit": key in tiers,
                 "embedding_tier": tiers.get(key),
             }
@@ -1052,10 +1238,19 @@ class MMEmbeddingCache:
         for owner in owners:
             owner.release()
 
-    def _remove_entry_locked(self, cache_key: str, eviction: bool = False) -> None:
+    def _unlink_entry_locked(self, cache_key: str, eviction: bool = False):
+        """Index-only removal. Caller owns transfer lock through finalization."""
         entry = self._entries.pop(cache_key)
         was_cpu = entry.tier == "cpu"
         self._uncharge_locked(cache_key, entry)
+        if eviction:
+            self._stats["eviction"] += 1
+        return cache_key, entry, was_cpu, eviction
+
+    def _finish_removal(self, removal) -> None:
+        cache_key, entry, was_cpu, eviction = removal
+        # Copies, event waits, pool releases and remote admission must not
+        # block unrelated index probes or embedding -> hash publication.
         self._detach_pool_storage(entry)
         if eviction and was_cpu and self._on_cpu_evict is not None and entry.is_done:
             try:
@@ -1065,33 +1260,27 @@ class MMEmbeddingCache:
                     "Skipping failed remote cache eviction admission", exc_info=True
                 )
         if eviction:
-            self._stats["eviction"] += 1
             if self._report_metrics_enabled:
                 kmonitor.report(AccMetrics.VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC, 1)
+
+    def _remove_entry(self, cache_key, expected=None, *, eviction=False) -> bool:
+        """Caller owns _transfer_lock, never the index lock."""
+        with self._lock:
+            entry = self._entries.get(cache_key)
+            if entry is None or (expected is not None and entry is not expected):
+                return False
+            removal = self._unlink_entry_locked(cache_key, eviction)
+        self._finish_removal(removal)
+        return True
 
     def _admit_locked(
         self,
         cache_key: str,
         entry: MMEmbeddingCacheEntry,
-        result: Any,
-        offloaded: bool,
-        events: List[Any],
-        owners: List[_PoolReservation],
         gpu_bytes: int,
         cpu_bytes: int,
         charge_tokens: int,
     ) -> None:
-        with entry.storage_lock:
-            old_owners = entry.pool_owners
-            # New pool copies may still be reading the old pool blocks.
-            for owner in old_owners:
-                owner.add_events(events)
-            entry.result = result
-            entry.offloaded = offloaded
-            entry.ready_events = events
-            entry.pool_owners = owners
-        for owner in old_owners:
-            owner.release()
         entry.charge_tokens = charge_tokens
         entry.charge_gpu_bytes = gpu_bytes
         entry.charge_cpu_bytes = cpu_bytes
@@ -1105,12 +1294,15 @@ class MMEmbeddingCache:
         self._entries.move_to_end(cache_key)
 
     def _make_cpu_room(self, required_bytes: int) -> None:
-        with self._lock:
-            while self._cpu_bytes + required_bytes > self._cpu_max_bytes:
+        while True:
+            with self._lock:
+                if self._cpu_bytes + required_bytes <= self._cpu_max_bytes:
+                    return
                 # CPU tensors attached to hot GPU entries also count toward the
                 # CPU budget. Drop a hot entry only after all cold victims.
                 lru = self._cpu_lru or self._gpu_lru
-                self._remove_entry_locked(next(iter(lru)), eviction=True)
+                removal = self._unlink_entry_locked(next(iter(lru)), eviction=True)
+            self._finish_removal(removal)
 
     def _make_cpu_pool_room(self, required_bytes: int) -> None:
         while required_bytes:
@@ -1124,7 +1316,8 @@ class MMEmbeddingCache:
                 lru = self._cpu_lru or self._gpu_lru
                 if not lru:
                     return
-                self._remove_entry_locked(next(iter(lru)), eviction=True)
+                removal = self._unlink_entry_locked(next(iter(lru)), eviction=True)
+            self._finish_removal(removal)
 
     def _make_gpu_pool_room(self, required_bytes: int) -> None:
         while required_bytes:
@@ -1158,9 +1351,7 @@ class MMEmbeddingCache:
             or required_cpu > self._cpu_max_bytes
             or (required_gpu == 0 and required_cpu == 0)
         ):
-            with self._lock:
-                if self._entries.get(cache_key) is entry:
-                    self._remove_entry_locked(cache_key, eviction=True)
+            self._remove_entry(cache_key, entry, eviction=True)
             return False
         if required_gpu:
             self._make_gpu_room(required_gpu)
@@ -1200,7 +1391,7 @@ class MMEmbeddingCache:
             with self._lock:
                 if self._entries.get(cache_key) is entry:
                     self._stats["transfer_error"] += 1
-                    self._remove_entry_locked(cache_key, eviction=True)
+            self._remove_entry(cache_key, entry, eviction=True)
             return False
         except Exception:
             # Cache insertion is optional. Preserve the successful computation
@@ -1211,20 +1402,30 @@ class MMEmbeddingCache:
             with self._lock:
                 if self._entries.get(cache_key) is entry:
                     self._stats["transfer_error"] += 1
-                    self._remove_entry_locked(cache_key, eviction=True)
+            self._remove_entry(cache_key, entry, eviction=True)
             return False
         with self._lock:
-            if self._entries.get(cache_key) is not entry:
-                for owner in owners:
-                    owner.release()
-                return False
+            indexed = self._entries.get(cache_key) is entry
+        if not indexed:
+            for owner in owners:
+                owner.release()
+            return False
+        # Residency mutation is serialized by _transfer_lock. A request may
+        # hold storage_lock while cloning; do not wait for it under _lock.
+        with entry.storage_lock:
+            old_owners = entry.pool_owners
+            for owner in old_owners:
+                owner.add_events(events)
+            entry.result = pooled_result
+            entry.offloaded = offloaded
+            entry.ready_events = events
+            entry.pool_owners = owners
+        for owner in old_owners:
+            owner.release()
+        with self._lock:
             self._admit_locked(
                 cache_key,
                 entry,
-                pooled_result,
-                offloaded,
-                events,
-                owners,
                 gpu_bytes,
                 cpu_bytes,
                 _embedding_output_tokens(result),
@@ -1268,16 +1469,15 @@ class MMEmbeddingCache:
             with self._lock:
                 if self._entries.get(cache_key) is not entry:
                     return
-                if not self.enabled:
-                    self._remove_entry_locked(cache_key)
-                    return
+            if not self.enabled:
+                self._remove_entry(cache_key, entry)
+                return
             if gpu_bytes > self._gpu_max_bytes:
                 self._store_cpu(cache_key, entry, result, entry.ready_events)
             elif cpu_bytes > self._cpu_max_bytes or (
                 gpu_bytes == 0 and self._cpu_max_bytes == 0
             ):
-                with self._lock:
-                    self._remove_entry_locked(cache_key)
+                self._remove_entry(cache_key, entry)
             else:
                 self._store_pooled(
                     cache_key,
@@ -1390,10 +1590,9 @@ class MMEmbeddingCache:
         self._remove_if_same(cache_key, entry)
 
     def _remove_if_same(self, cache_key: str, expected: MMEmbeddingCacheEntry) -> bool:
-        with self._transfer_lock, self._lock:
-            if self._entries.get(cache_key) is not expected:
+        with self._transfer_lock:
+            if not self._remove_entry(cache_key, expected):
                 return False
-            self._remove_entry_locked(cache_key)
         self._report_current_residency()
         return True
 
@@ -1402,8 +1601,10 @@ class MMEmbeddingCache:
         cache_key: str,
         entry: MMEmbeddingCacheEntry,
         result: Any,
+        *,
+        before_publish: Optional[Callable[[], None]] = None,
     ) -> bool:
-        return entry.complete(result)
+        return entry.complete(result, before_publish=before_publish)
 
     def fail(
         self, cache_key: str, entry: MMEmbeddingCacheEntry, error: Exception
@@ -1419,6 +1620,17 @@ class MMEmbeddingCache:
     def peek(self, cache_key: str) -> Optional[MMEmbeddingCacheEntry]:
         with self._lock:
             return self._entries.get(cache_key)
+
+    def _with_current_entry(self, cache_key, expected, action):
+        """Validate and publish sidecar metadata atomically with index removal.
+
+        action may take the hash index lock, but must not copy tensors, touch
+        pools, or call back into this cache. Never acquire these in reverse.
+        """
+        with self._lock:
+            if self._entries.get(cache_key) is expected and expected.error is None:
+                return action()
+        return None
 
     def resident_tiers(
         self, keys: Optional[List[str]] = None, limit: Optional[int] = None
@@ -1455,8 +1667,12 @@ class MMEmbeddingCache:
                 # Pool sizes are fixed. Runtime growth is rare and cannot move
                 # live pool views safely, so discard indexed values first.
                 with self._lock:
-                    for key in list(self._entries):
-                        self._remove_entry_locked(key, eviction=True)
+                    removals = [
+                        self._unlink_entry_locked(key, eviction=True)
+                        for key in list(self._entries)
+                    ]
+                for removal in removals:
+                    self._finish_removal(removal)
                 if grow_gpu:
                     self._gpu_pool = _TensorMemoryPool(
                         gpu_max_bytes,
@@ -1472,16 +1688,27 @@ class MMEmbeddingCache:
             self._make_gpu_room(0)
             self._make_cpu_room(0)
             with self._lock:
-                if cpu_max_bytes == 0:
-                    for key in list(self._cpu_lru):
-                        self._remove_entry_locked(key, eviction=True)
+                removals = (
+                    [
+                        self._unlink_entry_locked(key, eviction=True)
+                        for key in list(self._cpu_lru)
+                    ]
+                    if cpu_max_bytes == 0
+                    else []
+                )
+            for removal in removals:
+                self._finish_removal(removal)
         self._report_current_residency()
 
     def clear(self, error: Optional[Exception] = None) -> None:
-        with self._transfer_lock, self._lock:
-            entries = list(self._entries.values())
-            for key in list(self._entries):
-                self._remove_entry_locked(key)
+        with self._transfer_lock:
+            with self._lock:
+                entries = list(self._entries.values())
+                removals = [
+                    self._unlink_entry_locked(key) for key in list(self._entries)
+                ]
+            for removal in removals:
+                self._finish_removal(removal)
         if error is not None:
             for entry in entries:
                 if not entry.is_done:
