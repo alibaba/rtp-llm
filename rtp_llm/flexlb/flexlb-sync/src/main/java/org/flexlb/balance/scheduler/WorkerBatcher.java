@@ -40,7 +40,11 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.LongMath.saturatedAdd;
 
-/** Queue execution for one P generation; endpoint state owns identities and capacity. */
+/**
+ * QUEUE execution for one Prefill generation, with SINGLE or FIXED_WINDOW decisions. NON_BATCH
+ * publishes individual routes; BATCH sends an engine batch. DIRECT does not use this executor.
+ * Endpoint state owns request identities and capacity.
+ */
 public final class WorkerBatcher {
 
     /** Frozen decision evidence; the log representation is materialized only on failure. */
@@ -526,14 +530,6 @@ public final class WorkerBatcher {
             List<RequestRoute> candidates,
             String reason,
             PrefillTimePredictor.Evaluator evaluator,
-            OptionalLong plannedPrediction) {
-        return processSelection(candidates, reason, evaluator, plannedPrediction, null);
-    }
-
-    private CapacityBoundary processSelection(
-            List<RequestRoute> candidates,
-            String reason,
-            PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPrediction,
             RequestRoute bypassedHead) {
         queueGuard.lock();
@@ -586,7 +582,7 @@ public final class WorkerBatcher {
                     prep.transferred = true;
                     dispatcher.deliverBatch(command);
                 } else {
-                    deliverRoutes(
+                    publishRoutes(
                             prep.members,
                             prep.predictions,
                             precedingWork,
@@ -633,7 +629,7 @@ public final class WorkerBatcher {
     }
 
     /** Route publication and its committed queue owner finish before telemetry. */
-    private void deliverRoutes(
+    private void publishRoutes(
             List<Member> members,
             long[] predictions,
             WorkSnapshot precedingWork,
@@ -859,8 +855,6 @@ public final class WorkerBatcher {
 
     private BatcherCycleResult processQueue() {
         int maxRequests = settings.maxRequests();
-        long predictionBudgetMs = settings.executionBudgetMs();
-        long windowMs = settings.collectionWaitMs();
         PrefillState.QueueSnapshot snapshot = prefillState.captureQueue(maxRequests);
         RequestRoute head = snapshot.head();
         if (head == null) {
@@ -898,26 +892,57 @@ public final class WorkerBatcher {
         }
         try {
             PrefillTimePredictor.Evaluator evaluator = prefillEndpoint.predictor.evaluator();
+            var result = decideGroup(snapshot, null, evaluator, constraints);
+            if (settings.priorityOrdering()
+                    && result.unavailable() != null
+                    && result.unavailable().resource() == CapacityBoundary.Resource.DECODE_ENGINE) {
+                decideGroup(
+                        prefillState.captureQueue(Math.max(2, maxRequests)),
+                        head,
+                        evaluator,
+                        schedulingConstraints());
+            }
+            return result;
+        } catch (InvalidPrefillPredictionException failure) {
+            return commitBoundary(head, CapacityBoundary.failed(failure), snapshot.queueVersion());
+        }
+    }
+
+    private BatcherCycleResult decideGroup(
+            PrefillState.QueueSnapshot snapshot,
+            RequestRoute bypassedHead,
+            PrefillTimePredictor.Evaluator evaluator,
+            GroupPlanner.Constraints constraints) {
+        var candidates =
+                bypassedHead == null ? snapshot.items() : bypassCandidates(snapshot, bypassedHead);
+        if (candidates.isEmpty()) {
+            return BatcherCycleResult.NO_ACTION;
+        }
+        RequestRoute first = candidates.getFirst();
+        try {
             var predictor =
-                    predictionBudgetMs > 0L
+                    settings.executionBudgetMs() > 0L
                             ? RequestTimeEstimation.newGroupPredictor(
                                     settings.dispatcherType(), evaluator)
                             : null;
             long planningAtMs = System.currentTimeMillis();
-            var selection = grouping.select(snapshot.items(), constraints, predictor);
+            var selection = grouping.select(candidates, constraints, predictor);
             if (selection.items().isEmpty()) {
                 return BatcherCycleResult.NO_ACTION;
             }
-            String reason = grouping.dispatchReason(selection, constraints, planningAtMs);
+            String reason =
+                    bypassedHead == null
+                            ? grouping.dispatchReason(selection, constraints, planningAtMs)
+                            : "decode_head_bypass";
             if (reason == null) {
                 return BatcherCycleResult.awaitingSchedulingChange(
-                        head,
+                        first,
                         snapshot.queueVersion(),
                         snapshot.schedulingInputVersion(),
                         Math.min(
                                 GroupPlanner.collectionDeadlineMs(
-                                        selection.windowOpenedAtMs(), windowMs),
-                                head.expiresAtMs()),
+                                        selection.windowOpenedAtMs(), settings.collectionWaitMs()),
+                                first.expiresAtMs()),
                         "Prefill collection window");
             }
             // Recheck advisory capacity after prediction, before acquiring hard-capacity leases.
@@ -933,16 +958,15 @@ public final class WorkerBatcher {
                             : OptionalLong.of(
                                     PrefillPredictionBoundary.committedDecisionGroupMs(
                                             selection.selectedPredictionMs().getAsDouble()));
-            var boundary = processSelection(selection.items(), reason, evaluator, prediction);
-            if (settings.priorityOrdering()
-                    && boundary != null
-                    && boundary.unavailable()
-                    && boundary.resource() == CapacityBoundary.Resource.DECODE_ENGINE) {
-                bypass(head, evaluator);
-            }
-            return commitBoundary(head, boundary, snapshot.queueVersion());
+            var boundary =
+                    processSelection(
+                            selection.items(), reason, evaluator, prediction, bypassedHead);
+            return commitBoundary(first, boundary, snapshot.queueVersion());
         } catch (InvalidPrefillPredictionException failure) {
-            return commitBoundary(head, CapacityBoundary.failed(failure), snapshot.queueVersion());
+            return commitBoundary(
+                    candidates.get(failure.memberIndex()),
+                    CapacityBoundary.failed(failure),
+                    snapshot.queueVersion());
         }
     }
 
@@ -957,43 +981,16 @@ public final class WorkerBatcher {
     }
 
     /** Only the immediate blocked head may be skipped; a second blocked member stops this batch. */
-    private void bypass(RequestRoute head, PrefillTimePredictor.Evaluator evaluator) {
-        var snapshot = prefillState.captureQueue(Math.max(2, settings.maxRequests()));
+    private List<RequestRoute> bypassCandidates(
+            PrefillState.QueueSnapshot snapshot, RequestRoute head) {
         if (snapshot.head() != head) {
-            return;
+            return List.of();
         }
         int end = 1;
         while (end < snapshot.items().size() && canBypass(head, snapshot.items().get(end))) {
             end++;
         }
-        if (end == 1) {
-            return;
-        }
-        var predictor =
-                settings.executionBudgetMs() > 0L
-                        ? RequestTimeEstimation.newGroupPredictor(
-                                settings.dispatcherType(), evaluator)
-                        : null;
-        var candidates = snapshot.items().subList(1, end);
-        try {
-            var selection = grouping.select(candidates, schedulingConstraints(), predictor);
-            var constraints = schedulingConstraints();
-            if (!selection.items().isEmpty()
-                    && selection.fitsKv(constraints.batchKvCapacity())
-                    && (selection.items().size() == 1
-                            || selection.fitsCompute(constraints.batchTokenCapacity()))) {
-                var boundary =
-                        processSelection(
-                                selection.items(),
-                                "decode_head_bypass",
-                                evaluator,
-                                OptionalLong.empty(),
-                                head);
-                commitBoundary(selection.items().getFirst(), boundary, 0L);
-            }
-        } catch (InvalidPrefillPredictionException failure) {
-            commitBoundary(candidates.getFirst(), CapacityBoundary.failed(failure), 0L);
-        }
+        return snapshot.items().subList(1, end);
     }
 
     // ==================== Internal: Run loop ====================
@@ -1311,11 +1308,16 @@ public final class WorkerBatcher {
                     return CapacityBoundary.failed(failure);
                 }
             }
-            long prediction =
-                    batch
-                            ? 0L
-                            : PrefillPredictionBoundary.predictSingleRequestMs(
-                                    evaluator, item.seqLen(), item.hitCache());
+            long prediction;
+            try {
+                prediction =
+                        batch
+                                ? 0L
+                                : PrefillPredictionBoundary.predictSingleRequestMs(
+                                        evaluator, item.seqLen(), item.hitCache());
+            } catch (InvalidPrefillPredictionException failure) {
+                return CapacityBoundary.failed(failure);
+            }
             var attempt = Member.prepare(item, runtime.deliveries().decodeDeliveryCapacity);
             if (!attempt.accepted()) {
                 return attempt.boundary();

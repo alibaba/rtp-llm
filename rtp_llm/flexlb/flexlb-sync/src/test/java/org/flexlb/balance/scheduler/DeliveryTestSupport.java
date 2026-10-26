@@ -80,7 +80,8 @@ public final class DeliveryTestSupport {
                                         call.getArgument(2),
                                         call.getArgument(3)))
                 .when(worker)
-                .processSelection(Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any());
+                .processSelection(
+                        Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any());
         Mockito.doAnswer(call -> stub.capacityAvailable(call.getArgument(0), call.getArgument(1)))
                 .when(worker)
                 .capacityAvailable(Mockito.any(), Mockito.any());
@@ -100,7 +101,7 @@ public final class DeliveryTestSupport {
             String reason,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong prediction) {
-        return worker.processSelection(items, reason, evaluator, prediction);
+        return worker.processSelection(items, reason, evaluator, prediction, null);
     }
 
     public static void afterSelection(
@@ -111,7 +112,8 @@ public final class DeliveryTestSupport {
                             return call.callRealMethod();
                         })
                 .when(worker)
-                .processSelection(Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any());
+                .processSelection(
+                        Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any());
     }
 
     @FunctionalInterface
@@ -141,7 +143,8 @@ public final class DeliveryTestSupport {
                                             }
                                         }))
                 .when(worker)
-                .processSelection(Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any());
+                .processSelection(
+                        Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any());
     }
 
     public static void beforeCommit(WorkerBatcher worker, Runnable hook) {

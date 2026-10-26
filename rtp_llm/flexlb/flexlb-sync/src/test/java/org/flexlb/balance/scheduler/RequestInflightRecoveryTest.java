@@ -251,7 +251,8 @@ class RequestInflightRecoveryTest {
                                 List.of(f.route, behindHead),
                                 "ordered-prefix",
                                 mock(PrefillTimePredictor.Evaluator.class),
-                                java.util.OptionalLong.empty());
+                                java.util.OptionalLong.empty(),
+                                null);
                 assertNotNull(boundary, "The ordered prefix cannot skip its blocked head");
                 assertEquals(CapacityBoundary.Status.UNAVAILABLE, boundary.status());
                 assertEquals(0L, d2.routingView().engineCapacityUsed());
