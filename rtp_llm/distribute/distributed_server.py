@@ -20,7 +20,7 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 from rtp_llm.utils import scr_vip
-from rtp_llm.utils.gang_info import GangInfoReader
+from rtp_llm.utils.gang_info import GangInfoReader, get_gang_member
 from rtp_llm.utils.scr_local_comm import local_comm_enabled, validate_local_members
 
 
@@ -540,14 +540,15 @@ def get_master(
 ) -> (str, str):
     port = ""
     if scr_vip.enabled(parallelism_config):
-        return (
-            scr_vip.topology(
-                parallelism_config,
-                GangInfoReader.from_config(distribute_config),
-                wait=True,
-            )[0],
-            port,
+        nodes = scr_vip.topology(
+            parallelism_config,
+            GangInfoReader.from_config(distribute_config),
+            wait=True,
         )
+        address, port = get_master_from_c2(distribute_config)
+        if address != nodes[0]:
+            raise RuntimeError("SCR master changed after validating C2 gang info")
+        return address, port
     if parallelism_config.local_world_size < parallelism_config.world_size:
         # from config file
         if distribute_config.distribute_config_file:
@@ -579,12 +580,11 @@ def get_master(
 
 
 def get_master_from_json(gang_info_json: Dict[str, Any]) -> (str, str):
-    # here is only the fake ip
-    for name, info in gang_info_json.items():
-        if name.endswith("part0") or name.endswith("-rank-0"):
-            port = info.get("port", 0)
-            port_str = str(port) if port else ""
-            return info["ip"], port_str
+    info = get_gang_member(gang_info_json, 0)
+    if info is not None:
+        port = info.get("port", 0)
+        port_str = str(port) if port else ""
+        return info["ip"], port_str
     return "", ""
 
 

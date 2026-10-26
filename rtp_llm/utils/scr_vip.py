@@ -10,13 +10,12 @@ advertisements still use Pod IPs.
 import ipaddress
 import json
 import os
-import re
 import socket
 import subprocess
 import time
 from pathlib import Path
 
-from rtp_llm.utils.gang_info import GangInfoReader
+from rtp_llm.utils.gang_info import GangInfoReader, get_gang_member
 
 VIP_INTERFACE = "scr_vxlan0"
 NETWORK_READY_SOCKET = Path("/scr-share/snm/daemon.sock")
@@ -36,25 +35,25 @@ def _read_topology(world_size: int, local_world_size: int, gang_info: GangInfoRe
         raise ValueError("SCR gang info must be an object")
     nodes = {}
     real_ip_by_vip = {}
-    for name, info in rows.items():
-        match = re.search(r"(?:^|-)rank-(\d+)$", name)
-        if match is None:
-            raise ValueError(f"SCR gang member has no node rank: {name}")
-        rank = int(match.group(1))
+    node_count = world_size // local_world_size
+    if len(rows) != node_count:
+        raise ValueError("SCR gang info does not match the complete node topology")
+    for rank in range(node_count):
+        info = get_gang_member(rows, rank)
+        if info is None:
+            raise ValueError(f"SCR gang info is missing node {rank}")
         vip = str(ipaddress.IPv4Address(info["ip"]))
         real = str(ipaddress.IPv4Address(info["real_ip"]))
         for address in (vip, real):
             parsed = ipaddress.IPv4Address(address)
             if parsed.is_loopback or parsed.is_unspecified or parsed.is_multicast:
                 raise ValueError("SCR gang addresses must be unicast")
-        if vip == real or rank in nodes or vip in nodes.values():
+        if vip == real or vip in nodes.values():
             raise ValueError(
                 "SCR gang info requires distinct VIPs and unique node ranks"
             )
         nodes[rank] = vip
         real_ip_by_vip[vip] = real
-    if set(nodes) != set(range(world_size // local_world_size)):
-        raise ValueError("SCR gang info does not match the complete node topology")
     return nodes, real_ip_by_vip
 
 
@@ -103,20 +102,16 @@ def topology(pc, gang_info: GangInfoReader, *, wait: bool = False) -> dict[int, 
         raise ValueError("SCR VIP requires equally sized nodes")
     # The runc interposer reads node topology separately from RTP's GPU ranks.
     # Missing RANK_SIZE silently selects its single-node IPC registry.
-    expected = {
-        "RANK_SIZE": pc.world_size // pc.local_world_size,
-        "RANK_ID": pc.world_rank // pc.local_world_size,
-    }
-    for name, value in expected.items():
-        if os.environ.get(name) != str(value):
-            raise ValueError(
-                f"SCR VIP requires {name}={value} in the worker environment"
-            )
+    node_count = pc.world_size // pc.local_world_size
+    if os.environ.get("RANK_SIZE") != str(node_count):
+        raise ValueError(
+            f"SCR VIP requires RANK_SIZE={node_count} in the worker environment"
+        )
     deadline = time.monotonic() + (120 if wait else 0)
     while True:
         try:
             nodes = read_topology(pc.world_size, pc.local_world_size, gang_info)
-            validate_device(nodes[int(os.environ["RANK_ID"])])
+            validate_device(nodes[pc.world_rank // pc.local_world_size])
             return nodes
         except (
             OSError,
@@ -133,7 +128,7 @@ def topology(pc, gang_info: GangInfoReader, *, wait: bool = False) -> dict[int, 
 def internal_ip(pc, fallback: str, gang_info: GangInfoReader) -> str:
     if not enabled(pc):
         return fallback
-    return topology(pc, gang_info, wait=True)[int(os.environ["RANK_ID"])]
+    return topology(pc, gang_info, wait=True)[pc.world_rank // pc.local_world_size]
 
 
 def configure_network(pc) -> None:
