@@ -40,7 +40,6 @@ from rtp_llm.utils import scr_vip
 from rtp_llm.utils.scr_local_comm import cache_store_advertise_ip
 
 
-@dataclass
 def resolve_pd_role_type(py_env_configs) -> RoleType:
     """Return the engine PD role for this process.
 
@@ -58,6 +57,7 @@ def resolve_pd_role_type(py_env_configs) -> RoleType:
     return launcher_role
 
 
+@dataclass
 class EngineConfig:
     """Engine configuration collection created from py_env_configs.
 
