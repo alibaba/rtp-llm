@@ -93,7 +93,7 @@ The following legacy options and environment variables were removed and must no 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
-| `--eplb_mode` | `NONE`, `STATS`, `EPLB`, or `ALL`. `STATS` collects counts without migration and allows online switching to `EPLB` or `ALL`. Both `EPLB` and `ALL` collect counts and rearrange experts. With EP > 1, enabled runtimes prepare shuffle resources and warm up planning at startup, including `STATS` and a paused update interval. This preserves the initial weights, routing maps and statistics. Monitoring is configured independently. | "NONE" |
+| `--eplb_mode` | `NONE`, `STATS`, `EPLB`, or `ALL`. Set the mode at startup; online changes are disabled. `STATS` collects counts without migration. Both `EPLB` and `ALL` collect counts and rearrange experts. With EP > 1, enabled runtimes prepare shuffle resources and warm up planning at startup, including `STATS` and a paused update interval. This preserves the initial weights, routing maps and statistics. Monitoring is configured independently. | "NONE" |
 | `--redundant_expert` | Number of redundant experts. | 0 |
 | `--eplb_update_time` | Rearrangement interval in eligible model steps. `0` disables rearrangement; the first update runs after `max(1, interval // 4)` eligible steps. | 0 |
 | `--eplb_stats_window_size` | Rearrangement count window. Must be non-negative; a positive update interval requires `1 <= window <= interval`. | 100 |
@@ -106,7 +106,7 @@ The following legacy options and environment variables were removed and must no 
 
 Each rearrangement handles every layer in a homogeneous weight-layout group. The former CPU layer-selection and debug options (`balance_method`, `eplb_balance_layer_per_step`, `eplb_force_repack`, and `eplb_test_mode`) have been removed.
 
-`POST /update_eplb_config` accepts `{"mode": "ALL", "update_time": 5000}`. `update_time` is a non-negative integer step interval: omit it to keep the current interval, or use `0` to disable rearrangement. The preallocated count window must fit any positive interval. A runtime started with `NONE` cannot be enabled online; start with `STATS` to allow online enabling.
+`POST /update_eplb_config` is disabled. Its backend RPC returns `UNIMPLEMENTED` without changing the engine configuration. Set `EPLB_MODE` and `EPLB_UPDATE_TIME` at startup; automatic rearrangement continues to follow that configuration.
 
 `moe_lb` follows DeepInfer: sum the maximum EP-rank load for each step and layer,
 then divide by the sum of their mean EP-rank loads. `1.0` means balanced; larger

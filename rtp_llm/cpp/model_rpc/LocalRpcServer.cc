@@ -1127,34 +1127,11 @@ LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request
     return grpc::Status::OK;
 }
 
-grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*             context,
-                                              const UpdateEplbConfigRequestPB* request,
-                                              EmptyPB*                         response) {
-    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
-    const string mode_str = request->mode();
-    EPLBConfig   config;
-    if (mode_str == "EPLB" || mode_str == "eplb") {
-        config.eplb_mode = EplbMode::EPLB;
-    } else if (mode_str == "STATS" || mode_str == "stats") {
-        config.eplb_mode = EplbMode::STATS;
-    } else if (mode_str == "NONE" || mode_str == "none") {
-        config.eplb_mode = EplbMode::NONE;
-    } else if (mode_str == "ALL" || mode_str == "all") {
-        config.eplb_mode = EplbMode::ALL;
-    } else {
-        RTP_LLM_LOG_WARNING("set eplb mode failed, unknown mode : %s", mode_str.c_str());
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid eplb mode");
-    }
-    const bool has_update_time = request->update_interval_case() == UpdateEplbConfigRequestPB::kUpdateTime;
-    if (has_update_time && request->update_time() < 0) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "EPLB update_time must be non-negative");
-    }
-    // The update-only sentinel is resolved by the controller before publication.
-    config.eplb_update_time = has_update_time ? request->update_time() : -1;
-    if (!engine_->updateEplbConfig(config)) {
-        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "Engine rejected EPLB configuration update");
-    }
-    return grpc::Status::OK;
+grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*, const UpdateEplbConfigRequestPB*, EmptyPB*) {
+    // Frontends on non-root DP ranks cannot publish a controller update.
+    // Reject all online updates until the request has a consistent owner.
+    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
+                        "Runtime EPLB configuration updates are disabled; configure EPLB at startup");
 }
 
 void LocalRpcServer::reportWorkerStatusTime(int64_t request_begin_time_us, int64_t request_after_ws_time_us) {

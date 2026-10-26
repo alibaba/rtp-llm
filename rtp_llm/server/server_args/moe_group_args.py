@@ -112,7 +112,7 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         type=str,
         default="NONE",
         help=(
-            "专家负载均衡模式。STATS 采样但不迁移，支持在线切换到 EPLB/ALL。"
+            "专家负载均衡模式，在启动时指定，不支持在线修改。STATS 采样但不迁移。"
             "EPLB 和 ALL 均采样并重排专家；搬迁缓冲区在首次重排时初始化。"
             "非 NONE 模式要求模型实现 EPLB、完整专家 EP=WORLD、PP=1 且关闭 FFN 分离；"
             "仅上报负载指标请用 NONE 并设置 eplb_metrics_report_interval。"
