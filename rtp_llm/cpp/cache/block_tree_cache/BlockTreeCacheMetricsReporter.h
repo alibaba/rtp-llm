@@ -35,6 +35,8 @@ struct BlockTreePoolMetricsSnapshot {
     size_t      available_blocks{0};
     size_t      active_blocks{0};
     size_t      request_ref_blocks{0};
+    size_t      remote_connector_ref_blocks{0};
+    size_t      pd_connector_ref_blocks{0};
     size_t      block_cache_ref_blocks{0};
     size_t      load_ref_blocks{0};
     size_t      eviction_target_ref_blocks{0};

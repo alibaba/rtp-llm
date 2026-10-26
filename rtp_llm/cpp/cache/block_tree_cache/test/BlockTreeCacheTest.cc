@@ -686,6 +686,56 @@ TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
     }
 }
 
+TEST(BlockTreeCacheMetricsTest, ExternalOwnerSnapshotsAndMetricsUseExistingPoolTags) {
+    auto        pools = makeStructuralDevicePools(1, "external_owner_metrics");
+    const auto& pool  = pools.front();
+    auto        group = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);
+    initializeTestGroupSet(group, pools);
+    const auto blocks = pool->malloc(2).value();
+    pool->incRef(blocks.front());
+    pool->incRef(blocks.front(), DeviceBlockRefType::REMOTE_CONNECTOR);
+    pool->incRef(blocks.back(), DeviceBlockRefType::REMOTE_CONNECTOR);
+    pool->incRef(blocks.back(), DeviceBlockRefType::PD_CONNECTOR);
+
+    BlockTreeCacheMetricsReporter snapshot_reporter(nullptr);
+    const auto                    snapshots = snapshot_reporter.collectPoolMetricsSnapshots({group});
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots.front().request_ref_blocks, 1u);
+    EXPECT_EQ(snapshots.front().remote_connector_ref_blocks, 2u);
+    EXPECT_EQ(snapshots.front().pd_connector_ref_blocks, 1u);
+    EXPECT_EQ(snapshots.front().active_blocks, 2u);
+
+    auto                  reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto*                 metrics  = reporter->getMetricsGroup<RtpLLMCachePoolMetrics>();
+    kmonitor::MetricsTags tags("pool_name", pool->poolName());
+    tags.AddTag("tier", "DEVICE");
+    RtpLLMCachePoolMetricsCollector collector;
+    collector.request_ref_blocks          = snapshots.front().request_ref_blocks;
+    collector.remote_connector_ref_blocks = snapshots.front().remote_connector_ref_blocks;
+    collector.pd_connector_ref_blocks     = snapshots.front().pd_connector_ref_blocks;
+    ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->request_ref_blocks_metric, tags, "rtp_llm_kv_cache_request_ref_blocks"), 1);
+    EXPECT_DOUBLE_EQ(
+        snapshotQps(metrics->remote_connector_ref_blocks_metric, tags, "rtp_llm_kv_cache_remote_connector_ref_blocks"),
+        2);
+    EXPECT_DOUBLE_EQ(
+        snapshotQps(metrics->pd_connector_ref_blocks_metric, tags, "rtp_llm_kv_cache_pd_connector_ref_blocks"), 1);
+
+    pool->decRef(blocks.front());
+    pool->decRef(blocks, DeviceBlockRefType::REMOTE_CONNECTOR);
+    pool->decRef(blocks.back(), DeviceBlockRefType::PD_CONNECTOR);
+    collector.request_ref_blocks          = 0;
+    collector.remote_connector_ref_blocks = 0;
+    collector.pd_connector_ref_blocks     = 0;
+    ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->request_ref_blocks_metric, tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->remote_connector_ref_blocks_metric, tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->pd_connector_ref_blocks_metric, tags), 0);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+    EXPECT_TRUE(reporter->getTags().FindTag("tier").empty());
+    EXPECT_TRUE(reporter->getTags().FindTag("pool_name").empty());
+}
+
 TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyReportPopulatedValues) {
     auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     for (const Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
@@ -1784,6 +1834,43 @@ TEST_F(BlockTreeCacheTest, WatermarkDirectDropSkipsHeldLruCandidateUntilLastRequ
     EXPECT_EQ(pool->freeBlocksNum(), initial_free + 2);
     EXPECT_TRUE(cache_->tree()->findNode({100}).empty());
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
+}
+
+TEST_F(BlockTreeCacheTest, CapacityReleaseRetriesWatermarkWithoutDroppingHeldOrFrozenBlocks) {
+    std::shared_ptr<BlockTreeCache> cache = std::move(cache_);
+    const auto& pool = cache->groupSets()[0]->devicePools()[0];
+    pool->incRef(42, DeviceBlockRefType::REQUEST);
+    pool->incRef(42, DeviceBlockRefType::REMOTE_CONNECTOR);
+    pool->freezeBlock(43);
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    cache->insert({100}, resources, Tier::DEVICE);
+    resources[0][0].device_blocks = {43};
+    cache->insert({200}, resources, Tier::DEVICE);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.99);
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
+    EXPECT_FALSE(cache->tree()->findNode({100}).empty());
+
+    const std::weak_ptr<BlockTreeCache> weak_cache = cache;
+    pool->setCapacityChangeCallback([weak_cache] {
+        if (const auto current = weak_cache.lock()) {
+            current->onCapacityChanged();
+        }
+    });
+    pool->decRef(42, DeviceBlockRefType::REQUEST);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    EXPECT_FALSE(cache->tree()->findNode({100}).empty());
+    EXPECT_TRUE(pool->isAllocated(42));
+
+    // Remote upload completion releases the last external pin, with no new insert.
+    pool->decRef(42, DeviceBlockRefType::REMOTE_CONNECTOR);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    EXPECT_TRUE(cache->tree()->findNode({100}).empty());
+    EXPECT_FALSE(pool->isAllocated(42));
+    EXPECT_FALSE(cache->tree()->findNode({200}).empty());
+    EXPECT_TRUE(pool->isAllocated(43));
+    EXPECT_TRUE(pool->isFrozen(43));
+    pool->setCapacityChangeCallback({});
 }
 
 TEST_F(BlockTreeCacheTest, WatermarkDirectDropPreservesDeviceBlockWithTreeOperationReference) {
