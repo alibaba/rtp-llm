@@ -326,20 +326,14 @@ class RequestTerminalSettlementTest {
                         })
                 .when(assignedDecode)
                 .publishCapacity(org.flexlb.balance.endpoint.DecodeEndpoint.CapacityEdge.BOTH);
+        assertTrue(
+                RequestProtocolTestSupport.preemptionPhase(
+                        f.scheduler(), preemption, PreemptionCancelPhase.NOT_FOUND_STALE));
         if (notificationFails) {
             assertSame(
                     notificationFailure,
-                    assertThrows(
-                            IllegalStateException.class,
-                            () ->
-                                    RequestProtocolTestSupport.preemptionPhase(
-                                            f.scheduler(),
-                                            preemption,
-                                            PreemptionCancelPhase.NOT_FOUND_STALE)));
-        } else {
-            assertTrue(
-                    RequestProtocolTestSupport.preemptionPhase(
-                            f.scheduler(), preemption, PreemptionCancelPhase.NOT_FOUND_STALE));
+                    org.springframework.test.util.ReflectionTestUtils.getField(
+                            f.scheduler().runtime, "failure"));
         }
         assertTrue(
                 RequestProtocolTestSupport.awaitResult(f.requestContext().data().getFuture())
@@ -367,7 +361,7 @@ class RequestTerminalSettlementTest {
         // The new protocol commits the exact reconciliation once; no redundant proof replay.
         verify(f.item().decodeEp(), times(1))
                 .updatePreemption(9L, DecodeResources.PreemptionUpdate.active(RESERVATION));
-        verify(f.item().decodeEp())
+        verify(f.item().decodeEp(), times(notificationFails ? 3 : 1))
                 .publishCapacity(org.flexlb.balance.endpoint.DecodeEndpoint.CapacityEdge.BOTH);
     }
 
@@ -425,18 +419,27 @@ class RequestTerminalSettlementTest {
                         })
                 .when(assignedDecode)
                 .publishCapacity(org.flexlb.balance.endpoint.DecodeEndpoint.CapacityEdge.BOTH);
-        var failed =
-                new PrefillState.PrefillRequestStatus(
-                        f.item(), PrefillState.PrefillRequestStatus.Kind.FAILED, 9L);
-        RequestProtocolTestSupport.applyPrefillStatus(
-                f.scheduler(), f.requestContext(), f.item().prefillEp(), role, failed);
+        long observedAtMs =
+                Math.max(
+                        System.currentTimeMillis(),
+                        f.requestContext().snapshot().lastWorkerAtMs() + 1L);
+        var failed = prefillFailure(f, role, observedAtMs);
+        f.scheduler().onEngineEvidence(f.requestContext(), failed);
+        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
         assertFalse((stage(f.requestContext()) == Stage.FINISHED));
         assertFalse(RequestProtocolTestSupport.preemptionFinished(claim));
         assertFalse(f.requestContext().data().getFuture().isDone());
         verify(f.item().decodeEp(), never())
                 .publishCapacity(org.flexlb.balance.endpoint.DecodeEndpoint.CapacityEdge.BOTH);
-        RequestProtocolTestSupport.applyPrefillStatus(
-                f.scheduler(), f.requestContext(), f.item().prefillEp(), role, failed);
+        var retained = f.requestContext().snapshot();
+        f.scheduler().onEngineEvidence(f.requestContext(), failed);
+        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        assertSame(retained, f.requestContext().snapshot());
+        verify(f.item().decodeEp(), times(1))
+                .updatePreemption(4L, DecodeResources.PreemptionUpdate.finished(RESERVATION));
+        f.scheduler()
+                .onEngineEvidence(f.requestContext(), prefillFailure(f, role, observedAtMs + 1L));
+        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
         verify(f.item().decodeEp(), times(2))
                 .updatePreemption(4L, DecodeResources.PreemptionUpdate.finished(RESERVATION));
         assertEquals(
@@ -461,6 +464,12 @@ class RequestTerminalSettlementTest {
                 .publishCapacity(org.flexlb.balance.endpoint.DecodeEndpoint.CapacityEdge.BOTH);
         verify(f.item().prefillEp(), never()).release(org.mockito.ArgumentMatchers.isNull(), any());
         verify(f.item().decodeEp(), never()).release(any(), any());
+    }
+
+    private static EngineEvidence prefillFailure(
+            Fixture fixture, RoleType role, long observedAtMs) {
+        return new EngineEvidence(
+                fixture.item(), RESERVATION, role, EngineKind.FAILED, 9L, null, observedAtMs);
     }
 
     @ParameterizedTest
@@ -961,8 +970,7 @@ class RequestTerminalSettlementTest {
                                                                 .DISPATCH_FAILED,
                                                         "original terminal failure",
                                                         false,
-                                                        false),
-                                                null)));
+                                                        false))));
         SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
         var original = context.snapshot().outcome();
         assertEquals("original terminal failure", original.detail());
@@ -973,7 +981,7 @@ class RequestTerminalSettlementTest {
                     attempts.get(),
                     "close installs at most three times, then settlement recovers at most twice");
             assertEquals(Phase.ENDING, context.snapshot().phase());
-            assertNotNull(context.snapshot().close().endOperation());
+            assertNull(context.snapshot().close().endOperation());
             assertTrue(context.snapshot().close().notificationsAttempted());
             assertFalse(context.snapshot().close().timersDone());
             assertTrue(timer.needsUpdate(context, context.snapshot().deadlines()));

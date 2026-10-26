@@ -5,12 +5,12 @@ import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.PrefillQueueRunner;
 import org.flexlb.balance.scheduler.QueueExecutionSettings;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -35,7 +35,7 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import static org.mockito.Mockito.mock;
 
-/** Same source on both revisions; includes real WorkerBatcher snapshot capture. */
+/** Same source on both revisions; includes real PrefillQueueRunner snapshot capture. */
 public class SnapshotBench {
     static final ThreadMXBean CPU = (ThreadMXBean) ManagementFactory.getThreadMXBean();
     static volatile long sink;
@@ -111,18 +111,18 @@ public class SnapshotBench {
         enableQueue.setAccessible(true);
         lock.lock();
         try {
-            enableQueue.invoke(state, WorkerBatcher.PRIORITY_QUEUE_ORDER);
+            enableQueue.invoke(state, PrefillQueueRunner.PRIORITY_QUEUE_ORDER);
         } finally {
             lock.unlock();
         }
         var worker =
-                new WorkerBatcher(
+                new PrefillQueueRunner(
                         endpoint.ipPort(),
                         endpoint,
                         QueueExecutionSettings.capture(config),
                         strategy,
                         state);
-        Field batcherField = PrefillEndpoint.class.getDeclaredField("batcher");
+        Field batcherField = PrefillEndpoint.class.getDeclaredField("queueRunner");
         batcherField.setAccessible(true);
         batcherField.set(endpoint, worker);
         var random = new Random(seed);

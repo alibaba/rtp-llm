@@ -69,7 +69,7 @@ class QueuedBatchDeliveryTest {
     private EngineGrpcClient grpc;
     private PrefillEndpoint prefill;
     private DecodeEndpoint decode;
-    private WorkerBatcher worker;
+    private PrefillQueueRunner worker;
     private final java.util.concurrent.CopyOnWriteArrayList<EngineRpcService.EnqueueBatchRequestPB>
             sent = new java.util.concurrent.CopyOnWriteArrayList<>();
 
@@ -145,13 +145,13 @@ class QueuedBatchDeliveryTest {
                         SchedulerTestSupport.repository(registry));
         worker =
                 org.mockito.Mockito.spy(
-                        new WorkerBatcher(
+                        new PrefillQueueRunner(
                                 "queued-delivery",
                                 prefill,
                                 QueueExecutionSettings.capture(config),
                                 dispatcher,
                                 ledger.prefill));
-        ReflectionTestUtils.setField(prefill, "batcher", worker);
+        ReflectionTestUtils.setField(prefill, "queueRunner", worker);
         ReflectionTestUtils.setField(prefill, "ownership", ledger.prefill);
         if (config.getDispatcher().getType() == org.flexlb.config.DispatcherConfig.Type.NON_BATCH) {
             return;
@@ -927,13 +927,13 @@ class QueuedBatchDeliveryTest {
         enableBypass(true);
         // The thread callback must observe the actual instance, rather than a Mockito spy copy.
         worker =
-                new WorkerBatcher(
+                new PrefillQueueRunner(
                         "bypass-wakeup",
                         prefill,
                         (QueueExecutionSettings) ReflectionTestUtils.getField(worker, "settings"),
                         dispatcher,
                         ledger.prefill);
-        ReflectionTestUtils.setField(prefill, "batcher", worker);
+        ReflectionTestUtils.setField(prefill, "queueRunner", worker);
         var head = item(1L);
         var blocker = blockDecode();
         worker.start();
@@ -966,7 +966,7 @@ class QueuedBatchDeliveryTest {
                 new DecodeResources.AdmissionCapacity(1, 100L));
         worker =
                 org.mockito.Mockito.spy(
-                        new WorkerBatcher(
+                        new PrefillQueueRunner(
                                 "bypass",
                                 prefill,
                                 new QueueExecutionSettings(
@@ -978,7 +978,7 @@ class QueuedBatchDeliveryTest {
                                         0L),
                                 dispatcher,
                                 ledger.prefill));
-        ReflectionTestUtils.setField(prefill, "batcher", worker);
+        ReflectionTestUtils.setField(prefill, "queueRunner", worker);
     }
 
     @Test
@@ -1008,7 +1008,7 @@ class QueuedBatchDeliveryTest {
     void singleNonBatchDecisionCanBypassOnlyOnce() {
         enableBypass(true);
         worker =
-                new WorkerBatcher(
+                new PrefillQueueRunner(
                         "single-bypass",
                         prefill,
                         new QueueExecutionSettings(
@@ -1020,7 +1020,7 @@ class QueuedBatchDeliveryTest {
                                 0L),
                         dispatcher,
                         ledger.prefill);
-        ReflectionTestUtils.setField(prefill, "batcher", worker);
+        ReflectionTestUtils.setField(prefill, "queueRunner", worker);
         var head = item(1L);
         var other = anotherDecode();
         item(2L, null, other, 50);
@@ -1049,7 +1049,7 @@ class QueuedBatchDeliveryTest {
         when(predictor.evaluator()).thenReturn(evaluator);
         ReflectionTestUtils.setField(prefill, "predictor", predictor);
         worker =
-                new WorkerBatcher(
+                new PrefillQueueRunner(
                         "predicted-bypass",
                         prefill,
                         new QueueExecutionSettings(

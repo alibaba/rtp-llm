@@ -40,10 +40,10 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Canonical endpoint-queue contract exposed by {@link WorkerBatcher}. */
-class WorkerBatcherQueueTest {
+/** Canonical endpoint-queue contract exposed by {@link PrefillQueueRunner}. */
+class PrefillQueueRunnerQueueTest {
 
-    private final List<WorkerBatcher> runtimes = new ArrayList<>();
+    private final List<PrefillQueueRunner> runtimes = new ArrayList<>();
     private FlexlbConfig config;
     private PrefillEndpoint prefillEndpoint;
     private BlockingDispatcher deliveryStrategy;
@@ -59,7 +59,7 @@ class WorkerBatcherQueueTest {
 
     @AfterEach
     void stopRuntimes() {
-        for (WorkerBatcher runtime : runtimes) {
+        for (PrefillQueueRunner runtime : runtimes) {
             assertNull(runtime.stopAndAwait());
         }
     }
@@ -80,12 +80,12 @@ class WorkerBatcherQueueTest {
                 new IllegalStateException("injected preparation failure");
         var callbackReturned = new CountDownLatch(1);
         var laterSelected = new CountDownLatch(1);
-        WorkerBatcher worker = null;
+        PrefillQueueRunner worker = null;
         try {
             prefillEndpoint =
                     org.flexlb.balance.endpoint.EndpointTestSupport.unstartedPrefill(
                             config, prefillEndpoint.getStatus(), deliveryStrategy, owner);
-            worker = org.flexlb.balance.endpoint.EndpointTestSupport.batcher(prefillEndpoint);
+            worker = org.flexlb.balance.endpoint.EndpointTestSupport.queueRunner(prefillEndpoint);
             var activeWorker = worker;
             var decode =
                     org.flexlb.balance.endpoint.EndpointTestSupport.decode(
@@ -196,17 +196,17 @@ class WorkerBatcherQueueTest {
     @Test
     void batchModeKeepsPriorityQueueWithoutAnExtraRequestCountLimit() {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
-        WorkerBatcher runtime = runningRuntime();
+        PrefillQueueRunner runtime = runningRuntime();
         RequestRoute low = item(901L, 10, Long.MAX_VALUE, 1, 128);
         RequestRoute high = item(902L, 90, Long.MAX_VALUE, 2, 128);
         assertTrue(runtime.offer(low));
         assertTrue(runtime.offer(high));
-        assertEquals(List.of(high, low), WorkerBatcherTestSupport.capture(runtime).items());
+        assertEquals(List.of(high, low), PrefillQueueRunnerTestSupport.capture(runtime).items());
     }
 
     @Test
     void priorityOrderIsPriorityDescendingThenActualOfferFifo() {
-        WorkerBatcher runtime = runningRuntime();
+        PrefillQueueRunner runtime = runningRuntime();
         long now = System.currentTimeMillis();
 
         assertTrue(runtime.offer(item(1, 50, now + 5_000, now, 128)));
@@ -214,14 +214,14 @@ class WorkerBatcherQueueTest {
         assertTrue(runtime.offer(item(3, 50, now + 1_000, now + 200, 128)));
         assertTrue(runtime.offer(item(4, 50, now + 5_000, now - 100, 128)));
 
-        var snapshot = WorkerBatcherTestSupport.capture(runtime);
+        var snapshot = PrefillQueueRunnerTestSupport.capture(runtime);
         assertEquals(List.of(2L, 1L, 3L, 4L), requestIds(snapshot.items()));
         assertEquals(4, snapshot.items().size());
     }
 
     @Test
     void priorityOrderUsesUniqueOfferSequenceBeforeRequestIdOrCallerTimestamp() {
-        WorkerBatcher runtime = runningRuntime();
+        PrefillQueueRunner runtime = runningRuntime();
         long now = System.currentTimeMillis();
 
         assertTrue(runtime.offer(item(1, 50, now + 9_000, now, 128)));
@@ -231,13 +231,13 @@ class WorkerBatcherQueueTest {
 
         assertEquals(
                 List.of(1L, 2L, 4L, 3L),
-                requestIds(WorkerBatcherTestSupport.capture(runtime).items()));
+                requestIds(PrefillQueueRunnerTestSupport.capture(runtime).items()));
     }
 
     @Test
     void fifoOrderIgnoresPriorityAndCallerTimestamp() {
         SchedulingTestConfig.useFifoQueue(config);
-        WorkerBatcher runtime = runningRuntime();
+        PrefillQueueRunner runtime = runningRuntime();
         long now = System.currentTimeMillis();
 
         assertTrue(runtime.offer(item(1, 30, now + 1_000, now, 128)));
@@ -245,34 +245,36 @@ class WorkerBatcherQueueTest {
         assertTrue(runtime.offer(item(3, 70, now + 100, now + 200, 128)));
 
         assertEquals(
-                List.of(1L, 2L, 3L), requestIds(WorkerBatcherTestSupport.capture(runtime).items()));
+                List.of(1L, 2L, 3L),
+                requestIds(PrefillQueueRunnerTestSupport.capture(runtime).items()));
     }
 
     @Test
     void snapshotsExposeExactCanonicalIdentitiesAndMonotonicMutationVersion() {
-        WorkerBatcher runtime = runningRuntime();
+        PrefillQueueRunner runtime = runningRuntime();
         RequestRoute first = item(11, 70, Long.MAX_VALUE, 1, 128);
         RequestRoute second = item(12, 50, Long.MAX_VALUE, 2, 128);
 
-        var empty = WorkerBatcherTestSupport.capture(runtime);
-        long emptyVersion = WorkerBatcherTestSupport.state(runtime).captureQueue(1).queueVersion();
+        var empty = PrefillQueueRunnerTestSupport.capture(runtime);
+        long emptyVersion =
+                PrefillQueueRunnerTestSupport.state(runtime).captureQueue(1).queueVersion();
         assertTrue(runtime.offer(first));
         assertTrue(runtime.offer(second));
-        var offered = WorkerBatcherTestSupport.capture(runtime);
+        var offered = PrefillQueueRunnerTestSupport.capture(runtime);
 
         long offeredVersion =
-                WorkerBatcherTestSupport.state(runtime).captureQueue(1).queueVersion();
+                PrefillQueueRunnerTestSupport.state(runtime).captureQueue(1).queueVersion();
         assertTrue(offeredVersion > emptyVersion);
         assertTrue(empty.items().isEmpty());
         assertSame(first, offered.items().get(0));
         assertSame(second, offered.items().get(1));
-        assertEquals(2, WorkerBatcherTestSupport.state(runtime).progress().queueDepth());
+        assertEquals(2, PrefillQueueRunnerTestSupport.state(runtime).progress().queueDepth());
         assertEquals(java.util.Map.of(70, 1, 50, 1), runtime.queueSizeByPriority());
 
-        assertTrue(runtime.control(first, WorkerBatcher.Control.REMOVE));
-        var removed = WorkerBatcherTestSupport.capture(runtime);
+        assertTrue(runtime.control(first, PrefillQueueRunner.Control.REMOVE));
+        var removed = PrefillQueueRunnerTestSupport.capture(runtime);
         assertTrue(
-                WorkerBatcherTestSupport.state(runtime).captureQueue(1).queueVersion()
+                PrefillQueueRunnerTestSupport.state(runtime).captureQueue(1).queueVersion()
                         > offeredVersion);
         assertEquals(List.of(first, second), offered.items());
         assertEquals(List.of(second), removed.items());
@@ -280,14 +282,14 @@ class WorkerBatcherQueueTest {
 
     @Test
     void removalRequiresTheExactQueuedIdentityEvenForSameRequestId() {
-        WorkerBatcher runtime = runningRuntime();
+        PrefillQueueRunner runtime = runningRuntime();
         RequestRoute canonical = item(21, 50, Long.MAX_VALUE, 1, 128);
         RequestRoute lookalike = item(21, 50, Long.MAX_VALUE, 1, 128);
         assertTrue(runtime.offer(canonical));
 
-        assertFalse(runtime.control(lookalike, WorkerBatcher.Control.REMOVE));
-        assertEquals(List.of(canonical), WorkerBatcherTestSupport.capture(runtime).items());
-        assertTrue(runtime.control(canonical, WorkerBatcher.Control.REMOVE));
+        assertFalse(runtime.control(lookalike, PrefillQueueRunner.Control.REMOVE));
+        assertEquals(List.of(canonical), PrefillQueueRunnerTestSupport.capture(runtime).items());
+        assertTrue(runtime.control(canonical, PrefillQueueRunner.Control.REMOVE));
     }
 
     @Test
@@ -298,8 +300,8 @@ class WorkerBatcherQueueTest {
                         prefillEndpoint.getStatus(),
                         deliveryStrategy,
                         mock(AbstractRequestScheduler.class));
-        WorkerBatcher runtime =
-                org.flexlb.balance.endpoint.EndpointTestSupport.batcher(prefillEndpoint);
+        PrefillQueueRunner runtime =
+                org.flexlb.balance.endpoint.EndpointTestSupport.queueRunner(prefillEndpoint);
         runtimes.add(runtime);
         runtime.start();
         var before = prefillEndpoint.captureRouteProjectionInputs();
@@ -308,15 +310,15 @@ class WorkerBatcherQueueTest {
         var after = prefillEndpoint.captureRouteProjectionInputs();
         assertTrue(after.ownershipVersion() > before.ownershipVersion());
         assertSame(before.work(), after.work());
-        assertTrue(runtime.control(queued, WorkerBatcher.Control.REMOVE));
+        assertTrue(runtime.control(queued, PrefillQueueRunner.Control.REMOVE));
         assertSame(before.work(), prefillEndpoint.captureRouteProjectionInputs().work());
     }
 
     @Test
     void controlTicketRunsOnWorkerOutsideQueueLock() throws Exception {
         AbstractRequestScheduler events = mock(AbstractRequestScheduler.class);
-        WorkerBatcher runtime =
-                WorkerBatcherTestSupport.create(
+        PrefillQueueRunner runtime =
+                PrefillQueueRunnerTestSupport.create(
                         "test-worker", prefillEndpoint, config, deliveryStrategy, events);
         runtimes.add(runtime);
         runtime.start();
@@ -336,12 +338,12 @@ class WorkerBatcherQueueTest {
                 .when(events)
                 .onQueueEvent(queued, AbstractRequestScheduler.QueueKind.CONTROL, null, null);
 
-        runtime.control(queued, WorkerBatcher.Control.WAKE);
+        runtime.control(queued, PrefillQueueRunner.Control.WAKE);
 
         assertTrue(delivered.await(5, TimeUnit.SECONDS));
         assertFalse(callbackHeldLock.get());
         assertFalse(callbackThread.get() == Thread.currentThread());
-        assertEquals(List.of(queued), WorkerBatcherTestSupport.capture(runtime).items());
+        assertEquals(List.of(queued), PrefillQueueRunnerTestSupport.capture(runtime).items());
     }
 
     @ParameterizedTest
@@ -356,8 +358,8 @@ class WorkerBatcherQueueTest {
                         mock(RequestSchedulerReporter.class),
                         mock(RecentCacheKeyTraceReporter.class));
         try {
-            WorkerBatcher runtime =
-                    WorkerBatcherTestSupport.create(
+            PrefillQueueRunner runtime =
+                    PrefillQueueRunnerTestSupport.create(
                             "test-worker", prefillEndpoint, config, deliveryStrategy, registry);
             runtimes.add(runtime);
             runtime.start();
@@ -382,14 +384,14 @@ class WorkerBatcherQueueTest {
                             })
                     .when(prefillEndpoint)
                     .signal(PrefillEndpoint.Signal.INPUT);
-            when(prefillEndpoint.control(queued, WorkerBatcher.Control.WAKE))
-                    .thenAnswer(call -> runtime.control(queued, WorkerBatcher.Control.WAKE));
+            when(prefillEndpoint.control(queued, PrefillQueueRunner.Control.WAKE))
+                    .thenAnswer(call -> runtime.control(queued, PrefillQueueRunner.Control.WAKE));
             AtomicReference<Thread> cleanupThread = new AtomicReference<>();
             AtomicInteger releases = new AtomicInteger();
             when(prefillEndpoint.release(null, queued))
                     .thenAnswer(
                             call -> {
-                                var state = WorkerBatcherTestSupport.state(runtime);
+                                var state = PrefillQueueRunnerTestSupport.state(runtime);
                                 assertFalse(
                                         Thread.holdsLock(context),
                                         "request cleanup must run outside Context's monitor");
@@ -430,7 +432,7 @@ class WorkerBatcherQueueTest {
                                             return true;
                                         })));
             }
-            assertEquals(List.of(queued), WorkerBatcherTestSupport.capture(runtime).items());
+            assertEquals(List.of(queued), PrefillQueueRunnerTestSupport.capture(runtime).items());
             RequestProtocolTestSupport.awaitCondition(
                     () -> {
                         var lock = prefillEndpoint.ownership.queueGuard();
@@ -464,20 +466,20 @@ class WorkerBatcherQueueTest {
                                                     .getRequestState(907L, 0L)
                                                     .state()
                                             == RequestState.Phase.CANCELLED
-                                    && WorkerBatcherTestSupport.state(runtime)
+                                    && PrefillQueueRunnerTestSupport.state(runtime)
                                                     .progress()
                                                     .queueDepth()
                                             == 0);
-            assertEquals(0, WorkerBatcherTestSupport.state(runtime).progress().queueDepth());
+            assertEquals(0, PrefillQueueRunnerTestSupport.state(runtime).progress().queueDepth());
             assertEquals(
                     0L,
-                    WorkerBatcherTestSupport.state(runtime)
+                    PrefillQueueRunnerTestSupport.state(runtime)
                             .admissionSummary(0, 0L)
                             .occupiedRequests());
             assertEquals(1, releases.get(), "the exact waiting resource seat is released once");
             assertFalse(
                     org.flexlb.balance.endpoint.EndpointTestSupport.releaseRequest(
-                            WorkerBatcherTestSupport.state(runtime), queued));
+                            PrefillQueueRunnerTestSupport.state(runtime), queued));
             assertEquals(
                     RequestState.Phase.CANCELLED,
                     SchedulerTestSupport.repository(registry).getRequestState(907L, 0L).state());
@@ -510,8 +512,8 @@ class WorkerBatcherQueueTest {
             config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
         }
         AbstractRequestScheduler events = mock(AbstractRequestScheduler.class);
-        WorkerBatcher runtime =
-                WorkerBatcherTestSupport.create(
+        PrefillQueueRunner runtime =
+                PrefillQueueRunnerTestSupport.create(
                         "stop-test", prefillEndpoint, config, deliveryStrategy, events);
         if (!callbackFails) {
             runtimes.add(runtime);
@@ -572,11 +574,11 @@ class WorkerBatcherQueueTest {
             assertSame(cleanupFailure, second.get(5L, TimeUnit.SECONDS));
             assertTrue(interruptPreserved.get());
             assertEquals(2, callbacks.get(), "later items must drain even after a callback fails");
-            assertEquals(0, WorkerBatcherTestSupport.state(runtime).progress().queueDepth());
+            assertEquals(0, PrefillQueueRunnerTestSupport.state(runtime).progress().queueDepth());
             assertSame(cleanupFailure, runtime.stopAndAwait());
             if (callbackFails) {
                 var retirement =
-                        WorkerBatcherTestSupport.state(runtime).retireGenerationOwnership();
+                        PrefillQueueRunnerTestSupport.state(runtime).retireGenerationOwnership();
                 assertNull(retirement.invariantFailure());
                 assertEquals(
                         List.of(queued),
@@ -591,9 +593,9 @@ class WorkerBatcherQueueTest {
         }
     }
 
-    private WorkerBatcher runningRuntime() {
-        WorkerBatcher runtime =
-                WorkerBatcherTestSupport.create(
+    private PrefillQueueRunner runningRuntime() {
+        PrefillQueueRunner runtime =
+                PrefillQueueRunnerTestSupport.create(
                         "test-worker",
                         prefillEndpoint,
                         config,

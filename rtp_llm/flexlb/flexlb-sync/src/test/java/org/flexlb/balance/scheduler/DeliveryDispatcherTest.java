@@ -662,8 +662,7 @@ class DeliveryDispatcherTest {
         RequestRoute second = createRequestRoute(2L, 500, 200, prefillEp);
         when(prefillEp.getIp())
                 .thenThrow(new IllegalStateException("endpoint unavailable before send"));
-        // Three bounded attempts for the throwing observer, then the unaffected request.
-        CountDownLatch attempted = new CountDownLatch(4);
+        CountDownLatch attempted = new CountDownLatch(2);
         var failures = new java.util.concurrent.ConcurrentHashMap<Long, Integer>();
         AtomicInteger uncertain = new AtomicInteger();
         BiConsumer<RequestRoute, DeliveryResult> throwingCallback =
@@ -684,7 +683,7 @@ class DeliveryDispatcherTest {
 
         assertTrue(attempted.await(5, TimeUnit.SECONDS));
         runtime.deliveries().awaitDeliveries();
-        assertEquals(java.util.Map.of(1L, 3, 2L, 1), failures);
+        assertEquals(java.util.Map.of(1L, 1, 2L, 1), failures);
         assertEquals(0, uncertain.get());
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
     }
@@ -696,8 +695,7 @@ class DeliveryDispatcherTest {
         RequestRoute second = createRequestRoute(2L, 500, 200, prefillEp);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenThrow(new IllegalStateException("client threw after invocation began"));
-        // Three bounded attempts for the throwing observer, then the unaffected request.
-        CountDownLatch attempted = new CountDownLatch(4);
+        CountDownLatch attempted = new CountDownLatch(2);
         AtomicInteger failures = new AtomicInteger();
         var uncertain = new java.util.concurrent.ConcurrentHashMap<Long, Integer>();
         BiConsumer<RequestRoute, DeliveryResult> throwingCallback =
@@ -719,7 +717,7 @@ class DeliveryDispatcherTest {
         assertTrue(attempted.await(5, TimeUnit.SECONDS));
         runtime.deliveries().awaitDeliveries();
         assertEquals(0, failures.get());
-        assertEquals(java.util.Map.of(1L, 3, 2L, 1), uncertain);
+        assertEquals(java.util.Map.of(1L, 1, 2L, 1), uncertain);
     }
 
     @Test
@@ -928,7 +926,7 @@ class DeliveryDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
-        CountDownLatch callbacksAttempted = new CountDownLatch(4);
+        CountDownLatch callbacksAttempted = new CountDownLatch(2);
         AtomicInteger successes = new AtomicInteger();
         AtomicInteger failures = new AtomicInteger();
         AtomicInteger uncertain = new AtomicInteger();
@@ -951,10 +949,7 @@ class DeliveryDispatcherTest {
         assertTrue(callbacksAttempted.await(5, TimeUnit.SECONDS));
         runtime.deliveries().awaitDeliveries();
         assertEquals(1, successes.get());
-        assertEquals(
-                3,
-                failures.get(),
-                "the throwing observer is retried within the existing publication budget");
+        assertEquals(1, failures.get(), "an observer failure must not replay a committed fact");
         assertEquals(0, uncertain.get(), "a later callback exception must not reclassify any item");
     }
 

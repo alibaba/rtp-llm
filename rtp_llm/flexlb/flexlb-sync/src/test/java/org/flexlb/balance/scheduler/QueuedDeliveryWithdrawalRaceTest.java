@@ -170,7 +170,7 @@ class QueuedDeliveryWithdrawalRaceTest {
         final QueuedRequestScheduler owner;
         final PrefillEndpoint prefill;
         final DecodeEndpoint decode;
-        final WorkerBatcher batcher;
+        final PrefillQueueRunner batcher;
         final RequestContext context;
         final CompletableFuture<Response> future;
         final DecodeResources.ReservationHandle reservation;
@@ -261,19 +261,19 @@ class QueuedDeliveryWithdrawalRaceTest {
             var state =
                     new PrefillState(
                             new ReentrantLock(),
-                            PrefillActiveIndex.ordered(16, WorkerBatcher.PRIORITY_QUEUE_ORDER),
+                            PrefillActiveIndex.ordered(16, PrefillQueueRunner.PRIORITY_QUEUE_ORDER),
                             System::currentTimeMillis);
             ReflectionTestUtils.setField(prefill, "ownership", state);
             batcher =
-                    new WorkerBatcher(
+                    new PrefillQueueRunner(
                             "withdrawal-race",
                             prefill,
                             QueueExecutionSettings.capture(config),
                             dispatcher,
                             state);
-            ReflectionTestUtils.setField(prefill, "batcher", batcher);
+            ReflectionTestUtils.setField(prefill, "queueRunner", batcher);
             var runtimeState =
-                    Class.forName("org.flexlb.balance.scheduler.WorkerBatcher$RuntimeState");
+                    Class.forName("org.flexlb.balance.scheduler.PrefillQueueRunner$RuntimeState");
             @SuppressWarnings({"rawtypes", "unchecked"})
             Object running = Enum.valueOf((Class) runtimeState, "RUNNING");
             // Drive the real selection directly so the regression controls both transaction

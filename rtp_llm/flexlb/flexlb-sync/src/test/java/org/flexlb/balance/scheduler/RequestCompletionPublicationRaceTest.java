@@ -26,6 +26,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.balance.scheduler.RequestProtocolTestSupport.await;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -842,8 +843,7 @@ class RequestCompletionPublicationRaceTest {
             var phase = context.snapshot().phase();
             org.mockito.Mockito.doReturn(null).when(publisher).tryRegister();
             try {
-                assertThrows(
-                        IllegalStateException.class,
+                Runnable reject =
                         () -> {
                             if (deliveryFailure) {
                                 fixture.scheduler()
@@ -868,10 +868,17 @@ class RequestCompletionPublicationRaceTest {
                                                         StrategyErrorType.WORKER_EXECUTION_FAILED,
                                                         null,
                                                         false,
-                                                        true),
-                                                null);
+                                                        true));
                             }
-                        });
+                        };
+                if (deliveryFailure) {
+                    assertDoesNotThrow(reject::run);
+                    assertNotNull(
+                            org.springframework.test.util.ReflectionTestUtils.getField(
+                                    fixture.scheduler().runtime, "failure"));
+                } else {
+                    assertThrows(IllegalStateException.class, reject::run);
+                }
                 assertSame(exact, context.snapshot().route());
                 assertEquals(phase, context.snapshot().phase());
                 assertNull(context.snapshot().close().endOperation());

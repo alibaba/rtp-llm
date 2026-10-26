@@ -28,8 +28,10 @@ import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.ResponseKind;
 import static org.flexlb.balance.scheduler.ContextResult.RouteDelivered;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -97,14 +99,13 @@ class RequestPublicationFailureOwnershipTest {
             assertSame(
                     failure,
                     assertThrows(
-                            IllegalStateException.class,
-                            () -> f.owner.closeRequest(context, end, null)));
+                            IllegalStateException.class, () -> f.owner.closeRequest(context, end)));
             if (beforeFreeze) {
                 assertNull(context.snapshot().outcome());
                 assertFalse(future.isDone());
                 assertEquals(0, registrations(f.runtime).size());
                 doCallRealMethod().when(context).beginClose(any(), anyLong());
-                f.owner.closeRequest(context, end, null);
+                f.owner.closeRequest(context, end);
                 assertTrue(future.get(5, TimeUnit.SECONDS).isSuccess());
             } else {
                 assertSame(
@@ -157,17 +158,13 @@ class RequestPublicationFailureOwnershipTest {
                 doThrow(failure).when(route).successResponse(anyBoolean());
             }
             try {
-                assertSame(
-                        failure,
-                        assertThrows(
-                                IllegalStateException.class,
-                                () ->
-                                        f.owner.onDeliveryEvidence(
-                                                delivery,
-                                                new RouteDelivered(
-                                                        delivery,
-                                                        0L,
-                                                        System.currentTimeMillis()))));
+                assertDoesNotThrow(
+                        () ->
+                                f.owner.onDeliveryEvidence(
+                                        delivery,
+                                        new RouteDelivered(
+                                                delivery, 0L, System.currentTimeMillis())));
+                assertSame(failure, SchedulerTestSupport.failure(f.owner));
                 assertSame(
                         failure,
                         assertThrows(
@@ -260,20 +257,19 @@ class RequestPublicationFailureOwnershipTest {
             ReflectionTestUtils.setField(publisher, "rejectedTaskWorker", recovery);
             ReflectionTestUtils.setField(publisher, "emergencyWorkers", emergency);
             try {
+                assertDoesNotThrow(
+                        () ->
+                                f.owner.onDeliveryEvidence(
+                                        delivery,
+                                        new RouteDelivered(
+                                                delivery, 0L, System.currentTimeMillis())));
                 var failure =
-                        assertThrows(
+                        assertInstanceOf(
                                 java.util.concurrent.RejectedExecutionException.class,
-                                () ->
-                                        f.owner.onDeliveryEvidence(
-                                                delivery,
-                                                new RouteDelivered(
-                                                        delivery, 0L, System.currentTimeMillis())));
-                assertSame(
-                        failure,
-                        assertThrows(
-                                        ExecutionException.class,
-                                        () -> future.get(5, TimeUnit.SECONDS))
-                                .getCause());
+                                assertThrows(
+                                                ExecutionException.class,
+                                                () -> future.get(5, TimeUnit.SECONDS))
+                                        .getCause());
                 RequestProtocolTestSupport.awaitCondition(() -> registrations(f.runtime).isEmpty());
                 assertEquals(ResponseKind.ACK, context.snapshot().selectedResponse().kind());
                 assertEquals(Phase.OPEN, context.snapshot().phase());
@@ -332,7 +328,9 @@ class RequestPublicationFailureOwnershipTest {
                                 route, RequestProtocolTestSupport.publication(() -> true)));
                 doThrow(failure)
                         .when(endpoint)
-                        .control(route, org.flexlb.balance.scheduler.WorkerBatcher.Control.WAKE);
+                        .control(
+                                route,
+                                org.flexlb.balance.scheduler.PrefillQueueRunner.Control.WAKE);
                 try {
                     assertSame(
                             failure,
@@ -352,7 +350,8 @@ class RequestPublicationFailureOwnershipTest {
                     doReturn(false)
                             .when(endpoint)
                             .control(
-                                    route, org.flexlb.balance.scheduler.WorkerBatcher.Control.WAKE);
+                                    route,
+                                    org.flexlb.balance.scheduler.PrefillQueueRunner.Control.WAKE);
                     admission.finish();
                 }
             }
@@ -433,7 +432,7 @@ class RequestPublicationFailureOwnershipTest {
                             failure,
                             assertThrows(
                                     IllegalStateException.class,
-                                    () -> f.owner.closeRequest(context, end, null)));
+                                    () -> f.owner.closeRequest(context, end)));
                     if (alreadyRunning) {
                         assertTrue(accepted.hasTaskOwner());
                         assertEquals(1, registrations(f.runtime).size());

@@ -1022,7 +1022,8 @@ public final class RequestContext {
         if (placement != null && !deliveryFailure) {
             return new Blocked<>(before, refresh(nowMs), Blocker.PLACEMENT);
         }
-        if (preemption != null
+        if (outcome == null
+                && preemption != null
                 && !preemption.finished()
                 && !deliveryFailure
                 && (pendingEnd == null
@@ -1128,7 +1129,7 @@ public final class RequestContext {
                         : exact != close.releaseOperation())) {
             return new Update(UpdateKind.STALE, before, before);
         }
-        if (notification != (progress.kind() == ProgressKind.NOTIFICATIONS)) {
+        if (notification != (progress.kind() != ProgressKind.RELEASE)) {
             throw new IllegalArgumentException("close progress belongs to another operation");
         }
         if (notification

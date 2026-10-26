@@ -62,7 +62,7 @@ public final class ExpirationTimer implements AutoCloseable {
     private final ScheduledThreadPoolExecutor executor;
     private final ConcurrentMap<RequestContext, Slot> slots = new ConcurrentHashMap<>();
     private final Object registrationMonitor = new Object();
-    private CompletableFuture<Throwable> closing;
+    private volatile CompletableFuture<Throwable> closing;
     private int registrations;
 
     ExpirationTimer(RequestRepository requests) {
@@ -85,6 +85,9 @@ public final class ExpirationTimer implements AutoCloseable {
 
     boolean needsUpdate(RequestContext context, Plan plan) {
         Slot observed = slots.get(context);
+        if (closing != null && requests.isClosed()) {
+            return observed != null;
+        }
         return requests.isCurrent(context)
                 && (observed == null
                         || plan.revision() > observed.revision()

@@ -106,13 +106,13 @@ class RejectedDeliveryWithdrawalRaceTest {
                                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
                         SchedulerTestSupport.repository(owner));
         var worker =
-                new WorkerBatcher(
+                new PrefillQueueRunner(
                         "rejected-withdrawal",
                         prefill,
                         QueueExecutionSettings.capture(config),
                         dispatcher,
                         ledger.prefill);
-        ReflectionTestUtils.setField(prefill, "batcher", worker);
+        ReflectionTestUtils.setField(prefill, "queueRunner", worker);
         ReflectionTestUtils.setField(prefill, "ownership", ledger.prefill);
 
         var context = RequestProtocolTestSupport.context(config, 1L);

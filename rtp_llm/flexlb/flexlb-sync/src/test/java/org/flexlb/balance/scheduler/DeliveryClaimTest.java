@@ -129,18 +129,12 @@ class DeliveryClaimTest {
                     new ContextResult.TransportResult(
                             f.claim, DeliveryResult.delivered(), System.currentTimeMillis());
             try {
-                assertSame(
-                        failure,
-                        assertThrows(
-                                IllegalStateException.class,
-                                () -> f.owner.onDeliveryEvidence(f.claim, delivered)));
-                f.context
-                        .data()
-                        .getFuture()
-                        .handle((value, error) -> null)
-                        .get(2, TimeUnit.SECONDS);
+                assertDoesNotThrow(() -> f.owner.onDeliveryEvidence(f.claim, delivered));
+                assertTrue(f.context.data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
                 SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+                verify(f.owner, times(1)).onDeliveryEvidence(f.claim, delivered);
                 verify(timer, times(2)).update(eq(f.context), any());
+                assertSame(failure, ReflectionTestUtils.getField(f.owner.runtime, "failure"));
                 assertFalse(
                         timer.needsUpdate(f.context, f.context.snapshot().deadlines()),
                         "the ACK owner must finish deadline installation before returning");
@@ -153,6 +147,287 @@ class DeliveryClaimTest {
                 ReflectionTestUtils.setField(f.owner.runtime, "timer", original);
                 finishOwnershipRequest(f);
             }
+        }
+    }
+
+    @Test
+    void closeOwnerRetriesStopSubmissionAndLateAckDoesNotSubmitItAgain() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var dispatcher = SchedulerTestSupport.dispatcher(f.owner.runtime);
+            var failure = new IllegalStateException("stop submission failed");
+            doThrow(failure).doCallRealMethod().when(dispatcher).stop(f.claim);
+            f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            verify(dispatcher, times(2)).stop(f.claim);
+            assertSame(failure, ReflectionTestUtils.getField(f.owner.runtime, "failure"));
+            f.owner.onDeliveryEvidence(
+                    f.claim,
+                    new ContextResult.TransportResult(
+                            f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+            verify(dispatcher, times(2)).stop(f.claim);
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            verify(dispatcher, times(2)).stop(f.claim);
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void latePreemptionFinishCannotCompleteAnUnsentTerminalNotification(boolean signalFails)
+            throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            f.owner.onDeliveryEvidence(
+                    f.claim,
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            DeliveryResult.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            var registration = f.preempt();
+            var signals = org.mockito.Mockito.spy(f.owner.runtime.signals());
+            ReflectionTestUtils.setField(f.owner.runtime, "signals", signals);
+            if (signalFails) {
+                var failure = new IllegalStateException("terminal notification unavailable");
+                doThrow(failure)
+                        .doThrow(failure)
+                        .doThrow(failure)
+                        .doCallRealMethod()
+                        .when(signals)
+                        .resolvePreemption(eq(registration), any());
+            }
+            var dispatcher = SchedulerTestSupport.dispatcher(f.owner.runtime);
+            doAnswer(
+                            call -> {
+                                // Arrive after notifyOwners took its snapshot but before it reports
+                                // progress. The original snapshot still has unfinished preemption.
+                                f.prefillOwned.set(false);
+                                f.prefillClearedByState.set(true);
+                                f.decodeOwned.set(false);
+                                f.decodeClearedByState.set(true);
+                                f.context.completePreemption(
+                                        registration,
+                                        new ContextResult.PreemptionReport(
+                                                null,
+                                                true,
+                                                true,
+                                                false,
+                                                new ContextResult.EndEvidence(
+                                                        f.claim.item(),
+                                                        ContextResult.EndKind.WORKER,
+                                                        org.flexlb.dao.route.RoleType.DECODE,
+                                                        false,
+                                                        9L,
+                                                        org.flexlb.dao.loadbalance.StrategyErrorType
+                                                                .WORKER_EXECUTION_FAILED,
+                                                        "worker failed",
+                                                        true,
+                                                        true)),
+                                        System.currentTimeMillis());
+                                return call.callRealMethod();
+                            })
+                    .when(dispatcher)
+                    .stop(f.claim);
+            if (signalFails) {
+                assertThrows(
+                        IllegalStateException.class,
+                        () -> f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED));
+            } else {
+                f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            }
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            assertEquals(
+                    org.flexlb.balance.preemption.VictimResolution.Outcome.REQUEST_END,
+                    signals.preemption(registration)
+                            .toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS)
+                            .outcome());
+            verify(signals, times(signalFails ? 4 : 1)).resolvePreemption(eq(registration), any());
+            verify(dispatcher, times(1)).stop(f.claim);
+        }
+    }
+
+    @Test
+    void acknowledgementOwnerRetriesOnlyItsPublicationRegistration() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var publisher =
+                    org.mockito.Mockito.spy(
+                            SchedulerTestSupport.responseCompletions(f.owner.runtime));
+            org.mockito.Mockito.doReturn(null).doCallRealMethod().when(publisher).tryRegister();
+            ReflectionTestUtils.setField(f.owner.runtime, "responseCompletions", publisher);
+            var delivered =
+                    new ContextResult.TransportResult(
+                            f.claim, DeliveryResult.delivered(), System.currentTimeMillis());
+            f.owner.onDeliveryEvidence(f.claim, delivered);
+            assertTrue(f.context.data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            verify(f.owner, times(1)).onDeliveryEvidence(f.claim, delivered);
+            verify(publisher, times(2)).tryRegister();
+            finishOwnershipRequest(f);
+        }
+    }
+
+    @Test
+    void exhaustedReconciliationReturnsItsPermitAndInstalledInactivityOwnerClosesRequest()
+            throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            f.owner.onDeliveryEvidence(
+                    f.claim,
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            DeliveryResult.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            var registration = f.preempt();
+            assertTrue(
+                    RequestProtocolTestSupport.preemptionPhase(
+                            f.owner,
+                            registration,
+                            org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT));
+            var proof = DecodeResources.PreemptionUpdate.finished(f.reservation);
+            when(f.decode.updatePreemption(4L, proof))
+                    .thenThrow(new IllegalStateException("Decode ledger unavailable"));
+            f.prefillOwned.set(false);
+            f.prefillClearedByState.set(true);
+            var failedEvidence =
+                    new ContextResult.EngineEvidence(
+                            f.claim.item(),
+                            null,
+                            org.flexlb.dao.route.RoleType.PREFILL,
+                            ContextResult.EngineKind.FAILED,
+                            9L,
+                            null,
+                            System.currentTimeMillis());
+            f.owner.onEngineEvidence(f.context, failedEvidence);
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            var retained = f.context.snapshot();
+            assertSame(registration, retained.preemption().identity());
+            assertNull(retained.preemption().reconciliation());
+            assertFalse(retained.close().decodeSettled());
+            assertNull(retained.outcome());
+            verify(f.decode, times(3)).updatePreemption(4L, proof);
+            f.owner.onEngineEvidence(f.context, failedEvidence);
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            assertSame(retained, f.context.snapshot());
+            verify(f.decode, times(3)).updatePreemption(4L, proof);
+            var inactivity = retained.deadlines().inactivity();
+            assertNotNull(inactivity, "the accepted delivery retains its timeout owner");
+            assertFalse(f.owner.runtime.deadlines().needsUpdate(f.context, retained.deadlines()));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.owner.onDeadline(
+                    inactivity, Math.max(inactivity.atMs(), retained.inactivityExpiresAtMs()));
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            assertEquals(ContextResult.Phase.CLOSED, f.context.snapshot().phase());
+            assertEquals(
+                    org.flexlb.balance.preemption.VictimResolution.Outcome.REQUEST_END,
+                    f.owner
+                            .runtime
+                            .signals()
+                            .preemption(registration)
+                            .toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS)
+                            .outcome());
+        }
+    }
+
+    @Test
+    void lateDecodeFinishNotifiesPreemptionBeforePrefillCleanupCompletes() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var registration = f.preempt();
+            var signals = org.mockito.Mockito.spy(f.owner.runtime.signals());
+            ReflectionTestUtils.setField(f.owner.runtime, "signals", signals);
+            var original = ReflectionTestUtils.getField(f.owner.runtime, "requestWorkers");
+            var queued = new java.util.concurrent.ConcurrentLinkedQueue<Runnable>();
+            var paused = mock(java.util.concurrent.ExecutorService.class);
+            doAnswer(
+                            call -> {
+                                queued.add(call.getArgument(0));
+                                return null;
+                            })
+                    .when(paused)
+                    .execute(any(Runnable.class));
+            ReflectionTestUtils.setField(f.owner.runtime, "requestWorkers", paused);
+            try {
+                f.applyDecodeTerminal();
+                assertFalse(queued.isEmpty());
+                f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+                assertFalse(signals.preemption(registration).toCompletableFuture().isDone());
+                f.owner.onDeliveryEvidence(
+                        f.claim,
+                        new ContextResult.TransportResult(
+                                f.claim,
+                                DeliveryResult.uncertain(new IllegalStateException("reply lost")),
+                                System.currentTimeMillis()));
+            } finally {
+                ReflectionTestUtils.setField(f.owner.runtime, "requestWorkers", original);
+                Runnable task;
+                while ((task = queued.poll()) != null) {
+                    task.run();
+                }
+            }
+            assertEquals(
+                    org.flexlb.balance.preemption.VictimResolution.Outcome.REQUEST_END,
+                    signals.preemption(registration)
+                            .toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS)
+                            .outcome());
+            assertFalse(f.context.snapshot().delivery().prefillProof());
+            assertEquals(ContextResult.Phase.ENDING, f.context.snapshot().phase());
+            verify(signals, times(1)).resolvePreemption(eq(registration), any());
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            verify(signals, times(1)).resolvePreemption(eq(registration), any());
+        }
+    }
+
+    @Test
+    void exhaustedStopSubmissionReturnsClaimAndInactivityCanClaimTheRemainingAction()
+            throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            f.owner.onDeliveryEvidence(
+                    f.claim,
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            DeliveryResult.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            var dispatcher = SchedulerTestSupport.dispatcher(f.owner.runtime);
+            var failure = new IllegalStateException("stop admission unavailable");
+            doThrow(failure)
+                    .doThrow(failure)
+                    .doThrow(failure)
+                    .doCallRealMethod()
+                    .when(dispatcher)
+                    .stop(f.claim);
+            assertSame(
+                    failure,
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED)));
+            var retained = f.context.snapshot();
+            assertNull(retained.close().endOperation());
+            assertFalse(
+                    retained.close().notificationsAttempted(), "rejection is not stop acceptance");
+            verify(dispatcher, times(3)).stop(f.claim);
+            var inactivity = retained.deadlines().inactivity();
+            assertNotNull(inactivity);
+            assertFalse(f.owner.runtime.deadlines().needsUpdate(f.context, retained.deadlines()));
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            f.owner.onDeadline(
+                    inactivity, Math.max(inactivity.atMs(), retained.inactivityExpiresAtMs()));
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            verify(dispatcher, times(4)).stop(f.claim);
         }
     }
 
@@ -2122,9 +2397,10 @@ class DeliveryClaimTest {
     }
 
     @Test
-    void failedFactApplicationRetriesTheFactWithoutRepeatingTheRpc() throws Exception {
+    void failedFactAcceptanceLeavesRemoteRetryWithTheStopOwner() throws Exception {
         try (var f = new Fixture()) {
-            doThrow(new IllegalStateException("temporary publication failure"))
+            var failure = new IllegalStateException("temporary fact acceptance failure");
+            doThrow(failure)
                     .doCallRealMethod()
                     .when(f.owner)
                     .onDeliveryEvidence(
@@ -2137,8 +2413,11 @@ class DeliveryClaimTest {
                             f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
             f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             f.assertArchivedAfterCleanup();
-            verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
-            assertNull(SchedulerTestSupport.failure(f.owner));
+            verify(f.channel, times(2)).cancelAsync(any(), anyInt(), any(), anyLong());
+            verify(f.owner, times(2))
+                    .onDeliveryEvidence(
+                            eq(f.claim), isA(ContextResult.CleanupAcknowledgement.class));
+            assertSame(failure, SchedulerTestSupport.failure(f.owner));
         }
     }
 
@@ -2380,6 +2659,15 @@ class DeliveryClaimTest {
                     .signals()
                     .delivery(claim)
                     .toCompletableFuture();
+        }
+
+        PreemptionRegistration preempt() {
+            var selected =
+                    (org.flexlb.dao.loadbalance.ServerStatus)
+                            ReflectionTestUtils.getField(claim.item(), "prefill");
+            selected.setServerIp("127.0.0.1");
+            selected.setGrpcPort(9000);
+            return owner.tryClaim(reservation, 4L).orElseThrow();
         }
 
         void awaitArchive() throws InterruptedException {

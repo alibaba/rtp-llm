@@ -110,7 +110,7 @@ import static org.mockito.Mockito.withSettings;
  *
  * <p>The exercised path is:
  * client call -> Netty Master gRPC server -> FlexlbServiceImpl -> AbstractRequestScheduler
- * -> AbstractRequestScheduler -> WorkerBatcher. BATCH continues through EngineGrpcClient
+ * -> AbstractRequestScheduler -> PrefillQueueRunner. BATCH continues through EngineGrpcClient
  * to a Netty mock engine; NON_BATCH publishes the route decision to the frontend.
  * The worker capacities are fixed by the fixture, while worker selection uses the
  * production RequestWorkerSelector with cost-based Prefill and Decode selection.

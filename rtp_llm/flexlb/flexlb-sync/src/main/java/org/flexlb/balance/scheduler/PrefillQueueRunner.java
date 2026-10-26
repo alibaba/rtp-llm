@@ -45,7 +45,7 @@ import static com.google.common.math.LongMath.saturatedAdd;
  * publishes individual routes; BATCH sends an engine batch. DIRECT does not use this executor.
  * Endpoint state owns request identities and capacity.
  */
-public final class WorkerBatcher {
+public final class PrefillQueueRunner {
 
     /** Frozen decision evidence; the log representation is materialized only on failure. */
     @lombok.RequiredArgsConstructor(access = lombok.AccessLevel.PRIVATE)
@@ -112,7 +112,7 @@ public final class WorkerBatcher {
     }
 
     /** Exact predicate captured by one scheduling cycle. */
-    private record BatcherCycleResult(
+    private record QueueCycle(
             RequestRoute request,
             CapacityBoundary unavailable,
             long queueVersion,
@@ -120,12 +120,11 @@ public final class WorkerBatcher {
             long wakeAtMs,
             String waitReason) {
 
-        private static final BatcherCycleResult NO_ACTION =
-                new BatcherCycleResult(null, null, 0L, 0L, 0L, null);
+        private static final QueueCycle NO_ACTION = new QueueCycle(null, null, 0L, 0L, 0L, null);
 
-        private static BatcherCycleResult capacityBlocked(
+        private static QueueCycle capacityBlocked(
                 RequestRoute item, CapacityBoundary unavailable, long queueVersion) {
-            return new BatcherCycleResult(
+            return new QueueCycle(
                     Objects.requireNonNull(item),
                     Objects.requireNonNull(unavailable),
                     queueVersion,
@@ -134,13 +133,13 @@ public final class WorkerBatcher {
                     unavailable.resource().getDescription());
         }
 
-        private static BatcherCycleResult awaitingSchedulingChange(
+        private static QueueCycle awaitingSchedulingChange(
                 RequestRoute head,
                 long queueVersion,
                 long schedulingInputVersion,
                 long wakeAtMs,
                 String waitReason) {
-            return new BatcherCycleResult(
+            return new QueueCycle(
                     Objects.requireNonNull(head),
                     null,
                     queueVersion,
@@ -194,12 +193,12 @@ public final class WorkerBatcher {
     public final Runnable capacityAvailableSignal;
 
     /** Exact active head for which this worker is waiting on a capacity event. */
-    private BatcherCycleResult capacityBlockedHead;
+    private QueueCycle capacityBlockedHead;
 
     /** Last waiting decision; timeout readers never acquire queueGuard. */
     private volatile QueueWaitSnapshot latestQueueWaitSnapshot;
 
-    public WorkerBatcher(
+    public PrefillQueueRunner(
             String key,
             PrefillEndpoint prefillEp,
             QueueExecutionSettings settings,
@@ -227,11 +226,11 @@ public final class WorkerBatcher {
                         "FlexLB worker stop callback lost its exact retained owner: " + key);
         this.workerThread =
                 Thread.ofVirtual()
-                        .name("flexlb-batcher-" + key)
+                        .name("flexlb-prefill-queue-" + key)
                         .uncaughtExceptionHandler(
                                 (thread, failure) ->
                                         Logger.error(
-                                                "WorkerBatcher[{}] thread died unexpectedly",
+                                                "PrefillQueueRunner[{}] thread died unexpectedly",
                                                 key,
                                                 failure))
                         .unstarted(this::runLoop);
@@ -239,7 +238,8 @@ public final class WorkerBatcher {
 
     public synchronized void start() {
         if (runtimeState != RuntimeState.NEW) {
-            throw new IllegalStateException("Worker batcher cannot start from " + runtimeState);
+            throw new IllegalStateException(
+                    "Prefill queue runner cannot start from " + runtimeState);
         }
         runtimeState = RuntimeState.STARTING;
         try {
@@ -295,7 +295,7 @@ public final class WorkerBatcher {
     /** Caller holds P lock; availability only probes the already subscribed resource. */
     public PlanningView planningViewLocked() {
         queueGuard.requireHeld();
-        BatcherCycleResult blocked = capacityBlockedHead;
+        QueueCycle blocked = capacityBlockedHead;
         AdmissionBlock block =
                 blocked == null
                                 || !prefillState.queueWaitCurrentLocked(
@@ -413,17 +413,8 @@ public final class WorkerBatcher {
                     }
                 } catch (Throwable settlementFailure) {
                     // A failed callback is never acknowledged. A failed acknowledgement
-                    // also leaves the exact owner available to generation retirement.
+                    // leaves the exact owner for retirement; the stop owner reports failures.
                     cleanupFailure = Failures.append(cleanupFailure, settlementFailure);
-                    try {
-                        Logger.error(
-                                "WorkerBatcher[{}] shutdown settlement failed request_id={}",
-                                key,
-                                item.requestId(),
-                                settlementFailure);
-                    } catch (Throwable ignoredLoggingFailure) {
-                        // Cleanup ownership cannot depend on diagnostics.
-                    }
                 }
             }
         } catch (Throwable unexpectedCleanupFailure) {
@@ -596,7 +587,7 @@ public final class WorkerBatcher {
                 return null;
             } catch (Throwable failure) {
                 if (prep.committed != null && !prep.transferred) {
-                    Throwable cause = failure;
+                    String detail = String.valueOf(failure.getMessage());
                     for (Member member : prep.members) {
                         failure =
                                 Failures.run(
@@ -612,8 +603,7 @@ public final class WorkerBatcher {
                                                                         .PreparationFailure(
                                                                         null,
                                                                         member.route(),
-                                                                        String.valueOf(
-                                                                                cause.getMessage()),
+                                                                        detail,
                                                                         System
                                                                                 .currentTimeMillis())));
                     }
@@ -764,10 +754,10 @@ public final class WorkerBatcher {
         }
     }
 
-    private BatcherCycleResult commitBoundary(
+    private QueueCycle commitBoundary(
             RequestRoute blockedItem, CapacityBoundary blockedResult, long queueVersion) {
         if (blockedItem == null || blockedResult == null) {
-            return BatcherCycleResult.NO_ACTION;
+            return QueueCycle.NO_ACTION;
         }
         boolean capacityBlocked = blockedResult.unavailable();
         boolean failed = blockedResult.status() == CapacityBoundary.Status.FAILED;
@@ -775,12 +765,12 @@ public final class WorkerBatcher {
         queueGuard.lock();
         try {
             if (drainClaimed) {
-                return BatcherCycleResult.NO_ACTION;
+                return QueueCycle.NO_ACTION;
             }
             long nowMs = System.currentTimeMillis();
             if (capacityBlocked) {
                 if (!prefillState.queueWaitCurrentLocked(blockedItem, 0L, 0L, true, nowMs)) {
-                    return BatcherCycleResult.NO_ACTION;
+                    return QueueCycle.NO_ACTION;
                 }
             } else if (failed) {
                 removed =
@@ -800,12 +790,12 @@ public final class WorkerBatcher {
                                             == CapacityBoundary.Resource.DECODE_ENGINE
                             ? queueVersion
                             : 0L;
-            return BatcherCycleResult.capacityBlocked(blockedItem, blockedResult, version);
+            return QueueCycle.capacityBlocked(blockedItem, blockedResult, version);
         }
         if (removed) {
             removeAndNotify(blockedItem, blockedResult, true);
         }
-        return BatcherCycleResult.NO_ACTION;
+        return QueueCycle.NO_ACTION;
     }
 
     /** Once removed, the request must be notified even if a capacity listener fails. */
@@ -843,7 +833,7 @@ public final class WorkerBatcher {
                             problem,
                             () ->
                                     Logger.error(
-                                            "WorkerBatcher[{}] removed request callback failed request_id={}",
+                                            "PrefillQueueRunner[{}] removed request callback failed request_id={}",
                                             key,
                                             item.requestId(),
                                             callbackFailure));
@@ -853,17 +843,17 @@ public final class WorkerBatcher {
 
     // ==================== Group decisions ====================
 
-    private BatcherCycleResult processQueue() {
+    private QueueCycle processQueue() {
         int maxRequests = settings.maxRequests();
         PrefillState.QueueSnapshot snapshot = prefillState.captureQueue(maxRequests);
         RequestRoute head = snapshot.head();
         if (head == null) {
-            return BatcherCycleResult.NO_ACTION;
+            return QueueCycle.NO_ACTION;
         }
         long nowMs = System.currentTimeMillis();
         var requestState = head.ctx().snapshot();
         if (requestState.placement() != null && !requestState.placement().published()) {
-            return BatcherCycleResult.awaitingSchedulingChange(
+            return QueueCycle.awaitingSchedulingChange(
                     head,
                     snapshot.queueVersion(),
                     snapshot.schedulingInputVersion(),
@@ -872,11 +862,11 @@ public final class WorkerBatcher {
         }
         if (head.requestExpired(nowMs)) {
             removeAndNotify(head, null, false);
-            return BatcherCycleResult.NO_ACTION;
+            return QueueCycle.NO_ACTION;
         }
         GroupPlanner.Constraints constraints = schedulingConstraints();
         if (Math.max(0L, head.seqLen()) > constraints.batchKvCapacity()) {
-            return BatcherCycleResult.awaitingSchedulingChange(
+            return QueueCycle.awaitingSchedulingChange(
                     head,
                     snapshot.queueVersion(),
                     snapshot.schedulingInputVersion(),
@@ -887,28 +877,24 @@ public final class WorkerBatcher {
             RequestRoute member = snapshot.items().get(index);
             if (member.requestExpired(nowMs)) {
                 removeAndNotify(member, null, false);
-                return BatcherCycleResult.NO_ACTION;
+                return QueueCycle.NO_ACTION;
             }
         }
-        try {
-            PrefillTimePredictor.Evaluator evaluator = prefillEndpoint.predictor.evaluator();
-            var result = decideGroup(snapshot, null, evaluator, constraints);
-            if (settings.priorityOrdering()
-                    && result.unavailable() != null
-                    && result.unavailable().resource() == CapacityBoundary.Resource.DECODE_ENGINE) {
-                decideGroup(
-                        prefillState.captureQueue(Math.max(2, maxRequests)),
-                        head,
-                        evaluator,
-                        schedulingConstraints());
-            }
-            return result;
-        } catch (InvalidPrefillPredictionException failure) {
-            return commitBoundary(head, CapacityBoundary.failed(failure), snapshot.queueVersion());
+        PrefillTimePredictor.Evaluator evaluator = prefillEndpoint.predictor.evaluator();
+        var result = decideGroup(snapshot, null, evaluator, constraints);
+        if (settings.priorityOrdering()
+                && result.unavailable() != null
+                && result.unavailable().resource() == CapacityBoundary.Resource.DECODE_ENGINE) {
+            decideGroup(
+                    prefillState.captureQueue(Math.max(2, maxRequests)),
+                    head,
+                    evaluator,
+                    schedulingConstraints());
         }
+        return result;
     }
 
-    private BatcherCycleResult decideGroup(
+    private QueueCycle decideGroup(
             PrefillState.QueueSnapshot snapshot,
             RequestRoute bypassedHead,
             PrefillTimePredictor.Evaluator evaluator,
@@ -916,7 +902,7 @@ public final class WorkerBatcher {
         var candidates =
                 bypassedHead == null ? snapshot.items() : bypassCandidates(snapshot, bypassedHead);
         if (candidates.isEmpty()) {
-            return BatcherCycleResult.NO_ACTION;
+            return QueueCycle.NO_ACTION;
         }
         RequestRoute first = candidates.getFirst();
         try {
@@ -928,14 +914,14 @@ public final class WorkerBatcher {
             long planningAtMs = System.currentTimeMillis();
             var selection = grouping.select(candidates, constraints, predictor);
             if (selection.items().isEmpty()) {
-                return BatcherCycleResult.NO_ACTION;
+                return QueueCycle.NO_ACTION;
             }
             String reason =
                     bypassedHead == null
                             ? grouping.dispatchReason(selection, constraints, planningAtMs)
                             : "decode_head_bypass";
             if (reason == null) {
-                return BatcherCycleResult.awaitingSchedulingChange(
+                return QueueCycle.awaitingSchedulingChange(
                         first,
                         snapshot.queueVersion(),
                         snapshot.schedulingInputVersion(),
@@ -950,10 +936,11 @@ public final class WorkerBatcher {
             if ((selection.items().size() > 1
                             && !selection.fitsCompute(constraints.batchTokenCapacity()))
                     || !selection.fitsKv(constraints.batchKvCapacity())) {
-                return BatcherCycleResult.NO_ACTION;
+                return QueueCycle.NO_ACTION;
             }
             OptionalLong prediction =
-                    selection.selectedPredictionMs().isEmpty()
+                    settings.dispatcherType() != DispatcherConfig.Type.BATCH
+                                    || selection.selectedPredictionMs().isEmpty()
                             ? OptionalLong.empty()
                             : OptionalLong.of(
                                     PrefillPredictionBoundary.committedDecisionGroupMs(
@@ -1021,7 +1008,7 @@ public final class WorkerBatcher {
                                         null);
                         continue;
                     }
-                    BatcherCycleResult result = processQueue();
+                    QueueCycle result = processQueue();
                     if (result.waitReason() != null) {
                         recordQueueWait(result.request(), result.waitReason());
                     }
@@ -1034,7 +1021,7 @@ public final class WorkerBatcher {
                 } catch (Throwable failure) {
                     try {
                         Logger.error(
-                                "WorkerBatcher[{}] stopped after an unexpected loop failure",
+                                "PrefillQueueRunner[{}] stopped after an unexpected loop failure",
                                 key,
                                 failure);
                     } catch (Throwable ignoredLoggingFailure) {
@@ -1043,7 +1030,7 @@ public final class WorkerBatcher {
                     if (cleanup != null) {
                         try {
                             Logger.error(
-                                    "WorkerBatcher[{}] failure cleanup exposed invariants",
+                                    "PrefillQueueRunner[{}] failure cleanup exposed invariants",
                                     key,
                                     cleanup);
                         } catch (Throwable ignoredLoggingFailure) {
@@ -1065,7 +1052,7 @@ public final class WorkerBatcher {
      * A null decision waits for the first item; other decisions retain their
      * exact head and either resource or queue/input-version predicate.
      */
-    private void awaitWork(BatcherCycleResult waiting) throws InterruptedException {
+    private void awaitWork(QueueCycle waiting) throws InterruptedException {
         boolean capacityWait = waiting != null && waiting.unavailable() != null;
         queueGuard.lockInterruptibly();
         try {
@@ -1115,7 +1102,7 @@ public final class WorkerBatcher {
     /** Called after Prefill or Decode capacity changes, outside endpoint locks. */
 
     /** Own the blocked head, its listener and projection invalidation under queueGuard. */
-    private void setCapacityBlockedHeadLocked(BatcherCycleResult blocked) {
+    private void setCapacityBlockedHeadLocked(QueueCycle blocked) {
         queueGuard.requireHeld();
         if (capacityBlockedHead == blocked) {
             return;

@@ -68,7 +68,8 @@ class QueuedPublicationNotificationFailureTest {
             var actual = fixture.publish(incoming);
 
             var items =
-                    WorkerBatcherTestSupport.capture(EndpointTestSupport.batcher(fixture.prefill))
+                    PrefillQueueRunnerTestSupport.capture(
+                                    EndpointTestSupport.queueRunner(fixture.prefill))
                             .items();
             assertEquals(3, items.size());
             assertTrue(items.containsAll(List.of(firstRoute, secondRoute, actual)));
@@ -113,8 +114,8 @@ class QueuedPublicationNotificationFailureTest {
                 assertFalse(fixture.decode.ownership(acquired.decodeReservation()).owned());
                 assertEquals(
                         List.of(oldRoute),
-                        WorkerBatcherTestSupport.capture(
-                                        EndpointTestSupport.batcher(fixture.prefill))
+                        PrefillQueueRunnerTestSupport.capture(
+                                        EndpointTestSupport.queueRunner(fixture.prefill))
                                 .items());
                 assertTrue(fixture.decode.ownership(oldRoute.decodeReservation()).owned());
             } finally {
@@ -177,8 +178,8 @@ class QueuedPublicationNotificationFailureTest {
             doAnswer(
                             call -> {
                                 assertFalse(
-                                        WorkerBatcherTestSupport.state(
-                                                        EndpointTestSupport.batcher(prefill))
+                                        PrefillQueueRunnerTestSupport.state(
+                                                        EndpointTestSupport.queueRunner(prefill))
                                                 .queueGuard()
                                                 .isHeldByCurrentThread());
                                 if (metricsFailure != null

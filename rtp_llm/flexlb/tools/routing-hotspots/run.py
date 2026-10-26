@@ -52,6 +52,13 @@ for variant, directory in [("before", baseline), ("after", root)]:
     benchmark_source = source.read_text()
     if not (
         directory
+        / "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PrefillQueueRunner.java"
+    ).exists():
+        benchmark_source = benchmark_source.replace(
+            "PrefillQueueRunner", "WorkerBatcher"
+        ).replace('"queueRunner"', '"batcher"')
+    if not (
+        directory
         / "flexlb-sync/src/main/java/org/flexlb/balance/projection/RequestTimeEstimation.java"
     ).exists():
         benchmark_source, verification_source = (
