@@ -35,8 +35,10 @@ LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::shared_ptr<LoadAsy
 
     auto task = std::make_shared<Task>(
         std::move(task_load_descs),
-        TransferTask(std::move(host_to_device_descriptors), std::chrono::milliseconds(host_timeout_ms_)),
-        TransferTask(std::move(disk_to_device_descriptors), std::chrono::milliseconds(disk_timeout_ms_)),
+        TransferTask(
+            std::move(host_to_device_descriptors), std::chrono::milliseconds(host_timeout_ms_), context->requestId()),
+        TransferTask(
+            std::move(disk_to_device_descriptors), std::chrono::milliseconds(disk_timeout_ms_), context->requestId()),
         context);
     return task;
 }

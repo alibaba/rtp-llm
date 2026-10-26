@@ -662,6 +662,7 @@ TEST(BlockTreeStorerTest, WatermarkDropKeepsPendingRemoteWritePayloadAlive) {
     }
     std::vector<int> uploaded_bytes;
     backend->inspect_write = [&](const StorageRequest& request) {
+        EXPECT_EQ(request.request_id, 214);
         for (const auto& handles : request.handles) {
             ASSERT_EQ(handles.size(), 1u);
             const auto buffers = pool->convertIndexToBuffer(0, handles[0].block);
@@ -673,7 +674,7 @@ TEST(BlockTreeStorerTest, WatermarkDropKeepsPendingRemoteWritePayloadAlive) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = holders[0];
     resources[1][0].device_blocks = holders[1];
-    env.cache->insert({100, 101}, resources, Tier::DEVICE);
+    env.cache->insert({100, 101}, resources, Tier::DEVICE, false, 214);
     EXPECT_EQ(backend->submittedCount(), 1u);
     EXPECT_EQ(env.cache->getStats().tree_node_count, 0u);
     EXPECT_EQ(env.cache->match({100, 101}).matched_device_blocks, 0u);
