@@ -38,6 +38,7 @@ import static org.flexlb.balance.scheduler.RequestProtocolTestSupport.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -46,6 +47,8 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -131,7 +134,7 @@ class QueuedBatchDeliveryTest {
                 .when(prefill)
                 .release(any(PrefillState.Reservation.class), isNull());
         when(prefill.commitLocked(any(PrefillState.CommitPlan.class)))
-                .thenAnswer(call -> ledger.prefill.commitLocked(call.getArgument(0), null));
+                .thenAnswer(call -> ledger.commit(call.getArgument(0)));
         decode =
                 EndpointTestSupport.decode(
                         WorkerStatus.createDiscovered(
@@ -734,12 +737,396 @@ class QueuedBatchDeliveryTest {
         ReflectionTestUtils.invokeMethod(context, "refresh", System.currentTimeMillis());
     }
 
+    @ParameterizedTest
+    @CsvSource({
+        "true,50,false,true",
+        "false,50,false,false",
+        "true,40,false,false",
+        "true,50,true,false"
+    })
+    void onlySamePriorityRequestsOnAnotherDecodeMayBypass(
+            boolean priorityOrdering, int candidatePriority, boolean sameDecode, boolean allowed) {
+        enableBypass(priorityOrdering);
+        var head = item(1L);
+        var other = sameDecode ? decode : anotherDecode();
+        var candidate = item(2L, null, other, candidatePriority);
+        var blocker = blockDecode();
+        try {
+            assertEquals(allowed, worker.canBypass(head, candidate));
+            cycle();
+            assertTrue(ledger.prefill.captureQueue(10).items().contains(head));
+            assertEquals(!allowed, ledger.prefill.captureQueue(10).items().contains(candidate));
+            assertFalse(worker.canBypass(head, candidate));
+        } finally {
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    @Test
+    void wakeupsAndNewArrivalsCannotRenewTheSingleBypassAllowance() {
+        enableBypass(true);
+        var head = item(1L);
+        var other = anotherDecode();
+        var first = item(2L, null, other, 50);
+        var blocker = blockDecode();
+        try {
+            cycle();
+            var next = item(3L, null, other, 50);
+            worker.signal(false);
+            cycle();
+            cycle();
+            assertEquals(List.of(head, next), ledger.prefill.captureQueue(10).items());
+            assertFalse(worker.canBypass(head, next));
+            assertEquals(1, other.resourceSnapshot().activeDispatchPermits());
+            assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
+            assertFalse(ledger.prefill.captureQueue(10).items().contains(first));
+        } finally {
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    @Test
+    void failedBypassCommitReleasesTemporaryResourcesAndRetainsAllowance() {
+        enableBypass(true);
+        var head = item(1L);
+        var other = anotherDecode();
+        var candidate = item(2L, null, other, 50);
+        var blocker = blockDecode();
+        doReturn(null).doCallRealMethod().when(worker).commitSelection(any());
+        try {
+            cycle();
+            assertTrue(worker.canBypass(head, candidate));
+            assertEquals(0, other.resourceSnapshot().activeDispatchPermits());
+            assertEquals(0, ledger.prefill.stats().batchCount());
+            cycle();
+            assertFalse(worker.canBypass(head, candidate));
+            assertEquals(List.of(head), ledger.prefill.captureQueue(10).items());
+        } finally {
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cancellationBeforeBypassCommitReleasesEveryTemporaryPermit(boolean cancelHead) {
+        enableBypass(true);
+        var head = item(1L);
+        var other = anotherDecode();
+        var candidate = item(2L, null, other, 50);
+        var blocker = blockDecode();
+        doAnswer(
+                        call -> {
+                            registry.cancel(
+                                    cancelHead ? head.requestId() : candidate.requestId(),
+                                    0L,
+                                    CancelReason.CLIENT_CANCELLED);
+                            SchedulerTestSupport.awaitRequestWork(registry.runtime);
+                            return call.callRealMethod();
+                        })
+                .when(worker)
+                .commitSelection(any());
+        try {
+            cycle();
+            assertEquals(
+                    List.of(cancelHead ? candidate : head),
+                    ledger.prefill.captureQueue(10).items());
+            assertEquals(0, other.resourceSnapshot().activeDispatchPermits());
+            assertEquals(0, ledger.prefill.stats().batchCount());
+            var permit = registry.runtime.deliveries().tryReserveDelivery();
+            assertTrue(permit.accepted());
+            permit.value().close();
+            if (!cancelHead) {
+                assertTrue(worker.canBypass(head, item(3L, null, other, 50)));
+            }
+        } finally {
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    @Test
+    void recoveringHeadAbortsBypassBeforeCommit() {
+        enableBypass(true);
+        var head = item(1L);
+        var other = anotherDecode();
+        var candidate = item(2L, null, other, 50);
+        var blocker = blockDecode();
+        doAnswer(
+                        call -> {
+                            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+                            return call.callRealMethod();
+                        })
+                .when(worker)
+                .commitSelection(any());
+        cycle();
+        assertEquals(List.of(head, candidate), ledger.prefill.captureQueue(10).items());
+        assertEquals(0, other.resourceSnapshot().activeDispatchPermits());
+        assertEquals(0, ledger.prefill.stats().batchCount());
+        assertTrue(worker.canBypass(head, candidate));
+        cycle();
+        assertFalse(ledger.prefill.captureQueue(10).items().contains(head));
+    }
+
+    @Test
+    void secondBlockedRequestStopsBypassInsteadOfSkippingAnotherOwner() {
+        enableBypass(true);
+        var head = item(1L);
+        var second = item(2L);
+        item(3L, null, anotherDecode(), 50);
+        var blocker = blockDecode();
+        try {
+            cycle();
+            assertEquals(3, ledger.prefill.captureQueue(10).items().size());
+            assertFalse(worker.canBypass(head, second));
+            assertEquals(0, ledger.prefill.stats().batchCount());
+        } finally {
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    @Test
+    void bypassWaitNoticesArrivalsUntilItsAllowanceIsUsed() {
+        enableBypass(true);
+        var head = item(1L);
+        var guard = ledger.prefill.queueGuard();
+        long version = ledger.prefill.captureQueue(10).queueVersion();
+        var candidate = item(2L, null, anotherDecode(), 50);
+        guard.lock();
+        try {
+            assertFalse(
+                    ledger.prefill.queueWaitCurrentLocked(
+                            head, version, 0L, true, System.currentTimeMillis()));
+        } finally {
+            guard.unlock();
+        }
+        var blocker = blockDecode();
+        try {
+            cycle();
+            item(3L, null, anotherDecode(), 50);
+            guard.lock();
+            try {
+                assertTrue(
+                        ledger.prefill.queueWaitCurrentLocked(
+                                head, version, 0L, true, System.currentTimeMillis()));
+            } finally {
+                guard.unlock();
+            }
+            assertFalse(worker.canBypass(head, candidate));
+        } finally {
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    @Test
+    void arrivalWakesTheRealDecodeWaitAndUsesItsAllowanceOnce() throws InterruptedException {
+        enableBypass(true);
+        // The thread callback must observe the actual instance, rather than a Mockito spy copy.
+        worker =
+                new WorkerBatcher(
+                        "bypass-wakeup",
+                        prefill,
+                        (QueueExecutionSettings) ReflectionTestUtils.getField(worker, "settings"),
+                        dispatcher,
+                        ledger.prefill);
+        ReflectionTestUtils.setField(prefill, "batcher", worker);
+        var head = item(1L);
+        var blocker = blockDecode();
+        worker.start();
+        try {
+            RequestProtocolTestSupport.awaitCondition(
+                    () ->
+                            worker.getLatestQueueWaitSnapshot()
+                                    .containsValue(
+                                            org.flexlb.balance.delivery.CapacityBoundary.Resource
+                                                    .DECODE_ENGINE
+                                                    .getDescription()));
+            var other = anotherDecode();
+            var candidate = item(2L, null, other, 50);
+            worker.signal(false);
+            RequestProtocolTestSupport.awaitCondition(
+                    () -> !ledger.prefill.captureQueue(10).items().contains(candidate));
+            assertFalse(worker.canBypass(head, candidate));
+            assertEquals(List.of(head), ledger.prefill.captureQueue(10).items());
+        } finally {
+            assertNull(worker.stopAndAwait());
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    private void enableBypass(boolean priorityOrdering) {
+        ReflectionTestUtils.setField(prefill, "predictor", new FormulaPredictor("1"));
+        ReflectionTestUtils.setField(
+                registry.runtime.deliveries(),
+                "decodeDeliveryCapacity",
+                new DecodeResources.AdmissionCapacity(1, 100L));
+        worker =
+                org.mockito.Mockito.spy(
+                        new WorkerBatcher(
+                                "bypass",
+                                prefill,
+                                new QueueExecutionSettings(
+                                        priorityOrdering,
+                                        config.getDispatcher().getType(),
+                                        org.flexlb.config.DecisionPolicyConfig.Type.FIXED_WINDOW,
+                                        2,
+                                        0L,
+                                        0L),
+                                dispatcher,
+                                ledger.prefill));
+        ReflectionTestUtils.setField(prefill, "batcher", worker);
+    }
+
+    @Test
+    void invalidCandidatePredictionDoesNotTerminateTheBlockedHead() throws Exception {
+        enableBypass(true);
+        var head = item(1L);
+        var other = anotherDecode();
+        var candidate = item(2L, null, other, 50);
+        var blocker = blockDecode();
+        ReflectionTestUtils.setField(prefill, "predictor", new FormulaPredictor("-1"));
+        try {
+            cycle();
+            assertEquals(List.of(head), ledger.prefill.captureQueue(10).items());
+            assertFalse(head.future().isDone());
+            assertFalse(candidate.future().get(2, TimeUnit.SECONDS).isSuccess());
+            assertEquals(0, other.resourceSnapshot().activeDispatchPermits());
+            assertEquals(0, ledger.prefill.stats().batchCount());
+            var next = item(3L, null, other, 50);
+            assertTrue(worker.canBypass(head, next));
+        } finally {
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    @Test
+    void singleNonBatchDecisionCanBypassOnlyOnce() {
+        config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+        enableBypass(true);
+        worker =
+                new WorkerBatcher(
+                        "single-bypass",
+                        prefill,
+                        new QueueExecutionSettings(
+                                true,
+                                config.getDispatcher().getType(),
+                                org.flexlb.config.DecisionPolicyConfig.Type.SINGLE,
+                                1,
+                                0L,
+                                0L),
+                        dispatcher,
+                        ledger.prefill);
+        ReflectionTestUtils.setField(prefill, "batcher", worker);
+        var head = item(1L);
+        var other = anotherDecode();
+        item(2L, null, other, 50);
+        var blocker = blockDecode();
+        try {
+            cycle();
+            var next = item(3L, null, other, 50);
+            cycle();
+            assertEquals(List.of(head, next), ledger.prefill.captureQueue(10).items());
+            assertFalse(worker.canBypass(head, next));
+            assertEquals(0, ledger.prefill.stats().batchCount());
+        } finally {
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    @Test
+    void bypassCannotExceedThePrefillKvCapacity() {
+        enableBypass(true);
+        var head = item(1L);
+        var other = anotherDecode();
+        var candidate = item(2L, null, other, 50);
+        ReflectionTestUtils.setField(candidate.ctx().data().getRequest(), "seqLen", 32L);
+        var status = mock(WorkerStatus.class);
+        when(status.committedEngineObservation())
+                .thenReturn(
+                        new WorkerStatus.EngineObservation(
+                                RoleType.PREFILL,
+                                null,
+                                16L,
+                                16L,
+                                java.util.Map.of(),
+                                0.0,
+                                0L,
+                                0L,
+                                0L,
+                                0L,
+                                0L,
+                                0L,
+                                0L,
+                                0L));
+        when(prefill.getStatus()).thenReturn(status);
+        var blocker = blockDecode();
+        try {
+            cycle();
+            assertEquals(List.of(head, candidate), ledger.prefill.captureQueue(10).items());
+            assertTrue(worker.canBypass(head, candidate));
+            assertEquals(0, other.resourceSnapshot().activeDispatchPermits());
+            assertEquals(0, ledger.prefill.stats().batchCount());
+        } finally {
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    @Test
+    void newHeadBeforeCommitRejectsBypassWithoutUsingAllowance() {
+        enableBypass(true);
+        var head = item(10L);
+        var other = anotherDecode();
+        var candidate = item(20L, null, other, 50);
+        var blocker = blockDecode();
+        doAnswer(
+                        call -> {
+                            item(1L, null, other, 90);
+                            return call.callRealMethod();
+                        })
+                .when(worker)
+                .commitSelection(any());
+        try {
+            cycle();
+            assertEquals(3, ledger.prefill.captureQueue(10).items().size());
+            assertEquals(0, other.resourceSnapshot().activeDispatchPermits());
+            assertEquals(0, ledger.prefill.stats().batchCount());
+            var first = ledger.prefill.captureQueue(10).head();
+            ledger.prefill.updateQueue(
+                    PrefillState.QueueChange.REMOVE, first, System.currentTimeMillis());
+            assertTrue(worker.canBypass(head, candidate));
+        } finally {
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    private DecodeEndpoint anotherDecode() {
+        return EndpointTestSupport.decode(
+                WorkerStatus.createDiscovered(RoleType.DECODE, null, "127.0.0.2", 8080, 8081, null),
+                SchedulerTestSupport.repository(registry));
+    }
+
+    private DecodeResources.ReservationHandle blockDecode() {
+        try (var pin = decode.tryPinGeneration()) {
+            return EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 90_000L, 1L, 2L, 50);
+        }
+    }
+
+    private void cycle() {
+        assertNotNull(ReflectionTestUtils.invokeMethod(worker, "processQueue"));
+    }
+
     private RequestRoute item(long id) {
         return item(id, null);
     }
 
     private RequestRoute item(long id, com.google.protobuf.ByteString payload) {
+        return item(id, payload, decode, 50);
+    }
+
+    private RequestRoute item(
+            long id, com.google.protobuf.ByteString payload, DecodeEndpoint target, int priority) {
         var context = RequestProtocolTestSupport.context(config, id);
+        context.data()
+                .setSchedulingMetadata(
+                        org.flexlb.dao.SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         context.data()
                 .setGenerateInputPb(
                         payload != null
@@ -752,11 +1139,12 @@ class QueuedBatchDeliveryTest {
                                         .toByteString());
         var future = RequestProtocolTestSupport.register(registry, context);
         DecodeResources.ReservationHandle reservation;
-        try (var pin = decode.tryPinGeneration()) {
-            reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, id, 1L, 2L, 50);
+        try (var pin = target.tryPinGeneration()) {
+            reservation =
+                    EndpointTestSupport.reserveUnqueuedDecode(target, pin, id, 1L, 2L, priority);
         }
         assertNotNull(reservation);
-        DeliverySettlementTestSupport.queueDecode(decode, reservation);
+        DeliverySettlementTestSupport.queueDecode(target, reservation);
         ServerStatus status = new ServerStatus();
         status.setRole(RoleType.PREFILL);
         status.setServerIp("127.0.0.1");
@@ -770,7 +1158,7 @@ class QueuedBatchDeliveryTest {
                         status,
                         null,
                         prefill,
-                        decode,
+                        target,
                         reservation,
                         System.currentTimeMillis());
         RequestProtocolTestSupport.bind(
