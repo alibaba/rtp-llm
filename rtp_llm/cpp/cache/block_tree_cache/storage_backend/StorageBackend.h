@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <unordered_map>
 
 #include <condition_variable>
@@ -37,6 +38,14 @@ enum class StorageQuarantineReason {
     RPC_ERROR,
     INVALID_RESPONSE,
 };
+
+struct StorageQuarantineCounts {
+    size_t task_count{0};
+    size_t block_count{0};
+};
+
+// Read/write rows and StorageQuarantineReason columns share one state snapshot.
+using StorageQuarantineBreakdown = std::array<std::array<StorageQuarantineCounts, 4>, 2>;
 
 // The backend accepted an operation but cannot prove that DMA/RDMA has
 // stopped touching its buffers. StorageBackend replaces request pins with
@@ -152,7 +161,8 @@ protected:
     virtual void               writeImpl(const StorageRequest& request)                             = 0;
     virtual void               shutdownImpl() noexcept {}
     virtual void               onQuarantined(bool, StorageQuarantineReason, size_t) noexcept {}
-    virtual void               onQuarantineChanged(uint64_t, size_t, size_t) noexcept {}
+    virtual void               onQuarantineChanged(uint64_t, size_t, size_t,
+                                                   const StorageQuarantineBreakdown&) noexcept {}
 
 private:
     enum class Lifecycle {
@@ -186,9 +196,10 @@ private:
 
     std::mutex quarantine_mutex_;
     // Preserve the per-operation quarantine metrics and abort threshold.
-    size_t   quarantined_task_count_{0};
-    size_t   quarantined_block_count_{0};
-    uint64_t quarantine_generation_{0};
+    size_t                     quarantined_task_count_{0};
+    size_t                     quarantined_block_count_{0};
+    uint64_t                   quarantine_generation_{0};
+    StorageQuarantineBreakdown quarantined_breakdown_{};
 
     friend class LoadAsyncContext;
 };

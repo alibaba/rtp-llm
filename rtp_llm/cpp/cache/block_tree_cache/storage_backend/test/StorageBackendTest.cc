@@ -442,7 +442,10 @@ protected:
         last_quarantine_blocks   = block_count;
     }
 
-    void onQuarantineChanged(uint64_t, size_t task_count, size_t block_count) noexcept override {
+    void onQuarantineChanged(uint64_t,
+                             size_t task_count,
+                             size_t block_count,
+                             const StorageQuarantineBreakdown&) noexcept override {
         quarantined_tasks  = task_count;
         quarantined_blocks = block_count;
     }
