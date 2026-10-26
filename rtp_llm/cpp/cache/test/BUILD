@@ -192,7 +192,8 @@ cc_test(
         "//rtp_llm/cpp/utils:hash_util",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO"},
 )
 
 cc_test(
