@@ -188,7 +188,7 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 
 ### KVCM（外部 KV Cache Manager）
 
-- 开关：`FLEXLB_CONFIG.cacheMatching.type=KVCM`；`MODEL_SERVICE_CONFIG.kvcm` 只提供
+- 开关：`FLEXLB_CONFIG.cacheMatching.type=KVCM` 或 `LOCAL_STANDBY`；`MODEL_SERVICE_CONFIG.kvcm` 只提供
   KVCM address/namespace/port/discovery 定位信息；
   `CacheMatchConfiguration` 推导不变量 **`localSyncEnabled = !kvcmEnabled`、
   `localStandbyEnabled = kvcmEnabled`**。
@@ -219,7 +219,9 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   最新的 `KvcmCacheMatchingConfig`；`KvcmGrpcClient` 与 `KvcmLeaderResolver` 不再缓存构造期快照，
   因此 `requestTimeoutMs`、`maxQueryRetryCount`、健康阈值与三个查询参数在更新后即时生效。
   单次查询开始时读取一次快照，同一查询的所有重试复用该快照。`leaderRefreshIntervalMs`、
-  `localStandby.*` 与 `cacheMatching.type` 仍在启动时固定，修改需重启。
+  `localStandby.*` 在启动时固定，修改需重启。
+  `cacheMatching.type` 支持在 `KVCM` 与 `LOCAL_STANDBY` 之间热切换，两个模式共用配置参数和
+  已初始化的 KVCM 客户端、Standby 索引。只更新 type 时保留其余参数。与 `LOCAL_SYNC` 之间切换需重启。
 
 ### LOCAL_STANDBY（兜底索引）
 
@@ -254,11 +256,14 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
    Local Standby 的结果登记为预测；预测结果与选定 Worker 齐备时由 Local Standby 组件上报该 Worker 的预测命中值。有效的 engine feedback
    可进一步生成 cache-hit comparison 指标和 PV。预测登记异常不触发 KVCM 降级或 Local Standby 路由失败。
 
-`CacheMatchFailoverManager`：监听 KVCM 健康——不健康且 `autoSwitch` 开 → 切 LOCAL_STANDBY；恢复健康 →
-切回 KVCM；手动 `ACTIVATE_FALLBACK` 覆盖一切，
-`RECOVER_PRIMARY` 要求 KVCM 已健康
-（HTTP 入口 `POST /flexlb/cache_match/failover`，非 master 会转发给 master；状态查询
-`GET /flexlb/cache_match/status`）。
+`CacheMatchFailoverManager` 根据配置和 KVCM 健康状态选择缓存源：
+
+- `cacheMatching.type=LOCAL_STANDBY` 固定查本地索引。
+- `cacheMatching.type=KVCM` 使用 KVCM；不健康且 `autoSwitch` 开启时切到 Local Standby，
+  恢复健康后切回 KVCM。不健康且关闭自动切换时，告警提示通过配置选择 Local Standby。
+- KVCM 查询失败的单次请求同步使用 Local Standby 兜底。
+
+配置更新到达后立即重新选择缓存源；状态查询使用 `GET /flexlb/cache_match/status`。
 
 `CacheMatchResult` 携带**应答源自己的 blockSize**（KVCM/standby 的块大小可能与请求主
 hash 不同）和 `querySucceeded`。空匹配是成功结果，查询失败的结果不产生预测指标。

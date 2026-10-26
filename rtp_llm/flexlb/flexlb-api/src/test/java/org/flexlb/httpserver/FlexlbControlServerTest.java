@@ -1,18 +1,13 @@
 package org.flexlb.httpserver;
 
-import org.flexlb.cache.domain.CacheMatchFailoverAction;
-import org.flexlb.cache.domain.CacheMatchFailoverRequest;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.domain.CacheMatchStatus;
 import org.flexlb.cache.match.CacheMatchQueryOrchestrator;
 import org.flexlb.config.CacheMatchMode;
-import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.kvcm.KvcmHealthState;
 import org.flexlb.enums.LogLevel;
 import org.flexlb.service.monitor.FlexlbLogManager;
-import org.flexlb.transport.GeneralHttpNettyService;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -21,17 +16,9 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
-import reactor.core.publisher.Mono;
 
-import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.argThat;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -40,10 +27,6 @@ import static org.mockito.Mockito.when;
 class FlexlbControlServerTest {
 
     @Mock
-    private GeneralHttpNettyService generalHttpNettyService;
-    @Mock
-    private LBStatusConsistencyService lbStatusConsistencyService;
-    @Mock
     private CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator;
     @Mock
     private FlexlbLogManager flexlbLogManager;
@@ -51,11 +34,7 @@ class FlexlbControlServerTest {
 
     @BeforeEach
     void setUp() {
-        FlexlbControlServer server = new FlexlbControlServer(
-                generalHttpNettyService,
-                lbStatusConsistencyService,
-                cacheMatchQueryOrchestrator,
-                flexlbLogManager);
+        FlexlbControlServer server = new FlexlbControlServer(cacheMatchQueryOrchestrator, flexlbLogManager);
         webTestClient = WebTestClient.bindToRouterFunction(
                 server.flexlbControlRoutes()).build();
     }
@@ -90,127 +69,18 @@ class FlexlbControlServerTest {
                 .jsonPath("$.localStandbyMaximumEntries").isEqualTo(456);
     }
 
-    @Test
-    void activatesCacheMatchFailover() {
-        when(cacheMatchQueryOrchestrator.status()).thenReturn(cacheMatchStatus());
-
-        webTestClient.post()
-                .uri("/flexlb/cache_match/failover")
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of(
-                        "action",
-                        CacheMatchFailoverAction.ACTIVATE_FALLBACK.name()))
-                .exchange()
-                .expectStatus().isOk();
-
-        verify(cacheMatchQueryOrchestrator)
-                .applyFailoverAction(CacheMatchFailoverAction.ACTIVATE_FALLBACK);
-    }
-
-    @Test
-    void recoversKvcmPrimary() {
-        when(cacheMatchQueryOrchestrator.status()).thenReturn(cacheMatchStatus());
-
-        webTestClient.post()
-                .uri("/flexlb/cache_match/failover")
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of(
-                        "action",
-                        CacheMatchFailoverAction.RECOVER_PRIMARY.name()))
-                .exchange()
-                .expectStatus().isOk();
-
-        verify(cacheMatchQueryOrchestrator)
-                .applyFailoverAction(CacheMatchFailoverAction.RECOVER_PRIMARY);
-    }
-
-    @Test
-    void rejectsUnknownFailoverAction() {
-        webTestClient.post()
-                .uri("/flexlb/cache_match/failover")
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of("action", "UNKNOWN"))
-                .exchange()
-                .expectStatus().isBadRequest();
-
-        verify(cacheMatchQueryOrchestrator, never())
-                .applyFailoverAction(any());
-    }
-
     @ParameterizedTest
-    @ValueSource(strings = {"{}", "{\"action\":null}"})
-    void rejectsMissingFailoverActionBeforeApplyingOrForwarding(String body) {
+    @ValueSource(strings = {"ACTIVATE_FALLBACK", "RECOVER_PRIMARY"})
+    void cacheSourceCannotBeChangedThroughHttp(String action) {
         webTestClient.post()
                 .uri("/flexlb/cache_match/failover")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(body.getBytes(StandardCharsets.UTF_8))
+                .bodyValue(Map.of("action", action))
                 .exchange()
-                .expectStatus().isBadRequest()
-                .expectBody(String.class).isEqualTo("action is required");
+                .expectStatus()
+                .isNotFound();
 
-        verifyNoInteractions(cacheMatchQueryOrchestrator, generalHttpNettyService, lbStatusConsistencyService);
-    }
-
-    @Test
-    void rejectsEmptyFailoverActionBeforeApplyingOrForwarding() {
-        webTestClient.post()
-                .uri("/flexlb/cache_match/failover")
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue("{\"action\":\"\"}".getBytes(StandardCharsets.UTF_8))
-                .exchange()
-                .expectStatus().isBadRequest();
-
-        verifyNoInteractions(cacheMatchQueryOrchestrator, generalHttpNettyService, lbStatusConsistencyService);
-    }
-
-    @Test
-    @DisplayName("恢复不健康的 KVCM 主源返回 500 和拒绝原因")
-    void rejectsUnsafePrimaryRecoveryWithServerError() {
-        doThrow(new IllegalStateException("KVCM is unhealthy"))
-                .when(cacheMatchQueryOrchestrator)
-                .applyFailoverAction(CacheMatchFailoverAction.RECOVER_PRIMARY);
-
-        webTestClient.post()
-                .uri("/flexlb/cache_match/failover")
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of(
-                        "action",
-                        CacheMatchFailoverAction.RECOVER_PRIMARY.name()))
-                .exchange()
-                .expectStatus().isEqualTo(500)
-                .expectBody(String.class).isEqualTo("KVCM is unhealthy");
-    }
-
-    @Test
-    @DisplayName("从节点将激活备用操作转发到主节点地址，不在本地执行")
-    void forwardsCacheMatchFailoverOnFollower() {
-        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
-        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
-        when(lbStatusConsistencyService.getMasterHostIpPort())
-                .thenReturn("10.0.0.1:7001");
-        when(generalHttpNettyService.request(
-                any(CacheMatchFailoverRequest.class),
-                any(URI.class),
-                eq("/flexlb/cache_match/failover"),
-                eq(CacheMatchStatus.class)))
-                .thenReturn(Mono.just(cacheMatchStatus()));
-
-        webTestClient.post()
-                .uri("/flexlb/cache_match/failover")
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of(
-                        "action",
-                        CacheMatchFailoverAction.ACTIVATE_FALLBACK.name()))
-                .exchange()
-                .expectStatus().isOk();
-
-        verify(generalHttpNettyService).request(
-                argThat((CacheMatchFailoverRequest request) -> request.action() == CacheMatchFailoverAction.ACTIVATE_FALLBACK),
-                eq(URI.create("http://10.0.0.1:7001")),
-                eq("/flexlb/cache_match/failover"),
-                eq(CacheMatchStatus.class));
-        verify(cacheMatchQueryOrchestrator, never())
-                .applyFailoverAction(any());
+        verifyNoInteractions(cacheMatchQueryOrchestrator);
     }
 
     private CacheMatchStatus cacheMatchStatus() {

@@ -3,6 +3,7 @@ package org.flexlb.cache;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.KvcmCacheMatchingConfig;
+import org.flexlb.config.LocalSyncCacheMatchingConfig;
 import org.flexlb.config.ModelMetaConfig;
 
 import java.util.function.Consumer;
@@ -14,7 +15,9 @@ public final class CacheMatchTestConfigurations {
     }
 
     public static CacheMatchConfiguration localSync(ModelMetaConfig modelMetaConfig) {
-        return new CacheMatchConfiguration(modelMetaConfig, new FlexlbConfig());
+        FlexlbConfig config = new FlexlbConfig();
+        config.setCacheMatching(new LocalSyncCacheMatchingConfig());
+        return new CacheMatchConfiguration(modelMetaConfig, config);
     }
 
     public static CacheMatchConfiguration kvcm(ModelMetaConfig modelMetaConfig) {

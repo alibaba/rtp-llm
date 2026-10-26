@@ -1,7 +1,6 @@
 package org.flexlb.cache.match;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.cache.domain.CacheMatchFailoverAction;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -96,19 +95,6 @@ public class CacheMatchQueryOrchestrator {
             }
             cacheMetricsReporter.reportStandbyFallback("kvcm_query_failure");
             return queryAndTrackLocalStandby(query, startTimeNs);
-        }
-    }
-
-    public void applyFailoverAction(CacheMatchFailoverAction action) {
-        if (!configuration.isKvcmEnabled()) {
-            throw new IllegalStateException("cache failover is unavailable in LOCAL_SYNC mode");
-        }
-        if (action == null) {
-            throw new IllegalArgumentException("cache failover action must not be null");
-        }
-        switch (action) {
-            case ACTIVATE_FALLBACK -> failoverManager.activateFallbackManually();
-            case RECOVER_PRIMARY -> failoverManager.recoverPrimaryManually();
         }
     }
 

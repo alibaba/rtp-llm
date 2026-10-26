@@ -85,6 +85,11 @@ public final class FlexlbConfigMerger {
             return true;
         }
         JsonNode replacementType = replacement.get("type");
+        if ("cacheMatching".equals(path) && replacementType != null
+                && Set.of("KVCM", "LOCAL_STANDBY").contains(replacementType.asText())
+                && Set.of("KVCM", "LOCAL_STANDBY").contains(current.path("type").asText())) {
+            return true;
+        }
         return replacementType == null || replacementType.equals(current.get("type"));
     }
 }

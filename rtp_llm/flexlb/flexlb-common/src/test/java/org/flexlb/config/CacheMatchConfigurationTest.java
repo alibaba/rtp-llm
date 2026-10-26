@@ -22,10 +22,24 @@ import static org.mockito.Mockito.when;
 class CacheMatchConfigurationTest {
 
     @Test
-    void usesLocalSyncByDefault() {
-        CacheMatchConfiguration configuration = new CacheMatchConfiguration(
-                modelMetaConfig(route("service-1", false)),
-                new FlexlbConfig());
+    void defaultsToKvcmAndRequiresTopology() {
+        FlexlbConfig config = ConfigTestFixtures.parse("{}");
+        CacheMatchConfiguration configuration =
+                new CacheMatchConfiguration(modelMetaConfig(route("service-1", true)), config);
+        assertEquals(CacheMatchMode.KVCM, configuration.getConfiguredMode());
+        assertTrue(configuration.isKvcmEnabled());
+        assertTrue(configuration.isLocalStandbyEnabled());
+        assertFalse(configuration.isLocalSyncEnabled());
+        assertThrows(IllegalStateException.class,
+                () -> new CacheMatchConfiguration(modelMetaConfig(route("service-1", false)), config));
+    }
+
+    @Test
+    void usesExplicitLocalSync() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setCacheMatching(new LocalSyncCacheMatchingConfig());
+        CacheMatchConfiguration configuration =
+                new CacheMatchConfiguration(modelMetaConfig(route("service-1", false)), config);
 
         assertFalse(configuration.isKvcmEnabled());
         assertTrue(configuration.isLocalSyncEnabled());
@@ -51,10 +65,8 @@ class CacheMatchConfigurationTest {
         assertTrue(configuration.isLocalStandbyEnabled());
         assertSame(route, configuration.getKvcmServiceRoute());
         assertSame(route.getKvcm(), configuration.getKvcmConfig());
-        assertSame(flexlbConfig.kvcmCacheMatching(),
-                configuration.getKvcmRuntimeConfig());
-        assertSame(flexlbConfig.kvcmCacheMatching().getLocalStandby(),
-                configuration.getLocalStandbyConfig());
+        assertSame(flexlbConfig.getKvcmAndStandbyConfig(), configuration.getKvcmRuntimeConfig());
+        assertSame(flexlbConfig.getKvcmAndStandbyConfig().getLocalStandby(), configuration.getLocalStandbyConfig());
         assertFalse(configuration.isAutoSwitchEnabled());
         assertEquals(CacheMatchMode.KVCM, configuration.getConfiguredMode());
     }
@@ -78,6 +90,15 @@ class CacheMatchConfigurationTest {
 
         assertTrue(error.getMessage().contains(
                 "cacheMatching.type=KVCM requires MODEL_SERVICE_CONFIG kvcm topology"));
+    }
+
+    @Test
+    void standbyRequiresKvcmTopologyForSwitchingBack() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setCacheMatching(new LocalStandbyCacheMatchingConfig());
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new CacheMatchConfiguration(modelMetaConfig(route("service-1", false)), config));
+        assertTrue(error.getMessage().contains("cacheMatching.type=LOCAL_STANDBY"));
     }
 
     @Test
@@ -105,24 +126,23 @@ class CacheMatchConfigurationTest {
 
         CacheMatchConfiguration configuration = new CacheMatchConfiguration(
                 modelMetaConfig(route("service-1", true)), configService);
-        assertSame(initial.kvcmCacheMatching(), configuration.getKvcmRuntimeConfig());
+        assertSame(initial.getKvcmAndStandbyConfig(), configuration.getKvcmRuntimeConfig());
         verify(configService).addUpdateListener(listener.capture());
 
         FlexlbConfig updated = kvcmConfig(false);
-        updated.kvcmCacheMatching().setTopKHostCount(7);
-        updated.kvcmCacheMatching().setBackendTypes(List.of(
-                KvcmCacheMatchingConfig.BackendType.ST_EVENT_REPORT_L2));
-        updated.kvcmCacheMatching().setMedium(List.of("kvs"));
+        updated.getKvcmAndStandbyConfig().setTopKHostCount(7);
+        updated.getKvcmAndStandbyConfig()
+                .setBackendTypes(List.of(KvcmCacheMatchingConfig.BackendType.ST_EVENT_REPORT_L2));
+        updated.getKvcmAndStandbyConfig().setMedium(List.of("kvs"));
         listener.getValue().accept(updated);
 
-        assertNotSame(initial.kvcmCacheMatching(), configuration.getKvcmRuntimeConfig());
-        assertSame(updated.kvcmCacheMatching(), configuration.getKvcmRuntimeConfig());
+        assertNotSame(initial.getKvcmAndStandbyConfig(), configuration.getKvcmRuntimeConfig());
+        assertSame(updated.getKvcmAndStandbyConfig(), configuration.getKvcmRuntimeConfig());
         assertEquals(7, configuration.getKvcmRuntimeConfig().getTopKHostCount());
         assertEquals(List.of(KvcmCacheMatchingConfig.BackendType.ST_EVENT_REPORT_L2),
                 configuration.getKvcmRuntimeConfig().getBackendTypes());
         assertEquals(List.of("kvs"), configuration.getKvcmRuntimeConfig().getMedium());
-        assertEquals(initial.kvcmCacheMatching().getLocalStandby(),
-                configuration.getLocalStandbyConfig(),
+        assertEquals(initial.getKvcmAndStandbyConfig().getLocalStandby(), configuration.getLocalStandbyConfig(),
                 "local standby stays fixed for the process lifetime");
     }
 
@@ -139,9 +159,11 @@ class CacheMatchConfigurationTest {
                 modelMetaConfig(route("service-1", true)), configService);
         verify(configService).addUpdateListener(listener.capture());
 
-        listener.getValue().accept(new FlexlbConfig());
+        FlexlbConfig localSync = new FlexlbConfig();
+        localSync.setCacheMatching(new LocalSyncCacheMatchingConfig());
+        listener.getValue().accept(localSync);
 
-        assertSame(initial.kvcmCacheMatching(), configuration.getKvcmRuntimeConfig());
+        assertSame(initial.getKvcmAndStandbyConfig(), configuration.getKvcmRuntimeConfig());
         assertEquals(CacheMatchMode.KVCM, configuration.getConfiguredMode());
     }
 

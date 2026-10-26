@@ -367,9 +367,10 @@ public final class FlexlbConfigValidator {
     }
 
     private static void validateCacheMatching(CacheMatchingConfig cacheMatching) {
-        if (!(cacheMatching instanceof KvcmCacheMatchingConfig kvcm)) {
+        if (cacheMatching.getType() == CacheMatchMode.LOCAL_SYNC) {
             return;
         }
+        KvcmCacheMatchingConfig kvcm = (KvcmCacheMatchingConfig) cacheMatching;
         positive(kvcm.getRequestTimeoutMs(), "cacheMatching.requestTimeoutMs");
         positive(kvcm.getLeaderRefreshIntervalMs(),
                 "cacheMatching.leaderRefreshIntervalMs");

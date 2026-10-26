@@ -120,17 +120,12 @@ public final class MasterEngineSynchronizer {
                 syncCount.longValue(), modelName);
         try {
             for (RoleType roleType : requiredRoles) {
-                engineSyncExecutor.submit(new EngineSyncRunner(
-                        modelName, workerDirectory,
-                        workerAddressService, statusCheckExecutor, engineHealthReporter,
-                        engineGrpcService, roleType, cacheAwareService,
-                        cacheIntervalService,
-                        syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
-                        flexlbConfig.isKvcmCacheMatching(),
-                        flexlbConfig.getWorkerRegistry().getCacheStatus()
-                                .isFullSnapshotDebugMode(),
-                        statusStaleAfterUs
-                ));
+                engineSyncExecutor.submit(new EngineSyncRunner(modelName, workerDirectory, workerAddressService,
+                        statusCheckExecutor, engineHealthReporter, engineGrpcService, roleType, cacheAwareService,
+                        cacheIntervalService, syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                        flexlbConfig.isKvcmAndStandbyEnabled(),
+                        flexlbConfig.getWorkerRegistry().getCacheStatus().isFullSnapshotDebugMode(),
+                        statusStaleAfterUs));
             }
         } catch (Exception e) {
             logger.error("sync engine prefill status error", e);

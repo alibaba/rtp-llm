@@ -1,5 +1,6 @@
 package org.flexlb.config;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -7,7 +8,7 @@ import java.util.List;
 
 @Getter
 @Setter
-public final class KvcmCacheMatchingConfig implements CacheMatchingConfig {
+public sealed class KvcmCacheMatchingConfig implements CacheMatchingConfig permits LocalStandbyCacheMatchingConfig {
 
     public static final long DEFAULT_REQUEST_TIMEOUT_MS = 500L;
     public static final long DEFAULT_LEADER_REFRESH_INTERVAL_MS = 10_000L;
@@ -51,6 +52,12 @@ public final class KvcmCacheMatchingConfig implements CacheMatchingConfig {
      */
     private List<BackendType> backendTypes = List.of();
     private LocalStandbyConfig localStandby = new LocalStandbyConfig();
+
+    @Override
+    @JsonIgnore
+    public CacheMatchMode getType() {
+        return CacheMatchMode.KVCM;
+    }
 
     public void setMedium(List<String> medium) {
         this.medium = medium == null ? List.of() : List.copyOf(medium);

@@ -158,10 +158,14 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
     }
 
     private static void configureKvcm(ObjectNode flexlbConfig, ObjectNode kvcmConfig) {
-        if (kvcmConfig == null || !kvcmConfig.path("enabled").asBoolean(false)) {
+        if (kvcmConfig == null) {
             return;
         }
         ObjectNode cacheMatching = flexlbConfig.putObject("cacheMatching");
+        if (!kvcmConfig.path("enabled").asBoolean(false)) {
+            cacheMatching.put("type", "LOCAL_SYNC");
+            return;
+        }
         cacheMatching.put("type", "KVCM");
         ObjectNode localStandby = objectAt(kvcmConfig, "local_standby");
         if (localStandby != null) {

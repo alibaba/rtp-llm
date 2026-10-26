@@ -22,16 +22,37 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ConfigServiceTest {
 
     @Test
+    void cacheMatchingTypesRoundTripWithoutExtraJsonProperties() throws Exception {
+        for (CacheMatchMode type : CacheMatchMode.values()) {
+            FlexlbConfig config = ConfigTestFixtures.parse("{\"cacheMatching\":{\"type\":\"" + type + "\"}}");
+            assertEquals(type, config.getCacheMatching().getType());
+            assertEquals(type != CacheMatchMode.LOCAL_SYNC, config.isKvcmAndStandbyEnabled());
+            if (type != CacheMatchMode.LOCAL_SYNC) {
+                assertSame(config.getCacheMatching(), config.getKvcmAndStandbyConfig());
+            }
+
+            String document = JsonUtils.toStrictString(config);
+            var json = JsonUtils.readStrictTree(document);
+            FlexlbConfig restored = ConfigTestFixtures.parse("{\"cacheMatching\":" + json.get("cacheMatching") + "}");
+            assertEquals(type, restored.getCacheMatching().getType());
+            assertEquals(type.name(), json.path("cacheMatching").path("type").asText());
+            assertFalse(json.path("cacheMatching").has("mode"));
+            assertFalse(json.has("kvcmAndStandbyEnabled"));
+            assertFalse(json.has("kvcmAndStandbyConfig"));
+        }
+    }
+
+    @Test
     void defaultsKvcmTopKToThreeAndBackendTypesToEmpty() {
         KvcmCacheMatchingConfig config = ConfigTestFixtures.parse("""
                 {"cacheMatching":{"type":"KVCM"}}
-                """).kvcmCacheMatching();
+                """).getKvcmAndStandbyConfig();
 
         assertEquals(3, config.getTopKHostCount());
         assertTrue(config.getBackendTypes().isEmpty());
         assertEquals(0, ConfigTestFixtures.parse("""
                 {"cacheMatching":{"type":"KVCM","topKHostCount":0}}
-                """).kvcmCacheMatching().getTopKHostCount());
+                """).getKvcmAndStandbyConfig().getTopKHostCount());
     }
 
     @Test
@@ -81,8 +102,11 @@ class ConfigServiceTest {
         for (double ratio : new double[]{0.0, 1.0}) {
             String patch = "{\"cacheMatching\":{\"type\":\"KVCM\",\"localStandby\":{\"ttlReductionStartRatio\":"
                     + ratio + "}}}";
-            assertEquals(ratio, ConfigTestFixtures.parse(patch)
-                    .kvcmCacheMatching().getLocalStandby().getTtlReductionStartRatio());
+            assertEquals(ratio,
+                    ConfigTestFixtures.parse(patch)
+                            .getKvcmAndStandbyConfig()
+                            .getLocalStandby()
+                            .getTtlReductionStartRatio());
         }
         for (double ratio : new double[]{-0.01, 1.01}) {
             String patch = "{\"cacheMatching\":{\"type\":\"KVCM\",\"localStandby\":{\"ttlReductionStartRatio\":"

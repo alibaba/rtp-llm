@@ -41,6 +41,21 @@ class V0ConfigDocumentParserTest {
     }
 
     @Test
+    void preservesExplicitlyDisabledKvcm() {
+        NormalizedConfig normalized = new V0ConfigDocumentParser().parse("""
+                {"enableQueueing":true,"modelServiceConfig":{"kvcm":{"enabled":false}}}
+                """, null);
+        ConfigService.register(new CompatibilitySource(normalized));
+        ConfigService service =
+                new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
+        try {
+            assertThat(service.loadBalanceConfig().isKvcmAndStandbyEnabled()).isFalse();
+        } finally {
+            service.close();
+        }
+    }
+
+    @Test
     void rejectsMissingV0CompatibilityDocument() {
         V0ConfigDocumentParser parser = new V0ConfigDocumentParser();
         assertThatThrownBy(() -> parser.parse(null, null)).isInstanceOf(IllegalArgumentException.class).hasMessage("V0 compatibility configuration document must not be null or blank");

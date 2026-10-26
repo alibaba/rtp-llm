@@ -305,7 +305,7 @@ class NacosConfigSourceTest {
                 listener.getValue().receiveConfigInfo(
                         "{\"schemaVersion\":3,\"cacheMatching\":{" + invalidField + "}}");
                 assertThat(configuration.getKvcmRuntimeConfig()).isSameAs(updated);
-                assertThat(configService.loadBalanceConfig().kvcmCacheMatching()).isSameAs(updated);
+                assertThat(configService.loadBalanceConfig().getKvcmAndStandbyConfig()).isSameAs(updated);
             }
 
             listener.getValue().receiveConfigInfo("""

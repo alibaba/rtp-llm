@@ -24,7 +24,7 @@ public final class FlexlbConfig {
     private ObservabilityConfig observability = new ObservabilityConfig();
     private GrpcServerConfig grpcServer = new GrpcServerConfig();
     private ServiceDiscoveryRuntimeConfig serviceDiscovery = new ServiceDiscoveryRuntimeConfig();
-    private CacheMatchingConfig cacheMatching = new LocalSyncCacheMatchingConfig();
+    private CacheMatchingConfig cacheMatching = new KvcmCacheMatchingConfig();
     private OptimizerRuntimeConfig optimizer = new OptimizerRuntimeConfig();
     private ConsistencyConfig consistency = new NoConsistencyConfig();
     private boolean enableFallback;
@@ -39,16 +39,17 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
-    public boolean isKvcmCacheMatching() {
-        return cacheMatching instanceof KvcmCacheMatchingConfig;
+    public boolean isKvcmAndStandbyEnabled() {
+        CacheMatchMode type = cacheMatching.getType();
+        return type == CacheMatchMode.KVCM || type == CacheMatchMode.LOCAL_STANDBY;
     }
 
+    /**
+     * Returns the shared parameters when the configured type is KVCM or LOCAL_STANDBY.
+     */
     @JsonIgnore
-    public KvcmCacheMatchingConfig kvcmCacheMatching() {
-        if (cacheMatching instanceof KvcmCacheMatchingConfig kvcm) {
-            return kvcm;
-        }
-        throw new IllegalStateException("KVCM cache matching configuration is not active");
+    public KvcmCacheMatchingConfig getKvcmAndStandbyConfig() {
+        return (KvcmCacheMatchingConfig) cacheMatching;
     }
 
     @JsonIgnore

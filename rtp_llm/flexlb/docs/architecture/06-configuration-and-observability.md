@@ -229,8 +229,12 @@ UniConfig / Nacos 的 v3 部分更新示例：
 - `observability.logging`：FlexLB logger group 级别与 root/PV stdout 开关。
 - `serviceDiscovery`：connect/read timeout、poll interval 与连接池运行参数。
   持续空结果保留已有地址，不按空结果次数或持续时间撤销 worker。
-- `cacheMatching`：`LOCAL_SYNC` / `KVCM` tagged union；KVCM 分支拥有查询、健康、远端命中
+- `cacheMatching`：默认 `KVCM`，要求 `MODEL_SERVICE_CONFIG.kvcm` 提供定位信息。
+  支持 `LOCAL_SYNC` / `KVCM` / `LOCAL_STANDBY`；KVCM 和 LOCAL_STANDBY 共用查询、健康、远端命中
   （`medium` / `topKHostCount` / `backendTypes`）和 Local Standby 参数。
+  使用 Worker 本地同步缓存时显式设置 `cacheMatching.type=LOCAL_SYNC`。
+  Java 配置接口通过 `getType()` 提供模式；`isKvcmAndStandbyEnabled()` 对 KVCM 和 LOCAL_STANDBY
+  返回 true，`getKvcmAndStandbyConfig()` 提供这两个模式共用的参数。
 - `optimizer`：启用开关和服务发现轮询间隔。
 - `consistency`：`NONE` / `ZOOKEEPER` tagged union；ZooKeeper 分支拥有连接和 master
   刷新参数。
@@ -267,7 +271,23 @@ KVCM 模式下，Nacos v3 配置可设置并热更新查询参数：
 
 Nacos 监听更新通过 `ConfigService` 校验并发布到 `CacheMatchConfiguration`；
 下一次查询使用新配置，同一次查询的重试继续使用原配置快照和原绝对 Deadline。
-查询线程只读取内存快照，不访问 Nacos。`cacheMatching.type` 仍需重启才能切换。
+查询线程只读取内存快照，不访问 Nacos。
+
+`cacheMatching.type` 支持 `KVCM` 与 `LOCAL_STANDBY` 双向热切换，切换时保留未指定的参数。
+以下片段合并到现有配置后固定使用本地 Standby：
+
+```json
+{
+  "schemaVersion": 3,
+  "cacheMatching": {"type": "LOCAL_STANDBY"}
+}
+```
+
+将 type 设置为 `KVCM` 恢复 KVCM 优先策略，并遵循现有健康检查和 `localStandby.autoSwitch`。
+两个模式都要求 `MODEL_SERVICE_CONFIG.kvcm` 定位信息；启动时均初始化 KVCM 和 Standby。
+配置到达各副本后立即更新选源，已发起的缓存查询继续完成。`configuredMode` 返回配置模式，
+`effectiveSource` 返回实际选源。与 `LOCAL_SYNC` 之间切换需要重启。
+环境变量只在启动时读取；运行时切换通过 Nacos 或 UniConfig 配置来源下发。
 
 ## MODEL_SERVICE_CONFIG
 
@@ -561,7 +581,7 @@ Decode 预留字段 `inputKvTokens = max(0, seqLen)`，
 - 管理端口：7002。
 - `/health` 与 lifecycle hook。
 - `/flexlb/update_log_level`。
-- `/flexlb/cache_match/status`、`/flexlb/cache_match/failover`。
+- `/flexlb/cache_match/status`：查询当前配置模式、实际缓存源和 KVCM 健康状态。
 - `/rtp_llm/schedule`、master notification 和 queue snapshot 等路由入口。
 - gRPC 调度入口及 follower-to-master forwarding。
 
