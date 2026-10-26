@@ -26,6 +26,31 @@ static std::shared_ptr<LinearKVCacheSpec> makeTestLinearSpec(uint32_t seq_size_p
 
 class LinearKVCacheGroupTest: public ::testing::Test {};
 
+TEST_F(LinearKVCacheGroupTest, BoundedNonReusePoolSurvivesSpeculativeWindowReplacement) {
+    createDevice();
+    for (const int proposals : {0, 1, 4}) {
+        for (const int accepted : {1, proposals + 1}) {
+            SCOPED_TRACE(::testing::Message() << "proposals=" << proposals << ", accepted=" << accepted);
+            const int reserve_step = proposals > 0 ? proposals + 1 : 0;
+            // Two retained tails, cleanup's reserve slots, and the next full
+            // materialization window (one tail + proposals), plus null block 0.
+            const int budget = 2 + reserve_step + 1 + proposals;
+            auto      config = createTestConfig(512, 512, 0, 0, DataType::TYPE_FP16, 1, 1, budget + 1);
+            auto      pool   = std::make_shared<BlockPool>(config);
+            ASSERT_TRUE(pool->init());
+            LinearKVCacheGroup group({}, makeTestLinearSpec(1), pool, 0, 1);
+            ASSERT_TRUE(group.init());
+            BlockIds blocks;
+            for (int seq_len = 256; seq_len < 1024; seq_len += accepted) {
+                ASSERT_TRUE(group.malloc(blocks, seq_len, false, reserve_step));
+                group.removeSkippedBlocks(blocks, false, reserve_step);
+            }
+            group.free(blocks.blocks());
+            EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+        }
+    }
+}
+
 TEST_F(LinearKVCacheGroupTest, DefaultPolicyDrivesBehaviorInterfaces) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
@@ -369,6 +394,98 @@ TEST_F(LinearKVCacheGroupTest, MallocBackfillsExistingNullReadSlot) {
     EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[1]));
     EXPECT_EQ(blocks.blocks()[2], allocated[1]);
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before);
+}
+
+TEST_F(LinearKVCacheGroupTest, ReusedPrefixDoesNotPublishUncomputedHistoricalSnapshots) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+    auto shared_cache = std::make_shared<SharedBlockCache>();
+    shared_cache->init(1, std::vector<BlockPoolPtr>{block_pool});
+    LinearKVCacheGroup group({}, makeTestLinearSpec(64), block_pool, 0, 8, shared_cache.get());
+    ASSERT_TRUE(group.init());
+
+    // A joint prefix hit restores the last recurrent state at 1024 tokens.
+    // Earlier logical slots have no state: prefill will resume at token 1024.
+    auto cached_tail = block_pool->malloc(1);
+    ASSERT_EQ(cached_tail.size(), 1u);
+    BlockIds blocks;
+    blocks.assign(BlockIndicesType(16, NULL_BLOCK_IDX));
+    blocks.setAt(15, cached_tail[0]);
+    std::vector<size_t> backfilled;
+    ASSERT_TRUE(group.malloc(blocks, 1088, true, 5, &backfilled));
+
+    // Retention cadence alone must not materialize the uncomputed 512-token
+    // snapshot. Otherwise insertion publishes an uninitialized block as valid.
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[7]));
+    EXPECT_TRUE(backfilled.empty());
+    EXPECT_EQ(blocks.blocks()[15], cached_tail[0]);
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[16]));
+    CacheKeysType keys;
+    for (int i = 1; i <= 17; ++i) {
+        keys.push_back(i * 64);
+    }
+    group.insertIntoCache(keys, blocks.blocks(), false);
+    EXPECT_TRUE(group.matchSingleKey(512).block_indices.empty());
+    EXPECT_EQ(group.matchSingleKey(1024).block_indices, cached_tail);
+}
+
+TEST_F(LinearKVCacheGroupTest, MallocBackfillsActiveTailAndReserveWithoutHistoricalSnapshots) {
+    for (bool enable_reuse_cache : {false, true}) {
+        auto block_pool = createBlockPool();
+        ASSERT_TRUE(block_pool->init());
+        LinearKVCacheGroup group({}, makeTestLinearSpec(1), block_pool, 0, 1);
+        ASSERT_TRUE(group.init());
+
+        auto previous_tail = block_pool->malloc(1);
+        ASSERT_EQ(previous_tail.size(), 1u);
+        BlockIds blocks;
+        blocks.assign(BlockIndicesType(5, NULL_BLOCK_IDX));
+        blocks.setAt(2, previous_tail[0]);
+        const size_t free_before = block_pool->freeBlocksNum();
+        std::vector<size_t> backfilled;
+
+        ASSERT_TRUE(group.malloc(blocks, 4, enable_reuse_cache, 3, &backfilled));
+        ASSERT_EQ(blocks.blocksNum(), 6u);
+        EXPECT_EQ(backfilled, (std::vector<size_t>{3, 4}));
+        EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[0]));
+        EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[1]));
+        EXPECT_EQ(blocks.blocks()[2], previous_tail[0]);
+        for (size_t pos : {3u, 4u, 5u}) {
+            EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[pos]));
+        }
+        EXPECT_EQ(block_pool->freeBlocksNum() + 3, free_before);
+        group.free(blocks.blocks());
+        EXPECT_EQ(block_pool->freeBlocksNum(), block_pool->totalBlocksNum());
+    }
+}
+
+TEST_F(LinearKVCacheGroupTest, FailedBackfillPreservesSparseSlotsAndPoolReferences) {
+    createDevice();
+    for (bool enable_reuse_cache : {false, true}) {
+        auto config = createTestConfig(512, 512, 0, 0, DataType::TYPE_FP16, 1, 1, 4);
+        auto pool   = std::make_shared<BlockPool>(config);
+        ASSERT_TRUE(pool->init());
+        LinearKVCacheGroup group({}, makeTestLinearSpec(1), pool, 0, 1);
+        ASSERT_TRUE(group.init());
+
+        auto previous_tail = pool->malloc(1);
+        ASSERT_EQ(previous_tail.size(), 1u);
+        BlockIds blocks;
+        blocks.assign(BlockIndicesType(5, NULL_BLOCK_IDX));
+        blocks.setAt(2, previous_tail[0]);
+        const auto blocks_before = blocks.blocks();
+        const auto free_before   = pool->freeBlocksNum();
+        std::vector<size_t> backfilled{99};
+
+        // Tail, existing reserve, and appended reserve need three blocks;
+        // only two remain available, so allocation must fail atomically.
+        EXPECT_FALSE(group.malloc(blocks, 4, enable_reuse_cache, 3, &backfilled));
+        EXPECT_EQ(blocks.blocks(), blocks_before);
+        EXPECT_EQ(pool->freeBlocksNum(), free_before);
+        EXPECT_TRUE(backfilled.empty());
+        group.free(blocks.blocks());
+        EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+    }
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocMaterializesCausalConvReadSlotAtBoundaries) {

@@ -1393,16 +1393,20 @@ TEST_F(HybridTypeKVCacheAllocatorTest, PrefillInitSkipsSparseCleanupAndPreserves
     info.enable_device_cache          = true;
     info.reuse_cache                  = true;
     info.enable_remove_skipped_blocks = false;  // prefill init path
+    const auto free_before            = block_pool->freeBlocksNum();
     auto result                       = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
     const auto& linear_out = batch_res->blocks(0, gid_linear);
     ASSERT_EQ(linear_out.size(), 5u);
     EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
-    EXPECT_FALSE(isNullBlockIdx(linear_out[1]));
+    // Prefix reuse restores only its terminal state; historical step hits
+    // must stay sparse because prefill will not recompute them.
+    EXPECT_TRUE(isNullBlockIdx(linear_out[1]));
     EXPECT_EQ(linear_out[2], cached_linear_blocks[2]) << "reused linear tail must survive prefill init";
     EXPECT_FALSE(isNullBlockIdx(linear_out[3]));
     EXPECT_FALSE(isNullBlockIdx(linear_out[4]));
+    EXPECT_EQ(block_pool->freeBlocksNum() + 4, free_before);
 }
 
 // Decode path (StreamCacheResource::incrKVBlock sets enable_remove_skipped_blocks=true).
