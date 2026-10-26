@@ -316,7 +316,7 @@ TEST(DeviceBlockPoolTest, ReclaimCacheBlockRequiresOneCacheRefAndNoOtherHolders)
     EXPECT_TRUE(pool.canReclaimCacheBlock(*block));
 
     for (const BlockTreeRefType type :
-         {BlockTreeRefType::CACHE, BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE, BlockTreeRefType::FROZEN}) {
+         {BlockTreeRefType::CACHE, BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE}) {
         pool.incTreeRef(*block, type);
         EXPECT_FALSE(pool.canReclaimCacheBlock(*block));
         pool.decTreeRef(*block, type);
@@ -324,6 +324,15 @@ TEST(DeviceBlockPoolTest, ReclaimCacheBlockRequiresOneCacheRefAndNoOtherHolders)
     }
     pool.decTreeRef(*block, BlockTreeRefType::CACHE);
     EXPECT_FALSE(pool.isAllocated(*block));
+
+    const auto frozen = pool.malloc();
+    ASSERT_TRUE(frozen.has_value());
+    pool.incTreeRef(*frozen, BlockTreeRefType::CACHE);
+    pool.freezeBlock(*frozen);
+    EXPECT_FALSE(pool.canReclaimCacheBlock(*frozen));
+    pool.decTreeRef(*frozen, BlockTreeRefType::CACHE);
+    EXPECT_TRUE(pool.isAllocated(*frozen));
+    EXPECT_TRUE(pool.isFrozen(*frozen));
 }
 
 TEST(DeviceBlockPoolTest, ActiveBlocksIncludeRequestAndTreeOperationRefs) {
