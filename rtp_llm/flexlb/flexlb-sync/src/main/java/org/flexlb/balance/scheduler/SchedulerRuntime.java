@@ -220,11 +220,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
                     // Accepted terminal/publication owners cannot be dropped or run on an RPC
                     // callback.
                     recordFailure(Failures.append(rejected, recoveryRejected));
-                    try {
-                        Thread.ofPlatform().daemon().name("request-work-emergency").start(task);
-                    } catch (RuntimeException | Error failedToStart) {
-                        throw failedToStart;
-                    }
+                    Thread.ofPlatform().daemon().name("request-work-emergency").start(task);
                 }
             }
         }

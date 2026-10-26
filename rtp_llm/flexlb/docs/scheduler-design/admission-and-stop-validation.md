@@ -283,3 +283,50 @@ effects and passes ownership/recovery contracts; these runs do not establish a
 causal speedup or rule out performance regression. `ownership-results.json`
 records totals and metrics. The complete Java manifest still matches after UT,
 performance execution and commit-hook checks.
+
+## Residual code and test cleanup
+
+This follow-up is based on `6e23c937c7`. It removes two test-only Dispatcher
+preemption overloads, the unused Scheduler claim detail parameter and a catch
+that only rethrew its exception. Production code decreases by 23 lines; Java
+production and test sources together decrease by 112 lines. Dispatcher has
+18 methods / maximum 97 lines. Scheduler remains 30 / 99, Runtime 30 / 61,
+and DecodeAdmission 19 / 96.
+
+`DeliveryCleanupTest` becomes `DeliveryStopTest`, matching the current owner.
+Its equal-valued claim case now explicitly verifies STALE rejection rather
+than mislabeling that branch as a second deduplicated operation. The duplicate
+ACK fixtures become one first-ACK/replay contract with both assertions retained.
+Decode admission tests now verify the injected Dispatcher instead of an unused
+Engine mock, configure the construction-time policy, and use a Decode endpoint
+so early-exit cases cannot accidentally pass the endpoint-type guard. Priority 1
+must reach endpoint selection; FIFO and DIRECT policy cases exercise the actual
+frozen configuration. No failure or concurrency contract is removed.
+
+The final source manifest contains 579 Java files. Its SHA-256 is
+`df9c1ab41edb6459eef985d253e57db5330d3aaaefe4456fd3bffa76409082b4`.
+The first focused run passes 171 tests; the final full run also includes the
+subsequent fixture correction and combined ACK test. Final validation evidence
+uses the separate `residual-` prefix.
+
+The complete UT run passes **3,288 tests, 0 failures, 0 errors, 1 skipped**,
+including all 400 mock-engine tests. The one-test decrease is the combined
+first-ACK/replay contract, not removed assertions. Maven reports BUILD SUCCESS
+in `residual-ut.log`; all six modules' XML reports are retained in
+`residual-ut-reports.tar`. The shared workspace's obsolete
+`DeliveryCleanupTest.class` was removed; historical reports remain available.
+
+The full performance rerun passes **22/25 tests, with 3 failures and 0 errors**:
+Sync 5/5, API 15/16, BATCH matrix 0/2, NON_BATCH matrix 2/2. The burst case
+fails at server P99 616ms against 50ms. The 750P/750D results are:
+
+| Mode / target QPS  | Client QPS | Client P99 | Server P99 | Result           |
+| ------------------ | ---------: | ---------: | ---------: | ---------------- |
+| BATCH / 3,000      |    2,996.8 |   56.561ms |       13ms | Fail: client P99 |
+| BATCH / 10,000     |    9,972.5 |  160.142ms |       29ms | Fail: client P99 |
+| NON_BATCH / 3,000  |    2,999.6 |   11.914ms |        2ms | Pass             |
+| NON_BATCH / 10,000 |    9,991.3 |   27.457ms |        5ms | Pass             |
+
+**Performance remains unaccepted.** These shared-host runs do not establish
+a causal improvement from cleanup. `residual-results.json` records this run
+independently of the earlier ownership measurements.

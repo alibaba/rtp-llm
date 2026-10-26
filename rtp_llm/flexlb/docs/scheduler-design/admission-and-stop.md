@@ -22,6 +22,12 @@ request future cannot grant capacity to another request.
 Decode ledger validation can commit preemption. `PreemptionResult.reservation`
 is informational after public `admit` completes: the Plan already owns it.
 
+Scheduler claims an attempt with `tryClaim(reservation, attempt)`; it does not
+accept unused diagnostic text. Dispatcher exposes one production preemption
+entry: `preempt(registration, endpoint, detail, timeoutMs)`. The exact Decode
+endpoint and diagnostic text travel with the remote receipt; tests use this
+same entry rather than an overload that infers the endpoint from mutable state.
+
 `DeliveryCleanup` is removed. Dispatcher has a private `StopTask`; it is execution
 state, not a second service exposed to Scheduler. Its remote result and the
 runtime's physical delivery settlement signal have different meanings.
@@ -76,7 +82,7 @@ sequenceDiagram
     A->>S: claim exact victims
     A->>D: beginPreemption(exact reservations)
     A->>A: observe victims; start remaining attempt deadline
-    A->>X: preempt(exact claim, remaining ACK budget)
+    A->>X: preempt(exact claim, endpoint, detail, remaining ACK budget)
     X->>E: cancel when queued work starts before deadline
     E-->>X: ACK
     X->>S: onPreemption(registration, receipt)

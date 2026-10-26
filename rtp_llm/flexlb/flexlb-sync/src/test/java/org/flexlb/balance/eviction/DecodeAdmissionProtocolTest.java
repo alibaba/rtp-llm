@@ -97,7 +97,7 @@ class DecodeAdmissionProtocolTest {
         CompletableFuture<VictimResolution> secondTerminal = new CompletableFuture<>();
         PreemptionRegistration first = claim(fixture.requests(), 11L, firstTerminal);
         PreemptionRegistration second = claim(fixture.requests(), 12L, secondTerminal);
-        when(requests.tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
+        when(requests.tryClaim(any(DecodeResources.ReservationHandle.class), anyLong()))
                 .thenAnswer(
                         invocation ->
                                 Optional.of(
@@ -187,8 +187,7 @@ class DecodeAdmissionProtocolTest {
         when(signalInput.resolved(victimClaim))
                 .thenAnswer(call -> resolution.handle((result, failure) -> result).getNow(null));
         org.mockito.Mockito.doReturn(signalInput).when(runtime).signals();
-        when(fixture.requests().tryClaim(any(), anyLong(), any()))
-                .thenReturn(Optional.of(victimClaim));
+        when(fixture.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(victimClaim));
         var channel = mock(EngineGrpcClient.class);
         when(channel.cancelAsync(
                         any(),
@@ -241,8 +240,7 @@ class DecodeAdmissionProtocolTest {
                 CompletableFuture.completedFuture(
                         new VictimResolution(11L, VictimResolution.Outcome.DELIVERY_RESUMED));
         var victimClaim = claim(fixture.requests(), 11L, resolution);
-        when(fixture.requests().tryClaim(any(), anyLong(), any()))
-                .thenReturn(Optional.of(victimClaim));
+        when(fixture.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(victimClaim));
         when(fixture.endpoint().commitPreemption(anyLong())).thenReturn(null);
         var channel = mock(EngineGrpcClient.class);
         var acquirer =
@@ -289,8 +287,7 @@ class DecodeAdmissionProtocolTest {
         Fixture fixture = fixture();
         CompletableFuture<VictimResolution> terminal = new CompletableFuture<>();
         PreemptionRegistration victimClaim = claim(fixture.requests(), 11L, terminal);
-        when(fixture.requests()
-                        .tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
+        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong()))
                 .thenReturn(Optional.of(victimClaim));
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
         CompletableFuture<EngineGrpcClient.CancelReply> ack = new CompletableFuture<>();
@@ -354,8 +351,7 @@ class DecodeAdmissionProtocolTest {
         CompletableFuture<VictimResolution> secondTerminal = new CompletableFuture<>();
         PreemptionRegistration first = claim(fixture.requests(), 11L, firstTerminal);
         PreemptionRegistration second = claim(fixture.requests(), 12L, secondTerminal);
-        when(fixture.requests()
-                        .tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
+        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong()))
                 .thenAnswer(
                         invocation ->
                                 Optional.of(
@@ -467,8 +463,7 @@ class DecodeAdmissionProtocolTest {
         CompletableFuture<VictimResolution> secondTerminal = new CompletableFuture<>();
         PreemptionRegistration first = claim(fixture.requests(), 11L, firstTerminal);
         PreemptionRegistration second = claim(fixture.requests(), 12L, secondTerminal);
-        when(fixture.requests()
-                        .tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
+        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong()))
                 .thenAnswer(
                         invocation ->
                                 Optional.of(
@@ -590,8 +585,7 @@ class DecodeAdmissionProtocolTest {
         Fixture fixture = fixture();
         CompletableFuture<VictimResolution> terminal = new CompletableFuture<>();
         PreemptionRegistration claim = claim(fixture.requests(), 11L, terminal);
-        when(fixture.requests()
-                        .tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
+        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong()))
                 .thenReturn(Optional.of(claim));
         when(fixture.requests()
                         .onPreemption(
@@ -664,8 +658,7 @@ class DecodeAdmissionProtocolTest {
     void laterVictimClaimFailureReleasesEarlierClaimBeforeAnyCancel() throws Exception {
         Fixture fixture = fixture();
         PreemptionRegistration first = claim(fixture.requests(), 11L, new CompletableFuture<>());
-        when(fixture.requests()
-                        .tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
+        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong()))
                 .thenReturn(Optional.of(first), Optional.empty());
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
         var acquirer =
@@ -707,8 +700,7 @@ class DecodeAdmissionProtocolTest {
             throws Exception {
         Fixture fixture = fixture();
         PreemptionRegistration first = claim(fixture.requests(), 11L, new CompletableFuture<>());
-        when(fixture.requests()
-                        .tryClaim(any(DecodeResources.ReservationHandle.class), anyLong(), any()))
+        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong()))
                 .thenReturn(Optional.of(first))
                 .thenThrow(
                         new IllegalStateException("Priority victim has no routable Cancel target"));
@@ -753,7 +745,7 @@ class DecodeAdmissionProtocolTest {
             throws Exception {
         Fixture fixture = fixture();
         var stale = new DecodeResources.ReservationHandle(9L, 11L, 101L);
-        when(fixture.requests().tryClaim(eq(stale), anyLong(), any())).thenReturn(Optional.empty());
+        when(fixture.requests().tryClaim(eq(stale), anyLong())).thenReturn(Optional.empty());
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
         var acquirer =
                 new DecodeAdmission(
@@ -780,7 +772,7 @@ class DecodeAdmissionProtocolTest {
                         .get(1, TimeUnit.SECONDS);
         assertFalse(result.committed());
         assertFalse(result.controlFailure());
-        verify(fixture.requests()).tryClaim(eq(stale), anyLong(), eq("old endpoint"));
+        verify(fixture.requests()).tryClaim(eq(stale), anyLong());
         verify(fixture.endpoint(), never())
                 .beginPreemption(
                         anyLong(), anyList(), anyLong(), anyLong(), anyLong(), anyInt(), any());
@@ -801,7 +793,7 @@ class DecodeAdmissionProtocolTest {
                 Fixture fixture = fixture();
                 var terminal = new CompletableFuture<VictimResolution>();
                 var victimClaim = claim(fixture.requests(), 11L, terminal);
-                when(fixture.requests().tryClaim(any(), anyLong(), any()))
+                when(fixture.requests().tryClaim(any(), anyLong()))
                         .thenReturn(Optional.of(victimClaim));
                 org.mockito.Mockito.doAnswer(
                                 call -> {
@@ -874,8 +866,7 @@ class DecodeAdmissionProtocolTest {
         Fixture fixture = fixture();
         var terminal = new CompletableFuture<VictimResolution>();
         var victimClaim = claim(fixture.requests(), 11L, terminal);
-        when(fixture.requests().tryClaim(any(), anyLong(), any()))
-                .thenReturn(Optional.of(victimClaim));
+        when(fixture.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(victimClaim));
         var deadline = mock(org.flexlb.balance.scheduler.RequestTaskScheduler.Cancellation.class);
         var protocolRuntime =
                 mock(
@@ -950,8 +941,7 @@ class DecodeAdmissionProtocolTest {
         when(context.data().getScheduler()).thenReturn(fixture.requests());
         var terminal = new CompletableFuture<VictimResolution>();
         var victimClaim = claim(fixture.requests(), 11L, terminal);
-        when(fixture.requests().tryClaim(any(), anyLong(), any()))
-                .thenReturn(Optional.of(victimClaim));
+        when(fixture.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(victimClaim));
         var channel = mock(EngineGrpcClient.class);
         when(channel.cancelAsync(
                         any(),
@@ -1093,8 +1083,7 @@ class DecodeAdmissionProtocolTest {
         var fixture = fixture();
         var terminal = new CompletableFuture<VictimResolution>();
         var victimClaim = claim(fixture.requests(), 11L, terminal);
-        when(fixture.requests().tryClaim(any(), anyLong(), any()))
-                .thenReturn(Optional.of(victimClaim));
+        when(fixture.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(victimClaim));
         var threadName = new CompletableFuture<String>();
         org.mockito.Mockito.doAnswer(
                         call -> {
@@ -1154,7 +1143,7 @@ class DecodeAdmissionProtocolTest {
                 var terminal = new CompletableFuture<VictimResolution>();
                 terminals.add(terminal);
                 var victimClaim = claim(fixture.requests(), 11L, terminal);
-                when(fixture.requests().tryClaim(any(), anyLong(), any()))
+                when(fixture.requests().tryClaim(any(), anyLong()))
                         .thenReturn(Optional.of(victimClaim));
                 org.mockito.Mockito.doAnswer(
                                 call -> {
@@ -1206,9 +1195,11 @@ class DecodeAdmissionProtocolTest {
                                 return CompletableFuture.completedFuture(
                                         EngineGrpcClient.CancelReply.REQUEST_CLEANED);
                             });
-            var nextOwner = fixture().requests();
-            var nextClaim = claim(nextOwner, 12L, new CompletableFuture<>());
-            var next = dispatcher(nextClient).preempt(nextClaim, 500L);
+            var nextVictim = fixture();
+            var nextClaim = claim(nextVictim.requests(), 12L, new CompletableFuture<>());
+            var next =
+                    dispatcher(nextClient)
+                            .preempt(nextClaim, nextVictim.endpoint(), "priority preemption", 500L);
             assertTrue(
                     nextSent.await(1, TimeUnit.SECONDS),
                     "slow coordinators must not occupy stop workers");
@@ -1319,7 +1310,7 @@ class DecodeAdmissionProtocolTest {
         var f = fixture();
         var terminal = new CompletableFuture<VictimResolution>();
         var victimClaim = claim(f.requests(), 11L, terminal);
-        when(f.requests().tryClaim(any(), anyLong(), any())).thenReturn(Optional.of(victimClaim));
+        when(f.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(victimClaim));
         var channel = mock(EngineGrpcClient.class);
         when(channel.cancelAsync(any(), anyInt(), any(), anyLong()))
                 .thenReturn(
@@ -1416,7 +1407,7 @@ class DecodeAdmissionProtocolTest {
         var f = fixture();
         var terminal = new CompletableFuture<VictimResolution>();
         var victimClaim = claim(f.requests(), 11L, terminal);
-        when(f.requests().tryClaim(any(), anyLong(), any())).thenReturn(Optional.of(victimClaim));
+        when(f.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(victimClaim));
         var channel = mock(EngineGrpcClient.class);
         var ack = new CompletableFuture<EngineGrpcClient.CancelReply>();
         when(channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(ack);
@@ -1517,7 +1508,7 @@ class DecodeAdmissionProtocolTest {
         var secondTerminal = new CompletableFuture<VictimResolution>();
         var first = claim(f.requests(), 11L, firstTerminal);
         var second = claim(f.requests(), 12L, secondTerminal);
-        when(f.requests().tryClaim(any(), anyLong(), any()))
+        when(f.requests().tryClaim(any(), anyLong()))
                 .thenAnswer(
                         call ->
                                 Optional.of(
@@ -1577,7 +1568,7 @@ class DecodeAdmissionProtocolTest {
         var f = fixture();
         var terminal = new CompletableFuture<VictimResolution>();
         var victimClaim = claim(f.requests(), 11L, terminal);
-        when(f.requests().tryClaim(any(), anyLong(), any())).thenReturn(Optional.of(victimClaim));
+        when(f.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(victimClaim));
         var channel = mock(EngineGrpcClient.class);
         var ack = new CompletableFuture<EngineGrpcClient.CancelReply>();
         when(channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(ack);
@@ -1725,7 +1716,7 @@ class DecodeAdmissionProtocolTest {
         var secondTerminal = new CompletableFuture<VictimResolution>();
         var first = claim(f.requests(), 11L, firstTerminal);
         var second = claim(f.requests(), 12L, secondTerminal);
-        when(f.requests().tryClaim(any(), anyLong(), any()))
+        when(f.requests().tryClaim(any(), anyLong()))
                 .thenAnswer(
                         call ->
                                 Optional.of(

@@ -1,8 +1,9 @@
 package org.flexlb.balance.eviction;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigTestSupport;
@@ -12,7 +13,6 @@ import org.flexlb.config.VictimStage;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter.CancelEvent;
@@ -57,29 +57,37 @@ class DecodeAdmissionTest {
 
     private RequestSchedulerReporter reporter;
 
-    private EngineGrpcClient engineClient;
+    private DeliveryDispatcher dispatcher;
 
     private AbstractRequestScheduler requests;
 
-    private WorkerEndpoint blockedEndpoint;
+    private DecodeEndpoint blockedEndpoint;
 
     private DecodeAdmission acquirer;
 
     @BeforeEach
     void setUp() {
         reporter = mock(RequestSchedulerReporter.class);
-        engineClient = mock(EngineGrpcClient.class);
+        dispatcher = mock(DeliveryDispatcher.class);
         requests = mock(AbstractRequestScheduler.class);
-        blockedEndpoint = mock(WorkerEndpoint.class);
+        blockedEndpoint = mock(DecodeEndpoint.class);
+        var config = SchedulingTestConfig.newConfig();
+        SchedulingTestConfig.usePriorityQueue(config);
+        config.priorityOrdering().setPreemption(new PreemptionConfig());
+        configureAdmission(config);
+    }
+
+    private void configureAdmission(FlexlbConfig config) {
         acquirer =
-                new DecodeAdmission(
-                        mock(org.flexlb.balance.scheduler.DeliveryDispatcher.class),
-                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests),
-                        mock(org.flexlb.balance.scheduler.SchedulerRuntime.class),
-                        reporter,
-                        SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
-                        SchedulingTestConfig.capacity(SchedulingTestConfig.newConfig()));
-        acquirer = org.mockito.Mockito.spy(acquirer);
+                org.mockito.Mockito.spy(
+                        new DecodeAdmission(
+                                dispatcher,
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
+                                        requests),
+                                mock(org.flexlb.balance.scheduler.SchedulerRuntime.class),
+                                reporter,
+                                SchedulingTestConfig.configService(config),
+                                SchedulingTestConfig.capacity(config)));
     }
 
     @ParameterizedTest
@@ -140,7 +148,6 @@ class DecodeAdmissionTest {
                 .thenReturn(new DecodeResources.CapacityUsage(1L, 20_000L, 10_000L, 0L, 10_000L));
 
         var completion = new CompletableFuture<DecodeAdmission.PreemptionResult>();
-        org.mockito.Mockito.doReturn(completion).when(acquirer).preempt(any(), any());
         var incoming = Request.builder().requestId(902L).seqLen(128L).rawPriority(70).build();
         var context = new RequestContext(config);
         context.data().setRequest(incoming);
@@ -153,16 +160,7 @@ class DecodeAdmissionTest {
                 context.data(), "register", requests, future);
         org.flexlb.balance.scheduler.SchedulerTestSupport.bindOwner(context, requests);
         var frozenRequest = context.data().getRequest();
-        acquirer =
-                org.mockito.Mockito.spy(
-                        new DecodeAdmission(
-                                mock(org.flexlb.balance.scheduler.DeliveryDispatcher.class),
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
-                                        requests),
-                                mock(org.flexlb.balance.scheduler.SchedulerRuntime.class),
-                                reporter,
-                                SchedulingTestConfig.configService(config),
-                                SchedulingTestConfig.capacity(config)));
+        configureAdmission(config);
         org.mockito.Mockito.doReturn(completion).when(acquirer).preempt(any(), any());
         when(requests.isAdmissionOpen(902L, future)).thenReturn(admissionOpen);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(99L);
@@ -227,17 +225,7 @@ class DecodeAdmissionTest {
                 .getDecode()
                 .getAvailability()
                 .setMaxEngineRequests(capacityBlocked ? 1L : 4L);
-        when(context.data().getConfig()).thenReturn(config);
-        acquirer =
-                org.mockito.Mockito.spy(
-                        new DecodeAdmission(
-                                mock(org.flexlb.balance.scheduler.DeliveryDispatcher.class),
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
-                                        requests),
-                                mock(org.flexlb.balance.scheduler.SchedulerRuntime.class),
-                                reporter,
-                                SchedulingTestConfig.configService(config),
-                                SchedulingTestConfig.capacity(config)));
+        configureAdmission(config);
         when(context.data().getFuture()).thenReturn(new CompletableFuture<>());
         var endpoint = org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
         var snapshot = mock(DecodeResources.ResourceSnapshot.class);
@@ -263,7 +251,7 @@ class DecodeAdmissionTest {
 
         assertNull(acquirer.tryReclaim(context, endpoint));
         verify(endpoint, org.mockito.Mockito.times(1)).resourceSnapshot();
-        verifyNoInteractions(engineClient, requests);
+        verifyNoInteractions(dispatcher, requests);
         verify(acquirer, never()).preempt(any(), any());
         if (capacityBlocked) {
             verify(reporter)
@@ -279,7 +267,7 @@ class DecodeAdmissionTest {
     }
 
     private void assertZeroSideEffect() {
-        verifyNoInteractions(engineClient);
+        verifyNoInteractions(dispatcher);
         verify(acquirer, never()).preempt(any(), any());
         verifyNoInteractions(requests);
         verifyNoInteractions(blockedEndpoint);
@@ -339,7 +327,7 @@ class DecodeAdmissionTest {
         assertZeroSideEffect();
     }
 
-    // ─── Priority boundaries ────────────────────────────────────────────
+    // Priority boundaries
     @Test
     @DisplayName("Priority 0 (NO_PRIORITY sentinel) declines without side effects")
     void noPriorityDeclines() {
@@ -348,17 +336,16 @@ class DecodeAdmissionTest {
     }
 
     @Test
-    @DisplayName("Priority 1 (minimum valid) passes the guard — does NOT decline on priority alone")
+    @DisplayName("Priority 1 reaches endpoint selection when preemption is enabled")
     void minimumValidPriorityPassesGuard() {
-        // priority=1 has priority; with FIFO config (no preemption policy) it
-        // still declines, but for a DIFFERENT reason (no preemption policy),
-        // proving the priority guard itself passed.
-        RequestContext ctx = ctx(1);
-        when(ctx.data().getConfig())
-                .thenReturn(SchedulingTestConfig.newConfig()); // FIFO = no preemption
-        assertNull(tryReclaim(ctx, new CompletableFuture<>()));
-        // It passed the priority guard but declined on preemption policy,
-        // proving priority=1 is accepted by hasPriority.
+        var context = ctx(1);
+        when(context.data().getFuture()).thenReturn(new CompletableFuture<>());
+        var endpoint = org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
+        when(endpoint.isRetired()).thenReturn(true);
+        assertNull(acquirer.tryReclaim(context, endpoint));
+        verify(endpoint).resourceSnapshot();
+        verify(endpoint).isRetired();
+        verifyNoInteractions(dispatcher, requests, reporter);
     }
 
     // ─── Scheduler mode ─────────────────────────────────────────────────
@@ -366,8 +353,7 @@ class DecodeAdmissionTest {
     @DisplayName("FIFO ordering (no preemption policy) never evicts")
     void fifoOrderingNeverEvicts() {
         RequestContext ctx = ctx(50);
-        when(ctx.data().getConfig())
-                .thenReturn(SchedulingTestConfig.newConfig()); // default=QUEUE+FIFO
+        configureAdmission(SchedulingTestConfig.newConfig());
         assertNull(tryReclaim(ctx, new CompletableFuture<>()));
         assertZeroSideEffect();
     }
@@ -377,8 +363,10 @@ class DecodeAdmissionTest {
     void directSchedulerDeclines() {
         RequestContext ctx = ctx(50);
         FlexlbConfig directConfig = SchedulingTestConfig.newConfig();
+        SchedulingTestConfig.usePriorityQueue(directConfig);
+        directConfig.priorityOrdering().setPreemption(new PreemptionConfig());
         directConfig.setScheduler(ConfigTestSupport.direct());
-        when(ctx.data().getConfig()).thenReturn(directConfig);
+        configureAdmission(directConfig);
         assertNull(tryReclaim(ctx, new CompletableFuture<>()));
         assertZeroSideEffect();
     }
@@ -391,7 +379,6 @@ class DecodeAdmissionTest {
         when(ctx.data().getSchedulingMetadata())
                 .thenReturn(org.flexlb.dao.SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         when(ctx.data().getRequestExpiresAtMs()).thenReturn(Long.MAX_VALUE);
-        when(ctx.data().getConfig()).thenReturn(SchedulingTestConfig.newConfig());
         return ctx;
     }
 }
