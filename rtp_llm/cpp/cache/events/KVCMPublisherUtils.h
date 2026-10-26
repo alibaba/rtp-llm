@@ -1,7 +1,6 @@
 #pragma once
 
 #include <string>
-#include <cstdint>
 
 namespace rtp_llm::detail {
 
@@ -10,7 +9,6 @@ struct KVCMReportFeedback {
     bool ok = false;
     bool snapshot_required = false;
     bool registration_required = false;
-    uint64_t retry_after_ms = 0;
 };
 
 std::string normalizeKVCacheEventEndpoint(std::string endpoint);
