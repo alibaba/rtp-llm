@@ -70,7 +70,7 @@ class MockV41ImageTest {
                 var first = stub.remoteMultimodalEmbedding(request(image));
                 assertEquals(List.of(5L, 8L), first.getMultimodalEmbedding().getShapeList());
                 assertEquals(EngineRpcService.TensorPB.DataType.BF16, first.getMultimodalEmbedding().getDataType());
-                assertEquals(80, first.getMultimodalEmbedding().getBf16Data().size());
+                assertEquals(0, first.getMultimodalEmbedding().getBf16Data().size());
                 var input = input(image, server.getPort());
                 assertEquals(input, client.prepare(input, 1000));
                 assertEquals(first, stub.remoteMultimodalEmbedding(request(image)));

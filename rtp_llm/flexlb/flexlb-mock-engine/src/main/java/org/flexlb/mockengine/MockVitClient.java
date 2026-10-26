@@ -15,7 +15,23 @@ import java.util.concurrent.TimeUnit;
 
 /** Prefill consumes the same image hashes used by frontend routing. Never called on D. */
 final class MockVitClient implements AutoCloseable {
-    private final Map<String, ManagedChannel> channels = new ConcurrentHashMap<>();
+    private record Connection(String localName, ManagedChannel channel) {}
+    private final Map<String, Connection> channels = new ConcurrentHashMap<>();
+    java.util.function.BiFunction<String, Integer, String> localEndpoint = (host, port) -> null;
+
+    private ManagedChannel channel(String host, int port) {
+        String target = host + ":" + port;
+        String localName = localEndpoint.apply(host, port);
+        return channels.compute(target, (key, prior) -> {
+            if (prior != null && java.util.Objects.equals(prior.localName(), localName)) return prior;
+            if (prior != null) prior.channel().shutdownNow();
+            ManagedChannel channel = localName == null
+                    ? ManagedChannelBuilder.forAddress(host, port).usePlaintext()
+                        .maxInboundMessageSize(64 << 20).disableRetry().build()
+                    : io.grpc.inprocess.InProcessChannelBuilder.forName(localName).directExecutor().disableRetry().build();
+            return new Connection(localName, channel);
+        }).channel();
+    }
 
     EngineRpcService.GenerateInputPB prepare(EngineRpcService.GenerateInputPB input, long budgetMs) {
         boolean typed = input.hasV41Inputs();
@@ -25,10 +41,7 @@ final class MockVitClient implements AutoCloseable {
                 .filter(a -> a.getRoleStr().equals("VIT") || a.getRole() == EngineRpcService.RoleAddrPB.RoleType.VIT)
                 .findFirst().orElseThrow(() -> Status.FAILED_PRECONDITION.withDescription("image request has no VIT role address").asRuntimeException());
         if (budgetMs <= 0) throw Status.DEADLINE_EXCEEDED.asRuntimeException();
-        String target = address.getIp() + ":" + address.getGrpcPort();
-        var channel = channels.computeIfAbsent(target, ignored -> ManagedChannelBuilder
-                .forAddress(address.getIp(), address.getGrpcPort()).usePlaintext()
-                .maxInboundMessageSize(64 << 20).disableRetry().build());
+        var channel = channel(address.getIp(), address.getGrpcPort());
         var request = EngineRpcService.MultimodalInputsPB.newBuilder().setRequestId(input.getRequestId())
                 .addAllMultimodalInputs(input.getMultimodalInputsList()).setTimeoutMs(Math.min(budgetMs, 120000));
         if (typed) request.setV41Inputs(input.getV41Inputs());
@@ -42,29 +55,31 @@ final class MockVitClient implements AutoCloseable {
         long rows = response.getSplitSizeList().stream().mapToLong(Integer::longValue).sum();
         int segments = typed ? input.getV41Inputs().getImagesCount() : input.getMultimodalInputsCount();
         boolean bf16 = features.getDataType() == EngineRpcService.TensorPB.DataType.BF16;
-        var data = bf16 ? features.getBf16Data() : features.getFp32Data();
         if (response.getSplitSizeCount() != segments
                 || response.getSplitSizeList().stream().anyMatch(size -> size <= 0)
                 || features.getShapeCount() != 2 || features.getShape(0) != rows
                 || features.getShape(1) <= 0
                 || (typed ? !bf16 : features.getDataType() != EngineRpcService.TensorPB.DataType.FP32)
-                || rows * features.getShape(1) * (bf16 ? 2 : 4) != data.size())
+                || !features.getFp32Data().isEmpty() || !features.getBf16Data().isEmpty()
+                || !features.getInt32Data().isEmpty() || !features.getFp16Data().isEmpty())
             throw Status.DATA_LOSS.withDescription("invalid Mock ViT embedding shape or split sizes").asRuntimeException();
+        try { Math.multiplyExact(Math.multiplyExact(rows, features.getShape(1)), bf16 ? 2 : 4); }
+        catch (ArithmeticException overflow) {
+            throw Status.DATA_LOSS.withDescription("ViT logical tensor size overflows").asRuntimeException();
+        }
         if (typed) {
             for (int i = 0; i < segments; i++) if (response.getSplitSize(i) != input.getV41Inputs().getImages(i).getTypesCount())
                 throw Status.DATA_LOSS.withDescription("V4.1 feature rows do not match canonical image span").asRuntimeException();
             return input; // Prepared frontend IDs are canonical; never replace them with feature hashes.
         }
-        byte[] tensor = data.toByteArray();
-        int stride = Math.toIntExact(features.getShape(1) * 4);
         var hashes = new ArrayList<Integer>();
-        for (int i = 0; i < rows; i++) hashes.add(MockFeatureHash.row(tensor, i * stride, stride));
-        if (response.hasMultimodalFeatureHash()) {
-            var wire = response.getMultimodalFeatureHash().getInt32Data().asReadOnlyByteBuffer().order(ByteOrder.LITTLE_ENDIAN);
-            if (wire.remaining() != hashes.size() * 4) throw Status.DATA_LOSS.withDescription("invalid ViT hash size").asRuntimeException();
-            for (int hash : hashes) if (wire.getInt() != hash)
-                throw Status.DATA_LOSS.withDescription("ViT hash does not match embedding").asRuntimeException();
-        }
+        var hashTensor = response.getMultimodalFeatureHash();
+        var wire = hashTensor.getInt32Data().asReadOnlyByteBuffer().order(ByteOrder.LITTLE_ENDIAN);
+        if (hashTensor.getDataType() != EngineRpcService.TensorPB.DataType.INT32
+                || hashTensor.getShapeCount() != 1 || hashTensor.getShape(0) != rows
+                || wire.remaining() != rows * 4)
+            throw Status.DATA_LOSS.withDescription("invalid ViT hash metadata").asRuntimeException();
+        while (wire.hasRemaining()) hashes.add(wire.getInt());
         if (input.getMultimodalTokenLayout().getSpansCount() != response.getSplitSizeCount())
             throw Status.FAILED_PRECONDITION.withDescription("frontend must provide expanded multimodal token layout").asRuntimeException();
         int cursor = 0, previousEnd = 0;
@@ -131,9 +146,13 @@ final class MockVitClient implements AutoCloseable {
             throw Status.INVALID_ARGUMENT.withDescription("V4.1 image spans do not cover token metadata").asRuntimeException();
     }
 
+    Map<String, Long> snapshot() {
+        long local = channels.values().stream().filter(connection -> connection.localName() != null).count();
+        return Map.of("local_channels", local, "remote_channels", channels.size() - local);
+    }
     int channelCount() { return channels.size(); }
     @Override public void close() {
-        channels.values().forEach(ManagedChannel::shutdownNow);
+        channels.values().forEach(connection -> connection.channel().shutdownNow());
         channels.clear();
     }
 }

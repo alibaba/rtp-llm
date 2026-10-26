@@ -14,6 +14,10 @@
 
     <dependencies>
         <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-inprocess</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.flexlb</groupId>
             <artifactId>flexlb-grpc</artifactId>
         </dependency>

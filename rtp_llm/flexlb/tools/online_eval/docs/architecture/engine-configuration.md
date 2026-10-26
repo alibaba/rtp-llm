@@ -273,7 +273,7 @@ spawn preprocess 各子进程独立导入默认 10 项缓存，父进程的 resi
 缓存命中仍校验当前文件大小限制。`mm_cache_item_num` 保留 real 的模型内部旧缓存配置，
 当前通用 URL scheduler 不使用它；V4.1 编码缓存由上面的独立环境变量控制。
 
-GPU/CPU pool 不申请真实显存，payload 仍为不可变 JVM 数据。回收依赖完成事件，事件未完成的块计入
+GPU/CPU pool 不申请真实显存，embedding 仅存不可变 shape/dtype/hash 元数据，按逻辑 tensor 字节数计费；V→P 的本地与远端传输见 [ViT 链路](../../../mock_bundle/docs/VIT_API.md)。回收依赖完成事件，事件未完成的块计入
 used/pending，不能重新分配；默认 CPU 模拟事件立即完成，测试通过受控事件覆盖延迟回收和搬运失败。
 这些事件用于验证所有权和容量，不拟合 CUDA/DMA 延迟、forward workspace 或真实 OOM。
 模拟输出的 shape/dtype 由现有模型/校准输入决定，比较容量时必须先匹配输出 tensor 布局。

@@ -20,10 +20,12 @@ import java.util.Locale;
 /** Qwen2/2.5-VL image geometry; forward values are deterministic CPU simulation. */
 final class MockVitImage {
     record Result(EngineRpcService.TensorPB embedding, EngineRpcService.TensorPB hashes, int rows) {
-        long embeddingBytes() { return embedding.getFp32Data().size() + embedding.getBf16Data().size(); }
+        // Shape describes logical tensor storage; embedding payload is deliberately absent.
+        long embeddingBytes() { return Math.multiplyExact(Math.multiplyExact(embedding.getShape(0), embedding.getShape(1)),
+                embedding.getDataType() == EngineRpcService.TensorPB.DataType.BF16 ? 2 : 4); }
         long hashBytes() { return hashes.getInt32Data().size(); }
     }
-    record Prepared(int rows, int hiddenSize, int bytes, long seed, double downloadMs) {}
+    record Prepared(int rows, int hiddenSize, long seed, double downloadMs) {}
     private MockVitImage() {}
 
     static String key(EngineRpcService.MultimodalInputPB image) {
@@ -159,24 +161,24 @@ final class MockVitImage {
         digest.update(cacheKey.substring(cacheKey.indexOf('_')).getBytes(StandardCharsets.UTF_8));
         digest.update(ByteBuffer.allocate(8).putInt(geometry[0]).putInt(geometry[1]).array());
         byte[] seed = digest.digest();
-        return new Prepared(rows, hiddenSize, (int)bytes, ByteBuffer.wrap(seed).getLong(), downloadMs);
+        return new Prepared(rows, hiddenSize, ByteBuffer.wrap(seed).getLong(), downloadMs);
     }
 
     static Result forward(Prepared image) {
         int rows = image.rows(), hiddenSize = image.hiddenSize();
         long state = image.seed();
-        ByteBuffer features = ByteBuffer.allocate(image.bytes()).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer features = ByteBuffer.allocate(Math.multiplyExact(hiddenSize, 4)).order(ByteOrder.LITTLE_ENDIAN);
         ByteBuffer hashes = ByteBuffer.allocate(rows * 4).order(ByteOrder.LITTLE_ENDIAN);
         for (int row = 0; row < rows; row++) {
-            int start = features.position();
+            features.clear();
             for (int col = 0; col < hiddenSize; col++) {
                 state = MockFeatureHash.mix(state + 0x9e3779b97f4a7c15L);
                 features.putFloat(((state >>> 40) / (float)(1 << 24)) * 2 - 1);
             }
-            hashes.putInt(MockFeatureHash.row(features.array(), start, hiddenSize * 4));
+            hashes.putInt(MockFeatureHash.row(features.array(), 0, hiddenSize * 4));
         }
         return new Result(EngineRpcService.TensorPB.newBuilder().setDataType(EngineRpcService.TensorPB.DataType.FP32)
-                .addShape(rows).addShape(hiddenSize).setFp32Data(ByteString.copyFrom(features.array())).build(),
+                .addShape(rows).addShape(hiddenSize).build(),
                 EngineRpcService.TensorPB.newBuilder().setDataType(EngineRpcService.TensorPB.DataType.INT32)
                         .addShape(rows).setInt32Data(ByteString.copyFrom(hashes.array())).build(), rows);
     }

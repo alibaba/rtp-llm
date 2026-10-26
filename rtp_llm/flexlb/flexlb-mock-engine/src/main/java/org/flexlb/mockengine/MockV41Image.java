@@ -107,20 +107,20 @@ final class MockV41Image {
         // Simulate model forward using patch content; preserve canonical IDs at P.
         byte[] digest = MessageDigest.getInstance("SHA-256").digest(image.getPatches().getBf16Data().toByteArray());
         long state = ByteBuffer.wrap(digest).getLong();
-        ByteBuffer features = ByteBuffer.allocate((int)bytes).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer features = ByteBuffer.allocate(Math.multiplyExact(config.hidden(), 2)).order(ByteOrder.LITTLE_ENDIAN);
         ByteBuffer hashes = ByteBuffer.allocate(rows * 4).order(ByteOrder.LITTLE_ENDIAN);
         for (int row = 0; row < rows; row++) {
-            int start = features.position();
+            features.clear();
             for (int col = 0; col < config.hidden(); col++) {
                 state = MockFeatureHash.mix(state + 0x9e3779b97f4a7c15L);
                 float value = (state >>> 40) / (float)(1 << 24);
                 features.putShort((short)(Float.floatToIntBits(value) >>> 16));
             }
-            hashes.putInt(MockFeatureHash.row(features.array(), start, config.hidden() * 2));
+            hashes.putInt(MockFeatureHash.row(features.array(), 0, config.hidden() * 2));
         }
         return new MockVitImage.Result(EngineRpcService.TensorPB.newBuilder()
                 .setDataType(EngineRpcService.TensorPB.DataType.BF16).addShape(rows).addShape(config.hidden())
-                .setBf16Data(ByteString.copyFrom(features.array())).build(), EngineRpcService.TensorPB.newBuilder()
+                .build(), EngineRpcService.TensorPB.newBuilder()
                 .setDataType(EngineRpcService.TensorPB.DataType.INT32).addShape(rows)
                 .setInt32Data(ByteString.copyFrom(hashes.array())).build(), rows);
     }

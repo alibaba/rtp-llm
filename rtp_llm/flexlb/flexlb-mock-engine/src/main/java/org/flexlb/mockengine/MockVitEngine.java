@@ -24,6 +24,9 @@ final class MockVitEngine implements MockEngineLifecycle {
     private final MockPerformanceModel performance;
     private final AtomicBoolean closed = new AtomicBoolean();
     private volatile boolean stopped, accepting = true;
+    private Server localServer;
+    private volatile String localName;
+    String localName() { return localName; }
 
     MockVitEngine(JavaMockEngineCluster.Config config, MockPerformanceModel template, String name, String host,
                   int port, EventLoopGroup boss, EventLoopGroup workers) throws IOException {
@@ -75,13 +78,25 @@ final class MockVitEngine implements MockEngineLifecycle {
                 return next.startCall(call, headers);
             }
         };
+        var definition = ServerInterceptors.intercept(service,
+                monitor == null ? java.util.List.of() : java.util.List.of(monitor));
         var server = NettyServerBuilder.forAddress(new java.net.InetSocketAddress(config.bindHost, port))
                 .bossEventLoopGroup(boss).workerEventLoopGroup(workers).channelType(NioServerSocketChannel.class)
                 .withOption(ChannelOption.SO_REUSEADDR, true).withChildOption(ChannelOption.SO_REUSEADDR, true)
                 .executor(runtime.controlExecutor()).callExecutor(rpc).intercept(rpc).intercept(admission)
                 .maxInboundMessageSize(config.grpcMaxInboundMessageBytes)
-                .addService(ServerInterceptors.intercept(service, monitor == null ? java.util.List.of() : java.util.List.of(monitor)))
+                .addService(definition)
                 .build().start();
+        try {
+            if (localServer != null) localServer.shutdownNow();
+            String name = io.grpc.inprocess.InProcessServerBuilder.generateName();
+            localServer = io.grpc.inprocess.InProcessServerBuilder.forName(name)
+                    .executor(runtime.controlExecutor()).callExecutor(rpc).intercept(rpc).intercept(admission)
+                    .addService(definition).build().start();
+            localName = name;
+        } catch (IOException | RuntimeException error) {
+            server.shutdownNow(); throw error;
+        }
         stopped = false; accepting = true;
         return server;
     }
@@ -113,7 +128,9 @@ final class MockVitEngine implements MockEngineLifecycle {
     @Override public void drainAndShutdown() { closeAdmission(); }
     @Override public void shutdown() {
         if (closed.compareAndSet(false,true)) {
-            accepting=false; stopped=true; rpc.stop();
+            accepting=false; stopped=true;
+            if (localServer != null) localServer.shutdownNow();
+            rpc.stop();
             ShutdownTasks.runAll(java.util.List.of(service::close, () -> { if(monitor!=null) monitor.close(); }));
         }
     }

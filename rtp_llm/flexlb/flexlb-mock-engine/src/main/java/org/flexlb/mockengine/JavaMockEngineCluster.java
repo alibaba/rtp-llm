@@ -309,6 +309,10 @@ public final class JavaMockEngineCluster {
                 engineName, declaredHost(config, engineIndex), roleName, roleType, grpcPort,
                 services, scheduler, performance, totalBlocks, stats,
                 poolTotalKvTokens, config.engineConfig.concurrency(roleName));
+        service.vitClient.localEndpoint = (host, port) -> {
+            var selected = config.engines.get(port);
+            return selected instanceof MockVitEngine vit && vit.getHost().equals(host) ? vit.localName() : null;
+        };
         service.effectiveConfig = config.engineConfig.snapshot();
         service.setResponsePollTimeoutMs(DEFAULT_RESPONSE_POLL_TIMEOUT_MS);
         service.setAutoFetch(config.autoFetch);
@@ -6570,6 +6574,7 @@ public final class JavaMockEngineCluster {
             // availability, matching the production master's view.
             long effectiveActiveKv = usedKvTokens();
             snap.put("name", engineName);
+            if (roleName.equals("PREFILL")) snap.put("vit_transport", vitClient.snapshot());
             snap.put("engine_incarnation", engineIncarnation);
             snap.put("role", roleName.toLowerCase());
             snap.put("grpc_addr", host + ":" + grpcPort);

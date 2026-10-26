@@ -8,7 +8,7 @@ Mock ViT 是 JavaMockEngineCluster 的 VIT 角色，和 P/D 共用入口、JVM�
 2. frontend 对选定 ViT 调用 `GetMultimodalHashes`。先只探测 key；缺失时提交对应图片，得到每张图的行 hash、长度及 worker instance。
 3. frontend 用 hash 展开图片标签，携带展开后的 seq_len、KV block keys 和 selected_vit 再请求 Master。原始 prompt tensor 保留，GenerateInputPB 使用展开后的 token_ids 和 multimodal_token_layout。
 4. Master 核对 ViT 的 group/worker generation；失效时返回 8408，frontend 丢弃展开结果并最多重选一次。ViT-only 取消或响应丢失不能取消同请求号的 P/D admission。
-5. P 调用同一个 ViT 获取 embedding，重新计算行 hash，并校验 layout 长度和 frontend token_ids。D 沿用 P/D 流程。BATCH dispatcher 必须把已选择的 ViT 地址与 P/D 一并下发。
+5. P 调用同一个 ViT 获取特征元数据，校验 shape、dtype、行 hash、layout 长度和 frontend token_ids。D 沿用 P/D 流程。BATCH dispatcher 必须把已选择的 ViT 地址与 P/D 一并下发。
 
 ## 启动与连接
 
@@ -22,7 +22,11 @@ java -jar <mock-engine.jar> \
 
 `--mock.n_vit` 默认 0；启用时 V 默认和 P/D 共 JVM，端口连续排列为 P、D、V。需要 prepared V4.1 输入时设置 `--mock.vit_model_path <模型元数据目录>`。real VitConfig、每 worker 的缓存字节预算继续从 engine-config 读取；Mock 假特征宽度、输出保护和计算耗时从 calibration 的 `mock.vit`、`mock.forward.vit` 读取。字段语义统一见 [引擎配置](../../online_eval/docs/architecture/engine-configuration.md)。
 
-各角色保留真实 gRPC 接口，P 仍通过地址访问已选中的 V；共 JVM 不绕过序列化、deadline、取消或 RPC 容量与抖动。缓存预算按 worker 独立计算；实际 heap、GC 和 JVM 故障由同一进程承担，不模拟物理 GPU 内存隔离。
+P 按选中的 V 地址选择传输：该地址属于本集群同一 JVM 内的 V 时使用进程内 gRPC，直接传递不可变 protobuf 对象，不经过 TCP 或 protobuf 序列化；其他 JVM/Pod 使用网络 gRPC。同端口但不同 host 不视为本地 V。两条通路共用服务、门禁、deadline、取消、RPC 配额、抖动和监控；stop/start 与移除重建后，P 根据当前实例重新连接。P 的 snapshot.vit_transport 显示当前 local_channels/remote_channels。
+
+V 的 embedding TensorPB 仅保留 shape 和 dtype，FP32/BF16 payload 为空；另传每行 INT32 特征 hash 和每图 split_size。逻辑字节数为 rows × hidden_size × dtype 字节数，输出保护、CPU/GPU 缓存容量和碎片分配仍按该值计算，不按精简后的响应大小计算。生成哈希使用一个行缓冲区，不构建整块假 embedding；哈希缓存、引用保护、淘汰、层间迁移和失败释放语义保留。V4.1 同样返回 BF16 元数据；输入图片/patch 的校验和预处理保持执行。
+
+这是 Mock 专用的元数据协议，不能交给 real P 的 tensor decoder。real 的 MMOutputTransport 支持 grpc 与 rdma；rdma backend 导出注册内存并经控制 RPC 返回描述符，MMGrpcTransport 传播预算和取消。Mock 不实现物理 RDMA、注册内存 lease 或数据面带宽，也不以 TCP 搬运假 tensor 来模拟它。缓存预算按 worker 独立计算；实际 heap、GC 和 JVM 故障由同一进程承担，不模拟物理 GPU 内存隔离。
 
 Master 的 `MODEL_SERVICE_CONFIG.role_endpoints` 包含 `vit_endpoint`；动态发现文件统一由集群原子写入。发现地址使用 HTTP 端口约定，gRPC=HTTP+1；集群的统一 HTTP 控制口为 base_grpc_port-1，不为每个逻辑 worker 额外开 HTTP server。
 
@@ -40,7 +44,7 @@ embedding 和 hash 元数据分别按字节限制 LRU；embedding 淘汰后 hash
 
 ## 验证与边界
 
-`MockVitServiceTest` 覆盖真实 gRPC、冷查/补齐、特征与 hash 一致、淘汰、并发去重、超时隔离、错误输入和 P 校验。`VitCacheDirectoryTest` 覆盖 Master 的目录、实例变化及选路。frontend 的 token expansion 测试校验原 tensor 与 wire 输入的关系。
+`MockVitServiceTest` 覆盖真实 gRPC、冷查/补齐、特征元数据与 hash 一致、淘汰、并发去重、超时隔离、错误输入和 P 校验。`VitCacheDirectoryTest` 覆盖 Master 的目录、实例变化及选路。frontend 的 token expansion 测试校验原 tensor 与 wire 输入的关系。
 
 在真实 frontend 运行环境中执行：
 
@@ -75,7 +79,7 @@ Whale 的 `per_engine` 部署按 `ROLE_TYPE=PREFILL|DECODE|VIT` 启动一个 wor
 V 使用 `--mock.vit_model_path <模型元数据目录>`；bundle 使用 `MOCK_VIT_MODEL_PATH`。
 读取真实 config.json 的 text/vision 元数据，校验与 main `V41ImageProcessorConfig.identity` 相同的处理器身份。
 整批先检查 schema、BF16 patch shape、降采样网格、token types、跨度和资源上限，再提交 CPU 计算。
-输出 `[image span rows, text hidden size]` BF16；包含 start/newline/end 行。
+输出 `[image span rows, text hidden size]` BF16 元数据及行哈希，不携带 embedding payload；包含 start/newline/end 行。
 P 校验 canonical token metadata/image mask 和返回行数，保留 frontend 的 canonical IDs，不用 embedding hash 覆盖它们。
 text-only V4.1 metadata 不触发 ViT RPC。
 

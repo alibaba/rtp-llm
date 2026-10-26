@@ -21,7 +21,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** Main ViT wire contract with deterministic forward, byte-bounded caches and shared computation. */
+/** Mock metadata-only ViT contract with deterministic hashes, byte-bounded caches and shared computation. */
 public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase implements AutoCloseable {
     public record Config(int hiddenSize, int concurrency, int queueCapacity, long embeddingCacheBytes,
                          long hashCacheBytes, int maxInputBytes, long maxOutputBytes, double computeDelayMs) {
@@ -386,21 +386,21 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
         }
     }
     private EngineRpcService.MultimodalOutputPB output(List<MockVitImage.Result> results) {
-        var data = new ByteArrayOutputStream(); var ids = new ByteArrayOutputStream();
+        long bytes = 0; var ids = new ByteArrayOutputStream();
         var output = EngineRpcService.MultimodalOutputPB.newBuilder();
         int rows = 0;
         boolean bf16 = !results.isEmpty() && results.get(0).embedding().getDataType() == EngineRpcService.TensorPB.DataType.BF16;
         for (var result : results) {
-            if ((long)data.size() + result.embeddingBytes() > config.maxOutputBytes())
+            bytes = Math.addExact(bytes, result.embeddingBytes());
+            if (bytes > config.maxOutputBytes())
                 throw new IllegalArgumentException("aggregate embedding exceeds output byte limit");
-            data.writeBytes((bf16 ? result.embedding().getBf16Data() : result.embedding().getFp32Data()).toByteArray());
             ids.writeBytes(result.hashes().getInt32Data().toByteArray());
             output.addSplitSize(result.rows()); rows = Math.addExact(rows, result.rows());
         }
         var tensor = EngineRpcService.TensorPB.newBuilder().addShape(rows)
                 .addShape(bf16 ? v41.hidden() : config.hiddenSize());
-        if (bf16) tensor.setDataType(EngineRpcService.TensorPB.DataType.BF16).setBf16Data(ByteString.copyFrom(data.toByteArray()));
-        else tensor.setDataType(EngineRpcService.TensorPB.DataType.FP32).setFp32Data(ByteString.copyFrom(data.toByteArray()));
+        if (bf16) tensor.setDataType(EngineRpcService.TensorPB.DataType.BF16);
+        else tensor.setDataType(EngineRpcService.TensorPB.DataType.FP32);
         return output.setMultimodalEmbedding(tensor)
                 .setMultimodalFeatureHash(EngineRpcService.TensorPB.newBuilder()
                         .setDataType(EngineRpcService.TensorPB.DataType.INT32).addShape(rows)
@@ -497,7 +497,7 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
     @Override public void releaseRdmaLease(EngineRpcService.ReleaseLeasePB request,
                                            StreamObserver<EngineRpcService.EmptyPB> observer) {
         if (request.getLeaseIdCount() != 0) {
-            observer.onError(Status.FAILED_PRECONDITION.withDescription("inline Mock ViT owns no RDMA leases").asRuntimeException()); return;
+            observer.onError(Status.FAILED_PRECONDITION.withDescription("metadata-only Mock ViT owns no RDMA leases").asRuntimeException()); return;
         }
         observer.onNext(EngineRpcService.EmptyPB.getDefaultInstance()); observer.onCompleted();
     }
@@ -553,7 +553,7 @@ public final class MockVitService extends MultimodalRpcServiceGrpc.MultimodalRpc
                 "simulation", Map.of("hidden_size", config.hiddenSize(), "forward_ms", gpuScheduler.forwardMs(),
                         "max_output_bytes", config.maxOutputBytes()),
                 "model", Map.of("V41_IMAGE_ENCODE_CACHE_ITEMS", typedCacheCapacity),
-                "limitations", List.of("logical GPU/CPU pools; immutable JVM payloads", "no physical DMA/RDMA or workspace/OOM model", "work estimates require a matching model estimator"));
+                "limitations", List.of("logical GPU/CPU pools; metadata-only embeddings (shape, dtype, hashes)", "no physical DMA/RDMA or workspace/OOM model", "work estimates require a matching model estimator"));
     }
     @Override public void close() {
         synchronized (this) {

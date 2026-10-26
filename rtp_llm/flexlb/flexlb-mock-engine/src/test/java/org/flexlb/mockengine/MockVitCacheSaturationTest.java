@@ -98,8 +98,8 @@ class MockVitCacheSaturationTest {
                 assertFalse(cache(service).contains(MockVitImage.key(d)));
                 assertEquals(copied, stub.remoteMultimodalEmbedding(MockVitServiceTest.inputs(d)));
                 assertTrue(service.snapshot().get("cache_transfer_errors") > 0);
-                assertEquals(128, first.getMultimodalEmbedding().getFp32Data().size());
-                assertEquals(128, second.getMultimodalEmbedding().getFp32Data().size());
+                assertEquals(0, first.getMultimodalEmbedding().getFp32Data().size());
+                assertEquals(0, second.getMultimodalEmbedding().getFp32Data().size());
             } finally {
                 channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
                 server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);

@@ -134,28 +134,83 @@ class MockVitClusterTest {
         assertPdAlive();
     }
 
-    @Test void prefillFetchesFeaturesFromSelectedVWithinTheSameClusterJvm() throws Exception {
+    EngineRpcService.GenerateInputPB imageRequest(int vitPort, long id) throws Exception {
         var image=MockVitServiceTest.image(56,56,0xaabbcc);
-        var features=vit(base+2).remoteMultimodalEmbedding(MockVitServiceTest.inputs(image));
+        var features=vit(vitPort).remoteMultimodalEmbedding(MockVitServiceTest.inputs(image));
+        assertTrue(features.getMultimodalEmbedding().getFp32Data().isEmpty());
+        assertTrue(features.getSerializedSize()<256,"response contains metadata and row hashes only");
         var hashes=features.getMultimodalFeatureHash().getInt32Data().asReadOnlyByteBuffer().order(java.nio.ByteOrder.LITTLE_ENDIAN);
         int rows=hashes.remaining()/4;
-        var request=EngineRpcService.GenerateInputPB.newBuilder().setRequestId(101).addTokenIds(10);
+        var request=EngineRpcService.GenerateInputPB.newBuilder().setRequestId(id).addTokenIds(10);
         while(hashes.hasRemaining())request.addTokenIds(hashes.getInt());
         request.addTokenIds(11).addMultimodalInputs(image);
         request.getMultimodalTokenLayoutBuilder().addSpansBuilder().setOffset(1).setLength(rows);
         request.getGenerateConfigBuilder().setMaxNewTokens(2).setTimeoutMs(5000)
-                .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder().setRoleStr("VIT").setRole(EngineRpcService.RoleAddrPB.RoleType.VIT).setIp("127.0.0.1").setGrpcPort(base+2))
+                .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder().setRoleStr("VIT").setRole(EngineRpcService.RoleAddrPB.RoleType.VIT).setIp("127.0.0.1").setGrpcPort(vitPort))
                 .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder().setRoleStr("DECODE").setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE).setIp("127.0.0.1").setGrpcPort(base+1));
-        var stream=RpcServiceGrpc.newBlockingStub(channel(base)).withDeadlineAfter(7,TimeUnit.SECONDS).generateStreamCall(request.build());
+        return request.build();
+    }
+    void generate(EngineRpcService.GenerateInputPB request) {
+        var stream=RpcServiceGrpc.newBlockingStub(channel(base)).withDeadlineAfter(7,TimeUnit.SECONDS).generateStreamCall(request);
         boolean finished=false;
         while(stream.hasNext()) {
             var frame=stream.next();assertFalse(frame.hasErrorInfo(),frame.toString());
             if(frame.hasFlattenOutput() && frame.getFlattenOutput().getFinishedCount()>0)finished|=frame.getFlattenOutput().getFinished(0);
         }
         assertTrue(finished);
+    }
+    @Test void prefillUsesInternalTransportAndReconnectsAfterVReplacement() throws Exception {
+        generate(imageRequest(base+2,101));
         await(()->snap(base).path("running").asInt()==0 && snap(base+1).path("running").asInt()==0);
+        assertEquals(1,snap(base).path("vit_transport").path("local_channels").asInt());
+        assertEquals(0,snap(base).path("vit_transport").path("remote_channels").asInt());
         assertEquals(1,snap(base+2).path("vit").path("computations").asInt());
         assertEquals(0,snap(base+3).path("vit").path("computations").asInt());
+        assertEquals(200,post("/stop_engine","{\"port\":"+(base+2)+"}").statusCode());
+        assertEquals(200,post("/start_engine","{\"port\":"+(base+2)+"}").statusCode());
+        generate(imageRequest(base+2,102));
+        assertEquals(200,post("/remove_engine","{\"port\":"+(base+2)+"}").statusCode());
+        assertEquals(200,post("/add_engine","{\"role\":\"vit\",\"port\":"+(base+2)+"}").statusCode());
+        generate(imageRequest(base+2,103));
+        assertEquals(1,snap(base).path("vit_transport").path("local_channels").asInt());
+        assertEquals(1,snap(base+2).path("vit").path("computations").asInt());
+    }
+    @Test void prefillUsesMetadataRpcForVInAnotherJvm() throws Exception {
+        Path remoteDir=Files.createDirectory(directory.resolve("remote"));
+        var remote=new ProcessBuilder(System.getProperty("java.home")+"/bin/java","-cp",System.getProperty("java.class.path"),
+                JavaMockEngineCluster.class.getName(),"--mock.engine_config","../tools/mock_bundle/engine-config.json",
+                "--mock.calibration",directory.resolve("performance.json").toString(),"--mock.n_prefill","0","--mock.n_decode","0","--mock.n_vit","1",
+                "--mock.unique_engine_ips","false","--mock.base_grpc_port",Integer.toString(base+6),
+                "--mock.endpoint_file",remoteDir.resolve("endpoints.json").toString())
+                .redirectErrorStream(true).redirectOutput(remoteDir.resolve("engine.log").toFile()).start();
+        try {
+            await(()->{
+                if(!remote.isAlive())fail(Files.readString(remoteDir.resolve("engine.log")));
+                try{return vit(base+6).getWorkerStatus(EngineRpcService.StatusVersionPB.getDefaultInstance()).getAlive();}
+                catch(StatusRuntimeException starting){return false;}
+            });
+            generate(imageRequest(base+6,104));
+            assertEquals(0,snap(base).path("vit_transport").path("local_channels").asInt());
+            assertEquals(1,snap(base).path("vit_transport").path("remote_channels").asInt());
+            assertEquals(0,snap(base+2).path("vit").path("computations").asInt());
+            assertEquals(0,snap(base+3).path("vit").path("computations").asInt());
+        } finally {remote.destroy();if(!remote.waitFor(10,TimeUnit.SECONDS))remote.destroyForcibly().waitFor();}
+    }
+
+    @Test void gracefulRemovalWaitsForInternalResponseBeforeReleasingV() throws Exception {
+        var request=imageRequest(base+2,105);
+        assertEquals(200,post("/set_perf","{\"engine\":\"vit-0\",\"mock\":{\"rpc\":{\"remote_multimodal_embedding\":{\"response\":{\"delay_ms\":1500}}}}}").statusCode());
+        var inference=CompletableFuture.runAsync(()->generate(request));
+        await(()->snap(base).path("vit_transport").path("local_channels").asInt()==1
+                && snap(base+2).path("rpc_runtime").path("delayed_calls").asInt()==1);
+        var remove=CompletableFuture.supplyAsync(()->{try{return post("/remove_engine","{\"engine\":\"vit-0\",\"drain_timeout_ms\":5000}");}catch(Exception e){throw new CompletionException(e);}});
+        await(()->discovery().path("mock.vit.hosts.address").size()==1);
+        assertFalse(remove.isDone());
+        inference.get(5,TimeUnit.SECONDS);
+        var result=remove.get(6,TimeUnit.SECONDS);
+        assertEquals(200,result.statusCode(),result.body());
+        assertTrue(json.readTree(result.body()).path("drained").asBoolean());
+        assertPdAlive();
     }
 
     @Test void slowVForwardDoesNotOccupyAnotherWorkersComputeLane() throws Exception {
