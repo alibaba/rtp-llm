@@ -174,8 +174,13 @@ class GlobalOverlapCPUTest(unittest.TestCase):
                 calls = []
                 work = SimpleNamespace(finish=lambda: calls.append("join"))
                 qkv = SimpleNamespace(
-                    kv=x, qr=x, qr_quantized=None, index_q=None, swa_written=False,
-                    head_weights=None, index_prepared=None,
+                    kv=x,
+                    qr=x,
+                    qr_quantized=None,
+                    index_q=None,
+                    swa_written=False,
+                    head_weights=None,
+                    index_prepared=None,
                 )
 
                 def project(*args, **kwargs):
@@ -312,11 +317,13 @@ class FullOverlapCPUTest(unittest.TestCase):
         with patch.dict(
             sys.modules, {"deep_gemm": SimpleNamespace(get_pdl=lambda: True)}
         ), patch.object(full_overlap, "is_supported", return_value=True), patch.object(
-            full_overlap, "_GLOBAL_COMPUTE_STREAMS",
-            SimpleNamespace(streams={(0, 17, 51): glob})
+            full_overlap,
+            "_GLOBAL_COMPUTE_STREAMS",
+            SimpleNamespace(streams={(0, 17, 51): glob}),
         ), patch.object(
-            full_overlap, "_INDEXER_STREAMS",
-            SimpleNamespace(streams={(0, 17, 51): aux})
+            full_overlap,
+            "_INDEXER_STREAMS",
+            SimpleNamespace(streams={(0, 17, 51): aux}),
         ), patch(
             "rtp_llm.models_py.modules.dsv41.fp8.attention._cuda_device_index",
             return_value=0,
@@ -454,11 +461,13 @@ class FullOverlapCPUTest(unittest.TestCase):
         with patch.dict(
             os.environ, {"DSV41_FULL_DECODE_MULTISTREAM": "1"}
         ), patch.object(full_overlap, "is_supported", return_value=True), patch.object(
-            full_overlap, "_GLOBAL_COMPUTE_STREAMS",
-            SimpleNamespace(streams={(0, 17, 51): glob})
+            full_overlap,
+            "_GLOBAL_COMPUTE_STREAMS",
+            SimpleNamespace(streams={(0, 17, 51): glob}),
         ), patch.object(
-            full_overlap, "_INDEXER_STREAMS",
-            SimpleNamespace(streams={(0, 17, 51): aux})
+            full_overlap,
+            "_INDEXER_STREAMS",
+            SimpleNamespace(streams={(0, 17, 51): aux}),
         ), patch(
             "rtp_llm.models_py.modules.dsv41.fp8.attention._cuda_device_index",
             return_value=0,
@@ -823,8 +832,11 @@ class FullOverlapCudaTest(unittest.TestCase):
     def test_qb_pdl_dynamic_graph(self):
         import deep_gemm
 
-        if not hasattr(deep_gemm, "get_pdl") or not deep_gemm.get_pdl():
-            self.skipTest("DeepGEMM PDL consumer must already be enabled")
+        if torch.cuda.get_device_capability()[0] != 10:
+            self.skipTest("native global producer requires Blackwell")
+        previous_pdl = deep_gemm.get_pdl()
+        self.addCleanup(deep_gemm.set_pdl, previous_pdl)
+        deep_gemm.set_pdl(True)
         with patch.dict(os.environ, {"DSV41_FULL_DECODE_QB_PDL": "1"}):
             self.test_real_full_graph_replay_and_changed_inputs()
 

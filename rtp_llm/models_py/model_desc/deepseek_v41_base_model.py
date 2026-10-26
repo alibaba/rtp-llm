@@ -593,6 +593,18 @@ class DeepSeekV4Model(GptModelBase):
 
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         super().initialize(init_resource)
+        if (
+            self._v4_args.v41_config is not None
+            and torch.version.hip is None
+            and torch.cuda.is_available()
+            and torch.cuda.get_device_capability()[0] >= 9
+        ):
+            import deep_gemm
+
+            # Set the launch policy before model construction, JIT warmup and capture.
+            pdl = os.environ.get("DSV41_PDL", "1") == "1"
+            deep_gemm.set_pdl(pdl)
+            logging.info("[DeepSeekV4Model] DeepGEMM PDL enabled=%s (DSV41_PDL)", pdl)
         self._max_prefill_batch_tokens = int(
             getattr(init_resource, "max_batch_tokens_size", 0)
         )
