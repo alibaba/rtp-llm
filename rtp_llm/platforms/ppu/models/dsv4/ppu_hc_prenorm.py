@@ -8,6 +8,7 @@ Explicit opt-in via DSV4_MHC_PRE_GEMM_BACKEND=deepgemm_deterministic.
 
 import logging
 from functools import lru_cache
+from pathlib import Path
 
 import torch
 
@@ -16,6 +17,14 @@ using gemm_t = deep_gemm::HcPrenormGemm<
     {N}, {K}, {BLOCK_M}, {BLOCK_N}, {BLOCK_K}, {NUM_SPLITS},
     {FAST_BF16_TO_TF32}, false>;
 gemm_t::run(d, sqr_sum, m, a, b, stream, num_sms, smem_size);
+"""
+
+_WORKSPACE_TEMPLATE = """
+using gemm_t = deep_gemm::HcPrenormGemm<
+    {N}, {K}, {BLOCK_M}, {BLOCK_N}, {BLOCK_K}, {NUM_SPLITS},
+    {FAST_BF16_TO_TF32}, {BLOCK_M} * 2, 2, (1u << 22)>;
+gemm_t::run(reduced, reduced_squares, m, a, b, stream, num_sms, smem_size,
+            d, sqr_sum, counter);
 """
 
 
@@ -104,6 +113,7 @@ def tf32_hc_prenorm_partials(x, weight):
 
 def _launch_partials(x, weight, config):
 
+    import deep_gemm
     from deep_gemm.jit_kernels.tuner import jit_tuner
     from deep_gemm.jit_kernels.utils import get_num_sms
 
@@ -125,13 +135,39 @@ def _launch_partials(x, weight, config):
         get_num_sms(),
         smem,
     )
+    workspace_abi = (
+        Path(deep_gemm.__file__).parent
+        / "include/deep_gemm/impls/tf32_hc_prenorm_gemm.cuh"
+    ).is_file()
+    extra_defs = ()
+    if workspace_abi:
+        # The new kernel writes split-major workspace before its own reduction.
+        # Keep returning those planes to the existing HC reduction consumers.
+        reduced = torch.empty((m, n), dtype=torch.float32, device=x.device)
+        reduced_squares = torch.empty((m,), dtype=torch.float32, device=x.device)
+        counter = torch.zeros(
+            ((m + config["BLOCK_M"] - 1) // config["BLOCK_M"],),
+            dtype=torch.int32,
+            device=x.device,
+        )
+        args += (reduced, reduced_squares, counter)
+        extra_defs = (
+            ("reduced", torch.float32),
+            ("reduced_squares", torch.float32),
+            ("counter", torch.int32),
+        )
     runtime = jit_tuner.compile_and_tune(
         # Vendor's in-memory tuner omits template from its key. A distinct
         # name is mandatory: otherwise it can return the cached atomic kernel.
-        name="rtp_dsv4_hc_prenorm_partials",
+        name=("rtp_dsv4_hc_prenorm_workspace" if workspace_abi
+              else "rtp_dsv4_hc_prenorm_partials"),
         keys=config,
         space=(),
-        includes=('"../deep_gemm/tf32_hc_prenorm_gemm.cuh"',),
+        includes=(
+            "<deep_gemm/impls/tf32_hc_prenorm_gemm.cuh>"
+            if workspace_abi
+            else '\"../deep_gemm/tf32_hc_prenorm_gemm.cuh\"',
+        ),
         arg_defs=(
             ("a", torch.bfloat16),
             ("b", torch.float32),
@@ -141,8 +177,8 @@ def _launch_partials(x, weight, config):
             ("stream", torch.cuda.Stream),
             ("num_sms", int),
             ("smem_size", int),
-        ),
-        template=_TEMPLATE,
+        ) + extra_defs,
+        template=_WORKSPACE_TEMPLATE if workspace_abi else _TEMPLATE,
         args=args,
         jit_include_dir="actlize_v1.0.0",
     )
