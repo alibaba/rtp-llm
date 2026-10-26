@@ -13,7 +13,10 @@
                 ],
                 "max_tokens": 100,
                 "temperature": 0.0,
-                "top_p": 1.0
+                "top_p": 1.0,
+                "chat_template_kwargs": {
+                    "enable_thinking": false
+                }
             },
             "result": {
                 "id": "chat-",
@@ -24,15 +27,15 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "<think>\n嗯，用户问“你是谁”，我需要先确认他们想知道什么。可能他们想了解我的身份、功能或者开发背景。首先，我应该介绍自己是通义千问，由通义实验室研发的超大规模语言模型。然后，要说明我的主要功能，比如回答问题、创作文字、编程等，这样用户能知道我能帮他们做什么。另外，可能需要提到我支持多语言，这样国际用户也会觉得有用。还要注意语气"
+                            "content": "我是通义千问，阿里巴巴集团旗下的通义实验室自主研发的超大规模语言模型。我能够回答问题、创作文字，如写故事、公文、邮件、剧本等，还能进行逻辑推理、编程，甚至表达观点和玩游戏。我在多国语言上都有很好的掌握，能为你提供多样化的帮助。有什么我可以帮到你的吗？"
                         },
-                        "finish_reason": "length"
+                        "finish_reason": "stop"
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": 10,
-                    "total_tokens": 110,
-                    "completion_tokens": 100
+                    "prompt_tokens": 14,
+                    "total_tokens": 90,
+                    "completion_tokens": 76
                 }
             }
         }

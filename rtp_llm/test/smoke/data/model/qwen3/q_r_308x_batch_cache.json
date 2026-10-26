@@ -47,6 +47,9 @@
           "temperature": 0.0,
           "top_p": 0.1,
           "top_k": 1
+        },
+        "chat_template_kwargs": {
+          "enable_thinking": false
         }
       },
       "result": {
@@ -59,7 +62,7 @@
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "<think>\nOkay, so the user is asking which Flask alternative is most similar to Django North in syntax. Hmm, first I need to make sure I understand what Django North is. Wait, Django North was a migration tool for Django, right? But I think it's been deprecated and replaced by Django's built-in migration system. Maybe the user is referring to Django's migration framework, or perhaps there's a confusion here. Let me check.\n\nAssuming the user meant Django's migration system, they",
+              "content": "If you're looking for a **Flask alternative** that is **most similar in syntax and philosophy to Django**, particularly in terms of **database migrations** (like Django's `makemigrations` and `migrate`), the closest match is:\n\n---\n\n### ✅ **FastAPI with Alembic (or Tortoise ORM)**\n\n#### Why FastAPI?\n- **Modern, async-ready**, and built on **Starlette** and **Pydantic**.\n- **Similar to Django",
               "reasoning_content": null,
               "function_call": null,
               "tool_calls": null,
@@ -71,8 +74,8 @@
           }
         ],
         "usage": {
-          "prompt_tokens": 21,
-          "total_tokens": 121,
+          "prompt_tokens": 25,
+          "total_tokens": 125,
           "completion_tokens": 100,
           "completion_tokens_details": null,
           "prompt_tokens_details": null
@@ -82,7 +85,7 @@
           "cost_time": 2989.088,
           "iter_count": 100,
           "prefix_len": 0,
-          "input_len": 21,
+          "input_len": 25,
           "output_len": 100,
           "step_output_len": 100,
           "first_token_cost_time": 52.489,
@@ -123,6 +126,9 @@
           "temperature": 0.0,
           "top_p": 0.1,
           "top_k": 1
+        },
+        "chat_template_kwargs": {
+          "enable_thinking": false
         }
       },
       "result": {
@@ -135,7 +141,7 @@
             "index": 0,
             "message": {
               "role": "assistant",
-              "content": "<think>\nOkay, so the user is asking which Flask alternative is most similar to Django North in syntax. Hmm, first I need to make sure I understand what Django North is. Wait, Django North was a migration tool for Django, right? But I think it's been deprecated and replaced by Django's built-in migration system. Maybe the user is referring to Django's migration framework, or perhaps there's a confusion here. Let me check.\n\nAssuming the user meant Django's migration system, they",
+              "content": "If you're looking for a **Flask alternative** that is **most similar in syntax and philosophy to Django**, particularly in terms of **database migrations** (like Django's `makemigrations` and `migrate`), the closest match is:\n\n---\n\n### ✅ **FastAPI with Alembic (or Tortoise ORM)**\n\n#### Why FastAPI?\n- **Modern and async-friendly** like Django 3+.\n- **Similar structure** to Django in terms of organizing apps,",
               "reasoning_content": null,
               "function_call": null,
               "tool_calls": null,
@@ -147,8 +153,8 @@
           }
         ],
         "usage": {
-          "prompt_tokens": 21,
-          "total_tokens": 121,
+          "prompt_tokens": 25,
+          "total_tokens": 125,
           "completion_tokens": 100,
           "completion_tokens_details": null,
           "prompt_tokens_details": {
@@ -161,7 +167,7 @@
           "cost_time": 23835.21,
           "iter_count": 100,
           "prefix_len": 0,
-          "input_len": 21,
+          "input_len": 25,
           "output_len": 100,
           "step_output_len": 100,
           "first_token_cost_time": 20898.399,

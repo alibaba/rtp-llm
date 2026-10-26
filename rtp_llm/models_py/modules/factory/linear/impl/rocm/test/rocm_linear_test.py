@@ -393,6 +393,7 @@ class LinearTest(TestCase):
             num_layers=1,
             vocab_size=32,
             layernorm_eps=1e-6,
+            use_multimodal_embedding=False,
         )
         parallelism_config = SimpleNamespace()
         hw_kernel_config = HWKernelConfig()

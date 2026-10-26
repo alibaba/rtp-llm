@@ -1209,7 +1209,7 @@ void CudaGraphRunner::initCapture() {
             attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
 #if USING_ROCM
             device_metadata_replay_ =
-                role_ == CudaGraphRole::DECODE && num_tokens_per_bs_ == 1 && supportsDeviceMetadataReplay(attn_pyobj);
+                !is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ == 1 && supportsDeviceMetadataReplay(attn_pyobj);
 #endif
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("initCapture prepare_fmha_impl failed: %s", e.what());
