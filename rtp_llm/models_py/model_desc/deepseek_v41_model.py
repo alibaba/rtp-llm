@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import torch
@@ -74,12 +75,30 @@ class DeepSeekV41Model(DeepSeekV4Model):
         modules = []
         device = self.v4.embed.weight.device
         self._engram_hash_state = NgramHashState(layout, checkpoint_path, device=device)
+        from rtp_llm.models_py.modules.dsv41._engram_scale_shards import (
+            select_scale_group,
+        )
+
+        scale_group = select_scale_group(
+            device,
+            signature={
+                "checkpoint": checkpoint_path,
+                "layers": [i for i in layout.layer_ids if i < len(self.v4.layers)],
+            },
+            enabled=(
+                os.getenv("DSV41_ENGRAM_SHARD_SCALES", "1") == "1"
+                and os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1"
+                and os.getenv("DSV41_ENGRAM_DIRECT_FP8", "1") == "1"
+                and layout.head_dim == 256
+                and layout.n_hash_cols == 24
+            ),
+        )
         for layer_id in layout.layer_ids:
             if layer_id >= len(self.v4.layers):
                 continue
             layer = self.v4.layers[layer_id]
             layer.engram = Engram.from_checkpoint(
-                config, layer_id, checkpoint_path, device
+                config, layer_id, checkpoint_path, device, scale_group=scale_group
             )
             modules.append((layer_id, layout.layer_ids.index(layer_id)))
         self._engram_layers = tuple(modules)

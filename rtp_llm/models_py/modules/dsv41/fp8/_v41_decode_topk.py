@@ -5,9 +5,10 @@
 Candidate pooling/flags follow vLLM's attention/dsa/candidate_blocks.py.
 The L20 source can publish DeepInfer-style complete, sorted visible prefixes;
 other callers retain the historical score-filtered candidate contract.
-Supported candidate-block selections reuse RTP's exact radix-select kernel;
-other candidate counts retain torch.topk. Candidate scores remain FP32.
-Output order and cutoff-tie choices are unspecified; the newest block is pinned.
+Complete BF16 K2048 candidates use DeepSelect's sorted-index output directly;
+legacy/unsupported paths retain radix-select/torch.topk and prefix publication.
+FP32 source scores are never downcast. Cutoff-tie choices are unspecified;
+complete prefixes are ascending and the newest block is pinned.
 Token K512 uses native DeepSelect when supported, with radix-select fallback.
 """
 
@@ -20,8 +21,11 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_deepselect as deepselect
+from rtp_llm.models_py.modules.dsv41.fp8 import (
+    _v41_candidate_deepselect as candidate_deepselect,
+)
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_candidate_topk_v3 as candidate_topk
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_deepselect as deepselect
 from rtp_llm.models_py.modules.dsv41.fp8.indexer import _TOPK_V3_OK, _get_topk_workspace
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -144,10 +148,12 @@ def _candidate_pool_bounded_kernel(
     indexer kernel >20 us left after round 14.
 
     Blocks ``>= block_lengths[row]`` keep the allocator contents. This is safe
-    only for the topk_v3 selection path, whose readers all clamp by the same
+    for the topk_v3 and candidate DeepSelect paths, whose readers clamp by the same
     per-row ``block_lengths``: topk_v3 scans ``seq_len = block_lengths[row]``
     (topk_v3.cu:77, vector loads never straddle seq_len) and the store-flags
     epilogue reads scores only at indices topk_v3 selected (< block_lengths).
+    DeepSelect masks the partial TMA tail before ranking and excludes internal
+    padding from its candidate tie quotas, including all--inf rows.
     The unbounded ``scores.topk`` fallback and the ``nblocks <= count`` dense
     path read the full score row, so ``select_candidates`` retains the padded
     static kernel for those. Visible-block scores and block_lengths are bitwise
@@ -210,8 +216,12 @@ def _candidate_store_flags_kernel(
 
 @triton.jit
 def _candidate_store_prefix_kernel(
-    candidates, flags, block_lengths,
-    K: tl.constexpr, NBLOCKS: tl.constexpr, SEARCH_STEPS: tl.constexpr,
+    candidates,
+    flags,
+    block_lengths,
+    K: tl.constexpr,
+    NBLOCKS: tl.constexpr,
+    SEARCH_STEPS: tl.constexpr,
 ):
     """Publish sorted visible IDs, not score-filtered holes (decode only)."""
     row = tl.program_id(0).to(tl.int64)
@@ -243,15 +253,55 @@ def _candidate_store_prefix_kernel(
         present = tl.gather(values, tl.minimum(lo, K - 1), 0) == lanes
         fillers = tl.sort(tl.where((lanes < expected) & ~present, lanes, 2147483647))
         filler = tl.gather(fillers, tl.maximum(lanes - count, 0), 0)
-        values = tl.sort(tl.where(lanes < expected, tl.where(lanes < count, values, filler), 2147483647))
+        values = tl.sort(
+            tl.where(
+                lanes < expected, tl.where(lanes < count, values, filler), 2147483647
+            )
+        )
     # Preserve the partial context tail even if NaN scores displaced its +inf
     # pin. It is the largest logical ID, so replacing the last slot stays sorted.
-    has_last = tl.sum(((lanes < expected) & (values == visible - 1)).to(tl.int32), 0) != 0
-    values = tl.where((expected > 0) & ~has_last & (lanes == expected - 1), visible - 1, values)
+    has_last = (
+        tl.sum(((lanes < expected) & (values == visible - 1)).to(tl.int32), 0) != 0
+    )
+    values = tl.where(
+        (expected > 0) & ~has_last & (lanes == expected - 1), visible - 1, values
+    )
     valid = lanes < expected
     tl.store(candidates + row * K + lanes, tl.where(valid, values, -1))
     tl.debug_barrier()
     tl.store(flags + row * NBLOCKS + values, 1, valid)
+
+
+@triton.jit
+def _candidate_prefix_flags_kernel(
+    candidates, flags, K: tl.constexpr, NBLOCKS: tl.constexpr
+):
+    """Compatibility bitmap only; do not sort or modify an existing prefix."""
+    row = tl.program_id(0).to(tl.int64)
+    offsets = tl.arange(0, 1024)
+    for tile in range(tl.cdiv(NBLOCKS, 1024)):
+        blocks = tile * 1024 + offsets
+        tl.store(flags + row * NBLOCKS + blocks, 0, blocks < NBLOCKS)
+    tl.debug_barrier()
+    slots = tl.arange(0, K)
+    ids = tl.load(candidates + row * K + slots)
+    tl.store(flags + row * NBLOCKS + ids, 1, (ids >= 0) & (ids < NBLOCKS))
+
+
+def build_candidate_flags(candidates, width, block_size):
+    """Materialize only for dense consumers; graph replay clears stale bits."""
+    nblocks = triton.cdiv(width, block_size)
+    flags = torch.empty(
+        (candidates.shape[0], nblocks), dtype=torch.uint8, device=candidates.device
+    )
+    _candidate_prefix_flags_kernel[(candidates.shape[0],)](
+        candidates,
+        flags,
+        candidates.shape[1],
+        nblocks,
+        num_warps=4,
+    )
+    return flags
 
 
 @triton.jit
@@ -355,8 +405,10 @@ def select_candidates(
     lengths: torch.Tensor,
     block_size: int,
     topk_blocks: int,
-    *, complete: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    *,
+    complete: bool = False,
+    build_flags: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """``complete`` publishes sorted valid-prefix IDs for the decode source.
 
     It keeps selected NaN/-inf-score blocks (unlike legacy publication), pins
@@ -368,22 +420,31 @@ def select_candidates(
     count = min(topk_blocks, nblocks)
     if complete and count not in (512, 1024, 2048):
         raise ValueError("Complete decode candidates require K512/K1024/K2048")
-    # Keep score rows aligned for topk_v3's vectorized loads, without widening
-    # its logical selection domain or reading uninitialized padding.
-    score_stride = triton.cdiv(nblocks, 256) * 256
-    scores = torch.empty(
-        (rows, score_stride), dtype=torch.float32, device=logits.device
-    )[:, :nblocks]
+    use_deepselect = complete and candidate_deepselect.is_supported(
+        logits, lengths, block_size, count
+    )
+    # Align backed score storage for the selected native reader, while device
+    # block_lengths keeps padding outside the logical selection domain.
+    alignment = 512 if use_deepselect else 256
+    score_stride = triton.cdiv(nblocks, alignment) * alignment
+    score_storage = torch.empty(
+        (rows, score_stride),
+        dtype=torch.bfloat16 if use_deepselect else torch.float32,
+        device=logits.device,
+    )
+    scores = score_storage[:, :nblocks]
     block_lengths = torch.empty((rows,), dtype=torch.int32, device=logits.device)
     # The topk_v3 selection path clamps every score read by the per-row
     # block_lengths, so pooling can skip the capacity-wide padding and the
     # mostly-empty static grid (see _candidate_pool_bounded_kernel). The
     # scores.topk fallback and the nblocks<=count dense epilogue read the full
     # score row and keep the padded static kernel.
-    use_candidate_v3 = topk_blocks == 2048 and candidate_topk.is_available(
-        "decode", logits.device
+    use_candidate_v3 = (
+        not use_deepselect
+        and topk_blocks == 2048
+        and candidate_topk.is_available("decode", logits.device)
     )
-    bounded_pool = (
+    bounded_pool = use_deepselect or (
         nblocks > count
         and count in (512, 1024, 2048)
         and (topk_blocks != 2048 or use_candidate_v3)
@@ -414,6 +475,17 @@ def select_candidates(
             score_stride,
             128,
         )
+    if use_deepselect:
+        # Expose backed, complete TMA tiles; block_lengths bounds all score
+        # reads so the allocator contents in the padded tail are never ranked.
+        # No FP32->BF16 cast kernel: BF16-source block maxima are stored directly.
+        candidates = candidate_deepselect.select(score_storage, block_lengths)
+        flags = (
+            build_candidate_flags(candidates, width, block_size)
+            if build_flags
+            else None
+        )
+        return candidates, flags
     if use_candidate_v3:
         # Full K2048 output already has the packed layout used by publication.
         candidates = candidate_topk.select(scores, block_lengths)
@@ -438,7 +510,13 @@ def select_candidates(
     flags = torch.empty((rows, nblocks), dtype=torch.uint8, device=logits.device)
     if complete:
         _candidate_store_prefix_kernel[(rows,)](
-            candidates, flags, block_lengths, count, nblocks, count.bit_length(), num_warps=8,
+            candidates,
+            flags,
+            block_lengths,
+            count,
+            nblocks,
+            count.bit_length(),
+            num_warps=8,
         )
     else:
         _candidate_store_flags_kernel[(rows,)](
@@ -474,6 +552,10 @@ def select_tokens(
             out=output,
             filter_finite=False,
             enabled=os.environ.get("DSV41_DECODE_DEEPSELECT", "1") == "1",
+            sorted_index=(
+                logits.dtype == torch.bfloat16
+                and os.environ.get("DSV41_DECODE_DEEPSELECT_SORTED", "1") == "1"
+            ),
         )
     if selected is None:
         rtp_llm_ops.topk_v3(
