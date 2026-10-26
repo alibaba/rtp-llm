@@ -297,6 +297,44 @@ class GenerateConfigTest(TestCase):
                 config = setup_args(args).kv_cache_config
                 self.assertEqual(config.reserve_block_ratio, expected_ratio)
 
+    def test_reuse_tail_and_independent_pools_from_env_and_cli(self):
+        env = _jit_env(
+            REUSE_CACHE_TAIL_BLOCKS="16", LINEAR_POOL_BLOCKS="100", SWA_POOL_BLOCKS="50"
+        )
+        with patch.dict("os.environ", env, clear=True):
+            config = setup_args([]).kv_cache_config
+            self.assertEqual(config.reuse_cache_tail_blocks, 16)
+            self.assertEqual(config.linear_pool_blocks, 100)
+            self.assertEqual(config.swa_pool_blocks, 50)
+            config = setup_args(
+                ["--reuse_cache_tail_blocks", "32", "--swa_pool_blocks", "0"]
+            ).kv_cache_config
+            self.assertEqual(config.reuse_cache_tail_blocks, 32)
+            self.assertEqual(config.linear_pool_blocks, 100)
+            self.assertEqual(config.swa_pool_blocks, 0)
+
+    def test_reuse_tail_and_pool_limits(self):
+        for option, value in (
+            ("reuse_cache_tail_blocks", "invalid"),
+            ("reuse_cache_tail_blocks", "0"),
+            ("reuse_cache_tail_blocks", "-1"),
+            ("reuse_cache_tail_blocks", "2147483648"),
+            ("linear_pool_blocks", "invalid"),
+            ("linear_pool_blocks", "1"),
+            ("linear_pool_blocks", "-1"),
+            ("swa_pool_blocks", "1"),
+            ("swa_pool_blocks", "4294967296"),
+        ):
+            for from_env in (False, True):
+                env = {option.upper(): value} if from_env else {}
+                args = [] if from_env else ["--" + option, value]
+                with self.subTest(option=option, value=value, env=from_env), patch.dict(
+                    "os.environ", _jit_env(**env), clear=True
+                ), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(
+                    SystemExit
+                ):
+                    setup_args(args)
+
     def test_canonical_kv_cache_cli_names(self):
         config = setup_args(
             [
@@ -397,8 +435,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 75)
-        self.assertEqual(state[:2], ("KVCacheConfig", 11))
+        self.assertEqual(len(state), 77)
+        self.assertEqual(state[:2], ("KVCacheConfig", 12))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)

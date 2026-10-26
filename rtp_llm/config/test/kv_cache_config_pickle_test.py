@@ -25,8 +25,8 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 75)
-                self.assertEqual(state[:2], ("KVCacheConfig", 11))
+                self.assertEqual(len(state), 77)
+                self.assertEqual(state[:2], ("KVCacheConfig", 12))
                 self.assertEqual(
                     state[64:69], tuple(list(KV_CACHE_EVENT_FIELD_VALUES.values())[:5])
                 )
@@ -50,12 +50,26 @@ class KVCacheConfigPickleTest(TestCase):
                     self.assertEqual(getattr(restored, name), value, name)
                 self.assertIn(f"enable_crc: {int(enable_crc)}\n", restored.to_string())
 
+    def test_tail_and_pool_configuration_survives_worker_round_trips(self):
+        config = KVCacheConfig()
+        config.reuse_cache_tail_blocks = 13
+        config.linear_pool_blocks = 31
+        config.swa_pool_blocks = 17
+        for _ in range(2):
+            config = pickle.loads(pickle.dumps(config))
+            self.assertEqual(config.reuse_cache_tail_blocks, 13)
+            self.assertEqual(config.linear_pool_blocks, 31)
+            self.assertEqual(config.swa_pool_blocks, 17)
+        self.assertFalse(hasattr(config, "linear_step"))
+        self.assertFalse(hasattr(config, "linear_cache_tail_blocks"))
+
     def test_malformed_event_states_are_rejected(self):
         state = KVCacheConfig().__getstate__()
         for malformed in (
             state[:-1],
             state + ("extra",),
             (state[0], 99, *state[2:]),
+            (state[0], 11, *state[2:75]),
             ("OtherConfig", *state[1:]),
         ):
             with self.subTest(state=malformed), self.assertRaisesRegex(
