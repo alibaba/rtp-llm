@@ -51,6 +51,32 @@ cc_test_wrapper(
 
 _ENTRYPOINTS = ["__init__.py", "model_dispatch.py", "ppu/__init__.py"]
 
+[py_test(
+    name = name + "_test",
+    srcs = ["ppu/test/test_" + name + ".py"],
+    main = "ppu/test/test_" + name + ".py",
+    data = [":ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    tags = ["manual", "ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+) for name in ["mega_moe_contract", "mtp_input", "decode_metadata_graph", "decode_state_slots"]]
+
+py_test(
+    name = "decode_fusions_test",
+    srcs = ["ppu/test/test_decode_fusions.py"],
+    main = "ppu/test/test_decode_fusions.py",
+    data = [":ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    tags = ["manual", "ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
 py_test(
     name = "platform_boundary_test",
     srcs = ["ppu/test/test_platform_boundary.py"],

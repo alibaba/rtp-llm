@@ -8,14 +8,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-from safetensors import safe_open
-
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert import (
     FusedSharedExpertFastPath,
     SequentialSharedExpertExecutor,
 )
-from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
 from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
+from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
+from safetensors import safe_open
 
 
 @unittest.skipUnless(
@@ -106,6 +105,37 @@ class DecodeSharedExpertTest(unittest.TestCase):
                 SequentialSharedExpertExecutor().start(self.shared, x)
 
     @torch.inference_mode()
+    def test_quantized_input_overlap_graph(self):
+        from rtp_llm.platforms.ppu.modules.linear.fp8_linear import (
+            quantize_ppu_fp8_activation,
+        )
+
+        executor = self.provider.build_shared_expert_executor()
+        executor.prepare(self.shared)
+        self.shared.fuse_activation_quant = True
+        for batch in (1, 8, 32):
+            x = torch.randn((batch, 4096), device="cuda", dtype=torch.bfloat16)
+
+            def run():
+                quantized = quantize_ppu_fp8_activation(x, quantization="v2_column")
+                executor.start(self.shared, x, input_quantized=quantized)
+                return executor.finish()
+
+            for _ in range(3):
+                run()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = run()
+            for _ in range(4):
+                x.normal_()
+                expected = self.shared(x)
+                actual.fill_(float("nan"))
+                graph.replay()
+                self.assertTrue(
+                    torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+                )
+
+    @torch.inference_mode()
     def test_overlap_graph_joins_producer_and_consumer(self):
         from rtp_llm.platforms.ppu.models.dsv4.ppu_ep_moe import PpuEPMoE as MoE
 
@@ -150,7 +180,10 @@ class DecodeSharedExpertTest(unittest.TestCase):
                             shared_experts=self.shared,
                             gate=lambda values, ids: (values * 0.5, ids),
                         )
-                        routed, _ = MoE._route_and_start_shared(context, x, None)
+                        routed, _, remaining_mask = MoE._route_and_start_shared(
+                            context, x, None
+                        )
+                        self.assertIsNone(remaining_mask)
                         shared = executor.finish()
                         # Consumer work must wait for the shared result.
                         return shared.float() + routed.float()

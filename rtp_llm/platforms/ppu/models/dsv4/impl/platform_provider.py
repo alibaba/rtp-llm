@@ -20,6 +20,7 @@ class Dsv4ProviderCapability(str, Enum):
     FP8_MQA_LOGITS = "fp8_mqa_logits"
     HC_PRENORM = "hc_prenorm"
     DECODE_METADATA = "decode_metadata"
+    MTP_INPUT_FUSION = "mtp_input_fusion"
 
 
 class Dsv4AttentionLayout(str, Enum):
@@ -32,6 +33,8 @@ class Dsv4PlatformProvider(Protocol):
 
     name: str
     capabilities: FrozenSet[Dsv4ProviderCapability]
+
+    def build_mtp_input_fusion(self, enorm, hnorm, e_proj, h_proj) -> Any: ...
 
     def run_hc_prenorm(self, *args: Any, **kwargs: Any) -> Any: ...
 

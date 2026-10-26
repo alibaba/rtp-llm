@@ -3,9 +3,8 @@
 import torch
 
 
-def prepare_routed_mxfp4_weights(cfg, layer_weights):
-    """Preserve EP-sliced checkpoint nibbles; prepare scale pairs once."""
-    from rtp_llm.platforms.ppu.kernels.ppu_mxfp4 import prepare_fp4_weight_scale_mxfp4
+def take_raw_routed_mxfp4_weights(cfg, layer_weights):
+    """Consume validated EP-local checkpoint nibbles and raw E8M0 scales."""
     from rtp_llm.utils.model_weight import W
 
     keys = (
@@ -37,13 +36,26 @@ def prepare_routed_mxfp4_weights(cfg, layer_weights):
         raise RuntimeError("PPU routed MXFP4 requires PPU-resident weights")
     result = (
         torch.cat((w1.view(torch.uint8), w3.view(torch.uint8)), dim=1).contiguous(),
-        prepare_fp4_weight_scale_mxfp4(torch.cat((s1, s3), dim=1).contiguous()),
+        torch.cat((s1, s3), dim=1).contiguous(),
         w2.view(torch.uint8).contiguous(),
-        prepare_fp4_weight_scale_mxfp4(s2.contiguous()),
+        s2.contiguous(),
     )
     for key in keys:
         layer_weights.pop(key)
     return result
+
+
+def prepare_routed_mxfp4_weights(cfg, layer_weights):
+    """Preserve EP-sliced checkpoint nibbles; prepare scale pairs once."""
+    from rtp_llm.platforms.ppu.kernels.ppu_mxfp4 import prepare_fp4_weight_scale_mxfp4
+
+    w13, s13, w2, s2 = take_raw_routed_mxfp4_weights(cfg, layer_weights)
+    return (
+        w13,
+        prepare_fp4_weight_scale_mxfp4(s13),
+        w2,
+        prepare_fp4_weight_scale_mxfp4(s2),
+    )
 
 
 class PpuDeepEPFP4Strategy(torch.nn.Module):
@@ -70,7 +82,11 @@ class PpuDeepEPFP4Strategy(torch.nn.Module):
         )
 
     def __init__(
-        self, cfg, *, expected_m_policy="capacity", output_dtype=torch.float32,
+        self,
+        cfg,
+        *,
+        expected_m_policy="capacity",
+        output_dtype=torch.float32,
         gemm_tile="auto",
     ):
         super().__init__()
@@ -85,9 +101,7 @@ class PpuDeepEPFP4Strategy(torch.nn.Module):
             raise ValueError("PPU MoE GEMM tile must be auto or n128")
         self._gemm_tile = gemm_tile
         if not self.can_handle(cfg):
-            raise ValueError(
-                "PPU DeepEP MXFP4 requires compatible EP-local experts"
-            )
+            raise ValueError("PPU DeepEP MXFP4 requires compatible EP-local experts")
         self._wrapper = None
         # At TP>1 the wrapper slices the replicated batch before dispatch, so
         # the per-rank MoE budget is this rank's slice of the global capacity.
@@ -113,8 +127,12 @@ class PpuDeepEPFP4Strategy(torch.nn.Module):
             cfg = self.cfg
             return max(
                 1,
-                (num_tokens * cfg.ep_size * cfg.n_activated_experts
-                 + cfg.n_routed_experts - 1) // cfg.n_routed_experts,
+                (
+                    num_tokens * cfg.ep_size * cfg.n_activated_experts
+                    + cfg.n_routed_experts
+                    - 1
+                )
+                // cfg.n_routed_experts,
             )
         return self._expected_m
 

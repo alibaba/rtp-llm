@@ -74,12 +74,11 @@ struct C4Trait {
   static_assert(kHeadDim % kTileDim == 0);
 };
 
-template <typename Trait, bool kUsePDL, typename InFloat, typename OutFloat>
-SGL_DEVICE void c4_forward(
+template <typename Trait, typename InFloat, typename OutFloat, bool kExplicitFastMath = false>
+SGL_DEVICE device::AlignedVector<OutFloat, kTileElements> c4_reduce(
     const InFloat* kv_buf_0,  // overlap [4n - 4, 4n - 1]
     const InFloat* kv_buf_1,  // normal [4n + 0, 4n + 3]
     const InFloat* kv_src,    // ragged pointer at position = 4n + 3
-    OutFloat* kv_out,
     const InFloat* score_bias,
     const bool should_overlap,
     const int32_t buffer_len) {
@@ -128,7 +127,6 @@ SGL_DEVICE void c4_forward(
 
   /// NOTE: part 2: safe online softmax + weighted sum
   using StorageOut = AlignedVector<OutFloat, kTileElements>;
-  const auto gmem_out = tile::Memory<StorageOut>::warp();
   StorageOut result;
 
   // consume 32 fp registers
@@ -158,17 +156,32 @@ SGL_DEVICE void c4_forward(
 #pragma unroll
     for (int32_t j = 0; j < 8; ++j) {
       const auto fp32_score = score[j];
-      const auto exp_score = expf(fp32_score - max_value);
+      const auto exp_score = kExplicitFastMath ? __expf(fp32_score - max_value) : expf(fp32_score - max_value);
       sum_product += cast<float>(kv[j][i]) * exp_score;
       sum_exp_value += exp_score;
     }
 
-    result[i] = cast<OutFloat>(sum_product / sum_exp_value);
+    result[i] = cast<OutFloat>(kExplicitFastMath ? __fdividef(sum_product, sum_exp_value) : sum_product / sum_exp_value);
   }
 
-  // overlap the store with the next iteration's load
+  return result;
+}
+
+template <typename Trait, bool kUsePDL, typename InFloat, typename OutFloat>
+SGL_DEVICE void c4_forward(
+    const InFloat* kv_buf_0,  // overlap [4n - 4, 4n - 1]
+    const InFloat* kv_buf_1,  // normal [4n + 0, 4n + 3]
+    const InFloat* kv_src,    // ragged pointer at position = 4n + 3
+    OutFloat* kv_out,
+    const InFloat* score_bias,
+    const bool should_overlap,
+    const int32_t buffer_len) {
+  using namespace device;
+  using StorageOut = AlignedVector<OutFloat, kTileElements>;
+  const auto result = c4_reduce<Trait, InFloat, OutFloat>(
+      kv_buf_0, kv_buf_1, kv_src, score_bias, should_overlap, buffer_len);
   PDLTriggerSecondary<kUsePDL>();
-  gmem_out.store(kv_out, result);
+  tile::Memory<StorageOut>::warp().store(kv_out, result);
 }
 
 template <typename Trait, typename InFloat>

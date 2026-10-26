@@ -11,6 +11,7 @@ from rtp_llm.platforms.ppu.models.dsv4.impl.utils import _v4_fp8_linear
 from rtp_llm.utils.model_weight import W
 
 from rtp_llm.platforms.ppu.models.dsv4.runtime_model import PpuDeepSeekV4Model
+from rtp_llm.platforms.ppu.models.dsv4.impl.platform_provider import Dsv4ProviderCapability
 
 
 class PpuDeepSeekV4MtpModel(DeepSeekV4MtpModel, PpuDeepSeekV4Model):
@@ -29,6 +30,11 @@ class PpuDeepSeekV4MtpModel(DeepSeekV4MtpModel, PpuDeepSeekV4Model):
             gw[W.v4_mtp_h_proj_s],
             platform_provider=self._platform_provider,
         )
+        self._mtp_input_fusion = None
+        if Dsv4ProviderCapability.MTP_INPUT_FUSION in self._platform_provider.capabilities:
+            self._mtp_input_fusion = self._platform_provider.build_mtp_input_fusion(
+                self.enorm, self.hnorm, self.e_proj, self.h_proj
+            )
 
     def _build_fused_chunked(
         self,
@@ -103,6 +109,11 @@ class PpuDeepSeekV4MtpModel(DeepSeekV4MtpModel, PpuDeepSeekV4Model):
         # The shared embedding can be sharded along hidden size under TP.
         # Use the target's gather path before the full-width fusion norms.
         inputs_embeds = self.v4._embed(input_ids)  # [T, dim]
+        fusion = getattr(self, "_mtp_input_fusion", None)
+        if fusion is not None:
+            fused = fusion(inputs_embeds, pre_hc, positions)
+            if fused is not None:
+                return fused
         # Suppress position-0 embedding (matches main-model "step 0 of a
         # brand-new request" behavior the official MTP impl relies on).
         inputs_embeds = torch.where(

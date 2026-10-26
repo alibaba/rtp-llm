@@ -41,3 +41,26 @@ class PpuHCHead(HCHeadBase):
         else:
             y = _head_chunk(x)
         return y.to(dtype)
+
+
+class PpuDecodeHCHead(PpuHCHead):
+    def __init__(self, *args, options=None, **kwargs):
+        super().__init__(*args, options={} if options is None else options, **kwargs)
+
+    def _head_impl(self, x):
+        if not (
+            x.is_cuda
+            and x.dtype == torch.bfloat16
+            and x.is_contiguous()
+            and x.ndim in (3, 4)
+            and x.shape[-2:] == (4, 4096)
+            and 0 < x.numel() // 16384 <= 512
+            and getattr(self, "tp_size", 1) == 1
+        ):
+            return super()._head_impl(x)
+        from ...kernels.ppu_hc_head_sum import hc_head_sum
+
+        mixes = F.linear(x.flatten(-2).float(), self.fn.float())
+        mixes *= torch.rsqrt(x.flatten(-2).float().square().mean(-1, keepdim=True) + self.norm_eps)
+        pre = torch.sigmoid(mixes * self.scale + self.base)
+        return hc_head_sum(x, pre, self.hc_eps)
