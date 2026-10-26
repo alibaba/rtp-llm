@@ -93,12 +93,8 @@ public:
             group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(
                 topology, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
         } else {
-            group_policy_ = std::make_unique<kvcm::FullLinearLayerGroupPolicy>(topology,
-                                                                               buffer_resolver,
-                                                                               full_group_tags,
-                                                                               other_group_tags,
-                                                                               std::max(1, cache_config_.linear_step),
-                                                                               std::move(group_block_size_bytes));
+            group_policy_ = std::make_unique<kvcm::FullLinearLayerGroupPolicy>(
+                topology, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
         }
         if (!group_policy_->init()) {
             RTP_LLM_LOG_ERROR("BlockTree KVCM group policy init failed");

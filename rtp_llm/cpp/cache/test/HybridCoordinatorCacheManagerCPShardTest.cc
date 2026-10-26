@@ -33,7 +33,7 @@ CacheConfig makeCPHybridConfig() {
     config.dtype              = rtp_llm::DataType::TYPE_FP16;
     config.layer_num          = 4;
     config.seq_size_per_block = 4;
-    config.linear_step        = 2;
+    config.reuse_cache_tail_blocks = 2;
 
     auto linear_spec = makeResolvedLinearSpec(config.dtype,
                                               1,
@@ -88,6 +88,27 @@ protected:
         createDevice();
     }
 };
+
+TEST_F(HybridCoordinatorCacheManagerCPShardTest, PrefillNeedBlocksUsesEachGroupsReuseLength) {
+    auto config                    = makeCPHybridConfig();
+    config.reuse_cache_tail_blocks = 3;
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
+    auto       resource    = makeBatchRes(1, config, {});
+    auto       linear_pool = allocator->groupBlockPools()[0];
+    auto       full_pool   = allocator->groupBlockPools()[1];
+    const auto linear      = linear_pool->malloc(1).value();
+    const auto full        = full_pool->malloc(2).value();
+    linear_pool->incRef(linear);
+    full_pool->incRef(full);
+    resource->mutableBlockIds(0, "linear").assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, linear[0]});
+    resource->mutableBlockIds(0, "full").assign(full);
+    auto       tokens = makeTokens(1, 24, 4);
+    MallocInfo info{resource, tokens};
+    EXPECT_EQ(allocator->getNeedBlocks(info), 3);  // Two Linear tails and one rank-local Full block.
+    allocator->free({resource, tokens});
+}
 
 TEST_F(HybridCoordinatorCacheManagerCPShardTest, RecomputeDetachesSuffixUsingGroupCPMapping) {
     const auto config    = makeCPHybridConfig();
