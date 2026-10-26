@@ -405,6 +405,35 @@ TEST_F(MultiRankBlockTransferEngineTest, CallbackCompletesWithoutCallingWaitDone
     EXPECT_TRUE(context->success());
 }
 
+TEST_F(MultiRankBlockTransferEngineTest, ConnectFailureUsesQueryAndActualCopyDirection) {
+    MultiRankBlockTransferRpcConfig config{
+        true, MemoryOperationResponsePB::OK, grpc::Status(grpc::StatusCode::UNAVAILABLE, "Connect Failed")};
+    MultiRankBlockTransferRpcServer server(std::make_unique<MultiRankBlockTransferRpcService>(config));
+    ASSERT_TRUE(server.start());
+    std::vector<std::string> directions;
+    auto                     manager = std::make_shared<BroadcastManager>(std::vector<std::string>{server.address()},
+                                                      [&](const auto& direction) { directions.push_back(direction); });
+    ASSERT_TRUE(manager->init());
+    auto                                                          cache = makeBroadcastCache(manager);
+    const std::vector<std::pair<TransferDescriptor, std::string>> cases{
+        {TransferDescriptor::hostToDevice(0, 1, {1}), "H2D"},
+        {TransferDescriptor::deviceToHost(0, {1}, 1), "D2H"},
+        {TransferDescriptor::hostToDisk(0, 1, 1), "H2DISK"},
+        {TransferDescriptor::diskToHost(0, 1, 1), "DISK2H"},
+        {TransferDescriptor::deviceToDisk(0, {1}, 1), "D2DISK"},
+        {TransferDescriptor::diskToDevice(0, 1, {1}), "DISK2D"}};
+    for (const auto& [descriptor, direction] : cases) {
+        auto result = cache->transfer_dispatcher_->multi_rank_engine_->execute(
+            TransferTask({descriptor}, std::chrono::milliseconds(1000), 73));
+        result->waitDone();
+        EXPECT_FALSE(result->success());
+        const auto message = result->errorInfo().ToString();
+        EXPECT_NE(message.find("request_id=73"), std::string::npos);
+        EXPECT_NE(message.find("direction=" + direction), std::string::npos);
+    }
+    EXPECT_EQ(directions, (std::vector<std::string>{"H2D", "D2H", "H2DISK", "DISK2H", "D2DISK", "DISK2D"}));
+}
+
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferReportsWorkerRpcError) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
