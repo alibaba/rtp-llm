@@ -298,13 +298,7 @@ class RequestPreemptionRegressionTest {
                         KV_TOKENS,
                         70,
                         CAPACITY));
-        var registration =
-                scheduler
-                        .tryClaim(
-                                route.decodeReservation(),
-                                ATTEMPT,
-                                "higher priority incoming request")
-                        .orElseThrow();
+        var registration = scheduler.tryClaim(route.decodeReservation(), ATTEMPT).orElseThrow();
         assertTrue(
                 RequestProtocolTestSupport.preemptionPhase(
                         scheduler, registration, PreemptionCancelPhase.CANCEL_IN_FLIGHT));

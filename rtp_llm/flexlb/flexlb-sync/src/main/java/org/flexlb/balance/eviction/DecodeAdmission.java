@@ -167,8 +167,7 @@ public class DecodeAdmission {
                                 endpointGenerationId,
                                 victim.requestId(),
                                 victim.reservationToken());
-                Optional<PreemptionRegistration> claimAttempt =
-                        owner.tryClaim(reservation, token, command.detail());
+                Optional<PreemptionRegistration> claimAttempt = owner.tryClaim(reservation, token);
                 if (claimAttempt.isEmpty()) {
                     return CompletableFuture.completedFuture(
                             capability.abort(false, "victim_inflight_gone"));
