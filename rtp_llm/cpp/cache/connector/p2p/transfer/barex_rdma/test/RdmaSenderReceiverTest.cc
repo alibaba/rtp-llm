@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <chrono>
 #include <cstring>
@@ -181,6 +182,7 @@ TEST_F(RdmaSenderOnlyTest, F1_EmptyBlockInfo_ImmediateBuildFailed) {
     req.unique_key = "k_f1_rdma";
     req.block_info = {};
     req.deadline_ms = currentTimeMs() + 5000;
+    req.timeout_ms = 5000;
 
     auto code = syncSend(*sender_, req);
     EXPECT_EQ(code, TransferErrorCode::BUILD_REQUEST_FAILED);
@@ -201,6 +203,7 @@ TEST_F(RdmaSenderOnlyTest, D1_ConnectionFailed_ReceiverNotRunning) {
     req.unique_key = "k_d1_rdma";
     req.block_info = blocks;
     req.deadline_ms = currentTimeMs() + 1000;
+    req.timeout_ms = 1000;
 
     auto code = syncSend(*sender_, req, std::chrono::seconds(5));
     EXPECT_TRUE(code == TransferErrorCode::RPC_FAILED || code == TransferErrorCode::CONNECTION_FAILED);
@@ -221,6 +224,7 @@ TEST_F(RdmaSenderReceiverTest, B1_SenderTimeout_ReceiverHasNoMatchingTask) {
     req.unique_key = "k_b1_rdma_integ";
     req.block_info = blocks;
     req.deadline_ms = currentTimeMs() + 500;
+    req.timeout_ms = 500;
 
     auto code = syncSend(*sender_, req, std::chrono::seconds(5));
     EXPECT_EQ(code, TransferErrorCode::TIMEOUT);
@@ -251,6 +255,7 @@ TEST_F(RdmaSenderReceiverTest, C1_RecvCancelledBeforeRpcArrives_Integration) {
     send_req.unique_key = "k_c1_rdma_integ";
     send_req.block_info = blocks;
     send_req.deadline_ms = currentTimeMs() + 5000;
+    send_req.timeout_ms = 5000;
 
     auto code = syncSend(*sender_, send_req, std::chrono::seconds(5));
     EXPECT_EQ(code, TransferErrorCode::CANCELLED);
@@ -260,6 +265,62 @@ TEST_F(RdmaSenderReceiverTest, C1_RecvCancelledBeforeRpcArrives_Integration) {
 // ===========================================================================
 // A. Happy path (integration)
 // ===========================================================================
+
+TEST_F(RdmaSenderReceiverTest, IncrementalBatchesCompleteOnlyTheDecodeWindow) {
+
+    constexpr size_t size = kMinMrRegBytes;
+    auto first_source = allocDevice(size);
+    auto final_source = allocDevice(size);
+    auto first_target = allocDevice(size);
+    auto final_target = allocDevice(size);
+    first_source.fill_(17);
+    final_source.fill_(42);
+    at::cuda::getCurrentCUDAStream().synchronize();
+
+    const auto deadline_ms = currentTimeMs() + 5000;
+    RecvRequest receive;
+    receive.unique_key = "incremental-window";
+    receive.deadline_ms = deadline_ms;
+    receive.block_info = makeBlocks(101, first_target.data_ptr(), size, true);
+    receive.block_info.merge(makeBlocks(102, final_target.data_ptr(), size, true));
+    ASSERT_TRUE(regAllMem(*receiver_, receive.block_info));
+    auto copied_batches = std::make_shared<std::vector<std::vector<int64_t>>>();
+    receive.on_batch_copied = [copied_batches](const std::vector<int64_t>& keys) {
+        copied_batches->push_back(keys);
+        return keys == std::vector<int64_t>{102};
+    };
+    auto task = receiver_->recv(receive);
+    ASSERT_NE(task, nullptr);
+
+    SendRequest send;
+    send.ip = "127.0.0.1";
+    send.port = test_port_;
+    send.unique_key = receive.unique_key;
+    send.deadline_ms = deadline_ms;
+    send.timeout_ms = 5000;
+
+    send.block_info = makeBlocks(100, first_source.data_ptr(), size, true);
+    ASSERT_TRUE(regAllMem(*sender_, send.block_info));
+    ASSERT_EQ(syncSend(*sender_, send), TransferErrorCode::OK);
+    EXPECT_FALSE(task->done());
+
+    send.block_info = makeBlocks(101, first_source.data_ptr(), size, true);
+    send.block_info.merge(makeBlocks(100, first_source.data_ptr(), size, true));
+    ASSERT_EQ(syncSend(*sender_, send), TransferErrorCode::OK);
+    EXPECT_FALSE(task->done());
+
+    send.block_info = makeBlocks(102, final_source.data_ptr(), size, true);
+    ASSERT_TRUE(regAllMem(*sender_, send.block_info));
+    ASSERT_EQ(syncSend(*sender_, send), TransferErrorCode::OK);
+    EXPECT_TRUE(task->success());
+    EXPECT_TRUE(verifyDevice(first_target.data_ptr(), std::string(size, 17)));
+    EXPECT_TRUE(verifyDevice(final_target.data_ptr(), std::string(size, 42)));
+    EXPECT_EQ(*copied_batches, (std::vector<std::vector<int64_t>>{{}, {101}, {102}}));
+
+    receiver_->stealTask(receive.unique_key);
+    send.block_info = makeBlocks(100, first_source.data_ptr(), size, true);
+    EXPECT_EQ(syncSend(*sender_, send), TransferErrorCode::OK);
+}
 
 TEST_F(RdmaSenderReceiverTest, A1_NormalTransfer_EndToEnd_Success) {
     constexpr size_t size = kMinMrRegBytes;
@@ -291,6 +352,7 @@ TEST_F(RdmaSenderReceiverTest, A1_NormalTransfer_EndToEnd_Success) {
     send_req.unique_key = "k_a1_rdma_integ";
     send_req.block_info = src_blocks;
     send_req.deadline_ms = currentTimeMs() + 5000;
+    send_req.timeout_ms = 5000;
 
     auto code = syncSend(*sender_, send_req, std::chrono::seconds(10));
     EXPECT_EQ(code, TransferErrorCode::OK);
@@ -344,6 +406,7 @@ TEST_F(RdmaSenderReceiverTest, G2_MultipleSenders_ConcurrentKeys) {
         send_req.unique_key = "k_g2_rdma_" + std::to_string(i);
         send_req.block_info = src_blocks;
         send_req.deadline_ms = currentTimeMs() + 5000;
+        send_req.timeout_ms = 5000;
 
         auto code = syncSend(*sender_, send_req, std::chrono::seconds(10));
         EXPECT_EQ(code, TransferErrorCode::OK) << "key index " << i;

@@ -14,6 +14,9 @@ enum class TransferBackend {
     kBarexRdma,
 };
 
+enum class TransferBackendRole { kSender, kReceiver };
+
+// Exactly the requested endpoint is populated.
 struct TransferBackendPair {
     IKVCacheSenderPtr   sender;
     IKVCacheReceiverPtr receiver;
@@ -21,6 +24,7 @@ struct TransferBackendPair {
 
 TransferBackendPair createTransferBackend(TransferBackend                     backend,
                                           const TransferBackendConfig&        config,
+                                          TransferBackendRole                 role,
                                           const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr);
 
 }  // namespace transfer

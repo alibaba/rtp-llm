@@ -730,6 +730,22 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     cache_store_inputs.host_kv_cache_offset  = to_host(inputs.kv_cache_block_id);
     cache_store_inputs.request_id            = inputs.request_id;
     cache_store_inputs.request_pd_separation = inputs.request_pd_separation;
+    cache_store_inputs.request_deadline_ms   = to_host(inputs.request_deadline_ms);
+    if (cache_manager_->hasP2PConnector()) {
+        cache_store_inputs.p2p_layer_write =
+            [manager         = cache_manager_,
+             clock_offset_ms = inputs.p2p_deadline_clock_offset_ms](size_t                               model_id,
+                                                                    int                                  layer_id,
+                                                                    const std::string&                   tag,
+                                                                    const std::vector<int64_t>&          keys,
+                                                                    const std::vector<int32_t>&          blocks,
+                                                                    int64_t                              request_id,
+                                                                    const std::shared_ptr<torch::Event>& event,
+                                                                    int64_t                              deadline_ms) {
+                return manager->writeP2PLayer(
+                    model_id, layer_id, tag, keys, blocks, request_id, event, deadline_ms, clock_offset_ms);
+            };
+    }
     cache_store_inputs.cache_keys            = inputs.cache_keys;
     return cache_store_inputs;
 }
@@ -1439,6 +1455,7 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
 
     buffer_holder_.hold_host(inputs.request_id);
     buffer_holder_.hold_host(inputs.request_pd_separation);
+    buffer_holder_.hold_host(inputs.request_deadline_ms);
     buffer_holder_.hold_host(inputs.cache_keys);
 }
 

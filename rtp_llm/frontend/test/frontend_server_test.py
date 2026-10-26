@@ -798,9 +798,12 @@ class FrontendServerTest(TestCase):
             num_return_sequences=1,
             can_use_pd_separation=True,
         )
-        self.assertIs(_selected_pd_separation(RoleType.PREFILL, pd_config), True)
-        self.assertIs(_selected_pd_separation(RoleType.PDFUSION, pd_config), False)
-        self.assertIsNone(_selected_pd_separation(RoleType.DECODE, pd_config))
+        self.assertIs(_selected_pd_separation(RoleType.PREFILL, pd_config, False), True)
+        self.assertIs(_selected_pd_separation(RoleType.PDFUSION, pd_config, False), False)
+        self.assertIs(
+            _selected_pd_separation(RoleType.DECODE, pd_config, False), True
+        )
+        self.assertIsNone(_selected_pd_separation(None, pd_config, False))
 
         fallback_updates = (
             {"max_new_tokens": 1},
@@ -813,7 +816,7 @@ class FrontendServerTest(TestCase):
             with self.subTest(update=update):
                 fallback_config = pd_config.model_copy(update=update)
                 self.assertIs(
-                    _selected_pd_separation(RoleType.PREFILL, fallback_config),
+                    _selected_pd_separation(RoleType.PREFILL, fallback_config, False),
                     False,
                 )
 
@@ -847,7 +850,7 @@ class FrontendServerTest(TestCase):
         )
         cases = (
             (RoleType.PDFUSION, "127.0.0.1", 51001, False),
-            (RoleType.PREFILL, "prefill.test", 51002, True),
+            (RoleType.DECODE, "decode.test", 51002, True),
         )
         try:
             for request_id, (role, host, port, expected_pd_sep) in enumerate(

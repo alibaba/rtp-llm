@@ -404,7 +404,14 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     }
 
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
-        cudaSyncAndCheck();
+        if (cache_manager_ && cache_manager_->hasP2PConnector()) {
+            // P2P synchronizes KV readiness and transfer completion separately.
+            // Avoid waiting for independent transfer streams at forward completion.
+            cudaCurrentStreamSyncAndCheck();
+        } else {
+            // Preserve device-wide synchronization before releasing non-P2P buffers.
+            cudaSyncAndCheck();
+        }
         model_->releaseBuffers();
         if (profile_step_finish_) {
             profile_step_finish_();

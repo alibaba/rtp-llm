@@ -5,10 +5,12 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/CudaCopyUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferMetric.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/proto/tcp_service.pb.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace rtp_llm {
@@ -19,7 +21,7 @@ namespace tcp {
 class TcpKVCacheSender: public transfer::IKVCacheSender {
 public:
     explicit TcpKVCacheSender(const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr);
-    ~TcpKVCacheSender() = default;
+    ~TcpKVCacheSender();
 
 public:
     /// @brief 初始化 TCP client；idle_ttl_ms 为 0 时关闭 idle 淘汰，sweep_interval_calls 为 0 时仅 miss 路径清扫
@@ -50,10 +52,14 @@ private:
                       std::function<void(TransferErrorCode, const std::string&)>           callback,
                       int64_t                                                              deadline_ms);
 
+    bool tryStagedGatherCopyToHost(std::vector<CopyTask>& copy_tasks, int device_index);
+
 private:
     std::shared_ptr<transfer::TcpClient> tcp_client_;
     kmonitor::MetricsReporterPtr         metrics_reporter_;
     std::unique_ptr<CudaCopyUtil>        cuda_copy_util_;
+    mutable std::mutex                   staged_scratch_mutex_;
+    StagedMemoryCopyScratch              staged_scratch_{};
 };
 
 }  // namespace tcp

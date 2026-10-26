@@ -868,14 +868,22 @@ void allreduce_impl(CommMeta    meta,
 
 namespace ipc_details {
 
-Tensor get_handle(void* ptr) {
+Tensor get_handle(void* ptr, const char* allocation_name) {
     TORCH_CHECK(ptr != nullptr,
                 "get_handle: received null pointer. "
                 "This usually means the preceding hipMalloc failed due to insufficient GPU memory.");
     gpuIpcMemHandle_t handle;
     auto              err = gpuIpcGetMemHandle(&handle, ptr);
+    int current_device = -1;
+    if (err != gpuSuccess) {
+        (void)hipGetDevice(&current_device);
+    }
     TORCH_CHECK(err == gpuSuccess,
-                "hipIpcGetMemHandle failed for ptr=",
+                "hipIpcGetMemHandle failed for ",
+                allocation_name,
+                " on device=",
+                current_device,
+                " ptr=",
                 ptr,
                 ": ",
                 hipGetErrorString(err),
@@ -1006,11 +1014,11 @@ public:
     }
 
     Tensor get_barrier_handle() {
-        return ipc_details::get_handle(barrier_flags_);
+        return ipc_details::get_handle(barrier_flags_, "barrier_flags");
     }
 
     Tensor get_data_handle() {
-        return ipc_details::get_handle(data_);
+        return ipc_details::get_handle(data_, "data");
     }
 
     void open_barrier_handles(std::vector<Tensor> handles) {
@@ -1083,7 +1091,7 @@ public:
             void* ptr = unregistered_ptrs_[i];
             void* base_ptr;
             ipc_details::create_base_ptr(&base_ptr, ptr);
-            ipc_handles.push_back(ipc_details::get_handle(base_ptr));
+            ipc_handles.push_back(ipc_details::get_handle(base_ptr, "captured_allocation"));
             unregistered_base_ptrs_.push_back(base_ptr);
         }
         return ipc_handles;

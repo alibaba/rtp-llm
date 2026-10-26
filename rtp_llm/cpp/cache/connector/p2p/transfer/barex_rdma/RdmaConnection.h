@@ -52,10 +52,13 @@ public:
     /// @brief transport 层连接失败或断开时回调
     void onConnectFailed(const std::shared_ptr<::accl::barex::XConnection>& connection);
 
+    /// @brief 关闭底层连接，并使尚未派发的请求失败
+    void close() override;
+
     /// @brief 发起 RDMA Read；CONNECTED 时立即派发，否则入队等待或同步失败
     void read(const std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>>& local_remote_buffers,
-              std::function<void(bool)>                                                  callback,
-              uint64_t                                                                   deadline_ms) override;
+              RdmaReadCallback callback,
+              uint64_t deadline_ms) override;
 
     const std::string& getIp() const { return ip_; }
     uint32_t           getPort() const { return port_; }
@@ -63,7 +66,7 @@ public:
 private:
     struct PendingReadRequest {
         std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>> local_remote_buffers;
-        std::function<void(bool)>                                            callback;
+        RdmaReadCallback callback;
         std::shared_ptr<RdmaMetricsCollector>                                collector;
         uint64_t                                                             deadline_ms;
     };
@@ -84,21 +87,30 @@ private:
                           const std::shared_ptr<::accl::barex::XConnection>& conn);
 
     // Fails all requests in the list (called outside all locks).
-    static void failRequests(std::vector<PendingReadRequest>& requests);
+    void failRequests(std::vector<PendingReadRequest>& requests);
 
-    void sendReadRequest(const std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>>& local_remote_buffers,
-                         const std::shared_ptr<RdmaMetricsCollector>&                               collector,
-                         std::function<void(bool)>                                                  callback,
-                         uint64_t                                                                   deadline_ms,
-                         const std::shared_ptr<::accl::barex::XConnection>&                         conn);
+public:
+    /// @brief Sweep pending_requests_ for entries whose deadline has passed while
+    ///        the connection is still CONNECTING.  Called periodically by RdmaClient.
+    void sweepExpiredPendingRequests();
 
-    bool validateAndBuildRwMemps(
+    void
+    sendReadRequest(const std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>>& local_remote_buffers,
+                    const std::shared_ptr<RdmaMetricsCollector>& collector,
+                    RdmaReadCallback callback,
+                    uint64_t deadline_ms,
+                    const std::shared_ptr<::accl::barex::XConnection>& conn);
+
+    TransferErrorCode validateAndBuildRwMemps(
         const std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>>& local_remote_buffers,
-        std::vector<::accl::barex::rw_memp_t>&                                      mems,
-        uint64_t                                                                    deadline_ms,
-        const std::shared_ptr<::accl::barex::XConnection>&                          conn);
+        std::vector<::accl::barex::rw_memp_t>& mems,
+        uint64_t deadline_ms,
+        const std::shared_ptr<::accl::barex::XConnection>& conn,
+        std::string& error_message);
 
 private:
+    uint32_t remoteRkeyOrAbort(const RemoteBuffer& remote, uint32_t nic_id) const;
+    std::string readContext() const;
     std::shared_ptr<IRdmaMemoryManager>         memory_manager_;
     std::string                                ip_;
     uint32_t                                   port_;
