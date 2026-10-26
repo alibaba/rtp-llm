@@ -192,6 +192,7 @@ cc_test(
         "//rtp_llm/cpp/utils:hash_util",
     ],
     env = {},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
