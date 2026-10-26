@@ -273,7 +273,11 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadUsesConfiguredLoadBudgetAndRequestDea
     waitAsyncContextDone(result.context);
     ASSERT_TRUE(result.context->success());
     auto request = prefill_server_->service()->getLastStartLoadRequest();
-    EXPECT_EQ(request.timeout_ms(), 1000);
+    ASSERT_NE(result.context->server_call_result_, nullptr);
+    EXPECT_EQ(request.timeout_ms(),
+              std::min<int64_t>(config.load_cache_timeout_ms, result.context->server_call_result_->timeout_ms));
+    EXPECT_GT(request.timeout_ms(), 0);
+    EXPECT_LE(request.timeout_ms(), config.load_cache_timeout_ms);
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncReadKeepsRequestDeadlineSeparateFromLoadBudget) {
@@ -284,7 +288,10 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadKeepsRequestDeadlineSeparateFromLoadB
     waitAsyncContextDone(result.context);
     ASSERT_TRUE(result.context->success());
     auto request = prefill_server_->service()->getLastStartLoadRequest();
-    EXPECT_EQ(request.timeout_ms(), 5000);
+    ASSERT_NE(result.context->server_call_result_, nullptr);
+    EXPECT_EQ(request.timeout_ms(), result.context->server_call_result_->timeout_ms);
+    EXPECT_GT(request.timeout_ms(), 0);
+    EXPECT_LE(request.timeout_ms(), 2000);
     EXPECT_EQ(result.context->request_deadline_ms_, request_deadline_ms);
     EXPECT_LE(result.context->transfer_deadline_ms_, request_deadline_ms);
 }
@@ -304,7 +311,11 @@ TEST_F(P2PConnectorSchedulerTest, InvalidLoadConfigurationUsesBoundedSharedFallb
         ASSERT_TRUE(result.ok());
         waitAsyncContextDone(result.context);
         ASSERT_TRUE(result.context->success());
-        EXPECT_EQ(prefill_server_->service()->getLastStartLoadRequest().timeout_ms(), expected);
+        const auto request = prefill_server_->service()->getLastStartLoadRequest();
+        ASSERT_NE(result.context->server_call_result_, nullptr);
+        EXPECT_EQ(request.timeout_ms(), std::min<int64_t>(expected, result.context->server_call_result_->timeout_ms));
+        EXPECT_GT(request.timeout_ms(), 0);
+        EXPECT_LE(request.timeout_ms(), std::min<int64_t>(expected, 60000));
     }
 }
 

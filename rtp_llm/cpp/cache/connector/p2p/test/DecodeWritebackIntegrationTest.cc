@@ -117,6 +117,7 @@ protected:
     using Allocator = test::BlockTreeCacheTestAllocator<AllocatorType>;
     autil::EnvGuard                                    perf_{"PERF_TEST", "1"};
     CacheConfig                                        config_;
+    CacheConfig                                        prefill_config_;
     std::shared_ptr<Allocator>                         source_, target_;
     std::shared_ptr<KVCacheManager>                    decode_, prefill_;
     std::shared_ptr<GatedTcpSender>                    sender_;
@@ -124,6 +125,7 @@ protected:
     WritebackService                                   decode_service_, prefill_service_;
     std::vector<std::unique_ptr<grpc::Server>>         servers_;
     std::vector<std::shared_ptr<Allocator>>            peer_allocators_;
+    std::vector<std::shared_ptr<Allocator>>            decode_peer_allocators_;
     std::vector<std::shared_ptr<KVCacheManager>>       peer_managers_;
     std::vector<std::unique_ptr<WritebackService>>     peer_services_;
     int                                                prefill_port_{0};
@@ -159,7 +161,7 @@ protected:
         CacheStoreConfig store;
         store.p2p_writeback_enable           = enabled;
         store.p2p_writeback_kv_reserve_ratio = kv_reserve_ratio;
-        auto manager               = std::make_shared<KVCacheManager>(config_,
+        auto manager               = std::make_shared<KVCacheManager>(role == RoleType::PREFILL ? prefill_config_ : config_,
                                                         false,
                                                         nullptr,
                                                         KVCacheConfig{},
@@ -174,7 +176,7 @@ protected:
         return manager;
     }
 
-    virtual CacheConfig cacheConfig() const {
+    virtual CacheConfig cacheConfig(RoleType) const {
         return test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16, 1, 2);
     }
 
@@ -182,11 +184,15 @@ protected:
         return 1;
     }
 
+    virtual int decodeTpSize() const {
+        return 1;
+    }
+
     ParallelismConfig parallelismFor(RoleType role) const {
         ParallelismConfig parallelism;
         parallelism.role_type = role;
+        parallelism.tp_size = role == RoleType::PREFILL ? prefillCpSize() : decodeTpSize();
         if (prefillCpSize() > 1) {
-            parallelism.tp_size                            = role == RoleType::PREFILL ? prefillCpSize() : 1;
             parallelism.prefill_cp_config.kv_cache_sharded = true;
             parallelism.prefill_cp_config.prefill_cp_size  = prefillCpSize();
             parallelism.prefill_cp_config.method =
@@ -197,10 +203,12 @@ protected:
 
     void SetUp() override {
         DeviceTestBase::SetUp();
-        config_ = cacheConfig();
+        config_ = cacheConfig(RoleType::DECODE);
         config_.cache_key_hash_seed = 42;
+        prefill_config_ = cacheConfig(RoleType::PREFILL);
+        prefill_config_.cache_key_hash_seed = config_.cache_key_hash_seed;
         source_ = std::make_shared<Allocator>(config_);
-        target_ = std::make_shared<Allocator>(config_);
+        target_ = std::make_shared<Allocator>(prefill_config_);
         ASSERT_TRUE(source_->init());
         ASSERT_TRUE(target_->init());
         if (prefillCpSize() > 1) {
@@ -220,11 +228,12 @@ protected:
         sender_                          = std::make_shared<GatedTcpSender>();
         ASSERT_TRUE(receiver_->init(transfer_port, 1, 1));
         ASSERT_TRUE(sender_->sender_->init(1));
+        std::vector<std::string> decode_grpc_addrs{decode_addr};
         std::vector<std::string> prefill_grpc_addrs{prefill_addr};
         std::vector<std::string> prefill_worker_addrs{"127.0.0.1:" + std::to_string(transfer_port) + ":"
                                                       + std::to_string(prefill_port_)};
         for (int rank = 1; rank < prefillCpSize(); ++rank) {
-            auto allocator = std::make_shared<Allocator>(config_);
+            auto allocator = std::make_shared<Allocator>(prefill_config_);
             ASSERT_TRUE(allocator->init());
             allocator->setCPSlotMapper(
                 std::make_shared<CPSlotMapper>(rank, prefillCpSize(), config_.seq_size_per_block));
@@ -242,7 +251,7 @@ protected:
             connector_config.tp_rank                            = rank;
             connector_config.p2p_writeback_enable               = true;
             auto& worker                                        = connector_config.worker_config;
-            worker.topology                                     = config_.topologyPtr();
+            worker.topology                                     = prefill_config_.topologyPtr();
             worker.layer_all_num                                = config_.layer_num;
             worker.tp_rank                                      = rank;
             worker.tp_size                                      = prefillCpSize();
@@ -262,6 +271,36 @@ protected:
             peer_managers_.push_back(std::move(manager));
             peer_services_.push_back(std::move(service));
         }
+        for (int rank = 1; rank < decodeTpSize(); ++rank) {
+            auto allocator = std::make_shared<Allocator>(config_);
+            ASSERT_TRUE(allocator->init());
+            auto manager = makeManager(RoleType::DECODE, allocator);
+            auto service = std::make_unique<WritebackService>();
+            service->local.engine_ = std::make_shared<WritebackEngine>(manager);
+            int rpc_port = 0;
+            decode_grpc_addrs.push_back(launch(*service, rpc_port));
+            P2PConnectorConfig connector_config;
+            connector_config.role_type = RoleType::DECODE;
+            connector_config.tp_rank = rank;
+            connector_config.p2p_writeback_enable = true;
+            auto& worker = connector_config.worker_config;
+            worker.topology = config_.topologyPtr();
+            worker.layer_all_num = config_.layer_num;
+            worker.tp_rank = rank;
+            worker.tp_size = decodeTpSize();
+            worker.cache_key_tokens_per_block = config_.seq_size_per_block;
+            worker.p2p_writeback_cleanup_interval_ms = 5;
+            auto converter = std::make_shared<LayerBlockConverterImpl>(allocator);
+            auto connector = std::make_shared<P2PConnector>(connector_config, converter, nullptr, allocator);
+            auto entry = std::make_unique<P2PConnectorDecode>(connector_config, converter, nullptr);
+            entry->write_worker_ = std::make_unique<P2PWorkerDecodeWrite>(worker, converter, sender_);
+            ASSERT_TRUE(entry->write_worker_->init());
+            connector->decode_ = std::move(entry);
+            manager->p2p_connector_ = std::move(connector);
+            decode_peer_allocators_.push_back(std::move(allocator));
+            peer_managers_.push_back(std::move(manager));
+            peer_services_.push_back(std::move(service));
+        }
         // Warm the synchronous D2H path before starting the writeback deadline.
         auto warmup = torch::zeros({4096}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
         std::array<std::array<char, 1024>, 4> host{};
@@ -274,25 +313,25 @@ protected:
         for (auto role : {RoleType::DECODE, RoleType::PREFILL}) {
             auto               manager   = role == RoleType::DECODE ? decode_ : prefill_;
             auto               converter = std::make_shared<LayerBlockConverterImpl>(manager->coordinator_manager_);
-            const auto&        address   = role == RoleType::DECODE ? decode_addr : prefill_addr;
+            const auto&        local_config = role == RoleType::DECODE ? config_ : prefill_config_;
             P2PConnectorConfig connector_config;
             connector_config.role_type                             = role;
             connector_config.p2p_writeback_enable                  = true;
             auto& worker                                           = connector_config.worker_config;
-            worker.topology                                        = config_.topologyPtr();
+            worker.topology                                        = local_config.topologyPtr();
             worker.cache_key_tokens_per_block                      = config_.seq_size_per_block;
             worker.layer_all_num                                   = config_.layer_num;
-            worker.tp_size                                         = role == RoleType::PREFILL ? prefillCpSize() : 1;
+            worker.tp_size                                         = role == RoleType::PREFILL ? prefillCpSize() : decodeTpSize();
             worker.cp_size                                         = role == RoleType::PREFILL ? prefillCpSize() : 1;
             worker.p2p_writeback_cleanup_interval_ms    = 5;
             auto& scheduler                                        = connector_config.scheduler_config;
-            scheduler.topology                                     = config_.topologyPtr();
+            scheduler.topology                                     = local_config.topologyPtr();
             scheduler.cache_key_tokens_per_block                           = config_.seq_size_per_block;
             scheduler.cache_key_hash_seed = config_.cache_key_hash_seed;
             scheduler.role_type                                    = role;
             scheduler.parallelism_config                           = parallelismFor(role);
             scheduler.worker_grpc_addrs =
-                role == RoleType::PREFILL ? prefill_grpc_addrs : std::vector<std::string>{address};
+                role == RoleType::PREFILL ? prefill_grpc_addrs : decode_grpc_addrs;
             scheduler.worker_addrs                                 = prefill_worker_addrs;
             scheduler.p2p_cancel_broadcast_timeout_ms              = 100;
             scheduler.p2p_writeback_timeout_ms                     = 3000;
@@ -477,7 +516,7 @@ class DecodeWritebackIntegrationTest: public DecodeWritebackIntegrationTestBase<
 class DecodeWritebackIndependentPoolsIntegrationTest:
     public DecodeWritebackIntegrationTestBase<CoordinatorCacheManager> {
 protected:
-    CacheConfig cacheConfig() const override {
+    CacheConfig cacheConfig(RoleType) const override {
         auto       config                  = test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16, 1, 2);
         const auto full                    = test::makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 2);
         const auto swa                     = test::makeMhaSpec("swa", 4, DataType::TYPE_FP16, 1, 2);
@@ -569,11 +608,131 @@ TEST_F(DecodeWritebackCpIntegrationTest, TcpScatterPublishesCanonicalPrefixAndRe
     prefill_->free(FreeInfo{reused, ids});
 }
 
+class DecodeWritebackCpTpIntegrationTest:
+    public DecodeWritebackCpIntegrationTest,
+    public ::testing::WithParamInterface<int> {
+protected:
+    int decodeTpSize() const override {
+        return 2;
+    }
+
+    CacheConfig cacheConfig(RoleType role) const override {
+        auto config = DecodeWritebackCpIntegrationTest::cacheConfig(role);
+        auto parallelism = parallelismFor(role);
+        AttentionConfigs attention;
+        attention.kv_head_num = GetParam();
+        attention.size_per_head = 2;
+        KVCacheSpecDesc desc;
+        desc.tag = "default";
+        desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+        desc.dtype = DataType::TYPE_FP16;
+        SpecBuildContext build;
+        build.seq_size_per_block = 4;
+        build.attn_config = &attention;
+        build.parallelism_config = &parallelism;
+        auto spec = MHAKVCacheSpec::build(desc, build);
+        config.fromGroupedSpecs({spec}, {{0, 1}}, {CacheGroupType::FULL}, {desc.tag});
+        config.setGroupBlockLayout({desc.tag}, {16}, {spec->block_size_bytes()}, {0});
+        return config;
+    }
+};
+
+TEST_P(DecodeWritebackCpTpIntegrationTest, TcpScatterMergesHeadsAndReusesBothPrefillRankBuffers) {
+    ASSERT_TRUE(decode_->writebackEnabled());
+    prepare();
+    ASSERT_EQ(decode_peer_allocators_.size(), 1u);
+    const int head_shards = std::gcd(GetParam(), decodeTpSize());
+    const int local_heads = GetParam() / head_shards;
+    const std::array<std::shared_ptr<Allocator>, 2> sources{source_, decode_peer_allocators_.front()};
+    for (int rank = 0; rank < decodeTpSize(); ++rank) {
+        for (int layer = 0; layer < 2; ++layer) {
+            for (size_t position = 0; position < source_blocks_.size(); ++position) {
+                for (int head = 0; head < local_heads; ++head) {
+                    const int global_head = rank / (decodeTpSize() / head_shards) * local_heads + head;
+                    const auto blocks = sources[rank]->convertIndexToBuffer(
+                        layer, "default", source_blocks_[position], local_heads, head);
+                    ASSERT_EQ(blocks.size(), 2u);
+                    for (size_t kv = 0; kv < blocks.size(); ++kv) {
+                        const int value = 64 * kv + 16 * layer + 4 * position + global_head + 1;
+                        ASSERT_EQ(cudaMemset(blocks[kv].addr, value, blocks[kv].size_bytes), cudaSuccess);
+                    }
+                }
+            }
+        }
+    }
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    stream_->generate_status_->status = StreamState::RUNNING;
+    stream_->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    ASSERT_TRUE(await([&]() { return sender_->started >= head_shards; }));
+    auto write = context();
+    ASSERT_NE(write, nullptr);
+    EXPECT_EQ(target_->devicePrefixBlocksForTest({keys_[1]}), 0u);
+    sender_->release();
+    ASSERT_TRUE(await([&]() { return drained(); }));
+    ASSERT_TRUE(write->success()) << write->errorInfo().ToString();
+    EXPECT_EQ(target_->devicePrefixBlocksForTest({keys_[1]}), 1u);
+
+    auto reused = std::make_shared<BatchKVCacheResource>();
+    reused->resetBatchSize(1);
+    reused->initGroups(prefill_config_.topologyPtr());
+    auto ids = std::make_shared<CompleteTokenIds>(1, 1, 64, 4);
+    auto input = std::make_shared<GenerateInput>();
+    input->input_ids = torch::tensor(tokens_, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    ids->init(input);
+    MallocInfo info;
+    info.batch_kv_cache_resource = reused;
+    info.complete_token_ids = ids;
+    info.reuse_cache = true;
+    info.enable_cache_lookup = true;
+    const auto result = prefill_->malloc(info);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, 8);
+    ASSERT_EQ(peer_allocators_.size(), 1u);
+    const std::array<std::shared_ptr<Allocator>, 2> targets{target_, peer_allocators_.front()};
+    for (int rank = 0; rank < prefillCpSize(); ++rank) {
+        for (int layer = 0; layer < 2; ++layer) {
+            for (int head = 0; head < GetParam(); ++head) {
+                const auto blocks = targets[rank]->convertIndexToBuffer(
+                    layer, "default", reused->blocks(0, "default").front(), GetParam(), head);
+                ASSERT_EQ(blocks.size(), 2u);
+                for (size_t kv = 0; kv < blocks.size(); ++kv) {
+                    const uint8_t expected = 64 * kv + 16 * layer + 4 * rank + head + 1;
+                    std::vector<uint8_t> bytes(blocks[kv].size_bytes);
+                    ASSERT_EQ(cudaMemcpy(bytes.data(), blocks[kv].addr, bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+                    EXPECT_EQ(bytes, std::vector<uint8_t>(bytes.size(), expected))
+                        << "rank=" << rank << " layer=" << layer << " head=" << head << " kv=" << kv;
+                }
+            }
+        }
+    }
+    prefill_->free(FreeInfo{reused, ids});
+}
+
+INSTANTIATE_TEST_SUITE_P(ReplicatedAndShardedHeads, DecodeWritebackCpTpIntegrationTest, ::testing::Values(1, 4));
+
+class DecodeWritebackLinearCpIntegrationTest: public DecodeWritebackCpIntegrationTest {
+protected:
+    CacheConfig cacheConfig(RoleType role) const override {
+        auto config = DecodeWritebackCpIntegrationTest::cacheConfig(role);
+        const auto spec = test::makeLinearSpec("default", 4, DataType::TYPE_FP16, 1, 2);
+        config.fromGroupedSpecs({spec}, {{0, 1}}, {CacheGroupType::LINEAR}, {"default"});
+        config.setGroupBlockLayout({"default"}, {16}, {spec->block_size_bytes()}, {0});
+        config.linear_step = 1;
+        return config;
+    }
+};
+
+TEST_F(DecodeWritebackLinearCpIntegrationTest, FinalStepReplicatesStateAndPublishesCanonicalPrefix) {
+    checkWritebackAfterFinalStepCrossesBoundary();
+}
+
 class DecodeWritebackHybridIntegrationTest:
     public DecodeWritebackIntegrationTestBase<CoordinatorCacheManager>,
     public ::testing::WithParamInterface<int> {
 protected:
-    CacheConfig cacheConfig() const override {
+    CacheConfig cacheConfig(RoleType) const override {
         auto config        = test::makeFullSwaLinearCacheConfig(GetParam() != 1);
         config.linear_step = 1;
         if (GetParam() == 2) {
