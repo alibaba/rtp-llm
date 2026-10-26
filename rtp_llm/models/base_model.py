@@ -195,7 +195,18 @@ class BaseModel(object):
         logging.info(
             f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
         )
-        self._create_python_model()
+        from rtp_llm.models_py.modules.batch_invariant import BatchInvariantPolicy
+
+        policy = BatchInvariantPolicy(enabled=self.model_config.batch_invariant)
+        with policy.construction():
+            self._create_python_model()
+        policy.validate_model(self.py_model)
+        if policy.enabled:
+            logging.info(
+                "batch invariant enabled: profile=%s model=%s",
+                policy.profile,
+                type(self.py_model).__name__,
+            )
 
     def _create_python_model(self):
         pass

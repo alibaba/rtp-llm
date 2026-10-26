@@ -152,30 +152,42 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
             !stream->usesBeamSearchTokenLayoutForCurrentStep() && stream->currentBatchSize() == stream->nextBatchSize();
     }
     torch::Tensor selected_probs_cpu;
+    torch::Tensor selected_logprobs_cpu;
+    const auto&   log_normalizers = merge_outputs.model_output.log_normalizers;
+    RTP_LLM_CHECK_WITH_INFO(!log_normalizers.defined() || direct_rows,
+                            "batch invariant logprobs do not support beam expansion or row reordering");
     if (any_softmax_probs && direct_rows) {
         const auto& logits = merge_outputs.model_output.logits;
         RTP_LLM_CHECK(logits.defined() && logits.dim() == 2
                       && logits.size(0) >= static_cast<int64_t>(total_batch_size_out) && logits.size(1) > 0);
         // The in-place normalization must not overwrite logits returned to
         // another stream, or logits retained by the model/sampler.
-        auto probabilities = logits.narrow(0, 0, total_batch_size_out)
-                                 .to(torch::kFloat32, /*non_blocking=*/false, /*copy=*/true)
-                                 .contiguous();
-#if USING_CUDA
-        if (probabilities.is_cuda()) {
-            cudaSoftmaxInplace(probabilities, at::cuda::getCurrentCUDAStream().stream());
+        auto raw_logits   = logits.narrow(0, 0, total_batch_size_out);
+        auto selected_ids = token_ids_for_copy.to(logits.device(), torch::kLong).clamp(0, logits.size(1) - 1);
+        if (log_normalizers.defined()) {
+            RTP_LLM_CHECK(log_normalizers.dim() == 2 && log_normalizers.size(1) == 1
+                          && log_normalizers.size(0) >= static_cast<int64_t>(total_batch_size_out)
+                          && log_normalizers.scalar_type() == torch::kFloat32
+                          && raw_logits.scalar_type() == torch::kFloat32);
+            auto selected = raw_logits.gather(1, selected_ids) - log_normalizers.narrow(0, 0, total_batch_size_out);
+            selected_logprobs_cpu = copyToPinnedCpuAsync(selected, need_d2h_sync);
+            selected_probs_cpu    = copyToPinnedCpuAsync(selected.exp(), need_d2h_sync);
         } else {
-            probabilities = torch::softmax(probabilities, -1);
-        }
+            auto probabilities = raw_logits.to(torch::kFloat32, /*non_blocking=*/false, /*copy=*/true).contiguous();
+#if USING_CUDA
+            if (probabilities.is_cuda()) {
+                cudaSoftmaxInplace(probabilities, at::cuda::getCurrentCUDAStream().stream());
+            } else {
+                probabilities = torch::softmax(probabilities, -1);
+            }
 #else
-        probabilities = torch::softmax(probabilities, -1);
+            probabilities = torch::softmax(probabilities, -1);
 #endif
-        // A failed sampler can leave an invalid token. Its stream still gets
-        // the original failure below; avoid a device-side gather assertion
-        // while collecting successful peers' probabilities.
-        auto selected_ids =
-            token_ids_for_copy.to(probabilities.device(), torch::kLong).clamp(0, probabilities.size(1) - 1);
-        selected_probs_cpu = copyToPinnedCpuAsync(probabilities.gather(1, selected_ids), need_d2h_sync);
+            // A failed sampler can leave an invalid token. Its stream still gets
+            // the original failure below; avoid a device-side gather assertion
+            // while collecting successful peers' probabilities.
+            selected_probs_cpu = copyToPinnedCpuAsync(probabilities.gather(1, selected_ids), need_d2h_sync);
+        }
     }
     syncPinnedCpuCopies(need_d2h_sync);
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
@@ -199,7 +211,8 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                              new_tokens_all,
                              token_ids_cpu,
                              success_cpu,
-                             selected_probs_cpu);
+                             selected_probs_cpu,
+                             selected_logprobs_cpu);
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -219,7 +232,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   const torch::Tensor& new_tokens_all,
                                                   const torch::Tensor& token_ids_cpu,
                                                   const torch::Tensor& success_cpu,
-                                                  const torch::Tensor& selected_probs_cpu) const {
+                                                  const torch::Tensor& selected_probs_cpu,
+                                                  const torch::Tensor& selected_logprobs_cpu) const {
 
     const auto&  model_output      = merge_outputs.model_output;
     const auto&  sampler_output    = merge_outputs.sampler_output;
@@ -341,7 +355,9 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
             auto [topk_values_raw, topk_indices] = sliced_logits.topk(top_k, -1);
 
             // single reduce for log-normalizer, avoids materializing [slice_len, vocab_size]
-            auto log_sum_exp   = sliced_logits.logsumexp(-1, /*keepdim=*/true);
+            auto log_sum_exp   = model_output.all_log_normalizers.defined() ?
+                                     model_output.all_log_normalizers.narrow(0, token_offset + start_pos, slice_len) :
+                                     sliced_logits.logsumexp(-1, /*keepdim=*/true);
             auto topk_logprobs = topk_values_raw - log_sum_exp;
 
             // target_logprobs[i] = logprob of token[start_pos+i+1] at position start_pos+i.
@@ -471,6 +487,9 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  /*force_update_info=*/false,
                                  std::move(prompt_logits_output),
                                  std::move(error_info)};
+    if (stream->calculateSoftmaxProbs() && selected_logprobs_cpu.defined()) {
+        update_info.raw_logprobs = selected_logprobs_cpu.narrow(0, batch_idx_out, next_batch_size);
+    }
     stream->update(update_info);
 }
 

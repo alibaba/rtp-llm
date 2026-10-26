@@ -101,6 +101,26 @@ class LinearFactory:
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ):
+        from rtp_llm.models_py.modules.batch_invariant import construction_policy
+
+        if construction_policy().enabled:
+            from rtp_llm.models_py.modules.batch_invariant.linear import (
+                BatchInvariantLinear,
+            )
+
+            if not BatchInvariantLinear.can_handle(
+                quant_config,
+                weight,
+                weight_scales,
+                hw_kernel_config,
+                weight_scale_2,
+                input_scale,
+            ):
+                raise ValueError(
+                    "batch invariant: no compatible Linear for this dtype/quantization/device"
+                )
+            return BatchInvariantLinear(weight, bias=bias)
+
         candidates = [
             strategy_class
             for strategy_class in cls._strategies

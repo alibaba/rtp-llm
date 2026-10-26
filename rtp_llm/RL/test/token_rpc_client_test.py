@@ -175,6 +175,34 @@ class TokenClientTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(TokenProtocolError):
                     await self.client.generate(4, [1], self.params)
 
+    async def test_raw_logprobs_preserve_fp32_bits_and_survive_probability_underflow(
+        self,
+    ):
+        expected = packed([-0.123456789, -1200.0])
+
+        def response(req):
+            out = reply(req, probabilities=(0.9, 0.0))
+            out.flatten_output.aux_info[0].raw_logprobs.CopyFrom(expected)
+            return [out]
+
+        self.service.responses = response
+        result = await self.client.generate(31, [1], self.params)
+        self.assertEqual(struct.pack("<2f", *result.log_probs), expected.fp32_data)
+
+    async def test_invalid_raw_logprobs_cannot_fall_back_to_probabilities(self):
+        for values in ((math.nan, -1.0), (math.inf, -1.0), (0.1, -1.0), (-1.0,)):
+
+            def response(req):
+                out = reply(req)
+                out.flatten_output.aux_info[0].raw_logprobs.CopyFrom(packed(values))
+                return [out]
+
+            self.service.responses = response
+            with self.subTest(values=values), self.assertRaisesRegex(
+                TokenProtocolError, "raw logprobs"
+            ):
+                await self.client.generate(32, [1], self.params)
+
     async def test_missing_probability_and_wrong_length_fail(self):
         def missing(req):
             out = reply(req)
@@ -193,8 +221,11 @@ class TokenClientTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_score_indexes_first_and_last_response_positions(self):
         def scoring(req):
-            out = reply(req)
             cfg = req.generate_config
+            # Match engines that terminate zero-token requests without output.
+            if cfg.max_new_tokens == 0:
+                return []
+            out = reply(req)
             scores = out.flatten_output.prompt_logits
             scores.start_pos, scores.end_pos = (
                 cfg.prompt_logits_start,

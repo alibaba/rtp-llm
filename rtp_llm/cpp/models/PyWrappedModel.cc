@@ -1089,8 +1089,11 @@ mergeMixedOutputs(const GptModelOutputs& decode, const GptModelOutputs& context,
         merged.all_hidden_states =
             concatOutputTensors(decode.all_hidden_states, context.all_hidden_states, "all_hidden_states");
     }
-    merged.all_logits     = concatOutputTensors(decode.all_logits, context.all_logits, "all_logits");
-    merged.softmax_result = concatOutputTensors(decode.softmax_result, context.softmax_result, "softmax_result");
+    merged.all_logits      = concatOutputTensors(decode.all_logits, context.all_logits, "all_logits");
+    merged.softmax_result  = concatOutputTensors(decode.softmax_result, context.softmax_result, "softmax_result");
+    merged.log_normalizers = concatOutputTensors(decode.log_normalizers, context.log_normalizers, "log_normalizers");
+    merged.all_log_normalizers =
+        concatOutputTensors(decode.all_log_normalizers, context.all_log_normalizers, "all_log_normalizers");
 
     RTP_LLM_CHECK_WITH_INFO(decode.moe_gating.size() == context.moe_gating.size(),
                             "mixed model output moe_gating count mismatch: decode=%zu context=%zu",
@@ -1379,7 +1382,12 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(final_layernorm)");
         const auto& norm_w = *weights_.final_layernorm;
         const auto  eps    = description_.layernorm_eps;
-        if (description_.norm_type == NormType::rmsnorm) {
+        if (batch_invariant_) {
+            RTP_LLM_CHECK_WITH_INFO(description_.norm_type == NormType::rmsnorm,
+                                    "batch invariant dense-gqa-v1 requires RMSNorm");
+            py::gil_scoped_acquire gil;
+            hidden = py_model_.attr("batch_invariant_rmsnorm")(hidden, norm_w.gamma, eps).cast<torch::Tensor>();
+        } else if (description_.norm_type == NormType::rmsnorm) {
             auto variance = hidden.to(torch::kFloat32).pow(2).mean(-1, /*keepdim=*/true);
             hidden        = hidden * torch::rsqrt(variance + eps);
             if (norm_w.gamma.defined()) {
@@ -1432,8 +1440,12 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         torch::Tensor logits;
         {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head_mm)");
+            if (batch_invariant_) {
+                py::gil_scoped_acquire gil;
+                logits = py_model_.attr("batch_invariant_lm_head")(last_hidden, lm_head->kernel).cast<torch::Tensor>();
+            } else
 #if USING_CUDA
-            if (lm_head->kernel.dtype() == torch::kBFloat16) {
+                if (lm_head->kernel.dtype() == torch::kBFloat16) {
                 logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
             } else
 #endif
@@ -1459,22 +1471,36 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
         }
         torch::Tensor softmax_result_t;
+        torch::Tensor log_normalizers;
+        if (batch_invariant_) {
+            py::gil_scoped_acquire gil;
+            log_normalizers = py_model_.attr("batch_invariant_logsumexp")(logits).cast<torch::Tensor>();
+        }
         if (need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(need_all_logits_index)");
-            auto last_logits = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));
-            return {last_logits, last_hidden, hidden, logits, softmax_result_t};
+            auto            last_logits = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));
+            GptModelOutputs outputs{last_logits, last_hidden, hidden, logits, softmax_result_t};
+            if (log_normalizers.defined()) {
+                outputs.log_normalizers =
+                    torch::index_select(log_normalizers, 0, lm_output_indexes_device.to(torch::kLong));
+                outputs.all_log_normalizers = log_normalizers;
+            }
+            return outputs;
         }
 
         if (merged_eagle3_hidden.defined()) {
             hidden = merged_eagle3_hidden;
         }
-        return {logits, last_hidden, hidden, torch::Tensor(), softmax_result_t};
+        GptModelOutputs outputs{logits, last_hidden, hidden, torch::Tensor(), softmax_result_t};
+        outputs.log_normalizers = log_normalizers;
+        return outputs;
     } else {
         return {torch::Tensor(), torch::Tensor(), hidden};
     }
 }
 
 GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs) {
+    RTP_LLM_CHECK_WITH_INFO(!batch_invariant_, "batch invariant dense-gqa-v1 does not support the CP last-hidden path");
     // `hidden` is already the lm_output_indexes-selected, post-final-layernorm rows
     // ([num_lm, hidden_size]) gathered by handleOutputsLastHidden. Mirror the CP
     // exit's existing tail: skip the final layernorm (the CP path passes

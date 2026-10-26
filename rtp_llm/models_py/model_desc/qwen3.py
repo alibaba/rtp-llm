@@ -80,6 +80,9 @@ class Qwen3DecoderLayer(nn.Module):
 
 
 class Qwen3Model(GptModelBase):
+    # Capability of this shared execution structure, independent of checkpoint name.
+    batch_invariant_capability = "dense-gqa-v1"
+
     def __init__(
         self,
         config: ModelConfig,

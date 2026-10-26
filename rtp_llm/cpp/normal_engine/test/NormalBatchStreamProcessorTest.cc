@@ -1,3 +1,4 @@
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -146,6 +147,55 @@ TEST_F(NormalBatchStreamProcessorTest, testBatchedSelectedProbabilitiesIsolateIn
                 EXPECT_NEAR(stream->getSoftmaxProbs().data_ptr<float>()[1], 1.f / 3.f, 1e-6f);
             }
             ++row;
+        }
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testBatchInvariantRawLogprobsSurviveUnderflowAndBatching) {
+    float expected = -1200.f - 0.625f;
+    for (int batch_size : {1, 3}) {
+        ResourceContext resource_context;
+        ModelConfig     model_config;
+        model_config.max_seq_len = 8;
+        model_config.vocab_size  = 3;
+        model_config.num_layers  = 1;
+        RuntimeConfig                runtime_config;
+        std::list<GenerateStreamPtr> streams;
+        for (int row = 0; row < batch_size; ++row) {
+            auto query                                   = make_shared<GenerateInput>();
+            query->input_ids                             = hostIntBuffer({0});
+            query->generate_config                       = make_shared<GenerateConfig>();
+            query->generate_config->return_softmax_probs = true;
+            query->generate_config->max_new_tokens       = 1;
+            auto stream =
+                make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+            stream->generate_status_->status = StreamState::RUNNING;
+            streams.push_back(stream);
+        }
+        PDSepConfig                 pd_sep_config;
+        ProfilingDebugLoggingConfig logging_config;
+        CacheConfig                 cache_config;
+        NormalBatchStreamProcessor  processor(model_config, pd_sep_config, logging_config, cache_config, false);
+        MergedOutput                outputs;
+        outputs.model_output.logits = torch::tensor({0.f, -1200.f, -0.3f}).repeat({batch_size, 1}).to(torch::kCUDA);
+        // Deliberately supplied by the model: dispatcher must preserve this
+        // normalizer, not recompute a different softmax/logsumexp reduction.
+        outputs.model_output.log_normalizers = torch::full({batch_size, 1}, 0.625f).to(torch::kCUDA);
+        outputs.sampler_output.token_ids     = torch::ones({batch_size, 1}, torch::kInt32).to(torch::kCUDA);
+        outputs.sampler_output.success       = torch::ones({batch_size}, torch::kBool).to(torch::kCUDA);
+        ASSERT_TRUE(processor.dispatch(StreamGroups(streams), outputs).ok());
+        for (const auto& stream : streams) {
+            ASSERT_FALSE(stream->hasError());
+            ASSERT_TRUE(stream->raw_logprobs_.defined());
+            const float actual = stream->raw_logprobs_[0][1].item<float>();
+            EXPECT_EQ(std::memcmp(&actual, &expected, sizeof(float)), 0);
+            EXPECT_EQ(stream->getSoftmaxProbs()[0][1].item<float>(), 0.f);
+            auto normal = std::dynamic_pointer_cast<NormalGenerateStream>(stream);
+            ASSERT_FALSE(normal->generate_outputs_.empty());
+            const auto& info = normal->generate_outputs_.front().generate_outputs[0].aux_info;
+            ASSERT_TRUE(info.raw_logprobs.has_value());
+            const float returned = info.raw_logprobs.value()[0].item<float>();
+            EXPECT_EQ(std::memcmp(&returned, &expected, sizeof(float)), 0);
         }
     }
 }

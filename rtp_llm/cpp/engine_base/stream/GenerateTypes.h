@@ -135,6 +135,7 @@ struct AuxInfo {
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;
+    std::optional<torch::Tensor> raw_logprobs;
     std::map<int, int>           multimodal_lengths = {};
 };
 

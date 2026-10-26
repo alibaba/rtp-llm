@@ -21,10 +21,25 @@ class RMSNorm(BaseNorm):
     ):
         super().__init__(weight, eps)
         self.zero_centered = zero_centered
+        from rtp_llm.models_py.modules.batch_invariant import construction_policy
+
+        self.batch_invariant_policy = construction_policy()
+        if self.batch_invariant_policy.enabled and zero_centered:
+            raise ValueError(
+                "batch invariant dense-gqa-v1 does not support zero-centered RMSNorm"
+            )
 
     def forward(
         self, hidden_states: torch.Tensor, output: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        if self.batch_invariant_policy.enabled:
+            from rtp_llm.models_py.modules.batch_invariant.kernels import rmsnorm
+
+            result = rmsnorm(hidden_states, self.weight, self.variance_epsilon)
+            if output is not None:
+                output.copy_(result)
+                return output
+            return result
         if output is None:
             output = torch.empty_like(hidden_states)
         if self.zero_centered:
@@ -157,8 +172,28 @@ class FusedQKRMSNorm(nn.Module):
         self.kv_size = self.kv_head_num * self.size_per_head
         self.enable_pdl = enable_pdl
         self.zero_centered = zero_centered
+        from rtp_llm.models_py.modules.batch_invariant import construction_policy
+
+        self.batch_invariant_policy = construction_policy()
+        if self.batch_invariant_policy.enabled and zero_centered:
+            raise ValueError(
+                "batch invariant dense-gqa-v1 does not support zero-centered QK RMSNorm"
+            )
 
     def forward(self, hidden_states: torch.Tensor):
+        if self.batch_invariant_policy.enabled:
+            from rtp_llm.models_py.modules.batch_invariant.kernels import rmsnorm
+
+            qkv = hidden_states.view(
+                -1, self.head_num + 2 * self.kv_head_num, self.size_per_head
+            )
+            q, k = (
+                qkv[:, : self.head_num],
+                qkv[:, self.head_num : self.head_num + self.kv_head_num],
+            )
+            q.copy_(rmsnorm(q, self.q_weight, self.eps))
+            k.copy_(rmsnorm(k, self.k_weight, self.eps))
+            return hidden_states
         if self.zero_centered and hidden_states.numel() == 0:
             return hidden_states
         from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.fused_qk_rmsnorm import (

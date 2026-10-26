@@ -257,18 +257,26 @@ class TokenRpcClient:
             )
         scores = None
         if params.logprobs:
-            if not info.HasField("softmax_probs"):
-                raise TokenProtocolError("Missing selected-token probabilities")
-            probabilities = _tensor_values(info.softmax_probs, pb.TensorPB.FP32)
-            if len(probabilities) != len(ids) or any(
-                not math.isfinite(p) or not 0 < p <= 1 for p in probabilities
+            if "raw_logprobs" in info.DESCRIPTOR.fields_by_name and info.HasField(
+                "raw_logprobs"
             ):
-                raise TokenProtocolError(
-                    "Invalid selected-token probabilities; zero/underflow cannot be used as logprobs"
-                )
-            # Native NormalOutputDispatcher uses FP32 raw logits for this field.
-            # Fixed-prefix and decode-vs-prefill tests must validate each engine build.
-            scores = [math.log(value) for value in probabilities]
+                scores = _tensor_values(info.raw_logprobs, pb.TensorPB.FP32)
+                if len(scores) != len(ids) or any(
+                    not math.isfinite(p) or p > 0 for p in scores
+                ):
+                    raise TokenProtocolError("Invalid selected-token raw logprobs")
+            elif not info.HasField("softmax_probs"):
+                raise TokenProtocolError("Missing selected-token probabilities")
+            else:
+                probabilities = _tensor_values(info.softmax_probs, pb.TensorPB.FP32)
+                if len(probabilities) != len(ids) or any(
+                    not math.isfinite(p) or not 0 < p <= 1 for p in probabilities
+                ):
+                    raise TokenProtocolError(
+                        "Invalid selected-token probabilities; zero/underflow cannot be used as logprobs"
+                    )
+                # Backward compatibility for engines without the raw FP32 field.
+                scores = [math.log(value) for value in probabilities]
         stop_ids = set(params.stop_token_ids) | (
             set() if params.ignore_eos else self.eos_token_ids
         )
@@ -302,8 +310,8 @@ class TokenRpcClient:
         start = len(prompt_ids) - 1
         end = start + len(response_ids)
         config = self._config(TokenSamplingParams(max_new_tokens=1, logprobs=False))
-        # Prompt scoring normalizes this zero to one discarded generated token.
-        config.max_new_tokens = 0
+        # Reserve one discarded generation step explicitly. Some engine branches
+        # finish a zero-token request without emitting its prompt logits.
         config.return_prompt_logits = True
         config.return_target_logprob = True
         config.prompt_logits_top_k = 1

@@ -31,6 +31,7 @@ class AutoModel:
         max_total_tokens: int = 4096,
         tokens_per_block: int = 64,
         stop_id_list: list[int] = [],
+        batch_invariant: bool = False,
         **kwargs,
     ):
         # set configs instead of environment variables
@@ -40,6 +41,7 @@ class AutoModel:
         self.py_env_configs.model_args.model_type = model_type
         self.py_env_configs.model_args.ckpt_path = model_path
         self.py_env_configs.model_args.max_seq_len = max_total_tokens
+        self.py_env_configs.model_args.batch_invariant = batch_invariant
         self.py_env_configs.kv_cache_config.seq_size_per_block = tokens_per_block
         if not self.py_env_configs.model_args.tokenizer_path:
             self.py_env_configs.model_args.tokenizer_path = model_path
@@ -258,8 +260,13 @@ class AutoModel:
         self, model_outputs: PyModelOutputs, sampling_params: dict = None
     ) -> torch.Tensor:
         hidden_states = model_outputs.hidden_states[-1:, :]
-        logits = torch.matmul(
-            hidden_states.to(self.lm_head_weight.dtype), self.lm_head_weight.t()
-        ).to(torch.float32)
+        if self.model.batch_invariant:
+            logits = self.model.batch_invariant_lm_head(
+                hidden_states, self.lm_head_weight
+            )
+        else:
+            logits = torch.matmul(
+                hidden_states.to(self.lm_head_weight.dtype), self.lm_head_weight.t()
+            ).to(torch.float32)
         next_token_id = torch.argmax(logits, dim=-1)
         return next_token_id

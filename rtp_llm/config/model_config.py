@@ -62,6 +62,7 @@ class ModelConfig(CppModelConfig):
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
         "enable_output_vocab_pruning",
+        "batch_invariant",
         "has_lm_head_bias",
         "tie_word_embeddings",
         "quantization",
@@ -547,6 +548,7 @@ class ModelConfig(CppModelConfig):
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True
         self.enable_output_vocab_pruning: bool = False
+        self.batch_invariant: bool = False
         self.has_lm_head_bias: bool = False
         self.tie_word_embeddings: bool = False
         # Model loading related fields
@@ -953,6 +955,7 @@ def build_model_config(
     model_config.output_vocab_ids = []
     model_config.output_vocab_padded_size = 0
     model_config.enable_output_vocab_pruning = model_args.enable_output_vocab_pruning
+    model_config.batch_invariant = model_args.batch_invariant
 
     # Apply model override args
     if model_args.json_model_override_args:

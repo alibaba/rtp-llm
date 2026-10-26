@@ -7,6 +7,14 @@ def init_model_group_args(parser, model_args):
     ##############################################################################################################
     model_group = parser.add_argument_group("Model Configuration")
     model_group.add_argument(
+        "--batch_invariant",
+        env_name="RTP_BATCH_INVARIANT",
+        bind_to=(model_args, "batch_invariant"),
+        type=str2bool,
+        default=False,
+        help="Use strict dense-gqa-v1 arithmetic; unsupported configurations fail closed.",
+    )
+    model_group.add_argument(
         "--tokenizer_path",
         env_name="TOKENIZER_PATH",
         bind_to=(model_args, "tokenizer_path"),

@@ -141,6 +141,7 @@ private:
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;
     py::object py_forward_method_;
+    bool       batch_invariant_{false};
     // Keep every eager-attention preparation object alive until the executor
     // releases this forward cycle. Mixed continuous batching performs a pure
     // decode pass followed by a pure context pass, so a single object would
@@ -258,7 +259,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
-    py_model_                 = py_instance;
+    py_model_        = py_instance;
+    batch_invariant_ = py::hasattr(py_model_, "batch_invariant") && py_model_.attr("batch_invariant").cast<bool>();
+    if (batch_invariant_) {
+        RTP_LLM_CHECK_WITH_INFO(
+            !use_spec_decoding && !init_resources.is_speculative && !enable_prefill_cp_ && device_props_.tp_size == 1
+                && int(device_props_.enable_layer_micro_batch) == 0,
+            "batch invariant dense-gqa-v1 requires TP=1 without speculative decoding, CP or layer micro batching");
+        py_model_.attr("_batch_invariant_native_version") = 1;
+    }
     auto py_initialize_method = py_model_.attr("initialize");
     try {
         py_init_result = py_initialize_method(init_resources);

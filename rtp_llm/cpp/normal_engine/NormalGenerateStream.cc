@@ -169,6 +169,10 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.aux_info.softmax_probs =
                     softmax_probs_[i].narrow(0, last_output_pos_, output_len).clone();
             }
+            if (raw_logprobs_.defined()) {
+                generate_output.aux_info.raw_logprobs =
+                    raw_logprobs_[i].narrow(0, last_output_pos_, output_len).clone();
+            }
             if (update_info.cum_log_probs.defined()) {
                 generate_output.aux_info.cum_log_probs = cum_log_probs_.narrow(0, i, 1).cpu().clone();
             }
@@ -234,6 +238,19 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     finished_ = needFinish();
+    if (update_info.raw_logprobs.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(!update_info.src_batch_indices.defined(),
+                                "batch invariant raw logprobs do not support beam reordering");
+        RTP_LLM_CHECK(update_info.raw_logprobs.dim() == 2);
+        RTP_LLM_CHECK(update_info.raw_logprobs.size(0) == static_cast<int64_t>(currentBatchSize()));
+        RTP_LLM_CHECK(update_info.raw_logprobs.size(1) == update_info.num_new_tokens);
+        if (!raw_logprobs_.defined()) {
+            raw_logprobs_ = torch::zeros({(int64_t)maxBatchSize(), (int64_t)maxTokenNum()}, torch::kFloat32);
+        }
+        raw_logprobs_.narrow(0, 0, currentBatchSize())
+            .narrow(1, seqLength() - update_info.num_new_tokens, update_info.num_new_tokens)
+            .copy_(update_info.raw_logprobs);
+    }
     if (finished_) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);

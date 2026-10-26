@@ -235,11 +235,21 @@ class AttnImplFactory(object):
         attn_inputs: PyAttentionInputs,
         fmha_config: Optional[FMHAConfig] = None,
         is_cuda_graph: bool = False,
+        batch_invariant_policy=None,
+        batch_invariant_warmup=False,
     ) -> AttentionImpl:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(
             parallelism_config.get_attn_tp_size()
         )
+        if batch_invariant_policy is not None and batch_invariant_policy.enabled:
+            from rtp_llm.models_py.modules.batch_invariant.attention import (
+                BatchInvariantAttention,
+            )
+
+            return BatchInvariantAttention(
+                attn_configs, attn_inputs, warmup=batch_invariant_warmup
+            )
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]

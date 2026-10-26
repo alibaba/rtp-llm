@@ -46,6 +46,7 @@ struct StreamUpdateInfo {
     // prompt scoring
     std::optional<PromptLogitsOutput> prompt_logits;
     std::optional<ErrorInfo>          error_info;
+    torch::Tensor                     raw_logprobs;
 };
 
 struct StreamSpecUpdateInfo {
@@ -860,6 +861,7 @@ protected:
     torch::Tensor                            cum_log_probs_;
     torch::Tensor                            all_probs_;
     torch::Tensor                            softmax_probs_;
+    torch::Tensor                            raw_logprobs_;
     torch::Tensor                            loss_;
     torch::Tensor                            last_hidden_states_;
     int                                      loss_index_ = 0;

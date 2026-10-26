@@ -2,6 +2,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Optional
 
+import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
@@ -38,6 +39,10 @@ class GptModelBase(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+        from rtp_llm.models_py.modules.batch_invariant import construction_policy
+
+        self.batch_invariant_policy = construction_policy()
+        self.batch_invariant = self.batch_invariant_policy.enabled
         self.parallelism_config = parallelism_config
         self.weight = weight
         self.fmha_config = fmha_config
@@ -55,7 +60,15 @@ class GptModelBase(nn.Module):
         self.device_type: DeviceType = get_device_type()
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
+        if (
+            self.batch_invariant
+            and getattr(self, "_batch_invariant_native_version", 0) != 1
+        ):
+            raise RuntimeError(
+                "batch invariant requires the matching native library; rebuild libth_transformer"
+            )
         self.kv_cache = init_resource.kv_cache
+        self._batch_invariant_warmup = self.kv_cache is None
         if self.kv_cache is not None:
             num_layers = self.kv_cache.layer_count
             layer0_caches = (
@@ -96,6 +109,11 @@ class GptModelBase(nn.Module):
                     group_inputs,
                     self.fmha_config,
                     is_cuda_graph,
+                    batch_invariant_policy=self.batch_invariant_policy,
+                    batch_invariant_warmup=getattr(
+                        self, "_batch_invariant_warmup", False
+                    )
+                    and self.kv_cache is None,
                 )
                 for tag, group_inputs in selected_group_inputs
             }
@@ -106,7 +124,25 @@ class GptModelBase(nn.Module):
             attention_inputs,
             self.fmha_config,
             is_cuda_graph,
+            batch_invariant_policy=self.batch_invariant_policy,
+            batch_invariant_warmup=getattr(self, "_batch_invariant_warmup", False)
+            and self.kv_cache is None,
         )
+
+    def batch_invariant_lm_head(self, hidden, weight):
+        from rtp_llm.models_py.modules.batch_invariant.kernels import linear
+
+        return linear(hidden.to(weight.dtype), weight, output_dtype=torch.float32)
+
+    def batch_invariant_logsumexp(self, logits):
+        from rtp_llm.models_py.modules.batch_invariant.kernels import logsumexp
+
+        return logsumexp(logits)
+
+    def batch_invariant_rmsnorm(self, hidden, weight, eps):
+        from rtp_llm.models_py.modules.batch_invariant.kernels import rmsnorm
+
+        return rmsnorm(hidden, weight, eps)
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         """Model hook: None means every attention-input tag requires FMHA."""
