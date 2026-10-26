@@ -356,6 +356,90 @@ TEST(DeviceBlockPoolTest, ActiveBlocksIncludeRequestAndTreeOperationRefs) {
     pool.decTreeRef(*block, BlockTreeRefType::CACHE);
 }
 
+TEST(DeviceBlockPoolTest, ExternalOwnersCountSharedBlocksIndependently) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc().value();
+    const auto total = pool.totalBlocksNum();
+    pool.incTreeRef(block, BlockTreeRefType::CACHE);
+    pool.incRef(block);
+    pool.incRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
+    pool.incRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
+    pool.incRef(block, DeviceBlockRefType::PD_CONNECTOR);
+
+    EXPECT_EQ(pool.refCount(block), 5u);
+    EXPECT_EQ(pool.referencedBlocksNum(), 1u);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 1u);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 1u);
+    EXPECT_EQ(pool.referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+
+    pool.decRef(block);
+    EXPECT_EQ(pool.referencedBlocksNum(), 0u);
+    EXPECT_EQ(pool.activeBlocksNum(), 1u);
+    EXPECT_EQ(pool.availableBlocksNum(), total - 1);
+    pool.decRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 1u);
+    pool.decRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+    EXPECT_TRUE(pool.isAllocated(block));
+    pool.decRef(block, DeviceBlockRefType::PD_CONNECTOR);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR), 0u);
+    EXPECT_EQ(pool.activeBlocksNum(), 0u);
+    EXPECT_EQ(pool.availableBlocksNum(), total);
+    pool.decTreeRef(block, BlockTreeRefType::CACHE);
+    EXPECT_FALSE(pool.isAllocated(block));
+}
+
+TEST(DeviceBlockPoolTest, RequestReleaseCannotConsumeConnectorReference) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc().value();
+    pool.incRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
+
+    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    EXPECT_ANY_THROW(pool.decRef(block));
+    EXPECT_ANY_THROW(pool.decRef(block, DeviceBlockRefType::PD_CONNECTOR));
+    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
+
+    EXPECT_EQ(pool.refCount(block), 1u);
+    EXPECT_EQ(pool.referencedBlocksNum(), 0u);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 1u);
+    EXPECT_FALSE(pool.isExclusiveRequestBlock(block));
+    pool.decRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
+    EXPECT_FALSE(pool.isAllocated(block));
+}
+
+TEST(DeviceBlockPoolTest, RequestReplacementCannotRecycleConnectorHeldDonor) {
+    for (const auto owner : {DeviceBlockRefType::REMOTE_CONNECTOR, DeviceBlockRefType::PD_CONNECTOR}) {
+        DeviceBlockPool pool(makeConfig());
+        ASSERT_TRUE(pool.init());
+        const auto blocks = pool.malloc(pool.totalBlocksNum()).value();
+        pool.incRef(blocks);
+        const auto donor = blocks.front();
+        pool.incRef(donor, owner);
+        EXPECT_FALSE(pool.isExclusiveRequestBlock(donor));
+
+        BlockIndicesType replacements;
+        int              required_free = 0;
+        EXPECT_FALSE(pool.tryReplaceRequestReferences({{donor, 1, 0}}, 1, replacements, required_free));
+        EXPECT_EQ(required_free, 1);
+        EXPECT_TRUE(replacements.empty());
+        EXPECT_EQ(pool.refCount(donor), 2u);
+        EXPECT_EQ(pool.referencedBlocksNum(), blocks.size());
+        EXPECT_EQ(pool.referencedBlocksNum(owner), 1u);
+
+        pool.decRef(donor, owner);
+        EXPECT_TRUE(pool.isExclusiveRequestBlock(donor));
+        ASSERT_TRUE(pool.tryReplaceRequestReferences({{donor, 1, 0}}, 1, replacements, required_free));
+        EXPECT_EQ(replacements, (BlockIndicesType{donor}));
+        EXPECT_EQ(pool.referencedBlocksNum(), blocks.size());
+        EXPECT_EQ(pool.referencedBlocksNum(owner), 0u);
+        pool.decRef(blocks);
+        EXPECT_EQ(pool.freeBlocksNum(), pool.totalBlocksNum());
+    }
+}
+
 TEST(DeviceBlockPoolTest, ExplicitReleaseCannotConsumeTreeUmbrella) {
     auto            config = makeConfig();
     DeviceBlockPool pool(config);

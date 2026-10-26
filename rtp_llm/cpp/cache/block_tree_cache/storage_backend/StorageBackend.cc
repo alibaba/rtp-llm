@@ -43,7 +43,7 @@ struct StorageTaskState {
     void             finish() {
         std::call_once(finish_once, [this] {
             for (const Pin& pin : pins) {
-                pin.pool->decRef(pin.block);
+                pin.pool->decRef(pin.block, DeviceBlockRefType::REMOTE_CONNECTOR);
             }
             pins.clear();
         });
@@ -275,7 +275,7 @@ std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepar
             const auto&    pool = devicePool(handle.tag);
             const BlockKey key{pool.get(), handle.block};
             if (pinned.insert(key).second) {
-                pool->incRef(handle.block);
+                pool->incRef(handle.block, DeviceBlockRefType::REMOTE_CONNECTOR);
                 state->pins.push_back({pool, handle.block});
             }
         }
