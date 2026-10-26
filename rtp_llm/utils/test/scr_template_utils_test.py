@@ -107,6 +107,39 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         self.assertEqual(manifest.worker_id("backend_rank", "0"), 2)
         manifest.validate()
 
+    def test_template_arrival_ignores_sigpipe_before_prepare(self) -> None:
+        lifecycle = mock.MagicMock()
+        with mock.patch.dict(
+            os.environ,
+            {scr.RTPLLM_ENABLE_SCR_ENV: "1", scr.SCR_PHASE_ENV: "checkpoint"},
+            clear=True,
+        ), mock.patch.object(
+            scr, "is_scr_template_phase_active", return_value=True
+        ), mock.patch.object(
+            scr, "get_template_lifecycle", return_value=lifecycle
+        ), mock.patch.object(
+            scr, "arrive_scr_checkpoint_barrier", return_value=0
+        ), mock.patch.object(
+            scr, "fixup_runtime_after_restore"
+        ), mock.patch.object(
+            scr, "ignore_sigpipe"
+        ) as ignore_sigpipe:
+            order = mock.Mock()
+            order.attach_mock(ignore_sigpipe, "ignore_sigpipe")
+            order.attach_mock(lifecycle.prepare_for_template, "prepare_for_template")
+
+            self.assertEqual(
+                scr.arrive_scr_template_barrier(worker_id=0, worker_num=1), 0
+            )
+
+        # Helper processes can close their pipes while templates are prepared,
+        # so the disposition must be re-asserted before any lifecycle hook runs.
+        self.assertEqual(
+            [call[0] for call in order.mock_calls[:2]],
+            ["ignore_sigpipe", "prepare_for_template"],
+        )
+        lifecycle.release_template.assert_called_once()
+
     def test_manifest_rejects_duplicate_participant(self) -> None:
         with self.assertRaisesRegex(ValueError, "duplicate"):
             scr.build_scr_participant_manifest(

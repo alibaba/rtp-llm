@@ -33,6 +33,7 @@ from rtp_llm.utils.gang_info import GangInfoReader
 from rtp_llm.utils.scr_restore_context import RestoreContext
 from rtp_llm.utils.scr_runtime_fixup import fixup_runtime_after_restore
 from rtp_llm.utils.scr_template_lifecycle import CallbackHook, get_template_lifecycle
+from rtp_llm.utils.signal_guard import ignore_sigpipe
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1237,6 +1238,11 @@ def arrive_scr_template_barrier(
     fail_closed: bool = False,
 ) -> int | None:
     """Run lifecycle hooks and Epsilon arrival as one template barrier."""
+
+    # Helper processes can close their pipes while the dump is running; keep
+    # SIGPIPE ignored so those writes fail with EPIPE instead of killing a rank
+    # that is being captured.
+    ignore_sigpipe("before template arrival")
 
     if not is_scr_template_phase_active():
         return arrive_scr_checkpoint_barrier(

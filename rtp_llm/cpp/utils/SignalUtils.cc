@@ -64,6 +64,16 @@ void getSighandler(int signum, siginfo_t* siginfo, void* ucontext) {
 }
 
 bool installSighandler() {
+    // A broken pipe must never terminate a rank. Peers disappear during their
+    // own shutdown (helper stdin, RPC sockets around a checkpoint), and a rank
+    // killed that way still ends up inside the checkpoint image. Ignoring
+    // SIGPIPE turns those writes into EPIPE on the normal error path. Python
+    // ignores SIGPIPE at startup, but native libraries loaded later can restore
+    // the default disposition.
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        return false;
+    }
+
     struct sigaction action;
     memset(&action, 0, sizeof(action));
     action.sa_sigaction = getSighandler;

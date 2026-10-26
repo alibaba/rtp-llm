@@ -52,6 +52,7 @@ from rtp_llm.utils.scr_template_utils import (
     register_for_scr,
     resolve_scr_worker_mapping,
 )
+from rtp_llm.utils.signal_guard import ignore_sigpipe
 from rtp_llm.utils.util import copy_gemm_config
 
 setup_logging()
@@ -384,6 +385,9 @@ def local_rank_start(
     # Setup signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
+    # Native runtimes loaded by the engine can restore the default SIGPIPE
+    # disposition; one broken helper pipe during a checkpoint would kill the rank.
+    ignore_sigpipe("at backend rank start")
 
     def clear_cpp_comm_ops():
         try:
@@ -440,6 +444,7 @@ def local_rank_start(
         # the finally block can stop JIT cache workers on shutdown.
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
+        ignore_sigpipe("after engine startup")
         if shutdown_pending:
             shutdown_requested = True
             backend_manager.request_shutdown()

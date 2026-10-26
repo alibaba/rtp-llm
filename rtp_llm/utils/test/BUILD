@@ -308,6 +308,12 @@ py_test(
 )
 
 py_test(
+    name = "signal_guard_test",
+    srcs = ["signal_guard_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
     name = "scr_advertise_ip_test",
     srcs = ["scr_advertise_ip_test.py"],
     deps = ["//rtp_llm:utils"],

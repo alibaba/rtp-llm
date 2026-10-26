@@ -33,6 +33,7 @@ from rtp_llm.utils.scr_template_utils import (
     configure_scr_environment,
     is_scr_template_phase_active,
 )
+from rtp_llm.utils.signal_guard import ignore_sigpipe
 from rtp_llm.utils.warmup import configure_warmup
 
 setup_logging()
@@ -597,6 +598,9 @@ def _start_parent_scr_arrival(
 
 
 def main():
+    # Ranks must survive a closed helper/RPC pipe: a SIGPIPE death here would
+    # still be captured by the checkpoint and break the restored process group.
+    ignore_sigpipe("at server start")
     configure_scr_environment()
     _install_hot_hook_runtime("main")
     py_env_configs: PyEnvConfigs = setup_args()
