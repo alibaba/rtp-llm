@@ -251,29 +251,38 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, UpdateKVBlockDoesNotTransferExte
 
     // Being unique within this batch does not imply exclusive ownership in the
     // pool. Another request or any tree reference may still hold the tail.
-    for (int owner = 0; owner <= static_cast<int>(BlockTreeRefType::COUNT); ++owner) {
-        if (owner == 0) {
-            pool->incRef(blocks[1]);
-        } else {
-            pool->incTreeRef(blocks[1], static_cast<BlockTreeRefType>(owner - 1));
-        }
-
+    const auto expect_tail_preserved = [&] {
         std::vector<TaggedBlockIdPair> mapping;
         EXPECT_FALSE(allocator_->updateKVBlock(resource, {0, 0}, /*copy_last_block=*/true, mapping));
         EXPECT_TRUE(mapping.empty());
         EXPECT_EQ(resource->blocks(0, "default"), (BlockIndicesType{blocks[0]}));
         EXPECT_EQ(resource->blocks(1, "default"), (BlockIndicesType{blocks[1]}));
         EXPECT_EQ(pool->freeBlocksNum(), 0u);
+    };
 
-        if (owner == 0) {
-            pool->decRef(blocks[1]);
-        } else {
-            pool->decTreeRef(blocks[1], static_cast<BlockTreeRefType>(owner - 1));
-        }
+    pool->incRef(blocks[1]);
+    expect_tail_preserved();
+    pool->decRef(blocks[1]);
+    for (const auto owner : {BlockTreeRefType::CACHE,
+                             BlockTreeRefType::LOAD,
+                             BlockTreeRefType::EVICTION,
+                             BlockTreeRefType::STORE,
+                             BlockTreeRefType::FROZEN}) {
+        SCOPED_TRACE(static_cast<int>(owner));
+        pool->incTreeRef(blocks[1], owner);
+        expect_tail_preserved();
+        pool->decTreeRef(blocks[1], owner);
     }
 
+    // An outstanding frozen reference also prevents donor reuse after task holds end.
+    pool->freezeBlock(blocks[1]);
+    expect_tail_preserved();
     allocator_->free(FreeInfo{resource, nullptr});
-    EXPECT_EQ(pool->freeBlocksNum(), 2u);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum() - 1);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    EXPECT_EQ(pool->refCount(blocks[1]), 1u);
+    pool->decTreeRef(blocks[1], BlockTreeRefType::FROZEN);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
 }
 
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, TransfersTailSharedOnlyByDroppedBeams) {

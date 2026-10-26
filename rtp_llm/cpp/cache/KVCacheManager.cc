@@ -92,42 +92,10 @@ void logGlobalCacheMetrics(const RtpLLMCacheMetricsCollector& collector) {
                      static_cast<long>(collector.kv_cache_left_seq));
 }
 
-std::string frozenBlockSummary(const std::vector<const IBlockPool*>& pools) {
-    size_t             total = 0;
-    std::ostringstream entries;
-    for (size_t i = 0; i < pools.size(); ++i) {
-        const auto*  pool  = pools[i];
-        const size_t count = pool->frozenBlocksNum();
-        total += count;
-        entries << (i == 0 ? "" : ",") << pool->poolName() << "_" << i << ":" << count;
-    }
-    return "{total:" + std::to_string(total) + ",pools:{" + entries.str() + "}}";
-}
-
-void logFrozenCacheBlocks(const BlockTreeCache& cache) {
-    std::array<std::vector<const IBlockPool*>, 3> pools;
-    const auto                                    add_pool = [&pools](size_t tier, const IBlockPool* pool) {
-        auto& tier_pools = pools[tier];
-        if (pool && std::find(tier_pools.begin(), tier_pools.end(), pool) == tier_pools.end()) {
-            tier_pools.push_back(pool);
-        }
-    };
-    for (const auto& group_set : cache.groupSets()) {
-        for (const auto& pool : group_set->devicePools()) {
-            add_pool(0, pool.get());
-        }
-        add_pool(1, group_set->hostPool().get());
-        add_pool(2, group_set->diskPool().get());
-    }
-    const auto device = frozenBlockSummary(pools[0]);
-    const auto host   = frozenBlockSummary(pools[1]);
-    const auto disk   = frozenBlockSummary(pools[2]);
-    RTP_LLM_LOG_INFO("btc_leaked_blocks L1=%s L2=%s L3=%s", device.c_str(), host.c_str(), disk.c_str());
-}
-
 void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter,
                             const CachePoolMetricsSnapshot&     pool_snapshot,
-                            bool                                should_log) {
+                            bool                                should_log,
+                            bool                                report_frozen_ref_blocks) {
     if (should_log) {
         RTP_LLM_LOG_INFO("kvc raw pool[%s/%s]: block_size_bytes=%zu total=%zu free=%zu used=%zu available=%zu "
                          "active=%zu "
@@ -164,6 +132,8 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.eviction_target_ref_blocks        = static_cast<int64_t>(pool_snapshot.eviction_target_ref_blocks);
     pool_collector.report_eviction_target_ref_blocks = pool_snapshot.tier != tierName(Tier::DEVICE);
     pool_collector.store_ref_blocks                  = static_cast<int64_t>(pool_snapshot.store_ref_blocks);
+    pool_collector.frozen_ref_blocks                 = static_cast<int64_t>(pool_snapshot.frozen_ref_blocks);
+    pool_collector.report_frozen_ref_blocks          = report_frozen_ref_blocks;
     pool_collector.used_ratio                        = pool_snapshot.used_ratio;
     pool_collector.read_bytes                        = pool_snapshot.read_bytes;
     pool_collector.write_bytes                       = pool_snapshot.write_bytes;
@@ -981,9 +951,6 @@ void KVCacheManager::reportMetricsLoop() {
         if (should_log) {
             last_log_time = now;
             logGlobalCacheMetrics(global_metrics);
-            if (isAllocatorOwner()) {
-                logFrozenCacheBlocks(*block_tree_cache_);
-            }
         }
 
         block_tree_cache_->reportMetrics();
@@ -993,7 +960,7 @@ void KVCacheManager::reportMetricsLoop() {
         const std::vector<CachePoolMetricsSnapshot> report_snapshots =
             mergeCachePoolMetricsSnapshots(device_pool_snapshots, tree_pool_snapshots);
         for (const CachePoolMetricsSnapshot& report_snapshot : report_snapshots) {
-            reportPoolCacheMetrics(metrics_reporter_, report_snapshot, should_log);
+            reportPoolCacheMetrics(metrics_reporter_, report_snapshot, should_log, isAllocatorOwner());
         }
 
         std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s

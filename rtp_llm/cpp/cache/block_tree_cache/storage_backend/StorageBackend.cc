@@ -217,17 +217,15 @@ void StorageBackend::shutdown() {
         lifecycle_ = Lifecycle::FINALIZING;
     }
     shutdownImpl();
-    std::vector<std::shared_ptr<storage_backend_detail::StorageTaskState>> released_tasks;
-    uint64_t                                                               quarantine_generation;
+    uint64_t quarantine_generation;
     {
         std::lock_guard<std::mutex> lock(quarantine_mutex_);
-        released_tasks.swap(quarantined_tasks_);
+        quarantined_task_count_  = 0;
         quarantined_block_count_ = 0;
         quarantine_generation    = ++quarantine_generation_;
     }
     onQuarantineChanged(quarantine_generation, /*task_count=*/0, /*block_count=*/0);
-    // shutdownImpl() drains the transport before these pins become reusable.
-    released_tasks.clear();
+    // FROZEN references remain until the block pools are destroyed.
     {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
         lifecycle_ = Lifecycle::STOPPED;
@@ -241,23 +239,27 @@ void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail
     if (!state) {
         return;
     }
+    const size_t pinned_block_count = state->pins.size();
+    for (const auto& pin : state->pins) {
+        pin.pool->freezeBlock(pin.block);
+    }
+    state->finish();
     size_t task_count;
     size_t block_count;
     uint64_t generation;
     {
         std::lock_guard<std::mutex> lock(quarantine_mutex_);
-        quarantined_block_count_ += state->pins.size();
-        quarantined_tasks_.push_back(state);
-        task_count  = quarantined_tasks_.size();
+        quarantined_block_count_ += pinned_block_count;
+        task_count  = ++quarantined_task_count_;
         block_count = quarantined_block_count_;
         generation  = ++quarantine_generation_;
     }
     RTP_LLM_LOG_WARNING("quarantine storage request after transfer completion became unknown: tasks=%zu blocks=%zu",
                         task_count,
                         block_count);
-    // Count each insertion even if its state snapshot is superseded, and before
+    // Count each operation even if its state snapshot is superseded, and before
     // onQuarantineChanged may abort due to the configured capacity limit.
-    onQuarantined(is_write, reason, state->pins.size());
+    onQuarantined(is_write, reason, pinned_block_count);
     onQuarantineChanged(generation, task_count, block_count);
 }
 

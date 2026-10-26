@@ -524,7 +524,7 @@ TEST(KVCMMockOnlyFullTest, TP2CoordinatorBroadcastsRankOrderedReadAndWritePayloa
     }
 }
 
-TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndQuarantinesPins) {
+TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndFreezesSource) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_tp2_broadcast_failure");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
     auto metrics_reporter =
@@ -592,8 +592,11 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndQuarantinesPi
     backend->write(backend->prepareWrite(makeStorageRequest(environment)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
     // A non-OK gRPC status does not prove whether the worker touched the
-    // transfer buffer, so the request pin remains quarantined until shutdown.
+    // transfer buffer, so a permanent FROZEN reference replaces the request pin.
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count + 1);
+    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
+    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 1);
@@ -604,10 +607,56 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndQuarantinesPi
         EXPECT_EQ(requests.front().op(), REMOTE_OPERATION_WRITE);
     }
     backend->shutdown();
-    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count);
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count + 1);
+    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 0);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+}
+
+TEST(KVCMMockOnlyFullTest, TP2ReadRpcTimeoutFreezesDestinationAndPreservesDeadline) {
+    auto environment            = makeBackendEnvironment("kvcm_storage_backend_tp2_read_rpc_timeout");
+    auto client_wrapper         = std::make_shared<MockClientWrapper>();
+    auto timeout_state          = std::make_shared<KVCMBroadcastState>();
+    timeout_state->fail         = true;
+    timeout_state->failure_code = grpc::StatusCode::DEADLINE_EXCEEDED;
+    KVCMBroadcastRpcServer first_server(0, std::make_shared<KVCMBroadcastState>());
+    KVCMBroadcastRpcServer timeout_server(1, timeout_state);
+    ASSERT_TRUE(first_server.start());
+    ASSERT_TRUE(timeout_server.start());
+    auto broadcast_manager =
+        std::make_shared<BroadcastManager>(std::vector<std::string>{first_server.address(), timeout_server.address()});
+    ASSERT_TRUE(broadcast_manager->init());
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size    = 2;
+    parallelism_config.tp_rank    = 0;
+    parallelism_config.local_rank = 0;
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
+    auto backend = makeBackend(environment, parallelism_config, client_wrapper, broadcast_manager);
+    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
+                              environment.pools_by_tag,
+                              [&](int layer_id, const std::string&, int block_id) {
+                                  return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
+                              }));
+    kv_cache_manager::Locations locations{kv_cache_manager::Location{
+        kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_rank_0"},
+        kv_cache_manager::LocationSpecUnit{"tp1_Fdefault", "read_rank_1"},
+    }};
+    EXPECT_CALL(*client_wrapper, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
+    auto matched = match(*backend.backend, makeStorageRequest(environment));
+    ASSERT_TRUE(matched.success);
+    ASSERT_NE(matched.match_meta, nullptr);
+    const auto request_ref_count = environment.device_pool->refCount(environment.block_id);
+    const auto error = readResult(*backend.backend, makeStorageRequest(environment), std::move(matched.match_meta));
+    EXPECT_EQ(error.code(), ErrorCode::DEADLINE_EXCEEDED);
+    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), request_ref_count + 1);
+    backend->shutdown();
+    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), request_ref_count + 1);
 }
 
 TEST(KVCMMockOnlyFullTest, RejectsMismatchedTransferVectorsBeforeClientIO) {

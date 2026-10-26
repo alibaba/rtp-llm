@@ -396,12 +396,12 @@ void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransf
             const auto freeze = [&group_set](Tier tier, const std::vector<BlockIdxType>& blocks) noexcept {
                 if (tier == Tier::DEVICE) {
                     for (size_t i = 0; i < blocks.size(); ++i) {
-                        group_set->devicePools()[i]->freezeBlock(blocks[i], BlockTreeRefType::EVICTION);
+                        group_set->devicePools()[i]->freezeBlock(blocks[i]);
                     }
                 } else {
                     IBlockPool* pool = tier == Tier::HOST ? static_cast<IBlockPool*>(group_set->hostPool().get()) :
                                                             static_cast<IBlockPool*>(group_set->diskPool().get());
-                    pool->freezeBlock(blocks.front(), BlockTreeRefType::EVICTION);
+                    pool->freezeBlock(blocks.front());
                 }
             };
             freeze(desc.source_tier, desc.source_blocks);

@@ -514,9 +514,11 @@ TEST(KVCMLocalTest, PayloadReadFailurePropagatesToCompletion) {
         .WillOnce(Return(false));
     EXPECT_FALSE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before);
+    EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 0u);
 }
 
-TEST(KVCMLocalTest, PayloadReadTimeoutQuarantinesOnlyDestinationBlock) {
+TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
     autil::EnvGuard quarantine_abort_ratio("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "0.125");
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_read_timeout");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
@@ -552,6 +554,9 @@ TEST(KVCMLocalTest, PayloadReadTimeoutQuarantinesOnlyDestinationBlock) {
         readResult(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta));
     EXPECT_EQ(error.code(), ErrorCode::DEADLINE_EXCEEDED);
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
+    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
+    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
@@ -569,6 +574,7 @@ TEST(KVCMLocalTest, PayloadReadTimeoutQuarantinesOnlyDestinationBlock) {
 
     client_wrapper->load_status = kv_cache_manager::ClientErrorCode::ER_OK;
     EXPECT_TRUE(read(*backend.backend, healthy_request, std::move(healthy_observation.match_meta)));
+    EXPECT_FALSE(environment.device_pool->isFrozen(healthy_blocks.get().front()));
 
     kv_cache_manager::WriteLocation empty_write_location;
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _, 0))
@@ -584,7 +590,9 @@ TEST(KVCMLocalTest, PayloadReadTimeoutQuarantinesOnlyDestinationBlock) {
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
 
     backend.backend->shutdown();
-    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before);
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
+    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
