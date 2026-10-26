@@ -8,11 +8,13 @@ import os
 import tempfile
 import unittest
 from datetime import timedelta
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from rtp_llm.eplb.policy import rebalance_experts_global
 from rtp_llm.eplb.runtime import RuntimeExpertBalancer
 from rtp_llm.eplb.shuffle import (
     expert_model_parallel_shuffle_inplace,
@@ -174,7 +176,6 @@ def _runtime_scenario(rank, world_size, force_p2p):
         # Exercise the real cross-domain transport on one host. This does not
         # simulate or claim to validate a multi-node network/topology probe.
         for group in runtime.groups:
-            group.shuffle_initialized = True
             group.intranode_shuffle = False
     saved_identity = _identities(layers)
     ids = torch.tensor([[0, 1], [2, -1], [3, 2]], dtype=torch.int32, device="cuda")
@@ -233,6 +234,87 @@ def _runtime_scenario(rank, world_size, force_p2p):
     assert (
         graph_output_changed
     ), "captured routing must observe an actually changed mapping"
+
+
+def _startup_scenario(rank, world_size):
+    # STATS and paused runtimes can be enabled after startup. Their first real
+    # update must reuse resources without consuming a synthetic warmup window.
+    for mode, interval, window in ((1, 4, 4), (2, 0, 4), (1, 0, 0)):
+        layers = _make_layers(rank, world_size, mixed=True)
+        initial_maps = [
+            tuple(
+                tensor.clone()
+                for tensor in (
+                    layer.physical_to_logical,
+                    layer.logical_to_physical,
+                    layer.logical_count,
+                )
+            )
+            for layer in layers
+        ]
+        initial_storage = [row[:-1] for row in _identities(layers)]
+        # Observe the real policy, including its CUDA operations; do not replace
+        # planning or NCCL with a fake warmup result.
+        with patch(
+            "rtp_llm.eplb.runtime.rebalance_experts_global",
+            wraps=rebalance_experts_global,
+        ) as planner:
+            runtime = RuntimeExpertBalancer(
+                layers,
+                make_config(
+                    eplb_mode=mode,
+                    eplb_update_time=interval,
+                    eplb_stats_window_size=window,
+                ),
+                rank,
+                world_size,
+                "target",
+            )
+        assert planner.call_count == (len(runtime.groups) if window > 0 else 0)
+        for call, group in zip(planner.call_args_list, runtime.groups):
+            history, physical, local = call.args
+            assert history.shape == (window, len(group.layers), group.num_logical)
+            assert torch.count_nonzero(history).item() == 0
+            assert (physical, local) == (group.num_physical, group.num_local)
+        # The runtime owns its new physical-map views; borrowed weights and
+        # logical maps must keep the original executor storage during warmup.
+        assert [row[:-1] for row in _identities(layers)] == initial_storage
+        for group in runtime.groups:
+            assert group.intranode_shuffle
+            assert group.updates == 0 and group.window_index == 0
+            assert group.steps == max(0, interval - max(1, interval // 4))
+            assert torch.count_nonzero(group.window).item() == 0
+        for layer, original in zip(layers, initial_maps):
+            _check_weights(layer)
+            for tensor, expected in zip(
+                (
+                    layer.physical_to_logical,
+                    layer.logical_to_physical,
+                    layer.logical_count,
+                ),
+                original,
+            ):
+                assert torch.equal(tensor, expected)
+        if window == 0:
+            continue  # A zero-size window cannot be enabled online.
+        saved_identity = _identities(layers)
+        runtime.update_config(2, 4)
+        local = layers[0].num_local_experts
+        counts = torch.zeros(8, local, dtype=torch.int32, device="cuda")
+        for layer in layers:
+            local_map = layer.physical_to_logical[rank * local : (rank + 1) * local]
+            counts[layer.layer_id] = (local_map == 2).int() * 10000
+        with patch(
+            "rtp_llm.eplb.runtime._ExpertLayoutGroup.initialize_shuffle",
+            side_effect=AssertionError("communication initialization in a live step"),
+        ):
+            assert runtime.step(counts)
+        assert all(group.updates == 1 for group in runtime.groups)
+        assert all(group.window_index == 1 for group in runtime.groups)
+        for layer in layers:
+            _check_weights(layer)
+        _check_rank_maps(layers, world_size)
+        assert _identities(layers) == saved_identity
 
 
 def _mixed_prompt_scenario(rank, world_size, after_prefill):
@@ -337,6 +419,8 @@ def _run_distributed(rank, path, scenario, world_size):
             _shuffle_scenario(rank, world_size, scenario == "shuffle_symm")
         elif scenario in ("mixed_prompt_skip", "mixed_prompt_defer"):
             _mixed_prompt_scenario(rank, world_size, scenario == "mixed_prompt_defer")
+        elif scenario == "startup":
+            _startup_scenario(rank, world_size)
         else:
             _runtime_scenario(rank, world_size, scenario == "runtime_p2p")
         dist.barrier()
@@ -379,6 +463,9 @@ class RuntimeDistributedTest(unittest.TestCase):
 
     def test_runtime_all_layout_groups_and_routing_graph_with_p2p(self):
         self.run_scenario("runtime_p2p")
+
+    def test_startup_preserves_state_and_prepares_online_activation(self):
+        self.run_scenario("startup")
 
     def test_normal_dp_mixed_prefill_globally_skips_sampling(self):
         self.run_scenario("mixed_prompt_skip")

@@ -159,7 +159,6 @@ class RuntimeTest(unittest.TestCase):
             "rtp_llm.utils.deepep_utils.configure_deepep_nccl_root"
         ), patch("torch.cuda.empty_cache"), self.assertLogs(level="WARNING") as logs:
             group.initialize_shuffle()
-        self.assertTrue(group.shuffle_initialized)
         self.assertFalse(group.intranode_shuffle)
         self.assertFalse(hasattr(group, "symmetric_weight_buffers"))
         self.assertIn("using P2P shuffle", logs.output[0])
@@ -263,7 +262,12 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(torch.count_nonzero(group.window).item(), 0)
 
     def test_ep_one_explicitly_skips_sampling_and_rearrange(self):
-        runtime = RuntimeExpertBalancer([make_layer()], make_config(), 0, 1, 0)
+        with patch.object(
+            _ExpertLayoutGroup,
+            "initialize_shuffle",
+            side_effect=AssertionError("EP=1 must not initialize communication"),
+        ):
+            runtime = RuntimeExpertBalancer([make_layer()], make_config(), 0, 1, 0)
         self.assertIsNone(runtime.prompt_flag)
         group = runtime.groups[0]
         counts = torch.ones(1, 6, dtype=torch.int32)

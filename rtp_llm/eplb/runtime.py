@@ -162,7 +162,6 @@ class _ExpertLayoutGroup:
         self.after_prefill = is_normal_engine and config.eplb_rearrange_after_prefill
         self.skip_prefill = is_normal_engine and not self.after_prefill
         self.p2p_groups = config.eplb_rearrange_p2p_groups
-        self.shuffle_initialized = False
         self.updates = 0
         self.reset(config.eplb_update_time)
 
@@ -211,7 +210,6 @@ class _ExpertLayoutGroup:
                 ]
                 for rank in range(self.ep_group.size())
             ]
-        self.shuffle_initialized = True
 
     def step(self, counts, is_prompt, mode, interval):
         if interval == 0 or (is_prompt and self.skip_prefill):
@@ -230,13 +228,8 @@ class _ExpertLayoutGroup:
             return False
         return self.rearrange()
 
-    def rearrange(self):
-        should_log = self.ep_group.rank() == 0
-        if should_log:
-            torch.cuda.synchronize(self.device)
-            started = time.perf_counter()
-        if not self.shuffle_initialized:
-            self.initialize_shuffle()
+    def _plan(self):
+        """Plan from the physical count window without changing runtime state."""
         rank = self.ep_group.rank()
         local_map = self.physical_to_logical[
             :, rank * self.num_local : (rank + 1) * self.num_local
@@ -252,9 +245,17 @@ class _ExpertLayoutGroup:
             -1, local_map.long().expand_as(self.window), self.window
         )
         dist.all_reduce(logical_counts, group=self.ep_group)
-        physical, inverse, replicas = rebalance_experts_global(
+        return rebalance_experts_global(
             logical_counts, self.num_physical, self.num_local
         )
+
+    def rearrange(self):
+        rank = self.ep_group.rank()
+        should_log = rank == 0
+        if should_log:
+            torch.cuda.synchronize(self.device)
+            started = time.perf_counter()
+        physical, inverse, replicas = self._plan()
         # The window remains a physical-slot ring, exactly as in DeepInfer.
         # Do not replace it with a logical history or clear it after a shuffle.
         changed_slots = (physical != self.physical_to_logical).sum(-1).tolist()
@@ -392,6 +393,22 @@ class RuntimeExpertBalancer:
             else None
         )
         self.update_config(config.eplb_mode, config.eplb_update_time)
+        if ep_size > 1:
+            # Prepare communication and planning kernels before serving requests,
+            # including STATS/paused runtimes that can be enabled online. Planning
+            # from the initial zero window does not publish maps or advance steps.
+            started = time.perf_counter()
+            for group in self.groups:
+                group.initialize_shuffle()
+                if self.window_size > 0:
+                    group._plan()
+            torch.cuda.synchronize(self.device)
+            logging.info(
+                "[EPLB] warmed up model_id=%s ep_rank=%d time=%.3fs",
+                model_id,
+                ep_rank,
+                time.perf_counter() - started,
+            )
 
     def update_config(self, mode, update_time):
         mode = int(mode)

@@ -93,7 +93,7 @@ The following legacy options and environment variables were removed and must no 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
-| `--eplb_mode` | `NONE`, `STATS`, `EPLB`, or `ALL`. `STATS` collects counts without migration and allows online switching to `EPLB` or `ALL`. Both `EPLB` and `ALL` collect counts and rearrange experts. Shuffle buffers are initialized on the first rearrangement. Monitoring is configured independently. | "NONE" |
+| `--eplb_mode` | `NONE`, `STATS`, `EPLB`, or `ALL`. `STATS` collects counts without migration and allows online switching to `EPLB` or `ALL`. Both `EPLB` and `ALL` collect counts and rearrange experts. With EP > 1, enabled runtimes prepare shuffle resources and warm up planning at startup, including `STATS` and a paused update interval. This preserves the initial weights, routing maps and statistics. Monitoring is configured independently. | "NONE" |
 | `--redundant_expert` | Number of redundant experts. | 0 |
 | `--eplb_update_time` | Rearrangement interval in eligible model steps. `0` disables rearrangement; the first update runs after `max(1, interval // 4)` eligible steps. | 0 |
 | `--eplb_stats_window_size` | Rearrangement count window. Must be non-negative; a positive update interval requires `1 <= window <= interval`. | 100 |
