@@ -29,6 +29,20 @@ inline std::map<std::string, std::string> buildStreamMetricTagMap(int32_t priori
     return tags;
 }
 
+struct RtpLLMGrpcConnectFailureMetricsCollector {
+    std::string direction;
+};
+
+class RtpLLMGrpcConnectFailureMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMGrpcConnectFailureMetricsCollector* collector);
+    kmonitor::MutableMetric* connect_failed_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RpcMetricsCollector final {
 public:
     // rpc server metrics

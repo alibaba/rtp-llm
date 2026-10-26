@@ -90,14 +90,18 @@ private:
         broadcast_result_->onDone([self = std::move(self)] { self->evaluate(); });
     }
 
-    void evaluate() {
-        if (!broadcast_result_->done()) {
-            return;
-        }
-        TransferResult result;
-        if (!broadcast_result_->success()) {
-            result = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "multi-rank transfer RPC failed"),
-                      CacheCopyError::RPC_FAILED};
+    void evaluate(ErrorInfo forced_error = ErrorInfo::OkStatus()) {
+        TransferResult result =
+            forced_error.ok() ? TransferResult{} : TransferResult(std::move(forced_error), CacheCopyError::RPC_FAILED);
+        if (result.ok()) {
+            if (!broadcast_result_->done()) {
+                return;
+            }
+            if (!broadcast_result_->success()) {
+                result = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN,
+                                    "multi-rank transfer RPC failed: " + broadcast_result_->failureSummary()),
+                          CacheCopyError::RPC_FAILED};
+            }
         }
 
         const auto responses = broadcast_result_->responses();
@@ -197,7 +201,9 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
            const FunctionRequestPB&                    rpc_request,
            grpc::CompletionQueue*                      completion_queue) {
             return stub->AsyncExecuteFunction(context.get(), rpc_request, completion_queue);
-        });
+        },
+        task.requestId(),
+        MemoryOperationRequestPB_CopyDirection_Name(request.copy_direction()));
     if (broadcast_result == nullptr) {
         RTP_LLM_LOG_WARNING("failed to start broadcast");
         return std::make_shared<CompletedTransferAsyncContext>(

@@ -7,6 +7,7 @@
 namespace rtp_llm {
 
 AUTIL_LOG_SETUP(rtp_llm, RpcMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMGrpcConnectFailureMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RpcWorkerStatusMetrics);
 AUTIL_LOG_SETUP(rtp_llm, PrefillRecentCacheKeyMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RpcCacheStatusMetrics);
@@ -36,6 +37,18 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheReadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheWriteMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheSDKMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheQuarantineMetrics);
+
+bool RtpLLMGrpcConnectFailureMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(connect_failed_qps_metric, "rtp_llm_rank_broadcast_grpc_connect_failed_qps");
+    return true;
+}
+
+void RtpLLMGrpcConnectFailureMetrics::report(const kmonitor::MetricsTags*              tags,
+                                             RtpLLMGrpcConnectFailureMetricsCollector* collector) {
+    kmonitor::MetricsTags failure_tags = tags ? *tags : kmonitor::MetricsTags{};
+    failure_tags.AddTag("direction", collector->direction);
+    connect_failed_qps_metric->Report(&failure_tags, 1);
+}
 
 #define REPORT_QPS(name)                                                                                               \
     if (collector->name) {                                                                                             \

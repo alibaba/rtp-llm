@@ -124,7 +124,8 @@ public:
 
     BlockTreeMatchResult match(const CacheKeysType&               cache_keys,
                                const std::function<bool(size_t)>& valid_prefix           = {},
-                               bool                               enable_storage_backend = true);
+                               bool                               enable_storage_backend = true,
+                               std::optional<int64_t>             request_id             = {});
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);
@@ -132,7 +133,8 @@ public:
     size_t insert(const CacheKeysType&                              cache_keys,
                   const std::vector<std::vector<GroupSetResource>>& resources,
                   Tier                                              target_tier,
-                  bool                                              is_resident);
+                  bool                                              is_resident,
+                  std::optional<int64_t>                            request_id = {});
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     // Skips plans containing device blocks that would remain referenced after dropping.
@@ -197,9 +199,9 @@ private:
     mutable std::mutex                             mutex_;
     BlockTreeEvictor                               evictor_;
     bool                                           initialized_{false};
-    BlockTreeLoader                             loader_;
-    BlockTreeStorer                             storer_;
-    std::unique_ptr<FullPrefixInvariantScanner> full_prefix_scanner_;
+    BlockTreeLoader                                loader_;
+    BlockTreeStorer                                storer_;
+    std::unique_ptr<FullPrefixInvariantScanner>    full_prefix_scanner_;
 };
 
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;
