@@ -1,5 +1,7 @@
 #include "autil/NetUtil.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/Interface.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
+#include "rtp_llm/cpp/utils/DevicePin.h"
 
 using namespace std;
 
@@ -8,14 +10,21 @@ namespace rtp_llm {
 grpc::Status RemoteRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                                    py::object                                             mm_process_engine) {
-    rtp_llm::ProposeModelEngineInitParams* propose_params_ptr = propose_params ? propose_params.get() : nullptr;
+    std::shared_ptr<MemoryUtil> memory_util;
+    if (maga_init_params.pd_sep_config.cache_store_rdma_mode) {
+        // RDMA initialization mutates process environment variables. Complete it
+        // before LocalRpcServer starts engine threads that read the environment.
+        // Keep ownership local until init succeeds so failures release the pool.
+        setCurrentThreadDeviceContext(maga_init_params.parallelism_config.local_rank);
+        memory_util = createMemoryUtilImpl(true);
+    }
     auto ret = LocalRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
     if (!ret.ok()) {
         return ret;
     }
     initLocalHostInfo();
     initLocalPeerInfo();
-    initCacheStore(maga_init_params, propose_params_ptr);
+    initCacheStore(maga_init_params, memory_util);
     return grpc::Status::OK;
 }
 
@@ -56,8 +65,7 @@ void RemoteRpcServer::initLocalPeerInfo() {
     RTP_LLM_LOG_INFO("%s", worker_grpc_info.c_str());
 }
 
-void RemoteRpcServer::initCacheStore(const EngineInitParams&                init_params,
-                                     rtp_llm::ProposeModelEngineInitParams* propose_params) {
+void RemoteRpcServer::initCacheStore(const EngineInitParams& init_params, const std::shared_ptr<MemoryUtil>& memory_util) {
     RTP_LLM_LOG_INFO("init_params.role_type : %d", init_params.pd_sep_config.role_type);
 
     if (init_params.pd_sep_config.role_type != RoleType::PREFILL
@@ -67,6 +75,7 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
     auto cache_manager = engine_->resourceContext().cache_manager;
 
     CacheStoreInitParams params;
+    params.memory_util                  = memory_util;
     params.listen_port                  = init_params.pd_sep_config.cache_store_listen_port;
     params.rdma_listen_port             = init_params.pd_sep_config.cache_store_rdma_listen_port;
     params.rdma_mode                    = init_params.pd_sep_config.cache_store_rdma_mode;
