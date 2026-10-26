@@ -213,6 +213,13 @@ bool DeviceBlockPool::isExclusiveRequestBlock(BlockIdxType block, uint32_t owned
            && refcounts_by_type_[static_cast<size_t>(DeviceBlockRefType::REQUEST)][block] == owned_references;
 }
 
+bool DeviceBlockPool::hasRequestRef(BlockIdxType block) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    checkAllocatedNoLock(block);
+    return hasRequestRefNoLock(block);
+}
+
 uint32_t DeviceBlockPool::refCount(BlockIdxType block) const {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();

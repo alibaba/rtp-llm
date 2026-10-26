@@ -72,6 +72,7 @@ public:
                                      int&                                       required_free_blocks);
     // owned_references includes the request table and its live GPU lifetime holds.
     bool isExclusiveRequestBlock(BlockIdxType block, uint32_t owned_references = 1) const;
+    bool hasRequestRef(BlockIdxType block) const;
 
     uint32_t refCount(BlockIdxType block) const;
     using IBlockPool::referencedBlocksNum;
