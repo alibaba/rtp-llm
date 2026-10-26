@@ -1,4 +1,4 @@
-load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "shared_smoke_test", "smoke_test")
 
 def rocm_oss_suites():
     # ROCm (AMD MI308X) — INDEPENDENT suite tree, all cases prefixed with `rocm_`
@@ -156,6 +156,11 @@ def rocm_oss_suites():
                 smoke_args="--max_seq_len 16384 --tp_size 1 --use_asm_pa 1 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --warm_up 0 --act_type BF16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --reserver_runtime_mem_mb 4002",
                 gpu_type=["MI308X-ROCM7"]
             ),
+            # Shared single-service Eagle entry; no second entrance mode or GPU run.
+            shared_smoke_test(
+                name="rocm_eagle_qwen2_14b_decode_entrance",
+                test="rocm_eagle_qwen2_14b",
+            ),
             smoke_test(
                 name="rocm_eagle_qwen2_14b_cudagraph",
                 task_info="data/model/qwen2_14b/q_r_mtp_rocm_cudagraph.json",
@@ -178,6 +183,10 @@ def rocm_oss_suites():
                     "decode": "--test_block_num 10 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --use_aiter_pa 1 --use_local 1 --role_type DECODE --world_size 1"
                 },
                 gpu_type=["MI308X-ROCM7"]
+            ),
+            shared_smoke_test(
+                name="rocm_pd_qwen3_8b_decode_entrance",
+                test="rocm_pd_qwen3_8b",
             ),
         ],
     )

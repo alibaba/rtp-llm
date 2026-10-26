@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/Types.h"
@@ -35,6 +36,11 @@ public:
 
     /// @brief 获取错误描述（done() == true 时有效）
     virtual std::string errorMessage() const = 0;
+
+    /// @brief 注册任务完成通知。回调在 done() 状态发布后调用，且只调用一次。
+    ///
+    /// Decode 侧用它推进写入 lease，避免为已返回的请求周期扫描所有接收任务。
+    virtual void setDoneCallback(std::function<void()> callback) = 0;
 };
 
 using IKVCacheRecvTaskPtr = std::shared_ptr<IKVCacheRecvTask>;

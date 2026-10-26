@@ -305,6 +305,50 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             status,
         )
 
+    async def test_domain_route_expands_multimodal_ids_before_decode(self):
+        visitor = self.visitor
+        decode = self.prefill.model_copy(update={"role": RoleType.DECODE})
+        visitor.host_service = SimpleNamespace(get_master_addr=lambda: None)
+        visitor.master_config = None
+        visitor.backend_role_list = [RoleType.VIT, RoleType.PREFILL, RoleType.DECODE]
+
+        async def domain_route(request):
+            request.generate_config.role_addrs = [self.vit, self.prefill, decode]
+
+        visitor.get_domain_route_addrs = AsyncMock(side_effect=domain_route)
+        await visitor.route_ips(self.request)
+        visitor.master_client.get_backend_role_addrs.assert_not_awaited()
+        visitor.master_client.get_vit_cache_metadata.assert_awaited_once_with(
+            self.vit, multimodal_cache_keys(self.request), input=self.request
+        )
+        wire = trans_input(self.request)
+        self.assertEqual(list(wire.token_ids), [1, -10, 11, 2])
+        self.assertEqual(
+            [(s.offset, s.length) for s in wire.multimodal_token_layout.spans], [(1, 2)]
+        )
+        self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
+        self.assertEqual(
+            self.request.generate_config.role_addrs, [self.vit, self.prefill, decode]
+        )
+
+    async def test_expanded_master_route_does_not_probe_vit_again(self):
+        await self.visitor.get_master_route_addrs(self.request)
+        decode = self.prefill.model_copy(update={"role": RoleType.DECODE})
+        self.request.generate_config.role_addrs.append(decode)
+        expansion = self.request.mm_token_expansion
+        self.visitor.master_client.get_vit_cache_metadata.reset_mock()
+        await self.visitor._expand_pd_multimodal_tokens(self.request)
+        self.assertIs(self.request.mm_token_expansion, expansion)
+        self.visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
+
+    async def test_domain_pd_incomplete_hashes_fail_before_decode(self):
+        decode = self.prefill.model_copy(update={"role": RoleType.DECODE})
+        self.request.generate_config.role_addrs = [self.vit, self.prefill, decode]
+        self.visitor.master_client.get_vit_cache_metadata.return_value = None
+        with self.assertRaisesRegex(FtRuntimeException, "complete routing hashes"):
+            await self.visitor._expand_pd_multimodal_tokens(self.request)
+        self.assertIsNone(self.request.mm_token_expansion)
+
     async def test_vit_preselection_still_routes_pd_and_sends_expanded_length(self):
         visitor, request, vit, prefill, status = (
             self.visitor,

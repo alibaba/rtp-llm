@@ -30,6 +30,7 @@ cc_library(
         "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/cpp/utils:torch_cuda_oom",
         "//rtp_llm/cpp/multimodal_processor:multimodal_input_utils",
+        "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
         "@havenask//aios/autil:lock_free",
         "//rtp_llm/models_py/bindings:op_defs",
     ] + select({

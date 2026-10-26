@@ -985,6 +985,32 @@ def try_gather_k_cache_packed_to_flat(
     ):
         return False
 
+    if invalid_kv_access_validation_enabled():
+        padded = per_req_padded_lens.detach().to(torch.int64)
+        actual = per_req_actual_lens.detach().to(torch.int64)
+        if (
+            bool(((padded < 0) | (actual < 0) | (actual > padded)).any().item())
+            or int(padded.sum().item()) != total_local_tokens
+        ):
+            raise RuntimeError(
+                "DSV4 direct-flat gather invalid lengths: "
+                f"padded={padded.cpu().tolist()} actual={actual.cpu().tolist()} "
+                f"total_local_tokens={total_local_tokens}"
+            )
+        max_actual = int(actual.max().item())
+        if max_actual > 0:
+            positions = torch.arange(max_actual, device=out.device, dtype=torch.int64)
+            req = torch.arange(batch_size, device=out.device, dtype=torch.int64)
+            use = positions[None, :] < actual[:, None]
+            validate_block_table_lookup(
+                "swa.direct_flat_gather.block_table",
+                block_table,
+                req[:, None].expand_as(use),
+                (positions[None, :] // block_size).expand_as(use),
+                use,
+                num_blocks=int(k_cache.shape[0]),
+            )
+
     batch_block = triton.next_power_of_2(batch_size)
     _gather_k_cache_packed_to_flat_kernel[(total_local_tokens,)](
         out,

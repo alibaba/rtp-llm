@@ -78,6 +78,9 @@ struct GptModelInputs {
     torch::Tensor                             input_embeddings_locs;  // input embeddings index
 
     torch::Tensor request_id;             // int64, [context_batch_size]
+    torch::Tensor request_deadline_ms;    // int64, [context_batch_size], absolute deadline in milliseconds
+    // Receiver-local clock offset for P2P layer retention. The tensor remains source identity.
+    int64_t       p2p_deadline_clock_offset_ms = 0;
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
     // Bytes/physical block/layer for a single group; zero for multiple groups.
@@ -87,7 +90,6 @@ struct GptModelInputs {
     size_t seq_size_per_block        = 0;  // tokens/base cache-key block
     size_t kernel_seq_size_per_block = 0;  // tokens/kernel page for single group; 0 for multi-group topology
     bool   pd_separation             = false;
-    bool   decode_entrance           = false;
     bool   use_opaque_kv_cache_store = false;
 
     bool need_all_logits = false;

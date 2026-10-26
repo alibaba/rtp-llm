@@ -65,7 +65,7 @@ class DSV4PDChunkTest(unittest.TestCase):
                 " --cp_rotate_method ALL_GATHER --use_deepep_low_latency 0",
                 "decode": common_args
                 + " --role_type DECODE --tp_size 1 --dp_size 2 --ep_size 2"
-                " --cp_rotate_method PREFILL_CP --prefill_cp_size 2"
+                " --cp_rotate_method PREFILL_CP --prefill_cp_size 1"
                 " --use_deepep_low_latency 1",
             },
         )
