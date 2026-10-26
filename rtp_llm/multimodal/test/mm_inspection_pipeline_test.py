@@ -1,35 +1,37 @@
 import asyncio
 import concurrent.futures
-import pickle
 import multiprocessing
+import os
+import pickle
 import threading
 import time
+from functools import partial
+from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import patch
-from types import SimpleNamespace
 
 import torch
 
+from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import (
     GreenNetHandle,
     GreenNetProvider,
     GreenNetVerdict,
 )
+from rtp_llm.multimodal.mm_async_result import continue_after
 from rtp_llm.multimodal.mm_preprocess import (
-    PreprocessExecutor,
     MultiprocessPreprocessExecutor,
+    PreprocessExecutor,
     PreprocessTaskResult,
     _report_result_path,
 )
-from rtp_llm.multimodal.mm_work_item import MMWorkItem
-from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.mm_preprocess_result import MMPreprocessResult
-from rtp_llm.multimodal.mm_async_result import continue_after
+from rtp_llm.multimodal.mm_work_item import MMWorkItem
+from rtp_llm.multimodal.test import multimodal_process_engine_test as helpers
 from rtp_llm.multimodal.test.multimodal_process_engine_test import (
     FakeMultiModalEmbeddingInterface,
 )
-from rtp_llm.multimodal.test import multimodal_process_engine_test as helpers
 
 
 class SourceModel(FakeMultiModalEmbeddingInterface):
@@ -115,6 +117,190 @@ class ControlledExecutor(PreprocessExecutor):
     def shutdown(self):
         self.slow_release.set()
         self.pool.shutdown()
+
+
+class WorkerSourceProvider(GreenNetProvider):
+    """Real spawn child, controlled audit completion, no model/GPU mocks below IPC."""
+
+    def __init__(self, release, records, cancelled):
+        self.release, self.records, self.cancelled = release, records, cancelled
+
+    async def submit_sources(self, request, mm_inputs, sources):
+        self.records.put(
+            (
+                os.getpid(),
+                request.id,
+                request.input_index_offset,
+                [m.url for m in mm_inputs],
+                list(sources),
+            )
+        )
+        provider = self
+
+        class Handle(GreenNetHandle):
+            async def wait_result(self):
+                if request.id == "worker-crash":
+                    os._exit(17)
+                while not provider.release.is_set():
+                    await asyncio.sleep(0.005)
+                return GreenNetVerdict(
+                    request.id != "reject",
+                    2 if request.id == "reject" else 1,
+                    str(request.input_index_offset),
+                )
+
+            def cancel(self):
+                provider.cancelled.set()
+
+        return Handle()
+
+
+class WorkerInspectionTest(TestCase):
+    _make_input = helpers.MMProcessEngineGreenNetTest._make_input
+    _make_engine = helpers.MMProcessEngineGreenNetTest._make_engine
+
+    def setUp(self):
+        context = multiprocessing.get_context("spawn")
+        self.release, self.cancelled = context.Event(), context.Event()
+        self.records = context.Queue()
+        self.factory = partial(
+            WorkerSourceProvider, self.release, self.records, self.cancelled
+        )
+        config = VitConfig()
+        config.mm_preprocess_max_workers = 1
+        config.url_cache_item_num = config.mm_cache_item_num = 0
+        self.executor = MultiprocessPreprocessExecutor(
+            context,
+            config,
+            {},
+            SourceModel.preprocess_input,
+            inspection_factory=self.factory,
+        )
+
+    def tearDown(self):
+        self.release.set()
+        self.executor.shutdown()
+        self.records.close()
+        self.records.join_thread()
+
+    def item(self, name, index=0, timeout=30):
+        item = MMWorkItem(
+            [self._make_input("fake://" + name)], deadline=time.monotonic() + timeout
+        )
+        item.capture_inspection_sources = True
+        item.inspection_request = SimpleNamespace(id=name, input_index_offset=index)
+        return item
+
+    def test_rgb_and_next_task_ready_before_verdict_without_jpeg_ipc(self):
+        first, second = self.item("first", 3), self.item("second", 7)
+        self.executor.submit(first)
+        payload = first.future.get(timeout=30)
+        self.assertEqual(payload.result.inspection_sources, [])
+        self.executor.get_result(first)
+        self.assertFalse(first.inspection_future.done())
+        self.assertIsNone(first.inspection_sources)
+        self.executor.submit(second)
+        self.executor.get_result(second)
+        records = [self.records.get(timeout=5) for _ in range(2)]
+        self.assertEqual(records[0][0], records[1][0])
+        self.assertNotEqual(records[0][0], os.getpid())
+        self.assertEqual([r[2] for r in records], [3, 7])
+        self.assertEqual(
+            [r[4] for r in records], [[b"fake://first"], [b"fake://second"]]
+        )
+        self.release.set()
+        self.assertEqual(first.inspection_future.result(5).message, "3")
+        self.assertEqual(second.inspection_future.result(5).message, "7")
+
+    def test_verdict_may_arrive_before_rgb_is_consumed(self):
+        self.release.set()
+        item = self.item("early")
+        self.executor.submit(item)
+        self.assertTrue(item.inspection_future.result(30).passed)
+        self.executor.get_result(item)
+        self.assertEqual(item.preprocess_result, ["fake://early"])
+
+    def test_cancellation_releases_worker_inspection(self):
+        item = self.item("cancel")
+        self.executor.submit(item)
+        self.executor.get_result(item)
+        self.records.get(timeout=5)
+        item.inspection_future.cancel()
+        self.assertTrue(self.cancelled.wait(3))
+        self.release.set()
+        later = self.item("later")
+        self.executor.submit(later)
+        self.executor.get_result(later)
+        self.assertTrue(later.inspection_future.result(5).passed)
+
+    def test_worker_death_fails_verdict_and_does_not_leak_capacity(self):
+        item = self.item("worker-crash")
+        self.executor.submit(item)
+        with self.assertRaisesRegex(RuntimeError, "worker exited"):
+            item.inspection_future.result(30)
+        self.assertEqual(self.executor._inspection_channel._pending, {})
+        self.release.set()
+        recovered = self.item("after-crash")
+        self.executor.submit(recovered)
+        self.executor.get_result(recovered)
+        self.assertTrue(recovered.inspection_future.result(5).passed)
+
+    def test_shutdown_fails_unfinished_audit(self):
+        item = self.item("unfinished")
+        self.executor.submit(item)
+        self.executor.get_result(item)
+        self.executor.shutdown()
+        with self.assertRaisesRegex(RuntimeError, "stopped"):
+            item.inspection_future.result(1)
+
+    def test_deadline_and_rejection_preserve_result_type_and_image_index(self):
+        self.release.set()
+        rejected = self.item("reject", 4)
+        self.executor.submit(rejected)
+        self.executor.get_result(rejected)
+        verdict = rejected.inspection_future.result(5)
+        self.assertFalse(verdict.passed)
+        self.assertEqual((verdict.code, verdict.message), (2, "4"))
+        self.release.clear()
+        expired = self.item("expired", timeout=0.3)
+        self.executor.submit(expired)
+        self.executor.get_result(expired)
+        with self.assertRaises(concurrent.futures.TimeoutError):
+            expired.inspection_future.result(5)
+
+    def test_embedding_and_cache_wait_for_second_reply(self):
+        model = SourceModel()
+        engine = self._make_engine(model)
+        engine._inspection._greennet_provider = SourceProvider()
+        engine.preprocess_executor.shutdown()
+        engine.preprocess_executor = self.executor
+        engine.mm_preprocess_batch_size = 1
+        inputs = [
+            self._make_input("fake://image-one"),
+            self._make_input("fake://image-two"),
+        ]
+        try:
+            with concurrent.futures.ThreadPoolExecutor(1) as caller:
+                result = caller.submit(
+                    engine._embed_with_greennet_sync, inputs, request_id=91
+                )
+                try:
+                    self.assertTrue(model.two_forwards.wait(30))
+                    self.assertFalse(result.done())
+                    self.assertTrue(
+                        all(
+                            not engine._embedding_cache.peek(m.cache_key()).is_done
+                            for m in inputs
+                        )
+                    )
+                    records = [self.records.get(timeout=5) for _ in range(2)]
+                    self.assertEqual([r[2] for r in records], [0, 1])
+                finally:
+                    self.release.set()
+                result.result(10)
+        finally:
+            self.release.set()
+            engine.stop()
 
 
 class InspectionPipelineTest(TestCase):
