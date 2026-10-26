@@ -64,6 +64,9 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
                                           bool                                              is_resident,
                                           size_t&                                           resident_prefix_length) {
     const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false, is_resident);
+    if (insert_result.hard_stop) {
+        metrics_reporter_.reportInsertHardStop(*insert_result.hard_stop);
+    }
     const bool resources_inserted = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
     if (resources_inserted || !insert_result.newly_resident_nodes.empty()) {
         evictor_.onInserted(insert_result);

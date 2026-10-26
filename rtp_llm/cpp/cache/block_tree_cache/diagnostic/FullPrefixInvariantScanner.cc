@@ -18,20 +18,6 @@ constexpr size_t  kNodesPerBatch      = 1024;
 constexpr size_t  kMaxDetailsPerCycle = 10;
 constexpr int64_t kMaxIntervalMs      = std::numeric_limits<int64_t>::max() / 1000;
 
-const char* transferStateName(GroupSetTransferState state) {
-    switch (state) {
-        case GroupSetTransferState::IDLE:
-            return "IDLE";
-        case GroupSetTransferState::DEMOTING:
-            return "DEMOTING";
-        case GroupSetTransferState::LOAD_PENDING:
-            return "LOAD_PENDING";
-        case GroupSetTransferState::LOADING:
-            return "LOADING";
-    }
-    return "UNKNOWN";
-}
-
 bool isIdleAttached(const GroupSetResource& resource) {
     return resource.transfer_state == GroupSetTransferState::IDLE && !resource.transfer_detached;
 }

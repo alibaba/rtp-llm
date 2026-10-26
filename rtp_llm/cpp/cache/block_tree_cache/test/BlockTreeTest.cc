@@ -534,6 +534,9 @@ TEST(BlockTreeTest, InsertSkipsBusyEmptyGroupOnExistingNode) {
         tree.insertNode({100}, make2DResources(1, 1, 20), /*collect_path=*/false, /*is_resident=*/false);
     EXPECT_TRUE(result.adopted_nodes.empty());
     EXPECT_EQ(result.accepted_resource_count, 0u);
+    ASSERT_TRUE(result.hard_stop.has_value());
+    EXPECT_EQ(result.hard_stop->existing_tier, Tier::NONE);
+    EXPECT_EQ(result.hard_stop->transfer_state, GroupSetTransferState::DEMOTING);
     EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{NULL_BLOCK_IDX}));
     EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::DEMOTING);
 }
@@ -582,9 +585,36 @@ TEST(BlockTreeTest, InsertHardStopsAtExistingHostFullNode) {
     EXPECT_EQ(result.path[1], host_node);
     EXPECT_TRUE(result.adopted_nodes.empty());
     EXPECT_TRUE(result.inserted_nodes.empty());
+    ASSERT_TRUE(result.hard_stop.has_value());
+    EXPECT_EQ(result.hard_stop->existing_tier, Tier::HOST);
+    EXPECT_EQ(result.hard_stop->transfer_state, GroupSetTransferState::IDLE);
     EXPECT_TRUE(host_node->children.empty());
     EXPECT_EQ(host_resource.getTopTier(), Tier::HOST);
     EXPECT_EQ(host_resource.host_block, 7);
+}
+
+TEST(BlockTreeTest, InsertHardStopCapturesFirstBlockingFullResource) {
+    for (const auto& [tier, state] : {std::make_pair(Tier::HOST, GroupSetTransferState::IDLE),
+                                      std::make_pair(Tier::DISK, GroupSetTransferState::IDLE),
+                                      std::make_pair(Tier::DEVICE, GroupSetTransferState::DEMOTING),
+                                      std::make_pair(Tier::HOST, GroupSetTransferState::LOAD_PENDING),
+                                      std::make_pair(Tier::HOST, GroupSetTransferState::LOADING)}) {
+        BlockTree        tree(makeGroupSets(2));
+        GroupSetResource resource;
+        resource.setBlocks(tier, {10});
+        TreeNode* node                              = insertAndGetNode(tree, {100}, {{resource, resource}});
+        node->group_set_resources[0].transfer_state = state;
+        node->group_set_resources[1].transfer_state = GroupSetTransferState::LOADING;
+
+        const auto result = tree.insertNode({100, 200}, make2DResources(2, 2, 20), false, false);
+
+        ASSERT_TRUE(result.hard_stop.has_value());
+        EXPECT_EQ(result.hard_stop->existing_tier, tier);
+        EXPECT_EQ(result.hard_stop->transfer_state, state);
+        EXPECT_TRUE(result.inserted_nodes.empty());
+        EXPECT_TRUE(result.adopted_nodes.empty());
+        EXPECT_TRUE(node->children.empty());
+    }
 }
 
 TEST(BlockTreeTest, InsertAdoptsIdleEmptyFullNodeBeforeAddingSuffix) {
@@ -605,6 +635,7 @@ TEST(BlockTreeTest, InsertAdoptsIdleEmptyFullNodeBeforeAddingSuffix) {
     EXPECT_EQ(result.adopted_nodes[0].second, (std::vector<size_t>{0}));
     ASSERT_EQ(result.inserted_nodes.size(), 1u);
     EXPECT_EQ(result.inserted_nodes[0]->cache_key, 300);
+    EXPECT_FALSE(result.hard_stop.has_value());
     EXPECT_EQ(empty_resource.device_blocks, (BlockIndicesType{21}));
 }
 
@@ -645,6 +676,7 @@ TEST(BlockTreeTest, LowerTierInsertDoesNotUseDeviceHardStop) {
     EXPECT_EQ(result.inserted_nodes[0]->cache_key, 200);
     EXPECT_EQ(result.inserted_nodes[0]->group_set_resources[0].getTopTier(), Tier::HOST);
     EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::LOADING);
+    EXPECT_FALSE(result.hard_stop.has_value());
 }
 
 TEST(BlockTreeTest, InsertReusesExistingDeviceFullNodeWithoutOverwritingIt) {
@@ -661,6 +693,7 @@ TEST(BlockTreeTest, InsertReusesExistingDeviceFullNodeWithoutOverwritingIt) {
     ASSERT_EQ(result.inserted_nodes.size(), 1u);
     EXPECT_EQ(result.inserted_nodes[0]->cache_key, 200);
     EXPECT_EQ(result.accepted_resource_count, 1u);
+    EXPECT_FALSE(result.hard_stop.has_value());
     const auto path = tree.findNode({100, 200});
     ASSERT_EQ(path.size(), 2u);
     EXPECT_EQ(path[0]->group_set_resources[0].device_blocks, (BlockIndicesType{10}));
@@ -687,6 +720,7 @@ TEST(BlockTreeTest, BusySwaResourceDoesNotGateFullSuffixInsertion) {
     ASSERT_EQ(result.inserted_nodes.size(), 1u);
     EXPECT_EQ(result.inserted_nodes[0]->cache_key, 200);
     EXPECT_EQ(node->group_set_resources[1].transfer_state, GroupSetTransferState::DEMOTING);
+    EXPECT_FALSE(result.hard_stop.has_value());
 }
 
 TEST(BlockTreeTest, RemoveNodeAndEmptyAncestorsStopsAtBusyEmptyNode) {
