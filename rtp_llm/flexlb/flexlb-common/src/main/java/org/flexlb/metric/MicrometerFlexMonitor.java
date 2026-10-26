@@ -1,6 +1,5 @@
 package org.flexlb.metric;
 
-import com.google.common.util.concurrent.AtomicDouble;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.Meter;
@@ -11,10 +10,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 
+import java.util.Arrays;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -27,7 +26,7 @@ import java.util.concurrent.TimeUnit;
  * <p>Metric type mapping:
  * <ul>
  *   <li>{@link FlexMetricType#QPS} / {@link FlexMetricType#COUNTER} → micrometer Counter (increment)</li>
- *   <li>{@link FlexMetricType#GAUGE} → micrometer Gauge (absolute value via AtomicDouble)</li>
+ *   <li>{@link FlexMetricType#GAUGE} → micrometer Gauge (sum of latest source values)</li>
  *   <li>{@link FlexMetricType#TIMER} → micrometer Timer (duration distribution with p50/p90/p95/p99)</li>
  *   <li>Unknown types default to Gauge</li>
  * </ul>
@@ -65,7 +64,7 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     private final MeterRegistry meterRegistry;
     private final ConcurrentHashMap<String, FlexMetricType> metricTypes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<MetricKey, GaugeEntry> gaugeCache = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<Meter.Id, ConcurrentLinkedQueue<AtomicDouble>> gaugeSources =
+    private final ConcurrentHashMap<Meter.Id, GaugeSources> gaugeSources =
             new ConcurrentHashMap<>();
     private final ConcurrentHashMap<MetricKey, Counter> counterCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<MetricKey, Timer> timerCache = new ConcurrentHashMap<>();
@@ -205,11 +204,15 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     private void reportGauge(MetricKey key, double value) {
         GaugeEntry entry = gaugeEntry(key);
         if (entry != null) {
-            entry.value.set(value);
+            entry.value = value;
         }
     }
 
     private GaugeEntry gaugeEntry(MetricKey key) {
+        GaugeEntry cached = gaugeCache.get(key);
+        if (cached != null) {
+            return cached;
+        }
         return gaugeCache.computeIfAbsent(
                 key,
                 ignored -> {
@@ -221,8 +224,8 @@ public class MicrometerFlexMonitor implements FlexMonitor {
                     // Registration returns the canonical meter after all tag filters have run.
                     entry.sources =
                             gaugeSources.computeIfAbsent(
-                                    gauge.getId(), unused -> new ConcurrentLinkedQueue<>());
-                    entry.sources.add(entry.value);
+                                    gauge.getId(), unused -> new GaugeSources());
+                    entry.sources.add(entry);
                     return entry;
                 });
     }
@@ -253,16 +256,47 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     }
 
     private static final class GaugeEntry {
-        private final AtomicDouble value = new AtomicDouble(0.0);
-        private volatile ConcurrentLinkedQueue<AtomicDouble> sources;
+        private volatile double value;
+        private volatile GaugeSources sources;
 
         private double read() {
             var current = sources;
-            double total = 0.0;
-            if (current != null) {
-                for (var source : current) {
-                    total += source.get();
+            return current == null ? 0.0 : current.read();
+        }
+    }
+
+    private static final class GaugeSources {
+        private GaugeEntry first;
+        private volatile GaugeEntry[] entries;
+        private volatile int size;
+
+        private synchronized void add(GaugeEntry entry) {
+            int count = size;
+            if (count == 0) {
+                first = entry;
+            } else if (count == 1) {
+                entries = new GaugeEntry[] {first, entry};
+            } else {
+                if (count == entries.length) {
+                    entries = Arrays.copyOf(entries, entries.length * 2);
                 }
+                entries[count] = entry;
+            }
+            // Publish the array and its populated prefix to readers without locking
+            // updates/scrapes.
+            size = count + 1;
+        }
+
+        private double read() {
+            int count = size;
+            if (count <= 1) {
+                return count == 0 ? 0.0 : first.value;
+            }
+            // A later array can only contain a longer initialized prefix than the captured size.
+            GaugeEntry[] current = entries;
+            double total = 0.0;
+            for (int i = 0; i < count; i++) {
+                total += current[i].value;
             }
             return total;
         }
