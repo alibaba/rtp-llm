@@ -162,7 +162,27 @@ public final class PrefillState {
             BatchReservation batchReservation,
             long[] predictions,
             RequestRoute failedMember,
-            long selectionTimeMs) {
+            long selectionTimeMs,
+            RequestRoute bypassedHead) {
+        public CommitPlan(
+                CommitKind kind,
+                List<RequestRoute> items,
+                List<RouteReservation> routeReservations,
+                BatchReservation batchReservation,
+                long[] predictions,
+                RequestRoute failedMember,
+                long selectionTimeMs) {
+            this(
+                    kind,
+                    items,
+                    routeReservations,
+                    batchReservation,
+                    predictions,
+                    failedMember,
+                    selectionTimeMs,
+                    null);
+        }
+
         public CommitPlan {
             Objects.requireNonNull(kind, "kind");
             items = List.copyOf(items);
@@ -173,6 +193,75 @@ public final class PrefillState {
         @Override
         public long[] predictions() {
             return predictions.clone();
+        }
+
+        private List<RequestEntry> membersLocked(PrefillState state) {
+            boolean direct = kind == CommitKind.DIRECT;
+            checkState(!items.isEmpty(), "committed group requires members");
+            var unique =
+                    java.util.Collections.newSetFromMap(
+                            new IdentityHashMap<RequestEntry, Boolean>());
+            var members = new ArrayList<RequestEntry>(items.size());
+            for (var route : items) {
+                var entry = state.requests.get(route.requestId());
+                checkState(
+                        entry != null
+                                && entry.route == route
+                                && entry.ownership
+                                        == (direct
+                                                ? OwnershipStage.DIRECT_RESERVED
+                                                : OwnershipStage.QUEUED),
+                        "plan member is not canonical");
+                checkState(unique.add(entry), "duplicate plan member");
+                checkState(
+                        state.activeIndex.contains(route) == !direct,
+                        "plan member has inconsistent queue ownership");
+                if (bypassedHead != null && !state.canBypassLocked(bypassedHead, route)) {
+                    return null;
+                }
+                members.add(entry);
+            }
+            return members;
+        }
+
+        private void validatePreparationsLocked(PrefillState state, List<RequestEntry> members) {
+            for (int i = 0; i < members.size(); i++) {
+                var entry = members.get(i);
+                Reservation expected =
+                        kind == CommitKind.DIRECT
+                                ? routeReservations.get(i)
+                                : batchReservation != null
+                                                && entry == batchReservation.originalOwner
+                                        ? batchReservation
+                                        : null;
+                checkArgument(
+                        expected == null || expected.owner == state,
+                        "preparation belongs to another ledger");
+                checkState(
+                        entry.reservation == expected
+                                && (expected == null || expected.originalOwner == entry),
+                        "plan does not own exact member preparation");
+            }
+        }
+
+        private RequestEntry failedMemberLocked(PrefillState state, List<RequestEntry> members) {
+            if (kind == CommitKind.DIRECT
+                    || failedMember == null
+                    || failedMember.requestExpired(selectionTimeMs)) {
+                return null;
+            }
+            var failed = state.requests.get(failedMember.requestId());
+            if (failed == null
+                    || failed.route != failedMember
+                    || failed.ownership != OwnershipStage.QUEUED) {
+                return null;
+            }
+            checkState(!members.contains(failed), "failed member belongs to committed selection");
+            checkState(state.activeIndex.contains(failedMember), "failed member lost queue index");
+            checkState(
+                    failed.reservation == null || failed.reservation.originalOwner != null,
+                    "failed member owns a consumed preparation");
+            return failed;
         }
     }
 
@@ -253,10 +342,30 @@ public final class PrefillState {
         long phaseBaseMs;
         PrefillBatch batch;
         Reservation reservation;
+        boolean bypassUsed;
 
         private RequestEntry(RequestRoute route, OwnershipStage ownership) {
             this.ownership = ownership;
             this.route = Objects.requireNonNull(route, "route");
+        }
+
+        private void commit(
+                PrefillBatch committedBatch,
+                RouteReservation directLease,
+                long predictedMs,
+                long nowMs) {
+            if (committedBatch == null) {
+                remainingWorkMs = Math.clamp(predictedMs, 0L, (long) Integer.MAX_VALUE);
+                phaseBaseMs = nowMs;
+                individualPhase = Phase.COMMITTED;
+                if (directLease != null) {
+                    directLease.originalOwner = null;
+                }
+            } else {
+                batch = committedBatch;
+            }
+            ownership = OwnershipStage.COMMITTED;
+            reservation = null;
         }
     }
 
@@ -612,6 +721,23 @@ public final class PrefillState {
         return true;
     }
 
+    /** The worker additionally requires PRIORITY ordering and a Decode-capacity wait. */
+    public boolean canBypassLocked(RequestRoute head, RequestRoute candidate) {
+        queueGuard.requireHeld();
+        var entry = requests.get(head.requestId());
+        return activeIndex.peek() == head
+                && entry != null
+                && entry.route == head
+                && !entry.bypassUsed
+                && activeIndex.contains(candidate)
+                && !head.requestExpired(clock.getAsLong())
+                && !candidate.requestExpired(clock.getAsLong())
+                && head.priority() == candidate.priority()
+                && head.decodeEp() != null
+                && candidate.decodeEp() != null
+                && head.decodeEp() != candidate.decodeEp();
+    }
+
     /** The queue part of a worker wait; the worker owns stop and control wakeups. */
     public boolean queueWaitCurrentLocked(
             RequestRoute head,
@@ -628,6 +754,9 @@ public final class PrefillState {
         }
         return capacityWait
                 ? !head.requestExpired(nowMs)
+                        && (queueVersion == 0L
+                                || requests.get(head.requestId()).bypassUsed
+                                || activeIndex.version() == queueVersion)
                 : activeIndex.version() == queueVersion && schedulingInputVersion == inputVersion;
     }
 
@@ -771,20 +900,9 @@ public final class PrefillState {
                         ? predictions.length == 0
                         : predictions.length == (batchLease == null ? items.size() : 1),
                 "prediction count does not match plan");
-        checkState(!items.isEmpty(), "committed group requires members");
-        Set<RequestEntry> unique = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
-        List<RequestEntry> members = new ArrayList<>(items.size());
-        var stage = direct ? OwnershipStage.DIRECT_RESERVED : OwnershipStage.QUEUED;
-        for (var route : items) {
-            var entry = requests.get(route.requestId());
-            checkState(
-                    entry != null && entry.route == route && entry.ownership == stage,
-                    "plan member is not canonical");
-            checkState(unique.add(entry), "duplicate plan member");
-            checkState(
-                    activeIndex.contains(route) == !direct,
-                    "plan member has inconsistent queue ownership");
-            members.add(entry);
+        List<RequestEntry> members = plan.membersLocked(this);
+        if (members == null) {
+            return null;
         }
         checkArgument(
                 !direct || leases.size() == items.size(),
@@ -802,40 +920,8 @@ public final class PrefillState {
             handoff = batchLease.generationHandoff;
         }
         Objects.requireNonNull(handoff, "generationHandoff");
-        for (int i = 0; i < members.size(); i++) {
-            var member = members.get(i);
-            Reservation expected =
-                    direct
-                            ? leases.get(i)
-                            : batchLease != null && member == batchLease.originalOwner
-                                    ? batchLease
-                                    : null;
-            checkArgument(
-                    expected == null || expected.owner == this,
-                    "preparation belongs to another ledger");
-            checkState(
-                    member.reservation == expected
-                            && (expected == null || expected.originalOwner == member),
-                    "plan does not own exact member preparation");
-        }
-        RequestEntry failed = null;
-        var failedRoute = plan.failedMember();
-        if (!direct && failedRoute != null && !failedRoute.requestExpired(plan.selectionTimeMs())) {
-            var candidate = requests.get(failedRoute.requestId());
-            if (candidate != null
-                    && candidate.route == failedRoute
-                    && candidate.ownership == OwnershipStage.QUEUED) {
-                checkState(
-                        !unique.contains(candidate),
-                        "failed member belongs to committed selection");
-                checkState(activeIndex.contains(failedRoute), "failed member lost queue index");
-                checkState(
-                        candidate.reservation == null
-                                || candidate.reservation.originalOwner != null,
-                        "failed member owns a consumed preparation");
-                failed = candidate;
-            }
-        }
+        plan.validatePreparationsLocked(this, members);
+        RequestEntry failed = plan.failedMemberLocked(this, members);
         long nowMs = clock.getAsLong();
         Set<RequestEntry> batchMembers = batch == null ? null : new HashSet<>(members);
         PrefillBatchFeatures features =
@@ -872,27 +958,17 @@ public final class PrefillState {
             if (!direct) {
                 checkState(activeIndex.remove(member.route), "committed owner lost queue index");
             }
-            if (batch == null) {
-                member.remainingWorkMs =
-                        Math.clamp(
-                                direct ? leases.get(i).predictedWorkMs : predictions[i],
-                                0L,
-                                (long) Integer.MAX_VALUE);
-                member.phaseBaseMs = nowMs;
-                member.ownership = OwnershipStage.COMMITTED;
-                member.individualPhase = Phase.COMMITTED;
-                member.reservation = null;
-                if (direct) {
-                    leases.get(i).originalOwner = null;
-                }
-            } else {
-                member.batch = batch;
-                member.reservation = null;
-                member.ownership = OwnershipStage.COMMITTED;
-            }
+            member.commit(
+                    batch,
+                    direct ? leases.get(i) : null,
+                    direct ? leases.get(i).predictedWorkMs : predictions[batch == null ? i : 0],
+                    nowMs);
         }
         if (failed != null) {
             removeEntry(failed);
+        }
+        if (plan.bypassedHead() != null) {
+            requests.get(plan.bypassedHead().requestId()).bypassUsed = true;
         }
         committedWorkCapture = null;
         recordMutationLocked();

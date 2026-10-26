@@ -46,6 +46,19 @@ public final class DeliverySettlementTestSupport {
         return prefill.reserveBatch(head, batchId, maxBatches, generation.tryAcquireHandoff());
     }
 
+    public PrefillState.CommittedHandoff commit(PrefillState.CommitPlan plan) {
+        var permit = plan.batchReservation() == null ? generation.tryAcquireHandoff() : null;
+        PrefillState.CommittedHandoff committed = null;
+        try {
+            committed = prefill.commitLocked(plan, permit);
+            return committed;
+        } finally {
+            if (committed == null && permit != null) {
+                permit.close();
+            }
+        }
+    }
+
     public void commit(long batchId, List<RequestRoute> items) {
         lock.lock();
         try {

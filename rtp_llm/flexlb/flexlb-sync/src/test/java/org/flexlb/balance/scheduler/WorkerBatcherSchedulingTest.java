@@ -465,7 +465,8 @@ class WorkerBatcherSchedulingTest {
                                             runtime,
                                             "commitBoundary",
                                             request,
-                                            CapacityBoundary.failed(admissionFailure));
+                                            CapacityBoundary.failed(admissionFailure),
+                                            0L);
                                 }
                             }));
             if (expired) {
