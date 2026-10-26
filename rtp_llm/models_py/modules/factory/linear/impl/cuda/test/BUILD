@@ -3,6 +3,14 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "fp4_b12x_linear_sm120_test",
+    srcs = ["fp4_b12x_linear_sm120_test.py"],
+    deps = py_test_deps,
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
+
+py_test(
     name = "fp8_deepgemm_linear_out_test",
     srcs = ["fp8_deepgemm_linear_out_test.py"],
     deps = [

@@ -14,16 +14,35 @@ from .linear_base import LinearBase
 from rtp_llm.ops import HWKernelConfig
 
 try:
-    # Fix nvidia-cutlass-dsl cutlass module path on sm100 or upper device
-    import sys
     import os
-    import nvidia_cutlass_dsl
-    pkg_dir = nvidia_cutlass_dsl.__path__[0]
-    python_packages_dir = os.path.join(pkg_dir, 'python_packages')
+    import sys
+    from importlib.metadata import PackageNotFoundError, distribution
 
-    if os.path.isdir(python_packages_dir) and python_packages_dir not in sys.path:
+    # Bazel stores the two CuTe payloads in separate wheel roots. Select one
+    # complete Python/native payload instead of the namespace's first path.
+    cuda_major = int((torch.version.cuda or "0").split(".")[0])
+    dsl_distribution = (
+        "nvidia-cutlass-dsl-libs-cu13"
+        if cuda_major >= 13
+        else "nvidia-cutlass-dsl-libs-base"
+    )
+    try:
+        python_packages_dir = str(
+            distribution(dsl_distribution).locate_file(
+                "nvidia_cutlass_dsl/python_packages"
+            )
+        )
+    except PackageNotFoundError:
+        # Preserve the layout used by older, single-payload DSL releases.
+        import nvidia_cutlass_dsl
+
+        python_packages_dir = os.path.join(
+            nvidia_cutlass_dsl.__path__[0], "python_packages"
+        )
+    if os.path.isdir(python_packages_dir):
+        if python_packages_dir in sys.path:
+            sys.path.remove(python_packages_dir)
         sys.path.insert(0, python_packages_dir)
-        print(f"[sitecustomize] Added to sys.path: {python_packages_dir}")
 except ImportError:
     pass  # nvidia-cutlass-dsl not installed
 
