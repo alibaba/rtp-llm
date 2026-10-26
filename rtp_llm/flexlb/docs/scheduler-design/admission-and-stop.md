@@ -127,15 +127,57 @@ manufacturing release proof.
 
 ## Concurrency and allocation
 
-Engine, delivery and preemption evidence share Scheduler's `advanceRequest`:
-reconcile the Decode ledger, select a response or end, update deadlines, and
-request local settlement when eligible. A combined receipt records both facts
+Engine, delivery and preemption evidence share Scheduler's `advanceRequest`.
+After Decode reconciliation it chooses one owner: close, cancellation, response
+confirmation, or deadline synchronization while waiting. It does not append a
+second deadline/settlement pass after handing work to another owner.
+A combined receipt records both facts
 under the Context identity lock before this continuation runs outside the lock.
 No execution-mode flag or thread-local controls whether an event is finished.
 Delivery passes the snapshot returned by its fact update into this continuation.
 Engine callbacks read state when their queued work runs, and preemption reads it
 after capacity notifications. The normal delivery path adds neither snapshot
 monitor acquisitions nor capturing Runnable wrappers for its effects.
+
+```mermaid
+flowchart TD
+    F[External fact] --> C[Context validates identity and records facts]
+    C --> R[Reconcile Decode when needed]
+    R --> B{Current state}
+    B -->|Terminal or ending| T[CloseTask owns deadlines, stop and settlement]
+    B -->|Open cancellation needs progress| X[Cancellation owner]
+    B -->|Confirmation eligible| A[Confirmation owns deadline and response]
+    B -->|Waiting| W[Install only an outstanding deadline revision]
+    T --> P{Release conditions satisfied?}
+    P -->|Yes| S[Claim settlement and release resources]
+    P -->|No| N[Wait for new sender or Worker proof]
+    A -->|Preemption blocks confirmation| Q[Record confirmationPending, then reconcile]
+```
+
+`closeRequest` owns the accepted closing obligation even when no new `EndToken`
+can be granted. In that case its task resumes deadline/settlement work without
+repeating terminal notifications. RETIREMENT still selects the outcome
+synchronously, but no longer submits another full continuation afterward.
+
+A failed effect is not necessarily a failed handoff. `requestCleanup` owns
+submission recovery. WorkRegistration atomically checks whether its task ever
+executed or still has an owner; only a failure with neither can retry submission.
+An inline task failure propagates without resubmitting work that already ran.
+Queue coalescing is a successful handoff, and every retry uses a new registration
+after closing the previous one. CloseTask does not retry the submission itself.
+Deadline installation retries are bounded to three attempts in the close owner;
+the existing settlement phase can make two further attempts on incomplete
+notifications after resource settlement.
+The actual installation state and the historical exception are recorded
+separately, so successful recovery neither hides the exception nor repeats a
+successful stop notification. Confirmation failure uses the same deadline
+recovery without publishing terminal notifications.
+
+`NO_CHANGE` is not automatically discarded: an uninstalled deadline or unfinished
+settlement may still need recovery. Completed ACKs do not reinstall deadlines.
+The timer's `needsUpdate` check is advisory; `update` still validates the revision
+when installing handles. A second reconciliation after setting
+`confirmationPending` consumes a new state transition, not a repeated old fact.
 
 The Decode resource transaction is allowed under the Context identity lock: it
 does not invoke workflow callbacks. Capacity notifications, future completion,
@@ -159,6 +201,9 @@ Regression coverage includes Decode replacement followed by Prefill removal
 failure, cancellation/withdrawal races, queued ACK timeout, late receipts,
 invalidated Plan release, cancelled result observers, executor rejection, fact
 application failure, and observer retention after attempt completion.
+Effect-ownership tests also count deadline updates and cleanup handoffs, reject
+cancel re-entry after closing, and inject one-shot installation/submission
+failures that must recover without another external fact.
 
 Validation results are recorded separately after running the final source in
 `luoli_gpu`. Passing source budgets or unit tests alone is not performance
