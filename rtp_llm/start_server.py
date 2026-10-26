@@ -427,6 +427,31 @@ def start_dash_sc_server_impl(
     return dash_sc_processes
 
 
+# VIT separation is deliberately outside the checkpoint template: it neither
+# arrives at the barrier nor restores runtime state.  Children still inherit the
+# launcher environment, so the SCR markers are dropped before the VIT entry
+# point runs; otherwise shared helpers would treat the process as a participant.
+_SCR_CHILD_ENV_KEYS = (
+    "RTPLLM_ENABLE_SCR",
+    "SCR_PHASE",
+    "SCR_GENERATION",
+    "RTP_LLM_SCR_GENERATION",
+    "RTP_LLM_SCR_WORKER_ID",
+    "RTP_LLM_SCR_WORKER_NUM",
+    "RTP_LLM_SCR_WORKER_OFFSET",
+    "RTP_LLM_SCR_TIMEOUT",
+    "RTP_LLM_SCR_INACTIVITY_TIMEOUT",
+    "RTP_LLM_SCR_RESTORE_START_EPOCH_MS",
+)
+
+
+def _run_vit_without_scr(target, *args):
+    """Run a VIT entry point with the SCR environment removed."""
+    for key in _SCR_CHILD_ENV_KEYS:
+        os.environ.pop(key, None)
+    return target(*args)
+
+
 @timer_wrapper(description="start vit server")
 def start_vit_server_impl(
     py_env_configs: PyEnvConfigs,
@@ -496,8 +521,9 @@ def start_vit_server_impl(
                 f"internal http_port={internal_http_port})"
             )
             process = torch.multiprocessing.Process(
-                target=vit_start_server,
+                target=_run_vit_without_scr,
                 args=(
+                    vit_start_server,
                     i,
                     py_env_configs,
                     internal_grpc_port,  # grpc_port
@@ -519,8 +545,9 @@ def start_vit_server_impl(
             f"(external grpc_port={external_grpc_port}, http_port={external_http_port})"
         )
         proxy_process = torch.multiprocessing.Process(
-            target=vit_proxy_start_server,
+            target=_run_vit_without_scr,
             args=(
+                vit_proxy_start_server,
                 py_env_configs,
                 worker_addresses,
                 external_grpc_port,  # grpc_port
@@ -546,8 +573,9 @@ def start_vit_server_impl(
             f"(grpc_port={grpc_port}, http_port={http_port})"
         )
         process = torch.multiprocessing.Process(
-            target=vit_start_server,
+            target=_run_vit_without_scr,
             args=(
+                vit_start_server,
                 0,
                 py_env_configs,
                 grpc_port,  # grpc_port

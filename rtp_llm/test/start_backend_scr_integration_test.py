@@ -240,6 +240,51 @@ class BackendScrIntegrationTest(unittest.TestCase):
         self.assertNotIn("backend_vit:0", manifest.participant_ids)
         self.assertNotIn("backend_rank:0", manifest.participant_ids)
 
+    def test_vit_role_stays_outside_the_template_quorum(self):
+        config = self._launcher_config(
+            role_type=RoleType.VIT,
+            vit_separation=VitSeparation.VIT_SEPARATION_ROLE,
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint"},
+            clear=True,
+        ), mock.patch("torch.cuda.device_count", return_value=1):
+            manifest = launcher._build_scr_participant_manifest(config)
+
+        self.assertIsNotNone(manifest)
+        # VIT does not arrive at the barrier and does not restore runtime state,
+        # so it must not appear as a participant that the quorum waits for.
+        self.assertNotIn("backend_vit:0", manifest.participant_ids)
+        self.assertNotIn("backend_rank:0", manifest.participant_ids)
+        self.assertNotIn("backend_manager:0", manifest.participant_ids)
+
+    def test_vit_children_run_without_the_scr_environment(self):
+        scr_env = {
+            "RTPLLM_ENABLE_SCR": "1",
+            "SCR_PHASE": "checkpoint",
+            "SCR_GENERATION": "3",
+            "RTP_LLM_SCR_GENERATION": "3",
+            "RTP_LLM_SCR_WORKER_ID": "2",
+            "RTP_LLM_SCR_WORKER_NUM": "5",
+            "RTP_LLM_SCR_WORKER_OFFSET": "0",
+            "RTP_LLM_SCR_TIMEOUT": "900",
+            "RTP_LLM_SCR_INACTIVITY_TIMEOUT": "10",
+            "RTP_LLM_SCR_RESTORE_START_EPOCH_MS": "1",
+            "UNRELATED": "keep",
+        }
+        seen = {}
+
+        def fake_vit_entry(*args):
+            seen["env"] = dict(os.environ)
+            return "started"
+
+        with mock.patch.dict(os.environ, scr_env, clear=True):
+            result = launcher._run_vit_without_scr(fake_vit_entry, 0, "cfg")
+
+        self.assertEqual(result, "started")
+        self.assertEqual(seen["env"], {"UNRELATED": "keep"})
+
     def test_manifest_uses_visible_device_count_when_local_world_size_is_unset(self):
         config = self._launcher_config(world_size=4)
         with mock.patch.dict(
