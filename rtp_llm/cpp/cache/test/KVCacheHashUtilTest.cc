@@ -218,4 +218,43 @@ TEST(KVCacheHashUtilTest, AlignedMtpTailIsTransferredByP2PAndExcludedFromCpPrefi
     }
 }
 
+TEST(KVCacheHashUtilTest, CompactCpPagesKeepTheirKeysAfterMtpTailRemoval) {
+    const auto config = makeSimpleMhaCacheConfig(1, 16, kBlockSize, DataType::TYPE_FP16);
+    for (int cp_size : {2, 3, 4}) {
+        CPSlotMapper mapper(cp_size - 1, cp_size, kBlockSize);
+        for (int length : {129, 192, 193, 256, 257, 320}) {
+            for (bool incremental : {false, true}) {
+                SCOPED_TRACE(::testing::Message()
+                             << "cp_size=" << cp_size << " length=" << length << " incremental=" << incremental);
+                auto tokens   = makeTokens(length);
+                auto resource = makeKeys(tokens);
+                resource->initGroups(config.topologyPtr());
+                auto& row = resource->cacheResource();
+                row.setCpFullBlocksAreCompact(true);
+                BlockIndicesType blocks;
+                for (int i = 0; i < mapper.localBlockCount(length); ++i) {
+                    blocks.push_back(100 + i);
+                }
+                row.mutableBlockIds(0).assign(blocks);
+                // releaseResource inserts into device cache before publishing
+                // to connectors; decode can already have trimmed the keys.
+                if (incremental) {
+                    updateCacheKeys(resource, tokens, kBlockSize, true);
+                } else {
+                    dropLastPartialBlock(resource);
+                }
+                const auto canonical = mapper.canonicalCacheKeys(row.cacheKeys());
+                auto       projected = mapper.projectConnectorResource(row, config, canonical);
+                EXPECT_TRUE(projected.lastBlockAligned());
+                EXPECT_EQ(projected.cacheKeys(), canonical);
+                ASSERT_EQ(projected.blocks(0).size(), canonical.size());
+                for (size_t i = 0; i < canonical.size(); ++i) {
+                    EXPECT_EQ(projected.blocks(0)[i], blocks[i]);
+                }
+                EXPECT_EQ(row.blocks(0), blocks);
+            }
+        }
+    }
+}
+
 }  // namespace rtp_llm::test

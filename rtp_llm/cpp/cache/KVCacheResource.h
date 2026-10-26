@@ -125,6 +125,13 @@ public:
     void                 setCacheKeys(CacheKeysType&& keys);
     bool                 cacheKeysAreCpCanonical() const;
     void                 setCacheKeysAreCpCanonical(bool cache_keys_are_cp_canonical);
+    // FULL block IDs stay rank-local even when MTP removes a provisional key.
+    bool cpFullBlocksAreCompact() const {
+        return cp_full_blocks_are_compact_;
+    }
+    void setCpFullBlocksAreCompact(bool compact) {
+        cp_full_blocks_are_compact_ = compact;
+    }
 
     BlockDependenciesType&       blockDependencies();
     const BlockDependenciesType& blockDependencies() const;
@@ -183,6 +190,7 @@ private:
     CacheKeysType         cache_keys;
     BlockDependenciesType block_dependencies;
     bool                  cache_keys_are_cp_canonical_{false};
+    bool                  cp_full_blocks_are_compact_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};
