@@ -3326,6 +3326,7 @@ TEST_F(BlockTreeEvictorTest, InvalidationDetachesBusyDescendantAndReclaimsAfterD
     const int64_t replacement_version = tree_->keyVersion();
 
     // Duplicate settlement entries reclaim the old node once without touching the new ancestors.
+    EXPECT_EQ(evictor_->heaps_[0].pending_timings.erase(busy_child), 1u);
     evictor_->discardDetachedTransfer({child_transfer});
     evictor_->heaps_[0].pending_timings.erase(busy_child);
     evictor_->settleEviction({child_transfer, child_transfer});
