@@ -219,21 +219,29 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_route_cache_key_mode_follows_engine_mtp_config(self):
-        for sp_type in (
-            None,
-            SpeculativeType.NONE,
-            SpeculativeType.MTP,
-            SpeculativeType.EAGLE3,
-            SpeculativeType.DSPARK,
+        for sp_type, model_type, mtp_lookahead in (
+            (None, "", False),
+            (SpeculativeType.NONE, "deepseek-v3-mtp", False),
+            (SpeculativeType.MTP, "", True),
+            (SpeculativeType.EAGLE, "qwen_2-mtp", False),
+            (SpeculativeType.EAGLE3, "", False),
+            (SpeculativeType.DSPARK, "", False),
+            (SpeculativeType.EAGLE, "deepseek-v3-mtp", True),
+            (SpeculativeType.EAGLE3, "mixtbstars-mtp", True),
+            (SpeculativeType.MTP, "qwen_3_moe-mtp", False),
         ):
             for force_disable_sp_run in (False, True):
                 with self.subTest(
-                    sp_type=sp_type, force_disable_sp_run=force_disable_sp_run
+                    sp_type=sp_type,
+                    model_type=model_type,
+                    force_disable_sp_run=force_disable_sp_run,
                 ):
                     visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
                     visitor.seq_size_per_block = 64
                     visitor.sp_config = (
-                        SimpleNamespace(type=sp_type) if sp_type is not None else None
+                        SimpleNamespace(type=sp_type, model_type=model_type)
+                        if sp_type is not None
+                        else None
                     )
                     visitor.master_client = _FakeMasterClient()
                     visitor._route_cache_keys = lambda keys: keys
@@ -255,7 +263,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
                         await visitor.get_master_route_addrs(input)
 
                     get_keys.assert_called_once_with(
-                        [1, 2, 3], 64, mtp_lookahead=sp_type == SpeculativeType.MTP
+                        [1, 2, 3], 64, mtp_lookahead=mtp_lookahead
                     )
 
     async def test_route_ips_preserves_master_route_error_code_on_route_error(self):

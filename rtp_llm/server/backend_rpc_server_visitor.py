@@ -15,6 +15,7 @@ from rtp_llm.config.exceptions import (
 from rtp_llm.config.generate_config import RoleAddr, RoleType, ThinkingMode
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.config.response_format_compiler import recompile_reasoning_envelope
+from rtp_llm.config.speculative_config import resolve_speculative_type
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
@@ -312,7 +313,10 @@ class BackendRPCServerVisitor:
             self.seq_size_per_block,
             mtp_lookahead=(
                 self.sp_config is not None
-                and self.sp_config.type == SpeculativeType.MTP
+                and resolve_speculative_type(
+                    self.sp_config.type, self.sp_config.model_type
+                )
+                == SpeculativeType.MTP
             ),
         )
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
