@@ -8,7 +8,6 @@ Humming is imported lazily: Blackwell does not require this backend.
 import json
 
 import torch
-
 from rtp_llm.device.device_type import is_h20
 
 
@@ -50,6 +49,9 @@ def unpack_ue8m0_input_scales(scales: torch.Tensor) -> torch.Tensor:
 
 class Sm90MXFP8Linear:
     """Prepared Humming W8A8/g32 linear with externally quantized activations."""
+
+    backend = "humming"
+    retains_checkpoint_weight = False
 
     def __init__(self, weight: torch.Tensor, scales: torch.Tensor):
         if not weight.is_cuda or torch.cuda.get_device_capability(weight.device) != (

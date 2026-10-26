@@ -4,7 +4,6 @@ import weakref
 
 import torch
 from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
-
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.device.device_type import is_cuda
 from rtp_llm.models_py.modules.base.common.embedding import Embedding
@@ -35,17 +34,28 @@ class V41MXFP8Linear(torch.nn.Module):
             and is_cuda()
             and torch.cuda.get_device_capability(weight.device) == (9, 0)
         ):
+            from rtp_llm.models_py.modules.dsv41.sm90_deepgemm_dense import (
+                Sm90DeepGEMMMXFP8Linear,
+                select_sm90_dense_backend,
+            )
             from rtp_llm.models_py.modules.dsv41.sm90_dense import Sm90MXFP8Linear
 
-            self._sm90_linear = Sm90MXFP8Linear(weight, scales)
-            # Humming owns the executable packed layout. Keep that same
-            # allocation for generic device discovery instead of retaining
-            # a second, unused checkpoint-layout GPU weight. Logical shape
-            # remains available through N/K; SM10x-only consumers gate on
-            # device capability before inspecting the weight layout.
+            backend = select_sm90_dense_backend(self.N, self.K)
+            adapter = (
+                Sm90DeepGEMMMXFP8Linear if backend == "deepgemm" else Sm90MXFP8Linear
+            )
+            self._sm90_linear = adapter(weight, scales)
+            # Retain exactly the selected backend's executable allocation.
+            # DeepGEMM uses the checkpoint layout itself; Humming repacks it.
             self.weight = self._sm90_linear.weight
             self._sm90_checkpoint_weight_ref = (
-                weakref.ref(weight) if isinstance(weight, torch.Tensor) else None
+                weakref.ref(weight)
+                if isinstance(weight, torch.Tensor)
+                and (
+                    backend == "humming"
+                    or not self._sm90_linear.retains_checkpoint_weight
+                )
+                else None
             )
             return
         self.weight_scales = self.pack_scales(scales)

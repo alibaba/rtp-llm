@@ -18,7 +18,6 @@ from pathlib import Path
 
 import pytest
 import torch
-
 from rtp_llm.models_py.modules.dsv41.sm90_dense import Sm90MXFP8Linear
 from rtp_llm.models_py.modules.dsv41.test.sm90_dense_reference import (
     SHAPES,
@@ -31,7 +30,10 @@ from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
 
 @pytest.fixture(autouse=True)
-def _require_locked_sm90():
+def _require_locked_sm90(monkeypatch):
+    # This diagnostic audits the explicit Humming fallback's selected cubin.
+    monkeypatch.setenv("DSV41_SM90_DENSE_BACKEND", "humming")
+    monkeypatch.setenv("DSV41_SM90_DENSE_BACKEND_MAP", "{}")
     assert torch.cuda.is_available(), "Requires parent-locked CUDA GPU"
     assert torch.cuda.get_device_capability() == (9, 0), "Requires SM90"
     old = torch.backends.cuda.matmul.allow_tf32

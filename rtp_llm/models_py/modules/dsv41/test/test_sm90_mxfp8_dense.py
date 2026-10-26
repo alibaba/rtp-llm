@@ -1,14 +1,14 @@
-"""SM90 native-g32 dense contracts; executed by the CUDA13 Bazel target."""
+"""Humming fallback G32 contracts; DeepGEMM has a separate acceptance target."""
 
 import gc
 import json
+import os
 import unittest
 import weakref
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-
 from rtp_llm.models_py.modules.dsv41.sm90_dense import (
     expand_block32_scales,
     unpack_ue8m0_input_scales,
@@ -34,6 +34,17 @@ _V41_TP8_DENSE_SHAPES = {
 
 
 class DenseScaleAndDispatchTest(unittest.TestCase):
+    def setUp(self):
+        backend = patch.dict(
+            os.environ,
+            {
+                "DSV41_SM90_DENSE_BACKEND": "humming",
+                "DSV41_SM90_DENSE_BACKEND_MAP": "{}",
+            },
+        )
+        backend.start()
+        self.addCleanup(backend.stop)
+
     def test_block32_scale_expansion_preserves_exponent_bytes(self):
         scales = torch.arange(120, 144, dtype=torch.uint8).reshape(3, 8)
         actual = expand_block32_scales(scales.view(torch.float8_e8m0fnu), 65, 256)
@@ -214,6 +225,15 @@ class Sm90MXFP8DenseTest(unittest.TestCase):
             raise RuntimeError("test_sm90_mxfp8_dense requires a CUDA SM90 GPU")
 
     def setUp(self):
+        backend = patch.dict(
+            os.environ,
+            {
+                "DSV41_SM90_DENSE_BACKEND": "humming",
+                "DSV41_SM90_DENSE_BACKEND_MAP": "{}",
+            },
+        )
+        backend.start()
+        self.addCleanup(backend.stop)
         previous = torch.backends.cuda.matmul.allow_tf32
         torch.backends.cuda.matmul.allow_tf32 = False
         self.addCleanup(setattr, torch.backends.cuda.matmul, "allow_tf32", previous)

@@ -14,7 +14,6 @@ does not restrict production forward or stand in for performance validation.
 import json
 
 import torch
-
 from rtp_llm.models_py.modules.dsv41._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
@@ -72,6 +71,34 @@ class Sm90GroupedOutputProjection(torch.nn.Module):
             scales = scales.view(torch.uint8).view(self.G, self.N, self.K // 32)
         else:
             raise ValueError("Expected UE8M0 [G,N/32,K/32] or packed int32 [G,N,K/128]")
+
+        from rtp_llm.models_py.modules.dsv41.sm90_deepgemm_dense import (
+            Sm90DeepGEMMMXFP8Linear,
+            select_sm90_dense_backend,
+        )
+
+        selected = select_sm90_dense_backend(self.N, self.K)
+        self.backend = "humming"
+        self._deepgemm_linear = None
+        if self.G == 1 and selected == "deepgemm":
+            # Dense block32 cannot represent distinct per-row weight scales.
+            # Validate the legacy expanded ABI before selecting one row/block.
+            blocks = scales[0].reshape(self.N // 32, 32, self.K // 32)
+            if not torch.equal(blocks, blocks[:, :1, :].expand_as(blocks)):
+                raise ValueError(
+                    "DeepGEMM WO_A requires equal scales within N32 blocks"
+                )
+            native_scales = blocks[:, 0, :].contiguous().view(torch.float8_e8m0fnu)
+            self._deepgemm_linear = Sm90DeepGEMMMXFP8Linear(weight[0], native_scales)
+            self.register_buffer(
+                "weight", self._deepgemm_linear.weight, persistent=False
+            )
+            self.register_buffer(
+                "weight_scale", self._deepgemm_linear.weight_scale, persistent=False
+            )
+            self.backend = "deepgemm"
+            self._warmed_shapes = set()
+            return
 
         from humming.forward import humming_forward
         from humming.schema import HummingInputSchema, HummingWeightSchema
@@ -289,6 +316,10 @@ class Sm90GroupedOutputProjection(torch.nn.Module):
             raise RuntimeError(
                 "Eagerly warm each grouped WO_A token count before CUDA graph capture"
             )
+        if self._deepgemm_linear is not None:
+            self._deepgemm_linear._forward_with_scales(q[:, 0, :], scales, out)
+            self._warmed_shapes.add(tokens)
+            return out
         offsets = None if self.G == 1 else self._offsets(tokens)
         # Fused quant already writes this physical layout: the Q transpose is
         # a zero-copy view, not an M*G*K permutation on the production path.

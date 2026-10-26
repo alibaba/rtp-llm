@@ -161,7 +161,14 @@ class SM90OutputProjectionTest(unittest.TestCase):
 
     def setUp(self):
         env = patch.dict(
-            os.environ, {"DSV41_SM90_NATIVE_A8": "1", "DSV4_FP8_QUANT_KERNEL": "auto"}
+            os.environ,
+            {
+                "DSV41_SM90_NATIVE_A8": "1",
+                "DSV4_FP8_QUANT_KERNEL": "auto",
+                # This target compares grouped Humming with its per-group path.
+                "DSV41_SM90_DENSE_BACKEND": "humming",
+                "DSV41_SM90_DENSE_BACKEND_MAP": "{}",
+            },
         )
         env.start()
         self.addCleanup(env.stop)

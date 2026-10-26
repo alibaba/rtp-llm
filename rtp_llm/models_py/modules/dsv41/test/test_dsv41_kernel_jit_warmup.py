@@ -406,6 +406,25 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.assertIn(8192, small_k)
         self.assertEqual(max(small_k), 8192)
 
+    def test_sm90_deepgemm_grid_covers_native_tile_boundaries_with_bounded_memory(self):
+        grid = warmup._sm90_deepgemm_m_grid(131072, 1280)
+        self.assertEqual(max(grid), 4096)
+        for m in (1, 16, 17, 32, 33, 64, 65, 128, 129, 256, 257, 3276, 3277):
+            self.assertIn(m, grid)
+        self.assertEqual(warmup._sm90_deepgemm_m_grid(3, 1280), (1, 2, 3))
+        self.assertEqual(warmup._sm90_deepgemm_m_grid(0, 1280), ())
+
+    def test_sm90_backend_default_respects_updated_package_architecture(self):
+        from rtp_llm.models_py.modules.dsv41 import sm90_deepgemm_dense as dense
+
+        for arch, backend in (("x86_64", "deepgemm"), ("aarch64", "humming")):
+            with mock.patch.object(dense.platform, "machine", return_value=arch):
+                self.assertEqual(dense.select_sm90_dense_backend(5120, 8192), backend)
+        with mock.patch.dict(
+            os.environ, {"DSV41_SM90_DENSE_BACKEND_MAP": '{"5120x8192":"humming"}'}
+        ):
+            self.assertEqual(dense.select_sm90_dense_backend(5120, 8192), "humming")
+
     def test_v41_single_accumulator_allows_n256_without_changing_v4(self):
         kwargs = dict(m_value=1024, n_value=32768, k_value=1536, num_sms=152)
         current = warmup.common._sm100_dense_layout_signature(kind="v41_fp8", **kwargs)
@@ -710,6 +729,21 @@ class V41KernelJitWarmupTest(unittest.TestCase):
             warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
         self.assertEqual(replacement.calls.call_count, 6)
         self.assertEqual(len(warmup._DENSE_WARMED), 3)
+
+    def test_sm90_native_backend_uses_deepgemm_retry_and_distinct_memoization(self):
+        _, attn, operation = self.sm90_grouped_output_fixture()
+        attn._sm90_wo_a.backend = "deepgemm"
+        with mock.patch.object(
+            warmup.common,
+            "_run_deepgemm_warmup_launch_with_retry",
+            side_effect=lambda label, desc, launch, **kwargs: launch(),
+        ) as retry:
+            warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
+            self.assertEqual(retry.call_count, 3)
+        attn._sm90_wo_a.backend = "humming"
+        warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
+        self.assertEqual(operation.call_count, 6)
+        self.assertEqual(len(warmup._DENSE_WARMED), 2)
 
     def test_sm90_grouped_wo_a_compile_failure_does_not_poison_retry(self):
         output, _, operation = self.sm90_grouped_output_fixture()

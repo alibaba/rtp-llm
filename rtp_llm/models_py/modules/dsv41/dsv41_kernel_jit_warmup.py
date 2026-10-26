@@ -14,7 +14,6 @@ import time
 from functools import partial
 
 import torch
-
 from rtp_llm.device.device_type import is_cuda
 from rtp_llm.models_py.modules.dsv41 import dsv4_kernel_jit_warmup as common
 from rtp_llm.utils.warmup import model_warm_up_enabled
@@ -213,6 +212,31 @@ def _run_sm90_dense_warmup_serialized(launch):
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
+def _sm90_deepgemm_m_grid(max_m, k):
+    """Cover block32 SM90 M-tile boundaries within bounded real launch sizes.
+
+    Its candidates are M16/M32 only for small rows, then M64/M128/M256.
+    Wave-count/layout changes therefore occur at multiples of 64 after M32.
+    The service still eagerly warms each CUDA-graph shape before capture.
+    Do not materialize a scheduler's million-token capacity during JIT warmup.
+    """
+    base = set(_sm90_dense_m_grid(max_m, k))
+    if not base:
+        return ()
+    limit = max(base)
+    base.update(m for m in (16, 17, 32, 33) if m <= limit)
+    for m in range(64, limit + 1, 64):
+        base.add(m)
+        if m + 1 <= limit:
+            base.add(m + 1)
+    return tuple(sorted(base))
+
+
+def _sm90_backend(adapter):
+    backend = getattr(adapter, "backend", "humming")
+    return backend if isinstance(backend, str) else "humming"
+
+
 @torch.inference_mode()
 def warmup_v41_dense_jit(model, *, max_m, device):
     if not model_warm_up_enabled() or not common._is_cuda_device(device) or max_m <= 0:
@@ -245,13 +269,17 @@ def warmup_v41_dense_jit(model, *, max_m, device):
         tuple(sorted(linears)),
         tuple(sorted(outputs)),
         sms,
-        "humming_sm90" if sm90 else "deepgemm",
+        "sm90" if sm90 else "deepgemm",
         # Equal shapes do not imply equal JIT kernels after an opt-in SM90
         # backend switch in the same process. Key by instantiated adapters,
         # not the current environment (which may have changed since loading).
         (
             tuple(
-                (shape, type(module._sm90_linear).__name__)
+                (
+                    shape,
+                    type(module._sm90_linear).__name__,
+                    _sm90_backend(module._sm90_linear),
+                )
                 for shape, (_, module) in sorted(linears.items())
             )
             if sm90
@@ -259,7 +287,11 @@ def warmup_v41_dense_jit(model, *, max_m, device):
         ),
         (
             tuple(
-                (shape, type(getattr(attn, "_sm90_wo_a", None)).__name__)
+                (
+                    shape,
+                    type(getattr(attn, "_sm90_wo_a", None)).__name__,
+                    _sm90_backend(getattr(attn, "_sm90_wo_a", None)),
+                )
                 for shape, (_, attn) in sorted(outputs.items())
             )
             if sm90
@@ -272,8 +304,9 @@ def warmup_v41_dense_jit(model, *, max_m, device):
 
     def launch():
         for (n, k), (name, module) in linears.items():
+            native_sm90 = sm90 and _sm90_backend(module._sm90_linear) == "deepgemm"
             grid = (
-                _sm90_dense_m_grid(max_m, k)
+                (_sm90_deepgemm_m_grid if native_sm90 else _sm90_dense_m_grid)(max_m, k)
                 if sm90
                 else _dense_m_grid(max_m, n, k, sms)
             )
@@ -283,11 +316,11 @@ def warmup_v41_dense_jit(model, *, max_m, device):
                 n,
                 k,
                 grid,
-                "humming_sm90" if sm90 else "deepgemm",
+                f"{_sm90_backend(module._sm90_linear)}_sm90" if sm90 else "deepgemm",
             )
             launch_with_retry = (
                 common._run_triton_warmup_launch_with_retry
-                if sm90
+                if sm90 and not native_sm90
                 else common._run_deepgemm_warmup_launch_with_retry
             )
             for m in grid:
@@ -306,14 +339,18 @@ def warmup_v41_dense_jit(model, *, max_m, device):
                 grouped = getattr(attn, "_sm90_wo_a", None)
                 if grouped is None:
                     continue  # Legacy per-group modules were warmed above.
-                grid = _sm90_dense_m_grid(max_m, k)
+                native_sm90 = _sm90_backend(grouped) == "deepgemm"
+                grid = (_sm90_deepgemm_m_grid if native_sm90 else _sm90_dense_m_grid)(
+                    max_m, k
+                )
                 logging.info(
-                    "[DSV41 GroupedWOA] %s G=%d N=%d K=%d M=%s backend=humming_sm90",
+                    "[DSV41 GroupedWOA] %s G=%d N=%d K=%d M=%s backend=%s_sm90",
                     name,
                     groups,
                     n,
                     k,
                     grid,
+                    _sm90_backend(grouped),
                 )
                 for m in grid:
                     x = torch.zeros(
@@ -326,7 +363,12 @@ def warmup_v41_dense_jit(model, *, max_m, device):
                         dtype=torch.complex64,
                         device=device,
                     )
-                    common._run_triton_warmup_launch_with_retry(
+                    launch_with_retry = (
+                        common._run_deepgemm_warmup_launch_with_retry
+                        if native_sm90
+                        else common._run_triton_warmup_launch_with_retry
+                    )
+                    launch_with_retry(
                         "DSV41 GroupedWOA",
                         f"{name} M={m}",
                         partial(grouped, x, freqs),
