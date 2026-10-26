@@ -89,7 +89,7 @@ class Sm90DeepGEMMMXFP8Linear:
             raise ValueError("Expected packed group32 UE8M0 int32 scales")
         from ._sm90_quant_scale_fused import unpack_ue8m0_to_fp32
 
-        scales = unpack_ue8m0_to_fp32(x_s)[:, : self.K // 32]
+        scales = unpack_ue8m0_to_fp32(x_s, mn_major=True)[:, : self.K // 32]
         return self._forward_with_scales(x_q, scales, out)
 
     def forward_bf16(self, x, out=None):
@@ -102,7 +102,7 @@ class Sm90DeepGEMMMXFP8Linear:
             or x.numel() // self.K > 16
         ):
             raise ValueError("Direct G32 scales require same-device BF16 with M<=16")
-        q, scales = quantize_g32(x.reshape(-1, self.K).contiguous())
+        q, scales = quantize_g32(x.reshape(-1, self.K).contiguous(), mn_major=True)
         return self._forward_with_scales(q.view(x.shape), scales, out)
 
     def _forward_with_scales(self, x_q, scales, out=None):
@@ -118,8 +118,8 @@ class Sm90DeepGEMMMXFP8Linear:
         ):
             raise ValueError("out must be contiguous BF16 with output shape/device")
         if rows:
-            # The package converts row-major F32 scales to its MN-major TMA
-            # layout inside this call, so graph replay sees changed scales.
+            # Quantization/unpack writes TMA-ready MN-major scales directly.
+            # Every replay updates values; no pointer-keyed scale cache exists.
             self._forward(
                 (x_q.reshape(rows, self.K).contiguous(), scales),
                 (self.weight, self.weight_scale),

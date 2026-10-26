@@ -2011,6 +2011,10 @@ class AttentionV41FP8(AttentionFP8):
                     weights = weights.to(torch.bfloat16)
                 else:
                     q = fp8_roundtrip(q)
+            if fused_indexer:
+                # Both FP4 producers allocate independent payload/scale storage;
+                # all fused score paths below consume that pair, never BF16 q.
+                del q
             dense_weights = weights
             pending = shared.pop("prefill_pool_ready", None)
             if pending is not None:

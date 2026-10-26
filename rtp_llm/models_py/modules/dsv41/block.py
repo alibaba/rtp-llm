@@ -579,6 +579,9 @@ class Block(nn.Module):
             if fused_mhc is None
             else fused_mhc[0]
         )
+        # HC post has submitted its last read of this attention output.
+        # Keep its full-prefill storage out of the subsequent FFN lifetime.
+        del attn_out
         self._sync_after_first_cp_prefill_attention()
 
         residual = x

@@ -1,4 +1,4 @@
-"""RTP G32 quantization with direct row-major FP32 scales for SM90 Humming.
+"""RTP G32 quantization with direct FP32 scales for native SM90 GEMMs.
 
 No GEMM or scale-policy change: mirror the local legacy/v2 CUDA quantizers,
 including their different small-value floors. WO_A also preserves the
@@ -81,7 +81,8 @@ def _quantize(values, V2: tl.constexpr, EPS: tl.constexpr = 1.1754943508222875e-
 
 @triton.jit(do_not_specialize=["rows", "input_stride"])
 def _dense_quant_kernel(
-    x, q, scales, rows, input_stride, K: tl.constexpr, V2: tl.constexpr
+    x, q, scales, rows, input_stride, scale_row_stride, scale_column_stride,
+    K: tl.constexpr, V2: tl.constexpr
 ):
     row = tl.program_id(0).to(tl.int64)
     group = tl.program_id(1) * 4 + tl.arange(0, 4)
@@ -91,7 +92,10 @@ def _dense_quant_kernel(
     )
     payload, scale = _quantize(values, V2)
     tl.store(q + row * K + columns, payload, columns < K)
-    tl.store(scales + row * (K // 32) + group, scale, group < K // 32)
+    tl.store(
+        scales + row * scale_row_stride + group * scale_column_stride,
+        scale, group < K // 32,
+    )
 
 
 @triton.jit(
@@ -143,7 +147,10 @@ def _woa_quant_kernel(
 
 
 @triton.jit(do_not_specialize=["rows", "row_stride", "column_stride"])
-def _unpack_kernel(packed, out, rows, row_stride, column_stride, COLUMNS: tl.constexpr):
+def _unpack_kernel(
+    packed, out, rows, row_stride, column_stride,
+    out_row_stride, out_column_stride, COLUMNS: tl.constexpr,
+):
     row = tl.program_id(0).to(tl.int64)
     column = tl.program_id(1) * 128 + tl.arange(0, 128)
     word = tl.load(
@@ -152,7 +159,10 @@ def _unpack_kernel(packed, out, rows, row_stride, column_stride, COLUMNS: tl.con
         other=0,
     ).to(tl.uint32)
     exponent = (word >> ((column % 4) * 8)) & 255
-    tl.store(out + row * COLUMNS + column, _decode_exponent(exponent), column < COLUMNS)
+    tl.store(
+        out + row * out_row_stride + column * out_column_stride,
+        _decode_exponent(exponent), column < COLUMNS,
+    )
 
 
 def _input(x):
@@ -187,13 +197,38 @@ def _output(out, shape, dtype, device, operands):
     return out
 
 
-def quantize_g32(x, *, out_q=None, out_scale=None):
-    """BF16 [M,K] -> E4M3 [M,K], contiguous FP32 [M,K/32]."""
+def _scale_output(rows, columns, device, mn_major):
+    if mn_major:
+        padded_rows = max(4, triton.cdiv(rows, 4) * 4)
+        return torch.empty_strided(
+            (rows, columns), (1, padded_rows), dtype=torch.float32, device=device
+        )
+    return torch.empty((rows, columns), dtype=torch.float32, device=device)
+
+
+def quantize_g32(x, *, out_q=None, out_scale=None, mn_major=False):
+    """BF16 [M,K] -> E4M3 [M,K], FP32 scales; optional TMA MN-major."""
     _input(x)
     rows, width = x.shape
     v2 = use_v2(rows, width)
     q = _output(out_q, x.shape, torch.float8_e4m3fn, x.device, (x,))
-    scale = _output(out_scale, (rows, width // 32), torch.float32, x.device, (x, q))
+    if mn_major:
+        expected = (1, max(4, triton.cdiv(rows, 4) * 4))
+        if out_scale is None:
+            scale = _scale_output(rows, width // 32, x.device, True)
+        elif (
+            out_scale.shape != (rows, width // 32)
+            or out_scale.dtype != torch.float32
+            or out_scale.device != x.device
+            or out_scale.stride() != expected
+            or out_scale.requires_grad
+            or any(torch._C._overlaps(out_scale, value) for value in (x, q))
+        ):
+            raise ValueError("Expected nonaliasing TMA MN-major FP32 output scales")
+        else:
+            scale = out_scale
+    else:
+        scale = _output(out_scale, (rows, width // 32), torch.float32, x.device, (x, q))
     if rows:
         _dense_quant_kernel[(rows, triton.cdiv(width, 128))](
             x,
@@ -201,6 +236,8 @@ def quantize_g32(x, *, out_q=None, out_scale=None):
             scale,
             rows,
             x.stride(0),
+            scale.stride(0),
+            scale.stride(1),
             width,
             v2,
             num_warps=4,
@@ -277,8 +314,8 @@ def quantize_wo_a_g32(o, freqs, *, n_groups, heads_per_group, imaginary_fma_firs
     return q.transpose(0, 1), scale.transpose(0, 1)
 
 
-def unpack_ue8m0_to_fp32(packed):
-    """One-kernel alternative for already packed 2D scales, including strides."""
+def unpack_ue8m0_to_fp32(packed, *, mn_major=False):
+    """Decode packed 2D scales; optionally write TMA-ready MN-major FP32."""
     if (
         not packed.is_cuda
         or packed.dtype != torch.int32
@@ -288,7 +325,7 @@ def unpack_ue8m0_to_fp32(packed):
     ):
         raise ValueError("Expected CUDA int32 [M,packed_K] scales")
     rows, words = packed.shape
-    out = torch.empty((rows, words * 4), dtype=torch.float32, device=packed.device)
+    out = _scale_output(rows, words * 4, packed.device, mn_major)
     if rows and words:
         _unpack_kernel[(rows, triton.cdiv(words * 4, 128))](
             packed,
@@ -296,6 +333,8 @@ def unpack_ue8m0_to_fp32(packed):
             rows,
             packed.stride(0),
             packed.stride(1),
+            out.stride(0),
+            out.stride(1),
             words * 4,
             num_warps=4,
         )
