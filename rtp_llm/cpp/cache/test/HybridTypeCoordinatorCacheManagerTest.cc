@@ -1717,6 +1717,57 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, UpdateKVBlockCopyLastBlockAcrossGr
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
+TEST_F(HybridTypeCoordinatorCacheManagerTest, UpdateKVBlockDoesNotReuseConnectorHeldDroppedBlocks) {
+    for (const bool is_pd_connector : {false, true}) {
+        auto config    = makeTinyHybridConfig();
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::HOST);
+        ASSERT_TRUE(allocator->init());
+        auto         linear_pool   = poolForTag(*allocator, "linear");
+        auto         full_pool     = poolForTag(*allocator, "full1");
+        const size_t free_before   = allocator->freeBlocksNum();
+        const auto   linear_blocks = allocateReferencedBlocks(linear_pool, 2);
+        const auto   full_blocks   = allocateReferencedBlocks(full_pool, 2);
+        if (is_pd_connector) {
+            linear_pool->incRef(linear_blocks[1], true);
+            full_pool->incRef(full_blocks[1], true);
+        } else {
+            linear_pool->incRemoteRef(linear_blocks[1]);
+            full_pool->incRemoteRef(full_blocks[1]);
+        }
+
+        auto resource = makeBatchResource(2, config, CacheKeysType{100}, /*reorder_resource=*/true);
+        resource->mutableBlockIds(0, "linear").assign({linear_blocks[0]});
+        resource->mutableBlockIds(0, "full1").assign({full_blocks[0]});
+        resource->mutableBlockIds(1, "linear").assign({linear_blocks[1]});
+        resource->mutableBlockIds(1, "full1").assign({full_blocks[1]});
+        std::vector<TaggedBlockIdPair> mapping;
+        ASSERT_TRUE(allocator->updateKVBlock(resource, {0, 0}, /*copy_last_block=*/true, mapping));
+        ASSERT_EQ(mapping.size(), 2u);
+        for (const auto& copy : mapping) {
+            EXPECT_NE(copy.dst, copy.tag == "linear" ? linear_blocks[1] : full_blocks[1]);
+        }
+        EXPECT_EQ(linear_pool->refCount(linear_blocks[1]), 1u);
+        EXPECT_EQ(full_pool->refCount(full_blocks[1]), 1u);
+        EXPECT_EQ((is_pd_connector ? linear_pool->pdConnectorReferencedBlocksNum() :
+                                     linear_pool->remoteConnectorReferencedBlocksNum()),
+                  1u);
+        EXPECT_EQ((is_pd_connector ? full_pool->pdConnectorReferencedBlocksNum() :
+                                     full_pool->remoteConnectorReferencedBlocksNum()),
+                  1u);
+
+        allocator->free(FreeInfo{resource, nullptr});
+        EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2);
+        if (is_pd_connector) {
+            linear_pool->decRef(linear_blocks[1], true);
+            full_pool->decRef(full_blocks[1], true);
+        } else {
+            linear_pool->decRemoteRef(linear_blocks[1]);
+            full_pool->decRemoteRef(full_blocks[1]);
+        }
+        EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+    }
+}
+
 TEST_F(HybridTypeCoordinatorCacheManagerTest, UpdateKVBlockReservationFailureLeavesResourceUnchanged) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::HOST);
@@ -2011,7 +2062,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ConnectorRefPreservesDummyTailAcro
     resource.mutableBlockIds("linear").assign(BlockIndicesType{blocks[0], NULL_BLOCK_IDX, NULL_BLOCK_IDX});
     resource.mutableBlockIds("full1").assign(BlockIndicesType{NULL_BLOCK_IDX, blocks[1], NULL_BLOCK_IDX});
 
-    auto ref = allocator->incrKVCacheRef(resource, resource.cacheKeys(), /*is_connector=*/true);
+    auto ref = allocator->incrKVCacheRef(resource, resource.cacheKeys(), /*is_pd_connector=*/true);
     ASSERT_NE(ref, nullptr);
     EXPECT_FALSE(ref->lastBlockAligned());
     EXPECT_EQ(ref->cacheKeys(), resource.cacheKeys());
@@ -2022,13 +2073,17 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ConnectorRefPreservesDummyTailAcro
 
     linear_pool->decRef(linear_blocks);
     full_pool->decRef(full_blocks);
-    EXPECT_EQ(linear_pool->referencedBlocksNum(), 1u);
-    EXPECT_EQ(full_pool->referencedBlocksNum(), 1u);
+    EXPECT_EQ(linear_pool->referencedBlocksNum(), 0u);
+    EXPECT_EQ(full_pool->referencedBlocksNum(), 0u);
+    EXPECT_EQ(linear_pool->pdConnectorReferencedBlocksNum(), 1u);
+    EXPECT_EQ(full_pool->pdConnectorReferencedBlocksNum(), 1u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2);
 
     ref.reset();
     EXPECT_EQ(linear_pool->referencedBlocksNum(), 0u);
     EXPECT_EQ(full_pool->referencedBlocksNum(), 0u);
+    EXPECT_EQ(linear_pool->pdConnectorReferencedBlocksNum(), 0u);
+    EXPECT_EQ(full_pool->pdConnectorReferencedBlocksNum(), 0u);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 

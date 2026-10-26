@@ -45,6 +45,8 @@ struct KVCachePoolMetricsSnapshot {
     size_t      total_blocks               = 0;
     size_t      reserve_blocks             = 0;
     size_t      request_ref_blocks         = 0;
+    size_t      remote_connector_ref_blocks = 0;
+    size_t      pd_connector_ref_blocks     = 0;
     size_t      block_cache_ref_blocks     = 0;
     size_t      load_ref_blocks            = 0;
     size_t      eviction_target_ref_blocks = 0;
@@ -79,8 +81,9 @@ public:
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(
         int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
-    virtual std::shared_ptr<KVCacheResource>
-    incrKVCacheRef(const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector = false);
+    virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
+                                                            const CacheKeysType&   cache_keys,
+                                                            bool                   is_pd_connector = false);
     virtual GroupedCacheLayerLayout allLayerCacheBase() const;
     virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                                                   const std::vector<int>&         block_src_batch,
@@ -210,6 +213,7 @@ protected:
                                                      int  target_batch_size) const;
     virtual void  checkCPShardedMallocResult(const MallocInfo&) const;
     virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
+    void          decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_pd_connector);
     size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;
     int           deviceCacheMetricTokensPerBlock() const;
     static size_t maxReusableMatchKeys(int seq_len, int reuse_unit_tokens) {

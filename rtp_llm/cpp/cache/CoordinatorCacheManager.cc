@@ -436,6 +436,8 @@ std::vector<KVCachePoolMetricsSnapshot> CoordinatorCacheManager::poolMetricsSnap
         snapshot.available_blocks           = pool->availableBlocksNum();
         snapshot.reserve_blocks             = reserveBlocksForPoolMetrics(pool_index);
         snapshot.request_ref_blocks         = pool->referencedBlocksNum();
+        snapshot.remote_connector_ref_blocks = pool->remoteConnectorReferencedBlocksNum();
+        snapshot.pd_connector_ref_blocks     = pool->pdConnectorReferencedBlocksNum();
         snapshot.block_cache_ref_blocks     = pool->referencedBlocksNum(BlockTreeRefType::CACHE);
         snapshot.load_ref_blocks            = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
         snapshot.eviction_target_ref_blocks = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
@@ -1001,7 +1003,7 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
 
 std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                                          const CacheKeysType&   cache_keys,
-                                                                         bool                   is_connector) {
+                                                                         bool                   is_pd_connector) {
     if (cache_keys.empty() || kvcache_resource.groupNums() <= 0) {
         return nullptr;
     }
@@ -1021,8 +1023,12 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
     }
 
     auto selected_resource_ptr = new KVCacheResource(kvcache_resource);
-    auto deleter               = [self = shared_from_this()](KVCacheResource* resource) {
-        self->decrKVCacheRef(*resource);
+    auto deleter               = [self = shared_from_this(), is_pd_connector](KVCacheResource* resource) {
+        if (!is_pd_connector) {
+            self->decrKVCacheRef(*resource);
+        } else {
+            self->decrKVCacheRef(*resource, is_pd_connector);
+        }
         delete resource;
     };
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
@@ -1049,7 +1055,7 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
             blocks_for_key[static_cast<size_t>(group_id)] = block;
             any_valid_block                               = any_valid_block || (!isNullBlockIdx(block) && block > 0);
         }
-        const bool preserve_connector_tail = is_connector && !kvcache_resource.lastBlockAligned()
+        const bool preserve_connector_tail = is_pd_connector && !kvcache_resource.lastBlockAligned()
                                              && pos + 1 == resource_keys.size() && !selected_keys.empty();
         if (!any_valid_block && !preserve_connector_tail) {
             continue;
@@ -1077,7 +1083,7 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
                 valid.push_back(b);
             }
         }
-        kv_cache_groups_[static_cast<size_t>(group_id)]->reference(valid);
+        kv_cache_groups_[static_cast<size_t>(group_id)]->reference(valid, is_pd_connector);
         selected_resource->mutableBlockIds(groups[static_cast<size_t>(group_id)].tag)
             .assign(std::move(selected_blocks[static_cast<size_t>(group_id)]));
     }
@@ -1085,6 +1091,10 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
 }
 
 void CoordinatorCacheManager::decrKVCacheRef(const KVCacheResource& kvcache_resource) {
+    decrKVCacheRef(kvcache_resource, false);
+}
+
+void CoordinatorCacheManager::decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_pd_connector) {
     const auto& groups = config_.topology().groups();
     RTP_LLM_CHECK_WITH_INFO(kvcache_resource.groupNums() == config_.groupNums(),
                             "cache resource and coordinator group counts differ");
@@ -1094,7 +1104,7 @@ void CoordinatorCacheManager::decrKVCacheRef(const KVCacheResource& kvcache_reso
         blocks_by_group.push_back(&kvcache_resource.blocks(group.tag));
     }
     for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
-        kv_cache_groups_[group_id]->unreference(*blocks_by_group[group_id]);
+        kv_cache_groups_[group_id]->unreference(*blocks_by_group[group_id], is_pd_connector);
     }
 }
 
@@ -1261,7 +1271,8 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
             }
             const auto block = dropped.back();
             if (!isNullBlockIdx(block) && block > 0 && dropped_block_counts[block] == 1 && !retained_blocks.count(block)
-                && !transferred.count(block)) {
+                && !transferred.count(block)
+                && group_block_pools_[static_cast<size_t>(group_id)]->isExclusiveRequestBlock(block)) {
                 replacements.push_back(block);
                 transferred[block] = 1;
             }
@@ -2230,7 +2241,8 @@ void CoordinatorCacheManager::logMallocFailure(const MallocInfo& malloc_info,
             "group_reserve_blocks=%zu required_available_blocks=%lld shortfall_blocks=%lld "
             "current_slots=%zu "
             "current_valid_blocks=%zu total_blocks=%zu free_blocks=%zu "
-            "request_ref_blocks=%zu block_cache_ref_blocks=%zu load_ref_blocks=%zu "
+            "request_ref_blocks=%zu remote_connector_ref_blocks=%zu pd_connector_ref_blocks=%zu "
+            "block_cache_ref_blocks=%zu load_ref_blocks=%zu "
             "layer_count=%zu block_bytes=%zu seq_size_per_block=%zu",
             malloc_info.request_id,
             gid,
@@ -2248,6 +2260,8 @@ void CoordinatorCacheManager::logMallocFailure(const MallocInfo& malloc_info,
             pool->totalBlocksNum(),
             free_blocks,
             pool->referencedBlocksNum(),
+            pool->remoteConnectorReferencedBlocksNum(),
+            pool->pdConnectorReferencedBlocksNum(),
             pool->referencedBlocksNum(BlockTreeRefType::CACHE),
             pool->referencedBlocksNum(BlockTreeRefType::LOAD),
             config_.layerIdsForGroup(group.tag).size(),

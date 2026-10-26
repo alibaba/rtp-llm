@@ -100,7 +100,9 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     if (should_log) {
         RTP_LLM_LOG_INFO("kvc raw pool[%s/%s]: block_size_bytes=%zu total=%zu free=%zu used=%zu available=%zu "
                          "active=%zu "
-                         "reserve=%zu request_ref_blocks=%zu block_cache_ref_blocks=%zu "
+                         "reserve=%zu request_ref_blocks=%zu "
+                         "remote_connector_ref_blocks=%zu pd_connector_ref_blocks=%zu "
+                         "block_cache_ref_blocks=%zu "
                          "load_ref_blocks=%zu eviction_target_ref_blocks=%zu store_ref_blocks=%zu used_ratio=%.4f%%",
                          pool_snapshot.tier.c_str(),
                          pool_snapshot.pool_name.c_str(),
@@ -112,6 +114,8 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
                          pool_snapshot.active_blocks,
                          pool_snapshot.reserve_blocks,
                          pool_snapshot.request_ref_blocks,
+                         pool_snapshot.remote_connector_ref_blocks,
+                         pool_snapshot.pd_connector_ref_blocks,
                          pool_snapshot.block_cache_ref_blocks,
                          pool_snapshot.load_ref_blocks,
                          pool_snapshot.eviction_target_ref_blocks,
@@ -128,6 +132,8 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.total_blocks                      = static_cast<int64_t>(pool_snapshot.total_blocks);
     pool_collector.reserve_blocks                    = static_cast<int64_t>(pool_snapshot.reserve_blocks);
     pool_collector.request_ref_blocks                = static_cast<int64_t>(pool_snapshot.request_ref_blocks);
+    pool_collector.remote_connector_ref_blocks       = static_cast<int64_t>(pool_snapshot.remote_connector_ref_blocks);
+    pool_collector.pd_connector_ref_blocks           = static_cast<int64_t>(pool_snapshot.pd_connector_ref_blocks);
     pool_collector.block_cache_ref_blocks            = static_cast<int64_t>(pool_snapshot.block_cache_ref_blocks);
     pool_collector.load_ref_blocks                   = static_cast<int64_t>(pool_snapshot.load_ref_blocks);
     pool_collector.eviction_target_ref_blocks        = static_cast<int64_t>(pool_snapshot.eviction_target_ref_blocks);
@@ -717,8 +723,8 @@ std::shared_ptr<CacheStore> KVCacheManager::getCacheStore() const {
 
 // PD separation: increment KV cache reference count
 std::shared_ptr<KVCacheResource>
-KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector) {
-    return coordinator_manager_->incrKVCacheRef(resource, cache_keys, is_connector);
+KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_pd_connector) {
+    return coordinator_manager_->incrKVCacheRef(resource, cache_keys, is_pd_connector);
 }
 
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {

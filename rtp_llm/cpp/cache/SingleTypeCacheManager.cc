@@ -145,13 +145,13 @@ void SingleTypeCacheManager::reference(BlockIds& block_ids, const BlockIndicesTy
     reference(valid_blocks);
 }
 
-void SingleTypeCacheManager::reference(const BlockIndicesType& block_indices) {
+void SingleTypeCacheManager::reference(const BlockIndicesType& block_indices, bool is_pd_connector) {
     if (!block_indices.empty()) {
-        block_pool_->incRef(block_indices);
+        block_pool_->incRef(block_indices, is_pd_connector);
     }
 }
 
-void SingleTypeCacheManager::unreference(const BlockIndicesType& block_indices) {
+void SingleTypeCacheManager::unreference(const BlockIndicesType& block_indices, bool is_pd_connector) {
     BlockIndicesType valid_blocks;
     valid_blocks.reserve(block_indices.size());
     for (const BlockIdxType block : block_indices) {
@@ -160,7 +160,7 @@ void SingleTypeCacheManager::unreference(const BlockIndicesType& block_indices) 
         }
     }
     if (!valid_blocks.empty()) {
-        block_pool_->decRef(valid_blocks);
+        block_pool_->decRef(valid_blocks, is_pd_connector);
     }
 }
 

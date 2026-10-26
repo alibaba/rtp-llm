@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -41,10 +42,13 @@ public:
     // the global-layer -> (layout, local layer) mapping. Invariants enforced via RTP_LLM_CHECK.
     bool init();
 
-    void incRef(BlockIdxType block);
-    void incRef(const BlockIdList& blocks);
-    void decRef(BlockIdxType block);
-    void decRef(const BlockIdList& blocks);
+    void incRef(BlockIdxType block, bool is_pd_connector = false);
+    void incRef(const BlockIdList& blocks, bool is_pd_connector = false);
+    void decRef(BlockIdxType block, bool is_pd_connector = false);
+    void decRef(const BlockIdList& blocks, bool is_pd_connector = false);
+
+    void incRemoteRef(BlockIdxType block);
+    void decRemoteRef(BlockIdxType block);
 
     struct RequestReferenceUpdate {
         BlockIdxType block;
@@ -67,6 +71,8 @@ public:
     uint32_t refCount(BlockIdxType block) const;
     using IBlockPool::referencedBlocksNum;
     size_t referencedBlocksNum() const;
+    size_t remoteConnectorReferencedBlocksNum() const;
+    size_t pdConnectorReferencedBlocksNum() const;
 
     // Stable CUDA device index of the backing buffer. Returns -1 for non-CUDA builds.
     int deviceIndex() const;
@@ -105,6 +111,17 @@ protected:
     bool hasExternalRefNoLock(BlockIdxType block) const override;
 
 private:
+    enum class RefType : uint8_t {
+        REQUEST,
+        REMOTE_CONNECTOR,
+        PD_CONNECTOR,
+        COUNT,
+    };
+
+    void   incRefImpl(const BlockIdList& blocks, RefType ref_type);
+    void   decRefImpl(const BlockIdList& blocks, RefType ref_type);
+    size_t referencedBlocksNum(RefType ref_type) const;
+
     bool                         hasRequestRefNoLock(BlockIdxType block) const;
     const DeviceBlockPoolConfig& config() const;
     // global_layer_id -> {layout_index, local_layer_id}
@@ -148,8 +165,10 @@ private:
                                    const std::string&          buffer_type);
 
 private:
+    static constexpr size_t                          kRefTypeCount = static_cast<size_t>(RefType::COUNT);
     std::vector<uint32_t> refcounts_;
-    size_t                request_referenced_blocks_num_{0};
+    std::array<std::vector<uint32_t>, kRefTypeCount> refcounts_by_type_;
+    std::array<size_t, kRefTypeCount>                referenced_block_counts_{};
 
     torch::Tensor cache_aligned_buffer_;
     void*         cache_base_ptr_{nullptr};

@@ -1168,7 +1168,7 @@ TEST_F(KVCacheManagerTest, ConnectorReferenceReleaseWakesAllocationWaiter) {
     ASSERT_TRUE(cache_manager->malloc(malloc_info).success);
 
     auto connector_ref =
-        cache_manager->incrKVCacheRef(resource->cacheResource(0), resource->cacheKeys(0), /*is_connector=*/true);
+        cache_manager->incrKVCacheRef(resource->cacheResource(0), resource->cacheKeys(0), /*is_pd_connector=*/true);
     ASSERT_NE(connector_ref, nullptr);
     cache_manager->free(FreeInfo{resource, tokens});
 

@@ -78,8 +78,8 @@ public:
                                                          bool                     reuse_enabled      = false,
                                                          const RequiredPositions& required_positions = {}) const = 0;
     void                                   reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices);
-    void                                   reference(const BlockIndicesType& block_indices);
-    void                                   unreference(const BlockIndicesType& block_indices);
+    void                   reference(const BlockIndicesType& block_indices, bool is_pd_connector = false);
+    void                   unreference(const BlockIndicesType& block_indices, bool is_pd_connector = false);
     std::unordered_map<int, torch::Tensor> allLayerCacheBase() const;
     std::unordered_map<int, torch::Tensor> allLayerScaleCacheBase() const;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;

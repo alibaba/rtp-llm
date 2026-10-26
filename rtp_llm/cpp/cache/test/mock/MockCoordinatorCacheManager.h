@@ -25,7 +25,7 @@ public:
                 (const, override));
     MOCK_METHOD(std::shared_ptr<KVCacheResource>,
                 incrKVCacheRef,
-                (const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector),
+                (const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_pd_connector),
                 (override));
     MOCK_METHOD(void, decrKVCacheRef, (const KVCacheResource& kvcache_resource), (override));
     MOCK_METHOD(GroupedCacheLayerLayout, allLayerCacheBase, (), (const, override));

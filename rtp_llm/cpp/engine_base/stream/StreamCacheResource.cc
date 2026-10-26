@@ -584,7 +584,7 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
 void StreamCacheResource::holdKVCacheForPDSep() {
     auto&       resource   = batch_kv_cache_resource_->cacheResource(0);
     const auto& cache_keys = resource.cacheKeys();
-    auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
+    auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_pd_connector=*/true);
     if (ref) {
         pd_kvcache_ref_ = std::move(ref);
     }

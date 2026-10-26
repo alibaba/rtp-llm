@@ -702,6 +702,58 @@ TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
     }
 }
 
+TEST(BlockTreeCacheMetricsTest, ExternalOwnerSnapshotsAndMetricsUseExistingPoolTags) {
+    auto        pools = makeStructuralDevicePools(1, "external_owner_metrics");
+    const auto& pool  = pools.front();
+    auto        group = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);
+    initializeTestGroupSet(group, pools);
+    const auto blocks = pool->malloc(2).value();
+    pool->incRef(blocks.front());
+    pool->incRemoteRef(blocks.front());
+    pool->incRemoteRef(blocks.back());
+    pool->incRef(blocks.back(), true);
+
+    BlockTreeCacheMetricsReporter snapshot_reporter(nullptr);
+    const auto                    snapshots = snapshot_reporter.collectPoolMetricsSnapshots({group});
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots.front().request_ref_blocks, 1u);
+    EXPECT_EQ(snapshots.front().remote_connector_ref_blocks, 2u);
+    EXPECT_EQ(snapshots.front().pd_connector_ref_blocks, 1u);
+    EXPECT_EQ(snapshots.front().active_blocks, 2u);
+
+    auto                  reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto*                 metrics  = reporter->getMetricsGroup<RtpLLMCachePoolMetrics>();
+    kmonitor::MetricsTags tags("pool_name", pool->poolName());
+    tags.AddTag("tier", "DEVICE");
+    RtpLLMCachePoolMetricsCollector collector;
+    collector.request_ref_blocks          = snapshots.front().request_ref_blocks;
+    collector.remote_connector_ref_blocks = snapshots.front().remote_connector_ref_blocks;
+    collector.pd_connector_ref_blocks     = snapshots.front().pd_connector_ref_blocks;
+    ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->request_ref_blocks_metric, tags, "rtp_llm_kv_cache_request_ref_blocks"), 1);
+    EXPECT_DOUBLE_EQ(
+        snapshotQps(metrics->remote_connector_ref_blocks_metric, tags, "rtp_llm_kv_cache_remote_connector_ref_blocks"),
+        2);
+    EXPECT_DOUBLE_EQ(
+        snapshotQps(metrics->pd_connector_ref_blocks_metric, tags, "rtp_llm_kv_cache_pd_connector_ref_blocks"), 1);
+
+    pool->decRef(blocks.front());
+    for (const auto block : blocks) {
+        pool->decRemoteRef(block);
+    }
+    pool->decRef(blocks.back(), true);
+    collector.request_ref_blocks          = 0;
+    collector.remote_connector_ref_blocks = 0;
+    collector.pd_connector_ref_blocks     = 0;
+    ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->request_ref_blocks_metric, tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->remote_connector_ref_blocks_metric, tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->pd_connector_ref_blocks_metric, tags), 0);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+    EXPECT_TRUE(reporter->getTags().FindTag("tier").empty());
+    EXPECT_TRUE(reporter->getTags().FindTag("pool_name").empty());
+}
+
 TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyReportPopulatedValues) {
     auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     for (const Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
