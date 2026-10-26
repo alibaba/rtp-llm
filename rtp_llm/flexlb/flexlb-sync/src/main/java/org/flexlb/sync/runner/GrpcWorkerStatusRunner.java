@@ -124,6 +124,11 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     if (failure == null) {
                         boolean alive = valid && response.getAlive();
                         workerStatus.recordStatusRpcResult(pollLease, valid, alive, null);
+                        if (valid && roleType == RoleType.VIT) {
+                            workerStatus.recordVitLoad(pollLease,
+                                    alive && response.hasMmInflightInputs()
+                                            ? response.getMmInflightInputs().getValue() : null);
+                        }
                     }
                     if (cause != null) {
                         reportFailure(cause);

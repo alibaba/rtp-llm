@@ -2,6 +2,7 @@ package org.flexlb.service;
 
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -20,7 +21,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 
-/** Selects cache-affine ViT endpoints and owns temporary cold-key placements. */
+/** Least-inflight-media routing, optionally preceded by cache affinity. */
 @Component
 public class VitCacheSelector {
     private static final long MIN_PENDING_TTL_MS = 120_000;
@@ -59,37 +60,50 @@ public class VitCacheSelector {
     }
 
     public synchronized ServerStatus select(BalanceContext ctx, String group) {
+        RoutingConfig.VitConfig config = ctx.getConfig() == null
+                ? new RoutingConfig.VitConfig() : ctx.getConfig().getRouter().getRoles().getVit();
+        boolean affinity = config.isCacheAffinityEnabled();
         var keys = ctx.getRequest().getCacheAffinityKeys();
-        if (keys == null || keys.size() > 256
+        if (keys == null) { keys = List.of(); }
+        if (keys.size() > 256
                 || keys.stream().anyMatch(k -> k == null || k.isEmpty() || k.length() > 4096)) {
             return errorStatus(StrategyErrorType.INVALID_REQUEST);
         }
         keys = new ArrayList<>(new LinkedHashSet<>(keys));
-        Map<String, Candidate> candidates = directory.candidates(group, keys);
+        Map<String, Candidate> candidates = directory.candidates(group, affinity ? keys : List.of());
         long now = System.currentTimeMillis();
+        long nowNanos = System.nanoTime();
         if (now - pendingPrunedAt >= 5000) {
             pending.values().removeIf(p -> !p.matches(candidates.get(p.worker().getLogicalIpPort()), now));
             pendingPrunedAt = now;
         }
         List<Candidate> best = new ArrayList<>();
         MatchScore bestScore = null;
+        long bestLoad = Long.MAX_VALUE;
         for (Candidate candidate : candidates.values()) {
             if (group != null && !Objects.equals(group, candidate.worker().getGroup())) {
                 continue;
             }
             int pendingHits = 0;
-            for (String key : keys) {
+            for (String key : affinity ? keys : List.<String>of()) {
                 Placement placement = pending.get(key);
                 if (placement != null && placement.matches(candidate, now)) {
                     pendingHits++;
                 }
             }
-            MatchScore score = new MatchScore(candidate.hashHits(), candidate.embeddingHits(),
-                    candidate.gpuHits(), pendingHits);
+            MatchScore score = affinity
+                    ? new MatchScore(candidate.hashHits(), candidate.embeddingHits(), candidate.gpuHits(), pendingHits)
+                    : new MatchScore(0, 0, 0, 0);
+            WorkerStatus.VitLoad sample = candidate.worker().vitLoad();
+            long load = sample != null && nowNanos - sample.receivedNanos()
+                    <= java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(config.getLoadMaxAgeMs())
+                    ? sample.inflightInputs() : Long.MAX_VALUE;
             int comparison = bestScore == null ? 1 : score.compareTo(bestScore);
+            if (comparison == 0) { comparison = Long.compare(bestLoad, load); }
             if (comparison > 0) {
                 best.clear();
                 bestScore = score;
+                bestLoad = load;
             }
             if (comparison >= 0) {
                 best.add(candidate);
@@ -102,7 +116,7 @@ public class VitCacheSelector {
         long timeout = ctx.getRequest().getGenerateTimeout();
         long ttl = timeout <= 0 ? MIN_PENDING_TTL_MS
                 : Math.min(MAX_PENDING_TTL_MS, Math.max(MIN_PENDING_TTL_MS, timeout));
-        for (String key : keys) {
+        for (String key : affinity ? keys : List.<String>of()) {
             if (!selected.hashKeys().contains(key)) {
                 pending.put(key, new Placement(selected.worker(), selected.instance(), now + ttl));
             }
