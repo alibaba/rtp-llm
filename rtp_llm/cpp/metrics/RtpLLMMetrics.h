@@ -1076,6 +1076,8 @@ public:
     int64_t total_blocks                      = 0;
     int64_t reserve_blocks                    = 0;
     int64_t request_ref_blocks                = 0;
+    int64_t remote_connector_ref_blocks       = 0;
+    int64_t pd_connector_ref_blocks           = 0;
     int64_t block_cache_ref_blocks            = 0;
     int64_t load_ref_blocks                   = 0;
     int64_t eviction_target_ref_blocks        = 0;
@@ -1105,6 +1107,8 @@ public:
     kmonitor::MutableMetric* total_blocks_metric               = nullptr;
     kmonitor::MutableMetric* reserve_blocks_metric             = nullptr;
     kmonitor::MutableMetric* request_ref_blocks_metric         = nullptr;
+    kmonitor::MutableMetric* remote_connector_ref_blocks_metric = nullptr;
+    kmonitor::MutableMetric* pd_connector_ref_blocks_metric     = nullptr;
     kmonitor::MutableMetric* block_cache_ref_blocks_metric     = nullptr;
     kmonitor::MutableMetric* load_ref_blocks_metric            = nullptr;
     kmonitor::MutableMetric* eviction_target_ref_blocks_metric = nullptr;

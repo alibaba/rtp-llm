@@ -31,6 +31,8 @@ mergeCachePoolMetricsSnapshots(const std::vector<KVCachePoolMetricsSnapshot>&   
         report_snapshot.active_blocks              = snapshot.active_blocks;
         report_snapshot.reserve_blocks             = snapshot.reserve_blocks;
         report_snapshot.request_ref_blocks         = snapshot.request_ref_blocks;
+        report_snapshot.remote_connector_ref_blocks = snapshot.remote_connector_ref_blocks;
+        report_snapshot.pd_connector_ref_blocks     = snapshot.pd_connector_ref_blocks;
         report_snapshot.block_cache_ref_blocks     = snapshot.block_cache_ref_blocks;
         report_snapshot.load_ref_blocks            = snapshot.load_ref_blocks;
         report_snapshot.eviction_target_ref_blocks = snapshot.eviction_target_ref_blocks;
@@ -53,6 +55,8 @@ mergeCachePoolMetricsSnapshots(const std::vector<KVCachePoolMetricsSnapshot>&   
         report_snapshot.used_blocks                   = snapshot.used_blocks;
         report_snapshot.available_blocks              = snapshot.available_blocks;
         report_snapshot.request_ref_blocks            = snapshot.request_ref_blocks;
+        report_snapshot.remote_connector_ref_blocks   = snapshot.remote_connector_ref_blocks;
+        report_snapshot.pd_connector_ref_blocks       = snapshot.pd_connector_ref_blocks;
         report_snapshot.block_cache_ref_blocks        = snapshot.block_cache_ref_blocks;
         report_snapshot.load_ref_blocks               = snapshot.load_ref_blocks;
         report_snapshot.eviction_target_ref_blocks    = snapshot.eviction_target_ref_blocks;

@@ -436,6 +436,8 @@ std::vector<KVCachePoolMetricsSnapshot> CoordinatorCacheManager::poolMetricsSnap
         snapshot.available_blocks           = pool->availableBlocksNum();
         snapshot.reserve_blocks             = reserveBlocksForPoolMetrics(pool_index);
         snapshot.request_ref_blocks         = pool->referencedBlocksNum();
+        snapshot.remote_connector_ref_blocks = pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR);
+        snapshot.pd_connector_ref_blocks     = pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR);
         snapshot.block_cache_ref_blocks     = pool->referencedBlocksNum(BlockTreeRefType::CACHE);
         snapshot.load_ref_blocks            = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
         snapshot.eviction_target_ref_blocks = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
@@ -1020,9 +1022,14 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
         key_to_pos.emplace(resource_keys[i], i);
     }
 
+    const auto ref_type              = is_connector ? DeviceBlockRefType::PD_CONNECTOR : DeviceBlockRefType::REQUEST;
     auto selected_resource_ptr = new KVCacheResource(kvcache_resource);
-    auto deleter               = [self = shared_from_this()](KVCacheResource* resource) {
-        self->decrKVCacheRef(*resource);
+    auto       deleter               = [self = shared_from_this(), ref_type](KVCacheResource* resource) {
+        if (ref_type == DeviceBlockRefType::REQUEST) {
+            self->decrKVCacheRef(*resource);
+        } else {
+            self->decrKVCacheRef(*resource, ref_type);
+        }
         delete resource;
     };
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
@@ -1077,7 +1084,7 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
                 valid.push_back(b);
             }
         }
-        kv_cache_groups_[static_cast<size_t>(group_id)]->reference(valid);
+        kv_cache_groups_[static_cast<size_t>(group_id)]->reference(valid, ref_type);
         selected_resource->mutableBlockIds(groups[static_cast<size_t>(group_id)].tag)
             .assign(std::move(selected_blocks[static_cast<size_t>(group_id)]));
     }
@@ -1085,6 +1092,10 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
 }
 
 void CoordinatorCacheManager::decrKVCacheRef(const KVCacheResource& kvcache_resource) {
+    decrKVCacheRef(kvcache_resource, DeviceBlockRefType::REQUEST);
+}
+
+void CoordinatorCacheManager::decrKVCacheRef(const KVCacheResource& kvcache_resource, DeviceBlockRefType ref_type) {
     const auto& groups = config_.topology().groups();
     RTP_LLM_CHECK_WITH_INFO(kvcache_resource.groupNums() == config_.groupNums(),
                             "cache resource and coordinator group counts differ");
@@ -1094,7 +1105,7 @@ void CoordinatorCacheManager::decrKVCacheRef(const KVCacheResource& kvcache_reso
         blocks_by_group.push_back(&kvcache_resource.blocks(group.tag));
     }
     for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
-        kv_cache_groups_[group_id]->unreference(*blocks_by_group[group_id]);
+        kv_cache_groups_[group_id]->unreference(*blocks_by_group[group_id], ref_type);
     }
 }
 
@@ -1261,7 +1272,8 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
             }
             const auto block = dropped.back();
             if (!isNullBlockIdx(block) && block > 0 && dropped_block_counts[block] == 1 && !retained_blocks.count(block)
-                && !transferred.count(block)) {
+                && !transferred.count(block)
+                && group_block_pools_[static_cast<size_t>(group_id)]->isExclusiveRequestBlock(block)) {
                 replacements.push_back(block);
                 transferred[block] = 1;
             }
@@ -2230,7 +2242,8 @@ void CoordinatorCacheManager::logMallocFailure(const MallocInfo& malloc_info,
             "group_reserve_blocks=%zu required_available_blocks=%lld shortfall_blocks=%lld "
             "current_slots=%zu "
             "current_valid_blocks=%zu total_blocks=%zu free_blocks=%zu "
-            "request_ref_blocks=%zu block_cache_ref_blocks=%zu load_ref_blocks=%zu "
+            "request_ref_blocks=%zu remote_connector_ref_blocks=%zu pd_connector_ref_blocks=%zu "
+            "block_cache_ref_blocks=%zu load_ref_blocks=%zu "
             "layer_count=%zu block_bytes=%zu seq_size_per_block=%zu",
             malloc_info.request_id,
             gid,
@@ -2248,6 +2261,8 @@ void CoordinatorCacheManager::logMallocFailure(const MallocInfo& malloc_info,
             pool->totalBlocksNum(),
             free_blocks,
             pool->referencedBlocksNum(),
+            pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR),
+            pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR),
             pool->referencedBlocksNum(BlockTreeRefType::CACHE),
             pool->referencedBlocksNum(BlockTreeRefType::LOAD),
             config_.layerIdsForGroup(group.tag).size(),
