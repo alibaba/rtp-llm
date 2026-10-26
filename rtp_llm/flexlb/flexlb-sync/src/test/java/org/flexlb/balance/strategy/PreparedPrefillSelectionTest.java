@@ -52,13 +52,13 @@ class PreparedPrefillSelectionTest {
         config.getDispatcher().setType(DispatcherConfig.Type.NON_BATCH_V2);
         when(configService.loadBalanceConfig()).thenReturn(config);
         registry = StrategyTestSupport.endpointRegistry(configService);
-        queues = new PrefillQueueRegistry(configService);
+        queues = new PrefillQueueRegistry();
         first = publish("10.0.0.1", "10");
         second = publish("10.0.0.2", "15");
         when(cache.findMatchingEngines(any())).thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
         CostBasedPrefillStrategy strategy =
                 new CostBasedPrefillStrategy(new WorkerDirectory(registry), cache, mock(EngineHealthReporter.class));
-        picker = new PrefillPicker(mock(DefaultRouter.class), strategy, queues);
+        picker = new PrefillPicker(mock(DefaultRouter.class), strategy);
     }
 
     @AfterEach
@@ -140,7 +140,10 @@ class PreparedPrefillSelectionTest {
 
     private PrefillEndpoint publish(String ip, String expression) {
         config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator().setExpression(expression);
-        return (PrefillEndpoint) StrategyTestSupport.publishEndpoint(registry, RoleType.PREFILL, ip + ":8080",
+        PrefillEndpoint endpoint = (PrefillEndpoint) StrategyTestSupport.publishEndpoint(
+                registry, RoleType.PREFILL, ip + ":8080",
                 StrategyTestSupport.workerStatus(RoleType.PREFILL, "g", ip, 8080, 8081, true, 10_000L, 10_000L));
+        V2TestSupport.register(queues, endpoint);
+        return endpoint;
     }
 }

@@ -7,6 +7,7 @@ import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -39,7 +40,7 @@ public final class RunnerTestSupport {
                 delivery,
                 new NonBatchTtftEstimator(),
                 new PlacementAvailability(),
-                new QueueCapacity());
+                new QueueCapacity(), new PrefillQueueRegistry());
     }
 
     public static WorkerStatus discovered(

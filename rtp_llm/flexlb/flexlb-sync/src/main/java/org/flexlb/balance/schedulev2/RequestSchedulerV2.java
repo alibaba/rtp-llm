@@ -111,7 +111,7 @@ public class RequestSchedulerV2 {
         this.cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, mainLoopSignal, prefillQueues,
                 decodeQueue, decodeLoopSignal);
         this.mainQueueLoop = new MainQueueLoop(mainQueue, mainLoopSignal, cleanup, queueCapacity, endpointRegistry,
-                placementAvailability, configService, new PrefillPicker(router, prefillStrategy, prefillQueues),
+                placementAvailability, configService, new PrefillPicker(router, prefillStrategy),
                 prefillQueues, prefillRole, this::sendToPrefillQueue, prefillWorkers(), queueReporter);
         this.decodeQueueLoop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, placementAvailability,
                 decodeSelector, router, preemptionCoordinator, new EmptyDecodeFinder(workerDirectory), configService,

@@ -13,6 +13,7 @@ import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.EncoderStrategy;
@@ -75,7 +76,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 configService.loadBalanceConfig().getDispatcher().requiresGenerateInput()
                         ? new BatchTtftEstimator() : new NonBatchTtftEstimator(),
                 placementAvailability,
-                queueCapacity);
+                queueCapacity, new PrefillQueueRegistry());
         this.evictionManager = new EvictionManager(
                 requestReporter,
                 cancelChannel,

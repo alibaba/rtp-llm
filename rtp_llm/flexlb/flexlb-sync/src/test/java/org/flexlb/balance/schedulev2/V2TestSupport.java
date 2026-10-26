@@ -2,6 +2,8 @@ package org.flexlb.balance.schedulev2;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueue;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.balance.schedulev2.request.PrefillChoice;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.strategy.SelectedRole;
@@ -49,6 +51,7 @@ public final class V2TestSupport {
         when(endpoint.ipPort()).thenReturn(ipPort);
         when(endpoint.getStatus()).thenReturn(status);
         when(status.getRole()).thenReturn(RoleType.PREFILL);
+        when(endpoint.prefillQueue()).thenReturn(new PrefillQueue(endpoint, false));
         return endpoint;
     }
 
@@ -69,6 +72,14 @@ public final class V2TestSupport {
                 new WorkerStatus.CommittedWorkerStatus(engine, new WorkerStatus.AppliedStatusCursor(statusVersion, 0L));
         WorkerStatus status = endpoint.getStatus();
         when(status.committedWorkerStatus()).thenReturn(committed);
+    }
+
+    /**
+     * 模拟节点完成首次状态初始化并发布到选路目录。
+     */
+    public static void register(PrefillQueueRegistry queues, PrefillEndpoint endpoint) {
+        endpoint.prefillQueue().updateFromEngine();
+        queues.start(endpoint);
     }
 
     /**

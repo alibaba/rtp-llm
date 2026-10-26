@@ -629,7 +629,8 @@ class PrefillQueueRequestCapacityTest {
         DeliveryStrategy delivery = mock(DeliveryStrategy.class, delegatesTo(parked));
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         PrefillEndpoint endpoint = new PrefillEndpoint(status, configSupplier, delivery, new NonBatchTtftEstimator(), runtime.events(),
-                reporter, availability, registry, queueCapacity);
+                reporter, availability, registry, queueCapacity,
+                new org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry());
         endpoint.startGeneration();
         return new Fixture(endpoint, delivery, parked, runtime, queueCapacity, reporter);
     }

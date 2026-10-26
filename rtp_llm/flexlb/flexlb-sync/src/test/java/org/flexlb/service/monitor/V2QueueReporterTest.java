@@ -37,9 +37,10 @@ class V2QueueReporterTest {
     private final FlexlbConfig config = SchedulingTestConfig.newConfig();
     private final RequestTable table = new RequestTable();
     private final ConfigService service = mock(ConfigService.class);
-    private final PrefillQueueRegistry prefills = new PrefillQueueRegistry(service);
+    private final PrefillQueueRegistry prefills = new PrefillQueueRegistry();
 
     V2QueueReporterTest() {
+        config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH_V2);
         when(service.loadBalanceConfig()).thenReturn(config);
     }
 
@@ -85,6 +86,7 @@ class V2QueueReporterTest {
         Request prefill = add("2");
         V2TestSupport.choose(prefill, V2TestSupport.prefillEndpoint("p1:8000"), 0L, 10L);
         prefill.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
+        V2TestSupport.register(prefills, prefill.prefillChoice().endpoint());
         prefills.addWaiting(prefill);
         Request decode = add("3");
         decode.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);

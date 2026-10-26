@@ -3,7 +3,6 @@ package org.flexlb.balance.schedulev2.prefill;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.schedulev2.request.PrefillChoice;
 import org.flexlb.balance.schedulev2.request.Request;
-import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.springframework.stereotype.Component;
 
@@ -15,27 +14,49 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
 /**
- * NON_BATCH_V2 里所有 Prefill 队列，按 {@link PrefillEndpoint} 对象查找。
+ * 按 {@link PrefillEndpoint} 对象管理已发布节点的 Prefill 队列。
  * PrefillEndpoint 没有重写 equals，同一地址重新上线后是另一个对象，所以也是另一个队列。
  * <p>
- * 只有 NON_BATCH_V2 会往里加队列，其他模式下一直是空的。
+ * NON_BATCH_V2 调度器提供循环工厂后，启动各节点的队列线程。
  */
 @Component
 public class PrefillQueueRegistry {
 
     private final ConcurrentHashMap<PrefillEndpoint, PrefillQueue> queues = new ConcurrentHashMap<>();
-    private final ConfigService configService;
     private final Map<PrefillEndpoint, PrefillQueueLoop> loops = new HashMap<>();
     private Function<PrefillQueue, PrefillQueueLoop> loopFactory;
     private boolean closed;
 
-    public PrefillQueueRegistry(ConfigService configService) {
-        this.configService = configService;
+    /**
+     * 节点已经可选路，可以启动其队列线程。
+     */
+    public synchronized void start(PrefillEndpoint endpoint) {
+        PrefillQueue queue = endpoint.prefillQueue();
+        if (closed || endpoint.isRetired()) {
+            return;
+        }
+        queues.put(endpoint, queue);
+        startLoop(queue);
     }
 
     /**
-     * 把请求加进它选中的 Prefill 的队列，队列不存在时创建。
-     * 和 {@link #remove(PrefillQueue)} 互斥：要么加进将被移除的队列、由移除方处理，要么加进新建的队列。
+     * 已启动的循环负责退回等待请求；未启动的队列直接移除。
+     */
+    public synchronized void retire(PrefillEndpoint endpoint) {
+        PrefillQueue queue = queues.get(endpoint);
+        if (queue == null) {
+            return;
+        }
+        if (loops.containsKey(endpoint)) {
+            queue.signal().wake();
+        } else {
+            queues.remove(endpoint, queue);
+        }
+    }
+
+    /**
+     * 把请求加进它选中的 Prefill 的已注册队列。
+     * 和节点队列的移除互斥，已退役节点拒绝入队。
      */
     public synchronized void addWaiting(Request request) {
         if (closed) {
@@ -43,14 +64,12 @@ public class PrefillQueueRegistry {
             return;
         }
         PrefillChoice choice = request.prefillChoice();
-        queues.compute(choice.endpoint(), (endpoint, queue) -> {
-            PrefillQueue target = queue == null
-                    ? new PrefillQueue(endpoint, configService.loadBalanceConfig().isPriorityOrdering())
-                    : queue;
-            target.addWaiting(request);
-            return target;
-        });
-        startLoop(queues.get(choice.endpoint()));
+        PrefillQueue queue = find(choice.endpoint());
+        if (queue == null) {
+            request.fail(StrategyErrorType.DISPATCH_FAILED, "prefill endpoint queue has retired");
+            return;
+        }
+        queue.addWaiting(request);
     }
 
     /**
@@ -64,7 +83,7 @@ public class PrefillQueueRegistry {
     }
 
     private void startLoop(PrefillQueue queue) {
-        if (closed || loopFactory == null || loops.containsKey(queue.endpoint())) {
+        if (closed || loopFactory == null || queue.endpoint().isRetired() || loops.containsKey(queue.endpoint())) {
             return;
         }
         PrefillQueueLoop loop = loopFactory.apply(queue);
@@ -82,10 +101,10 @@ public class PrefillQueueRegistry {
     }
 
     /**
-     * 这台 Prefill 的队列，没有时返回 null。
+     * 读取节点持有的队列，已退役节点返回 null。
      */
     public PrefillQueue find(PrefillEndpoint endpoint) {
-        return queues.get(endpoint);
+        return endpoint.isRetired() ? null : endpoint.prefillQueue();
     }
 
     /**
@@ -96,7 +115,7 @@ public class PrefillQueueRegistry {
         if (choice == null) {
             return null;
         }
-        return queues.get(choice.endpoint());
+        return find(choice.endpoint());
     }
 
     public List<PrefillQueue> list() {

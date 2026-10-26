@@ -58,7 +58,7 @@ public final class EndpointTestSupport {
                 ? new BatchTtftEstimator() : new NonBatchTtftEstimator();
         return new PrefillEndpoint(status, configSupplier, deliveryStrategy, ttftEstimator,
                 endpointEvents, reporter, availability, registry,
-                new QueueCapacity());
+                new QueueCapacity(), new org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry());
     }
 
     static EndpointEventHandler noopEventSink() {

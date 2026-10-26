@@ -20,6 +20,7 @@ import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.CacheStatus;
@@ -56,7 +57,7 @@ final class StrategyTestSupport {
                 delivery,
                 new NonBatchTtftEstimator(),
                 new PlacementAvailability(),
-                new QueueCapacity());
+                new QueueCapacity(), new PrefillQueueRegistry());
     }
 
     static WorkerStatus workerStatus(

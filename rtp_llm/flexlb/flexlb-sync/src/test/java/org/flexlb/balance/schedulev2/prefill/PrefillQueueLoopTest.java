@@ -59,11 +59,13 @@ class PrefillQueueLoopTest {
     private PrefillQueueLoop loop;
 
     PrefillQueueLoopTest() {
+        config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH_V2);
         when(configService.loadBalanceConfig()).thenReturn(config);
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
         when(endpointRegistry.getEndpointCount(RoleType.PREFILL)).thenReturn(1);
         when(endpointRegistry.get(RoleType.PREFILL, "p1:8000")).thenReturn(endpoint);
-        queues = new PrefillQueueRegistry(configService);
+        queues = new PrefillQueueRegistry();
+        V2TestSupport.register(queues, endpoint);
         cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, mainLoopSignal, queues,
                 new DecodeQueue(false), new LoopSignal());
     }
@@ -179,6 +181,7 @@ class PrefillQueueLoopTest {
     void waitingRequestsGoBackToMainQueueWhenEndpointIsGone() {
         Request request = addWaiting("1");
         when(endpointRegistry.get(RoleType.PREFILL, "p1:8000")).thenReturn(null);
+        when(endpoint.isRetired()).thenReturn(true);
 
         assertFalse(loop.runOnce());
 
@@ -196,6 +199,7 @@ class PrefillQueueLoopTest {
         Request request = addWaiting("1");
         PrefillEndpoint restarted = V2TestSupport.prefillEndpoint("p1:8000");
         when(endpointRegistry.get(RoleType.PREFILL, "p1:8000")).thenReturn(restarted);
+        when(endpoint.isRetired()).thenReturn(true);
 
         assertFalse(loop.runOnce());
 
@@ -353,15 +357,15 @@ class PrefillQueueLoopTest {
     void eachPrefillHasItsOwnThreadAndSlowMachineDoesNotBlockOthers() throws Exception {
         PrefillEndpoint other = V2TestSupport.prefillEndpoint("p2:8000");
         when(endpointRegistry.get(RoleType.PREFILL, "p2:8000")).thenReturn(other);
+        V2TestSupport.register(queues, other);
         CountDownLatch firstReadingStatus = new CountDownLatch(1);
         CountDownLatch finishStatus = new CountDownLatch(1);
         CompletableFuture<Request> secondSent = new CompletableFuture<>();
-        var status = endpoint.getStatus();
         doAnswer(call -> {
             firstReadingStatus.countDown();
             assertTrue(finishStatus.await(5, TimeUnit.SECONDS));
-            return null;
-        }).when(status).committedWorkerStatus();
+            return endpoint;
+        }).when(endpointRegistry).get(RoleType.PREFILL, "p1:8000");
         queues.start(queue -> new PrefillQueueLoop(queue, queues, cleanup, mainQueue, endpointRegistry, configService,
                 reporter, request -> {
                     if (request.prefillChoice().endpoint() == other) {

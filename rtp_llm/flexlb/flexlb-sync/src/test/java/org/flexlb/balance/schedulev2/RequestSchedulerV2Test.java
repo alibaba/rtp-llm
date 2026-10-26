@@ -175,7 +175,7 @@ class RequestSchedulerV2Test {
         when(modelMetaConfig.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
         return new RequestSchedulerV2(configService, queueCapacity, mock(EndpointRegistry.class),
                 new PlacementAvailability(), mock(DefaultRouter.class), mock(CostBasedPrefillStrategy.class),
-                mock(DecodeSelector.class), new PrefillQueueRegistry(configService), modelMetaConfig,
+                mock(DecodeSelector.class), new PrefillQueueRegistry(), modelMetaConfig,
                 mock(DecodePreemptionCoordinator.class), mock(RequestSchedulerReporter.class),
                 mock(WorkerDirectory.class), new DecodeReservations(), mock(V2QueueReporter.class));
     }

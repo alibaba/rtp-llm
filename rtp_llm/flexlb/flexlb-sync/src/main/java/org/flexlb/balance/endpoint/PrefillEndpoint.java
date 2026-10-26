@@ -27,6 +27,8 @@ import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueue;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -88,6 +90,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
     @Getter
     private final boolean engineSubQueueMode;
     private final WorkerBatcher workerBatcher;
+    private final PrefillQueue prefillQueue;
+    private final PrefillQueueRegistry prefillQueueRegistry;
     private final PrefillState prefillState;
     private final EndpointEventHandler endpointEvents;
     private final BatchSchedulerReporter reporter;
@@ -103,7 +107,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     BatchSchedulerReporter reporter,
                     PlacementAvailability placementAvailability,
                     EndpointRegistry endpointRegistry,
-                    QueueCapacity queueCapacity) {
+                    QueueCapacity queueCapacity,
+                    PrefillQueueRegistry prefillQueueRegistry) {
         super(status);
         this.configSupplier = configSupplier;
         this.reporter = reporter;
@@ -111,6 +116,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.placementAvailability = placementAvailability;
         this.endpointRegistry = endpointRegistry;
         this.queueCapacity = queueCapacity;
+        this.prefillQueueRegistry = prefillQueueRegistry;
         FlexlbConfig startupConfig = configSupplier.get();
         this.engineSubQueueMode = QueueCapacity.isEngineSubQueueMode(startupConfig);
         this.predictor = createPredictor(startupConfig);
@@ -118,11 +124,25 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 status.getLogicalIpPort(), this, configSupplier.get(),
                 deliveryStrategy, ttftEstimator, endpointEvents, queueCapacity);
         this.prefillState = workerBatcher.ownedState();
+        this.prefillQueue = new PrefillQueue(this, startupConfig.isPriorityOrdering());
+    }
+
+    /**
+     * 由这个节点创建并持有的 Prefill 队列。
+     */
+    public PrefillQueue prefillQueue() {
+        return prefillQueue;
     }
 
     /** Start the attached generation exactly once before routing publication. */
     void startGeneration() {
         workerBatcher.start();
+    }
+
+    @Override
+    void onPublished() {
+        prefillQueue.updateFromEngine();
+        prefillQueueRegistry.start(this);
     }
 
     /** Capture the canonical queue/work inputs for one pure route estimate. */
@@ -177,6 +197,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     @Override
     protected void closeEndpoint() {
+        prefillQueueRegistry.retire(this);
         // A self-await invariant escapes here before ledger mutation/event
         // publication. Ordinary stop cleanup failures are returned only after
         // the exact worker has exited, and are aggregated below.

@@ -5,6 +5,7 @@ import org.flexlb.balance.estimate.PrefillTtftEstimator;
 import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -129,6 +130,7 @@ public class EndpointRegistry {
     private final PrefillTtftEstimator ttftEstimator;
     private final PlacementAvailability placementAvailability;
     private final QueueCapacity queueCapacity;
+    private final PrefillQueueRegistry prefillQueueRegistry;
     private final Object lifecycleGate = new Object();
     private RegistryPhase registryPhase = RegistryPhase.OPEN;
     private int inflightPublications;
@@ -161,7 +163,8 @@ public class EndpointRegistry {
                             DeliveryStrategy deliveryStrategy,
                             PrefillTtftEstimator ttftEstimator,
                             PlacementAvailability placementAvailability,
-                            QueueCapacity queueCapacity) {
+                            QueueCapacity queueCapacity,
+                            PrefillQueueRegistry prefillQueueRegistry) {
         this.configService = configService;
         this.endpointEvents = endpointEvents;
         this.reporter = reporter;
@@ -169,6 +172,7 @@ public class EndpointRegistry {
         this.ttftEstimator = ttftEstimator;
         this.placementAvailability = placementAvailability;
         this.queueCapacity = queueCapacity;
+        this.prefillQueueRegistry = prefillQueueRegistry;
     }
 
     public WorkerEndpoint get(RoleType roleType, String ipPort) {
@@ -432,6 +436,7 @@ public class EndpointRegistry {
                 }
                 return candidate;
             });
+            candidate.onPublished();
             signalPublishedEndpoint(candidate);
             return publication;
         } catch (Throwable publicationFailure) {
@@ -741,7 +746,8 @@ public class EndpointRegistry {
                     reporter,
                     placementAvailability,
                     this,
-                    queueCapacity);
+                    queueCapacity,
+                    prefillQueueRegistry);
             case DECODE -> new DecodeEndpoint(
                     status, endpointEvents, placementAvailability);
             case ENCODER -> new EncoderEndpoint(status, endpointEvents);

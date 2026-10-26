@@ -11,6 +11,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.estimate.BatchTtftEstimator;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.EncoderStrategy;
@@ -92,7 +93,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 dispatcher.getType() == DispatcherConfig.Type.BATCH
                         ? new BatchTtftEstimator() : new NonBatchTtftEstimator(),
                 placementAvailability,
-                queueCapacity);
+                queueCapacity, new PrefillQueueRegistry());
         this.router = new BindingRouter(new org.flexlb.sync.status.WorkerDirectory(registry), configService, lifecycle);
         var cancelChannel = org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
         var preemption = new org.flexlb.balance.eviction.DecodePreemptionCoordinator(cancelChannel, lifecycle, requestReporter);

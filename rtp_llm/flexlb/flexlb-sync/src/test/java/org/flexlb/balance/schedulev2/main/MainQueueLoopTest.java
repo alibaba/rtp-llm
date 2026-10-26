@@ -73,10 +73,12 @@ class MainQueueLoopTest {
     private final MainQueueLoop loop;
 
     MainQueueLoopTest() {
+        config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH_V2);
         when(configService.loadBalanceConfig()).thenReturn(config);
         when(picker.prepare(any(), any(), any())).thenReturn(inputs);
         when(picker.inputsAreCurrent(any(), any(), any())).thenReturn(true);
-        prefillQueues = new PrefillQueueRegistry(configService);
+        prefillQueues = new PrefillQueueRegistry();
+        V2TestSupport.register(prefillQueues, endpoint);
         cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, loopSignal, prefillQueues,
                 new DecodeQueue(false), new LoopSignal());
         when(endpointRegistry.getEndpointCount(RoleType.PREFILL)).thenReturn(1);

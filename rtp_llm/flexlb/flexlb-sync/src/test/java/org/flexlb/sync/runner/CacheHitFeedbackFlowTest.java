@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.QueueCapacity;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -103,7 +104,7 @@ class CacheHitFeedbackFlowTest {
                         mock(org.flexlb.balance.delivery.DeliveryMetrics.class)),
                 new org.flexlb.balance.estimate.NonBatchTtftEstimator(),
                 new org.flexlb.balance.scheduler.PlacementAvailability(),
-                new QueueCapacity());
+                new QueueCapacity(), new PrefillQueueRegistry());
         directory = new WorkerDirectory(registry);
         worker = RunnerTestSupport.discovered(RoleType.PREFILL, "group", "10.0.0.1", 8080, 8081, "test");
         directory.currentOrDiscover(RoleType.PREFILL, worker.getLogicalIpPort(), () -> worker);

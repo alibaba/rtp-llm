@@ -11,6 +11,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.estimate.BatchTtftEstimator;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.EncoderStrategy;
@@ -89,7 +90,7 @@ class PdfusionSchedulingTest {
                 : new NonBatchDeliveryStrategy(lifecycle, new DeliveryMetrics(reporter));
         EndpointRegistry endpoints = new EndpointRegistry(service, new EndpointEventHandler(lifecycle), reporter,
                 delivery, batch ? new BatchTtftEstimator() : new NonBatchTtftEstimator(),
-                availability, queueCapacity);
+                availability, queueCapacity, new PrefillQueueRegistry());
         WorkerStatus worker = WorkerStatus.createDiscovered(RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test");
         WorkerStatusResponse status = new WorkerStatusResponse();
         status.setRole(RoleType.PDFUSION);

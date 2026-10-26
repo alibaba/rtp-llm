@@ -22,16 +22,14 @@ public final class QueuePrefillLoadProvider implements PrefillLoadProvider {
     private static final Comparator<GroupPlanner.Item> FIFO_ORDER =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq).thenComparing(GroupPlanner.Item::requestId);
 
-    private final PrefillQueueRegistry queues;
     private final ConfigService configService;
 
-    public QueuePrefillLoadProvider(PrefillQueueRegistry queues, ConfigService configService) {
-        this.queues = queues;
+    public QueuePrefillLoadProvider(ConfigService configService) {
         this.configService = configService;
     }
 
     /**
-     * 这台 Prefill 还没有队列时返回空视图。NON_BATCH_V2 每次只 dispatch 一个请求，所以每组最多一个请求。
+     * 读取节点持有的队列，最终选路通过节点 hold 检查其有效性。
      */
     @Override
     public PrefillTtftEstimate.LoadView loadView(PrefillEndpoint endpoint) {
@@ -40,10 +38,6 @@ public final class QueuePrefillLoadProvider implements PrefillLoadProvider {
         GroupPlanner.Constraints constraints =
                 new GroupPlanner.Constraints(1, capacity.batchTokenCapacity(), capacity.batchKvCapacity(), 0L, 0L);
         Comparator<GroupPlanner.Item> itemOrder = config.isPriorityOrdering() ? PRIORITY_ORDER : FIFO_ORDER;
-        PrefillQueue queue = queues.find(endpoint);
-        if (queue == null) {
-            queue = new PrefillQueue(endpoint, config.isPriorityOrdering());
-        }
-        return queue.loadView(System.currentTimeMillis(), itemOrder, constraints);
+        return endpoint.prefillQueue().loadView(System.currentTimeMillis(), itemOrder, constraints);
     }
 }

@@ -103,7 +103,7 @@ class DecodeQueueLoopTest {
         LoopSignal mainLoopSignal = new LoopSignal();
         mainQueue = new MainQueue(queueCapacity, mainLoopSignal, false, mock(V2QueueReporter.class));
         cleanup = new RequestCleanup(requestTable, mainQueue, queueCapacity, mainLoopSignal,
-                new PrefillQueueRegistry(mock(ConfigService.class)), decodeQueue, decodeLoopSignal);
+                new PrefillQueueRegistry(), decodeQueue, decodeLoopSignal);
         when(selector.select(any(), any(), any())).thenAnswer(invocation -> success());
         loop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, new PlacementAvailability(), selector,
                 router,

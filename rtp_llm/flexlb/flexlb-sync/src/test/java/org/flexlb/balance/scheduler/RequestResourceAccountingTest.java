@@ -10,6 +10,7 @@ import org.flexlb.balance.endpoint.prefill.CommitResult;
 import org.flexlb.balance.endpoint.prefill.single.SingleReservation;
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -265,7 +266,8 @@ class RequestResourceAccountingTest {
             var eventHandler = new EndpointEventHandler(requests);
             var queueCapacity = new QueueCapacity();
             var endpoints = new EndpointRegistry(service, eventHandler, reporter, EndpointTestSupport.parkedDelivery(),
-                    new NonBatchTtftEstimator(), new PlacementAvailability(), queueCapacity);
+                    new NonBatchTtftEstimator(), new PlacementAvailability(), queueCapacity,
+                    new PrefillQueueRegistry());
             runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter,
                     service, queueCapacity, new ModelMetaConfig());
             var worker = WorkerStatus.createDiscovered(RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test");

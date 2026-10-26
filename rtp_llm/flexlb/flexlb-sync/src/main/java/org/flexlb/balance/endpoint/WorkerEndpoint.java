@@ -46,6 +46,12 @@ public class WorkerEndpoint {
                 this::continueRetirementAfterHandoff);
     }
 
+    /**
+     * 节点进入选路目录后启动其运行任务。
+     */
+    void onPublished() {
+    }
+
     // ==================== identity (delegated to status) ====================
 
     /**

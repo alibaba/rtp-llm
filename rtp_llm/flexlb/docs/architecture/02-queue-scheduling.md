@@ -40,6 +40,9 @@ MainQueue -> 每台机器一个 PrefillQueue -> 共用 DecodeQueue -> publish(Pr
      +-> 并行查缓存、预测自身耗时
 ```
 
+各模式的 `PrefillEndpoint` 在构造时创建并持有自己的 `PrefillQueue`。节点发布后读取一次缓存状态并登记队列，
+NON_BATCH_V2 调度器提供循环工厂后启动线程。后续状态沿用队列循环读取缓存的方式更新；节点退役时清理对应队列。
+
 - 三段都按 `RequestOrder` 排序：PRIORITY 先按优先级降序，同优先级按进入主队列的顺序号升序；
   FIFO 只按顺序号。底层用有序集合，抢占时倒序遍历，从最低优先级中最晚入队的请求开始找。
 - `maxQueuedRequests` 统计三段里所有尚未发布的请求，包括已经 reserve、正在等待 Decode permit 的请求。

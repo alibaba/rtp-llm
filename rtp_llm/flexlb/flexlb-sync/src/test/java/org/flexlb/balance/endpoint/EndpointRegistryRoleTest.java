@@ -1,9 +1,12 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.estimate.NonBatchTtftEstimator;
+import org.flexlb.balance.scheduler.EndpointEventHandler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -12,6 +15,8 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.Mockito;
 
 import java.util.List;
@@ -44,12 +49,69 @@ class EndpointRegistryRoleTest {
                 EndpointTestSupport.routeStrategy(requestRuntime),
                 new NonBatchTtftEstimator(),
                 new PlacementAvailability(),
-                new QueueCapacity());
+                new QueueCapacity(), new PrefillQueueRegistry());
     }
 
     @AfterEach
     void tearDown() {
         registry.close();
+    }
+
+    @ParameterizedTest
+    @EnumSource(DispatcherConfig.Type.class)
+    void endpointOwnsInitializedQueueBeforeLoopStarts(DispatcherConfig.Type dispatcherType) {
+        ConfigService service = Mockito.mock(ConfigService.class);
+        var config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        config.getDispatcher().setType(dispatcherType);
+        Mockito.when(service.loadBalanceConfig()).thenReturn(config);
+        var queues = Mockito.spy(new PrefillQueueRegistry());
+        var runtime = EndpointTestSupport.requestRuntime();
+        var availability = Mockito.mock(PlacementAvailability.class);
+        var events = new EndpointEventHandler(runtime.requests());
+        var localRegistry = new EndpointRegistry(service, events, Mockito.mock(BatchSchedulerReporter.class),
+                EndpointTestSupport.routeStrategy(runtime), new NonBatchTtftEstimator(), availability,
+                new QueueCapacity(), queues);
+        String address = "127.0.0.1:8001";
+        Mockito.doAnswer(call -> {
+            PrefillEndpoint endpoint = call.getArgument(0);
+            assertSame(endpoint, localRegistry.get(RoleType.PREFILL, address));
+            assertNotNull(endpoint.prefillQueue());
+            assertSame(endpoint.prefillQueue(), queues.find(endpoint));
+            assertEquals(1L, endpoint.prefillQueue().inflightCount());
+            call.callRealMethod();
+            return null;
+        }).when(queues).start(Mockito.any(PrefillEndpoint.class));
+        Mockito.doAnswer(call -> {
+            var endpoint = (PrefillEndpoint) localRegistry.get(RoleType.PREFILL, address);
+            assertNotNull(queues.find(endpoint));
+            return null;
+        }).when(availability).topologyChanged(Mockito.eq(RoleType.PREFILL), Mockito.any(), Mockito.eq(address));
+        try {
+            TaskInfo task = new TaskInfo();
+            task.setRequestId("1");
+            task.setPhase(org.flexlb.enums.TaskPhase.RUNNING);
+            WorkerStatusResponse firstStatus = new WorkerStatusResponse();
+            firstStatus.setRunningTaskInfo(Map.of("1", task));
+            var endpoint = (PrefillEndpoint) EndpointTestSupport.publishEndpoint(localRegistry,
+                    RoleType.PREFILL, address, status(RoleType.PREFILL, 8001), firstStatus);
+            assertEquals(0, queues.find(endpoint).waitingCount());
+            Mockito.verify(queues).start(endpoint);
+
+            var originalQueue = endpoint.prefillQueue();
+            WorkerStatusResponse nextStatus = new WorkerStatusResponse();
+            nextStatus.setRunningTaskInfo(Map.of());
+            EndpointTestSupport.applyStatus(endpoint, nextStatus).run();
+            assertSame(originalQueue, endpoint.prefillQueue());
+            assertEquals(1L, originalQueue.inflightCount());
+            originalQueue.updateFromEngine();
+            assertEquals(0L, originalQueue.inflightCount());
+
+            endpoint.close();
+            assertNull(queues.find(endpoint));
+        } finally {
+            localRegistry.close();
+            queues.close();
+        }
     }
 
     @Test

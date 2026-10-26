@@ -4,6 +4,7 @@ import org.flexlb.balance.estimate.NonBatchTtftEstimator;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueCapacity;
 import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -37,7 +38,7 @@ class EndpointRetirementLinearizationTest {
                 EndpointTestSupport.routeStrategy(requestRuntime),
                 new NonBatchTtftEstimator(),
                 new PlacementAvailability(),
-                new QueueCapacity());
+                new QueueCapacity(), new PrefillQueueRegistry());
         String prefillAddress = "127.0.0.1:8100";
         String decodeAddress = "127.0.0.1:8200";
         WorkerStatus prefillStatus = status(RoleType.PREFILL, 8100);
