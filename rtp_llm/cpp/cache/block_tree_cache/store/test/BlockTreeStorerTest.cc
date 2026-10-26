@@ -951,9 +951,12 @@ TEST(BlockTreeStorerTest, StoreKeepsDeviceSourceAliveAfterRequestRelease) {
         EXPECT_EQ(env.device_pools[0]->refCount(device_block), 1u);
         EXPECT_EQ(env.device_pools[0]->treeRefCount(device_block), device_cache_on ? 2u : 1u);
         EXPECT_EQ(candidateCountForTier(*env.cache, Tier::DEVICE), device_cache_on ? 1u : 0u)
-            << "a store hold must not make a cached source ineligible for eviction";
+            << "a store hold must preserve candidate membership";
         if (device_cache_on) {
-            EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*env.cache, 1, Tier::DEVICE), 1);
+            EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*env.cache, 1, Tier::DEVICE), 0);
+            EXPECT_EQ(env.device_pools[0]->treeRefCount(device_block), 2u);
+            EXPECT_EQ(candidateCountForTier(*env.cache, Tier::DEVICE), 1u);
+            EXPECT_EQ(env.cache->tree()->findNode({100}).size(), 1u);
         }
 
         barrier->release();
@@ -961,19 +964,20 @@ TEST(BlockTreeStorerTest, StoreKeepsDeviceSourceAliveAfterRequestRelease) {
 
         EXPECT_EQ(env.storeRefCount(), 0u);
         if (device_cache_on) {
+            EXPECT_TRUE(env.device_pools[0]->isAllocated(device_block));
+            EXPECT_EQ(env.device_pools[0]->treeRefCount(device_block), 1u);
+            EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before - 1);
+            const std::vector<TreeNode*> path = env.cache->tree()->findNode({100});
+            ASSERT_EQ(path.size(), 1u);
+            EXPECT_TRUE(path.back()->group_set_resources[0].hasTier(Tier::DEVICE));
+            EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before)
+                << "STORE must not replace the existing DEVICE cache entry";
+
+            EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*env.cache, 1, Tier::DEVICE), 1);
             EXPECT_FALSE(env.device_pools[0]->isAllocated(device_block));
             EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before);
-            const std::vector<TreeNode*> path = env.cache->tree()->findNode({100});
-            if (path.empty()) {
-                EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before)
-                    << "eviction settled before STORE publication";
-            } else {
-                const GroupSetResource& resource = path.back()->group_set_resources[0];
-                EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
-                EXPECT_TRUE(resource.hasTier(Tier::HOST));
-                EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before - 1)
-                    << "STORE publication won the settlement race";
-            }
+            EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
+            EXPECT_EQ(candidateCountForTier(*env.cache, Tier::DEVICE), 0u);
         } else {
             ASSERT_EQ(env.cache->tree()->findNode({100}).size(), 1u);
             EXPECT_FALSE(env.device_pools[0]->isAllocated(device_block));

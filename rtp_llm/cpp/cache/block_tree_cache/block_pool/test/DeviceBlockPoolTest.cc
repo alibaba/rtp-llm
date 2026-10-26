@@ -299,6 +299,28 @@ TEST(DeviceBlockPoolTest, RequestAndCacheRefsUpdateAvailableIndependently) {
     EXPECT_EQ(pool.availableBlocksNum(), total_blocks);
 }
 
+TEST(DeviceBlockPoolTest, HasRequestRefDistinguishesRequestAndTreeReferences) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+    EXPECT_FALSE(pool.hasRequestRef(*block));
+    pool.incTreeRef(*block, BlockTreeRefType::CACHE);
+    pool.incTreeRef(*block, BlockTreeRefType::STORE);
+    EXPECT_EQ(pool.refCount(*block), 1u);
+    EXPECT_FALSE(pool.hasRequestRef(*block));
+    pool.incRef(*block);
+    pool.incRef(*block);
+    EXPECT_TRUE(pool.hasRequestRef(*block));
+    pool.decRef(*block);
+    EXPECT_TRUE(pool.hasRequestRef(*block));
+    pool.decRef(*block);
+    EXPECT_FALSE(pool.hasRequestRef(*block));
+    pool.decTreeRef(*block, BlockTreeRefType::STORE);
+    pool.decTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_FALSE(pool.isAllocated(*block));
+}
+
 TEST(DeviceBlockPoolTest, ReclaimCacheBlockRequiresOneCacheRefAndNoOtherHolders) {
     DeviceBlockPool pool(makeConfig());
     ASSERT_TRUE(pool.init());
