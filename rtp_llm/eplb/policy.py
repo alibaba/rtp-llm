@@ -71,12 +71,16 @@ def rebalance_experts_global(
     Physical experts cover all logical experts and fill equally sized ranks.
     The caller guarantees count values; checking them here would synchronize
     CUDA. Inverse-map replicas retain their original allocation order.
+
+    Contiguous NVIDIA CUDA int32 histories with 1, 2 or 4 steps and the FP32
+    default dtype use fused planning. Other inputs keep the Torch algorithm:
+    its division dtype and reduction order are part of the placement contract.
     """
     if tokens_per_expert.ndim != 3 or any(
         size == 0 for size in tokens_per_expert.shape
     ):
         raise ValueError("EPLB requires nonempty history [step, layer, logical]")
-    _, num_moe_layers, num_logical_experts = tokens_per_expert.shape
+    num_logical_experts = tokens_per_expert.shape[2]
     if (
         num_physical_experts < num_logical_experts
         or num_local_physical_experts <= 0
@@ -85,6 +89,33 @@ def rebalance_experts_global(
         raise ValueError(
             "EPLB physical experts must cover logical experts and fill ranks"
         )
+    if (
+        tokens_per_expert.is_cuda
+        and tokens_per_expert.dtype == torch.int32
+        and tokens_per_expert.shape[0] in (1, 2, 4)
+        and tokens_per_expert.is_contiguous()
+        and torch.get_default_dtype() == torch.float32
+    ):
+        from rtp_llm.device.device_type import is_cuda
+
+        if is_cuda():
+            from rtp_llm.eplb.policy_fused import rebalance_experts_global_fused
+
+            return rebalance_experts_global_fused(
+                tokens_per_expert, num_physical_experts, num_local_physical_experts
+            )
+    return _rebalance_experts_global_reference(
+        tokens_per_expert, num_physical_experts, num_local_physical_experts
+    )
+
+
+def _rebalance_experts_global_reference(
+    tokens_per_expert: torch.Tensor,
+    num_physical_experts: int,
+    num_local_physical_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Torch implementation for other devices, dtypes, layouts and windows."""
+    _, num_moe_layers, num_logical_experts = tokens_per_expert.shape
     num_redundant_experts = num_physical_experts - num_logical_experts
     device = tokens_per_expert.device
 

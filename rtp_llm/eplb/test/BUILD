@@ -25,6 +25,23 @@ py_test(
     deps = ["//rtp_llm:eplb", ":torch"],
 )
 
+py_test(
+    name = "policy_fused_test",
+    srcs = ["policy_fused_test.py", "policy_reference.py"],
+    data = ["policy_replay.json"],
+    deps = ["//rtp_llm:eplb", ":torch"],
+)
+
+cuda13_sm100_py_test(
+    name = "policy_fused_gpu_test",
+    main = "policy_fused_test.py",
+    srcs = ["policy_fused_test.py", "policy_reference.py"],
+    data = ["policy_replay.json"],
+    env = {"EPLB_POLICY_TEST_DEVICE": "cuda"},
+    timeout = "long",
+    deps = ["//rtp_llm:eplb", ":torch"],
+)
+
 cuda13_sm100_py_test(
     name = "runtime_distributed_test",
     srcs = ["runtime_distributed_test.py", "runtime_test.py"],
