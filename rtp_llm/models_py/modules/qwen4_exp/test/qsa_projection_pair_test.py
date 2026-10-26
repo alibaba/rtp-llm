@@ -137,15 +137,18 @@ class QsaProjectionPairTest(unittest.TestCase):
         )
         for rows, expected in (
             (1, 1),
-            (2, 0),
+            (2, 1),
             (3, 1),
+            (32, 1),
+            (33, 0),
         ):
             x = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
-            with patch(
-                "rtp_llm.models_py.modules.base.common.fp8_linear.project_fp8_pair",
-                wraps=project_fp8_pair,
-            ) as pair, patch.object(
-                attention, "_qsa_selected_indices", return_value=None
+            with (
+                patch(
+                    "rtp_llm.models_py.modules.base.common.fp8_linear.project_fp8_pair",
+                    wraps=project_fp8_pair,
+                ) as pair,
+                patch.object(attention, "_qsa_selected_indices", return_value=None),
             ):
                 with self.assertRaises(SelectionComplete):
                     attention(x, fmha, None, inputs, qsa_runtime=runtime)

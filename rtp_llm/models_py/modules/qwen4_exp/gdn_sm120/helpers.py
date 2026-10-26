@@ -10,7 +10,7 @@ import torch
 from cutlass._mlir.dialects import llvm
 from cutlass.cute import core as cute_core
 from cutlass.cute.atom import Trait, make_atom
-from cutlass.cute.nvgpu import warp, warpgroup
+from cutlass.cute.nvgpu import warp
 from cutlass.cute.typing import Shape
 from cutlass.cutlass_dsl import T
 
@@ -294,118 +294,6 @@ class SM80:
     def make_acc_into_op(acc: cute.Tensor, tiled_mma, dtype) -> cute.Tensor:
         operand = cute.make_fragment_like(
             SM80.convert_c_layout_to_a_layout(acc.layout, tiled_mma),
-            dtype,
-        )
-        operand_as_acc = cute.make_tensor(operand.iterator, acc.layout)
-        operand_as_acc.store(acc.load().to(dtype))
-        return operand
-
-
-class SM90:
-    @staticmethod
-    @cute.jit
-    def wgmma_gemm(
-        tiled_mma,
-        C: cute.Tensor,
-        A: cute.Tensor,
-        B: cute.Tensor,
-        accumulate: bool,
-    ):
-        for k_block_idx in cutlass.range(cute.size(A, mode=[2]), unroll_full=True):
-            tiled_mma.set(
-                warpgroup.Field.ACCUMULATE,
-                accumulate or k_block_idx != 0,
-            )
-            cute.gemm(
-                tiled_mma,
-                C,
-                A[None, None, k_block_idx],
-                B[None, None, k_block_idx],
-                C,
-            )
-
-    @staticmethod
-    @cute.jit
-    def wgmma_gemm_zero_acc(
-        tiled_mma,
-        C: cute.Tensor,
-        A: cute.Tensor,
-        B: cute.Tensor,
-    ):
-        SM90.wgmma_gemm(tiled_mma, C, A, B, False)
-
-    @staticmethod
-    @cute.jit
-    def _warpgroup_fence_reg_f32(reg: cutlass.Float32) -> cutlass.Float32:
-        return cutlass.Float32(
-            llvm.inline_asm(
-                T.f32(),
-                [reg.ir_value()],
-                "",
-                "=f,0",
-                has_side_effects=True,
-                is_align_stack=False,
-                asm_dialect=llvm.AsmDialect.AD_ATT,
-            )
-        )
-
-    @staticmethod
-    @cute.jit
-    def _warpgroup_fence_reg_u32(reg: cutlass.Uint32) -> cutlass.Uint32:
-        return cutlass.Uint32(
-            llvm.inline_asm(
-                T.i32(),
-                [reg.ir_value()],
-                "",
-                "=r,0",
-                has_side_effects=True,
-                is_align_stack=False,
-                asm_dialect=llvm.AsmDialect.AD_ATT,
-            )
-        )
-
-    @staticmethod
-    @cute.jit
-    def warpgroup_fence_operand(frg: cute.Tensor):
-        if cutlass.const_expr(frg.element_type is cutlass.Float32):
-            f32_frg = cute.recast_tensor(frg, cutlass.Float32)
-            for i in cutlass.range(cute.size(f32_frg), unroll_full=True):
-                f32_frg[i] = SM90._warpgroup_fence_reg_f32(f32_frg[i])
-        else:
-            u32_frg = cute.recast_tensor(frg, cutlass.Uint32)
-            for i in cutlass.range(cute.size(u32_frg), unroll_full=True):
-                u32_frg[i] = SM90._warpgroup_fence_reg_u32(u32_frg[i])
-
-    @staticmethod
-    @cute.jit
-    def convert_c_layout_to_a_layout(c_layout, operand_layout):
-        return cute.make_layout(
-            (
-                operand_layout,
-                c_layout.shape[1],
-                (
-                    c_layout.shape[2],
-                    cute.size(c_layout, mode=[0]) // cute.size(operand_layout),
-                ),
-            ),
-            stride=(
-                c_layout.stride[0],
-                c_layout.stride[1],
-                (
-                    c_layout.stride[2],
-                    cute.size(operand_layout, mode=[2]) * c_layout.stride[0][2],
-                ),
-            ),
-        )
-
-    @staticmethod
-    @cute.jit
-    def make_acc_into_op(acc: cute.Tensor, tiled_mma, dtype) -> cute.Tensor:
-        operand = cute.make_rmem_tensor_like(
-            SM90.convert_c_layout_to_a_layout(
-                acc.layout,
-                tiled_mma.tv_layout_A.shape[1],
-            ),
             dtype,
         )
         operand_as_acc = cute.make_tensor(operand.iterator, acc.layout)

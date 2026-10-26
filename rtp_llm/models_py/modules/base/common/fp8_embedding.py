@@ -37,23 +37,8 @@ class Fp8VocabEmbedding(nn.Module):
         self.hidden_size = weight.shape[1]
         self.vocab_size = weight.shape[0]
         self.device = device
-        self.tile_width = next(
-            width
-            for width in (256, 128, 64, 32, 16, 8, 4, 2, 1)
-            if self.hidden_size % width == 0
-        )
-        self.column_tiles = self.hidden_size // self.tile_width
-        flat = weight.view(-1, self.tile_width)
-        self.shards = [flat]
-        self.pointer_table = torch.tensor(
-            [flat.data_ptr()], dtype=torch.int64, device=weight.device
-        )
-        self.device = weight.device
-        self.weight = self.shards[0].view_as(weight)
+        self.weight = weight
         self.weight._rtp_requires_restart_for_update = True
-        self.columns = torch.arange(
-            self.column_tiles, dtype=torch.int64, device=self.device
-        )
 
     def prepare_byte_gather(self, *, role="PDFUSION"):
         """Collect immutable column scales once, before serving or capture.

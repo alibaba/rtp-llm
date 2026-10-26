@@ -19,7 +19,6 @@ class Fp8StorageWeight(CompositeWeight, QuantWeight):
         WeightModule.__init__(self, name=source.name)
         self.sub_weights = {source.name: source}
         self.resident_device = source.resident_device
-        self.pinned_memory = source.pinned_memory
         self.resident_output_devices = dict(source.resident_output_devices)
         self.additional_output_names = tuple(
             c.name + FP8_STORAGE_SCALE_SUFFIX for c in source.get_components()

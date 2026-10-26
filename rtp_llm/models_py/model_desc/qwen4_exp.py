@@ -30,7 +30,6 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
     prepare_side_cache_store_writers,
     publish_layer_side_caches,
 )
-from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_cache_views import PLECacheViews
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_execution import (
     PLEExecution,
     ple_input_ids,
@@ -431,8 +430,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     and not bool(qsa_runtime.main_inputs.is_target_verify)
                     and not bool(qsa_runtime.main_inputs.is_cuda_graph)
                     and "_qsa_selected_indices" not in self.__dict__
-                    and "forward_causal_from_projected"
-                    not in self.qsa_indexer.__dict__
+                    and "forward_causal_from_projected" not in self.qsa_indexer.__dict__
                     and callable(trusted_setter)
                 ):
                     trusted_setter(selected)
@@ -869,11 +867,11 @@ class Qwen4ExpModel(Qwen35Model):
 
     @property
     def _ple_graph_target_transactions(self):
-        return self._ple_coordinator().graph_registry.captured
+        return self._ple_coordinator().captured_transactions
 
     @_ple_graph_target_transactions.setter
     def _ple_graph_target_transactions(self, value):
-        self._ple_coordinator().graph_registry.captured = value
+        self._ple_coordinator().captured_transactions = value
 
     def resource_usage(self) -> dict[str, int]:
         totals = {}
@@ -1087,8 +1085,7 @@ class Qwen4ExpModel(Qwen35Model):
                 weight_scale=layer_weights.get(W.qwen4_ple_ngram_scale),
                 prefetch_budget_mb=getattr(self.config, "qwen4_ple_prefetch_mb", 256),
                 inline_cpu_uva_graph=(
-                    shard_pairs[0][1].device.type == "cpu"
-                    and torch.version.hip is None
+                    shard_pairs[0][1].device.type == "cpu" and torch.version.hip is None
                 ),
             )
             # Retain the same pinned owners in the weight/export inventory;
@@ -1124,62 +1121,6 @@ class Qwen4ExpModel(Qwen35Model):
                 layer_weights, W.qwen4_ple_value_proj_w, unit.value_projection
             )
 
-    _fixed_state_pool = staticmethod(PLECacheViews._fixed_state_pool)
-
-    _resolve_block_table = staticmethod(PLECacheViews._resolve_block_table)
-
-    _check_physical_blocks = staticmethod(PLECacheViews._check_physical_blocks)
-
-    _physical_blocks = staticmethod(PLECacheViews._physical_blocks)
-
-    _physical_blocks_for_pairs = staticmethod(PLECacheViews._physical_blocks_for_pairs)
-
-    def _validate_ple_mode(
-        self,
-        attention_inputs: PyAttentionInputs,
-        *,
-        allow_target_verify: bool = False,
-    ) -> None:
-        return self._ple_execution()._validate_ple_mode(
-            attention_inputs, allow_target_verify=allow_target_verify
-        )
-        # Prefix reuse is supported for page-aligned prefixes: the prefill path
-        # resumes state/context from the page holding the last prefix token (and
-        # fails fast there when a prefix is not page-aligned).
-
-    _same_metadata = staticmethod(PLECacheViews._same_metadata)
-
-    def _stage_ple_target_verify(
-        self,
-        *,
-        layer_idx: int,
-        ple: Qwen4ExpPLELayer,
-        hyper_states: torch.Tensor,
-        ids: torch.Tensor,
-        state_inputs: PyAttentionInputs,
-        ctx_inputs: PyAttentionInputs,
-        state_pool: torch.Tensor,
-        ctx_pool: torch.Tensor,
-        page_size: int,
-        embeddings: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        return self._ple_coordinator()._stage_ple_target_verify(
-            layer_idx=layer_idx,
-            ple=ple,
-            hyper_states=hyper_states,
-            ids=ids,
-            state_inputs=state_inputs,
-            ctx_inputs=ctx_inputs,
-            state_pool=state_pool,
-            ctx_pool=ctx_pool,
-            page_size=page_size,
-            embeddings=embeddings,
-        )
-
-    @staticmethod
-    def _synchronize_ple_transaction(transaction: _PLETargetTransaction) -> None:
-        return PLETransactionCoordinator._synchronize_ple_transaction(transaction)
-
     def _maybe_inject_speculative_fault(self, phase: str) -> None:
         """Invoke the private transaction test hook with actual phase and rank."""
         hook = getattr(self, "_speculative_test_hook", None)
@@ -1204,11 +1145,6 @@ class Qwen4ExpModel(Qwen35Model):
         head_graph = self.__dict__.get("_target_head_graph")
         if head_graph is not None:
             head_graph.activate(graph_key)
-
-    def _release_ple_target_transaction(
-        self, transaction: _PLETargetTransaction
-    ) -> None:
-        return self._ple_coordinator()._release_ple_target_transaction(transaction)
 
     def has_speculative_target_status_reducer(self) -> bool:
         return self.__dict__.get("_cpu_target_status") is not None
@@ -1437,10 +1373,7 @@ class Qwen4ExpModel(Qwen35Model):
         # earlier pinned-host gather can occupy every SM while vocabulary
         # lookup waits for it, despite the independent CUDA streams.
         prefetch_after_embedding = False
-        if (
-            type(self) is Qwen4ExpModel
-            and self.ple_layers
-        ):
+        if type(self) is Qwen4ExpModel and self.ple_layers:
             # Native grouped inputs are a tag mapping. Use the same PLE
             # context group as _start_eager_ple_prefetch, not the mapping
             # itself or an unrelated attention group's execution mode.

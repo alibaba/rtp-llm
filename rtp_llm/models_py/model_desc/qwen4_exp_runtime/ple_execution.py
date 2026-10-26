@@ -16,7 +16,6 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 
 from .ple_cache_views import PLECacheViews
-from .ple_state import PLELookupResult
 from .ple_transaction import PLETransactionCoordinator
 
 
@@ -350,7 +349,7 @@ class PLEExecution:
                 else None
             )
             if is_target_verify:
-                prefetched = PLELookupResult(
+                prefetched = (
                     ple.ple_embedding._reduce_rows(local_rows[0])
                     if local_rows is not None and local_rows[0] is not None
                     else None
@@ -365,7 +364,7 @@ class PLEExecution:
                     state_pool=state_pool,
                     ctx_pool=ctx_pool,
                     page_size=page_size,
-                    embeddings=prefetched.embeddings,
+                    embeddings=prefetched,
                 )
 
             if state_inputs.is_prefill:
@@ -451,12 +450,12 @@ class PLEExecution:
                             page_size,
                             state,
                             add_residual=True,
-                            embeddings=PLELookupResult(
+                            embeddings=(
                                 ple.ple_embedding._reduce_rows(local_rows[idx])
                                 if local_rows is not None
                                 and local_rows[idx] is not None
                                 else None
-                            ).embeddings,
+                            ),
                         )
                         for end, snapshot in zip(
                             range(page_size, length + page_size, page_size), snapshots
@@ -484,28 +483,28 @@ class PLEExecution:
                             output, state = ple.prefill(
                                 chunk_hyper,
                                 history,
-                                embeddings=PLELookupResult(
+                                embeddings=(
                                     ple.ple_embedding._reduce_rows(
                                         local_rows[idx][:, start:end].contiguous()
                                     )
                                     if local_rows is not None
                                     and local_rows[idx] is not None
                                     else None
-                                ).embeddings,
+                                ),
                             )
                         else:
                             output, state = ple.prefill_with_state(
                                 chunk_hyper,
                                 history,
                                 state,
-                                embeddings=PLELookupResult(
+                                embeddings=(
                                     ple.ple_embedding._reduce_rows(
                                         local_rows[idx][:, start:end].contiguous()
                                     )
                                     if local_rows is not None
                                     and local_rows[idx] is not None
                                     else None
-                                ).embeddings,
+                                ),
                             )
                         chunk_outputs.append((chunk_hyper + output).squeeze(0))
                         write_rows.append(idx)
@@ -516,9 +515,7 @@ class PLEExecution:
                         start = end
                     outputs.append(torch.cat(chunk_outputs, dim=0))
                     offset += length
-                write_rows_t = torch.tensor(
-                    write_rows, dtype=torch.long, device="cpu"
-                )
+                write_rows_t = torch.tensor(write_rows, dtype=torch.long, device="cpu")
                 write_pages_t = torch.tensor(
                     write_pages, dtype=torch.long, device="cpu"
                 )
@@ -584,12 +581,17 @@ class PLEExecution:
                     # already establish which checkpoint pages have storage.
                     writable_positions = [
                         index
-                        for index, (row, page) in enumerate(zip(write_rows, write_pages))
+                        for index, (row, page) in enumerate(
+                            zip(write_rows, write_pages)
+                        )
                         if host_block_tables[0][row, page] > 0
                         and host_block_tables[1][row, page] > 0
                     ]
                     host_positions = torch.tensor(
-                        writable_positions, dtype=torch.long, device="cpu", pin_memory=True
+                        writable_positions,
+                        dtype=torch.long,
+                        device="cpu",
+                        pin_memory=True,
                     )
                     writable = host_positions.to(
                         device=state_pool.device, non_blocking=True
@@ -597,13 +599,17 @@ class PLEExecution:
                     ctx_writable_positions = (
                         writable
                         if ctx_pool.device == state_pool.device
-                        else host_positions.to(device=ctx_pool.device, non_blocking=True)
+                        else host_positions.to(
+                            device=ctx_pool.device, non_blocking=True
+                        )
                     )
                     state_blocks_to_write = write_state_blocks.index_select(0, writable)
                     ctx_blocks_to_write = write_ctx_blocks.index_select(
                         0, ctx_writable_positions
                     )
-                    states_to_write = torch.stack(write_states).index_select(0, writable)
+                    states_to_write = torch.stack(write_states).index_select(
+                        0, writable
+                    )
                     contexts_to_write = torch.stack(write_contexts).index_select(
                         0, ctx_writable_positions
                     )
@@ -700,11 +706,11 @@ class PLEExecution:
                 hyper_states.view(batch, 1, -1),
                 history,
                 conv_buffer,
-                embeddings=PLELookupResult(
+                embeddings=(
                     ple.ple_embedding._reduce_rows(local_rows[0])
                     if local_rows is not None and local_rows[0] is not None
                     else None
-                ).embeddings,
+                ),
             )
             state_pool.index_copy_(
                 0, state_write_blocks, new_state.to(state_pool.dtype)

@@ -1,2 +1,0 @@
-# Unified diffs retain the leading space on blank context lines.
-vllm_full_state.patch whitespace=-blank-at-eol

@@ -41,7 +41,12 @@ from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
 )
-from rtp_llm.ops import HybridAttentionType, MoeConfig, ParallelismConfig
+from rtp_llm.ops import (
+    HybridAttentionType,
+    LinearAttentionConfig,
+    MoeConfig,
+    ParallelismConfig,
+)
 from rtp_llm.utils.model_weight import W
 
 _HC = 4
@@ -57,6 +62,19 @@ class _Attention(nn.Module):
     def __init__(self):
         super().__init__()
         self.seen = None
+        config = LinearAttentionConfig()
+        config.linear_num_key_heads = config.linear_num_value_heads = 1
+        config.linear_key_head_dim = config.linear_value_head_dim = _HIDDEN
+        config.linear_conv_kernel_dim = 4
+        self.prefill_gdn = qwen3_next.Qwen3NextGatedDeltaNetPrefill(
+            config,
+            ParallelismConfig(),
+            {
+                W.linear_attn_conv1d_w: torch.zeros(3 * _HIDDEN, 1, 4),
+                W.linear_attn_dt_b: torch.zeros(1),
+                W.linear_attn_alog: torch.zeros(1),
+            },
+        )
 
     def forward(self, hidden_states, fmha_impl, kv_cache, attention_inputs, attn_meta):
         self.seen = hidden_states
@@ -297,12 +315,10 @@ class Qwen4ExpMetadataTest(TestCase):
         alias = SimpleNamespace(input_lengths=values.view_as(values))
         different = SimpleNamespace(input_lengths=values + 1)
         with patch.object(torch, "equal", wraps=torch.equal) as equal:
-            self.assertTrue(
-                qwen4_exp.Qwen4ExpModel._same_metadata(left, alias, "input_lengths")
-            )
+            self.assertTrue(PLECacheViews._same_metadata(left, alias, "input_lengths"))
             equal.assert_not_called()
             self.assertFalse(
-                qwen4_exp.Qwen4ExpModel._same_metadata(left, different, "input_lengths")
+                PLECacheViews._same_metadata(left, different, "input_lengths")
             )
             equal.assert_called_once()
 
@@ -1192,7 +1208,9 @@ class Qwen4ExpPLERuntimeTest(TestCase):
                     prefix_lengths=torch.tensor(prefixes, dtype=torch.int32),
                     sequence_lengths=torch.empty(0, dtype=torch.int32),
                 )
-                expected = reference_apply_ple(self.model, 1, hyper, ids, inputs)
+                expected = reference_apply_ple(
+                    self.model._ple_execution(), 1, hyper, ids, inputs
+                )
                 expected_state = self.state_base.clone()
                 expected_context = self.ctx_base.clone()
                 self.state_base.copy_(state_before)
@@ -1306,7 +1324,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         table = torch.tensor([[1, 3], [5, 7]], dtype=torch.int32, device=device)
         pages = torch.tensor([1, 0], dtype=torch.long, device=device)
         attention_inputs = SimpleNamespace(kv_cache_block_id_device=table)
-        resolve = qwen4_exp.Qwen4ExpModel._physical_blocks
+        resolve = PLECacheViews._physical_blocks
 
         resolve(attention_inputs, PLE_STATE_TAG, pages, 12, device, graph_capture=True)
         graph = torch.cuda.CUDAGraph()
@@ -1459,7 +1477,9 @@ class Qwen4ExpPLERuntimeTest(TestCase):
                 prefix_lengths=torch.tensor([0, 8], dtype=torch.int32),
                 sequence_lengths=torch.empty(0, dtype=torch.int32),
             )
-            expected = reference_apply_ple(self.model, 1, hyper, ids, inputs)
+            expected = reference_apply_ple(
+                self.model._ple_execution(), 1, hyper, ids, inputs
+            )
             expected_state, expected_context = (
                 self.state_base.clone(),
                 self.ctx_base.clone(),
@@ -1529,7 +1549,9 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             sequence_lengths=torch.empty(0, dtype=torch.int32),
         )
         before_state, before_context = self.state_base.clone(), self.ctx_base.clone()
-        expected = reference_apply_ple(self.model, 1, hyper, ids, inputs)
+        expected = reference_apply_ple(
+            self.model._ple_execution(), 1, hyper, ids, inputs
+        )
         expected_state, expected_context = (
             self.state_base.clone(),
             self.ctx_base.clone(),
@@ -1735,7 +1757,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
             self.skipTest("CUDA is required for Graph replay")
         device = torch.device("cuda")
         self._move_ple_to_cuda(device)
-        state_pool = self.model._fixed_state_pool(
+        state_pool = PLECacheViews._fixed_state_pool(
             self.model.kv_cache.get_layer_cache(1, PLE_STATE_TAG),
             torch.bfloat16,
             self.ple.short_conv_state_len,
@@ -1812,7 +1834,7 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         device = torch.device("cuda")
         self._move_ple_to_cuda(device, cpu_tables=True)
         self.model.requires_cuda_graph_model_input_preparation = True
-        state_pool = self.model._fixed_state_pool(
+        state_pool = PLECacheViews._fixed_state_pool(
             self.model.kv_cache.get_layer_cache(1, PLE_STATE_TAG),
             torch.bfloat16,
             self.ple.short_conv_state_len,

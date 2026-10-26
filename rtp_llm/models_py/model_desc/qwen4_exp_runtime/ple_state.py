@@ -64,10 +64,3 @@ class _PLETargetTransaction:
     commit_started: bool = False
     tentative_committed: bool = False
     graph_key: Optional[int] = None
-
-
-@dataclass(frozen=True)
-class PLELookupResult:
-    """Optional gathered rows; absence requests the regular embedding lookup."""
-
-    embeddings: Optional[torch.Tensor] = None

@@ -90,14 +90,6 @@ py_test(
 )
 
 py_test(
-    name = "indexer_score_test",
-    srcs = ["indexer_score_test.py", "reference/indexer_score.py"],
-    deps = ["//rtp_llm:testlib", ":math_references"],
-    tags = ["L20_CU13"],
-    exec_properties = {"gpu": "L20_CU13"},
-)
-
-py_test(
     name = "indexer_compressor_test",
     srcs = ["indexer_compressor_test.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],

@@ -192,18 +192,7 @@ def project_fp8_pair(x, first, second):
         role=first.role if first.role == second.role else "PREFILL",
         output=padded,
     )
-    outputs = []
-    for projection in (first, second):
-        out = torch._scaled_mm(
-            quantized,
-            projection.weight.t(),
-            scale_a=scale,
-            scale_b=projection.scale,
-            out_dtype=torch.bfloat16,
-        )
-        if isinstance(out, tuple):
-            out = out[0]
-        outputs.append(
-            out[: rows.shape[0]].reshape(*x.shape[:-1], projection.weight.shape[0])
-        )
-    return tuple(outputs)
+    return tuple(
+        projection._run_quantized(quantized, scale, x.shape[:-1], rows.shape[0])
+        for projection in (first, second)
+    )

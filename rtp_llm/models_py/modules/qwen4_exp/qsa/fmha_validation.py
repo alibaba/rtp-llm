@@ -3,6 +3,79 @@
 import torch
 
 
+def _validate_main_cache_layout(self, cache, block_table, batch_size, device):
+    """Validate shared paged-cache layout without reading device tensor values."""
+    page_size = int(self.attn_configs.kernel_tokens_per_block)
+    if page_size <= 0:
+        raise RuntimeError(
+            f"qwen4_exp sparse GQA has invalid kernel page size {page_size}"
+        )
+    if (
+        page_size & (page_size - 1)
+        or self.head_dim <= 0
+        or self.head_dim & (self.head_dim - 1)
+    ):
+        raise RuntimeError(
+            "qwen4_exp QSA paged attention requires power-of-two page and head sizes"
+        )
+    if (
+        block_table is None
+        or block_table.dim() != 2
+        or int(block_table.shape[0]) != batch_size
+        or block_table.dtype != torch.int32
+        or block_table.device != device
+    ):
+        raise RuntimeError(
+            "qwen4_exp QSA paged attention requires a device int32 main block table"
+        )
+
+    if int(block_table.shape[1]) == 0:
+        raise RuntimeError(
+            "qwen4_exp sparse GQA block table must contain a logical block"
+        )
+
+    if cache is None or cache.dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+        raise RuntimeError(
+            "qwen4_exp QSA paged attention requires a BF16 or FP8 E4M3 main KV cache"
+        )
+    if cache.device != device:
+        raise RuntimeError(
+            "qwen4_exp QSA paged main cache and activations must share a device"
+        )
+    if cache.dim() == 2:
+        required_width = 2 * self.kv_head_num * page_size * self.head_dim
+        if int(cache.shape[1]) < required_width or cache.stride(1) != 1:
+            raise RuntimeError(
+                "qwen4_exp QSA paged packed main-cache geometry is invalid"
+            )
+        cache_blocks = int(cache.shape[0])
+    elif cache.dim() == 5:
+        if tuple(cache.shape[1:]) != (
+            2,
+            self.kv_head_num,
+            page_size,
+            self.head_dim,
+        ):
+            raise RuntimeError("qwen4_exp QSA paged main-cache geometry is invalid")
+        expected_inner_strides = (
+            self.kv_head_num * page_size * self.head_dim,
+            page_size * self.head_dim,
+            self.head_dim,
+            1,
+        )
+        if tuple(cache.stride()[1:]) != expected_inner_strides:
+            raise RuntimeError(
+                "qwen4_exp QSA paged main cache must use HND inner layout"
+            )
+        cache_blocks = int(cache.shape[0])
+    else:
+        raise RuntimeError(
+            "qwen4_exp QSA paged main cache must be packed 2-D or HND 5-D"
+        )
+
+    return page_size, cache_blocks
+
+
 def _validate_main_paged_geometry(
     self,
     cache: torch.Tensor,
@@ -47,64 +120,9 @@ def _validate_main_paged_geometry(
             "query lengths positive"
         )
 
-    page_size = int(self.attn_configs.kernel_tokens_per_block)
-    if page_size <= 0:
-        raise RuntimeError(
-            f"qwen4_exp sparse GQA has invalid kernel page size {page_size}"
-        )
-    if page_size & (page_size - 1) or self.head_dim & (self.head_dim - 1):
-        raise RuntimeError(
-            "qwen4_exp QSA paged attention requires power-of-two page and head sizes"
-        )
-    if (
-        block_table is None
-        or block_table.dim() != 2
-        or int(block_table.shape[0]) != batch_size
-        or block_table.dtype != torch.int32
-        or block_table.device != device
-    ):
-        raise RuntimeError(
-            "qwen4_exp QSA paged attention requires a device int32 main block table"
-        )
-
-    if cache is None or cache.dtype not in (torch.bfloat16, torch.float8_e4m3fn):
-        raise RuntimeError(
-            "qwen4_exp QSA paged attention requires a BF16 or FP8 E4M3 main KV cache"
-        )
-    if cache.device != device:
-        raise RuntimeError(
-            "qwen4_exp QSA paged main cache and activations must share a device"
-        )
-    if cache.dim() == 2:
-        required_width = 2 * self.kv_head_num * page_size * self.head_dim
-        if int(cache.shape[1]) < required_width or cache.stride(1) != 1:
-            raise RuntimeError(
-                "qwen4_exp QSA paged packed main-cache geometry is invalid"
-            )
-        cache_blocks = int(cache.shape[0])
-    elif cache.dim() == 5:
-        if tuple(cache.shape[1:]) != (
-            2,
-            self.kv_head_num,
-            page_size,
-            self.head_dim,
-        ):
-            raise RuntimeError("qwen4_exp QSA paged main-cache geometry is invalid")
-        expected_inner_strides = (
-            self.kv_head_num * page_size * self.head_dim,
-            page_size * self.head_dim,
-            self.head_dim,
-            1,
-        )
-        if tuple(cache.stride()[1:]) != expected_inner_strides:
-            raise RuntimeError(
-                "qwen4_exp QSA paged main cache must use HND inner layout"
-            )
-        cache_blocks = int(cache.shape[0])
-    else:
-        raise RuntimeError(
-            "qwen4_exp QSA paged main cache must be packed 2-D or HND 5-D"
-        )
+    page_size, cache_blocks = _validate_main_cache_layout(
+        self, cache, block_table, batch_size, device
+    )
 
     if (
         not graph_capture

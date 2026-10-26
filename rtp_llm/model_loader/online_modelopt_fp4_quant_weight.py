@@ -131,24 +131,6 @@ def quantize_expert_to_nvfp4(
     return packed, per_block_scale_fp8.contiguous(), weight_scale_2
 
 
-def _quantize_moe_weight(weight: torch.Tensor, block_size: int = NVFP4_BLOCK_SIZE):
-    """Quantize a stacked MoE weight ``[E, N, K]`` to NVFP4."""
-    assert weight.dim() == 3, f"expected 3D, got {tuple(weight.shape)}"
-    E, N, K = weight.shape
-    device = weight.device
-    packed = torch.empty([E, N, K // 2], dtype=torch.uint8, device=device)
-    block_scale = torch.empty(
-        [E, N, K // block_size], dtype=torch.float8_e4m3fn, device=device
-    )
-    scale_2 = torch.empty([E], dtype=torch.float32, device=device)
-    for i in range(E):
-        p, s, s2 = quantize_expert_to_nvfp4(weight[i], block_size)
-        packed[i].copy_(p)
-        block_scale[i].copy_(s)
-        scale_2[i] = s2
-    return packed, block_scale, scale_2
-
-
 def _moe_kernel_name(name: str) -> str:
     if name == W.moe_w1:
         return W.moe_w1
