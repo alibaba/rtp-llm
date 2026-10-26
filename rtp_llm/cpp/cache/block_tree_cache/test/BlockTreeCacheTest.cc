@@ -743,6 +743,72 @@ TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyReportPopulatedValues) {
     EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bandwidth_bytes_per_sec_metric, tags), 0);
 }
 
+TEST(BlockTreeCacheMetricsTest, InsertHardStopReportsTierStateAndPreservesCommonTags) {
+    kmonitor::MetricsTags         common_tags("dp_rank", "7");
+    auto                          metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", common_tags);
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
+    BlockTreeCacheMetricsReporter disabled(nullptr);
+    disabled.reportInsertHardStop({Tier::HOST, GroupSetTransferState::IDLE});
+
+    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheInsertMetrics>()->insert_hard_stop_qps_metric;
+    EXPECT_EQ(metric->GetMetricType(), kmonitor::QPS);
+    EXPECT_EQ(metricSeriesCount(metric), 0u);
+    for (const auto& [tier, tier_label] : {std::make_pair(Tier::DEVICE, "DEVICE"),
+                                           std::make_pair(Tier::HOST, "HOST"),
+                                           std::make_pair(Tier::DISK, "DISK"),
+                                           std::make_pair(Tier::NONE, "NONE")}) {
+        for (const auto& [state, state_label] : {std::make_pair(GroupSetTransferState::IDLE, "IDLE"),
+                                                 std::make_pair(GroupSetTransferState::DEMOTING, "DEMOTING"),
+                                                 std::make_pair(GroupSetTransferState::LOAD_PENDING, "LOAD_PENDING"),
+                                                 std::make_pair(GroupSetTransferState::LOADING, "LOADING")}) {
+            const BlockTreeInsertHardStopInfo hard_stop{tier, state};
+            reporter.reportInsertHardStop(hard_stop);
+            reporter.reportInsertHardStop(hard_stop);
+            auto tags = common_tags;
+            tags.AddTag("existing_tier", tier_label);
+            tags.AddTag("transfer_state", state_label);
+            EXPECT_DOUBLE_EQ(snapshotQps(metric, tags, "rtp_llm_kv_cache_insert_hard_stop_qps"), 2);
+        }
+    }
+    EXPECT_EQ(metricSeriesCount(metric), 16u);
+    EXPECT_EQ(metrics_reporter->getTags().FindTag("dp_rank"), "7");
+    EXPECT_TRUE(metrics_reporter->getTags().FindTag("existing_tier").empty());
+    EXPECT_TRUE(metrics_reporter->getTags().FindTag("transfer_state").empty());
+}
+
+TEST_F(BlockTreeCacheTest, InsertHardStopReportsOnceEvenWithoutAcceptedResources) {
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    std::vector<GroupSetPtr> groups;
+    for (size_t index = 0; index < 2; ++index) {
+        groups.push_back(std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(index)}, nullptr, nullptr));
+    }
+    cache_ = makeBlockTreeCacheForTest(std::move(groups), BlockTreeCacheConfig{}, nullptr, nullptr, metrics_reporter);
+    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheInsertMetrics>()->insert_hard_stop_qps_metric;
+
+    GroupSetResource device;
+    device.device_blocks = {42};
+    cache_->insert({100}, {{device, device}}, Tier::DEVICE);
+    EXPECT_EQ(metricSeriesCount(metric), 0u);
+    auto* node = cache_->tree()->findNode({100}).front();
+    for (size_t index = 0; index < 2; ++index) {
+        auto& resource = node->group_set_resources[index];
+        cache_->groupSets()[index]->unreferenceBlocks(
+            MultiNodeResource{index, Tier::DEVICE, {{node, resource.device_blocks}}}, BlockTreeRefType::CACHE);
+        resource.evictFromTier(Tier::DEVICE);
+        resource.host_block = 7;
+    }
+
+    cache_->insert({100, 200}, {{device, device}, {device, device}}, Tier::DEVICE);
+    cache_->insert({100, 200}, {{device, device}, {device, device}}, Tier::DEVICE);
+
+    kmonitor::MetricsTags tags("existing_tier", "HOST");
+    tags.AddTag("transfer_state", "IDLE");
+    EXPECT_EQ(metricSeriesCount(metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(metric, tags), 2);
+    EXPECT_TRUE(node->children.empty());
+}
+
 TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPool) {
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
