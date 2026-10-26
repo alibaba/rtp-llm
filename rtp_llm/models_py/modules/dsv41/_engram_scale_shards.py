@@ -6,6 +6,11 @@ including ranks with the feature disabled. Members of a selected group must
 then call create_sharded_scales in the same table order. Neither function may
 run during capture. Forward uses only descriptor metadata and fixed GPU pointers.
 
+Torch's CUDA symmetric-memory backend requires matching rendezvous histories
+among members (its exchange sequence is process-wide in Torch 2.11). These are
+fixed startup groups, not a facility for regrouping ranks after asymmetric
+symmetric-memory initialization on other groups.
+
 Published generations are intentionally retained for the process lifetime:
 local destruction cannot prove that another rank has drained its CUDA graphs.
 Reloading a different table therefore retains the previous allocation. There is
@@ -15,6 +20,7 @@ errors are startup errors, never permission for a rank-local runtime fallback.
 
 import hashlib
 import json
+import logging
 import socket
 import threading
 from dataclasses import dataclass
@@ -28,6 +34,7 @@ _AGREEMENT_TIMEOUT_SECONDS = 120
 _EPOCHS = {}
 _EPOCH_LOCK = threading.Lock()
 _GENERATIONS = {}
+_NODE_GROUPS = {}
 _FAILED_RENDEZVOUS_RESOURCES = []
 
 
@@ -148,30 +155,65 @@ def _can_access_peers(device, peer_uuids):
         return False
 
 
-def _existing_local_groups():
-    try:
-        from rtp_llm.models_py.distributed import collective_torch
-    except Exception:
+def _node_scale_groups(peers):
+    """Plan disjoint physical-node groups, independently of TP/DP/EP ranks."""
+    if (
+        not peers
+        or not all(peer["enabled"] for peer in peers)
+        or len({peer["signature"] for peer in peers}) != 1
+    ):
         return ()
-    # _get_group can initialize collectives; only inspect an already-ready runtime.
-    if not collective_torch._initialized:
-        return ()
-    result = []
-    for kind in (collective_torch.Group.TP, collective_torch.Group.DP):
-        try:
-            group = collective_torch._get_group(kind)
-            if group is not None and dist.get_rank(group) >= 0:
-                result.append(group)
-        except (RuntimeError, ValueError, KeyError, AssertionError):
-            continue
-    return tuple(result)
+    nodes = {}
+    for rank, peer in enumerate(peers):
+        node = (peer["hostname"], peer["boot_id"])
+        nodes.setdefault(node, []).append(rank)
+    return tuple(
+        tuple(members)
+        for members in nodes.values()
+        if _eligible_members(members, peers)
+    )
+
+
+def _new_node_scale_group(world, groups):
+    """All WORLD ranks create the same groups in the same startup order.
+
+    Use the runtime's NCCL group-creation protocol, including nonmember splits
+    when WORLD has a bound CUDA device. Only initialization uses this group;
+    forward has no collective. Avoid locally hashed group names, which can
+    differ when ranks already belong to different numbers of other subgroups.
+    Cache the complete plan even on singleton/fallback ranks, which must still
+    participate in group creation for other nodes.
+    """
+    key = (world, groups)
+    cached = key in _NODE_GROUPS
+    votes = _exchange(world, {"cached": cached}, "node_group_cache")
+    if any(vote["cached"] for vote in votes):
+        if not all(vote["cached"] for vote in votes):
+            raise RuntimeError("Engram scale node-group caches differ across ranks")
+        return _NODE_GROUPS[key]
+    selected = None
+    for members in groups:
+        group = dist.new_group(
+            ranks=list(members),
+            backend="nccl",
+            timeout=timedelta(seconds=_AGREEMENT_TIMEOUT_SECONDS),
+            use_local_synchronization=False,
+        )
+        if dist.get_rank(world) in members:
+            selected = group
+    # Do not let a fast node enter table setup while another is still building
+    # groups. Any failure here aborts startup instead of falling back rank-locally.
+    _exchange(world, {"ready": True}, "node_groups_ready")
+    _NODE_GROUPS[key] = selected
+    return selected
 
 
 def select_scale_group(device, signature, enabled=True):
-    """Collectively choose WORLD, existing TP, or existing DP, without new groups.
+    """Select a physical-node scale group, independent of global EP size.
 
-    The final WORLD exchange verifies identical choices by every member. An
-    overlapping TP/DP choice therefore falls back before any subgroup rendezvous.
+    Like DeepEP's NVLink/LSA scale domain, each node stores a complete set of
+    shards locally. An EP16/EP24 job on eight-GPU nodes therefore uses P=8 per
+    node. Group membership comes from host identity, never global-rank modulo.
     Disabled ranks still participate so mixed feature settings cannot hang peers.
     """
     if (
@@ -198,46 +240,42 @@ def select_scale_group(device, signature, enabled=True):
             signature=None, eligible=False, error=f"Invalid startup signature: {error}"
         )
     peers = _exchange(world, metadata, "select_metadata")
-    selected = None
-    choice = None
-    # A mixed feature setting is a coherent WORLD-wide fallback.
-    if (
-        device.type == "cuda"
-        and all(peer["enabled"] for peer in peers)
-        and len({peer["signature"] for peer in peers}) == 1
-    ):
-        candidates = [world]
-        if not _eligible_members(_members(world), peers):
-            candidates.extend(_existing_local_groups())
-        for candidate in candidates:
-            members = _members(candidate)
-            if _eligible_members(members, peers) and _can_access_peers(
-                device, [peers[rank]["uuid"] for rank in members]
-            ):
-                selected = candidate
-                choice = {
-                    "group_name": str(candidate.group_name),
-                    "members": list(members),
-                }
-                break
-        # WORLD may be on one host yet not form a complete peer-access clique.
-        if selected is None and candidates == [world]:
-            for candidate in _existing_local_groups():
-                members = _members(candidate)
-                if _eligible_members(members, peers) and _can_access_peers(
-                    device, [peers[rank]["uuid"] for rank in members]
-                ):
-                    selected = candidate
-                    choice = {
-                        "group_name": str(candidate.group_name),
-                        "members": list(members),
-                    }
-                    break
-    choices = _exchange(world, {"choice": choice}, "select_choice")
-    if choice is None or any(
-        choices[rank]["choice"] != choice for rank in choice["members"]
-    ):
+    groups = _node_scale_groups(peers)
+    rank = dist.get_rank(world)
+    candidate = next((members for members in groups if rank in members), None)
+    accessible = candidate is not None and _can_access_peers(
+        device, [peers[member]["uuid"] for member in candidate]
+    )
+    choices = _exchange(
+        world,
+        {"members": list(candidate) if accessible else None},
+        "select_choice",
+    )
+    groups = tuple(
+        members
+        for members in groups
+        if all(choices[member]["members"] == list(members) for member in members)
+    )
+    if not groups:
+        if enabled:
+            logging.info(
+                "Engram scales: full local replica; no eligible node-local peer group"
+            )
         return None
+    selected = (
+        world if groups == (_members(world),) else _new_node_scale_group(world, groups)
+    )
+    if selected is not None:
+        logging.info(
+            "Engram scales: node-local shards=%d, global members=%s, world size=%d",
+            dist.get_world_size(selected),
+            _members(selected),
+            len(peers),
+        )
+    elif enabled:
+        logging.info(
+            "Engram scales: full local replica on this node; other nodes use shards"
+        )
     return selected
 
 

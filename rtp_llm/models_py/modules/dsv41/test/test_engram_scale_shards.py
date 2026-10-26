@@ -6,6 +6,7 @@ distributed groups, or a model on import. CPU tests are metadata/oracle checks,
 not claims of hardware support or graph lifetime integration in a full model.
 """
 
+import copy
 import importlib
 import math
 import tempfile
@@ -13,6 +14,7 @@ import unittest
 from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -81,16 +83,294 @@ def forbid_forward_collectives():
 
 
 class ScaleShardCPUTest(unittest.TestCase):
-    def test_existing_groups_never_initialize_the_runtime(self):
-        from rtp_llm.models_py.distributed import collective_torch
+    @staticmethod
+    def peers(nodes):
+        return [
+            {
+                "enabled": True,
+                "eligible": True,
+                "hostname": f"node{node}",
+                "boot_id": f"boot{node}",
+                "uuid": f"gpu{rank}",
+                "signature": '{"model":"test"}',
+                "capability": [10, 3],
+            }
+            for rank, node in enumerate(nodes)
+        ]
 
-        with patch.object(collective_torch, "_initialized", False), patch.object(
-            collective_torch,
-            "_get_group",
-            side_effect=AssertionError("implicit group initialization"),
-        ) as get_group:
-            self.assertEqual(_provider()._existing_local_groups(), ())
-            get_group.assert_not_called()
+    def test_node_plans_multinode_ep_and_non_power_of_two(self):
+        provider = _provider()
+        for count in (16, 24, 32):
+            nodes = [rank // 8 for rank in range(count)]
+            expected = tuple(
+                tuple(range(start, start + 8)) for start in range(0, count, 8)
+            )
+            self.assertEqual(provider._node_scale_groups(self.peers(nodes)), expected)
+        for count in (5, 6, 7, 8):
+            with self.subTest(cards_per_node=count):
+                peers = self.peers([0] * count + [1] * count)
+                self.assertEqual(
+                    provider._node_scale_groups(peers),
+                    (tuple(range(count)), tuple(range(count, 2 * count))),
+                )
+        peers = self.peers([rank % 3 for rank in range(24)])
+        self.assertEqual(
+            provider._node_scale_groups(peers),
+            tuple(tuple(range(node, 24, 3)) for node in range(3)),
+        )
+        self.assertEqual(provider._node_scale_groups(self.peers([0, 1, 0])), ((0, 2),))
+        self.assertEqual(provider._node_scale_groups(self.peers([0])), ())
+
+    def test_node_identity_and_global_or_local_rejections(self):
+        provider = _provider()
+        peers = self.peers([0, 0, 1, 1])
+        for peer in peers:
+            peer["hostname"] = "same-hostname"
+        self.assertEqual(provider._node_scale_groups(peers), ((0, 1), (2, 3)))
+        for changed_field, changed_value in (
+            ("enabled", False),
+            ("signature", "different"),
+        ):
+            changed = copy.deepcopy(peers)
+            changed[0][changed_field] = changed_value
+            self.assertEqual(provider._node_scale_groups(changed), ())
+        changed = copy.deepcopy(peers)
+        changed[0].update(eligible=False, capability=[9, 0])
+        self.assertEqual(provider._node_scale_groups(changed), ((2, 3),))
+        changed = copy.deepcopy(peers)
+        changed[1]["uuid"] = changed[0]["uuid"]
+        self.assertEqual(provider._node_scale_groups(changed), ((2, 3),))
+
+    def _exercise_selector(self, peers, planned, accepted, inaccessible=()):
+        """Simulate each process independently; production selector still runs."""
+        provider = _provider()
+
+        class Group:
+            def __init__(self, members):
+                self.members = tuple(members)
+                self.group_name = str(self.members)
+
+        world = Group(range(len(peers)))
+        choices = []
+        for rank in range(len(peers)):
+            members = next((members for members in planned if rank in members), None)
+            choices.append(
+                {
+                    "members": (
+                        list(members)
+                        if members is not None and rank not in inaccessible
+                        else None
+                    )
+                }
+            )
+        for rank in range(len(peers)):
+            with self.subTest(rank=rank, nodes=len(planned)):
+                cache_votes = 0
+                phases = []
+
+                def exchange(group, payload, phase):
+                    nonlocal cache_votes
+                    self.assertIs(group, world)
+                    phases.append(phase)
+                    if phase == "select_metadata":
+                        self.assertEqual(payload["signature"], '{"model":"test"}')
+                        return copy.deepcopy(peers)
+                    if phase == "select_choice":
+                        self.assertEqual(payload, choices[rank])
+                        return copy.deepcopy(choices)
+                    if phase == "node_group_cache":
+                        self.assertEqual(payload, {"cached": bool(cache_votes)})
+                        cache_votes += 1
+                        return [dict(payload) for _ in peers]
+                    if phase == "node_groups_ready":
+                        self.assertEqual(payload, {"ready": True})
+                        return [dict(payload) for _ in peers]
+                    self.fail(f"Unexpected exchange phase: {phase}")
+
+                def new_group(*, ranks, backend, timeout, use_local_synchronization):
+                    self.assertEqual(backend, "nccl")
+                    self.assertEqual(timeout, timedelta(seconds=120))
+                    self.assertFalse(use_local_synchronization)
+                    return (
+                        Group(ranks)
+                        if rank in ranks
+                        else torch.distributed.GroupMember.NON_GROUP_MEMBER
+                    )
+
+                def size(group=None):
+                    return len(peers) if group is None else len(group.members)
+
+                with ExitStack() as stack:
+                    stack.enter_context(patch.dict(provider._NODE_GROUPS, clear=True))
+                    stack.enter_context(
+                        patch.object(
+                            provider.dist, "group", SimpleNamespace(WORLD=world)
+                        )
+                    )
+                    stack.enter_context(
+                        patch.object(provider.dist, "is_available", return_value=True)
+                    )
+                    stack.enter_context(
+                        patch.object(provider.dist, "is_initialized", return_value=True)
+                    )
+                    stack.enter_context(
+                        patch.object(provider.dist, "get_world_size", side_effect=size)
+                    )
+                    stack.enter_context(
+                        patch.object(provider.dist, "get_rank", return_value=rank)
+                    )
+                    stack.enter_context(
+                        patch.object(
+                            provider,
+                            "_members",
+                            side_effect=lambda group: group.members,
+                        )
+                    )
+                    stack.enter_context(
+                        patch.object(
+                            provider,
+                            "_local_metadata",
+                            return_value=copy.deepcopy(peers[rank]),
+                        )
+                    )
+                    access = stack.enter_context(
+                        patch.object(
+                            provider,
+                            "_can_access_peers",
+                            return_value=rank not in inaccessible,
+                        )
+                    )
+                    stack.enter_context(
+                        patch.object(provider, "_exchange", side_effect=exchange)
+                    )
+                    create = stack.enter_context(
+                        patch.object(provider.dist, "new_group", side_effect=new_group)
+                    )
+                    selected = provider.select_scale_group("cuda:0", {"model": "test"})
+                    repeated = provider.select_scale_group("cuda:0", {"model": "test"})
+                    self.assertIs(selected, repeated)
+                    member_group = next(
+                        (members for members in accepted if rank in members), None
+                    )
+                    if member_group is None:
+                        self.assertIsNone(selected)
+                    else:
+                        self.assertEqual(selected.members, member_group)
+                    whole_world = accepted == (world.members,)
+                    expected_creates = [] if whole_world else list(accepted)
+                    self.assertEqual(
+                        [tuple(call.kwargs["ranks"]) for call in create.call_args_list],
+                        expected_creates,
+                    )
+                    if whole_world:
+                        self.assertIs(selected, world)
+                    if accepted and not whole_world:
+                        # Includes singleton/fallback ranks: cached None is a
+                        # real cache entry and prevents asymmetric new_group.
+                        self.assertIn((world, accepted), provider._NODE_GROUPS)
+                        self.assertEqual(phases.count("node_groups_ready"), 1)
+                    planned_local = next(
+                        (members for members in planned if rank in members), None
+                    )
+                    if planned_local is None:
+                        access.assert_not_called()
+                    else:
+                        self.assertEqual(
+                            access.call_args.args[1],
+                            [peers[r]["uuid"] for r in planned_local],
+                        )
+
+    def test_selector_all_ranks_create_groups_and_cache_including_fallback(self):
+        for count in (16, 24, 32):
+            groups = tuple(
+                tuple(range(start, start + 8)) for start in range(0, count, 8)
+            )
+            self._exercise_selector(
+                self.peers([rank // 8 for rank in range(count)]), groups, groups
+            )
+        interleaved = tuple(tuple(range(node, 24, 3)) for node in range(3))
+        self._exercise_selector(
+            self.peers([rank % 3 for rank in range(24)]), interleaved, interleaved
+        )
+        self._exercise_selector(self.peers([0, 1, 0]), ((0, 2),), ((0, 2),))
+
+    def test_selector_single_node_world_reuse_five_through_eight(self):
+        for count in (5, 6, 7, 8):
+            groups = (tuple(range(count)),)
+            self._exercise_selector(self.peers([0] * count), groups, groups)
+
+    def test_metadata_admits_both_blackwell_capabilities(self):
+        import torch.distributed._symmetric_memory as symm
+
+        provider = _provider()
+        for capability, expected in (((10, 0), True), ((10, 3), True), ((9, 0), False)):
+            with self.subTest(capability=capability):
+                properties = SimpleNamespace(
+                    major=capability[0],
+                    minor=capability[1],
+                    uuid="test-gpu",
+                    multi_processor_count=148,
+                )
+                with patch.object(
+                    torch.cuda, "is_current_stream_capturing", return_value=False
+                ), patch.object(
+                    torch.cuda, "get_device_properties", return_value=properties
+                ), patch.object(
+                    symm, "get_backend", return_value="CUDA"
+                ), patch.object(
+                    provider.Path, "read_text", return_value="test-boot"
+                ):
+                    metadata = provider._local_metadata(torch.device("cuda:0"), True)
+                self.assertEqual(metadata["eligible"], expected)
+                self.assertEqual(metadata["capability"], list(capability))
+                self.assertIsNone(metadata["error"])
+
+    def test_selector_partial_peer_failure_and_global_mismatch(self):
+        peers = self.peers([0] * 8 + [1] * 8)
+        groups = (tuple(range(8)), tuple(range(8, 16)))
+        self._exercise_selector(peers, groups, (groups[1],), inaccessible=(0,))
+        self._exercise_selector(peers, groups, (), inaccessible=(0, 8))
+        for field, value in (("enabled", False), ("signature", "other")):
+            changed = copy.deepcopy(peers)
+            changed[0][field] = value
+            self._exercise_selector(changed, (), ())
+
+    def test_node_group_cache_disagreement_aborts_before_creating_groups(self):
+        provider = _provider()
+        world, groups = object(), ((0, 2),)
+        for local_cached in (False, True):
+            with self.subTest(local_cached=local_cached):
+                cache = {(world, groups): None} if local_cached else {}
+                with patch.dict(provider._NODE_GROUPS, cache, clear=True), patch.object(
+                    provider,
+                    "_exchange",
+                    return_value=[
+                        {"cached": local_cached},
+                        {"cached": not local_cached},
+                    ],
+                ), patch.object(provider.dist, "new_group") as create:
+                    with self.assertRaisesRegex(RuntimeError, "caches differ"):
+                        provider._new_node_scale_group(world, groups)
+                    create.assert_not_called()
+
+    def test_node_cache_uses_world_object_and_entire_partition(self):
+        provider = _provider()
+        world_a, world_b = object(), object()
+        plan_a, plan_b = ((0, 1), (2, 3)), ((0, 2), (1, 3))
+        with patch.dict(provider._NODE_GROUPS, clear=True), patch.object(
+            provider,
+            "_exchange",
+            side_effect=lambda group, payload, phase: [dict(payload)] * 4,
+        ), patch.object(provider.dist, "get_rank", return_value=0), patch.object(
+            provider.dist, "new_group", side_effect=lambda **kwargs: object()
+        ) as create:
+            a = provider._new_node_scale_group(world_a, plan_a)
+            self.assertIs(provider._new_node_scale_group(world_a, plan_a), a)
+            b = provider._new_node_scale_group(world_b, plan_a)
+            c = provider._new_node_scale_group(world_a, plan_b)
+            self.assertIsNot(a, b)
+            self.assertIsNot(a, c)
+            self.assertEqual(create.call_count, 6)
 
     def test_partition_oracle_counts_one_through_eight_and_empty_tails(self):
         for peers in range(1, 9):
@@ -127,6 +407,53 @@ class ScaleShardCPUTest(unittest.TestCase):
                 "cuda:0", "cpu-disabled-test", enabled=False
             )
         self.assertIsNone(selected)
+
+    def test_disabled_initialized_world_agrees_without_cuda_or_new_groups(self):
+        provider = _provider()
+        world = object()
+        phases = []
+
+        def exchange(group, payload, phase):
+            self.assertIs(group, world)
+            phases.append(phase)
+            if phase == "select_metadata":
+                self.assertFalse(payload["enabled"])
+                self.assertFalse(payload["eligible"])
+            else:
+                self.assertEqual(phase, "select_choice")
+                self.assertEqual(payload, {"members": None})
+            return [dict(payload), dict(payload)]
+
+        with ExitStack() as stack:
+            for name in ("is_available", "is_initialized"):
+                stack.enter_context(
+                    patch.object(provider.dist, name, return_value=True)
+                )
+            stack.enter_context(
+                patch.object(provider.dist, "group", SimpleNamespace(WORLD=world))
+            )
+            stack.enter_context(
+                patch.object(provider.dist, "get_world_size", return_value=2)
+            )
+            stack.enter_context(patch.object(provider.dist, "get_rank", return_value=0))
+            stack.enter_context(
+                patch.object(provider, "_exchange", side_effect=exchange)
+            )
+            for name in (
+                "current_device",
+                "is_current_stream_capturing",
+                "get_device_properties",
+                "device_count",
+            ):
+                stack.enter_context(
+                    patch.object(torch.cuda, name, side_effect=AssertionError(name))
+                )
+            create = stack.enter_context(patch.object(provider.dist, "new_group"))
+            self.assertIsNone(
+                provider.select_scale_group("cuda", "disabled-world", enabled=False)
+            )
+            create.assert_not_called()
+        self.assertEqual(phases, ["select_metadata", "select_choice"])
 
 
 def _ids(rows, tokens, generation, peers):
@@ -328,7 +655,83 @@ def run_distributed_cases(device=None, group=None):
     }
 
 
-def _distributed_worker(rank, world_size, store_path):
+def run_synthetic_node_cases(device):
+    """One physical host: fake node identity, real NCCL + symmetric GPU reads."""
+    dist, provider = torch.distributed, _provider()
+    if dist.get_world_size() != 3:
+        raise RuntimeError("Synthetic [0,1]+[2] topology requires exactly three ranks")
+    rank = dist.get_rank()
+    original_metadata = provider._local_metadata
+
+    def synthetic_metadata(device, enabled):
+        metadata = original_metadata(device, enabled)
+        # The earlier [0,2] subgroup leaves ranks 0 and 1 with different local
+        # process-group counts. Node-group names must still agree between them.
+        node = "pair" if rank in (0, 1) else "singleton"
+        metadata.update(hostname=f"synthetic-{node}", boot_id=f"synthetic-boot-{node}")
+        return metadata
+
+    with patch.object(provider, "_local_metadata", side_effect=synthetic_metadata):
+        original_new_group = dist.new_group
+        with patch.object(dist, "new_group", wraps=original_new_group) as create:
+            selected = provider.select_scale_group(device, "synthetic-three-rank-nodes")
+            repeated = provider.select_scale_group(device, "synthetic-three-rank-nodes")
+            if repeated is not selected:
+                raise AssertionError(
+                    "Real node-group cache failed to retain group identity"
+                )
+            if create.call_count != 1:
+                raise AssertionError(
+                    "Each WORLD rank must create the node group exactly once"
+                )
+            call = create.call_args.kwargs
+            if call != {
+                "ranks": [0, 1],
+                "backend": "nccl",
+                "timeout": timedelta(seconds=120),
+                "use_local_synchronization": False,
+            }:
+                raise AssertionError(f"Unexpected real node-group creation: {call}")
+        if rank in (0, 1):
+            if selected is None or dist.get_backend(selected) != "nccl":
+                raise AssertionError(
+                    "Expected a real NCCL group for the simulated two-GPU node"
+                )
+            if dist.get_process_group_ranks(selected) != [0, 1]:
+                raise AssertionError(
+                    "Synthetic topology selected incorrect global ranks"
+                )
+            proof = _run_group(selected, device, "synthetic_node_0_1_real_nccl")
+        else:
+            if selected is not None:
+                raise AssertionError("Singleton node must keep local GPU scale storage")
+            source = (
+                torch.arange(257 * 8, dtype=torch.int64).reshape(257, 8).to(torch.uint8)
+            )
+            local = provider.create_sharded_scales(
+                source, None, device, "synthetic-singleton"
+            )
+            if not isinstance(local, torch.Tensor) or not torch.equal(
+                local.cpu(), source
+            ):
+                raise AssertionError(
+                    "Singleton fallback did not preserve complete scale bytes"
+                )
+            proof = {"singleton_replica": "PASS", "local_scale_bytes": local.numel()}
+        dist.barrier()
+    return {
+        "status": "PASS",
+        "synthetic_topology": True,
+        "physical_hosts": 1,
+        "claimed_real_cross_node_runtime": False,
+        "node_members": [[0, 1], [2]],
+        "new_group_backend": "nccl",
+        "cache_reused": True,
+        "proof": proof,
+    }
+
+
+def _distributed_worker(rank, world_size, store_path, node_selection=False):
     device = torch.device("cuda", rank)
     torch.cuda.set_device(device)
     torch.distributed.init_process_group(
@@ -340,7 +743,13 @@ def _distributed_worker(rank, world_size, store_path):
         device_id=device,
     )
     try:
-        result = run_distributed_cases(device)
+        if node_selection:
+            # Different process-group counts, but equal symmetric-memory
+            # histories: Torch 2.11 uses a process-wide rendezvous sequence.
+            torch.distributed.new_group(ranks=[0, 2], backend="nccl")
+            result = run_synthetic_node_cases(device)
+        else:
+            result = run_distributed_cases(device)
         if result["status"] != "PASS":
             raise AssertionError(result)
     finally:
@@ -348,6 +757,21 @@ def _distributed_worker(rank, world_size, store_path):
 
 
 class ScaleShardDistributedCUDA(unittest.TestCase):
+    @unittest.skipUnless(
+        torch.cuda.is_available() and torch.cuda.device_count() >= 3,
+        "requires three peer-accessible GPUs",
+    )
+    def test_node_groups_with_asymmetric_existing_process_groups(self):
+        import torch.multiprocessing as mp
+
+        with tempfile.TemporaryDirectory(prefix="engram-scale-nodes-") as directory:
+            mp.spawn(
+                _distributed_worker,
+                args=(3, str(Path(directory) / "store"), True),
+                nprocs=3,
+                join=True,
+            )
+
     @unittest.skipUnless(
         torch.cuda.is_available() and torch.cuda.device_count() >= 3,
         "requires three peer-accessible GPUs",
