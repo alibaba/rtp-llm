@@ -1632,11 +1632,14 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             engine.async_submit([running], request_id=101)
             self.assertTrue(first_started.wait(timeout=2))
             engine.async_submit([queued], request_id=102)
+            self.assertEqual(engine.get_inflight_input_count(), 2)
 
             self.assertEqual(engine.cancel_queued_request(102), 1)
             self.assertIsNone(engine._embedding_cache.peek(queued.cache_key()))
             self.assertEqual(engine._async_admitted, 1)
+            self.assertEqual(engine.get_inflight_input_count(), 1)
             self.assertEqual(engine.cancel_queued_request(101), 0)
+            self.assertEqual(engine.get_inflight_input_count(), 1)
 
             release.set()
             self.assertTrue(first_done.wait(timeout=5))
@@ -1680,10 +1683,13 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             self.assertTrue(first_started.wait(timeout=2))
             engine.async_submit([shared], request_id=202)
             engine.async_submit([shared], request_id=203)
+            self.assertEqual(engine.get_inflight_input_count(), 2)
 
             self.assertEqual(engine.cancel_queued_request(202), 0)
+            self.assertEqual(engine.get_inflight_input_count(), 2)
             self.assertIsNotNone(engine._embedding_cache.peek(shared.cache_key()))
             self.assertEqual(engine.cancel_queued_request(203), 1)
+            self.assertEqual(engine.get_inflight_input_count(), 1)
             self.assertIsNone(engine._embedding_cache.peek(shared.cache_key()))
 
             release.set()
@@ -1710,6 +1716,7 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             )
             self.assertIsNone(engine._embedding_cache.peek(inp.cache_key()))
             self.assertEqual(engine._async_admitted, 0)
+            self.assertEqual(engine.get_inflight_input_count(), 0)
         finally:
             engine.stop()
 
