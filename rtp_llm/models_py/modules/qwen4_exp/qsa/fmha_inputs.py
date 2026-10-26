@@ -7,6 +7,7 @@ import torch
 from rtp_llm.ops.compute_ops import LayerKVCache
 
 from .fmha_plans import IncrementalPrefillInputs, PagedInputs, PrefillRequest
+from .fmha_validation import _validate_main_cache_layout
 
 
 def _prepare_paged_inputs(
@@ -110,68 +111,9 @@ def _prepare_paged_inputs(
         kv_lens = sequence_lengths.view(batch, 1) + query_offsets.view(1, query_len)
 
     block_table = self.attn_inputs.kv_cache_kernel_block_id_device
-    if (
-        block_table is None
-        or block_table.dim() != 2
-        or tuple(block_table.shape[:1]) != (batch,)
-        or block_table.dtype != torch.int32
-        or block_table.device != qkv.device
-    ):
-        raise RuntimeError(
-            f"qwen4_exp sparse GQA requires a device int32 [{batch}, max_blocks] table"
-        )
-    if int(block_table.shape[1]) == 0:
-        raise RuntimeError(
-            "qwen4_exp sparse GQA block table must contain a logical block"
-        )
-    page_size = int(self.attn_configs.kernel_tokens_per_block)
-    if page_size <= 0 or page_size & (page_size - 1):
-        raise RuntimeError(
-            "qwen4_exp sparse GQA kernel page size must be a positive power of two"
-        )
-    if self.head_dim <= 0 or self.head_dim & (self.head_dim - 1):
-        raise RuntimeError(
-            "qwen4_exp sparse GQA head size must be a positive power of two"
-        )
-
-    cache = kv_cache.kv_cache_base
-    if (
-        cache.dtype not in (torch.bfloat16, torch.float8_e4m3fn)
-        or cache.device != qkv.device
-    ):
-        raise RuntimeError(
-            "qwen4_exp sparse GQA requires a device-local BF16 or FP8 E4M3 main KV cache"
-        )
-    if cache.dim() == 2:
-        required_width = 2 * self.kv_head_num * page_size * self.head_dim
-        if int(cache.shape[1]) < required_width or cache.stride(1) != 1:
-            raise RuntimeError(
-                "qwen4_exp sparse GQA packed main-cache geometry is invalid"
-            )
-        cache_blocks = int(cache.shape[0])
-    elif cache.dim() == 5:
-        if tuple(cache.shape[1:]) != (
-            2,
-            self.kv_head_num,
-            page_size,
-            self.head_dim,
-        ):
-            raise RuntimeError("qwen4_exp sparse GQA main-cache geometry is invalid")
-        expected_inner_strides = (
-            self.kv_head_num * page_size * self.head_dim,
-            page_size * self.head_dim,
-            self.head_dim,
-            1,
-        )
-        if tuple(cache.stride()[1:]) != expected_inner_strides:
-            raise RuntimeError(
-                "qwen4_exp sparse GQA main cache must use HND inner layout"
-            )
-        cache_blocks = int(cache.shape[0])
-    else:
-        raise RuntimeError(
-            "qwen4_exp sparse GQA main cache must be packed 2-D or HND 5-D"
-        )
+    page_size, cache_blocks = _validate_main_cache_layout(
+        self, kv_cache.kv_cache_base, block_table, batch, qkv.device
+    )
 
     if not graph_paged:
         required_columns = (kv_lens[:, -1] + page_size - 1) // page_size

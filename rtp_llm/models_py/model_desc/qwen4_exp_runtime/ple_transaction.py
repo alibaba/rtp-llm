@@ -1,7 +1,7 @@
 """Model-wide PLE staging, prepare consensus boundary, undo and finalization.
 
 The C++ executor owns TP consensus. Captured stages retain their addresses in
-``graph_registry``; releasing an active commit only releases its undo record.
+``captured_transactions``; releasing an active commit only releases its undo record.
 """
 
 from collections.abc import Callable, Mapping
@@ -14,7 +14,6 @@ from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpPLELayer
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 from .ple_cache_views import PLECacheViews
-from .ple_graph_state import PLEGraphRegistry
 from .ple_state import (
     _PLEBoundaryWrite,
     _PLEPreparedWrite,
@@ -28,15 +27,15 @@ class PLETransactionCoordinator:
         self.ple_layers = layers
         self.fault_hook = fault_hook
         self.active_transaction: Optional[_PLETargetTransaction] = None
-        self.graph_registry = PLEGraphRegistry()
+        self.captured_transactions: dict[int, _PLETargetTransaction] = {}
 
     def close(self) -> None:
         if self.active_transaction is not None:
             self._synchronize_ple_transaction(self.active_transaction)
-        for transaction in self.graph_registry.captured.values():
+        for transaction in self.captured_transactions.values():
             self._synchronize_ple_transaction(transaction)
         self.active_transaction = None
-        self.graph_registry.clear()
+        self.captured_transactions.clear()
 
     _physical_blocks = staticmethod(PLECacheViews._physical_blocks)
     _commit_physical_blocks = staticmethod(PLECacheViews._commit_physical_blocks)
@@ -238,7 +237,7 @@ class PLETransactionCoordinator:
 
     def save_speculative_target_graph_capture(self, graph_key: int) -> None:
         """Retain graph-owned stage tensors for later replay of this exact batch."""
-        if graph_key <= 0 or graph_key in self.graph_registry.captured:
+        if graph_key <= 0 or graph_key in self.captured_transactions:
             raise RuntimeError("invalid or duplicate PLE target graph key")
         transaction = self.active_transaction
         if transaction is None:
@@ -252,7 +251,7 @@ class PLETransactionCoordinator:
         if transaction.prepared_writes is not None or transaction.commit_started:
             raise RuntimeError("PLE target graph contains an active commit")
         transaction.graph_key = graph_key
-        self.graph_registry.captured[graph_key] = transaction
+        self.captured_transactions[graph_key] = transaction
         self.active_transaction = None
 
     def activate_speculative_target_graph_replay(self, graph_key: int) -> None:
@@ -261,7 +260,7 @@ class PLETransactionCoordinator:
             raise RuntimeError("previous PLE target transaction is still active")
         if not self.ple_layers:
             return
-        transaction = self.graph_registry.captured.get(graph_key)
+        transaction = self.captured_transactions.get(graph_key)
         if transaction is None or transaction.batch_size != graph_key:
             raise RuntimeError("PLE target graph stage is missing for replay batch")
         if transaction.prepared_writes is not None or transaction.commit_started:
@@ -429,10 +428,7 @@ class PLETransactionCoordinator:
         # streams (async bookkeeping) the way a device-wide sync does.
         if resolution is not None:
             resolution.verify()
-        if transaction.prefixes.is_cuda:
-            # CPU-tensor unit tests reach prepare too; host ops are already
-            # synchronous and current_stream() rejects a cpu device.
-            torch.cuda.current_stream(transaction.prefixes.device).synchronize()
+        self._synchronize_ple_transaction(transaction)
         transaction.prepared_writes = prepared_writes
 
     def _prepare_boundary_slots(

@@ -12,7 +12,6 @@ def _main_qk_norm_rope(
     QKV,
     OUT,
     POS,
-    COEFFICIENTS,
     QG,
     KG,
     ROWS: tl.constexpr,
@@ -24,8 +23,6 @@ def _main_qk_norm_rope(
     ROPE_SCALE: tl.constexpr,
     H_SECTION: tl.constexpr,
     W_SECTION: tl.constexpr,
-    USE_FMA: tl.constexpr,
-    USE_TABLE: tl.constexpr,
     POSITION_BASE: tl.constexpr,
 ):
     row, head = tl.program_id(0), tl.program_id(1)
@@ -79,76 +76,55 @@ def _main_qk_norm_rope(
             position = tl.where(
                 position > 0, position, (row + POSITION_BASE).to(tl.float32)
             )
-            if USE_TABLE:
-                cosine = tl.load(COEFFICIENTS + position.to(tl.int32) * 64 + frequency)
-                sine = tl.load(
-                    COEFFICIENTS + position.to(tl.int32) * 64 + frequency + 32
-                )
-            else:
-                # Match the native CUDA --use_fast_math sequence, including
-                # approximate division and trig. libdevice pow/sin/cos use
-                # different rounding and fail BF16 KV byte parity.
-                log_base = tl.inline_asm_elementwise(
-                    "lg2.approx.ftz.f32 $0, $1;",
-                    constraints="=f,f",
-                    args=[tl.full((), BASE, tl.float32)],
-                    dtype=tl.float32,
-                    is_pure=True,
-                    pack=1,
-                )
-                denominator = tl.exp2((frequency.to(tl.float32) / 32.0) * log_base)
-                angle = tl.inline_asm_elementwise(
-                    "div.approx.ftz.f32 $0, $1, $2;",
-                    constraints="=f,f,f",
-                    args=[position, denominator],
-                    dtype=tl.float32,
-                    is_pure=True,
-                    pack=1,
-                )
-                cosine = tl.inline_asm_elementwise(
-                    "cos.approx.ftz.f32 $0, $1;",
-                    constraints="=f,f",
-                    args=[angle],
-                    dtype=tl.float32,
-                    is_pure=True,
-                    pack=1,
-                )
-                sine = tl.inline_asm_elementwise(
-                    "sin.approx.ftz.f32 $0, $1;",
-                    constraints="=f,f",
-                    args=[angle],
-                    dtype=tl.float32,
-                    is_pure=True,
-                    pack=1,
-                )
+            # Match the native CUDA --use_fast_math sequence, including
+            # approximate division and trig. libdevice pow/sin/cos use
+            # different rounding and fail BF16 KV byte parity.
+            log_base = tl.inline_asm_elementwise(
+                "lg2.approx.ftz.f32 $0, $1;",
+                constraints="=f,f",
+                args=[tl.full((), BASE, tl.float32)],
+                dtype=tl.float32,
+                is_pure=True,
+                pack=1,
+            )
+            denominator = tl.exp2((frequency.to(tl.float32) / 32.0) * log_base)
+            angle = tl.inline_asm_elementwise(
+                "div.approx.ftz.f32 $0, $1, $2;",
+                constraints="=f,f,f",
+                args=[position, denominator],
+                dtype=tl.float32,
+                is_pure=True,
+                pack=1,
+            )
+            cosine = tl.inline_asm_elementwise(
+                "cos.approx.ftz.f32 $0, $1;",
+                constraints="=f,f",
+                args=[angle],
+                dtype=tl.float32,
+                is_pure=True,
+                pack=1,
+            )
+            sine = tl.inline_asm_elementwise(
+                "sin.approx.ftz.f32 $0, $1;",
+                constraints="=f,f",
+                args=[angle],
+                dtype=tl.float32,
+                is_pure=True,
+                pack=1,
+            )
             signed_other = tl.where(rd < 32, -other_value, other_value)
-            if USE_FMA == 3:
-                rotated = tl.where(
-                    rd < 32,
-                    tl.fma(value, cosine, signed_other * sine),
-                    tl.fma(signed_other, sine, value * cosine),
-                )
-            elif USE_FMA == 4:
-                rotated = tl.where(
-                    rd < 32,
-                    tl.fma(signed_other, sine, value * cosine),
-                    tl.fma(value, cosine, signed_other * sine),
-                )
-            elif USE_FMA == 2:
-                rotated = tl.fma(signed_other, sine, value * cosine)
-            elif USE_FMA:
-                rotated = tl.fma(value, cosine, signed_other * sine)
-            else:
-                rotated = value * cosine + signed_other * sine
+            rotated = tl.where(
+                rd < 32,
+                tl.fma(value, cosine, signed_other * sine),
+                tl.fma(signed_other, sine, value * cosine),
+            )
             tl.store(OUT + base + rd, tl.where(rd < 64, rotated, value))
             if head == 0:
                 v_offset = row * STRIDE + (Q_HEADS + KV_HEADS) * 256 + rd
                 tl.store(OUT + v_offset, tl.load(QKV + v_offset))
 
 
-def try_main_qk_norm_rope(
-    qkv, positions, norm, config, *, use_fma=3, coefficients=None, position_base=0
-):
+def try_main_qk_norm_rope(qkv, positions, norm, config, *, position_base=0):
     """Prepare true TP2/4/8 Q/K without changing any KV writer/state contract.
 
     The model selects only the measured ordinary unpadded 4K prefill domain.
@@ -212,23 +188,11 @@ def try_main_qk_norm_rope(
         and config.mrope_dim1 + config.mrope_dim2 + config.mrope_dim3 == 32
     ):
         return None
-    if coefficients is not None and not (
-        coefficients.device == qkv.device
-        and coefficients.dtype == torch.float32
-        and coefficients.ndim == 2
-        and coefficients.shape[1] == 64
-        and coefficients.shape[0] > 0
-        and coefficients.is_contiguous()
-    ):
-        raise ValueError(
-            "MRoPE coefficient table must be contiguous device FP32 [positions,64]"
-        )
     out = torch.empty_like(qkv)
     _main_qk_norm_rope[(qkv.shape[0], norm.head_num + norm.kv_head_num)](
         qkv,
         out,
         positions,
-        qkv if coefficients is None else coefficients,
         norm.q_weight,
         norm.k_weight,
         ROWS=qkv.shape[0],
@@ -240,68 +204,8 @@ def try_main_qk_norm_rope(
         ROPE_SCALE=float(config.scale),
         H_SECTION=config.mrope_dim2,
         W_SECTION=config.mrope_dim3,
-        USE_FMA=use_fma,
-        USE_TABLE=coefficients is not None,
         POSITION_BASE=position_base,
         num_warps=1,
         enable_fp_fusion=False,
     )
     return out
-
-
-def build_native_mrope_coefficients(config, device, maximum_position):
-    """Build immutable FP32 coefficients with the original native math.
-
-    Run before Graph capture. Native FP32 basis vectors expose sin/cos without
-    BF16 rounding. All Qwen4 layers may share the returned device table. The
-    caller owns its position bounds and lifetime; no hot-path host scalar read.
-    """
-    from libth_transformer_config import AttentionConfigs
-
-    from rtp_llm.ops.fused_rope_kvcache_op import (
-        FusedRopeAttnParams,
-        FusedRopeKVCachePrefillOpQKVOut,
-    )
-
-    if torch.cuda.is_current_stream_capturing():
-        raise RuntimeError("native MRoPE coefficients must be prepared before capture")
-    cfg = AttentionConfigs()
-    cfg.head_num = 1
-    cfg.kv_head_num = 1
-    cfg.size_per_head = 256
-    cfg.kernel_tokens_per_block = 128
-    cfg.max_seq_len = maximum_position
-    cfg.use_logn_attn = False
-    cfg.rope_config = config
-    writer = FusedRopeKVCachePrefillOpQKVOut(cfg)
-    result = torch.empty((maximum_position, 64), device=device, dtype=torch.float32)
-    for start in range(0, maximum_position, 4096):
-        rows = min(4096, maximum_position - start)
-        source = torch.zeros(rows, 768, device=device, dtype=torch.float32)
-        source[:, :32] = 1
-        positions = (
-            torch.arange(start, start + rows, device=device, dtype=torch.int32)[:, None]
-            .expand(-1, 3)
-            .contiguous()
-        )
-        cu = torch.tensor([0, rows], device=device, dtype=torch.int32)
-        length = torch.tensor([rows], dtype=torch.int32)
-        params = FusedRopeAttnParams(
-            None,
-            None,
-            None,
-            positions.flatten(),
-            cu,
-            cu,
-            length,
-            torch.zeros_like(length),
-            torch.zeros_like(length),
-            rows,
-            0,
-            rows,
-            False,
-            torch.float32,
-        )
-        output = writer.forward(source, None, params).reshape(rows, 768)
-        result[start : start + rows].copy_(output[:, :64])
-    return result

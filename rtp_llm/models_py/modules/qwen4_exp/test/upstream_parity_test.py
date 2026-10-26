@@ -40,9 +40,9 @@ from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
-    Qwen4ExpQSAIndexer,
-    apply_partial_rope,
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import apply_partial_rope
+from rtp_llm.models_py.modules.qwen4_exp.test.reference.indexer import (
+    ReferenceQSAIndexer,
 )
 from rtp_llm.models_py.modules.qwen4_exp.test.upstream_fixture import (
     uncovered_fixture,
@@ -554,7 +554,7 @@ class QSAIndexerParityTest(unittest.TestCase):
         )
         ref = self.up.Qwen4ExpTextQSAIndexer(config, layer_idx=3).double()
         _randomize(ref, scale=0.1)
-        ours = Qwen4ExpQSAIndexer(
+        ours = ReferenceQSAIndexer(
             ref.index_qk_proj.weight.detach(),
             ref.q_layernorm.weight.detach(),
             ref.k_layernorm.weight.detach(),
@@ -692,7 +692,7 @@ class QSAIndexerParityTest(unittest.TestCase):
 
     def test_production_geometry_derives_documented_widths(self):
         """Real config: budget 2048 / ratio 4 -> topk 512, output width 2051."""
-        indexer = Qwen4ExpQSAIndexer(
+        indexer = ReferenceQSAIndexer(
             torch.zeros((4 + 1) * 128, 2560),
             torch.zeros(128),
             torch.zeros(128),

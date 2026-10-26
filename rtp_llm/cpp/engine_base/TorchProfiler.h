@@ -14,7 +14,6 @@ namespace rtp_llm {
 namespace tpi = torch::profiler::impl;
 
 struct ProfilingDebugLoggingConfig;
-class PythonTraceThreadState;
 
 namespace detail {
 
@@ -51,7 +50,6 @@ private:
     tpi::ProfilerConfig         config_ = tpi::ProfilerConfig(tpi::ProfilerState::KINETO, /*report_input_shapes=*/true);
     std::set<tpi::ActivityType> activities_{tpi::ActivityType::CPU, tpi::ActivityType::CUDA};
     bool                        stopped_ = true;
-    std::unique_ptr<PythonTraceThreadState> python_trace_thread_state_;
 };
 
 // Background thread that serializes profiler results to disk without blocking the engine loop.

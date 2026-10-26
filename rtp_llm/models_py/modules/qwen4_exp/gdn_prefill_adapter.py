@@ -1,6 +1,6 @@
 """Qwen4-only SM120 prefill candidate retaining every resumable cache page.
 
-The FlashInfer0.7 non-CP implementation is isolated under gdn_sm120. It does
+The FlashInfer0.7 CP implementation is isolated under gdn_sm120. It does
 not replace installed FlashInfer or the speculative Decode state owner.
 """
 
@@ -9,9 +9,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNetPrefill
-from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
 from rtp_llm.models_py.triton_kernels.fla.block import load_initial_state_from_block_map
-from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
 
 
@@ -57,7 +55,7 @@ def _store_page_checkpoints(
 
 
 def sm120_prefill_with_checkpoints(
-    q, k, v, g, beta, initial, cu_seqlens, lengths, page_size=128, backend="cp"
+    q, k, v, g, beta, initial, cu_seqlens, lengths, page_size=128
 ):
     """Log gates in, FP32 final/page states out; lengths are existing CPU metadata."""
 
@@ -67,12 +65,12 @@ def sm120_prefill_with_checkpoints(
     alpha = torch.exp(g.squeeze(0).float()).contiguous()
     beta_fp32 = beta.squeeze(0).float().contiguous()
     return sm120_prefill_prepared(
-        q, k, v, alpha, beta_fp32, initial, cu_seqlens, lengths, page_size, backend
+        q, k, v, alpha, beta_fp32, initial, cu_seqlens, lengths, page_size
     )
 
 
 def sm120_prefill_prepared(
-    q, k, v, alpha, beta_fp32, initial, cu_seqlens, lengths, page_size=128, backend="cp"
+    q, k, v, alpha, beta_fp32, initial, cu_seqlens, lengths, page_size=128
 ):
     from .gdn_prefill_prepare import checkpoint_starts as make_checkpoint_starts
 
@@ -90,45 +88,24 @@ def sm120_prefill_prepared(
     )
     output = torch.empty((q.shape[0], heads, 128), device=q.device, dtype=q.dtype)
     initial_fp32 = initial.float().contiguous() if initial is not None else None
-    if backend == "cp":
-        from .gdn_sm120.delta_rule_cp_sm120 import cp_delta_rule_dsl_sm120
+    from .gdn_sm120.delta_rule_cp_sm120 import cp_delta_rule_dsl_sm120
 
-        cp_delta_rule_dsl_sm120(
-            output,
-            final,
-            q,
-            k,
-            v,
-            alpha,
-            beta_fp32,
-            cu_seqlens,
-            128**-0.5,
-            initial_state=initial_fp32,
-            state_checkpoints=checkpoints,
-            checkpoint_cu_starts=checkpoint_starts,
-            checkpoint_every_n_tokens=page_size,
-            max_seqlen=max(lengths),
-        )
-    elif backend == "noncp":
-        from .gdn_sm120.delta_rule_sm120 import delta_rule_prefill_dsl
-
-        delta_rule_prefill_dsl(
-            output,
-            final,
-            q,
-            k,
-            v,
-            initial_fp32,
-            alpha,
-            beta_fp32,
-            cu_seqlens,
-            128**-0.5,
-            checkpoints,
-            checkpoint_starts,
-            page_size,
-        )
-    else:
-        raise ValueError("unknown Qwen4 SM120 prefill backend")
+    cp_delta_rule_dsl_sm120(
+        output,
+        final,
+        q,
+        k,
+        v,
+        alpha,
+        beta_fp32,
+        cu_seqlens,
+        128**-0.5,
+        initial_state=initial_fp32,
+        state_checkpoints=checkpoints,
+        checkpoint_cu_starts=checkpoint_starts,
+        checkpoint_every_n_tokens=page_size,
+        max_seqlen=max(lengths),
+    )
     return output.unsqueeze(0), checkpoints, final, checkpoint_starts
 
 

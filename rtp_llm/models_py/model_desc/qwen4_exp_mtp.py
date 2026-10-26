@@ -20,8 +20,8 @@ from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
 from rtp_llm.models_py.modules.hybrid.gated_residual import grouped_rms_norm
 from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
     Qwen4LinearFactory as LinearFactory,
-    annotate_compute_inventory,
 )
+from rtp_llm.models_py.modules.qwen4_exp.weight_views import annotate_compute_inventory
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs
 from rtp_llm.utils.model_weight import W
@@ -297,9 +297,7 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             hidden_size=model_config.hidden_size,
             norm_eps=model_config.layernorm_eps,
         )
-        self._draft_head_graph = DraftHeadGraph(
-            enabled=hasattr(self, "_fp8_lm_head")
-        )
+        self._draft_head_graph = DraftHeadGraph(enabled=hasattr(self, "_fp8_lm_head"))
         annotate_compute_inventory(self.weight)
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None):

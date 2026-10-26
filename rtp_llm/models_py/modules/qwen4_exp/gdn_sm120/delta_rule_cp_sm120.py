@@ -20,13 +20,13 @@ from .custom_compile_cache import (
     get_cached_compile,
     sm12x_compile_options,
 )
-from .delta_rule_sm120 import _FullyFusedDeltaRuleSm120
 from .device_utils import (
     _get_cache_buf,
     get_compute_capability,
     get_device_name,
     get_device_sm_count,
 )
+from .geometry import can_implement
 from .helpers import (
     SM80,
     TF32,
@@ -5296,7 +5296,7 @@ def cp_delta_rule_prefill_dsl_sm120(
             raise RuntimeError(
                 f"alpha heads must equal max(q heads, v heads)={num_sab_heads}, got {alpha.shape[1]}"
             )
-        if not _FullyFusedDeltaRuleSm120.can_implement(
+        if not can_implement(
             num_q_heads, num_k_heads, num_v_heads, d, q.element_size()
         ):
             raise RuntimeError(
@@ -5694,9 +5694,7 @@ def cp_delta_rule_dsl_sm120(
         raise RuntimeError(
             f"beta heads must equal max(q heads, v heads)={num_sab_heads}, got {beta.shape[1]}"
         )
-    if not _FullyFusedDeltaRuleSm120.can_implement(
-        num_q_heads, num_k_heads, num_v_heads, d, q.element_size()
-    ):
+    if not can_implement(num_q_heads, num_k_heads, num_v_heads, d, q.element_size()):
         raise RuntimeError(
             "CPDeltaRuleSm120 only supports head counts where q/v heads are positive multiples "
             f"of k heads, got q={num_q_heads}, k={num_k_heads}, v={num_v_heads}"

@@ -152,14 +152,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         """Whether the fused main KV writer may have mutated its cache."""
         return self._qsa_main_cache_mutation_started
 
-    def _is_mtp_incremental_prefill(self) -> bool:
-        return (
-            self.is_prefill
-            and not self.is_target_verify
-            and self._is_mtp_draft
-            and self._has_nonzero_prefill_prefix()
-        )
-
     def _is_prefix_reuse_prefill(self) -> bool:
         """Ragged prefill batch containing at least one reused prefix.
 

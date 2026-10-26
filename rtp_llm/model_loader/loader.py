@@ -125,10 +125,6 @@ class ModelLoader:
                 raise ValueError(
                     f"global weight alias {name!r} is on {tensor.device}, expected {expected_device}"
                 )
-            if descriptor.pinned_memory and not tensor.is_pinned():
-                raise ValueError(
-                    f"global weight alias {name!r} requires pinned CPU storage"
-                )
         if self._load_config.is_ft_style_weight:
             weights = self._load_from_ft_style(device)
         else:
@@ -250,11 +246,6 @@ class ModelLoader:
         weights = [{} for _ in range(num_layers)]
         global_weights = dict(self._global_weight_aliases)
         resident_devices = self._resident_weight_devices()
-        descriptors = (
-            {weight.name: weight for weight in self._model_weights_info.weights}
-            if self._model_weights_info is not None
-            else {}
-        )
         source_device = "cpu" if resident_devices else device
         # 重新构建权重
         all_tensors = self._load_config.database.load_tensors_by_prefix(
@@ -283,11 +274,6 @@ class ModelLoader:
                 value = tensor[0].to(
                     self._resident_weight_device(resident_devices, None, name, device)
                 )
-                descriptor = descriptors.get(name)
-                if descriptor is not None and descriptor.pinned_memory:
-                    if value.device.type != "cpu":
-                        raise ValueError("pinned weight residency requires CPU storage")
-                    value = value if value.is_pinned() else value.pin_memory()
                 global_weights[name] = value
         model_weights.weights = weights
         model_weights.global_weights = global_weights

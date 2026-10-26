@@ -2,34 +2,12 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "autil/TimeUtility.h"
-#include "autil/EnvUtil.h"
 #include <algorithm>
 #include <cctype>
 #include <string>
-#include <optional>
-#include <pybind11/pybind11.h>
-#include <pybind11/gil.h>
 
 namespace rtp_llm {
 namespace tap = torch::autograd::profiler;
-
-// Kineto installs Python callbacks on interpreter thread states present at
-// start. A native engine thread normally destroys its temporary pybind state
-// after each Python forward. Keep that state alive for the profiling session,
-// while releasing the GIL between Python calls as usual.
-class PythonTraceThreadState {
-public:
-    void release() {
-        released_.emplace();
-    }
-    void resume() {
-        released_.reset();
-    }
-
-private:
-    pybind11::gil_scoped_acquire                acquired_;
-    std::optional<pybind11::gil_scoped_release> released_;
-};
 
 namespace {
 // Trust-boundary limits for configure(). Every profiling config source (HTTP after
@@ -73,12 +51,7 @@ std::unique_ptr<tap::ProfilerResult> tryDisableProfiler(DisableProfilerFn disabl
 std::atomic<size_t> TorchProfile::count_{0};
 
 TorchProfile::TorchProfile(const std::string& prefix, std::string output_dir):
-    prefix_(prefix), output_dir_(output_dir.empty() ? "." : std::move(output_dir)) {
-    config_.with_stack = autil::EnvUtil::getEnv("RTP_LLM_TIMELINE_WITH_STACK", false);
-    if (config_.with_stack) {
-        RTP_LLM_LOG_INFO("torch timeline with_stack=true prefix=%s", prefix_.c_str());
-    }
-}
+    prefix_(prefix), output_dir_(output_dir.empty() ? "." : std::move(output_dir)) {}
 
 TorchProfile::~TorchProfile() {
     if (!stopped_) {
@@ -89,20 +62,8 @@ TorchProfile::~TorchProfile() {
 void TorchProfile::start() {
     count_ += 1;
     stopped_ = false;
-    if (config_.with_stack && Py_IsInitialized()) {
-        python_trace_thread_state_ = std::make_unique<PythonTraceThreadState>();
-    }
-    try {
-        tap::prepareProfiler(config_, activities_);
-        tap::enableProfiler(config_, activities_);
-    } catch (...) {
-        python_trace_thread_state_.reset();
-        stopped_ = true;
-        throw;
-    }
-    if (python_trace_thread_state_) {
-        python_trace_thread_state_->release();
-    }
+    tap::prepareProfiler(config_, activities_);
+    tap::enableProfiler(config_, activities_);
 }
 
 std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopAndCollect() {
@@ -113,11 +74,7 @@ std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopA
     // trace. Mark this wrapper stopped first so an exception is never retried
     // from the destructor.
     stopped_ = true;
-    if (python_trace_thread_state_) {
-        python_trace_thread_state_->resume();
-    }
     auto res = detail::tryDisableProfiler(&tap::disableProfiler);
-    python_trace_thread_state_.reset();
     if (!res) {
         return {nullptr, ""};
     }

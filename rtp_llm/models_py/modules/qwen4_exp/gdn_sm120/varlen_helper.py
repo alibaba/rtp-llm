@@ -109,25 +109,6 @@ def cp_short_workload_ratio_host(
     )
 
 
-def should_use_cp_host(
-    num_parallel_work: int,
-    num_sms: int,
-    device_name: str,
-    device_capability: tuple[int, int] | None = None,
-) -> bool:
-    """Return whether a public wrapper should dispatch to the CP path.
-
-    `num_parallel_work` is the non-CP kernel parallelism, typically batch times
-    output/state heads. CP is selected only when that parallelism is strictly
-    below the card-specific threshold.
-    """
-    if device_capability is not None and device_capability[0] == 10:
-        return num_parallel_work * CP_SM100_PARALLELISM_THRESHOLD_DENOMINATOR < num_sms
-
-    threshold_num, threshold_den = cp_parallelism_threshold_host(device_name)
-    return num_parallel_work * threshold_den < num_sms * threshold_num
-
-
 def choose_cp_chunk_len_host(
     max_seqlen: int,
     num_heads: int,
@@ -204,30 +185,6 @@ def chunk_bound(
 @cute.jit
 def chunks_for_len(seq_len: cutlass.Int32, chunk_size: cutlass.Int32) -> cutlass.Int32:
     return (seq_len + chunk_size - cutlass.Int32(1)) // chunk_size
-
-
-@cute.jit
-def logical_chunk_to_work_desc(
-    cu_seqlens: cute.Tensor,
-    logical_chunk_idx: cutlass.Int32,
-    chunk_size: cutlass.Int32,
-    num_seqs: cutlass.Int32,
-):
-    seq_idx = cutlass.Int32(0)
-    chunk_idx_in_seq = logical_chunk_idx
-    running = cutlass.Int32(0)
-    for candidate_seq in cutlass.range(num_seqs, unroll=1):
-        seq_start = cu_seqlens[candidate_seq]
-        seq_len = cutlass.Int32(
-            cu_seqlens[candidate_seq + cutlass.Int32(1)] - seq_start
-        )
-        seq_chunks = chunks_for_len(seq_len, chunk_size)
-        next_running = running + seq_chunks
-        if logical_chunk_idx >= running and logical_chunk_idx < next_running:
-            seq_idx = candidate_seq
-            chunk_idx_in_seq = logical_chunk_idx - running
-        running = next_running
-    return seq_idx, chunk_idx_in_seq
 
 
 @cute.jit

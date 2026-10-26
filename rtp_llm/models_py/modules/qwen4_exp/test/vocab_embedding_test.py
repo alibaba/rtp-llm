@@ -7,7 +7,6 @@ import torch.nn.functional as F
 
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models_py.modules.base.common.fp8_embedding import Fp8VocabEmbedding
 
@@ -176,16 +175,12 @@ class Fp8VocabEmbeddingTest(unittest.TestCase):
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class WeightResidencyContractTest(unittest.TestCase):
 
-    def test_loader_accepts_pinned_cpu_embedding_and_cuda_lm_head_aliases(self):
+    def test_loader_accepts_cpu_embedding_and_cuda_lm_head_aliases(self):
         loader = ModelLoader.__new__(ModelLoader)
         loader._model_weights_info = SimpleNamespace(
             weights=[
-                SimpleNamespace(
-                    name="embedding", resident_device="cpu", pinned_memory=True
-                ),
-                SimpleNamespace(
-                    name="lm_head", resident_device=None, pinned_memory=False
-                ),
+                SimpleNamespace(name="embedding", resident_device="cpu"),
+                SimpleNamespace(name="lm_head", resident_device=None),
             ]
         )
         loader._load_config = SimpleNamespace(is_ft_style_weight=True)
@@ -193,7 +188,7 @@ class WeightResidencyContractTest(unittest.TestCase):
         loader._load_from_ft_style = lambda device: sentinel
         loader._load_dynamic_weights = lambda *args: None
         loader._init_eplb_weight = lambda *args: None
-        embedding = torch.randn(7, 8, dtype=torch.bfloat16).pin_memory()
+        embedding = torch.randn(7, 8, dtype=torch.bfloat16)
         head = torch.randn(7, 8, dtype=torch.bfloat16, device="cuda")
         self.assertIs(
             loader.load_weights("cuda:0", {"embedding": embedding, "lm_head": head}),
@@ -206,13 +201,10 @@ class WeightResidencyContractTest(unittest.TestCase):
             loader.load_weights(
                 "cuda:0", {"embedding": embedding, "lm_head": embedding}
             )
-        with self.assertRaisesRegex(ValueError, "pinned CPU storage"):
-            loader.load_weights("cuda:0", {"embedding": torch.randn(7, 8)})
 
-    def test_descriptor_load_materializes_pinned_owner_without_cuda_staging(self):
-        class PinnedWeight(AtomicWeight):
+    def test_descriptor_load_keeps_cpu_residency_without_cuda_staging(self):
+        class CpuWeight(AtomicWeight):
             resident_device = "cpu"
-            pinned_memory = True
 
             @classmethod
             def support(cls, quant_config, src_weight_info):
@@ -228,25 +220,14 @@ class WeightResidencyContractTest(unittest.TestCase):
             def _postprocess(self, tensors, device, load_config):
                 return tensors
 
-        descriptor = PinnedWeight("embedding", weights=[])
+        descriptor = CpuWeight("embedding", weights=[])
         before = torch.cuda.memory_allocated()
         result = descriptor.load(
             None, None, "cuda:0", SimpleNamespace(merge_lora=False)
         )
         self.assertEqual(descriptor.received_device, "cpu")
-        self.assertTrue(result["embedding"].is_pinned())
+        self.assertEqual(result["embedding"].device.type, "cpu")
         self.assertEqual(torch.cuda.memory_allocated(), before)
-
-    def test_online_host_weight_update_rejects_before_ipc_decode(self):
-        manager = WeightManager.__new__(WeightManager)
-        descriptor = AtomicWeight("embedding", weights=[])
-        descriptor.resident_device = "cpu"
-        descriptor.pinned_memory = True
-        manager._weight_module = SimpleNamespace(weights=[descriptor])
-        with self.assertRaisesRegex(PermissionError, "service restart"):
-            manager.update(
-                dict(name="embed_tokens.weight", method="shm", desc="not decoded")
-            )
 
 
 if __name__ == "__main__":
