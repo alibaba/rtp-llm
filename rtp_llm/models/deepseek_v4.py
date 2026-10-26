@@ -35,7 +35,12 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.pp_layout import even_split_counts, register_pp_partitioner
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
-from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
+from rtp_llm.model_loader.ffn_weight import (
+    MoeAtomicWeight,
+    MoeConfig,
+    MoeWeight,
+    PreShardedTensor,
+)
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.deepseek_v2 import (
@@ -59,6 +64,39 @@ from rtp_llm.utils.model_weight import (
     yarn_get_mscale,
     zeros,
 )
+
+
+def dsv4_tp_sharded_moe_requested() -> bool:
+    return os.environ.get("DSV4_SM120_TP_MOE", "0") == "1"
+
+
+class _V4TpShardedExpertWeight(MoeAtomicWeight):
+    """Routed-expert tensor loaded TP-style: every rank keeps all experts and
+    a 1/tp slice of the intermediate dim (w1/w3 rows, w2 columns)."""
+
+    def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):
+        tp, rank = int(load_config.tp_size), int(load_config.tp_rank)
+        dim = 1 if self.name in (W.v4_routed_w2_w, W.v4_routed_w2_s) else 0
+        ckpt = self.weights[0]
+        out = None
+        for expert in range(self.config.expert_num):
+            name = self._ckpt_name(ckpt, layer_id, expert)
+            full = tensor_source.load_tensor(name, self.data_type)[0].to(device)
+            size = int(full.shape[dim])
+            if size % tp:
+                raise ValueError(
+                    f"{name}: dim {dim} size {size} not divisible by tp {tp}"
+                )
+            shard = full.narrow(dim, rank * (size // tp), size // tp)
+            if out is None:
+                out = torch.empty(
+                    (self.config.expert_num, *shard.shape),
+                    dtype=self.data_type,
+                    device=device,
+                )
+            out[expert].copy_(shard)
+        return {self.name: PreShardedTensor(out)}
+
 
 SCORING_FUNC_SOFTMAX = 0
 SCORING_FUNC_SIGMOID = 1
@@ -368,13 +406,18 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         # branch on dtype, and a uint8 cast will silently drop the FP4
         # routed-expert linears into a slower BF16 dequant fallback.
         out: List[WeightModule] = []
+        weight_cls = (
+            _V4TpShardedExpertWeight
+            if dsv4_tp_sharded_moe_requested() and self.tp_size > 1
+            else MoeAtomicWeight
+        )
         for sub_w_name, sub_s_name, sub in [
             (W.v4_routed_w1_w, W.v4_routed_w1_s, "w1"),
             (W.v4_routed_w2_w, W.v4_routed_w2_s, "w2"),
             (W.v4_routed_w3_w, W.v4_routed_w3_s, "w3"),
         ]:
             out.append(
-                MoeAtomicWeight(
+                weight_cls(
                     sub_w_name,
                     [
                         CkptWeightInfo(
@@ -388,7 +431,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 )
             )
             out.append(
-                MoeAtomicWeight(
+                weight_cls(
                     sub_s_name,
                     [
                         CkptWeightInfo(

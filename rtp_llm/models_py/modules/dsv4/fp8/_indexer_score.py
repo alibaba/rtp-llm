@@ -29,6 +29,8 @@ import os
 from typing import Optional
 
 import torch
+import triton
+import triton.language as tl
 
 # DeepGEMM JIT writes ``kernel.cu`` under ``$HOME/.deep_gemm/tmp/<id>/``
 # and shells out to NVCC; if ``HOME`` is unset (bazel test sandbox does
@@ -103,6 +105,117 @@ def _sm120_fused_gather_enabled(pool: torch.Tensor) -> bool:
         and pool.is_cuda
         and pool.is_contiguous()
     )
+
+
+def _sm120_triton_score_enabled(pool: torch.Tensor) -> bool:
+    return (
+        os.environ.get("DSV4_SM120_INDEXER_TRITON_SCORE", "1") == "1"
+        and pool.is_cuda
+        and pool.is_contiguous()
+    )
+
+
+@triton.jit
+def _sm120_paged_score_kernel(
+    Q,  # [rows, H, 128] fp8 (as uint8)
+    W,  # [rows, H] fp32
+    POOL,  # flat uint8: per block = EB*128 K bytes || EB*4 fp32 scales
+    TABLE,  # [B or rows, max_blocks] int32
+    LENGTHS,  # [rows] int32
+    OUT,  # [rows, WIDTH] fp32
+    NEXT_N: tl.constexpr,
+    H: tl.constexpr,
+    EB: tl.constexpr,
+    WIDTH,
+    TABLE_STRIDE,
+    TABLE_PER_ROW: tl.constexpr,
+    NUM_BLOCKS,
+    HEAD_TILE: tl.constexpr,
+    KEY_TILE: tl.constexpr,
+):
+    row = tl.program_id(0)
+    tile = tl.program_id(1)
+    keys = tile * KEY_TILE + tl.arange(0, KEY_TILE)
+    length = tl.load(LENGTHS + row)
+    out_ptr = OUT + row.to(tl.int64) * WIDTH + keys
+    if tile * KEY_TILE >= length:
+        tl.store(out_ptr, float("-inf"), keys < WIDTH)
+        return
+    req = row if TABLE_PER_ROW else row // NEXT_N
+    in_range = (keys < WIDTH) & (keys < length)
+    block = tl.load(TABLE + req * TABLE_STRIDE + keys // EB, in_range, -1)
+    valid = in_range & (block >= 0) & (block < NUM_BLOCKS)
+    base = block.to(tl.int64) * (EB * 132)
+    tok = (keys % EB).to(tl.int64)
+    dims = tl.arange(0, 128)
+    k = tl.load(
+        POOL + base[:, None] + tok[:, None] * 128 + dims[None, :],
+        valid[:, None],
+        0,
+    )
+    k = k.to(tl.float8e4nv, bitcast=True).to(tl.bfloat16)
+    k_scale = tl.load(
+        (POOL + base + EB * 128 + tok * 4).to(
+            tl.pointer_type(tl.float32), bitcast=True
+        ),
+        valid,
+        0.0,
+    )
+    heads = tl.arange(0, HEAD_TILE)
+    q = tl.load(
+        Q + (row.to(tl.int64) * H + heads[:, None]) * 128 + dims[None, :],
+        heads[:, None] < H,
+        0,
+    )
+    q = q.to(tl.float8e4nv, bitcast=True).to(tl.bfloat16)
+    per_head = tl.dot(q, tl.trans(k)) * k_scale[None, :]
+    per_head = tl.maximum(per_head, 0.0)
+    w = tl.load(W + row * H + heads, heads < H, 0.0)
+    score = tl.sum(per_head * w[:, None], axis=0)
+    tl.store(out_ptr, tl.where(valid, score, float("-inf")), keys < WIDTH)
+
+
+def _fp8_paged_indexer_score_sm120_triton(
+    q_fp8: torch.Tensor,
+    w_fold: torch.Tensor,
+    kv_pool_uint8: torch.Tensor,
+    block_table: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_size: int,
+    max_ctx_len: int,
+) -> torch.Tensor:
+    B, next_n, H, D = q_fp8.shape
+    rows = B * next_n
+    out = torch.empty((rows, max_ctx_len), dtype=torch.float32, device=q_fp8.device)
+    if rows == 0 or max_ctx_len == 0:
+        return out
+    lengths = context_lens.to(torch.int32).reshape(-1)
+    if lengths.numel() != rows:
+        lengths = lengths.repeat_interleave(rows // lengths.numel())
+    table = block_table.to(torch.int32)
+    if table.stride(1) != 1:
+        table = table.contiguous()
+    num_blocks = kv_pool_uint8.numel() // (block_size * INDEXER_ENTRY_BYTES)
+    key_tile = 64
+    _sm120_paged_score_kernel[(rows, triton.cdiv(max_ctx_len, key_tile))](
+        q_fp8.contiguous().view(torch.uint8),
+        w_fold.float().contiguous(),
+        kv_pool_uint8,
+        table,
+        lengths.contiguous(),
+        out,
+        next_n,
+        H,
+        block_size,
+        max_ctx_len,
+        table.stride(0),
+        table.shape[0] == rows,
+        num_blocks,
+        max(16, triton.next_power_of_2(H)),
+        key_tile,
+        num_warps=4,
+    )
+    return out
 
 
 def _get_num_sms(device: torch.device) -> int:
@@ -212,6 +325,16 @@ def _fp8_paged_indexer_score_sm120(
     if D != INDEXER_HEAD_DIM:
         raise ValueError(f"q_fp8 head dim must be {INDEXER_HEAD_DIM}, got {D}")
     device = q_fp8.device
+    if _sm120_triton_score_enabled(kv_pool_uint8):
+        return _fp8_paged_indexer_score_sm120_triton(
+            q_fp8,
+            w_fold,
+            kv_pool_uint8,
+            block_table,
+            context_lens,
+            block_size,
+            max_ctx_len,
+        )
     q = q_fp8.float().reshape(rows, H, D)
     weights = w_fold.float().reshape(rows, H)
     lengths = context_lens.to(device=device, dtype=torch.long).reshape(-1)

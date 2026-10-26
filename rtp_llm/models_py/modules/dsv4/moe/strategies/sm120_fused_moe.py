@@ -10,6 +10,7 @@ all-gather/all-reduce fallback for non-CP/CUDA-graph execution.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import replace
 from typing import Dict
 
@@ -46,6 +47,15 @@ def _validate_world_collective_topology(cfg: MoeCfg, dist, group) -> tuple[int, 
     return world, rank
 
 
+def _tokens_replicated_across_ep(cfg: MoeCfg, world: int) -> bool:
+    return (
+        os.environ.get("DSV4_SM120_TP_REPLICATED_MOE", "1") == "1"
+        and cfg.tp_size > 1
+        and cfg.tp_size == cfg.ep_size == world
+        and not cfg.cp_enabled
+    )
+
+
 @register_strategy
 class Sm120FusedMoeStrategy(RoutedExpertsStrategy):
     """SM120 FusedMoe compute with collective communication routers."""
@@ -78,6 +88,15 @@ class Sm120FusedMoeStrategy(RoutedExpertsStrategy):
         else:
             self._local = LocalLoopStrategy(cfg)
 
+        if (
+            self._sm120_grouped is not None
+            and os.environ.get("DSV4_SM120_TP_REPLICATED_MOE", "1") == "1"
+            and os.environ.get("DSV4_SM120_MOE_BF16_ALLREDUCE", "1") == "1"
+            and cfg.tp_size > 1
+            and cfg.tp_size == cfg.ep_size
+            and not cfg.cp_enabled
+        ):
+            self._sm120_grouped._return_bf16 = True
         self._fused_moe = build_sm120_fused_moe(
             cfg,
             self._local,
@@ -205,6 +224,25 @@ class Sm120FusedMoeStrategy(RoutedExpertsStrategy):
             )
         group = dist.group.WORLD
         world, rank = _validate_world_collective_topology(self.cfg, dist, group)
+        if _tokens_replicated_across_ep(self.cfg, world):
+            # TP == EP == WORLD: attention already all-reduced, so every rank
+            # holds identical tokens/routing. Each rank computes only its
+            # local experts on the shared tokens; one all-reduce sums experts.
+            with record_function_range("dsv4.moe.sm120.fused_moe"):
+                partial = self._fused_moe(x, weights, indices)
+            if os.environ.get("DSV4_SM120_MOE_BF16_ALLREDUCE", "1") == "1":
+                # Expert partial sums are combined with the bf16 shared-expert
+                # output anyway; reducing in bf16 halves PCIe traffic.
+                partial_bf16 = partial.to(torch.bfloat16)
+                from rtp_llm.models_py.distributed.collective_torch import (
+                    pcie_oneshot_all_reduce,
+                )
+
+                if pcie_oneshot_all_reduce(partial_bf16) is None:
+                    dist.all_reduce(partial_bf16, op=dist.ReduceOp.SUM, group=group)
+                return partial_bf16
+            dist.all_reduce(partial, op=dist.ReduceOp.SUM, group=group)
+            return partial
         if torch.cuda.is_current_stream_capturing():
             # Decode graphs use a fixed equal batch shape on every rank.
             counts = [x.size(0)] * world

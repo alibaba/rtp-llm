@@ -164,10 +164,13 @@ class Sm120GroupedFp4FusedMoeExecutor(FusedMoeExpertExecutor):
         cfg = self.cfg
 
         if self.uses_grouped_fp4:
-            local_ids = indices - cfg.local_expert_start
-            valid = (local_ids >= 0) & (local_ids < cfg.n_local_experts)
-            local_weights = weights * valid.to(weights.dtype)
-            local_ids = local_ids.clamp(0, cfg.n_local_experts - 1)
+            if cfg.n_local_experts == cfg.n_routed_experts:
+                local_ids, local_weights = indices, weights
+            else:
+                local_ids = indices - cfg.local_expert_start
+                valid = (local_ids >= 0) & (local_ids < cfg.n_local_experts)
+                local_weights = weights * valid.to(weights.dtype)
+                local_ids = local_ids.clamp(0, cfg.n_local_experts - 1)
 
             # Experimental MXFP8 all-to-all can pass a pre-quantized input
             # and its linear scale.  Normal CP/all-reduce calls enter through
@@ -190,7 +193,12 @@ class Sm120GroupedFp4FusedMoeExecutor(FusedMoeExpertExecutor):
                 local_end=cfg.local_expert_end,
             )
 
-        return CombineForwardPayload(fused_expert_output=output.float())
+        if not (
+            output.dtype == torch.bfloat16
+            and getattr(self.local_strategy, "_return_bf16", False)
+        ):
+            output = output.float()
+        return CombineForwardPayload(fused_expert_output=output)
 
 
 @dataclass(frozen=True)
