@@ -118,20 +118,19 @@ class BackendRPCServerVisitorSpeculativeTest(unittest.TestCase):
             with self.subTest(sp_type=sp_type):
                 self._check_request(sp_type)
 
-    def test_other_speculative_executor_rejects_token_probabilities(self):
-        for sp_type in (SpeculativeType.VANILLA, SpeculativeType.DETERMINISTIC):
-            with self.subTest(sp_type=sp_type):
+    def test_frontend_accepts_token_probabilities_without_backend_sp_type(self):
+        for mode in (ReturnAllProbsMode.DEFAULT, ReturnAllProbsMode.ORIGINAL):
+            with self.subTest(mode=mode):
+                self._check_request(SpeculativeType.NONE, return_all_probs=mode)
+
+    def test_mtp_still_rejects_multiple_sequences_or_beams(self):
+        for option in ("num_return_sequences", "num_beams"):
+            with self.subTest(option=option):
                 with self.assertRaises(FtRuntimeException) as ctx:
-                    self._check_request(sp_type)
+                    self._check_request(SpeculativeType.MTP, **{option: 2})
                 self.assertEqual(
                     ctx.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
                 )
-                self.assertIn("return_all_probs", str(ctx.exception))
-
-    def test_mtp_still_rejects_multiple_sequences(self):
-        with self.assertRaises(FtRuntimeException) as ctx:
-            self._check_request(SpeculativeType.MTP, num_return_sequences=2)
-        self.assertEqual(ctx.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION)
 
 
 class _FakeRouteTokenIds:
