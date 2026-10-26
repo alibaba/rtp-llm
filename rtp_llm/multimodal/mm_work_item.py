@@ -161,6 +161,8 @@ class MMWorkItem:
         self.preprocess_result: Optional[Any] = None
         self.capture_inspection_sources = False
         self.inspection_sources: Optional[List[bytes]] = None
+        self.inspection_request = None
+        self.inspection_future = None
         self.preprocess_ready = False
         self.preprocess_submitted_at = 0.0
         self.preprocess_received_at = 0.0
