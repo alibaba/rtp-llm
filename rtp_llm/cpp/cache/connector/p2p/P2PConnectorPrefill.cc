@@ -532,12 +532,17 @@ void P2PConnectorPrefill::processWrite(const P2PConnectorStartWriteBackRequestPB
 bool P2PConnectorPrefill::processWritePerRank(const P2PConnectorBroadcastTpRequestPB& request,
                                               FunctionResponsePB&                     response) {
     response.mutable_p2p_response()->Clear();
+    const auto deadline_ms = p2p_internal::writebackLocalDeadline(request.transfer_timeout_ms());
+    const auto stop_at_ms = p2p_internal::writebackSteadyDeadline(deadline_ms);
     const auto reject = [&](const std::string& message) {
         P2PConnector::setP2PResponse(response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, message));
         return false;
     };
     if (!write_worker_) {
         return reject("prefill writeback disabled");
+    }
+    if (deadline_ms == 0) {
+        return reject("writeback requires a positive remaining transfer budget");
     }
     P2PWorkerRoutePlan plan;
     plan.plan_digest = request.plan_digest();
@@ -568,7 +573,7 @@ bool P2PConnectorPrefill::processWritePerRank(const P2PConnectorBroadcastTpReque
         plan.routes.push_back(std::move(route));
     }
     const auto error = write_worker_->handleWrite(
-        request.request_id(), request.unique_key(), request.deadline_ms(), plan, [this, &request]() {
+        request.request_id(), request.unique_key(), deadline_ms, plan, [this, &request, stop_at_ms]() {
             P2PConnectorBroadcastTpRequestPB ready;
             ready.set_unique_key(request.unique_key());
             ready.set_plan_digest(request.plan_digest());
@@ -584,8 +589,8 @@ bool P2PConnectorPrefill::processWritePerRank(const P2PConnectorBroadcastTpReque
             P2PBroadcastClient::BroadcastParams params;
             params.request_id          = request.request_id();
             params.unique_key          = request.unique_key();
-            params.deadline_ms         = request.deadline_ms();
-            params.request_deadline_ms = request.deadline_ms();
+            params.deadline_ms         = currentTimeMs() + std::max<int64_t>(0, stop_at_ms - P2PNotification::nowMs());
+            params.request_deadline_ms = params.deadline_ms;
             params.type                = HANDLE_WRITE_READY;
             params.plan_digest         = request.plan_digest();
             params.worker_rank         = config_.tp_rank;
@@ -594,7 +599,7 @@ bool P2PConnectorPrefill::processWritePerRank(const P2PConnectorBroadcastTpReque
                 return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
                                  "write registration RPC submission failed");
             }
-            while (!result->done() && currentTimeMs() < request.deadline_ms()) {
+            while (!result->done() && P2PNotification::nowMs() < stop_at_ms) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             return result->success() ? ErrorInfo::OkStatus() :
@@ -622,7 +627,7 @@ bool P2PConnectorPrefill::cancelProcessWritePerRank(const std::string& unique_ke
             response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "prefill writeback disabled"));
         return false;
     }
-    if (!write_worker_->cancelWrite(unique_key, deadline_ms)) {
+    if (!write_worker_->cancelWrite(unique_key, currentTimeMs() + config_.worker_config.load_cache_timeout_ms)) {
         P2PConnector::setP2PResponse(
             response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "invalid write key"));
         return false;

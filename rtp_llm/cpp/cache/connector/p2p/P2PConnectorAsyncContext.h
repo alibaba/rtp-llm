@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PNotification.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWritebackResourceUtil.h"
 #include <algorithm>
 #include "autil/LoopThread.h"
 #include "autil/ThreadPool.h"
@@ -302,7 +303,8 @@ public:
                                   int64_t                             control_timeout_ms,
                                   int64_t                             lease_query_timeout_ms,
                                   std::function<void()>               on_released      = {},
-                                  kmonitor::MetricsReporterPtr        metrics_reporter = nullptr);
+                                  kmonitor::MetricsReporterPtr        metrics_reporter = nullptr,
+                                  KVCacheResourcePtr                  source_resource = nullptr);
 
     void               waitDone() override;
     void               onDone(DoneCallback callback) override;
@@ -331,7 +333,6 @@ private:
     void                  setNotification(const std::shared_ptr<P2PNotification>& notification);
     int64_t               nextWakeupMs() const;
     void                  runControl(const std::shared_ptr<autil::ThreadPool>& control_pool);
-    void                  failStopIfLeaseUnconfirmed();
     void                  dispatchDoneCallbacks();
     std::function<void()> completionCallback() const;
     void                  registerWriteCompletionCallbacksLocked();
@@ -341,8 +342,6 @@ private:
     void    checkPeerResultLocked();
     void    tryFinishLocked(const ErrorInfo& error);
     void    finishLocked(const ErrorInfo& error);
-    int64_t holdUntilMsLocked() const;
-    bool    retentionExpired() const;
     struct DoneNotifier {
         P2PConnectorAsyncWriteContext& context;
         ~DoneNotifier() {
@@ -352,6 +351,8 @@ private:
 
     const std::string                   unique_key_;
     int64_t                             deadline_ms_;
+    int64_t                             transfer_stop_at_ms_;
+    std::weak_ptr<KVCacheResource>       source_resource_;
     std::shared_ptr<P2PBroadcastClient> client_;
     const int64_t                       control_timeout_ms_;
     const int64_t                       lease_query_timeout_ms_;
@@ -386,7 +387,7 @@ private:
 class P2PConnectorAsyncWriteContextChecker {
 public:
     ~P2PConnectorAsyncWriteContextChecker();
-    bool   init();
+    bool   init(const P2PConnectorSchedulerConfig& config);
     bool   addContext(const std::shared_ptr<P2PConnectorAsyncWriteContext>& context);
     void   cancelAll();
     void   stop();
@@ -403,6 +404,7 @@ private:
     std::atomic<bool>                                                     stopping_{false};
     std::shared_ptr<P2PNotification>   notification_{std::make_shared<P2PNotification>()};
     std::shared_ptr<autil::ThreadPool> control_pool_;
+    WritebackRetainedKv retained_kv_;
 };
 
 }  // namespace rtp_llm

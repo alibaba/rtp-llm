@@ -321,15 +321,19 @@ void P2PConnectorDecode::cancelWrite(const std::shared_ptr<AsyncContext>& contex
 
 bool P2PConnectorDecode::writePerRank(const P2PConnectorBroadcastTpRequestPB& request, FunctionResponsePB& response) {
     response.mutable_p2p_response()->Clear();
+    const auto deadline_ms = p2p_internal::writebackLocalDeadline(request.transfer_timeout_ms());
     const auto reject = [&](const std::string& message) {
         P2PConnector::setP2PResponse(response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, message));
         if (write_worker_) {
-            write_worker_->cancelWrite(request.unique_key(), request.deadline_ms(), true);
+            write_worker_->cancelWrite(request.unique_key(), currentTimeMs() + config_.worker_config.load_cache_timeout_ms, true);
         }
         return false;
     };
     if (!write_worker_) {
         return reject("decode writeback disabled");
+    }
+    if (deadline_ms == 0) {
+        return reject("writeback requires a positive remaining transfer budget");
     }
     P2PWorkerRoutePlan plan;
     plan.plan_digest = request.plan_digest();
@@ -369,9 +373,9 @@ bool P2PConnectorDecode::writePerRank(const P2PConnectorBroadcastTpRequestPB& re
         plan.routes.push_back(std::move(route));
     }
     const auto error =
-        write_worker_->write(request.request_id(), request.unique_key(), request.deadline_ms(), plan);
+        write_worker_->write(request.request_id(), request.unique_key(), deadline_ms, plan);
     if (error.hasError()) {
-        write_worker_->cancelWrite(request.unique_key(), request.deadline_ms(), true);
+        write_worker_->cancelWrite(request.unique_key(), deadline_ms, true);
     }
     P2PConnector::setP2PResponse(response, error);
     return error.ok();
@@ -385,7 +389,7 @@ bool P2PConnectorDecode::cancelWritePerRank(const std::string& unique_key,
             response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "decode writeback disabled"));
         return false;
     }
-    const bool ret = write_worker_->cancelWrite(unique_key, deadline_ms, true);
+    const bool ret = write_worker_->cancelWrite(unique_key, currentTimeMs() + config_.worker_config.load_cache_timeout_ms, true);
     P2PConnector::setP2PResponse(
         response,
         ret ? ErrorInfo::OkStatus() :

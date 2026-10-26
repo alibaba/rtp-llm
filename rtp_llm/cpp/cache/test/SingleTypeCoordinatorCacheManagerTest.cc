@@ -468,7 +468,8 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ExternalInsertDoesNotOverwriteHost
     const auto host = seedSingleTypeLowerTier(*cache, Tier::HOST, 11);
     ASSERT_NE(host, NULL_BLOCK_IDX);
     const auto result = allocator_->commitWriteBackDecodeCache(*owner, 0, currentTimeMs() + 5000);
-    EXPECT_TRUE(result.ok()) << result.ToString();
+    EXPECT_EQ(result.code(), ErrorCode::CACHE_STORE_STORE_FAILED);
+    EXPECT_NE(result.ToString().find("publication incomplete"), std::string::npos);
     EXPECT_EQ(cache->tree()->findNode({11, 22}).size(), 1u);
     const auto& resource = cache->tree()->findNode({11}).front()->group_set_resources.front();
     EXPECT_EQ(resource.host_block, host);
@@ -504,7 +505,8 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ExternalInsertDoesNotOverwriteBusy
     auto&      suffix     = cache->tree()->findNode({11, 22}).back()->group_set_resources.front();
     suffix.transfer_state = GroupSetTransferState::DEMOTING;
     const auto result     = allocator_->commitWriteBackDecodeCache(*owner, 1, currentTimeMs() + 5000);
-    EXPECT_TRUE(result.ok()) << result.ToString();
+    EXPECT_EQ(result.code(), ErrorCode::CACHE_STORE_STORE_FAILED);
+    EXPECT_NE(result.ToString().find("publication incomplete"), std::string::npos);
     EXPECT_EQ(cache->tree()->findNode({11, 22, 33}).size(), 2u);
     suffix.transfer_state = GroupSetTransferState::IDLE;
 }

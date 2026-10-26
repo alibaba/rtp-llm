@@ -1,16 +1,29 @@
 #pragma once
 
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PNotification.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <exception>
 #include <map>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace rtp_llm::p2p_internal {
+
+inline int64_t writebackSteadyDeadline(int64_t wall_deadline_ms) {
+    const auto remaining = std::max<int64_t>(0, wall_deadline_ms - currentTimeMs());
+    const auto now = P2PNotification::nowMs();
+    return now + std::min(remaining, std::numeric_limits<int64_t>::max() - now);
+}
+
+inline int64_t writebackLocalDeadline(int64_t timeout_ms) {
+    return timeout_ms > 0 && timeout_ms <= std::numeric_limits<int32_t>::max() ? currentTimeMs() + timeout_ms : 0;
+}
 
 // Far above any writeback RPC deadline, so an evicted client never has an RPC in flight.
 constexpr int64_t kPeerClientIdleTtlMs = 10 * 60 * 1000;

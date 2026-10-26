@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/DecodeTargetWriteLease.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerRoute.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWriteRpcUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <map>
@@ -27,11 +28,13 @@ struct WriteTaskGroup: public std::enable_shared_from_this<WriteTaskGroup> {
     explicit WriteTaskGroup(int64_t deadline, KVCacheResourcePtr source_resource = nullptr):
         lease(std::make_shared<DecodeTargetWriteLease>()),
         deadline_ms(deadline),
+        stop_at_ms(writebackSteadyDeadline(deadline)),
         source_resource_(std::move(source_resource)) {}
     std::mutex                                           mutex;
     std::map<std::string, transfer::IKVCacheRecvTaskPtr> tasks;
     std::shared_ptr<DecodeTargetWriteLease>              lease;
     int64_t                                              deadline_ms;
+    int64_t                                              stop_at_ms;
     bool                                                 started   = false;
     bool                                                 cancelled = false;
     ErrorInfo                                            error;

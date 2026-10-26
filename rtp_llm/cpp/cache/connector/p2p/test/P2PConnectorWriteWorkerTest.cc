@@ -265,7 +265,8 @@ bool executeWrite(P2PConnector&                           connector,
         std::lock_guard<std::mutex> lock(scheduler->requests_mutex_);
         auto&                       state = scheduler->requests_[p2p_request->unique_key()];
         if (!state) {
-            state = std::make_shared<P2PSchedulerPrefillWrite::PrefillWriteRequest>(p2p_request->deadline_ms());
+            state = std::make_shared<P2PSchedulerPrefillWrite::PrefillWriteRequest>(
+                p2p_internal::writebackLocalDeadline(p2p_request->transfer_timeout_ms()));
             state->registered_workers.assign(1, false);
             state->plan_digest = p2p_request->plan_digest();
         }
@@ -300,6 +301,7 @@ protected:
         request.set_type(WRITE);
         request.set_unique_key("write_request");
         request.set_deadline_ms(currentTimeMs() + 60000);
+        request.set_transfer_timeout_ms(60000);
         request.set_plan_digest(123);
         auto* peer = request.add_peer_workers();
         peer->set_ip("127.0.0.1");
@@ -615,12 +617,14 @@ TEST_F(P2PConnectorWriteWorkerTest, QueuedSendUsesRemainingTransferBudget) {
     ASSERT_TRUE(awaitWrite([&]() { return worker.sender_pool_->getItemCount() == 1; }));
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     worker.cancelWrite("active", deadline);
-    const auto remaining = deadline - currentTimeMs();
+    const auto resumed_ms = currentTimeMs();
+    const auto remaining = worker.groups_.at("queued")->stop_at_ms - P2PNotification::nowMs();
     sender->release();
     worker.sender_pool_->stop(autil::ThreadPoolBase::STOP_AFTER_QUEUE_EMPTY);
     ASSERT_EQ(sender->requests.size(), 3u);
     for (size_t i = 1; i < sender->requests.size(); ++i) {
-        EXPECT_EQ(sender->requests[i].deadline_ms, deadline);
+        EXPECT_GE(sender->requests[i].deadline_ms, resumed_ms + sender->requests[i].timeout_ms);
+        EXPECT_LE(sender->requests[i].deadline_ms, currentTimeMs() + sender->requests[i].timeout_ms);
         EXPECT_GT(sender->requests[i].timeout_ms, 0);
         EXPECT_LE(sender->requests[i].timeout_ms, remaining);
     }
@@ -852,6 +856,7 @@ TEST_F(P2PConnectorWriteWorkerTest, RejectsInvalidPartitionsAndExpiredRequests) 
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
     req = request();
     req.set_deadline_ms(currentTimeMs() - 1);
+    req.set_transfer_timeout_ms(0);
     EXPECT_FALSE(executeWrite(*prefill_connector_, req, response));
     EXPECT_FALSE(executeWrite(*decode_connector_, req, response));
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
@@ -930,6 +935,33 @@ TEST_F(P2PConnectorWriteWorkerTest, PartitionOverlapIsRejectedBeforeAnyRegistrat
     FunctionResponsePB response;
     EXPECT_FALSE(executeWrite(*prefill_connector_, request_pb, response));
     EXPECT_EQ(receiver_->registrations, 0);
+}
+
+TEST_F(P2PConnectorWriteWorkerTest, RemainingBudgetIgnoresRemoteClockOnBothWorkers) {
+    auto source_request = request();
+    source_request.set_deadline_ms(currentTimeMs() - 60000);
+    source_request.set_transfer_timeout_ms(3000);
+    auto target_request = source_request;
+    target_request.set_deadline_ms(currentTimeMs() + 60000);
+    auto receive = std::async(std::launch::async, [&] {
+        FunctionResponsePB response;
+        return executeWrite(*prefill_connector_, target_request, response);
+    });
+    LeaseSnapshot status;
+    ASSERT_TRUE(awaitWrite([&] { return queryLease(*prefill_, source_request.unique_key(), status) && status.sealed; }));
+    auto send = std::async(std::launch::async, [&] {
+        FunctionResponsePB response;
+        return executeWrite(*decode_connector_, source_request, response);
+    });
+    sender_->begin();
+    for (const auto& [sent, callback] : sender_->pending) {
+        EXPECT_GT(sent.timeout_ms, 0);
+        EXPECT_LE(sent.timeout_ms, 3000);
+    }
+    sender_->finish();
+    EXPECT_TRUE(receive.get());
+    EXPECT_TRUE(send.get());
+    EXPECT_EQ(source_->bytes, target_->bytes);
 }
 
 TEST_F(P2PConnectorWriteWorkerTest, SourceTpPartitionAndCpSliceCopyIntoWholeSmallerDestination) {
