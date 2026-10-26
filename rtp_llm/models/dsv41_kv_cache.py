@@ -8,6 +8,8 @@ model-specific allocator are needed.
 import logging
 
 from rtp_llm.models.dsv4_kv_cache import (
+    CSA_KV_TAG,
+    HCA_KV_TAG,
     _make_dsv4_desc,
     _use_host_pinned_memory,
     apply_dsv4_explicit_pool_blocks,
@@ -40,10 +42,8 @@ def build_v41_kv_cache_spec_descs(
     and placement are delegated to the descriptor's generic policies.
     """
     global_pools = {
-        ratio: _make_dsv4_desc(
-            f"global_kv_{ratio}", "compressed_kv", 288, DataType.TYPE_UINT8, ratio
-        )
-        for ratio in (1, 2)
+        ratio: _make_dsv4_desc(tag, "compressed_kv", 288, DataType.TYPE_UINT8, ratio)
+        for ratio, tag in ((1, HCA_KV_TAG), (2, CSA_KV_TAG))
     }
     for desc in global_pools.values():
         desc.block_stride_bytes_alignment = 4608  # lcm(512, 288)
