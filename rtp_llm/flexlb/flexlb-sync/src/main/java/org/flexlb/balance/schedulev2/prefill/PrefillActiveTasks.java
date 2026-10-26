@@ -23,6 +23,10 @@ public final class PrefillActiveTasks {
         snapshot.updateAndGet(old -> new Snapshot(engine, old.claimed()));
     }
 
+    public long inflightCount() {
+        return snapshot.get().countTasks().count();
+    }
+
     public QueueBlockReason blockReason(long kvTokens, int limit) {
         return snapshot.get().blockReason(kvTokens, limit);
     }
@@ -64,8 +68,11 @@ public final class PrefillActiveTasks {
     /**
      * 同一不可变快照内计算数量和未被引擎计入的 KV，避免把同一请求计算两次。
      */
+    private record TaskCount(long count, long pendingKv) {
+    }
+
     private record Snapshot(WorkerStatus.EngineObservation engine, Map<String, DispatchedRequest> claimed) {
-        QueueBlockReason blockReason(long kvTokens, int limit) {
+        private TaskCount countTasks() {
             Set<String> engineIds = new HashSet<>();
             if (engine != null && engine.runningTaskList() != null) {
                 for (WorkerStatus.TaskObservation task : engine.runningTaskList().values()) {
@@ -82,12 +89,17 @@ public final class PrefillActiveTasks {
                     pendingKv += entry.getValue().kvTokens();
                 }
             }
-            if (count >= limit) {
+            return new TaskCount(count, pendingKv);
+        }
+
+        QueueBlockReason blockReason(long kvTokens, int limit) {
+            TaskCount tasks = countTasks();
+            if (tasks.count() >= limit) {
                 return QueueBlockReason.PREFILL_INFLIGHT_FULL;
             }
             // 空机允许一个大请求，沿用原有的防饥饿规则。
-            if (count > 0L && engine != null && engine.totalKvCacheTokens() > 0L
-                    && kvTokens > engine.availableKvCacheTokens() - pendingKv) {
+            if (tasks.count() > 0L && engine != null && engine.totalKvCacheTokens() > 0L
+                    && kvTokens > engine.availableKvCacheTokens() - tasks.pendingKv()) {
                 return QueueBlockReason.PREFILL_KV_FULL;
             }
             return null;

@@ -117,8 +117,10 @@ MainQueue -> 每台机器一个 PrefillQueue -> 共用 DecodeQueue -> publish(Pr
 - 每台 Prefill 队列有自己的线程和 `LoopSignal`。新请求、记录移除时唤醒自己的线程，
   空闲时阻塞等待。机器下线或同地址换成新的 endpoint 时，旧线程退回等待请求并停止；新队列启动新线程。
 - 每个循环最外层捕获 `Throwable`，记录异常后继续下一轮，worker 的异常作为结果交回调度线程。
-  主队列和 Decode waiting 每轮最多处理 256 个候选；因 group 阻塞而直接跳过的请求不占次数。
-  Decode 的 published 和 reserved 每轮遍历全部记录。
+  主队列每轮最多处理 256 个候选；因 group 阻塞而直接跳过的请求不占次数。
+  Decode 每轮成功发布的请求数上限取本轮开始时已注册 Decode 逻辑端点数，waiting 与 reserved 共用额度。
+  Prefill 或 Decode 容量阻塞、取消和失败不消耗发布额度；额度未用完时继续向后遍历，直到队列末尾。
+  group 防饥饿规则仍决定同 group 请求能否越过队头。published 每轮遍历全部记录。
 
 以下描述为原有 BATCH / NON_BATCH 链路。
 

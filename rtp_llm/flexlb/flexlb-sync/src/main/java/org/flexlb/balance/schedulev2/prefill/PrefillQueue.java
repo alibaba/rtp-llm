@@ -228,6 +228,13 @@ public final class PrefillQueue {
     }
 
     /**
+     * 准入使用的请求数：引擎活跃请求和本地发布名额按请求 ID 去重。
+     */
+    public long inflightCount() {
+        return activeTasks.inflightCount();
+    }
+
+    /**
      * 这个请求能否进入 Decode 候选队列。只检查 Prefill 活跃任务数和 KV，不占名额。
      * 机器上一个在途请求都没有时总是可以，避免大请求一直等不到。
      */

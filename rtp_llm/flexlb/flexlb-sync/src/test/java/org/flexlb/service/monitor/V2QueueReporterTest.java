@@ -176,6 +176,28 @@ class V2QueueReporterTest {
                 FlexMetricTags.of("queue", "main", "reason", "REQUEST_CANCELLED", "priority", "50"), 1.0);
     }
 
+    @Test
+    void prefillInflightReportsLimitChangesAndClearsRemovedEndpoint() {
+        var endpoint = V2TestSupport.prefillEndpoint("p1:8000");
+        var queue = new org.flexlb.balance.schedulev2.prefill.PrefillQueue(endpoint, false);
+        V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L,
+                java.util.Map.of("running", org.flexlb.enums.TaskPhase.RUNNING));
+        queue.updateFromEngine();
+        FlexMetricTags tags = FlexMetricTags.of("endpoint", endpoint.ipPort());
+        reporter.samplePrefillInflight(List.of(queue), 4);
+        verify(monitor).report(V2QueueReporter.PREFILL_INFLIGHT, tags, 1.0);
+        verify(monitor).report(V2QueueReporter.PREFILL_INFLIGHT_LIMIT, tags, 4.0);
+        clearInvocations(monitor);
+
+        reporter.samplePrefillInflight(List.of(queue), 8);
+        verify(monitor).report(V2QueueReporter.PREFILL_INFLIGHT_LIMIT, tags, 8.0);
+        clearInvocations(monitor);
+
+        reporter.samplePrefillInflight(List.of(), 8);
+        verify(monitor).report(V2QueueReporter.PREFILL_INFLIGHT, tags, 0.0);
+        verify(monitor).report(V2QueueReporter.PREFILL_INFLIGHT_LIMIT, tags, 0.0);
+    }
+
     private Request add(String id) {
         Request request = V2TestSupport.request(config, id, 50, 16L);
         table.add(request);

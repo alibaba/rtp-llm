@@ -2,6 +2,7 @@ package org.flexlb.service.monitor;
 
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.balance.schedulev2.QueueBlockReason;
+import org.flexlb.balance.schedulev2.prefill.PrefillQueue;
 import org.flexlb.balance.schedulev2.request.QueueProgress;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.balance.schedulev2.request.RequestTable;
@@ -38,6 +39,9 @@ public class V2QueueReporter {
     public static final String ATTEMPTS = "schedule_v2.queue.blocked_attempt.qps";
     public static final String REJECTED = "schedule_v2.queue.rejected.qps";
     public static final String WAIT = "schedule_v2.queue.wait_ms";
+    public static final String PREFILL_INFLIGHT = "schedule_v2.prefill.inflight";
+    public static final String PREFILL_INFLIGHT_LIMIT = "schedule_v2.prefill.inflight_limit";
+    private Set<String> previousPrefillEndpoints = Set.of();
     private final FlexMonitor monitor;
     private Set<QueueKey> previousQueues = Set.of();
 
@@ -49,6 +53,8 @@ public class V2QueueReporter {
     public void init() {
         monitor.register(DEPTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(OLDEST, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(PREFILL_INFLIGHT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(PREFILL_INFLIGHT_LIMIT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(WAIT, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         for (String metric : new String[]{BLOCKED, ATTEMPTS, REJECTED}) {
             monitor.register(metric, FlexMetricType.QPS, FlexPriorityType.PRECISE);
@@ -172,6 +178,28 @@ public class V2QueueReporter {
             report(OLDEST, tags, oldest.getOrDefault(key, 0L));
         }
         previousQueues = Set.copyOf(counts.keySet());
+    }
+
+    /**
+     * 每秒采样准入占用数和当前配置上限。移除的端点补零，避免保留旧占用。
+     */
+    public synchronized void samplePrefillInflight(List<PrefillQueue> queues, int limit) {
+        Set<String> endpoints = new HashSet<>();
+        for (PrefillQueue queue : queues) {
+            String endpoint = queue.endpoint().ipPort();
+            endpoints.add(endpoint);
+            FlexMetricTags tags = FlexMetricTags.of("endpoint", endpoint);
+            report(PREFILL_INFLIGHT, tags, queue.inflightCount());
+            report(PREFILL_INFLIGHT_LIMIT, tags, limit);
+        }
+        for (String endpoint : previousPrefillEndpoints) {
+            if (!endpoints.contains(endpoint)) {
+                FlexMetricTags tags = FlexMetricTags.of("endpoint", endpoint);
+                report(PREFILL_INFLIGHT, tags, 0L);
+                report(PREFILL_INFLIGHT_LIMIT, tags, 0L);
+            }
+        }
+        previousPrefillEndpoints = Set.copyOf(endpoints);
     }
 
     public static String queueName(Stage stage) {

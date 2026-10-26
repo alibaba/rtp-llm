@@ -641,3 +641,16 @@ GAUGE + SUMMARY 聚合实际采样值；Micrometer provider 只暴露最近上�
 默认 300 秒，必须为正整数。健康检查使用剩余启动时间作为请求超时。
 到期后启动脚本发送 SIGTERM，等待最多 30 秒，进程仍存活则发送 SIGKILL；
 清理 Java 进程和 PID 文件后以状态码 4 退出。容器重新拉起由部署平台的重启策略决定。
+
+### Prefill 准入占用监控
+
+`NON_BATCH_V2` 每秒按已创建的 Prefill 队列上报以下 GAUGE，`endpoint` 标识逻辑端点，
+Master 身份由公共监控标签区分：
+
+- `schedule_v2.prefill.inflight`：引擎活跃请求与 Master 本地发布名额按请求 ID 去重后的数量，
+  与准入判断共用同一快照计数逻辑。等待 Decode 且未取得发布名额的候选不计入。
+- `schedule_v2.prefill.inflight_limit`：当前 `dispatcher.maxInflightPerPrefillWorker`。
+
+队列移除后的下一次采样将两项指标补零。使用率按同一 Master、同一 endpoint 的占用数除以上限计算，
+仅使用上限大于零的序列。采样和监控聚合可能平滑瞬时占用；阻塞频率结合
+`PREFILL_INFLIGHT_FULL` 原因指标判断。

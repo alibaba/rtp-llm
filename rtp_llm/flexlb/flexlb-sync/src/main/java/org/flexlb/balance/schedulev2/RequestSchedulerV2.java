@@ -115,7 +115,7 @@ public class RequestSchedulerV2 {
                 prefillQueues, prefillRole, this::sendToPrefillQueue, prefillWorkers(), queueReporter);
         this.decodeQueueLoop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup, placementAvailability,
                 decodeSelector, router, preemptionCoordinator, new EmptyDecodeFinder(workerDirectory), configService,
-                reporter, prefillCheck, reservations, queueReporter);
+                reporter, prefillCheck, reservations, queueReporter, endpointRegistry);
         this.deadlineTimer = new ScheduledThreadPoolExecutor(1, task -> {
             Thread thread = new Thread(task, "flexlb-v2-deadline");
             thread.setDaemon(true);
@@ -284,6 +284,8 @@ public class RequestSchedulerV2 {
                         .map(entry -> entry.endpoint().ipPort())
                         .toList();
         queueReporter.sample(requestTable, endpoints);
+        queueReporter.samplePrefillInflight(prefillQueues.list(),
+                configService.loadBalanceConfig().getDispatcher().getMaxInflightPerPrefillWorker());
     }
 
     public int queuedRequestCount() {

@@ -3,6 +3,7 @@ package org.flexlb.balance.schedulev2.decode;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodeEndpointSnapshot;
 import org.flexlb.balance.eviction.DecodeEvictionProposal;
@@ -74,10 +75,12 @@ public final class DecodeQueueLoop {
      * 没事可做时最多等这么久再扫一遍，兜底没有发出变化通知的情况。
      */
     static final long IDLE_WAIT_MS = 50L;
+    private final EndpointRegistry endpointRegistry;
     /**
-     * 每一轮最多给这么多个 waiting 请求选 Decode，避免某个 group 一直选不到时每轮都扫完整个队列。
+     * 仅由 Decode 循环线程使用，每轮重置为已注册 Decode 端点数，成功发布一条请求扣减一次。
+     * waiting 与 reserved 共用额度，容量阻塞、取消和失败不扣减。
      */
-    static final int MAX_SCAN_PER_ROUND = 256;
+    private int scanQuota;
 
     private final DecodeQueue decodeQueue;
     private final LoopSignal loopSignal;
@@ -119,7 +122,9 @@ public final class DecodeQueueLoop {
                            RequestSchedulerReporter reporter,
                            PrefillPublishCheck prefillCheck,
                            DecodeReservations reservations,
-                           V2QueueReporter queueReporter) {
+                           V2QueueReporter queueReporter,
+                           EndpointRegistry endpointRegistry) {
+        this.endpointRegistry = endpointRegistry;
         this.queueReporter = queueReporter;
         this.decodeQueue = decodeQueue;
         this.loopSignal = loopSignal;
@@ -186,6 +191,7 @@ public final class DecodeQueueLoop {
      * 处理一轮，返回这一轮有没有请求发布、换了状态或离开队列。
      */
     boolean runOnce() {
+        scanQuota = endpointRegistry.getEndpointCount(RoleType.DECODE);
         boolean moved = checkPublished();
         moved |= dispatchReserved();
         moved |= reserveWaiting();
@@ -271,7 +277,7 @@ public final class DecodeQueueLoop {
         Set<DecodeEndpoint> fullEndpoints = Collections.newSetFromMap(new IdentityHashMap<>());
         boolean moved = false;
         Iterator<Request> iterator = decodeQueue.reservedIterator();
-        while (iterator.hasNext()) {
+        while (iterator.hasNext() && scanQuota > 0) {
             Request request = iterator.next();
             if (request.stage().isEnded()) {
                 releaseNow(request);
@@ -381,6 +387,7 @@ public final class DecodeQueueLoop {
         decodeQueue.removeReserved(request);
         if (request.publish(Stage.DECODE_RESERVED,
                 List.of(request.prefillChoice().serverStatus(), choice.serverStatus()))) {
+            scanQuota--;
             cleanup.releasePublished(request);
             decodeQueue.addPublished(request);
             for (DecodeEndpoint.DecodeRequestView victim : choice.preemptedRequests()) {
@@ -439,7 +446,8 @@ public final class DecodeQueueLoop {
     }
 
     /**
-     * waiting 的请求按顺序选 Decode 并 reserve。
+     * waiting 的请求按顺序选 Decode 并 reserve，直到成功发布额度用完或队列遍历结束。
+     * Prefill 或 Decode 容量不足不消耗额度。
      * <p>
      * 每个 group 排在最前面、放不下的请求叫队头。队头等得不久时，同 group 后面放得下的请求可以先走；
      * 队头从 Prefill dispatch 起等到 {@code dispatcher.dispatchStarvationThresholdMs}，这一轮跳过同 group 后面的请求，
@@ -452,9 +460,8 @@ public final class DecodeQueueLoop {
         Set<String> groupsWithHead = new HashSet<>();
         Set<String> blockedGroups = new HashSet<>();
         boolean moved = false;
-        int scanned = 0;
         Iterator<Request> iterator = decodeQueue.waitingIterator();
-        while (iterator.hasNext() && scanned < MAX_SCAN_PER_ROUND) {
+        while (iterator.hasNext() && scanQuota > 0) {
             Request request = iterator.next();
             if (request.stage() != Stage.DECODE_WAITING) {
                 decodeQueue.removeWaiting(request);
@@ -469,7 +476,6 @@ public final class DecodeQueueLoop {
             if (blockedGroups.contains(group)) {
                 continue;
             }
-            scanned++;
             try {
                 if (request.stage() != Stage.DECODE_WAITING) {
                     continue;
@@ -667,6 +673,7 @@ public final class DecodeQueueLoop {
             }
             if (request.publish(Stage.DECODE_WAITING,
                     List.of(request.prefillChoice().serverStatus(), choice.serverStatus()))) {
+                scanQuota--;
                 cleanup.releasePublished(request);
                 decodeQueue.addPublished(request);
             } else {

@@ -35,6 +35,7 @@ class PrefillQueueTest {
         V2TestSupport.report(endpoint, 1L, 1_000L, 1_000L, Map.of("other", TaskPhase.RUNNING));
         queue.updateFromEngine();
 
+        assertEquals(2L, queue.inflightCount());
         assertEquals(1L, queue.unknownRequestCount());
         assertTrue(queue.canDispatch(10L, 3));
         assertFalse(queue.canDispatch(10L, 2));
@@ -54,6 +55,7 @@ class PrefillQueueTest {
         V2TestSupport.report(endpoint, 2L, 100L, 1_000L, Map.of("1", TaskPhase.PENDING));
         queue.updateFromEngine();
 
+        assertEquals(1L, queue.inflightCount());
         assertTrue(queue.canDispatch(100L, 10));
     }
 

@@ -2,6 +2,7 @@ package org.flexlb.balance.schedulev2.decode;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
 import org.flexlb.balance.eviction.EngineCancelChannel;
@@ -87,9 +88,11 @@ class DecodeQueueLoopTest {
     private final DecodeEndpoint emptyDecode =
             new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, "g", "127.0.0.3", 8080, 8081, "test"),
                     mock(EndpointEventHandler.class));
+    private final EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
     private final DecodeQueueLoop loop;
 
     DecodeQueueLoopTest() {
+        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(16);
         when(prefillCheck.isAvailable(any())).thenReturn(true);
         when(prefillCheck.hold(any())).thenAnswer(call -> mock(WorkerEndpoint.EndpointHold.class));
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
@@ -106,13 +109,89 @@ class DecodeQueueLoopTest {
                 router,
                 new DecodePreemptionCoordinator(mock(EngineCancelChannel.class), mock(RequestRegistry.class),
                         mock(RequestSchedulerReporter.class)),
-                emptyDecodeFinder, configService(), reporter, prefillCheck, reservations, queueReporter);
+                emptyDecodeFinder, configService(), reporter, prefillCheck, reservations, queueReporter, endpointRegistry);
     }
 
     @AfterEach
     void closeEndpoint() {
         decode.close();
         emptyDecode.close();
+    }
+
+    @Test
+    void prefillBlockedRequestsDoNotHideReadyRequestAfterTwoThousandEntries() {
+        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(1);
+        doReturn(QueueBlockReason.PREFILL_INFLIGHT_FULL).when(prefillCheck)
+                .tryAcquire(any(), org.mockito.ArgumentMatchers.anyInt());
+        for (int i = 0; i < 2000; i++) {
+            addWaiting(Integer.toString(i + 1));
+        }
+        Request ready = addWaiting("2001");
+        doReturn(null).when(prefillCheck)
+                .tryAcquire(org.mockito.ArgumentMatchers.eq(ready), org.mockito.ArgumentMatchers.anyInt());
+        assertTrue(loop.runOnce());
+        assertEquals(Stage.PUBLISHED, ready.stage());
+        assertEquals(2000, decodeQueue.waitingCount());
+        verify(selector).select(any(), any(), any());
+    }
+
+    @Test
+    void decodeBlockedRequestsDoNotConsumePublicationBudget() {
+        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(1);
+        config.getDispatcher().setDispatchStarvationThresholdMs(Long.MAX_VALUE);
+        doReturn(PlacementResult.blocked(RoleType.DECODE)).when(selector).select(any(), any(), any());
+        for (int i = 0; i < 2000; i++) {
+            addWaiting(Integer.toString(i + 1));
+        }
+        Request ready = addWaiting("2001");
+        doAnswer(call -> success()).when(selector)
+                .select(org.mockito.ArgumentMatchers.eq(ready.ctx()), any(), any());
+        assertTrue(loop.runOnce());
+        assertEquals(Stage.PUBLISHED, ready.stage());
+        assertEquals(2000, decodeQueue.waitingCount());
+    }
+
+    @Test
+    void publicationBudgetTracksDecodeCountEachRound() {
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(20L);
+        for (int i = 0; i < 6; i++) {
+            addWaiting(Integer.toString(i + 1));
+        }
+        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(3);
+        assertTrue(loop.runOnce());
+        assertEquals(3, decodeQueue.waitingCount());
+        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(2);
+        assertTrue(loop.runOnce());
+        assertEquals(1, decodeQueue.waitingCount());
+        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(0);
+        assertFalse(loop.runOnce());
+        assertEquals(1, decodeQueue.waitingCount());
+    }
+
+    @Test
+    void reservedAndWaitingSharePublicationBudget() {
+        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(1);
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(20L);
+        Request reserved = addReserved("1");
+        Request waiting = addWaiting("2");
+        assertTrue(loop.runOnce());
+        assertEquals(Stage.PUBLISHED, reserved.stage());
+        assertEquals(Stage.DECODE_WAITING, waiting.stage());
+        assertTrue(loop.runOnce());
+        assertEquals(Stage.PUBLISHED, waiting.stage());
+    }
+
+    @Test
+    void emptyDecodePublicationConsumesBudget() {
+        when(endpointRegistry.getEndpointCount(RoleType.DECODE)).thenReturn(1);
+        doReturn(PlacementResult.blocked(RoleType.DECODE)).when(selector).select(any(), any(), any());
+        doAnswer(call -> SelectedRole.decode(emptyDecode.tryHold(), emptyDecodeStatus())).when(emptyDecodeFinder)
+                .find(any(), any());
+        Request first = addWaiting("1");
+        Request second = addWaiting("2");
+        assertTrue(loop.runOnce());
+        assertEquals(Stage.PUBLISHED, first.stage());
+        assertEquals(Stage.DECODE_WAITING, second.stage());
     }
 
     @Test
@@ -572,7 +651,8 @@ class DecodeQueueLoopTest {
         }).when(realSelector).select(any(), any(), any());
         DecodeQueueLoop realLoop = new DecodeQueueLoop(decodeQueue, decodeLoopSignal, cleanup,
                 new PlacementAvailability(), realSelector, router, mock(DecodePreemptionCoordinator.class),
-                emptyDecodeFinder, configService, reporter, prefillCheck, reservations, mock(V2QueueReporter.class));
+                emptyDecodeFinder, configService, reporter, prefillCheck, reservations,
+                mock(V2QueueReporter.class), endpointRegistry);
         realLoop.start();
         try {
             assertTrue(first.future().get(5, TimeUnit.SECONDS).isSuccess());
