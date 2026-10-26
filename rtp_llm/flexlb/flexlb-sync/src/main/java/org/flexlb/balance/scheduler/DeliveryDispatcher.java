@@ -958,11 +958,13 @@ public class DeliveryDispatcher {
                                         endpoint,
                                         detail));
             } catch (RuntimeException failed) {
-                receive(
+                applyReply(
                         null,
                         response,
                         EngineGrpcClient.CancelReply.FAILED,
-                        PreemptionRegistration.Reply.UNKNOWN);
+                        preemption,
+                        preemptionEndpoint,
+                        preemptionDetail);
             }
             if (stopRequested) {
                 wakeAt(Math.min(readyAt, deadline));
@@ -976,10 +978,16 @@ public class DeliveryDispatcher {
                 PreemptionRegistration registration,
                 DecodeEndpoint endpoint,
                 String detail) {
-            if (registration == null) {
-                post(() -> receive(remote, response, reply, PreemptionRegistration.Reply.UNKNOWN));
-                return;
-            }
+            var event =
+                    registration == null
+                            ? null
+                            : AbstractRequestScheduler.PreemptionEvent.receipt(
+                                    registration, endpoint, reply, detail, claim);
+            var acknowledgement =
+                    registration != null || claim == null
+                            ? null
+                            : AbstractRequestScheduler.PreemptionEvent.acknowledgement(
+                                    claim, reply);
             Runnable apply =
                     () -> {
                         var progress = PreemptionRegistration.Reply.UNKNOWN;
@@ -987,9 +995,14 @@ public class DeliveryDispatcher {
                         boolean applied = false;
                         for (int retry = 0; retry < 3; retry++) {
                             try {
-                                progress =
-                                        AbstractRequestScheduler.applyCancelReply(
-                                                registration, endpoint, reply, detail);
+                                var scheduler = context.data().getScheduler();
+                                if (event != null) {
+                                    progress =
+                                            event.progress(
+                                                    scheduler.onPreemption(registration, event));
+                                } else if (acknowledgement != null) {
+                                    scheduler.onDeliveryEvidence(claim, acknowledgement);
+                                }
                                 applied = true;
                                 break;
                             } catch (RuntimeException failed) {
@@ -1000,10 +1013,17 @@ public class DeliveryDispatcher {
                             runtime.recordFailure(failure);
                         }
                         var evidence = applied ? reply : EngineGrpcClient.CancelReply.FAILED;
-                        var result = progress;
-                        response.complete(result);
-                        post(() -> receive(remote, response, evidence, result));
+                        response.complete(progress);
+                        if (registration == null) {
+                            receive(remote, evidence);
+                        } else {
+                            post(() -> receive(remote, evidence));
+                        }
                     };
+            if (registration == null) {
+                post(apply);
+                return;
+            }
             try {
                 runtime.executeRequestWork(context, apply);
             } catch (RuntimeException rejected) {
@@ -1014,30 +1034,8 @@ public class DeliveryDispatcher {
 
         private void receive(
                 CompletableFuture<EngineGrpcClient.CancelReply> remote,
-                CompletableFuture<PreemptionRegistration.Reply> response,
-                EngineGrpcClient.CancelReply reply,
-                PreemptionRegistration.Reply progress) {
+                EngineGrpcClient.CancelReply reply) {
             try {
-                if (claim != null) {
-                    publish(
-                            claim,
-                            new ContextResult.CleanupAcknowledgement(
-                                    claim,
-                                    switch (reply) {
-                                        case REQUEST_CLEANED ->
-                                                ContextResult.CancelEvidenceKind.CLEANED;
-                                        case REQUEST_FENCED ->
-                                                ContextResult.CancelEvidenceKind.FENCED;
-                                        case ACCEPTED ->
-                                                ContextResult.CancelEvidenceKind.ACKNOWLEDGED;
-                                        case NOT_FOUND ->
-                                                ContextResult.CancelEvidenceKind.NOT_FOUND;
-                                        case UNSUPPORTED ->
-                                                ContextResult.CancelEvidenceKind.UNSUPPORTED;
-                                        case FAILED -> ContextResult.CancelEvidenceKind.UNKNOWN;
-                                    },
-                                    System.currentTimeMillis()));
-                }
                 if (reply == EngineGrpcClient.CancelReply.REQUEST_CLEANED) {
                     terminal = StopResult.REMOTE_CLEANED;
                 }
@@ -1058,7 +1056,6 @@ public class DeliveryDispatcher {
                                     + TimeUnit.MILLISECONDS.toNanos(
                                             Math.min(400L, 25L << (attempts - 1)));
                 }
-                response.complete(progress);
             } finally {
                 pending--;
             }

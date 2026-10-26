@@ -226,8 +226,11 @@ public class DecodeAdmission {
                                     capability.claims.stream()
                                             .map(owned -> owned.acknowledgement)
                                             .toArray(CompletableFuture[]::new))
-                            .thenCompose(
-                                    ignored -> coordinateAcknowledgements(context, capability));
+                            .thenComposeAsync(
+                                    ignored -> handleAcknowledgements(context, capability),
+                                    work -> runtime.executeRequestWork(context, work))
+                            .whenComplete(
+                                    (ignored, failure) -> capability.settlement.cancel(false));
             return protocol.handle(
                     (result, failure) -> {
                         if (failure != null) {
@@ -243,27 +246,13 @@ public class DecodeAdmission {
         }
     }
 
-    /** Freeze completion versus timeout at the ACK boundary, before coordination can queue. */
-    private CompletableFuture<PreemptionResult> coordinateAcknowledgements(
-            RequestContext context, AttemptCapability capability) {
-        var settlement = capability.settlement;
-        // Only signal observation and timer registration run on the ACK thread.
-        return CompletableFuture.completedFuture(null)
-                .thenComposeAsync(
-                        ignored -> handleAcknowledgements(context, capability, settlement),
-                        work -> runtime.executeRequestWork(context, work))
-                .whenComplete((ignored, failure) -> settlement.cancel(false));
-    }
-
     private CompletableFuture<PreemptionResult> handleAcknowledgements(
-            RequestContext context,
-            AttemptCapability capability,
-            CompletableFuture<Boolean> settlement) {
+            RequestContext context, AttemptCapability capability) {
         // A transport-unknown ACK is not a negative acknowledgement: the
         // Prefill may have installed the intent before the reply was lost.
         // Such a child therefore waits for the canonical victim resolution
         // transaction exactly like an ACCEPTED child.
-        List<ClaimedVictim> pendingResolutions = new ArrayList<>();
+        int waiting = 0;
         boolean hasNotFound = false;
 
         for (ClaimedVictim owned : capability.claims) {
@@ -279,20 +268,25 @@ public class DecodeAdmission {
             if (progress == PreemptionRegistration.Reply.NOT_FOUND) {
                 hasNotFound |= !owned.requestResolved();
             } else {
-                pendingResolutions.add(owned);
+                waiting++;
             }
         }
 
-        if (pendingResolutions.isEmpty()) {
-            settlement.complete(capability.allVictimsResolved());
+        if (waiting == 0) {
+            capability.settlement.complete(capability.allVictimsResolved());
             return CompletableFuture.completedFuture(
-                    capability.finish(hasNotFound, settlement.getNow(false)));
+                    capability.finish(hasNotFound, capability.settlement.getNow(false)));
         }
         // Keep early rejection when the waited victims resolve but a NOT_FOUND victim has not.
-        if (pendingResolutions.size() != capability.claims.size()) {
+        if (hasNotFound) {
             var pending =
                     CompletableFuture.allOf(
-                            pendingResolutions.stream()
+                            capability.claims.stream()
+                                    .filter(
+                                            owned ->
+                                                    owned.acknowledgement.join()
+                                                            != PreemptionRegistration.Reply
+                                                                    .NOT_FOUND)
                                     .map(
                                             owned ->
                                                     runtime.signals()
@@ -300,12 +294,13 @@ public class DecodeAdmission {
                                                             .toCompletableFuture())
                                     .toArray(CompletableFuture<?>[]::new));
             pending.whenComplete(
-                    (ignored, failure) -> settlement.complete(capability.allVictimsResolved()));
-            settlement.whenComplete((ignored, failure) -> pending.cancel(false));
+                    (ignored, failure) ->
+                            capability.settlement.complete(capability.allVictimsResolved()));
+            capability.settlement.whenComplete((ignored, failure) -> pending.cancel(false));
         }
         final boolean ackNotFound = hasNotFound;
         // Late facts still settle victims; they cannot change the frozen admission result.
-        return settlement.thenApplyAsync(
+        return capability.settlement.thenApplyAsync(
                 resolved -> capability.finish(ackNotFound, resolved),
                 work -> runtime.executeRequestWork(context, work));
     }

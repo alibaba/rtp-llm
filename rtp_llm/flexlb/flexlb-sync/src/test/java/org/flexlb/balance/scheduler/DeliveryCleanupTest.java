@@ -13,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.after;
@@ -23,6 +24,89 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class DeliveryCleanupTest {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {1, 3})
+    void cleanupApplicationRetriesPreserveProofWithoutInventingLocalSettlement(int failures)
+            throws Exception {
+        var runtime = runtime();
+        var claim = claim();
+        when(claim.owner().snapshot().delivery().send())
+                .thenReturn(ContextResult.SendState.DELIVERED);
+        when(claim.owner().snapshot().cancellation()).thenReturn(null);
+        when(claim.owner().snapshot().delivery().abandonment())
+                .thenReturn(CancelReason.CLIENT_CANCELLED);
+        when(claim.item().prefillEp())
+                .thenReturn(mock(org.flexlb.balance.endpoint.PrefillEndpoint.class));
+        var scheduler = claim.owner().data().getScheduler();
+        var applications = new java.util.concurrent.atomic.AtomicInteger();
+        var firstFailure = new java.util.concurrent.atomic.AtomicReference<IllegalStateException>();
+        var first =
+                new java.util.concurrent.atomic.AtomicReference<ContextResult.DeliveryEvidence>();
+        doAnswer(
+                        call -> {
+                            var evidence =
+                                    call.getArgument(1, ContextResult.CleanupAcknowledgement.class);
+                            assertEquals(ContextResult.CancelEvidenceKind.CLEANED, evidence.kind());
+                            assertSame(claim, evidence.delivery());
+                            int count = applications.incrementAndGet();
+                            if (count == 1) {
+                                first.set(evidence);
+                            } else if (count <= 3) {
+                                assertSame(first.get(), evidence);
+                            }
+                            if (count <= failures) {
+                                var failure =
+                                        new IllegalStateException(
+                                                "cleanup fact application failed");
+                                firstFailure.compareAndSet(null, failure);
+                                throw failure;
+                            }
+                            return null;
+                        })
+                .when(scheduler)
+                .onDeliveryEvidence(any(), any());
+        var client = mock(EngineGrpcClient.class);
+        when(client.cancelAsync(
+                        any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        any(),
+                        org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(
+                        java.util.concurrent.CompletableFuture.completedFuture(
+                                EngineGrpcClient.CancelReply.REQUEST_CLEANED));
+        var dispatcher =
+                new DeliveryDispatcher(
+                        null,
+                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                        new DeliveryMetricsReporter(null));
+        try {
+            assertEquals(
+                    DeliveryDispatcher.StopResult.REMOTE_CLEANED,
+                    dispatcher.stop(claim, client, runtime).get(2, TimeUnit.SECONDS));
+            assertEquals(failures + 1, applications.get());
+            org.mockito.Mockito.verify(client, org.mockito.Mockito.times(failures == 3 ? 2 : 1))
+                    .cancelAsync(
+                            any(),
+                            org.mockito.ArgumentMatchers.anyInt(),
+                            any(),
+                            org.mockito.ArgumentMatchers.anyLong());
+            assertFalse(runtime.signals().delivery(claim).toCompletableFuture().isDone());
+            runtime.signals().completeDelivery(claim);
+            SchedulerTestSupport.awaitRequestWork(runtime);
+            org.mockito.Mockito.verify(scheduler, org.mockito.Mockito.never())
+                    .onPreemption(any(), any());
+        } finally {
+            runtime.signals().completeDelivery(claim);
+            if (failures == 3) {
+                var reported = assertThrows(IllegalStateException.class, runtime::shutdown);
+                assertSame(firstFailure.get(), reported);
+                assertEquals(2, reported.getSuppressed().length);
+            } else {
+                assertDoesNotThrow(runtime::shutdown);
+            }
+        }
+    }
+
     @Test
     void expiredQueuedPreemptionCannotDiscardAnAcceptedOrdinaryStop() throws Exception {
         var runtime = runtime();
