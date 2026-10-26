@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import time
 import threading
+import time
 from typing import Any, List, Optional, Tuple
 
 import torch
@@ -249,17 +249,20 @@ class MMWorkItem:
             return
         if self.defer_feature_hashes:
             self.cache_entry.producer_streams = self.embedding_producer_streams or []
-        self.embedding_cache.complete(self.cache_key, self.cache_entry, result)
-        if (
-            self.feature_hashes is not None
-            and self.hash_key_cache is not None
-            and self.embedding_cache.peek(self.cache_key) is self.cache_entry
-        ):
-            self.hash_key_cache.put(
+        self.embedding_cache.complete(
+            self.cache_key,
+            self.cache_entry,
+            result,
+            before_publish=self._publish_cache_hashes,
+        )
+
+    def _publish_cache_hashes(self) -> None:
+        if self.feature_hashes is not None and self.hash_key_cache is not None:
+            self.hash_key_cache.put_for_entry(
                 self.cache_key,
-                self.feature_hashes or [],
-                self.cache_entry.generation,
-                greennet_passed=self.cache_entry.greennet_passed,
+                self.feature_hashes,
+                self.cache_entry,
+                self.embedding_cache,
             )
 
     def fail_cache(self, error: Exception) -> None:

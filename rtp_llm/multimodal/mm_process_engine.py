@@ -8,21 +8,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.profiler
-from rtp_llm.multimodal import mm_work_item as work_item_ops
-from rtp_llm.multimodal.mm_async_result import continue_after
-from rtp_llm.multimodal.mm_inspection import MMInspectionCoordinator, SourceInspection
-from rtp_llm.multimodal.mm_preprocess import (
-    LocalPreprocessExecutor,
-    MultiprocessPreprocessExecutor,
-    PreprocessExecutor,
-)
-from rtp_llm.multimodal.mm_work_item import (
-    MMEmbeddingRes,
-    MMWorkItem,
-    _acquire_input_cache,
-    _input_has_url,
-    _feature_hashes_from_result,
-)
 
 from rtp_llm.access_logger.access_logger import MMAccessLogger
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -31,18 +16,33 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.multimodal import mm_work_item as work_item_ops
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict, get_greennet_provider
+from rtp_llm.multimodal.mm_async_result import continue_after
 from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingAsyncCache,
     MMEmbeddingCache,
     MMEmbeddingCacheEntry,
     MMHashKeyCache,
 )
+from rtp_llm.multimodal.mm_inspection import MMInspectionCoordinator, SourceInspection
+from rtp_llm.multimodal.mm_preprocess import (
+    LocalPreprocessExecutor,
+    MultiprocessPreprocessExecutor,
+    PreprocessExecutor,
+)
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.mm_scheduler import (
     MMScheduler,
     MMSchedulerError,
     MMSchedulerRequestTooLargeError,
+)
+from rtp_llm.multimodal.mm_work_item import (
+    MMEmbeddingRes,
+    MMWorkItem,
+    _acquire_input_cache,
+    _feature_hashes_from_result,
+    _input_has_url,
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MMWorkEstimate,
@@ -53,11 +53,7 @@ from rtp_llm.multimodal.multimodal_util import (
     url_data_cache_,
     vit_emb_cache_,
 )
-from rtp_llm.ops import (
-    MMPreprocessConfig,
-    MultimodalInput,
-    VitSeparation,
-)
+from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, VitSeparation
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
@@ -1050,6 +1046,20 @@ class MMProcessEngine:
                 )
             if wi.feature_hashes is None and not wi.defer_feature_hashes:
                 wi.complete_cache(result)
+                # A cache-hit consumer may need to refill an evicted sidecar.
+                # It does not own completion, and must not publish a pending
+                # producer's private result before its inspection has passed.
+                if (
+                    wi.cache_state in ("complete", "in_progress")
+                    and wi.cache_entry is not None
+                    and wi.cache_entry.is_done
+                ):
+                    self._hash_key_cache.put_for_entry(
+                        wi.cache_key,
+                        wi.feature_hashes,
+                        wi.cache_entry,
+                        self._embedding_cache,
+                    )
             emb_res.extend(maybe_tensor_to_list(result[0], ndim_threshold=2))
             pos_res.extend(maybe_tensor_to_list(result[1], ndim_threshold=2))
             if len(result) > 2:
@@ -1203,11 +1213,11 @@ class MMProcessEngine:
                         if producer.device not in hashed_devices:
                             with cuda_graph_gate.operation():
                                 producer.synchronize()
-                    self._hash_key_cache.put(
+                    self._hash_key_cache.put_for_entry(
                         cache_key,
                         feature_hashes,
-                        entry.generation,
-                        greennet_passed=entry.greennet_passed,
+                        entry,
+                        self._embedding_cache,
                     )
                 if hashes_only:
                     results.append(MMEmbeddingRes([], feature_hashes=feature_hashes))
