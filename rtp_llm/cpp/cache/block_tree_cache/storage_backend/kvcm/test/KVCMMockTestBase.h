@@ -73,7 +73,7 @@ public:
             return grpc::Status(state_->grpc_code, "injected KVCM status");
         }
         if (state_->fail) {
-            return grpc::Status(grpc::StatusCode::INTERNAL, "injected KVCM broadcast failure");
+            return grpc::Status(state_->failure_code, "injected KVCM broadcast failure");
         }
         if (state_->omit_response) {
             return grpc::Status::OK;
