@@ -72,7 +72,7 @@ class EndpointRegistryCloseTest {
                                 return null;
                             })
                     .when(availability)
-                    .changed(any(), any(), any());
+                    .changed(any(), any());
             for (var status : statuses) {
                 status.markRemovedFromDiscovery();
                 var retirement =
@@ -110,7 +110,7 @@ class EndpointRegistryCloseTest {
                             return null;
                         })
                 .when(availability)
-                .changed(any(), any(), any());
+                .changed(any(), any());
         var status = EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 8300, 8301);
         try (var executor = Executors.newFixedThreadPool(3)) {
             Future<WorkerEndpoint> publication =
@@ -572,7 +572,7 @@ class EndpointRegistryCloseTest {
                             throw new IllegalStateException("notification unavailable");
                         })
                 .when(availability)
-                .changed(any(), any(), any());
+                .changed(any(), any());
         EndpointRegistry.Retirement retirement;
         status.lock.lock();
         try {

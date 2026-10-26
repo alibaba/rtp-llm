@@ -109,11 +109,7 @@ public class EndpointRegistry {
             // wait failure cannot discard a still-draining generation.
             endpoint.onRetired(finalizeExact);
             Throwable failure =
-                    Failures.run(
-                            null,
-                            () ->
-                                    placementAvailability.changed(
-                                            role, status.topologySnapshot().group(), address));
+                    Failures.run(null, () -> placementAvailability.changed(status, address));
             failure = Failures.run(failure, endpoint::close);
             // Pin release queues cleanup on this same pool. Its workers must return
             // rather than wait for their own queued cleanup; onRetired owns completion.
@@ -384,8 +380,7 @@ public class EndpointRegistry {
                                 address);
                         return exact;
                     });
-            WorkerStatus.TopologySnapshot topology = status.topologySnapshot();
-            placementAvailability.changed(role, topology.group(), address);
+            placementAvailability.changed(status, address);
             return candidate;
         } catch (Throwable publicationFailure) {
             failure = publicationFailure;
@@ -920,6 +915,7 @@ public class EndpointRegistry {
                 return false;
             }
             status.trace().record(Stage.RETIREMENT_CLEANUP_END);
+            placementAvailability.clearRetired(status, address);
             if (!statuses.remove(address, status)) {
                 logger.error(
                         "Exact status removal failed while its cache lock was held for {}#{}",

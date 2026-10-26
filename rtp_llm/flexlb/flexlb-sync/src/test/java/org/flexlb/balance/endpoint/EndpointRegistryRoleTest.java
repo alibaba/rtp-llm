@@ -121,7 +121,7 @@ class EndpointRegistryRoleTest {
                             throw failure;
                         })
                 .when(availability)
-                .changed(Mockito.eq(role), Mockito.any(), Mockito.eq(address));
+                .changed(Mockito.any(), Mockito.eq(address));
 
         assertSame(
                 failure,
