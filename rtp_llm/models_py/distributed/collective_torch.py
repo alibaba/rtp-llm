@@ -111,7 +111,11 @@ def pcie_oneshot_all_reduce(tensor: torch.Tensor) -> Optional[torch.Tensor]:
         if pool is None:
             return None
     nbytes = tensor.numel() * tensor.element_size()
-    if nbytes > _pcie_oneshot_max_bytes or nbytes % 16 != 0 or not tensor.is_contiguous():
+    if (
+        nbytes > _pcie_oneshot_max_bytes
+        or nbytes % 16 != 0
+        or not tensor.is_contiguous()
+    ):
         return None
     if tensor.dtype not in (torch.bfloat16, torch.float16, torch.float32):
         return None

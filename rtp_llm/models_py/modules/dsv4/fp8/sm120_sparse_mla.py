@@ -77,6 +77,7 @@ def _canonical_topk_triton(
     )
     return out, out_len
 
+
 # FlashInfer's DSV4 sparse-decode dispatcher specializes on the static index
 # width.  HCA compresses one entry per 128 input tokens, so a 1M context needs
 # an 8192-wide extra sparse table.  Keep the complete production width set in

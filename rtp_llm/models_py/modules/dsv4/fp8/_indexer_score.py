@@ -155,7 +155,9 @@ def _sm120_paged_score_kernel(
     )
     k = k.to(tl.float8e4nv, bitcast=True).to(tl.bfloat16)
     k_scale = tl.load(
-        (POOL + base + EB * 128 + tok * 4).to(tl.pointer_type(tl.float32), bitcast=True),
+        (POOL + base + EB * 128 + tok * 4).to(
+            tl.pointer_type(tl.float32), bitcast=True
+        ),
         valid,
         0.0,
     )

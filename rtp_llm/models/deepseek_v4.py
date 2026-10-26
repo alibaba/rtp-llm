@@ -65,6 +65,7 @@ from rtp_llm.utils.model_weight import (
     zeros,
 )
 
+
 def dsv4_tp_sharded_moe_requested() -> bool:
     return os.environ.get("DSV4_SM120_TP_MOE", "0") == "1"
 
@@ -83,7 +84,9 @@ class _V4TpShardedExpertWeight(MoeAtomicWeight):
             full = tensor_source.load_tensor(name, self.data_type)[0].to(device)
             size = int(full.shape[dim])
             if size % tp:
-                raise ValueError(f"{name}: dim {dim} size {size} not divisible by tp {tp}")
+                raise ValueError(
+                    f"{name}: dim {dim} size {size} not divisible by tp {tp}"
+                )
             shard = full.narrow(dim, rank * (size // tp), size // tp)
             if out is None:
                 out = torch.empty(
