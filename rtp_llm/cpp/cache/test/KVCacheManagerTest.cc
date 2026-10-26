@@ -495,8 +495,9 @@ TEST_F(KVCacheManagerTest, EventPublisherWiresEligibleGroupsInTopologyOrder) {
                       (std::map<int64_t, std::vector<size_t>>{{100, {full_index}}, {200, {0, 1}}}));
             EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 1u);
             EXPECT_EQ(cache->evictForGroup("swa", 1), 1);
-            EXPECT_EQ(cache->logicalCacheSnapshot().block_groups, full_only);
-            EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 2u);
+            EXPECT_TRUE(cache->getKeySnapshot().keys.empty());
+            EXPECT_TRUE(cache->logicalCacheSnapshot().block_groups.empty());
+            EXPECT_EQ(manager.cache_event_publisher_->status().accepted_count, 4u);
             manager.stopCacheEventPublisher();
         }
     }
@@ -1748,7 +1749,7 @@ TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenHostCacheDisabled) {
 
 TEST_F(KVCacheManagerTest, InitRejectsInvalidRemoteExecutorConfigurationBeforeAllocation) {
     const auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
-    for (const auto [thread_count, queue_size] : {std::pair<size_t, size_t>{0, 1}, std::pair<size_t, size_t>{1, 0}}) {
+    for (const auto& [thread_count, queue_size] : {std::pair<size_t, size_t>{0, 1}, std::pair<size_t, size_t>{1, 0}}) {
         SCOPED_TRACE(::testing::Message() << "thread_count=" << thread_count << " queue_size=" << queue_size);
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_remote_cache          = true;
