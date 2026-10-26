@@ -144,11 +144,12 @@ TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               cache_keys,
                                            const std::function<bool(size_t)>& valid_prefix,
-                                           bool                               enable_storage_backend) {
+                                           bool                               enable_storage_backend,
+                                           std::optional<int64_t>             request_id) {
     BlockTreeMatchResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        result = loader_.matchLocked(cache_keys, valid_prefix, enable_storage_backend);
+        result = loader_.matchLocked(cache_keys, valid_prefix, enable_storage_backend, request_id);
     }
     metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics_snapshots);
     return result;
@@ -163,12 +164,14 @@ void BlockTreeCache::insert(const CacheKeysType&                              ca
 size_t BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                               const std::vector<std::vector<GroupSetResource>>& resources,
                               Tier                                              target_tier,
-                              bool                                              is_resident) {
+                              bool                                              is_resident,
+                              std::optional<int64_t>                            request_id) {
     size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        storage_write = storer_.storeLocked(cache_keys, resources, target_tier, is_resident, resident_prefix_length);
+        storage_write =
+            storer_.storeLocked(cache_keys, resources, target_tier, is_resident, resident_prefix_length, request_id);
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));

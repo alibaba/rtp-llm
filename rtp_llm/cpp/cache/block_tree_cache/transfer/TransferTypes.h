@@ -319,8 +319,14 @@ class TransferTask {
 public:
     using Clock = std::chrono::steady_clock;
 
-    TransferTask(std::vector<TransferDescriptor> descriptors, std::chrono::milliseconds timeout):
-        descriptors_(std::move(descriptors)), deadline_(Clock::now() + timeout) {}
+    TransferTask(std::vector<TransferDescriptor> descriptors,
+                 std::chrono::milliseconds       timeout,
+                 std::optional<int64_t>          request_id = {}):
+        descriptors_(std::move(descriptors)), deadline_(Clock::now() + timeout), request_id_(request_id) {}
+
+    std::optional<int64_t> requestId() const {
+        return request_id_;
+    }
 
     const std::vector<TransferDescriptor>& descriptors() const {
         return descriptors_;
@@ -352,15 +358,18 @@ public:
     }
 
     TransferTask subtask(std::vector<TransferDescriptor> descriptors) const {
-        return TransferTask(std::move(descriptors), deadline_);
+        return TransferTask(std::move(descriptors), deadline_, request_id_);
     }
 
 private:
-    TransferTask(std::vector<TransferDescriptor> descriptors, Clock::time_point deadline):
-        descriptors_(std::move(descriptors)), deadline_(deadline) {}
+    TransferTask(std::vector<TransferDescriptor> descriptors,
+                 Clock::time_point               deadline,
+                 std::optional<int64_t>          request_id):
+        descriptors_(std::move(descriptors)), deadline_(deadline), request_id_(request_id) {}
 
     std::vector<TransferDescriptor> descriptors_;
     Clock::time_point               deadline_;
+    std::optional<int64_t>          request_id_;
 };
 
 }  // namespace rtp_llm
