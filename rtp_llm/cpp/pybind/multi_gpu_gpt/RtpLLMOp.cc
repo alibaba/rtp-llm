@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "c10/cuda/CUDAGuard.h"
 
 using namespace std;
 namespace th = torch;
@@ -553,7 +554,7 @@ void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) 
 #if USING_CUDA || USING_ROCM
     // Deferred startup runs on a new thread; bind its device before cache initialization.
     const int device_id = static_cast<int>(getDeviceId());
-    cudaPreRun(device_id);
+    const c10::cuda::CUDAGuard device_guard(static_cast<c10::DeviceIndex>(device_id));
     RTP_LLM_LOG_INFO("deferred RPC startup bound to device_id=%d", device_id);
 #endif
     int64_t model_rpc_port = -1;
