@@ -1,5 +1,6 @@
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -37,7 +38,6 @@ _TESTS = [
     "test_v41_decode_preprocessing",
     "test_v41_deepselect",
     "test_v41_fp4_codec",
-    "test_v41_flash_mla_cache_format",
     "test_v41_fp4_transport",
     "test_v41_global_overlap",
     "test_v41_merge_contracts",
@@ -252,3 +252,32 @@ cuda13_sm100_py_test(
     )
     for name in ["test_v41_deepgemm_producers", "test_v41_qkv_rope_cache", "test_v41_global_overlap"]
 ]
+
+dsv4_sm100_py_test(
+    name = "test_v41_flash_mla_cache_format",
+    tags = ["dsv41_cuda13"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+)
+
+dsv4_sm100_py_test(
+    name = "test_v41_mqa_score_abi",
+    gpu_count = 0,
+    tags = ["dsv41_cuda13"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+)
+
+dsv4_sm100_py_test(
+    name = "test_v41_mqa_score_cuda",
+    extra_srcs = ["test_v41_decode_indexer.py"],
+    tags = ["dsv41_cuda13"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+)

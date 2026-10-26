@@ -6,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <pybind11/embed.h>
 #include <thread>
 #include "torch/all.h"
 #include "gtest/gtest.h"
@@ -25,6 +26,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -40,6 +42,27 @@ namespace rtp_llm {
 
 using namespace std;
 namespace spec = speculative;
+
+TEST(MtpExecutorPolicyTest, DraftInitKeepsEplbDisabled) {
+    py::scoped_interpreter interpreter;
+    EngineInitParams       base_params;
+    py::dict               py_model;
+    base_params.eplb_config.eplb_mode                    = EplbMode::ALL;
+    base_params.eplb_config.redundant_expert             = 32;
+    base_params.eplb_config.eplb_metrics_report_interval = 4;
+    ModelConfig                  draft_model_config;
+    ProposeModelEngineInitParams params(1, SP_TYPE_VANILLA, 3, draft_model_config, base_params, Weights{}, py_model);
+
+    const auto& draft = params.getEngineInitParams();
+    EXPECT_TRUE(draft.py_model.is(py_model));
+    EXPECT_TRUE(draft.weight_manager.is_none());
+    EXPECT_EQ(draft.eplb_config.eplb_mode, EplbMode::NONE);
+    EXPECT_EQ(draft.eplb_config.redundant_expert, 0);
+    EXPECT_EQ(draft.eplb_config.eplb_metrics_report_interval, 0);
+    EXPECT_EQ(base_params.eplb_config.eplb_mode, EplbMode::ALL);
+    EXPECT_EQ(base_params.eplb_config.redundant_expert, 32);
+    EXPECT_EQ(base_params.eplb_config.eplb_metrics_report_interval, 4);
+}
 
 TEST(MtpExecutorPolicyTest, DSparkPrefillCPRequiresPrefillRole) {
     PrefillCPConfig prefill_cp_config;
@@ -284,6 +307,16 @@ public:
     size_t forwardCount() const {
         return forward_count_;
     }
+
+    bool updateEplbConfig(const EPLBConfig& config) override {
+        last_eplb_config = config;
+        ++eplb_update_count;
+        return accept_eplb_update;
+    }
+
+    EPLBConfig last_eplb_config;
+    size_t     eplb_update_count  = 0;
+    bool       accept_eplb_update = true;
 
     std::string waitCacheStorePublication() override {
         recordEvent("wait_publication");
@@ -724,7 +757,16 @@ public:
         auto sp_output_buffer = stream->getSPOutputBuffer();
         auto tokens           = sp_output_buffer->tokens;
         auto tokens_h         = tokens.cpu().clone();
-        EXPECT_EQ(expect_propose_tokens, toVec<int>(tokens_h));
+        if (sp_output_buffer->propose_tokens_gpu.defined()) {
+            // Async device state carries the new proposal only in the GPU
+            // mirror; the legacy CPU proposal slot intentionally stays stale.
+            ASSERT_FALSE(expect_propose_tokens.empty());
+            EXPECT_EQ(expect_propose_tokens.front(), tokens_h.reshape({-1})[0].item<int32_t>());
+            EXPECT_EQ(vector<int>(expect_propose_tokens.begin() + 1, expect_propose_tokens.end()),
+                      toVec<int>(sp_output_buffer->propose_tokens_gpu));
+        } else {
+            EXPECT_EQ(expect_propose_tokens, toVec<int>(tokens_h));
+        }
 
         auto all_probs   = sp_output_buffer->all_probs;
         auto all_probs_h = all_probs.is_cuda() ? all_probs.cpu() : all_probs;
@@ -1243,6 +1285,146 @@ TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
         FAIL() << "expected ordinary MTP construction to reject zero proposal width";
     } catch (const std::exception& e) {
         EXPECT_NE(std::string(e.what()).find("proposal width/gen_num_per_cycle must be positive"), std::string::npos);
+    }
+}
+
+TEST_F(MtpExecutorTest, testRealModelWrappersOnlyEnableTargetEplb) {
+    py::scoped_interpreter interpreter;
+    auto                   module = py::module_::import("__main__");
+    py::class_<torch_ext::PyModelInitResources>(module, "TestModelInitResources");
+    auto types                  = py::module_::import("types");
+    auto py_model               = types.attr("SimpleNamespace")();
+    py_model.attr("initialize") = py::cpp_function([](py::object) { return true; });
+    auto forward = py::cpp_function([](py::args) { ADD_FAILURE() << "construction must not run model forward"; });
+    py_model.attr("forward")         = forward;
+    py_model.attr("forward_propose") = forward;
+    py_model.attr("forward_commit")  = forward;
+    py_model.attr("get_eplb_layers") = py::cpp_function([]() { return py::list(); });
+
+    int  runtime_initializations                 = 0;
+    auto runtime_module                          = types.attr("ModuleType")("rtp_llm.eplb.runtime");
+    runtime_module.attr("RuntimeExpertBalancer") = py::cpp_function([&](py::object,
+                                                                        py::object config,
+                                                                        size_t     ep_rank,
+                                                                        size_t     ep_size,
+                                                                        size_t     model_id,
+                                                                        bool,
+                                                                        bool sync_prompt_phase) {
+        ++runtime_initializations;
+        EXPECT_EQ(config.attr("eplb_mode").cast<int>(), static_cast<int>(EplbMode::ALL));
+        EXPECT_EQ(ep_rank, 0);
+        EXPECT_EQ(ep_size, 1);
+        EXPECT_EQ(model_id, 0);
+        EXPECT_FALSE(sync_prompt_phase);
+        return types.attr("SimpleNamespace")();
+    });
+    py::dict replacements;
+    replacements["rtp_llm.eplb.runtime"] = runtime_module;
+    auto runtime_patch = py::module_::import("unittest.mock").attr("patch").attr("dict")("sys.modules", replacements);
+    runtime_patch.attr("__enter__")();
+
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.model_config_.moe_style                         = 1;
+    params.model_config_.expert_num                        = 2;
+    params.model_config_.moe_k                             = 1;
+    params.eplb_config.eplb_metrics_report_interval        = 2;
+    params.eplb_config.eplb_stats_window_size              = 1;
+    params.device_resource_config.enable_layer_micro_batch = 0;
+    params.sp_config.gen_num_per_cycle                     = 1;
+    params.sp_config.sp_dspark_mask_token_id               = 0;
+    params.py_model                                        = py_model;
+    params.py_sp_model                                     = py_model;
+
+    for (auto mode : {EplbMode::NONE, EplbMode::ALL}) {
+        params.eplb_config.eplb_mode = mode;
+        for (auto sp_type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+            for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+                for (bool enable_graph : {false, true}) {
+                    SCOPED_TRACE(::testing::Message()
+                                 << "mode=" << static_cast<int>(mode) << " sp_type=" << static_cast<int>(sp_type)
+                                 << " role=" << static_cast<int>(role) << " enable_graph=" << enable_graph);
+                    runtime_initializations                   = 0;
+                    params.sp_config.type                     = sp_type;
+                    params.pd_sep_config.role_type            = role;
+                    params.parallelism_config.role_type       = role;
+                    params.hw_kernel_config.enable_cuda_graph = enable_graph;
+                    auto draft_params                         = std::make_unique<EngineInitParams>(params);
+                    draft_params->model_id                    = 1;
+                    draft_params->eplb_config                 = EPLBConfig{};
+                    if (sp_type == SP_TYPE_DSPARK) {
+                        const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+                        draft_params->gpt_weights.dspark_markov_w1 =
+                            torch::zeros({params.model_config_.vocab_size, 1}, options);
+                        draft_params->gpt_weights.dspark_markov_w2 =
+                            torch::zeros({params.model_config_.vocab_size, 1}, options);
+                    }
+                    auto draft_models = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+                    draft_models->push_back(std::move(draft_params));
+                    auto propose_params = std::make_unique<ProposeModelEngineInitParams>(
+                        sp_type, params.sp_config.gen_num_per_cycle, std::move(draft_models));
+
+                    // Real wrapper selection and balancer lifecycle; no cache means no graph capture.
+                    // The Python planner alone is scripted, so no checkpoint or migration is needed here.
+                    MtpExecutor executor(params, propose_params, nullptr);
+                    auto*       target = dynamic_cast<PyWrappedModel*>(executor.model_.get());
+                    ASSERT_NE(target, nullptr);
+                    const auto& target_counts = target->expert_balancer_.stable_expert_token_counts();
+                    ASSERT_TRUE(target_counts.defined());
+                    EXPECT_EQ(target_counts.sizes(), (torch::IntArrayRef{2, 2}));
+                    EXPECT_EQ(runtime_initializations, mode == EplbMode::ALL ? 1 : 0);
+                    EXPECT_EQ(target->expert_balancer_.runtime_requested_, mode == EplbMode::ALL);
+
+                    const bool expect_propose = sp_type != SP_TYPE_DSPARK || role != RoleType::PREFILL;
+                    const bool expect_commit  = enable_graph || sp_type == SP_TYPE_DSPARK;
+                    EXPECT_EQ(executor.draft_model_ != nullptr, expect_propose);
+                    EXPECT_EQ(executor.sp_prefill_draft_model_ != nullptr, expect_commit);
+                    for (auto* model : {executor.draft_model_.get(), executor.sp_prefill_draft_model_.get()}) {
+                        if (model) {
+                            auto* draft = dynamic_cast<PyWrappedModel*>(model);
+                            ASSERT_NE(draft, nullptr);
+                            EXPECT_FALSE(draft->expert_balancer_.stable_expert_token_counts().defined());
+                            EXPECT_FALSE(draft->expert_balancer_.runtime_requested_);
+                            EXPECT_EQ(draft->expert_balancer_.load_monitor_, nullptr);
+                            draft->expert_balancer_.step(true);
+                            draft->expert_balancer_.step();
+                            EXPECT_EQ(draft->updateEplbConfig(params.eplb_config), mode == EplbMode::NONE);
+                        }
+                    }
+                    EXPECT_EQ(runtime_initializations, mode == EplbMode::ALL ? 1 : 0);
+                }
+            }
+        }
+    }
+    runtime_patch.attr("__exit__")(py::none(), py::none(), py::none());
+}
+
+TEST_F(MtpExecutorTest, testEplbUpdateOnlyReachesTarget) {
+    for (auto type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
+        for (bool target_accepts : {false, true}) {
+            MtpExecutorTestConfig config;
+            config.sp_type              = type;
+            config.dspark_mask_token_id = 0;
+            auto  components            = createMtpExecutorComponents(config);
+            auto* target                = components.fake_target_model.get();
+            auto* draft                 = components.fake_draft_model.get();
+            auto* commit                = components.fake_draft_prefill_model.get();
+            target->accept_eplb_update  = target_accepts;
+            components.executor->setTargetModel(std::move(components.fake_target_model));
+            components.executor->setDraftModel(std::move(components.fake_draft_model));
+            components.executor->setDraftPrefillModel(std::move(components.fake_draft_prefill_model));
+            EPLBConfig update;
+            update.eplb_mode        = EplbMode::ALL;
+            update.eplb_update_time = 17;
+            EXPECT_EQ(components.executor->updateEplbConfig(update), target_accepts);
+            EXPECT_EQ(target->eplb_update_count, 1);
+            EXPECT_EQ(target->last_eplb_config.eplb_mode, EplbMode::ALL);
+            EXPECT_EQ(target->last_eplb_config.eplb_update_time, 17);
+            EXPECT_EQ(draft->eplb_update_count, 0);
+            EXPECT_EQ(commit->eplb_update_count, 0);
+        }
     }
 }
 
@@ -2039,6 +2221,15 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
 
     next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, 3);
 
+    if (components.executor->useStreamAsync()) {
+        // Async MTP device state keeps the full verify width; only the
+        // accepted prefix is committed to the stream after the worker joins.
+        next_draft_input.combo_tokens       = torch::tensor({3, 2, 0, 0, 0}, torch::kInt32);
+        next_draft_input.input_lengths      = torch::tensor({5}, torch::kInt32);
+        next_draft_input.last_hidden_states = target_output.all_hidden_states;
+        next_draft_output.all_hidden_states = next_draft_output.all_hidden_states.to(torch::kCUDA);
+    }
+
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3});
     components.fake_draft_model->expectTargetVerify(false);
@@ -2078,6 +2269,11 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
     draft_sampler_output_3.all_probs    = torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
     next_draft_sampler_output.token_ids = torch::tensor({1}, torch::kInt32).reshape({(int64_t)batch_size, 1});
     next_draft_sampler_output.all_probs = torch::tensor({0.0f, 1.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
+
+    if (components.executor->useStreamAsync()) {
+        next_draft_sampler_output.token_ids = next_draft_sampler_output.token_ids.to(torch::kCUDA);
+        next_draft_sampler_output.all_probs = next_draft_sampler_output.all_probs.to(torch::kCUDA);
+    }
 
     components.fake_fast_topk_sampler->setInputs(
         {draft_output_1.logits, draft_output_2.logits, draft_output_3.logits, next_draft_output.logits});
@@ -2126,6 +2322,15 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
     auto status = with_prefill_only ? components.executor->process({prefill_only_stream, stream1}) :
                                       components.executor->process({stream1});
     ASSERT_TRUE(status.ok());
+    stream1->waitPendingAsyncBookkeeping();
+    if (components.executor->useStreamAsync()) {
+        const auto state = stream1->getMtpAsyncDeviceState();
+        EXPECT_GT(state.epoch, 0u);
+        EXPECT_EQ(state.next_seq_len_upper_bound, 8);
+        ASSERT_TRUE(state.next_seq_len_gpu.defined() && state.next_seq_len_gpu.is_cuda());
+        EXPECT_EQ(state.next_seq_len_gpu.cpu().item<int32_t>(), 6);
+        EXPECT_EQ(stream1->seqLength(), 6);
+    }
     if (with_prefill_only) {
         EXPECT_TRUE(prefill_only_stream->hasEvent(StreamEvents::GenerateDone));
         auto prefill_output = prefill_only_stream->nextOutput();
@@ -2205,6 +2410,15 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     next_draft_output.logits            = torch::tensor({0.2f, 0.1f, 0.8f, 0.0f}).reshape({1, 4});
     next_draft_output.all_hidden_states = torch::tensor({0.21f, 0.22f}).reshape({1, 2});
 
+    if (components.executor->useStreamAsync()) {
+        // Async MTP keeps the full verify width before committing the accepted prefix.
+        next_draft_input.combo_tokens       = torch::tensor({1, 0, 0}, torch::kInt32);
+        next_draft_input.input_lengths      = torch::tensor({3}, torch::kInt32);
+        next_draft_input.last_hidden_states = target_output.all_hidden_states;
+        next_draft_output.all_hidden_states =
+            torch::tensor({0.21f, 0.22f, 0.0f, 0.0f, 0.0f, 0.0f}).reshape({3, 2}).to(torch::kCUDA);
+    }
+
     components.fake_draft_model->setInputs({draft_input_1, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, next_draft_output});
     components.fake_target_model->setInputs({target_input});
@@ -2214,6 +2428,10 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
                                                               torch::tensor({0}, torch::kInt32).reshape({1, 1})};
     auto next_draft_sampler_output = spec::FastTopKSamplerOutput{
         torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4}), torch::tensor({2}, torch::kInt32).reshape({1, 1})};
+    if (components.executor->useStreamAsync()) {
+        next_draft_sampler_output.token_ids = next_draft_sampler_output.token_ids.to(torch::kCUDA);
+        next_draft_sampler_output.all_probs = next_draft_sampler_output.all_probs.to(torch::kCUDA);
+    }
     components.fake_fast_topk_sampler->setInputs({draft_output_1.logits, next_draft_output.logits});
     components.fake_fast_topk_sampler->setOutputs({draft_sampler_output_1, next_draft_sampler_output});
 
@@ -2242,6 +2460,7 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
 
     auto status = components.executor->process({stream});
     ASSERT_TRUE(status.ok());
+    stream->waitPendingAsyncBookkeeping();
 
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.21, 0.22});
 }
@@ -2913,6 +3132,15 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
     next_draft_output.logits            = torch::tensor({0.2f, 0.1f, 0.8f, 0.0f}).reshape({1, 4});
     next_draft_output.all_hidden_states = torch::tensor({0.21f, 0.22f}).reshape({1, 2});
 
+    if (components.executor->useStreamAsync()) {
+        // Async MTP keeps the full verify width before committing the accepted prefix.
+        next_draft_input.combo_tokens       = torch::tensor({1, 2}, torch::kInt32);
+        next_draft_input.input_lengths      = torch::tensor({2}, torch::kInt32);
+        next_draft_input.last_hidden_states = target_output.all_hidden_states;
+        next_draft_output.all_hidden_states =
+            torch::tensor({0.21f, 0.22f, 0.0f, 0.0f}).reshape({2, 2}).to(torch::kCUDA);
+    }
+
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
     components.fake_draft_model->setInputs({next_draft_input});
@@ -2920,6 +3148,10 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
 
     auto next_draft_sampler_output = spec::FastTopKSamplerOutput{
         torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4}), torch::tensor({2}, torch::kInt32).reshape({1, 1})};
+    if (components.executor->useStreamAsync()) {
+        next_draft_sampler_output.token_ids = next_draft_sampler_output.token_ids.to(torch::kCUDA);
+        next_draft_sampler_output.all_probs = next_draft_sampler_output.all_probs.to(torch::kCUDA);
+    }
     components.fake_fast_topk_sampler->setInputs({next_draft_output.logits});
     components.fake_fast_topk_sampler->setOutputs({next_draft_sampler_output});
 
@@ -2947,6 +3179,7 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
 
     auto status = components.executor->process({stream});
     ASSERT_TRUE(status.ok());
+    stream->waitPendingAsyncBookkeeping();
 
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {});
 }
@@ -3049,6 +3282,19 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     next_draft_input.last_hidden_states =
         torch::cat({target_output.all_hidden_states.narrow(0, 0, 1), target_output.all_hidden_states.narrow(0, 5, 5)});
 
+    if (components.executor->useStreamAsync()) {
+        // Each stream retains five verify rows, including rejected positions.
+        next_draft_input.combo_tokens       = torch::tensor({3, 0, 0, 0, 0, 3, 0, 2, 2, 1}, torch::kInt32);
+        next_draft_input.input_lengths      = torch::tensor({5, 5}, torch::kInt32);
+        next_draft_input.lm_output_indexes  = torch::tensor({0, 9}, torch::kInt32);
+        next_draft_input.last_hidden_states = target_output.all_hidden_states;
+        next_draft_output.all_hidden_states =
+            torch::tensor({0.1f, 0.11f, 0.0f, 0.0f,  0.0f, 0.0f,  0.0f, 0.0f,  0.0f, 0.0f,
+                           1.1f, 1.11f, 1.2f, 1.22f, 1.3f, 1.33f, 1.4f, 1.44f, 1.5f, 1.55f})
+                .reshape({10, 2})
+                .to(torch::kCUDA);
+    }
+
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
 
@@ -3075,6 +3321,11 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     next_draft_sampler_output.token_ids = torch::tensor({1, 2}, torch::kInt32).reshape({(int64_t)batch_size, 1});
     next_draft_sampler_output.all_probs =
         torch::tensor({0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f}).reshape({(int64_t)batch_size, 4});
+
+    if (components.executor->useStreamAsync()) {
+        next_draft_sampler_output.token_ids = next_draft_sampler_output.token_ids.to(torch::kCUDA);
+        next_draft_sampler_output.all_probs = next_draft_sampler_output.all_probs.to(torch::kCUDA);
+    }
 
     components.fake_fast_topk_sampler->setInputs(
         {draft_output_1.logits, draft_output_2.logits, draft_output_3.logits, next_draft_output.logits});
@@ -3126,6 +3377,8 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     // Verify executor was created successfully
     auto status = components.executor->process({stream1, stream2});
     ASSERT_TRUE(status.ok());
+    stream1->waitPendingAsyncBookkeeping();
+    stream2->waitPendingAsyncBookkeeping();
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 3}, {3, 1}, {0, 1, 0, 0}, {0.1, 0.11});

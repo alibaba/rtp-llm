@@ -33,6 +33,10 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import (
+    ExpertLoadContext,
+    expert_load_for_layer,
+)
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -52,6 +56,7 @@ class GenericMoeLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        layer_id: int = -1,
     ):
         super().__init__()
         self.config = config
@@ -71,6 +76,8 @@ class GenericMoeLayer(nn.Module):
         )
         self.select_topk = SelectTopk(config=config)
         if moe_config.fake_balance_expert:
+            if W.log2phy in weights:
+                raise ValueError("fake_balance_expert cannot be combined with EPLB")
             self.fake_balance_expert = FakeBalanceExpert(
                 expert_num=config.expert_num,
                 moe_k=config.moe_k,
@@ -87,6 +94,7 @@ class GenericMoeLayer(nn.Module):
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
         )
+        config_adapter.layer_id = layer_id
         config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
         router = self.fused_moe.router
@@ -171,7 +179,11 @@ class GenericMoeLayer(nn.Module):
             return torch.sigmoid(gate_output) * shared_expert_output
         return shared_expert_output
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
+    ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
 
@@ -224,6 +236,7 @@ class GenericMoeLayer(nn.Module):
             topk_ids=topk_ids,
             activation="SiGLU",
             skip_tp_allreduce=self.use_unified_tp_allreduce,
+            expert_load=expert_load,
         )
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
@@ -330,6 +343,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
                 hw_kernel_config=hw_kernel_config,
+                layer_id=layer_idx,
             )
 
         # 使用 RMSResNorm 来 fuse residual add 和 layernorm
@@ -345,6 +359,7 @@ class GenericMoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
         fmha_impl: Any,
+        expert_load: Optional[ExpertLoadContext],
         kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
     ) -> DecodeLayerOutput:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
@@ -357,7 +372,10 @@ class GenericMoeDecoderLayer(nn.Module):
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
-        hidden_states = self.mlp(hidden_states)
+        if isinstance(self.mlp, GenericMoeLayer):
+            hidden_states = self.mlp(hidden_states, expert_load=expert_load)
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         return DecodeLayerOutput(hidden_states, residual)
 
@@ -423,6 +441,13 @@ class GenericMoeModel(GptModelBase):
             self._capture_canonical_layer,
             self._capture_canonical_final,
         )
+
+    def get_eplb_layers(self):
+        return [
+            layer.mlp.fused_moe.eplb_layer
+            for layer in self.layers
+            if isinstance(layer.mlp, GenericMoeLayer)
+        ]
 
     def _capture_canonical_layer(
         self, hidden_states: torch.Tensor, residual: torch.Tensor | None
@@ -546,6 +571,7 @@ class GenericMoeModel(GptModelBase):
                 residual,
                 layer_fmha_impl,
                 kv_cache=layer_kv_cache,
+                expert_load=expert_load_for_layer(inputs.expert_token_counts, i),
             )
             hidden_states = output.hidden_states
             residual = output.residual

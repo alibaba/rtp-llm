@@ -669,6 +669,9 @@ flash-attn-4 @ https://files.pythonhosted.org/packages/44/1c/7ee1a5949e9b275eb62
 flash-mla @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261013/x86-cuda132/flash_mla-1.0.0%2B2e5429f-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:047ea42f62f8a7057dfcf376f521aa53ecc5d7d1731b9491cc75b70863e96ce1
     # via -r deps/requirements_torch_gpu_cuda13.txt
+flash-mla-legacy @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/whl/eplb-20261023-01a16309/flash_mla_legacy-1.0.0%2B9241ae3.rtp1-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:42cd4e4980f913a294b010b9c6125621f1398ea84d6c0b064c7ccf4e40f3f1fc
+    # via -r deps/requirements_torch_gpu_cuda13.txt
 flashinfer-cubin @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl \
     --hash=sha256:6e4a9132f5096b7a6d7904a90efd90a90573c365e5250237bc37f1812ab15b9f
     # via -r deps/requirements_torch_gpu_cuda13.txt

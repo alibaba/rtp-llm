@@ -729,6 +729,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
                 hw_kernel_config=hw_kernel_config,
+                layer_id=layer_idx,
             )
 
         # RMSResNorm: fused residual add + layernorm
@@ -771,7 +772,10 @@ class KimiLinearDecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         # MLP (Dense or MoE)
-        hidden_states = self.mlp(hidden_states)
+        if isinstance(self.mlp, GenericMoeLayer):
+            hidden_states = self.mlp(hidden_states, expert_load=None)
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         return DecodeLayerOutput(hidden_states, residual)
 

@@ -57,6 +57,7 @@ def make_moe(strategy):
     moe._has_visual_tokens = False
     moe._routed_includes_shared = True
     moe._strategy = strategy
+    moe.eplb_layer = None
     moe.gate = SimpleNamespace(
         topk=6,
         route_scale=2.5,
@@ -129,7 +130,7 @@ class MHCPreparedMoEHostTest(unittest.TestCase):
             indices.fill_(1)
             weights.copy_(x[:, :6].float())
 
-        def launch(y, tokens, device):
+        def launch(y, tokens, device, expert_load=None, eplb_layer=None):
             # Consumer-visible result depends on freshly written activations
             # and routing metadata; stale buffers or reversed out fail.
             buf = strategy._mega_buf
@@ -220,7 +221,7 @@ class MHCPreparedMoEHostTest(unittest.TestCase):
                 buf.x[:tokens].copy_(x)
 
             strategy._input_packer = SimpleNamespace(pack=pack)
-            strategy._launch = lambda y, tokens, device: y.copy_(
+            strategy._launch = lambda y, tokens, device, **kwargs: y.copy_(
                 strategy._mega_buf.x[:tokens].float()
             )
 
@@ -241,7 +242,9 @@ class MHCPreparedMoEHostTest(unittest.TestCase):
                 patch.object(mega_gate, "_native_gate", return_value=gate_kernel),
                 patch.object(v41_mega_mhc, "try_fused_post_pre", side_effect=mhc),
             ):
-                results.append(block.forward_decode(hidden.clone(), None, ids))
+                results.append(
+                    block.forward_decode(hidden.clone(), None, ids, expert_load=None)
+                )
             self.assertEqual(packs, [] if fused else [6])
         torch.testing.assert_close(results[0], results[1], rtol=0, atol=0)
 
@@ -319,6 +322,7 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
         import torch.distributed as dist
         from deep_gemm.utils import per_token_cast_to_fp4, per_token_cast_to_fp8
 
+        from rtp_llm.eplb.runtime import EplbLayer
         from rtp_llm.models_py.modules.dsv41.moe.mega_se_buf import (
             mega_moe_se_shared_recipe_kwargs,
         )
@@ -326,6 +330,7 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
             FusedMegaMoeSEInputPacker,
         )
         from rtp_llm.models_py.modules.dsv41.moe.strategies.base import MoeCfg
+        from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 
         if dist.is_initialized():
             self.skipTest("This test owns a single-rank NCCL group")
@@ -428,16 +433,39 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                     _weight_bf16=lambda: gate_weight,
                 )
                 buf = strategy._mega_buf
+                eplb_layer = EplbLayer(
+                    0,
+                    (
+                        (torch.arange(experts, device="cuda", dtype=torch.int32) + 7)
+                        % experts
+                    ).view(-1, 1),
+                    torch.ones(experts, device="cuda", dtype=torch.int32),
+                    strategy.get_eplb_weights(),
+                )
+                counts = torch.zeros(experts, device="cuda", dtype=torch.int32)
+                expert_load = ExpertLoadContext(counts)
+
+                def assert_counts(rows):
+                    expected_counts = torch.bincount(
+                        buf.topk_idx[:rows].flatten(), minlength=experts
+                    )
+                    torch.testing.assert_close(
+                        counts.long(), expected_counts, rtol=0, atol=0
+                    )
+                    self.assertEqual(int(counts.sum()), rows * topk)
+
                 # Different token counts reuse one symmetric allocation.
                 from rtp_llm.models_py.modules.base.cuda.select_topk import (
                     FakeBalanceExpert,
                 )
 
-                for enabled, rows in (
-                    (enabled, rows)
+                for enabled, mapped, rows in (
+                    (enabled, mapped, rows)
                     for enabled in (False, True)
+                    for mapped in (False, True)
                     for rows in (192, 6, 160)
                 ):
+                    moe.eplb_layer = eplb_layer if mapped else None
                     strategy.fake_balance_expert = (
                         FakeBalanceExpert(experts, topk, 0, 1, 1) if enabled else None
                     )
@@ -445,18 +473,23 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                     ids = torch.arange(rows, device="cuda")
 
                     def packed():
+                        counts.zero_()
                         out = v41_mega_mhc.try_fused_post_pre(**case)
                         self.assertIsNotNone(out)
-                        return moe(out[1], ids)
+                        return moe(out[1], ids, expert_load=expert_load)
 
                     def direct():
+                        counts.zero_()
                         inputs = moe.prepare_mhc_inputs(case["attn_out"])
                         self.assertIsNotNone(inputs)
                         out = v41_mega_mhc.try_fused_post_pre(**case, moe_inputs=inputs)
                         self.assertIsNotNone(out)
-                        return moe(out[1], ids, mhc_inputs=inputs)
+                        return moe(
+                            out[1], ids, expert_load=expert_load, mhc_inputs=inputs
+                        )
 
                     expected = packed().clone()
+                    assert_counts(rows)
                     expected_ids = buf.topk_idx[:rows].clone()
                     expected_weights = buf.topk_weights[:rows].clone()
                     if enabled:
@@ -464,6 +497,8 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                             torch.arange(rows * topk, device="cuda").reshape(rows, topk)
                             % experts
                         )
+                        if mapped:
+                            balanced = (balanced + 7) % experts
                         torch.testing.assert_close(
                             expected_ids, balanced, rtol=0, atol=0
                         )
@@ -480,6 +515,7 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                         buf.shared_l1_acts_sf.stride(),
                     ).fill_(0x7F7F7F7F)
                     actual = direct().clone()
+                    assert_counts(rows)
                     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
                     torch.testing.assert_close(buf.topk_idx[:rows], expected_ids)
                     torch.testing.assert_close(
@@ -499,7 +535,9 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                         case["previous"].pre_mix_out.mul_(0.97)
                         graph.replay()
                         actual = captured.clone()
+                        assert_counts(rows)
                         expected = packed().clone()
+                        assert_counts(rows)
                         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
             finally:
                 try:

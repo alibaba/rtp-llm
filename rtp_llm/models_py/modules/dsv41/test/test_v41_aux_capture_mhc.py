@@ -49,6 +49,7 @@ def run_model(model, hidden, ids, is_graph=False):
             is_cuda_graph=is_graph,
         ),
         prepare_hidden_fn=lambda **kwargs: hidden.clone(),
+        expert_token_counts=None,
     )
 
 
@@ -74,7 +75,7 @@ class AuxCaptureMHCCPUTest(unittest.TestCase):
         expected = {}
         for index, block in enumerate(baseline_blocks):
             expected[index] = value.mean(-2).reshape(10, 8).clone()
-            value = block.forward_decode(value, None, ids)
+            value = block.forward_decode(value, None, ids, expert_load=None)
         with patch.object(
             transition, "try_fused_post_pre", side_effect=backend
         ) as fused:

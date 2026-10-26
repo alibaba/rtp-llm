@@ -94,7 +94,7 @@ class PureDpRouterBase(FusedMoeDataRouter):
         self.tp_size = config.tp_size
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
-        self.expert_num = config.expert_num
+        self.expert_num = config.physical_expert_num
         self.expert_num_per_rank = self.expert_num // self.ep_size
         self.expert_start_id = self.ep_rank * self.expert_num_per_rank
 

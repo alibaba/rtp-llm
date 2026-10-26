@@ -56,6 +56,22 @@ TEST_F(HttpApiServerTest, testApiServerStop) {
     t.join();
 }
 
+TEST_F(HttpApiServerTest, ModelConfigOutlivesStartupParams) {
+    const std::string              address = "tcp:0.0.0.0:" + std::to_string(autil::NetUtil::randomPort());
+    std::shared_ptr<HttpApiServer> server;
+    {
+        EngineInitParams params;
+        params.model_config_.vocab_size = 257;
+        server = std::make_shared<HttpApiServer>(nullptr, nullptr, address, params, py::none());
+        params.model_config_.vocab_size = 514;
+        EXPECT_EQ(server->model_config_.vocab_size, 257);
+    }
+    ASSERT_TRUE(server->start());
+    ASSERT_NE(server->inference_service_, nullptr);
+    EXPECT_EQ(server->inference_service_->model_config_.vocab_size, 257);
+    server->stop();
+}
+
 TEST_F(HttpApiServerTest, IsEmbedding_InferenceService) {
     const auto        port = autil::NetUtil::randomPort();
     const std::string addr = "tcp:0.0.0.0:" + std::to_string(port);

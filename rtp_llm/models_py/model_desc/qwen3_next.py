@@ -1435,6 +1435,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph,
                 hw_kernel_config=hw_kernel_config,
+                layer_id=layer_idx,
             )
         elif config.moe_style == 0:
             self.mlp = DenseMLP(
@@ -1473,7 +1474,10 @@ class Qwen3NextDecoderLayer(nn.Module):
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
-        hidden_states = self.mlp(hidden_states)
+        if isinstance(self.mlp, GenericMoeLayer):
+            hidden_states = self.mlp(hidden_states, expert_load=None)
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
 

@@ -110,7 +110,7 @@ def _mega_intermediate_size(cfg: MoeCfg) -> int:
     alignment = 16 * FP4_BLOCK
     if intermediate % alignment == 0 or _native_mega_intermediate_supported(
         cfg.ep_size,
-        cfg.n_routed_experts,
+        cfg.physical_expert_num,
         cfg.n_activated_experts,
         cfg.dim,
         intermediate,
@@ -241,7 +241,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         group = dist.group.WORLD
         self._mega_group = group
         self._mega_buf_kwargs = dict(
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
             num_topk=cfg.n_activated_experts,
             hidden=D,
@@ -315,6 +315,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         del w13, s13_int, w2, s2_int
         torch.cuda.empty_cache()
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return (self._mega_l1_w, self._mega_l1_sf, self._mega_l2_w, self._mega_l2_sf)
+
     def _ensure_mega_buffers(self) -> None:
         """Initialize runtime buffers once and preserve their addresses across graph replay."""
         if self._mega_buf is None:
@@ -342,7 +345,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         if callable(get_block_m):
             block_m_resolver = lambda tokens: get_block_m(
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 max_tokens_per_rank,
                 tokens,
                 cfg.n_activated_experts,
@@ -350,7 +353,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             )
         return generate_mega_moe_jit_token_counts(
             num_ranks=cfg.ep_size,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
             intermediate_hidden=_mega_intermediate_size(cfg),
@@ -406,7 +409,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         max_tokens_per_rank = int(cfg.max_tokens_per_rank)
         warmup_key = (
             cfg.ep_size,
-            cfg.n_routed_experts,
+            cfg.physical_expert_num,
             cfg.n_local_experts,
             cfg.n_activated_experts,
             cfg.dim,
@@ -432,7 +435,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 format_token_counts(token_counts),
                 max_tokens_per_rank,
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 cfg.n_activated_experts,
                 cfg.dim,
                 cfg.moe_inter_dim,
@@ -473,7 +476,12 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         indices = local_expert_ids.view(1, -1).expand(max_tokens, -1).contiguous()
         for token_count in token_counts:
             dist.barrier()
-            self.forward(x[:token_count], weights[:token_count], indices[:token_count])
+            self.forward(
+                x[:token_count],
+                weights[:token_count],
+                indices[:token_count],
+                expert_load=None,
+            )
             torch.cuda.synchronize(device)
         dist.barrier()
         self._warmup_gate_pack_jit(token_counts)
@@ -542,7 +550,12 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         )
 
     def forward(
-        self, x: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        expert_load=None,
+        eplb_layer=None,
     ) -> torch.Tensor:
         """Run the fused DeepGEMM Mega MoE kernel: dispatch + L1 GEMM +
         SwiGLU + L2 GEMM + combine — all fused, symm-mem backed.
@@ -557,8 +570,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         T = x.size(0)
         buf = self._mega_buf
         self._input_packer.pack(x, weights, indices, buf, T)
-        if self.fake_balance_expert is not None:
-            self.apply_fake_balance(buf.topk_idx[:T], buf.topk_weights[:T])
+        self.finalize_routing(buf.topk_idx[:T], buf.topk_weights[:T], eplb_layer)
         self._maybe_pre_kernel_barrier(T)
         sync_cuda_graph_warmup_ranks(
             f"dsv4.mega_moe.layer{self.cfg.layer_id}.before_deepgemm", x.device
@@ -575,11 +587,19 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
+            cumulative_local_expert_recv_stats=(
+                expert_load.expert_token_counts if expert_load is not None else None
+            ),
         )
         return y
 
     def forward_with_gate_pack(
-        self, x: torch.Tensor, gate, input_ids: torch.Tensor | None
+        self,
+        x: torch.Tensor,
+        gate,
+        input_ids: torch.Tensor | None,
+        expert_load=None,
+        eplb_layer=None,
     ) -> torch.Tensor:
         """Run MegaMoE with router gate + input pack fused together."""
         kernels = _get_gate_pack_kernels()
@@ -619,8 +639,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
                 )
-        if self.fake_balance_expert is not None:
-            self.apply_fake_balance(buf.topk_idx[:T], buf.topk_weights[:T])
+        self.finalize_routing(buf.topk_idx[:T], buf.topk_weights[:T], eplb_layer)
         self._maybe_pre_kernel_barrier(T)
         sync_cuda_graph_warmup_ranks(
             f"dsv4.mega_moe.layer{self.cfg.layer_id}.before_deepgemm", x.device
@@ -636,6 +655,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
+            cumulative_local_expert_recv_stats=(
+                expert_load.expert_token_counts if expert_load is not None else None
+            ),
         )
         return y
 

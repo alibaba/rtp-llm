@@ -433,23 +433,11 @@ msgid "`--eplb_mode`"
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "EPLB mode"
+msgid "`NONE`, `STATS`, `EPLB`, or `ALL`. `STATS` collects counts without migration and allows online switching to `EPLB` or `ALL`. Both `EPLB` and `ALL` collect counts and rearrange experts. Shuffle buffers are initialized on the first rearrangement. Monitoring is configured independently."
 msgstr ""
 
 #: ../../backend/server_arguments.md
 msgid "\"NONE\""
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "`--balance_method`"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "EPLB load balancing method."
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "\"mix\""
 msgstr ""
 
 #: ../../backend/server_arguments.md
@@ -465,19 +453,7 @@ msgid "`--eplb_update_time`"
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "EPLB execution cycle."
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "5000"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "`--eplb_balance_layer_per_step`"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "Number of layers updated per EPLB update."
+msgid "Rearrangement interval in eligible model steps. `0` disables rearrangement; the first update runs after `max(1, interval // 4)` eligible steps."
 msgstr ""
 
 #: ../../backend/server_arguments.md
@@ -485,23 +461,31 @@ msgid "1"
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "`--eplb_force_repack`"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "Globally repack EPLB experts."
-msgstr ""
-
-#: ../../backend/server_arguments.md
 msgid "`--eplb_stats_window_size`"
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "EPLB statistics window size."
+msgid "Rearrangement count window. Must be non-negative; a positive update interval requires `1 <= window <= interval`."
 msgstr ""
 
 #: ../../backend/server_arguments.md
 msgid "10"
+msgstr ""
+
+#: ../../backend/server_arguments.md
+msgid "`--eplb_rearrange_after_prefill`"
+msgstr ""
+
+#: ../../backend/server_arguments.md
+msgid "On PDFUSION workers, collect prefill counts and rearrange on the next decode step. Otherwise PDFUSION prefill is excluded from rearrangement scheduling. Dedicated P/D workers retain their own eligible step schedule."
+msgstr ""
+
+#: ../../backend/server_arguments.md
+msgid "`--eplb_rearrange_p2p_groups`"
+msgstr ""
+
+#: ../../backend/server_arguments.md
+msgid "Positive P2P bucket count for rearrangement outside a shared NVLink domain."
 msgstr ""
 
 #: ../../backend/server_arguments.md
@@ -514,14 +498,6 @@ msgstr ""
 
 #: ../../backend/server_arguments.md
 msgid "100"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "`--eplb_test_mode`"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "(DEBUG) Enables ExpertBalancer test mode"
 msgstr ""
 
 #: ../../backend/server_arguments.md

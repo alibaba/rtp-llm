@@ -71,7 +71,6 @@ class DeepSeekV41ContractTest(unittest.TestCase):
                 "ROLE_TYPE": "PDFUSION",
                 "DSV4_MOE_STRATEGY": "mega",
                 "DSV4_USE_MEGA_MOE_SE": "0",
-                "DSV4_USE_MEGA_MOE_FUSED": "0",
                 "DSV41_SWA_BOUNDED_REPLAY": "0",
                 "DSV41_CED": "0",
             },

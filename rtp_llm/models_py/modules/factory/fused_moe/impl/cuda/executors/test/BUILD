@@ -1,6 +1,8 @@
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 
+exports_files(["mega_moe_routed_only_execution_test.py"])
+
 py_library(
     name = "fused_moe_executor_test_util",
     srcs = ["fused_moe_executor_test_util.py"],
@@ -333,4 +335,29 @@ dsv4_sm100_py_test(
         "//rtp_llm/models_py:modules",
     ],
     visibility = ["//visibility:public"],
+)
+
+cuda13_sm100_py_test(
+    name = "eplb_mega_moe_test",
+    srcs = [
+        "eplb_mega_moe_test.py",
+        "mega_moe_routed_only_execution_test.py",
+    ],
+    env_inherit = ["HOME"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+    timeout = "long",
+    gpu_count = 2,
+)
+
+cuda13_sm100_py_test(
+    name = "eplb_triton_moe_test",
+    srcs = ["eplb_triton_moe_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+    gpu_count = 2,
 )

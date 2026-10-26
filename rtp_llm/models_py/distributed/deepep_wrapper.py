@@ -10,49 +10,18 @@ import os
 import threading
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from pathlib import Path
 from typing import Optional, Tuple
 
 import torch
 from torch.distributed import ProcessGroup
 
-
-def _configure_deepep_nccl_root() -> None:
-    """Pin EP_NCCL_ROOT_DIR to the NCCL library that is actually loaded.
-
-    deep_ep byte-compares the loaded libnccl against find_nccl_root()'s pick
-    and EP_NCCL_ROOT_DIR takes precedence in find_nccl_root, so the env must
-    name the root of the LOADED library (torch's, usually the wheel from the
-    runfiles/venv).  Never guess from installed package metadata: a
-    conda/site-packages copy can differ byte-wise from the loaded wheel.  If
-    no loaded libnccl is mapped yet, leave the env unset and let deep_ep
-    auto-detect with its own sys.path-priority logic.
-    """
-    if "EP_NCCL_ROOT_DIR" in os.environ:
-        return
-    try:
-        loaded_nccl = sorted(
-            {
-                Path(line.rsplit(maxsplit=1)[-1]).resolve()
-                for line in Path("/proc/self/maps").read_text().splitlines()
-                if "/libnccl.so" in line
-            }
-        )
-    except OSError:
-        return
-    for nccl in loaded_nccl:
-        nccl_root = nccl.parent.parent
-        if (nccl_root / "lib").is_dir() and (nccl_root / "include").is_dir():
-            os.environ["EP_NCCL_ROOT_DIR"] = str(nccl_root)
-            logging.info("DeepEP will use NCCL from %s", nccl_root)
-            return
-
+from rtp_llm.utils.deepep_utils import configure_deepep_nccl_root
 
 # Must run before `from deep_ep import ...`: deep_ep byte-compares the loaded
 # libnccl against find_nccl_root() at import time, and EP_NCCL_ROOT_DIR takes
 # precedence there.  This module is imported after torch.distributed has
 # loaded the runtime NCCL, so the maps scan below sees the right library.
-_configure_deepep_nccl_root()
+configure_deepep_nccl_root()
 
 try:
     from deep_ep import Buffer as DeepEPBuffer
@@ -170,7 +139,7 @@ class DeepepWrapperConfig:
             world_size=parallelism_config.world_size,
             # Model parameters
             hidden_size=model_config.hidden_size,
-            expert_num=model_config.expert_num,
+            expert_num=config_adapter.physical_expert_num,
             moe_k=model_config.moe_k,
             # MoE-specific parameters
             deep_ep_num_sm=moe_config.deep_ep_num_sm,

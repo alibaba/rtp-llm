@@ -1,9 +1,12 @@
 // Unit tests for GrammarLogitsProcessor over a 128-char ASCII vocab.
 
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -158,6 +161,35 @@ int expectCapOk(ErrorResult<int>&& result) {
 }
 
 }  // namespace
+
+TEST(GrammarLogitsProcessorTest, FactoryShutdownReleasesReporterAndAllowsReinitialization) {
+    auto grammar_config                = grammarConfig();
+    grammar_config.tokenizer_info_json = makeAsciiTokenizerInfo().SerializeJSON();
+
+    for (int generation = 0; generation < 2; ++generation) {
+        SCOPED_TRACE(generation);
+        auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+        std::weak_ptr<kmonitor::MetricsReporter> reporter_lifetime = reporter;
+        LogitsProcessorFactory::init(ModelConfig{}, grammar_config, "", std::move(reporter));
+
+        auto input                    = std::make_shared<GenerateInput>();
+        input->input_ids              = torch::tensor({0}, torch::kInt32);
+        input->generate_config        = std::make_shared<GenerateConfig>();
+        input->generate_config->regex = "ab";
+        auto processors               = LogitsProcessorFactory::createLogitsProcessors(input, 1, 1, 0);
+        EXPECT_TRUE(processors.ok());
+        EXPECT_FALSE(reporter_lifetime.expired());
+
+        LogitsProcessorFactory::shutdown();
+        EXPECT_TRUE(reporter_lifetime.expired());
+        LogitsProcessorFactory::shutdown();
+
+        // Existing matchers own their compiled grammar, not the backend or reporter.
+        ASSERT_TRUE(processors.ok());
+        ASSERT_EQ(processors.value().size(), 1);
+        EXPECT_FALSE(processors.value().front()->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+    }
+}
 
 TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
     auto backend = makeBackend();

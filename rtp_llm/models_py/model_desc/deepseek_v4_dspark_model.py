@@ -69,6 +69,7 @@ from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     DSparkProposerMixin,
     optional_tensor,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import expert_load_for_layer
 from rtp_llm.ops import RoleType
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -735,6 +736,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         block_table: Optional[torch.Tensor],
         tokens_per_block: int,
         graph_metadata: Any,
+        expert_token_counts: Optional[torch.Tensor],
     ) -> torch.Tensor:
         hidden = self.v4.embed(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
@@ -745,6 +747,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx, layer in enumerate(self.v4.layers):
             with layer_forward_range(layer_idx):
+                expert_load = expert_load_for_layer(expert_token_counts, layer_idx)
                 hidden = layer.forward_decode(
                     hidden,
                     attn_metadata=None,
@@ -759,6 +762,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                         tokens_per_block,
                         graph_metadata,
                     ),
+                    expert_load=expert_load,
                 )
 
         return hidden
@@ -800,6 +804,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             block_table,
             tokens_per_block,
             graph_metadata,
+            expert_token_counts=inputs.expert_token_counts,
         )
 
     def compute_draft_hidden_states(self, hidden: torch.Tensor) -> torch.Tensor:
@@ -854,6 +859,10 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     def forward_commit(
         self, inputs: PyModelInputs, fmha_impl: Any = None
     ) -> PyModelOutputs:
+        if inputs.expert_token_counts is not None:
+            raise RuntimeError(
+                "DSpARK commit does not execute MoE expert load recording"
+            )
         device = self._forward_device()
         if getattr(self, "kv_cache", None) is None:
             return PyModelOutputs(

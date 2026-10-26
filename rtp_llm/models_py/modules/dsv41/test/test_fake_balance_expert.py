@@ -151,15 +151,10 @@ class FakeBalanceExpertTest(unittest.TestCase):
         import deep_gemm
 
         from rtp_llm.models_py.modules.dsv41.moe import mega_gate
-        from rtp_llm.models_py.modules.dsv41.moe.strategies import (
-            mega,
-            mega_fused,
-            mega_se,
-        )
+        from rtp_llm.models_py.modules.dsv41.moe.strategies import mega, mega_se
 
         for module, cls in (
             (mega, mega.MegaMoEStrategy),
-            (mega_fused, mega_fused.MegaMoEFusedStrategy),
             (mega_se, mega_se.MegaMoEStrategySE),
         ):
             for enabled in (False, True):
@@ -226,11 +221,7 @@ class FakeBalanceExpertTest(unittest.TestCase):
                     ),
                     _project_scores=lambda x, w: x @ w.T,
                 )
-                kernel_name = (
-                    "fp8_fp4_mega_moe_fused"
-                    if module is mega_fused
-                    else "fp8_fp4_mega_moe"
-                )
+                kernel_name = "fp8_fp4_mega_moe"
                 getter = (
                     "_get_mega_se_gate_pack_kernels"
                     if module is mega_se

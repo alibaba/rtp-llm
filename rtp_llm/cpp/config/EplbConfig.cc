@@ -39,14 +39,13 @@ std::string EPLBConfig::to_string() const {
         << "  eplb_update_time: " << eplb_update_time << "\n"
         << "  eplb_mode: " << (int)eplb_mode << "\n"
         << "  redundant_expert: " << redundant_expert << "\n"
-        << "  balance_method: " << balance_method << "\n"
-        << "  eplb_force_repack: " << eplb_force_repack << "\n"
         << "  eplb_stats_window_size: " << eplb_stats_window_size << "\n"
         << "  eplb_control_step: " << eplb_control_step << "\n"
-        << "  eplb_test_mode: " << eplb_test_mode << "\n"
-        << "  eplb_balance_layer_per_step: " << eplb_balance_layer_per_step;
+        << "  eplb_rearrange_after_prefill: " << eplb_rearrange_after_prefill << "\n"
+        << "  eplb_rearrange_p2p_groups: " << eplb_rearrange_p2p_groups << "\n"
+        << "  eplb_metrics_report_interval: " << eplb_metrics_report_interval << "\n"
+        << "  eplb_metrics_snapshot_max_files: " << eplb_metrics_snapshot_max_files;
     return oss.str();
 }
 
 }  // namespace rtp_llm
-
