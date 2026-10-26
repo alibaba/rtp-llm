@@ -64,6 +64,11 @@ class PpuDecodeProvider(PpuModuleProvider):
         if self._moe_backend not in ("deepep", "megamoe"):
             raise ValueError("DSV4_PPU_DECODE_MOE_BACKEND must be deepep or megamoe")
         self._shared_staged = self._bool("DSV4_PPU_MEGAMOE_SHARED_STAGED", False)
+        self._mega_streamed = self._bool("DSV4_PPU_MEGAMOE_STREAMED", False)
+        if self._mega_streamed and self._moe_backend != "megamoe":
+            raise ValueError("Streamed execution requires the MegaMoE backend")
+        if self._mega_streamed and self._shared_staged:
+            raise ValueError("Streamed MegaMoE does not support staged shared experts")
         if self._shared_staged and self._moe_backend != "megamoe":
             raise ValueError("Staged shared execution requires the MegaMoE backend")
         self._mega_resources = None

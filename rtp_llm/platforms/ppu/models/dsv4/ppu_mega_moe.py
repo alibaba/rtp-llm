@@ -64,7 +64,9 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
             cfg.n_activated_experts,
         ) == (1, 8, 4096, 2048, 256, 6)
 
-    def __init__(self, cfg, *, resources, module_name="deep_gemm", **kwargs):
+    def __init__(
+        self, cfg, *, resources, module_name="deep_gemm", streamed=False, **kwargs
+    ):
         kwargs.setdefault("output_dtype", torch.bfloat16)
         if kwargs["output_dtype"] != torch.bfloat16:
             raise ValueError("PPU MegaMoE currently requires BF16 routed output")
@@ -86,6 +88,11 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
                 "PPU MegaMoE requires a DeepGEMM build with the MegaMoE API"
             )
         self._mega = deep_gemm
+        self._streamed = streamed
+        if streamed and not callable(
+            getattr(deep_gemm, "fp4_fp4_mega_moe_streamed", None)
+        ):
+            raise RuntimeError("Streamed MegaMoE requires the DeepGEMM streamed API")
         self._resources = resources
         self._sym = None
 
@@ -111,6 +118,8 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
     def forward(self, x, weights, indices, *, active_token_mask=None, after_gemm1=None):
         from rtp_llm.platforms.ppu.kernels.ppu_topk_padding import pad_inactive_routes
 
+        if self._streamed and after_gemm1 is not None:
+            raise ValueError("Streamed MegaMoE does not support after_gemm1")
         if self._sym is None:
             wrapper = self._bind_wrapper()
             self._sym = self._resources.bind(self.cfg, wrapper, self._mega)
@@ -126,8 +135,15 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
             active_token_mask=active_token_mask,
         )
         y = torch.empty_like(x, dtype=torch.bfloat16)
-        kwargs = {} if after_gemm1 is None else {"after_gemm1": after_gemm1}
-        self._mega.fp4_fp4_mega_moe(
+        if self._streamed:
+            gemm = self._mega.fp4_fp4_mega_moe_streamed
+            kwargs = {}
+        else:
+            gemm = self._mega.fp4_fp4_mega_moe
+            kwargs = {"fuse_reduce": False}
+            if after_gemm1 is not None:
+                kwargs["after_gemm1"] = after_gemm1
+        gemm(
             y,
             (self._w13, self._s13),
             (self._w2, self._s2),
@@ -136,7 +152,6 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             preserve_bf16=True,
-            fuse_reduce=False,
             **kwargs,
         )
         return y

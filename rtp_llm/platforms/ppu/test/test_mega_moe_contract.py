@@ -64,6 +64,50 @@ class MegaMoEContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be deepep or megamoe"):
             PpuDecodeProvider({**options, "DSV4_PPU_DECODE_MOE_BACKEND": "typo"})
 
+    def test_streamed_options_are_snapshotted_and_validated(self):
+        options = {**DECODE_EXECUTION_OPTIONS, "DSV4_PPU_DECODE_MOE_BACKEND": "megamoe"}
+        default = PpuDecodeProvider(options)
+        options["DSV4_PPU_MEGAMOE_STREAMED"] = "1"
+        streamed = PpuDecodeProvider(options)
+        options["DSV4_PPU_MEGAMOE_STREAMED"] = "0"
+        self.assertFalse(default._mega_streamed)
+        self.assertTrue(streamed._mega_streamed)
+        for invalid, message in (
+            ({"DSV4_PPU_DECODE_MOE_BACKEND": "deepep"}, "MegaMoE backend"),
+            ({"DSV4_PPU_MEGAMOE_SHARED_STAGED": "1"}, "staged shared"),
+        ):
+            with self.assertRaisesRegex(ValueError, message):
+                PpuDecodeProvider(
+                    {**options, "DSV4_PPU_MEGAMOE_STREAMED": "1", **invalid}
+                )
+
+    def test_streamed_dispatch_and_callback_rejection(self):
+        strategy = object.__new__(PpuMegaMoEFP4Strategy)
+        torch.nn.Module.__init__(strategy)
+        strategy.cfg = self.cfg
+        strategy._sym = object()
+        strategy._w13 = strategy._s13 = strategy._w2 = strategy._s2 = object()
+        strategy._mega = Mock()
+        x = torch.zeros((8, 4096), dtype=torch.bfloat16)
+        indices = torch.zeros((8, 8), dtype=torch.int64)
+        weights = torch.ones((8, 8))
+        for streamed in (False, True):
+            strategy._streamed = streamed
+            strategy._mega.reset_mock()
+            strategy.forward(x, weights, indices)
+            selected = (
+                strategy._mega.fp4_fp4_mega_moe_streamed
+                if streamed
+                else strategy._mega.fp4_fp4_mega_moe
+            )
+            selected.assert_called_once()
+            self.assertTrue(selected.call_args.kwargs["preserve_bf16"])
+            self.assertEqual("fuse_reduce" in selected.call_args.kwargs, not streamed)
+        strategy._mega.reset_mock()
+        with self.assertRaisesRegex(ValueError, "after_gemm1"):
+            strategy.forward(x, weights, indices, after_gemm1=lambda: None)
+        strategy._mega.mega_moe_pre_dispatch.assert_not_called()
+
     @patch("torch.cuda.is_current_stream_capturing", return_value=False)
     @patch("torch.distributed.get_rank", return_value=0)
     @patch("torch.distributed.get_world_size", return_value=8)

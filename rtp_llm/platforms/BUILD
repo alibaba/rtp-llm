@@ -291,6 +291,45 @@ py_test(
 )
 
 py_test(
+    name = "hc_post_test",
+    srcs = ["ppu/test/test_hc_post.py"],
+    main = "ppu/test/test_hc_post.py",
+    data = [":platform_sources", ":ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    tags = ["gpu", "ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "mtp_input_test",
+    srcs = ["ppu/test/test_mtp_input.py"],
+    main = "ppu/test/test_mtp_input.py",
+    data = [":platform_sources", ":ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    tags = ["gpu", "ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "staged_shared_test",
+    srcs = ["ppu/test/test_staged_shared.py"],
+    main = "ppu/test/test_staged_shared.py",
+    data = [":platform_sources", ":ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    tags = ["gpu", "ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "decode_moe_output_test",
     srcs = ["ppu/test/test_decode_moe_output.py"],
     main = "ppu/test/test_decode_moe_output.py",

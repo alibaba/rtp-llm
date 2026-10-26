@@ -49,6 +49,7 @@ def build_decode_moe(*, build_ctx, request, platform_provider, **kwargs):
         strategy_type = PpuMegaMoEFP4Strategy
         strategy_kwargs["resources"] = platform_provider._mega_resources
         strategy_kwargs["module_name"] = platform_provider._mega_module_name
+        strategy_kwargs["streamed"] = platform_provider._mega_streamed
     return PpuEPMoE(
         platform_provider=platform_provider,
         strategy_type=strategy_type,
