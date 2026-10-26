@@ -44,19 +44,38 @@ struct BlockTreeNodeRangeResult {
     bool   cycle_complete{false};
 };
 
+// A content-matched interval backed by a real tree node. The source endpoint
+// can exceed matched_end; dense groups may reuse the shared part of that node.
+struct BlockTreeContentRange {
+    TreeNode* node{nullptr};
+    size_t    matched_end{0};
+};
+
 class BlockTree {
 public:
-    explicit BlockTree(std::vector<GroupSetPtr> group_sets);
+    explicit BlockTree(std::vector<GroupSetPtr> group_sets,
+                       size_t                    reuse_unit_tokens = 1);
     ~BlockTree();
 
     std::vector<TreeNode*> findNode(const CacheKeysType& cache_keys) const;
+    // Returns all content- and identity-matched endpoints, including terminal short leaves.
+    // The caller supplies keys computed with the request's original hash seed and base-block layout.
+    std::vector<TreeNode*> contentMatchCandidates(
+        const std::vector<int>& request_tokens, const std::function<CacheKeyType(size_t)>& endpoint_key) const;
+
+    std::vector<BlockTreeContentRange>
+    contentMatchRanges(const std::vector<int>&                                                   request_tokens,
+                       const std::function<CacheKeyType(size_t)>&                                endpoint_key,
+                       const std::function<bool(size_t, const std::vector<int>&, CacheKeyType)>& source_identity) const;
 
     bool isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const;
 
     BlockTreeInsertResult insertNode(const CacheKeysType&                              cache_keys,
                                      const std::vector<std::vector<GroupSetResource>>& resources,
                                      bool                                              collect_path,
-                                     bool                                              is_resident);
+                                     bool                                              is_resident,
+                                     const std::vector<std::vector<int>>*              token_segments = nullptr,
+                                     const std::vector<size_t>*                         token_ends = nullptr);
 
     bool      isRemovable(TreeNode* node) const;
     void      removePendingNodes(const std::unordered_set<TreeNode*>& nodes);
@@ -75,7 +94,11 @@ public:
     size_t size() const {
         return node_pool_.size();
     }
+    size_t reuseUnitTokens() const {
+        return reuse_unit_tokens_;
+    }
     CacheKeysType cacheKeys() const;
+    bool isShortLeaf(const TreeNode* node) const;
     int64_t keyVersion() const {
         return key_version_;
     }
@@ -105,10 +128,12 @@ private:
     BlockTreeInsertResult insertNodeImpl(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          bool                                              collect_path,
-                                         bool                                              is_resident);
+                                         bool                                              is_resident,
+                                         const std::vector<std::vector<int>>*              token_segments,
+                                         const std::vector<size_t>*                         token_ends);
 
     void      removeNode(TreeNode* node);
-    TreeNode* createNode(CacheKeyType key, TreeNode* parent);
+    TreeNode* createNode(CacheKeyType key, TreeNode* parent, size_t token_end);
     void      releaseNode(TreeNode* node);
 
     std::vector<GroupSetPtr>              group_sets_;
@@ -117,6 +142,7 @@ private:
     std::deque<std::unique_ptr<TreeNode>> node_pool_;
     std::unordered_map<CacheKeyType, std::unique_ptr<TreeNode>> pending_node_pool_;
     // Indexed together with node_pool_ for contiguous snapshot copies.
+    size_t reuse_unit_tokens_{1};
     CacheKeysType cache_keys_;
     int64_t       key_version_{-1};
 };

@@ -38,6 +38,22 @@ std::shared_ptr<const CacheTopology> warmupCacheTopology() {
     return topology;
 }
 
+std::shared_ptr<const MallocInfo::RequestLayout>
+makeRequestTokenSnapshot(const BatchKVCacheResource& resource, CompleteTokenIds& tokens, bool partial_tail_reuse) {
+    auto snapshot = std::make_shared<MallocInfo::RequestLayout>();
+    // Keys may not be computed yet in this flow; the coordinator falls back to
+    // its freshly computed keys when the snapshot copy is empty.
+    if (resource.cacheKeysInitialized()) {
+        snapshot->match_keys = resource.cacheKeys(0);
+    }
+    snapshot->partial_tail_reuse    = partial_tail_reuse;
+    snapshot->original_input_tokens = partial_tail_reuse ? static_cast<size_t>(tokens.seqLength()) : 0;
+    if (partial_tail_reuse) {
+        snapshot->token_ids = tokens.completeTokenIdsVec(0);
+        snapshot->token_ids.resize(snapshot->original_input_tokens);
+    }
+    return snapshot;
+}
 }  // namespace
 
 void StreamCacheResource::init(int batch_size) {
@@ -48,6 +64,61 @@ void StreamCacheResource::init(int batch_size) {
                               warmupCacheTopology();
     batch_kv_cache_resource_->initGroups(topology);
     resource_released_ = false;
+    prefix_cache_registration_.reset();
+}
+
+void StreamCacheResource::prepareRegisteredSave() {
+    if (!prefix_cache_registration_ || resource_released_ || !partialTailReuseEnabled()) {
+        return;
+    }
+    const size_t resume_endpoint = static_cast<size_t>(std::max(0, stream_->initialReuseLength()));
+    resource_context_.cache_manager->prepareRegisteredSave(
+        *prefix_cache_registration_, *batch_kv_cache_resource_, resume_endpoint);
+}
+
+absl::Status StreamCacheResource::prepareRequiredContinuation() {
+    if (!prefix_cache_registration_ || resource_released_ || !partialTailReuseEnabled()) {
+        return absl::OkStatus();
+    }
+    const size_t resume_endpoint = static_cast<size_t>(std::max(0, stream_->initialReuseLength()));
+    const auto   status          = resource_context_.cache_manager->prepareRequiredContinuation(
+        *prefix_cache_registration_, *batch_kv_cache_resource_, resume_endpoint);
+    if (status == MallocStatus::NONE) {
+        return absl::OkStatus();
+    }
+    if (status == MallocStatus::PERMANENT_RESOURCE_EXHAUSTED) {
+        return absl::ResourceExhaustedError("request continuation exceeds usable kv cache capacity");
+    }
+    return absl::UnavailableError("kv cache continuation is temporarily unavailable");
+}
+
+const std::vector<TaggedBlockIdPair>& StreamCacheResource::registeredSaveCopyMapping() const {
+    static const std::vector<TaggedBlockIdPair> empty;
+    return prefix_cache_registration_ ? prefix_cache_registration_->copy_mappings : empty;
+}
+
+void StreamCacheResource::completeRegisteredSave(size_t completed_endpoint) {
+    if (!prefix_cache_registration_ || !prefix_cache_registration_->prepared) {
+        return;
+    }
+    bool any_completed = prefix_cache_registration_->content_completed;
+    for (auto& point : prefix_cache_registration_->points) {
+        if (point.endpoint.pos > completed_endpoint) {
+            continue;
+        }
+        for (auto& binding : point.group_bindings) {
+            if (binding.state == PrefixCacheSaveState::REGISTERED && binding.resource.hasCompleteDeviceValue()) {
+                binding.state = PrefixCacheSaveState::CONTENT_COMPLETE;
+                any_completed = true;
+            }
+        }
+    }
+    // T05 calls this only after every rank has completed its copies and writer.
+    // Keeping source pins until request release would let completed optional
+    // history compete with mandatory fallback runtime allocation.
+    resource_context_.cache_manager->releaseRegisteredSourcePins(*prefix_cache_registration_);
+    prefix_cache_registration_->copy_mappings.clear();
+    prefix_cache_registration_->content_completed = any_completed;
 }
 
 bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& tag, int32_t* dst) const {
@@ -157,7 +228,9 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               tierName(target_tier));
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
-                size_t     resident_prefix_length = 0;
+                insert_info.prefix_cache_registration =
+                    prefix_cache_registration_ ? &*prefix_cache_registration_ : nullptr;
+                size_t resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
         } else {
@@ -172,6 +245,10 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         free_info.request_id = stream_->streamId();
 
         resource_context_.cache_manager->free(free_info);
+    }
+
+    if (prefix_cache_registration_) {
+        resource_context_.cache_manager->releaseRegisteredSave(*prefix_cache_registration_);
     }
 
     return total_blocks;
@@ -233,6 +310,10 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.enable_remove_skipped_blocks = false;
     malloc_info.max_chunk_tokens =
         stream_->chunkedPrefillEnabled() && stream_->isContextStream() ? stream_->maxChunkSize() : 0;
+    if (is_first_malloc && partialTailReuseEnabled()) {
+        malloc_info.request_layout =
+            makeRequestTokenSnapshot(*batch_kv_cache_resource_, *malloc_info.complete_token_ids, true);
+    }
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
@@ -254,6 +335,47 @@ absl::Status StreamCacheResource::initKVBlock() {
                           static_cast<int>(result.status),
                           malloc_info.request_id);
         return absl::InternalError("malloc failed with unknown status");
+    }
+
+    // The manager initializes the cache keys inside malloc, so the registration
+    // reads them only after the first prefill allocation succeeded.
+    if (is_first_malloc && !prefix_cache_registration_ && partialTailReuseEnabled()) {
+        PrefixCacheRegistration registration;
+        registration.token_ids             = malloc_info.complete_token_ids->completeTokenIdsVec(0);
+        registration.original_input_tokens = static_cast<size_t>(malloc_info.complete_token_ids->seqLength());
+        RTP_LLM_CHECK_WITH_INFO(registration.token_ids.size() >= registration.original_input_tokens,
+                                "missing original input tokens for partial tail registration");
+        registration.token_ids.resize(registration.original_input_tokens);
+        registration.base_keys = batch_kv_cache_resource_->cacheKeys(0);
+
+        const size_t base_tokens = static_cast<size_t>(seqSizePerBlock());
+        const size_t full_unit   = static_cast<size_t>(reuseBlockTokens());
+        RTP_LLM_CHECK_WITH_INFO(base_tokens > 0 && full_unit >= base_tokens && full_unit % base_tokens == 0,
+                                "invalid full checkpoint unit for partial tail registration");
+        for (size_t pos = full_unit; pos <= registration.original_input_tokens; pos += full_unit) {
+            // LINEAR materializes every slot while prefix reuse is on, and
+            // regular SWA groups keep their published blocks until eviction,
+            // so every full-unit boundary is an original checkpoint.
+            const size_t index = pos / base_tokens - 1;
+            RTP_LLM_CHECK_WITH_INFO(index < registration.base_keys.size(), "missing full checkpoint key");
+            registration.points.push_back({{index, registration.base_keys[index], pos}, {}});
+        }
+        if (registration.original_input_tokens > 0
+            && (registration.points.empty()
+                || registration.points.back().endpoint.pos != registration.original_input_tokens)) {
+            const size_t index = (registration.original_input_tokens - 1) / base_tokens;
+            RTP_LLM_CHECK_WITH_INFO(index < registration.base_keys.size(), "missing tail checkpoint key");
+            registration.points.push_back(
+                {{index, registration.base_keys[index], registration.original_input_tokens}, {}});
+        }
+        for (auto& point : registration.points) {
+            for (const auto& group_set : resource_context_.cache_manager->blockTreeCache()->groupSets()) {
+                PrefixCacheGroupSaveBinding binding;
+                binding.group_set_id = group_set->groupSetId();
+                point.group_bindings.push_back(std::move(binding));
+            }
+        }
+        prefix_cache_registration_ = std::move(registration);
     }
 
     // HOST/DISK reuse is published after the asynchronous load completes.
@@ -323,18 +445,24 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
                                 local,
                                 host,
                                 disk);
-        const int tokens = reuseBlockTokens();
-        RTP_LLM_CHECK_WITH_INFO(tokens > 0 && total <= static_cast<size_t>(std::numeric_limits<int>::max()) / tokens,
+        const int    tokens      = reuseBlockTokens();
+        const size_t exact_total = load_context->matchedTokenEndpoint(static_cast<size_t>(tokens));
+        RTP_LLM_CHECK_WITH_INFO(tokens > 0 && exact_total <= static_cast<size_t>(std::numeric_limits<int>::max()),
                                 "allocator reuse token count exceeds int range: blocks=%zu tokens=%d",
                                 total,
                                 tokens);
         const size_t backend  = total - local;
         auto&        resource = batch_kv_cache_resource_->cacheResource(0);
-        resource.setDeviceReuseBlockNum(local - host - disk);
+        // A remote miss can select a pinned local short leaf after the remote
+        // query started from an empty path. In that case the context's legacy
+        // block counts are zero, while its exact endpoint is the DEVICE reuse.
+        const size_t device_blocks =
+            load_context->localFallbackSelected() ? exact_total / static_cast<size_t>(tokens) : local - host - disk;
+        resource.setDeviceReuseBlockNum(device_blocks);
         resource.setMemoryReuseBlockNum(host);
         resource.setDiskReuseBlockNum(disk);
         resource.setStorageBackendReuseBlockNum(backend);
-        publishReuseLengths(total * tokens, host * tokens, disk * tokens, backend * tokens);
+        publishReuseLengths(static_cast<int>(exact_total), host * tokens, disk * tokens, backend * tokens);
     } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
         stream_->setHostReuseLength(0);
         stream_->setDiskReuseLength(0);
@@ -434,8 +562,23 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.enable_cache_lookup          = enableCacheLookup();
     malloc_info.enable_remove_skipped_blocks = !stream_->isContextStream();
     malloc_info.incr_seq_len_override        = seq_len_override;
+    const int initial_reuse                  = stream_->initialReuseLength();
+    // partialTailReuseEnabled() becomes false after a PREFILL-role stream
+    // leaves context mode; the registration still identifies this request.
+    // DSV4 publishes original full checkpoints at every reuseBlockTokens()
+    // boundary, so a nonaligned initial G identifies its added short leaf.
+    // LINEAR checkpoint spacing is a separate integration contract.
+    if (prefix_cache_registration_ && initial_reuse > 0 && initial_reuse % reuseBlockTokens() != 0) {
+        malloc_info.precise_resume_endpoint = static_cast<size_t>(initial_reuse);
+    }
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
+    if (!result.success && prefix_cache_registration_
+        && resource_context_.cache_manager->relinquishOptionalRegisteredSave(*prefix_cache_registration_)) {
+        // The original running allocation retains its status semantics; optional
+        // save blocks yield once before declaring an incremental shortfall.
+        result = resource_context_.cache_manager->malloc(malloc_info);
+    }
     if (!result.success) {
         malloc_failed_times_++;
         return absl::InternalError("malloc failed");
@@ -554,6 +697,23 @@ bool StreamCacheResource::reuseCache() const {
     // Per-request field flows frontend → FlexLB → engine via protobuf.
     return !stream_->generateConfig()->isPrefillOnly() && resource_context_.reuse_cache
            && (resource_context_.ignore_request_cache_switches || stream_->reuseCache());
+}
+
+bool StreamCacheResource::partialTailReuseEnabled() const {
+    if (!resource_context_.enable_prefill_partial_tail_reuse || resource_context_.role_type != RoleType::PREFILL
+        || !resource_context_.enable_device_cache || resource_context_.cache_manager == nullptr || !reuseCache()
+        || resource_context_.cache_manager->blockTreeCache() == nullptr || !stream_->isContextStream()) {
+        return false;
+    }
+#if !USING_CUDA
+    // Precise LINEAR state snapshots are supported on NVIDIA CUDA in the first release.
+    for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            return false;
+        }
+    }
+#endif
+    return true;
 }
 
 bool StreamCacheResource::enableMemoryCache() const {

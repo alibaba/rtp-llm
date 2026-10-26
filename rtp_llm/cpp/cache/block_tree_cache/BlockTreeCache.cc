@@ -1,6 +1,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
+#include <map>
+#include <set>
+
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -143,11 +146,12 @@ TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               cache_keys,
-                                           const std::function<bool(size_t)>& valid_prefix) {
+                                           const std::function<bool(size_t)>& valid_prefix,
+                                           const PartialTailMatchRequest*     partial_tail) {
     BlockTreeMatchResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        result = loader_.matchLocked(cache_keys, valid_prefix);
+        result = loader_.matchLocked(cache_keys, valid_prefix, partial_tail);
     }
     metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics_snapshots);
     return result;
@@ -156,23 +160,113 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               ca
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                             const std::vector<std::vector<GroupSetResource>>& resources,
                             Tier                                              target_tier) {
-    (void)insert(cache_keys, resources, target_tier, false);
+    (void)insert(cache_keys, resources, target_tier, false, nullptr);
 }
 
 size_t BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                               const std::vector<std::vector<GroupSetResource>>& resources,
                               Tier                                              target_tier,
-                              bool                                              is_resident) {
+                              bool                                              is_resident,
+                              const std::vector<std::vector<int>>*              token_segments,
+                              const std::vector<size_t>*                         token_ends) {
     size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        storage_write = storer_.storeLocked(cache_keys, resources, target_tier, is_resident, resident_prefix_length);
+        storage_write =
+            storer_.storeLocked(cache_keys,
+                                resources,
+                               target_tier,
+                               is_resident,
+                               resident_prefix_length,
+                               token_segments,
+                               token_ends);
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));
     }
     return resident_prefix_length;
+}
+
+CachedPrefixResources BlockTreeCache::pinRegisteredGroups(const std::vector<int>& tokens,
+                                                           const CacheKeysType& base_keys,
+                                                           size_t base_tokens,
+                                                           const std::vector<size_t>& endpoints) {
+    CachedPrefixResources result;
+    result.groups.resize(endpoints.size(), std::vector<CachedPrefixResources::Group>(tree_->groupSets().size()));
+    if (endpoints.empty() || base_tokens == 0
+        || base_keys.size() < (tokens.size() + base_tokens - 1) / base_tokens) {
+        return result;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto candidates = tree_->contentMatchCandidates(tokens, [&](size_t pos) {
+        return base_keys[(pos - 1) / base_tokens];
+    });
+    std::map<std::pair<size_t, size_t>, size_t> path_indices;
+    std::set<std::pair<std::string, BlockIdxType>> unique_pins;
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIndicesType>> acquisitions;
+    size_t acquired = 0;
+    try {
+        // Finish descriptor allocation before acquiring references. Incomplete
+        // groups contribute no partial pins; complete groups may be retained.
+        for (size_t row = 0; row < endpoints.size(); ++row) {
+            const size_t endpoint = endpoints[row];
+            const auto it = std::lower_bound(candidates.begin(), candidates.end(), endpoint,
+                                             [](const auto* node, size_t pos) { return node->token_end < pos; });
+            if (it == candidates.end() || (*it)->token_end != endpoint) {
+                continue;
+            }
+            std::vector<TreeNode*> path;
+            for (auto* node = *it; node->parent != nullptr; node = node->parent) {
+                path.push_back(node);
+            }
+            std::reverse(path.begin(), path.end());
+            for (size_t id = 0; id < tree_->groupSets().size(); ++id) {
+                auto& output = result.groups[row][id];
+                const auto& group = tree_->groupSets()[id];
+                const auto required = group->requiredPathIndices(path, endpoint);
+                output.ready         = group->hasDeviceCoverage(path, endpoint);
+                if (!output.ready) {
+                    continue;
+                }
+                for (size_t index : required) {
+                    const auto& value = path[index]->group_set_resources[id];
+                    const auto key = std::make_pair(id, path[index]->token_end);
+                    auto existing = path_indices.find(key);
+                    if (existing == path_indices.end()) {
+                        const size_t entry = result.path_resources.size();
+                        GroupSetResource device_only;
+                        device_only.device_blocks = value.device_blocks;
+                        result.path_resources.push_back({id, path[index]->token_end, std::move(device_only)});
+                        existing = path_indices.emplace(key, entry).first;
+                    }
+                    output.path_indices.push_back(existing->second);
+                    for (size_t member = 0; member < group->groupTags().size(); ++member) {
+                        const auto& tag = group->groupTags()[member];
+                        const auto block = value.device_blocks[member];
+                        if (unique_pins.emplace(tag, block).second) {
+                            result.pins.push_back({tag, block});
+                            acquisitions.push_back({group->devicePools()[member], BlockIndicesType{block}});
+                        }
+                    }
+                }
+                // An aligned local-only HCA group has no history to protect.
+                if (!required.empty() && path[required.back()]->token_end == endpoint) {
+                    output.endpoint_resource = result.path_resources[output.path_indices.back()].resource;
+                }
+            }
+        }
+        for (; acquired < acquisitions.size(); ++acquired) {
+            acquisitions[acquired].first->incRef(acquisitions[acquired].second);
+        }
+    } catch (...) {
+        while (acquired > 0) {
+            --acquired;
+            acquisitions[acquired].first->decRef(acquisitions[acquired].second);
+        }
+        throw;
+    }
+    return result;
 }
 
 int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks) {

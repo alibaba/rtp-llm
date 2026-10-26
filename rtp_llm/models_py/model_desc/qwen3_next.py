@@ -33,6 +33,8 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
     causal_conv1d_update,
+    gather_conv_initial_states,
+    has_nonaligned_conv_prefix,
     prepare_causal_conv1d_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
@@ -53,6 +55,9 @@ from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_prefill import (
 )
 from rtp_llm.models_py.triton_kernels.fla.block import (
     load_initial_state_from_block_map,
+    prepare_selected_state_positions,
+    store_selected_conv_states_to_block_map,
+    store_selected_ssm_states_to_block_map,
     store_ssm_state_to_block_map,
 )
 from rtp_llm.models_py.triton_kernels.fla.chunk import (
@@ -176,6 +181,36 @@ def _maybe_write_cp_cache_store(
     if kv_cache is None or not attn_meta.is_cp_linear_attn:
         return
     _write_cp_cache_store(attention_inputs, kv_cache)
+
+
+def _sparse_save_inputs(
+    attn_inputs: PyAttentionInputs,
+) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    positions = getattr(attn_inputs, "cache_save_positions", None)
+    block_ids = getattr(attn_inputs, "cache_save_block_ids", None)
+    if positions is None or block_ids is None or positions.numel() == 0:
+        return None, None
+    return positions, block_ids
+
+
+def _private_conv_initial_states(
+    conv_states: Optional[torch.Tensor],
+    attn_inputs: PyAttentionInputs,
+    seq_size_per_block: int,
+) -> Optional[torch.Tensor]:
+    if conv_states is None:
+        return None
+    prefix_lengths = getattr(attn_inputs, "prefix_lengths", None)
+    if prefix_lengths is None:
+        prefix_lengths = attn_inputs.prefix_lengths_device
+    if not has_nonaligned_conv_prefix(prefix_lengths, seq_size_per_block):
+        return None
+    return gather_conv_initial_states(
+        conv_states,
+        attn_inputs.prefix_lengths_device,
+        attn_inputs.kv_cache_kernel_block_id_device,
+        seq_size_per_block,
+    )
 
 
 def _is_aiter_flydsl_gdn_prefill_enabled() -> bool:
@@ -509,6 +544,9 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             if kv_cache_tensor is not None
             else None
         )
+        initial_states = _private_conv_initial_states(
+            conv_states, attn_inputs, seq_size_per_block
+        )
         out = causal_conv1d_fn(
             x=mixed_qkv.transpose(0, 1),
             weight=self.conv_weights,
@@ -519,6 +557,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attn_inputs.prefix_lengths_device,
             metadata=metadata,
+            initial_states=initial_states,
         ).transpose(0, 1)
         return out
 
@@ -587,6 +626,27 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             value = value.view(
                 1, value.shape[0], self.local_num_v_heads, self.head_v_dim
             )
+        save_positions, save_block_ids = _sparse_save_inputs(attn_inputs)
+        state_positions: Optional[torch.Tensor] = None
+        selected_states: Optional[torch.Tensor] = None
+        if ssm_states is not None and save_positions is not None:
+            state_positions = prepare_selected_state_positions(
+                attn_inputs.prefix_lengths_device,
+                cu_seqlens_without_padding,
+                save_positions,
+                save_block_ids,
+                mixed_qkv.device,
+            )
+            selected_states = torch.empty(
+                context_batch_size,
+                state_positions.shape[1],
+                self.local_num_v_heads,
+                self.head_v_dim,
+                self.head_k_dim,
+                device=mixed_qkv.device,
+                dtype=torch.float32,
+            )
+
         prefill_metadata = attn_meta.get_aiter_gdn_prefill_metadata(
             cu_seqlens_without_padding
         )
@@ -603,6 +663,12 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             and is_flydsl_chunk_gdn_enabled()
             and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)
         )
+        if state_positions is not None and (
+            use_aiter_flydsl_gdn or use_flydsl_chunk_gdn
+        ):
+            raise NotImplementedError(
+                "LINEAR sparse cache save requires the NVIDIA Triton GDN path"
+            )
         if use_aiter_flydsl_gdn:
             attn_out, h, final_state = (
                 chunk_gated_delta_rule_aiter_flydsl_with_intermediate_states(
@@ -662,6 +728,18 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 output_final_state=True,
                 cu_seqlens=cu_seqlens_without_padding,
                 use_qk_l2norm_in_kernel=True,
+                state_positions=state_positions,
+                selected_states=selected_states,
+            )
+        if selected_states is not None:
+            store_selected_conv_states_to_block_map(
+                self._get_conv_states(kv_cache_tensor).transpose(1, 2),
+                attn_inputs.prefix_lengths_device,
+                cu_seqlens_without_padding,
+                save_positions,
+                save_block_ids,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                seq_size_per_block,
             )
         if ssm_states is not None and not use_flydsl_chunk_gdn:
             store_ssm_state_to_block_map(
@@ -673,6 +751,16 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 ssm_states,
                 seq_size_per_block,
                 chunk_size=64,
+            )
+        if selected_states is not None:
+            store_selected_ssm_states_to_block_map(
+                selected_states,
+                final_state,
+                attn_inputs.prefix_lengths_device,
+                cu_seqlens_without_padding,
+                save_positions,
+                save_block_ids,
+                ssm_states,
             )
         return attn_out.squeeze_(0)
 
@@ -1212,6 +1300,9 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             if kv_cache_tensor is not None
             else None
         )
+        private_initial_states = _private_conv_initial_states(
+            conv_states, attention_inputs, seq_size_per_block
+        )
         full_mixed_qkv = causal_conv1d_fn(
             x=full_mixed_qkv.transpose(0, 1),
             weight=gdn.conv_weights,
@@ -1222,6 +1313,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attention_inputs.prefix_lengths_device,
             metadata=full_conv_meta,
+            initial_states=private_initial_states,
         ).transpose(0, 1)
 
         g, beta = fused_gdn_gating(gdn.alog, full_a, full_b, gdn.dt_bias)
@@ -1271,10 +1363,35 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             key = key.view(1, -1, gdn.local_num_k_heads, gdn.head_k_dim)
             value = value.view(1, -1, gdn.local_num_v_heads, gdn.head_v_dim)
 
+        save_positions, save_block_ids = _sparse_save_inputs(attention_inputs)
+        state_positions: Optional[torch.Tensor] = None
+        selected_states: Optional[torch.Tensor] = None
+        if ssm_states is not None and save_positions is not None:
+            state_positions = prepare_selected_state_positions(
+                attention_inputs.prefix_lengths_device,
+                full_cu,
+                save_positions,
+                save_block_ids,
+                query.device,
+            )
+            selected_states = torch.empty(
+                context_batch_size,
+                state_positions.shape[1],
+                gdn.local_num_v_heads,
+                gdn.head_v_dim,
+                gdn.head_k_dim,
+                device=query.device,
+                dtype=torch.float32,
+            )
+
         use_flydsl_chunk_gdn = (
             is_flydsl_chunk_gdn_enabled()
             and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)
         )
+        if state_positions is not None and use_flydsl_chunk_gdn:
+            raise NotImplementedError(
+                "LINEAR sparse cache save requires the NVIDIA Triton GDN path"
+            )
         if use_flydsl_chunk_gdn:
             need_final_state = ssm_states is None
             attn_out, final_state = chunk_gated_delta_rule_flydsl_with_cache_store(
@@ -1313,6 +1430,18 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 output_final_state=True,
                 cu_seqlens=full_cu,
                 use_qk_l2norm_in_kernel=True,
+                state_positions=state_positions,
+                selected_states=selected_states,
+            )
+        if selected_states is not None:
+            store_selected_conv_states_to_block_map(
+                gdn._get_conv_states(kv_cache_tensor).transpose(1, 2),
+                attention_inputs.prefix_lengths_device,
+                full_cu,
+                save_positions,
+                save_block_ids,
+                attention_inputs.kv_cache_kernel_block_id_device,
+                seq_size_per_block,
             )
 
         if ssm_states is not None and not use_flydsl_chunk_gdn:
@@ -1326,6 +1455,16 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 seq_size_per_block,
                 chunk_size=64,
             )
+            if selected_states is not None:
+                store_selected_ssm_states_to_block_map(
+                    selected_states,
+                    final_state,
+                    attention_inputs.prefix_lengths_device,
+                    full_cu,
+                    save_positions,
+                    save_block_ids,
+                    ssm_states,
+                )
 
         _maybe_write_cp_cache_store(attention_inputs, kv_cache, attn_meta)
 
@@ -1479,6 +1618,12 @@ class Qwen3NextDecoderLayer(nn.Module):
 
 
 class Qwen3NextModel(GptModelBase):
+    @property
+    def supports_sparse_cache_save(self) -> bool:
+        # The selected-state writer is implemented by the NVIDIA CUDA Triton
+        # GDN/KDA prefill path. Other backends retain the executor guard.
+        return torch.cuda.is_available() and torch.version.hip is None
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -1548,7 +1693,9 @@ class Qwen3NextModel(GptModelBase):
         is_cuda_graph: bool = False,
         cuda_graph_selection_mode: Optional[str] = None,
     ):
-        impls = super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
+        impls = super().prepare_fmha_impl(
+            inputs, is_cuda_graph, cuda_graph_selection_mode
+        )
         if torch.version.hip is None:
             return impls
         attention_inputs = get_attention_inputs_value(inputs)

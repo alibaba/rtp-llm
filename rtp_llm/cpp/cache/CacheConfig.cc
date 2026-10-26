@@ -127,7 +127,8 @@ std::optional<size_t> resolveDefaultMTPGroupAlias(const CacheConfig& target_conf
 
 bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
     return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
-           && lhs.reservable == rhs.reservable && lhs.explicit_block_num == rhs.explicit_block_num
+           && lhs.local_only_state == rhs.local_only_state && lhs.reservable == rhs.reservable
+           && lhs.explicit_block_num == rhs.explicit_block_num
            && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget && lhs.memory_placement == rhs.memory_placement
            && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
            && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice

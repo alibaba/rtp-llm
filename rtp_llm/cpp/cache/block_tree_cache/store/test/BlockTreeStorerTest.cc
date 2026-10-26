@@ -73,7 +73,8 @@ StoreEnvironment makeStoreEnvironment(const std::string&              name,
                                       const std::vector<size_t>&      lower_tier_blocks = {2},
                                       int                             task_pool_size    = 4,
                                       std::shared_ptr<StorageBackend> storage_backend   = nullptr,
-                                      TierWatermark                   device_watermark  = {}) {
+                                      TierWatermark                   device_watermark  = {},
+                                      int                             host_timeout_ms   = 10000) {
     StoreEnvironment env;
     for (size_t group_set_id = 0; group_set_id < lower_tier_blocks.size(); ++group_set_id) {
         env.device_pools.push_back(
@@ -94,6 +95,7 @@ StoreEnvironment makeStoreEnvironment(const std::string&              name,
     config.enable_remote_cache      = storage_backend != nullptr;
     config.watermark_device         = device_watermark;
     config.task_pool_size           = task_pool_size;
+    config.host_cache_sync_timeout_ms = host_timeout_ms;
     std::vector<GroupSetPtr> groups = env.groups;
     env.cache = makeBlockTreeCacheForTest(std::move(groups), std::move(config), std::move(storage_backend));
     RTP_LLM_CHECK(env.cache != nullptr);
@@ -991,8 +993,12 @@ TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
                                                             + transferCopyActionName(action),
                                                         /*device_cache_on=*/false,
                                                         /*host_cache_on=*/target_tier == Tier::HOST,
-                                                        /*disk_cache_on=*/target_tier == Tier::DISK);
-            auto             engine = installStoreTransferEngine(env, action);
+                                                        /*disk_cache_on=*/target_tier == Tier::DISK,
+                                                        /*lower_tier_blocks=*/{1},
+                                                        /*task_pool_size=*/4,
+                                                        /*storage_backend=*/nullptr,
+                                                        /*device_watermark=*/{});
+            auto                 engine = installStoreTransferEngine(env, action);
 
             const size_t target_free_before = env.poolFor(target_tier).freeBlocksNum();
             const size_t device_free_before = env.device_pools[0]->freeBlocksNum();
@@ -1000,7 +1006,7 @@ TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
             MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
             ASSERT_EQ(request_holder.size(), 1u);
 
-            env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier);
+            env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier, false);
             block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
             EXPECT_EQ(engine->submittedBatchCount(), 1u);
@@ -1012,6 +1018,147 @@ TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
             EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before);
         }
     }
+}
+
+TEST(BlockTreeStorerTest, StoreQueueRejectionClosesPlanExactlyOnce) {
+    StoreEnvironment env = makeStoreEnvironment("store_queue_rejection",
+                                                /*device_cache_on=*/false,
+                                                /*host_cache_on=*/true,
+                                                /*disk_cache_on=*/false,
+                                                /*lower_tier_blocks=*/{1},
+                                                /*task_pool_size=*/4,
+                                                /*storage_backend=*/nullptr,
+                                                /*device_watermark=*/{});
+    auto                 engine = installStoreTransferEngine(env, TransferCopyAction::Succeed);
+
+    MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
+    ASSERT_EQ(request_holder.size(), 1u);
+    const size_t host_free_before = env.host_pools[0]->freeBlocksNum();
+
+    {
+        BlockTreeCacheTestPeer::ScopedQueueRejectionGuard rejection_guard(*env.cache);
+        ASSERT_TRUE(rejection_guard.armed());
+        env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST);
+    }
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
+
+    EXPECT_EQ(engine->submittedBatchCount(), 0u);
+    EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
+    EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before);
+    EXPECT_EQ(env.storeRefCount(), 0u);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
+}
+
+TEST(BlockTreeStorerTest, StoreQueueTimeoutClosesPlanExactlyOnce) {
+    StoreEnvironment env = makeStoreEnvironment("store_queue_timeout",
+                                                /*device_cache_on=*/false,
+                                                /*host_cache_on=*/true,
+                                                /*disk_cache_on=*/false,
+                                                /*lower_tier_blocks=*/{1},
+                                                /*task_pool_size=*/4,
+                                                /*storage_backend=*/nullptr,
+                                                /*device_watermark=*/{},
+                                                /*host_timeout_ms=*/0);
+    auto                 engine = installStoreTransferEngine(env, TransferCopyAction::Succeed);
+
+    MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
+    ASSERT_EQ(request_holder.size(), 1u);
+    const size_t host_free_before = env.host_pools[0]->freeBlocksNum();
+
+    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST);
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
+
+    EXPECT_EQ(engine->submittedBatchCount(), 0u);
+    EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
+    EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before);
+    EXPECT_EQ(env.storeRefCount(), 0u);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
+}
+
+TEST(BlockTreeStorerTest, DuplicateStoreSettlementSettlesTaskOnce) {
+    StoreEnvironment env = makeStoreEnvironment("store_duplicate_settlement",
+                                                /*device_cache_on=*/false,
+                                                /*host_cache_on=*/true,
+                                                /*disk_cache_on=*/false,
+                                                /*lower_tier_blocks=*/{1},
+                                                /*task_pool_size=*/4,
+                                                /*storage_backend=*/nullptr,
+                                                /*device_watermark=*/{});
+    auto                 engine = installStoreTransferEngine(env, TransferCopyAction::Succeed);
+
+    MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
+    ASSERT_EQ(request_holder.size(), 1u);
+    std::vector<std::vector<GroupSetResource>> resources = deviceSourceResources({request_holder[0]});
+    const size_t host_free_before = env.host_pools[0]->freeBlocksNum();
+
+    auto task = std::make_shared<StoreTaskRunner::Task>(
+        Tier::HOST, CacheKeysType{100}, std::chrono::seconds(30));
+    ASSERT_TRUE(env.cache->storer_.store_task_runner_.prepareTask(*task, resources));
+    EXPECT_EQ(env.storeRefCount(), 2u);
+
+    const ErrorInfo error(ErrorCode::EXECUTION_EXCEPTION, "injected duplicate settlement failure");
+    env.cache->storer_.scheduleStoreSettlement(task, error);
+    env.cache->storer_.scheduleStoreSettlement(task, error);
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
+
+    EXPECT_EQ(task->phase.load(), StoreTaskRunner::Task::Phase::FINISHED);
+    EXPECT_EQ(engine->submittedBatchCount(), 0u);
+    EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
+    EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before);
+    EXPECT_EQ(env.storeRefCount(), 0u);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
+}
+
+TEST(BlockTreeStorerTest, StoreShutdownClosesLowerTierPlanExactlyOnce) {
+    StoreEnvironment env = makeStoreEnvironment("store_shutdown",
+                                                /*device_cache_on=*/false,
+                                                /*host_cache_on=*/true,
+                                                /*disk_cache_on=*/false,
+                                                /*lower_tier_blocks=*/{1},
+                                                /*task_pool_size=*/4,
+                                                /*storage_backend=*/nullptr,
+                                                /*device_watermark=*/{});
+    auto                 engine = installStoreTransferEngine(env, TransferCopyAction::Succeed);
+
+    MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
+    ASSERT_EQ(request_holder.size(), 1u);
+    const size_t host_free_before = env.host_pools[0]->freeBlocksNum();
+
+    BlockTreeCacheTestPeer::beginStoreShutdownForTest(*env.cache);
+    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST);
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
+
+    EXPECT_EQ(engine->submittedBatchCount(), 0u);
+    EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
+    EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before);
+    EXPECT_EQ(env.storeRefCount(), 0u);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
+}
+
+TEST(BlockTreeStorerTest, DeviceInsertDuringShutdownPreservesPublicationAndClosesPlan) {
+    StoreEnvironment env = makeStoreEnvironment("device_store_shutdown",
+                                                /*device_cache_on=*/true,
+                                                /*host_cache_on=*/false,
+                                                /*disk_cache_on=*/false,
+                                                /*lower_tier_blocks=*/{1},
+                                                /*task_pool_size=*/4,
+                                                /*storage_backend=*/nullptr,
+                                                /*device_watermark=*/{});
+    auto                 engine = installStoreTransferEngine(env, TransferCopyAction::Succeed);
+
+    MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
+    ASSERT_EQ(request_holder.size(), 1u);
+
+    BlockTreeCacheTestPeer::beginStoreShutdownForTest(*env.cache);
+    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DEVICE);
+
+    const std::vector<TreeNode*> path = env.cache->tree()->findNode({100});
+    ASSERT_EQ(path.size(), 1u);
+    EXPECT_EQ(path.back()->group_set_resources[0].getTopTier(), Tier::DEVICE);
+    EXPECT_EQ(candidateCountForTier(*env.cache, Tier::DEVICE), 1u);
+    EXPECT_EQ(env.device_pools[0]->treeRefCount(request_holder[0][0]), 1u);
+    EXPECT_EQ(env.storeRefCount(), 0u);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
 }
 
 enum class StoreRejection {

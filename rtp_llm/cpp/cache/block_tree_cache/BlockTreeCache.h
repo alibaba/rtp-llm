@@ -122,7 +122,9 @@ public:
     // Reject pending loads and wait for allocator callbacks before its members are destroyed.
     void shutdownLoads();
 
-    BlockTreeMatchResult match(const CacheKeysType& cache_keys, const std::function<bool(size_t)>& valid_prefix = {});
+    BlockTreeMatchResult match(const CacheKeysType&               cache_keys,
+                               const std::function<bool(size_t)>& valid_prefix = {},
+                               const PartialTailMatchRequest*     partial_tail = nullptr);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);
@@ -130,9 +132,17 @@ public:
     size_t insert(const CacheKeysType&                              cache_keys,
                   const std::vector<std::vector<GroupSetResource>>& resources,
                   Tier                                              target_tier,
-                  bool                                              is_resident);
+                  bool                                              is_resident,
+                  const std::vector<std::vector<int>>*              token_segments = nullptr,
+                  const std::vector<size_t>*                         token_ends = nullptr);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
+    // Atomically protect existing complete per-group histories with one request
+    // ref per (tag, id); registration owns all returned references until release.
+    CachedPrefixResources pinRegisteredGroups(const std::vector<int>& tokens,
+                                               const CacheKeysType& base_keys,
+                                               size_t base_tokens,
+                                               const std::vector<size_t>& endpoints);
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
 
     CacheStats                                getStats() const;

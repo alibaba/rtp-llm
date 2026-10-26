@@ -259,6 +259,7 @@ cc_test(
     deps = test_deps + [
         ":block_pool_test_helper",
         ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/cache:kv_cache_hash_util",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
     ],
@@ -330,6 +331,7 @@ cc_test(
     deps = test_deps + [
         ":block_pool_test_helper",
         "//rtp_llm/cpp/cache:prefill_cache_hit_metrics_reporter",
+        "//rtp_llm/cpp/utils:hash_util",
     ],
     env = {},
     exec_properties = {"gpu": "L20_CU13"},

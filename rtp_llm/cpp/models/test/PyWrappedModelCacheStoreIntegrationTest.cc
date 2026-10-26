@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -16,7 +17,9 @@
 #include <torch/extension.h>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "kmonitor/client/MetricType.h"
 #include "kmonitor/client/core/MetricsRecord.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
@@ -25,6 +28,8 @@
 #include "rtp_llm/cpp/models/HiddenStateCapturePublisher.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -40,6 +45,12 @@ namespace rtp_llm::test {
 struct PyWrappedModelTestPeer {
     static auto splitInputsIntoMicroBatches(PyWrappedModel& model, const GptModelInputs& inputs) {
         return model.splitInputsIntoMicroBatches(inputs, model.planMicroBatches(inputs));
+    }
+
+    static auto splitInputsIntoMicroBatches(PyWrappedModel& model,
+                                            const GptModelInputs& inputs,
+                                            const MicroBatchPlan& plan) {
+        return model.splitInputsIntoMicroBatches(inputs, plan);
     }
 
     static void replaceContextParallelProcessor(PyWrappedModel&                            model,
@@ -327,6 +338,146 @@ private:
     std::vector<StoreRecord>    records_;
     std::shared_ptr<MemoryUtil> null_memory_util_;
 };
+
+py::dict runExactPrefixPdGatherScenario(int cp_rank) {
+    RTP_LLM_CHECK_WITH_INFO(cp_rank == 0 || cp_rank == 1, "exact-prefix PD fixture requires CP rank 0 or 1");
+    initRuntime(/*device_id=*/0, /*trace_memory=*/false, /*enable_comm_overlap=*/false, MlaOpsType::AUTO);
+
+    ModelConfig model;
+    model.num_layers = 1;
+    model.max_seq_len = 2048;
+    model.vocab_size = 32;
+    model.input_vocab_size = 32;
+    model.hidden_size = 2;
+    model.attn_config.head_num = 2;
+    model.attn_config.kv_head_num = 2;
+    model.attn_config.size_per_head = 1;
+    model.attn_config.tokens_per_block = 256;
+    model.attn_config.kernel_tokens_per_block = 256;
+    KVCacheSpecDesc desc{"default", KVCacheSpecType::MultiHeadAttention};
+    desc.dtype = DataType::TYPE_INT8;
+    desc.cp = CacheCpPolicyDesc{};
+    desc.cp->mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    model.kv_cache_spec_descs.assign(1, {desc});
+
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 2;
+    parallelism.tp_rank = cp_rank;
+    parallelism.world_size = 2;
+    parallelism.world_rank = cp_rank;
+    parallelism.local_world_size = 1;
+    parallelism.local_rank = 0;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    KVCacheConfig kv_config;
+    kv_config.reuse_cache = true;
+    kv_config.enable_device_cache = true;
+    kv_config.enable_prefill_partial_tail_reuse = true;
+    PDSepConfig pd_config;
+    pd_config.role_type = RoleType::PREFILL;
+    auto config = CacheConfigCreator::createConfig(model, parallelism, kv_config);
+    config.finalizeBlockNums(32, RuntimeConfig{});
+    config.use_opaque_kv_cache_store = true;
+    RTP_LLM_CHECK_WITH_INFO(config.request_projection_required && config.seq_size_per_block == 256,
+                            "exact-prefix PD fixture lost CP projection or base block size");
+    auto manager = std::make_shared<KVCacheManager>(config, false, nullptr, kv_config, parallelism,
+                                                    RuntimeConfig{}, SpeculativeExecutionConfig{}, pd_config);
+    RTP_LLM_CHECK_WITH_INFO(manager->init(), "exact-prefix PD fixture cache manager init failed");
+
+    ResourceContext context;
+    context.cache_manager = manager;
+    context.reuse_cache = true;
+    context.role_type = RoleType::PREFILL;
+    context.ignore_request_cache_switches = true;
+    context.enable_device_cache = true;
+    context.enable_prefill_partial_tail_reuse = true;
+    std::vector<int32_t> tokens(1544);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        tokens[i] = static_cast<int32_t>(i % 31 + 1);
+    }
+    auto query = std::make_shared<GenerateInput>();
+    query->input_ids = torch::tensor(tokens, torch::kInt32);
+    query->generate_config = std::make_shared<GenerateConfig>();
+    query->generate_config->pd_separation = true;
+    auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, context, nullptr);
+    stream->setIsContextStream(true);
+    stream->setSeqLength(1300);
+    auto& resource = stream->streamCacheResource();
+    resource.init(1);
+    RTP_LLM_CHECK_WITH_INFO(resource.initKVBlock().ok(), "exact-prefix PD fixture initial allocation failed");
+    RTP_LLM_CHECK_WITH_INFO(resource.kvCache().cacheKeys(0).size() == 6,
+                            "G1300 must have six base keys before incremental execution");
+    stream->setSeqLength(1544);
+    RTP_LLM_CHECK_WITH_INFO(resource.incrKVBlock().ok(), "exact-prefix PD fixture incremental allocation failed");
+    stream->setInitialReuseLength(1300);
+    stream->setReuseLength(1300);
+    const auto expected_keys = resource.kvCache().cacheKeys(0);
+    RTP_LLM_CHECK_WITH_INFO(expected_keys.size() == 7 && expected_keys.back() != 0,
+                            "G1300 to N1544 did not generate the seventh partial base key");
+
+    NormalBatchStreamProcessor processor(model, pd_config, ProfilingDebugLoggingConfig{}, config, false);
+    StreamGroups stream_groups(std::list<GenerateStreamPtr>{stream});
+    TensorHolder holder;
+    auto gathered = processor.gatherModelInput(stream_groups, holder);
+    RTP_LLM_CHECK_WITH_INFO(gathered.ok(), "exact-prefix PD gather failed: %s", gathered.status().ToString().c_str());
+    const auto& inputs = *gathered;
+    RTP_LLM_CHECK_WITH_INFO(inputs.input_lengths.numel() == 1 && inputs.input_lengths.item<int32_t>() == 244
+                                && inputs.prefix_lengths.numel() == 1 && inputs.prefix_lengths.item<int32_t>() == 1300
+                                && inputs.cache_keys.size(1) >= 7,
+                            "exact-prefix PD gather lost G1300/N1544 metadata");
+    const auto gathered_keys = inputs.cache_keys.cpu().contiguous();
+    for (size_t i = 0; i < expected_keys.size(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(gathered_keys[0][static_cast<int64_t>(i)].item<int64_t>() == expected_keys[i],
+                                "exact-prefix PD gather lost base key index=%zu", i);
+    }
+
+    const auto to_host = [](const torch::Tensor& tensor) { return tensor.is_cuda() ? tensor.cpu() : tensor; };
+    torch_ext::PyCacheStoreInputs store_inputs;
+    store_inputs.input_lengths_host = to_host(inputs.input_lengths);
+    store_inputs.prefix_lengths_host = to_host(inputs.prefix_lengths);
+    store_inputs.host_kv_cache_offset = to_host(inputs.kv_cache_block_id).select(0, 0);
+    store_inputs.request_id = inputs.request_id;
+    store_inputs.request_pd_separation = inputs.request_pd_separation;
+    store_inputs.cache_keys = inputs.cache_keys;
+    const auto layout = manager->getMainModelGroupedCacheLayerLayout();
+    const auto& plane = layout.at("default", 0);
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base = plane.kv_addr;
+    layer_cache.kv_scale_base = plane.kv_scale_addr;
+    layer_cache.seq_size_per_block = config.group("default").seqSizePerBlock();
+    layer_cache.layer_id = 0;
+    layer_cache.tag = "default";
+    auto store = std::make_shared<RecordingCacheStore>();
+    runtimeWriteCacheStore(store_inputs, layer_cache, config, store, /*cache_model_id=*/0,
+                           cp_rank, /*cp_size=*/2, nullptr);
+    const auto records = store->snapshot();
+    RTP_LLM_CHECK_WITH_INFO(records.size() == 1, "exact-prefix PD writer did not submit one request");
+    const auto& table = store_inputs.host_kv_cache_offset;
+    py::list sent_base_indices;
+    for (size_t index = 0; index < expected_keys.size(); ++index) {
+        if (index % 2 != static_cast<size_t>(cp_rank)) {
+            continue;
+        }
+        const auto key = "kv_" + makeCacheKey(0, std::to_string(expected_keys[index]), 0, "default");
+        const auto it = std::find_if(records.front().blocks.begin(), records.front().blocks.end(),
+                                     [&](const auto& block) { return block.key == key; });
+        RTP_LLM_CHECK_WITH_INFO(it != records.front().blocks.end(),
+                                "exact-prefix PD writer omitted base key index=%zu", index);
+        const auto local_slot = static_cast<int64_t>(index / 2);
+        const auto block_id = table[0][local_slot].item<int32_t>();
+        const auto address = manager->convertIndexToAddr(0, "default", block_id).kv_addr;
+        RTP_LLM_CHECK_WITH_INFO(it->address == reinterpret_cast<uintptr_t>(address),
+                                "exact-prefix PD writer projected wrong physical page for key index=%zu", index);
+        sent_base_indices.append(index);
+    }
+    py::dict result;
+    result["rank"] = cp_rank;
+    result["key_count"] = expected_keys.size();
+    result["seventh_key"] = expected_keys.back();
+    result["sent_base_indices"] = std::move(sent_base_indices);
+    stream->releaseResource();
+    return result;
+}
 
 torch::Tensor pinnedTensor(const std::vector<int32_t>& values, at::IntArrayRef shape) {
     auto tensor = torch::empty(shape, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
@@ -734,7 +885,28 @@ Scenario makeScenario(const std::string& name) {
         return scenario;
     }
     if (name == "fake_micro_batch") {
-        return makeMultiTagScenario();
+        auto scenario = makeMultiTagScenario();
+        scenario.inputs.cache_save_positions = pinnedLongTensor({4}, {1, 1});
+        scenario.inputs.cache_save_block_ids = pinnedTensor({7, 8}, {2, 1, 1});
+        return scenario;
+    }
+    if (name == "sparse_save_split") {
+        auto config = makeCacheConfig({{"default", 2, 16}});
+        auto layout = makeLayout(config);
+        auto inputs = makeInputs(/*input_lengths=*/{1, 1, 2, 4},
+                                 /*request_ids=*/{201, 202, 203, 204},
+                                 /*cache_keys=*/{11, 0, 12, 0, 13, 0, 14, 15},
+                                 /*cache_keys_width=*/2,
+                                 /*block_ids=*/{1, -1, 2, -1, 3, -1, 4, 5},
+                                 /*group_tags=*/{"default"},
+                                 /*block_table_width=*/2,
+                                 /*global_tokens_per_block=*/2,
+                                 /*global_stride_bytes=*/16);
+        inputs.sequence_lengths = pinnedTensor({4, 5}, {2});
+        inputs.prefix_lengths = pinnedTensor({0, 0}, {2});
+        inputs.cache_save_positions = pinnedLongTensor({3, -1, 5, 6}, {2, 2});
+        inputs.cache_save_block_ids = pinnedTensor({31, -1, 41, 42}, {1, 2, 2});
+        return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     }
     if (name == "duplicate_tags" || name == "empty_tag" || name == "missing_tags" || name == "unknown_tag"
         || name == "physical_group_mismatch" || name == "type_group_mismatch" || name == "multi_group_2d") {
@@ -1044,6 +1216,8 @@ py::list runTpSyncModelInputsScenario(int64_t                                   
             inputs.kv_cache_kernel_block_id = pinnedTensor({131, 132, 111, 112}, {2, 1, 2});
             inputs.kv_cache_group_types     = pinnedTensor({0, 1}, {2});
             inputs.kv_cache_update_mapping  = pinnedTensor({0, 3, 4, 1, 1, 2}, {2, 3});
+            inputs.cache_save_positions     = pinnedLongTensor({1536, 2000}, {1, 2});
+            inputs.cache_save_block_ids     = pinnedTensor({41, -1, -1, 51}, {2, 1, 2});
         }
     }
     if (tp_rank == 0 && !skip_run) {
@@ -1084,6 +1258,12 @@ py::list runTpSyncModelInputsScenario(int64_t                                   
             result["copy_mapping"] = inputs.kv_cache_update_mapping.defined() ?
                                          py::cast(inputs.kv_cache_update_mapping.clone()) :
                                          py::none();
+            result["cache_save_positions"] = inputs.cache_save_positions.defined() ?
+                                                  py::cast(inputs.cache_save_positions.clone()) :
+                                                  py::none();
+            result["cache_save_block_ids"] = inputs.cache_save_block_ids.defined() ?
+                                                  py::cast(inputs.cache_save_block_ids.clone()) :
+                                                  py::none();
         }
         results.append(std::move(result));
     }
@@ -1107,12 +1287,14 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     RTP_LLM_CHECK_WITH_INFO(forward_count > 0, "forward_count must be positive");
 
     const bool cacheless_warmup = scenario_name == "cacheless_warmup";
-    const bool inspect_split = scenario_name == "micro_batch_split_pinned" || scenario_name == "micro_batch_split_cuda"
+    const bool inspect_split = scenario_name == "sparse_save_split"
+                               || scenario_name == "micro_batch_split_pinned" || scenario_name == "micro_batch_split_cuda"
                                || scenario_name == "micro_batch_split_single_group"
                                || scenario_name == "micro_batch_split_2d";
     const bool single_group_split =
         scenario_name == "micro_batch_split_single_group" || scenario_name == "micro_batch_split_2d";
-    const auto input_scenario = inspect_split ? (single_group_split ? "micro_batch" : "micro_batch_multi_tag") :
+    const auto input_scenario = scenario_name == "sparse_save_split" ? scenario_name :
+                                inspect_split ? (single_group_split ? "micro_batch" : "micro_batch_multi_tag") :
                                                 (cacheless_warmup ? "multi_tag" : scenario_name);
     auto       scenario       = makeScenario(input_scenario);
     if (inspect_split) {
@@ -1195,7 +1377,10 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
         PyWrappedModel                model(params, std::move(py_model));
         TestContextParallelProcessor* test_cp_processor = nullptr;
         if (inspect_split) {
-            const auto split = PyWrappedModelTestPeer::splitInputsIntoMicroBatches(model, scenario.inputs);
+            const auto split = scenario_name == "sparse_save_split" ?
+                                   PyWrappedModelTestPeer::splitInputsIntoMicroBatches(
+                                       model, scenario.inputs, MicroBatchPlan{true, {{0, 1}, {1, 1}, {1, 0}}}) :
+                                   PyWrappedModelTestPeer::splitInputsIntoMicroBatches(model, scenario.inputs);
             py::list   batches;
             for (const auto& inputs : split.first) {
                 py::dict batch;
@@ -1203,12 +1388,20 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                 batch["physical"]      = inputs.kv_cache_block_id;
                 batch["kernel"]        = inputs.kv_cache_kernel_block_id;
                 batch["input_lengths"] = inputs.input_lengths;
+                batch["cache_save_positions"] = inputs.cache_save_positions.defined() ?
+                                                     py::cast(inputs.cache_save_positions.clone()) : py::none();
+                batch["cache_save_block_ids"] = inputs.cache_save_block_ids.defined() ?
+                                                     py::cast(inputs.cache_save_block_ids.clone()) : py::none();
                 batches.append(std::move(batch));
             }
             py::dict result;
             result["source_tags"]     = scenario.inputs.kv_cache_group_tags;
             result["source_physical"] = scenario.inputs.kv_cache_block_id;
             result["source_kernel"]   = scenario.inputs.kv_cache_kernel_block_id;
+            result["source_cache_save_positions"] = scenario.inputs.cache_save_positions.defined() ?
+                                                        py::cast(scenario.inputs.cache_save_positions.clone()) : py::none();
+            result["source_cache_save_block_ids"] = scenario.inputs.cache_save_block_ids.defined() ?
+                                                        py::cast(scenario.inputs.cache_save_block_ids.clone()) : py::none();
             result["batches"]         = std::move(batches);
             return result;
         }
@@ -1219,6 +1412,10 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
             result["fake_tags"]             = split.first.at(1).kv_cache_group_tags;
             result["fake_physical_defined"] = split.first.at(1).kv_cache_block_id.defined();
             result["fake_kernel_defined"]   = split.first.at(1).kv_cache_kernel_block_id.defined();
+            result["real_cache_save_defined"] = split.first.at(0).cache_save_positions.defined()
+                                                  && split.first.at(0).cache_save_block_ids.defined();
+            result["fake_cache_save_defined"] = split.first.at(1).cache_save_positions.defined()
+                                                  || split.first.at(1).cache_save_block_ids.defined();
             return result;
         }
         if (scenario.replace_cp_processor) {
@@ -1579,6 +1776,7 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
     rtp_llm::registerExecCtxOps(m);
+    m.def("run_exact_prefix_pd_gather", &rtp_llm::test::runExactPrefixPdGatherScenario);
     m.def("run_post_layers", &rtp_llm::test::runCustomOutput);
     m.def("flush_capture_publisher_without_close", &rtp_llm::test::flushCapturePublisherWithoutClose);
     m.def("close_capture_publisher_without_gil", &rtp_llm::test::closeCapturePublisherWithoutGil);

@@ -374,7 +374,9 @@ protected:
         match_entered_ = true;
         cv_.notify_all();
         cv_.wait(lock, [this] { return match_released_; });
-        return {request.handles.size(), nullptr};
+        StorageMatchResult result;
+        result.matched_blocks_num = request.handles.size();
+        return result;
     }
 
     void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {

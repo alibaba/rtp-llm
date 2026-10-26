@@ -66,6 +66,9 @@ public:
             }
             auto block_update_copy_num = stream->streamCacheResource().getKVBlockUpdateMapping().size();
             if (is_context) {
+                block_update_copy_num += stream->streamCacheResource().registeredSaveCopyMapping().size();
+            }
+            if (is_context) {
                 context_block_update_copy_num_ += block_update_copy_num;
             } else {
                 decode_block_update_copy_num_ += block_update_copy_num;

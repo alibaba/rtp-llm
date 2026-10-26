@@ -18,6 +18,7 @@
 namespace rtp_llm {
 
 class AsyncContext;
+struct PrefixCacheRegistration;
 
 class CompleteTokenIds;
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
@@ -60,6 +61,27 @@ struct GroupBlockIdPair {
 static_assert(sizeof(GroupBlockIdPair) == 3 * sizeof(int32_t),
               "GroupBlockIdPair must match the three-column int32 tensor layout");
 
+struct PrefixCachePlanPoint {
+    size_t       index{0};
+    CacheKeyType key{0};
+    size_t       pos{0};
+};
+
+enum class PrefixCacheSaveState : uint8_t {
+    REGISTERED = 0,
+    CONTENT_COMPLETE,
+    UNFULFILLED,
+    CACHED_REF,  // Existing immutable checkpoint protected by this registration.
+};
+
+enum class PrefixCacheSaveOwnership : uint8_t {
+    NONE = 0,
+    REQUIRED_RUNTIME,  // The existing BatchKVCacheResource owns this block's request reference.
+    OPTIONAL_REQUEST,  // This registration owns a separate request reference until T04 releases it.
+    CACHED_REQUEST,    // cached_path_indices refer to shared registration-owned cached source pins.
+    PINNED_RUNTIME,    // Dense SWA runtime value protected by shared registration-owned pins; no snapshot.
+};
+
 struct MallocInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
@@ -71,9 +93,28 @@ struct MallocInfo {
     // Prefill init keeps reused prefix slots intact because model-path kernels
     // still read them by prefix_length.
     bool enable_remove_skipped_blocks = true;
+    // Present only for an enabled, local, noncanonical short-leaf resume.
+    // Incremental SWA allocation must keep the real prefix history at G;
+    // request_incr_seq_len is the destination N and cannot recover G.
+    std::optional<size_t> precise_resume_endpoint;
     // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
+    // Immutable request snapshot for partial-tail resume matching. Populated by
+    // the stream layer only when the feature is enabled; the token identity must
+    // stay stable across malloc retries while the resource's own cache keys are
+    // recomputed by the manager. Empty match_keys fall back to the manager's
+    // freshly computed keys.
+    struct RequestLayout {
+        CacheKeysType match_keys;  // full global cumulative hashes
+        // Owned token snapshot for functional local short-leaf lookup.
+        std::vector<int> token_ids;
+        // Functional local short-leaf lookup uses this immutable first-prefill
+        // view even when prefix observability is disabled.
+        bool   partial_tail_reuse = false;
+        size_t original_input_tokens = 0;
+    };
+    std::shared_ptr<const RequestLayout> request_layout;
 
     // Initial chunk admission reserves fixed sparse banks for this maximum grant.
     int max_chunk_tokens = 0;
@@ -141,6 +182,7 @@ struct InsertInfo {
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
     Tier                    target_tier{Tier::DEVICE};
+    const PrefixCacheRegistration* prefix_cache_registration{nullptr};
 };
 
 }  // namespace rtp_llm

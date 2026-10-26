@@ -202,7 +202,10 @@ def store_ssm_state_to_block_map_kernel(
             BLOCK_V,
             CONV_STRIDE_TOKEN,
         )
-    elif (chunk + 1) * CHUNK_SIZE % SEQ_SIZE_PER_BLOCK == 0:
+    elif (
+        prefix % SEQ_SIZE_PER_BLOCK == 0
+        and (chunk + 1) * CHUNK_SIZE % SEQ_SIZE_PER_BLOCK == 0
+    ):
         source_ptr = (
             h
             + linear_offset_64(i_c + 1, SSM_PER_BATCH)
@@ -267,3 +270,195 @@ def store_ssm_state_to_block_map(
         CONV_STRIDE_TOKEN=token_stride_ssm_state,
         CHUNK_SIZE=chunk_size,
     )
+
+
+def _selected_save_device_tensor(
+    tensor: torch.Tensor, device: torch.device, name: str
+) -> torch.Tensor:
+    result = tensor if tensor.device == device else tensor.to(device, non_blocking=True)
+    if not result.is_contiguous():
+        result = result.contiguous()
+    return result
+
+
+def prepare_selected_state_positions(
+    prefix_lengths: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    state_positions: torch.Tensor,
+    save_block_ids: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    """Convert absolute save endpoints to sequence-local snapshot positions.
+
+    The returned ``[N, S]`` tensor is suitable for the selected-state kernels.
+    Tail endpoint N is represented by ``-1`` so the model consumes final_state
+    instead of requesting a duplicate selected snapshot. Padding, endpoints not
+    covered by this forward, and rows without a destination are also disabled.
+    """
+    if state_positions.dim() != 2 or save_block_ids.shape != state_positions.shape:
+        raise ValueError("state positions and destination IDs must have shape [N, S]")
+    if prefix_lengths.dim() != 1 or prefix_lengths.numel() != state_positions.shape[0]:
+        raise ValueError("prefix lengths must have one row per save request")
+    if cu_seqlens.dim() != 1 or cu_seqlens.numel() != state_positions.shape[0] + 1:
+        raise ValueError("cu_seqlens must have one entry per save request plus one")
+
+    device_positions = _selected_save_device_tensor(
+        state_positions, device, "state_positions"
+    ).to(torch.int64)
+    device_block_ids = _selected_save_device_tensor(
+        save_block_ids, device, "save_block_ids"
+    ).to(torch.int32)
+    device_prefix = _selected_save_device_tensor(
+        prefix_lengths, device, "prefix_lengths"
+    ).to(torch.int64)
+    device_cu = _selected_save_device_tensor(cu_seqlens, device, "cu_seqlens").to(
+        torch.int64
+    )
+
+    input_lengths = device_cu.diff()
+    endpoints = device_prefix + input_lengths
+    valid = (
+        (device_block_ids >= 0)
+        & (device_positions > device_prefix[:, None])
+        & (device_positions <= endpoints[:, None])
+    )
+    tail = device_positions == endpoints[:, None]
+    relative = device_positions - device_prefix[:, None]
+    disabled = torch.full_like(relative, -1)
+    return torch.where(valid & ~tail, relative, disabled).to(torch.int32).contiguous()
+
+
+def store_selected_ssm_states_to_block_map(
+    selected_states: torch.Tensor,
+    final_states: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    state_positions: torch.Tensor,
+    save_block_ids: torch.Tensor,
+    ssm_states: torch.Tensor,
+) -> None:
+    """Scatter selected/final SSM states to caller-owned sparse destinations.
+
+    ``selected_states`` must use the producer's state-axis convention and be
+    scatterable through the existing LINEAR store layout. GDN supplies
+    ``[N, S, H, V, K]`` directly. KDA's current K==V model supplies its public
+    ``[N, S, H, K, V]`` buffer directly to match the existing final-state store;
+    callers must not transpose merely because K and V are equal.
+    ``final_states`` must have the producer's final-state layout. Cache dtype
+    conversion is performed only at this store boundary. Runtime writes are not
+    suppressed.
+    """
+    if selected_states.dtype != torch.float32 or final_states.dtype != torch.float32:
+        raise ValueError("selected and final SSM states must have FP32 dtype")
+    if (
+        selected_states.dim() != 5
+        or selected_states.shape[1] != state_positions.shape[1]
+    ):
+        raise ValueError("selected_states must have shape [N, S, H, V, K]")
+    if final_states.shape != (
+        state_positions.shape[0],
+        *ssm_states.shape[1:],
+    ):
+        raise ValueError("final_states must have the destination SSM cache layout")
+
+    device = ssm_states.device
+    positions = _selected_save_device_tensor(
+        state_positions, device, "state_positions"
+    ).to(torch.int64)
+    block_ids = _selected_save_device_tensor(
+        save_block_ids, device, "save_block_ids"
+    ).to(torch.int32)
+    prefix = _selected_save_device_tensor(prefix_lengths, device, "prefix_lengths").to(
+        torch.int64
+    )
+    cu = _selected_save_device_tensor(cu_seqlens, device, "cu_seqlens").to(torch.int64)
+
+    input_lengths = cu.diff()
+    endpoints = prefix + input_lengths
+    valid = (
+        (block_ids >= 0)
+        & (positions > prefix[:, None])
+        & (positions <= endpoints[:, None])
+    )
+    tail = valid & (positions == endpoints[:, None])
+    selected = valid & ~tail
+
+    ssm_states.index_copy_(
+        0,
+        block_ids[selected].to(torch.int64),
+        selected_states[selected].to(ssm_states.dtype),
+    )
+    tail_rows = torch.arange(positions.shape[0], device=device)[:, None].expand(
+        positions.shape
+    )[tail]
+    ssm_states.index_copy_(
+        0,
+        block_ids[tail].to(torch.int64),
+        final_states[tail_rows].to(ssm_states.dtype),
+    )
+
+
+def store_selected_conv_states_to_block_map(
+    conv_states: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    state_positions: torch.Tensor,
+    save_block_ids: torch.Tensor,
+    runtime_block_map: torch.Tensor,
+    seq_size_per_block: int,
+) -> None:
+    """Copy conv states at global complete endpoints to sparse destinations.
+
+    The ordinary conv producer has already written the endpoint state to the
+    runtime block. This scatter only materializes an independent destination;
+    an alias destination is left untouched. It never computes conv history and
+    therefore never rewrites an immutable source block.
+    """
+    if seq_size_per_block <= 0:
+        raise ValueError("seq_size_per_block must be positive")
+    if state_positions.dim() != 2 or save_block_ids.shape != state_positions.shape:
+        raise ValueError("state positions and destination IDs must have shape [N, S]")
+    if runtime_block_map.dim() != 2:
+        raise ValueError("runtime block map must have shape [N, blocks]")
+
+    device = conv_states.device
+    positions = _selected_save_device_tensor(
+        state_positions, device, "state_positions"
+    ).to(torch.int64)
+    block_ids = _selected_save_device_tensor(
+        save_block_ids, device, "save_block_ids"
+    ).to(torch.int32)
+    prefix = _selected_save_device_tensor(prefix_lengths, device, "prefix_lengths").to(
+        torch.int64
+    )
+    cu = _selected_save_device_tensor(cu_seqlens, device, "cu_seqlens").to(torch.int64)
+    runtime_map = _selected_save_device_tensor(
+        runtime_block_map, device, "runtime_block_map"
+    ).to(torch.int32)
+
+    input_lengths = cu.diff()
+    endpoints = prefix + input_lengths
+    boundary = (positions % seq_size_per_block == 0) | (positions == endpoints[:, None])
+    valid = (
+        boundary
+        & (block_ids >= 0)
+        & (positions > prefix[:, None])
+        & (positions <= endpoints[:, None])
+    )
+    source_columns = ((positions - 1) // seq_size_per_block).clamp(
+        min=0, max=runtime_map.shape[1] - 1
+    )
+    source_block_ids = torch.gather(
+        runtime_map[:, None, :].expand(-1, positions.shape[1], -1),
+        2,
+        source_columns.unsqueeze(-1),
+    ).squeeze(-1)
+    copy = valid & (source_block_ids >= 0) & (block_ids != source_block_ids)
+    source_ids = source_block_ids[copy].to(torch.int64)
+    destination_ids = block_ids[copy].to(torch.int64)
+    if destination_ids.numel() != 0:
+        conv_states.index_copy_(
+            0,
+            destination_ids,
+            conv_states.index_select(0, source_ids),
+        )

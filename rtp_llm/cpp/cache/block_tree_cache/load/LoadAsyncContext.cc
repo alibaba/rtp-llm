@@ -78,6 +78,16 @@ size_t LoadAsyncContext::matchedBlocks(Tier tier) const {
     return tier >= Tier::DEVICE && tier <= Tier::DISK ? matched_blocks_by_tier_[static_cast<size_t>(tier)] : 0;
 }
 
+size_t LoadAsyncContext::matchedTokenEndpoint(size_t reuse_unit_tokens) const {
+    return localFallbackSelected() ? local_fallback_endpoint_ : matchedBlocks() * reuse_unit_tokens;
+}
+
+void LoadAsyncContext::setLocalFallback(size_t token_endpoint, size_t reuse_unit_tokens) {
+    RTP_LLM_CHECK(need_backend_match_ && !backend_started_ && token_endpoint > 0 && reuse_unit_tokens > 0);
+    local_fallback_endpoint_   = token_endpoint;
+    local_fallback_reuse_unit_ = reuse_unit_tokens;
+}
+
 bool LoadAsyncContext::needBackendMatch() const {
     return need_backend_match_;
 }
@@ -149,6 +159,15 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
                   && matched_blocks_num <= storage_request_.handles.size());
     while (matched_blocks_num > local_matched_blocks_ && valid_prefix_ && !valid_prefix_(matched_blocks_num)) {
         --matched_blocks_num;
+    }
+    if (local_fallback_endpoint_ > matched_blocks_num * local_fallback_reuse_unit_) {
+        // A complete-key remote miss may leave a farther local short leaf.
+        // Keep remote read disabled; its full-key handles cannot name that leaf.
+        local_fallback_selected_.store(true, std::memory_order_release);
+        matched_blocks_num = local_matched_blocks_;
+        for (auto& handles : storage_request_.handles) {
+            handles.clear();
+        }
     }
     backend_matched_blocks_ = matched_blocks_num;
     if (matched_blocks_num < storage_request_.handles.size()) {

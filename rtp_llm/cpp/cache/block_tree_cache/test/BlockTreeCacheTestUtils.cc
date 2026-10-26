@@ -426,7 +426,8 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                           BlockTreeCacheConfig                       config,
                                                           std::shared_ptr<StorageBackend>            storage_backend,
                                                           std::shared_ptr<BroadcastManager>          broadcast_manager,
-                                                          std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
+                                                          std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
+                                                          size_t reuse_unit_tokens) {
     prepareGroupSets(group_sets);
     if (!config.enable_remote_cache) {
         storage_backend = nullptr;
@@ -468,7 +469,7 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
         std::move(per_rank_engine), std::move(multi_rank_engine), config.max_descriptors_per_transfer_batch);
     auto task_pool =
         std::make_unique<BlockTreeTaskPool>(static_cast<size_t>(config.task_pool_size), 1000, "BlockTreeCacheTaskPool");
-    auto tree  = std::make_unique<BlockTree>(std::move(group_sets));
+    auto tree  = std::make_unique<BlockTree>(std::move(group_sets), reuse_unit_tokens);
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(config),
                                                   std::move(storage_backend),
@@ -476,11 +477,10 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                   std::move(task_pool),
                                                   std::move(cache_metrics_reporter));
     if (cache->storageBackend()) {
-        const size_t canonical_size = storage_topology->groups().front().seqSizePerBlock();
         RTP_LLM_CHECK_WITH_INFO(cache->storageBackend()->init(std::move(storage_topology),
                                                               std::move(storage_pools),
                                                               std::move(storage_buffer_resolver),
-                                                              canonical_size),
+                                                              reuse_unit_tokens),
                                 "StorageBackend init failed");
     }
     if (!cache->init()) {

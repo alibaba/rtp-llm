@@ -159,6 +159,22 @@ class CacheConfigArgumentsTest(TestCase):
                 self.assertEqual(raised.exception.code, 2)
                 self.assertIn("Boolean value expected", stderr.getvalue())
 
+    def test_prefill_partial_tail_switch_defaults_off_and_binds_env_and_cli(self):
+        self.assertFalse(
+            self.parse_cache_config([], {}).enable_prefill_partial_tail_reuse
+        )
+        self.assertTrue(
+            self.parse_cache_config(
+                [], {"ENABLE_PREFILL_PARTIAL_TAIL_REUSE": "true"}
+            ).enable_prefill_partial_tail_reuse
+        )
+        self.assertFalse(
+            self.parse_cache_config(
+                ["--enable_prefill_partial_tail_reuse", "false"],
+                {"ENABLE_PREFILL_PARTIAL_TAIL_REUSE": "true"},
+            ).enable_prefill_partial_tail_reuse
+        )
+
     def test_canonical_env_and_cli_bind_all_fields(self):
         samples = self.startup_samples()
         env = self.startup_env(samples)

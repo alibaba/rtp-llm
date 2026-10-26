@@ -1699,6 +1699,14 @@ class AttentionFP8(nn.Module):
                 kv_tokens_per_block=kv_tpb,
                 kv_owner_tokens_per_block=kv_owner_tpb,
             )
+            self.compressor._sparse_save_targets_by_tag = getattr(
+                self, "_sparse_save_targets", None
+            )
+            self.compressor._sparse_state_tag = state_at
+            self.compressor._sparse_kv_tag = kv_at
+            self.compressor._protect_short_prefix = getattr(
+                self, "_protect_short_prefix", False
+            )
 
         if self.indexer is not None:
             kv_view = self._pool_view_3d_fp8(INDEXER_KV)
@@ -1722,11 +1730,27 @@ class AttentionFP8(nn.Module):
                 kv_tokens_per_block=kv_tpb,
                 kv_owner_tokens_per_block=kv_owner_tpb,
             )
+            self.indexer.compressor._sparse_save_targets_by_tag = getattr(
+                self, "_sparse_save_targets", None
+            )
+            self.indexer.compressor._sparse_state_tag = INDEXER_STATE
+            self.indexer.compressor._sparse_kv_tag = INDEXER_KV
+            self.indexer.compressor._protect_short_prefix = getattr(
+                self, "_protect_short_prefix", False
+            )
 
     def _clear_compressor_pool_context(self) -> None:
         if self.compressor is not None:
+            self.compressor._sparse_save_targets_by_tag = None
+            self.compressor._sparse_state_tag = None
+            self.compressor._sparse_kv_tag = None
+            self.compressor._protect_short_prefix = False
             self.compressor.clear_pool_context()
         if self.indexer is not None:
+            self.indexer.compressor._sparse_save_targets_by_tag = None
+            self.indexer.compressor._sparse_state_tag = None
+            self.indexer.compressor._sparse_kv_tag = None
+            self.indexer.compressor._protect_short_prefix = False
             self.indexer.clear_pool_context()
 
     def _prefill_paged_read_kv(
@@ -2528,6 +2552,7 @@ class AttentionFP8(nn.Module):
                 with record_function_range("dsv4.fp8.attn.clear_pool_context"):
                     self._clear_compressor_pool_context()
         finally:
+            self._saved_swa_prefix = None
             self._kv_cache = prev_kv
             self._block_tables_by_type = prev_bt
 
@@ -2561,6 +2586,7 @@ class AttentionFP8(nn.Module):
                 with record_function_range("dsv4.fp8.attn.clear_pool_context"):
                     self._clear_compressor_pool_context()
         finally:
+            self._saved_swa_prefix = None
             self._kv_cache = prev_kv
             self._block_tables_by_type = prev_bt
 
@@ -2668,6 +2694,7 @@ class AttentionFP8(nn.Module):
             qkv = self._prefill_compute_qkv(
                 x, common, shared_input_quant=shared_input_quant
             )
+        self._capture_short_prefix_swa(common)
 
         # Phase-Z overlap dispatch: hoist the SWA write into the orchestrator
         # so it can run on the default stream while the compressor NCCL
@@ -3209,7 +3236,12 @@ class AttentionFP8(nn.Module):
             if common.any_cont:
                 with record_function_range("dsv4.fp8.attn.workspace.gather_swa_prefix"):
                     assert wm.swa_cache_slot_mapping is not None
-                    if swa_byte_sliced:
+                    saved_prefix = getattr(self, "_saved_swa_prefix", None)
+                    if saved_prefix is not None:
+                        workspace[:, wm.N : wm.N + saved_prefix.shape[1]].copy_(
+                            saved_prefix
+                        )
+                    elif swa_byte_sliced:
                         assert common.cp_ctx is not None
                         assert wm.swa_cache_compaction is not None
                         if async_workspace_reads:
@@ -3674,15 +3706,21 @@ class AttentionFP8(nn.Module):
         # CP KV cache is sharded, because the full logical SWA block table is
         # not locally readable.
         if common.any_cont:
-            _swa_dq.dequantize_and_gather_k_cache(
-                out=workspace,
-                k_cache=swa_pool_3d,
-                seq_lens=wm.swa_cache_seq_lens,
-                gather_lens=wm.swa_cache_gather_lens,
-                block_table=wm.swa_bt_int32,
-                block_size=wm.swa_eb,
-                offset=local_N,
-            )
+            saved_prefix = getattr(self, "_saved_swa_prefix", None)
+            if saved_prefix is not None:
+                workspace[:, local_N : local_N + saved_prefix.shape[1]].copy_(
+                    saved_prefix
+                )
+            else:
+                _swa_dq.dequantize_and_gather_k_cache(
+                    out=workspace,
+                    k_cache=swa_pool_3d,
+                    seq_lens=wm.swa_cache_seq_lens,
+                    gather_lens=wm.swa_cache_gather_lens,
+                    block_table=wm.swa_bt_int32,
+                    block_size=wm.swa_eb,
+                    offset=local_N,
+                )
 
         req_full, pos_full = self._cp_full_req_ids_and_positions(common)
         if common.cp_ctx.prefix_lengths is not None:
@@ -5342,6 +5380,63 @@ class AttentionFP8(nn.Module):
         assert qkv.kv_full is not None, "PrefillQKV must carry materialized kv_full"
         return qkv
 
+    def _capture_short_prefix_swa(self, common: PrefillMeta) -> None:
+        """Read the old SWA tail before private runtime ring rows change."""
+        self._saved_swa_prefix = None
+        if not getattr(self, "_protect_short_prefix", False) or not common.any_cont:
+            return
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
+
+        if self.compress_ratio == 0:
+            meta = common.swa_meta
+            slots = meta.cache_slot_mapping if meta is not None else None
+            lens = meta.cache_gather_lens if meta is not None else None
+            compaction = meta.cache_compaction if meta is not None else None
+            entries = self._swa_entries_per_block()
+        else:
+            ratio_meta = (
+                common.csa_meta if self.compress_ratio == 4 else common.hca_meta
+            )
+            wm = ratio_meta.workspace_meta if ratio_meta is not None else None
+            slots = wm.swa_cache_slot_mapping if wm is not None else None
+            lens = wm.swa_cache_gather_lens if wm is not None else None
+            compaction = wm.swa_cache_compaction if wm is not None else None
+            entries = wm.swa_eb if wm is not None else 0
+        if slots is None or lens is None or int(slots.shape[1]) == 0:
+            return
+        scratch = torch.empty(
+            (int(slots.shape[0]), int(slots.shape[1]), self.head_dim),
+            dtype=torch.bfloat16,
+            device=slots.device,
+        )
+        with record_function_range("dsv4.fp8.attn.capture_short_swa_prefix"):
+            if self._swa_cp_byte_sliced():
+                cp_ctx = common.cp_ctx
+                assert cp_ctx is not None and compaction is not None
+                _swa_dq.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                    out=scratch,
+                    k_cache_raw=self._pool_raw_u8(SWA_KV),
+                    slot_mapping=slots,
+                    gather_lens=lens,
+                    offset=0,
+                    full_entries_per_block=entries,
+                    cp_rank=int(cp_ctx.cp_rank),
+                    cp_size=int(cp_ctx.cp_size),
+                    compaction=compaction,
+                )
+            else:
+                pool = self._pool_view_3d_fp8(SWA_KV)
+                assert pool is not None
+                _swa_dq.dequantize_and_gather_k_cache_slots(
+                    out=scratch,
+                    k_cache=pool,
+                    slot_mapping=slots,
+                    gather_lens=lens,
+                    offset=0,
+                )
+        self._saved_swa_prefix = scratch
+
     # ------------------------------------------------------------------
     # FP8 SWA-only fast path: paged write + concat-from-cache
     # ------------------------------------------------------------------
@@ -5389,6 +5484,63 @@ class AttentionFP8(nn.Module):
                 )
             else:
                 _ins.quantize_and_insert_k_cache(k_bf16, packed_3d, meta.slot_mapping)
+
+        save_targets = getattr(self, "_sparse_save_targets", None)
+        targets = save_targets.get(SWA_KV) if save_targets else None
+        if targets is None:
+            return
+        from rtp_llm.models_py.modules.dsv4.fp8.sparse_save import (
+            iter_sparse_save_slots,
+        )
+
+        if common.cp_ctx is not None and common.cp_on:
+            from rtp_llm.models_py.modules.dsv4.cp import (
+                build_cp_full_prefill_positions,
+            )
+
+            save_positions, save_req, _, _ = build_cp_full_prefill_positions(
+                common.cp_ctx, k_bf16.device
+            )
+        else:
+            assert (
+                common.position_ids is not None and common.req_id_per_token is not None
+            )
+            save_positions = common.position_ids
+            save_req = common.req_id_per_token
+        assert int(save_positions.numel()) == int(k_bf16.shape[0])
+        bt = self._block_tables_by_type[SWA_KV]
+        entries = self._swa_entries_per_block()
+        tpb = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
+        for endpoint, slots in iter_sparse_save_slots(
+            targets,
+            save_positions,
+            save_req,
+            entries_per_block=entries,
+            tokens_per_block=tpb,
+            runtime_block_table=bt,
+        ):
+            with record_function_range("dsv4.fp8.attn.swa.sparse_save"):
+                if cp_byte_sliced:
+                    cp_ctx = common.cp_ctx
+                    assert cp_ctx is not None and raw_u8 is not None
+                    compaction = self._build_swa_cp_byte_compaction(
+                        slots,
+                        full_entries_per_block=entries,
+                        validation_site="swa.sparse_save",
+                        negative_mode="skip_minus_one",
+                    )
+                    assert compaction is not None
+                    _ins.quantize_and_insert_k_cache_cp_byte_sliced(
+                        k_bf16,
+                        raw_u8,
+                        slots,
+                        full_entries_per_block=entries,
+                        cp_rank=int(cp_ctx.cp_rank),
+                        cp_size=int(cp_ctx.cp_size),
+                        compaction=compaction,
+                    )
+                else:
+                    _ins.quantize_and_insert_k_cache(k_bf16, packed_3d, slots)
 
     def _flash_mla_sparse_fwd_chunked_projected(
         self,
@@ -5613,7 +5765,10 @@ class AttentionFP8(nn.Module):
         if meta.prefix_len_max > 0:
             with record_function_range("dsv4.fp8.attn.swa_concat.gather_prefix"):
                 assert meta.cache_slot_mapping is not None
-                if cp_byte_sliced:
+                saved_prefix = getattr(self, "_saved_swa_prefix", None)
+                if saved_prefix is not None:
+                    workspace[:, : saved_prefix.shape[1]].copy_(saved_prefix)
+                elif cp_byte_sliced:
                     cp_ctx = common.cp_ctx
                     assert cp_ctx is not None
                     assert meta.cache_compaction is not None

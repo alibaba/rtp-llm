@@ -926,6 +926,7 @@ TEST(CacheConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlocks) {
     pc.role_type                          = RoleType::PREFILL;
     pc.tp_size                            = 4;
     pc.prefill_cp_config.kv_cache_sharded = true;
+    pc.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
 
     auto mc                       = makeProModelConfig();
     mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
@@ -2546,6 +2547,7 @@ TEST(CacheConfigCreatorTest, ExternalStateEntryLayoutPreservesCpRingAndPhysicalS
         parallelism.tp_size                            = cp_size;
         parallelism.tp_rank                            = cp_size - 1;
         parallelism.prefill_cp_config.kv_cache_sharded = true;
+        parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
         auto config                                    = makeProjectedCpWarmupConfig(model, parallelism, 2, options);
 
         const uint32_t expected_csa_full = cp_size == 4 ? 12u : 10u;
@@ -2579,6 +2581,7 @@ TEST(CacheConfigCreatorTest, ExternalStateEntryLayoutPreservesCpRingAndPhysicalS
     cp2.role_type                          = RoleType::PREFILL;
     cp2.tp_size                            = 2;
     cp2.prefill_cp_config.kv_cache_sharded = true;
+    cp2.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     auto        config                     = makeProjectedCpWarmupConfig(decoupled, cp2, 2, options);
     const auto* state = dynamic_cast<const FixedStateCacheSpec*>(config.group("csa_state").spec.get());
     ASSERT_NE(state, nullptr);
@@ -2599,6 +2602,7 @@ TEST(CacheConfigCreatorTest, ExternalSwaPackedBytesKeepDataScalePaddingAndKernel
         parallelism.tp_size                            = cp_size;
         parallelism.tp_rank                            = cp_size - 1;
         parallelism.prefill_cp_config.kv_cache_sharded = true;
+        parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
         const auto base                                = static_cast<uint32_t>(
             model.attn_config.tokens_per_block > 0 ? model.attn_config.tokens_per_block : options.seq_size_per_block);
         auto        config   = makeProjectedCpWarmupConfig(model, parallelism, 0, options);
@@ -2627,6 +2631,7 @@ TEST(CacheConfigCreatorTest, ExternalSwaPackedBytesKeepDataScalePaddingAndKernel
     cp2.role_type                          = RoleType::PREFILL;
     cp2.tp_size                            = 2;
     cp2.prefill_cp_config.kv_cache_sharded = true;
+    cp2.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     auto config                            = makeProjectedCpWarmupConfig(model, cp2, 0, options);
     EXPECT_EQ(config.group("swa_kv").spec->block_size_bytes(), 37440u);
     EXPECT_EQ(config.group("swa_kv").spec->seq_size_per_block, 512u);
@@ -2666,6 +2671,7 @@ TEST(CacheConfigCreatorTest, ExternalSwaByteSliceMayStartAtFp8ScaleAndIncludesTr
     parallelism.tp_size                            = 4;
     parallelism.tp_rank                            = 3;
     parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     KVCacheConfig options;
     auto          config = makeProjectedCpWarmupConfig(model, parallelism, 0, options);
     const auto*   spec   = dynamic_cast<const FixedStateCacheSpec*>(config.group("swa_kv").spec.get());
@@ -2738,6 +2744,7 @@ TEST(CacheConfigCreatorTest, PrefillCp8MtpGenNum2PadsStateRingBeforeSlicing) {
     pc.role_type                          = RoleType::PREFILL;
     pc.tp_size                            = 8;
     pc.prefill_cp_config.kv_cache_sharded = true;
+    pc.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
 
     auto config = makeProjectedCpWarmupConfig(mc, pc, 2);
 
@@ -2936,7 +2943,371 @@ protected:
         rtp_llm::initLogger();
         createDevice();
     }
+
+    void checkProductionRoundTrip(
+        CacheConfig config, size_t endpoint, size_t local_cp, size_t state_span, bool verify_shorter_state = false) {
+        const size_t base = config.seq_size_per_block;
+        ASSERT_EQ(config.canonicalSizePerBlock(), base * local_cp);
+        ASSERT_TRUE(config.supportsCanonicalReuse());
+        setGroupBlockNumsForTest(config, config.groupTags(), std::vector<uint32_t>(config.groupNums(), 32));
+        auto allocator = std::make_shared<TestDSV4HybridTypeAllocator>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+        std::vector<size_t> free_before;
+        for (const auto& pool : allocator->groupBlockPools()) {
+            free_before.push_back(pool->freeBlocksNum());
+        }
+        auto make_tokens = [base](size_t length) {
+            auto input             = std::make_shared<GenerateInput>();
+            input->input_ids       = torch::arange(length, torch::kInt32);
+            input->generate_config = std::make_shared<GenerateConfig>();
+            auto tokens            = std::make_shared<CompleteTokenIds>(1, 1, length + base, base);
+            tokens->init(input);
+            return tokens;
+        };
+        auto make_resource = [&config](const CompleteTokenIdsPtr& tokens) {
+            auto resource = std::make_shared<BatchKVCacheResource>();
+            resource->resetBatchSize(1);
+            resource->initGroups(config.topologyPtr());
+            initCacheKeys(resource, tokens, config.seq_size_per_block);
+            return resource;
+        };
+        auto pattern = [](size_t group, size_t slot, int layer, size_t part) {
+            return static_cast<uint8_t>(11 + (17 * group + 3 * slot + 5 * layer + part) % 200);
+        };
+        auto as_bytes = [](const BlockInfo& buffer) {
+            return torch::from_blob(buffer.addr,
+                                    {static_cast<int64_t>(buffer.size_bytes)},
+                                    torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+        };
+
+        auto       tokens = make_tokens(endpoint);
+        auto       source = make_resource(tokens);
+        MallocInfo cold{source, tokens};
+        cold.enable_cache_lookup = false;
+        cold.reuse_cache         = false;
+        cold.request_layout      = snapshotGlobalCacheRequest(*source, *tokens);
+        ASSERT_TRUE(allocator->malloc(cold).success);
+        for (size_t gid = 0; gid < config.groupTags().size(); ++gid) {
+            const auto& tag    = config.groupTags()[gid];
+            const auto& blocks = source->blocks(0, tag);
+            for (size_t slot = 0; slot < blocks.size(); ++slot) {
+                if (isNullBlockIdx(blocks[slot])) {
+                    continue;
+                }
+                for (const int layer : config.layerIdsForGroup(tag)) {
+                    const auto buffers = allocator->convertIndexToBuffer(layer, tag, blocks[slot]);
+                    for (size_t part = 0; part < buffers.size(); ++part) {
+                        as_bytes(buffers[part]).fill_(pattern(gid, slot, layer, part));
+                        const auto& group = config.group(tag);
+                        if (verify_shorter_state && group.policy.enable_prefix_reuse
+                            && group.policy.group_type != CacheGroupType::FULL) {
+                            const size_t ring = tag == "swa_kv" ? 128 : 8;
+                            ASSERT_EQ(buffers[part].size_bytes % (ring * sizeof(int32_t)), 0u);
+                            auto rows =
+                                as_bytes(buffers[part]).view(torch::kInt32).view({static_cast<int64_t>(ring), -1});
+                            for (size_t row = 0; row < ring; ++row) {
+                                rows.select(0, row).fill_(endpoint - ring + row);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        runtimeSyncAndCheck();
+        CacheKeysType expected_keys;
+        for (size_t i = local_cp - 1; i < endpoint / base; i += local_cp) {
+            expected_keys.push_back(source->cacheKeys(0)[i]);
+        }
+        size_t resident = 0;
+        allocator->insertIntoCache(InsertInfo{source, tokens, false}, resident);
+        const auto& cache = allocator->blockTreeCacheOwner();
+        auto        match = cache->match(expected_keys);
+        EXPECT_EQ(match.matched_device_endpoint, endpoint);
+        EXPECT_EQ(match.matched_device_blocks, expected_keys.size());
+        for (const auto& resource : match.matched_device_resources) {
+            cache->groupSets()[resource.group_set_id]->unreferenceBlocks(resource);
+        }
+        allocator->free(FreeInfo{source, tokens});
+
+        if (verify_shorter_state) {
+            ASSERT_EQ(endpoint, 1024u);
+            auto       short_tokens = make_tokens(513);
+            auto       shorter      = make_resource(short_tokens);
+            MallocInfo short_lookup{shorter, short_tokens};
+            short_lookup.request_layout = snapshotGlobalCacheRequest(*shorter, *short_tokens);
+            const auto short_hit        = allocator->malloc(short_lookup);
+            ASSERT_TRUE(short_hit.success);
+            EXPECT_EQ(short_hit.reuse_len, 0);
+            if (short_hit.reuse_len > 0) {
+                for (const auto& tag :
+                     {std::string("swa_kv"), std::string("csa_state"), std::string("indexer_state")}) {
+                    const size_t ring    = tag == "swa_kv" ? 128 : 8;
+                    const auto   block   = shorter->blocks(0, tag).front();
+                    const int    layer   = config.layerIdsForGroup(tag).front();
+                    const auto   buffers = allocator->convertIndexToBuffer(layer, tag, block);
+                    auto         rows =
+                        as_bytes(buffers.front()).view(torch::kInt32).view({static_cast<int64_t>(ring), -1}).cpu();
+                    RTP_LLM_LOG_INFO(
+                        "legacy Decode tag=%s requested=513 reused=%d block=%d first_token=%d expected=%zu",
+                        tag.c_str(),
+                        short_hit.reuse_len,
+                        block,
+                        rows[0][0].item<int32_t>(),
+                        512 - ring);
+                    for (size_t row = 0; row < ring; ++row) {
+                        EXPECT_TRUE(rows.select(0, row).eq(512 - ring + row).all().item<bool>())
+                            << tag << " row=" << row;
+                    }
+                }
+            }
+            allocator->free(FreeInfo{shorter, short_tokens});
+        }
+
+        auto       query_tokens = make_tokens(endpoint + 1);
+        auto       restored     = make_resource(query_tokens);
+        MallocInfo lookup{restored, query_tokens};
+        lookup.request_layout = snapshotGlobalCacheRequest(*restored, *query_tokens);
+        const auto hit        = allocator->malloc(lookup);
+        ASSERT_TRUE(hit.success);
+        EXPECT_EQ(hit.reuse_len, endpoint);
+        for (size_t gid = 0; gid < config.groupTags().size(); ++gid) {
+            const auto& tag   = config.groupTags()[gid];
+            const auto& group = config.group(tag);
+            if (!group.policy.enable_prefix_reuse) {
+                continue;
+            }
+            // Expected coordinates come from the production fixture, not canonicalBlockPosition.
+            const bool   full  = group.policy.group_type == CacheGroupType::FULL;
+            const size_t count = endpoint / (full ? base * local_cp : state_span);
+            ASSERT_GT(count, 0u) << tag;
+            const auto& blocks = restored->blocks(0, tag);
+            ASSERT_GE(blocks.size(), count) << tag;
+            for (size_t slot = full ? 0 : count - 1; slot < count; ++slot) {
+                ASSERT_FALSE(isNullBlockIdx(blocks[slot])) << tag << " slot=" << slot;
+                for (const int layer : config.layerIdsForGroup(tag)) {
+                    const auto buffers = allocator->convertIndexToBuffer(layer, tag, blocks[slot]);
+                    ASSERT_FALSE(buffers.empty()) << tag;
+                    for (size_t part = 0; part < buffers.size(); ++part) {
+                        if (verify_shorter_state && !full) {
+                            const size_t ring = tag == "swa_kv" ? 128 : 8;
+                            auto         rows = as_bytes(buffers[part])
+                                            .view(torch::kInt32)
+                                            .view({static_cast<int64_t>(ring), -1})
+                                            .cpu();
+                            for (size_t row = 0; row < ring; ++row) {
+                                EXPECT_TRUE(rows.select(0, row).eq(endpoint - ring + row).all().item<bool>()) << tag;
+                            }
+                        } else {
+                            EXPECT_TRUE(
+                                as_bytes(buffers[part]).cpu().eq(pattern(gid, slot, layer, part)).all().item<bool>())
+                                << tag << " slot=" << slot << " layer=" << layer << " part=" << part;
+                        }
+                    }
+                }
+            }
+        }
+        allocator->free(FreeInfo{restored, query_tokens});
+        for (const auto& tag : config.groupTags()) {
+            cache->evictForGroup(tag, 32);
+        }
+        for (size_t gid = 0; gid < free_before.size(); ++gid) {
+            EXPECT_EQ(allocator->groupBlockPools()[gid]->freeBlocksNum(), free_before[gid]) << config.groupTags()[gid];
+        }
+    }
 };
+
+TEST_F(DSV4AllocatorTest, ProductionFullLayoutsPublishMatchRestoreAndReleaseAcrossCpSizes) {
+    ModelConfig mha;
+    mha.num_layers                   = 1;
+    mha.attn_config.head_num         = 8;
+    mha.attn_config.kv_head_num      = 8;
+    mha.attn_config.size_per_head    = 16;
+    mha.attn_config.tokens_per_block = 128;
+    setDefaultKvCacheSpec(mha);
+    auto mla                      = mha;
+    mla.attn_config.use_mla       = true;
+    mla.attn_config.kv_lora_rank  = 32;
+    mla.attn_config.rope_head_dim = 16;
+    setDefaultKvCacheSpec(mla);
+    auto hybrid                 = makeHybridAttentionModelConfig();
+    hybrid.attn_config.head_num = hybrid.attn_config.kv_head_num = 8;
+    hybrid.linear_attention_config.linear_num_key_heads          = 8;
+    hybrid.linear_attention_config.linear_num_value_heads        = 8;
+    setHybridAttentionKvCacheSpecs(hybrid);
+    auto dsv4                              = makeFlashModelConfig();
+    dsv4.num_layers                        = 2;
+    dsv4.attn_config.layer_compress_ratios = {4, 128};
+    setDsv4KvCacheSpecs(dsv4, {4, 128});
+    auto v41                             = dsv4;
+    auto global1                         = makeDsv4Desc("global_kv_1", "compressed_kv", 288, DataType::TYPE_UINT8, 1);
+    auto global2                         = makeDsv4Desc("global_kv_2", "compressed_kv", 288, DataType::TYPE_UINT8, 2);
+    global1.block_stride_bytes_alignment = global2.block_stride_bytes_alignment = 4608;
+    auto indexer                     = makeDsv4Desc("indexer_kv", "compressed_kv", 68, DataType::TYPE_UINT8, 1);
+    auto swa                         = makeDsv4Desc("swa_kv", "sliding_window_kv", 528, DataType::TYPE_UINT8);
+    swa.block_stride_bytes_alignment = 16896;
+    auto state                       = makeDsv4Desc("csa_state", "fixed_state", 1024, DataType::TYPE_FP32);
+    state.compression_ratio          = 2;
+    state.state_ring_overlap         = 0;
+    v41.kv_cache_spec_descs          = {{global1, indexer, swa}, {global2, indexer, swa, state}};
+    for (const auto& [name, model] : std::vector<std::pair<std::string, ModelConfig>>{
+             {"MHA", mha}, {"MLA", mla}, {"hybrid", hybrid}, {"DSV4", dsv4}, {"DSV4.1", v41}}) {
+        for (const uint32_t cp : {1u, 2u, 4u}) {
+            SCOPED_TRACE(name + " CP=" + std::to_string(cp));
+            ParallelismConfig parallelism;
+            parallelism.role_type                          = RoleType::PREFILL;
+            parallelism.tp_size                            = cp;
+            parallelism.prefill_cp_config.kv_cache_sharded = true;
+            parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+            auto config                                    = createResolvedConfig(model, parallelism, KVCacheConfig{});
+            for (const auto& group : config.groups()) {
+                if (group.policy.group_type == CacheGroupType::FULL) {
+                    EXPECT_EQ(group.seqSizePerBlock(), model.attn_config.tokens_per_block);
+                    EXPECT_EQ(group.policy.cp_mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
+                    EXPECT_EQ(config.globalSizePerBlock(group.tag), model.attn_config.tokens_per_block * cp);
+                }
+            }
+            const size_t state_span = model.attn_config.tokens_per_block * (name == "hybrid" ? 1 : cp);
+            checkProductionRoundTrip(config, 2 * model.attn_config.tokens_per_block * cp, cp, state_span);
+        }
+    }
+}
+
+TEST_F(DSV4AllocatorTest, DecodeProducerCpKeepsNonFullReuseWithLocalCanonicalScale) {
+    auto model                              = makeFlashModelConfig();
+    model.num_layers                        = 2;
+    model.attn_config.layer_compress_ratios = {4, 128};
+    setDsv4KvCacheSpecs(model, {4, 128});
+    for (const uint32_t dp : {8u, 16u}) {
+        SCOPED_TRACE("producerCP8 decodeTP1 DP=" + std::to_string(dp));
+        ParallelismConfig parallelism;
+        parallelism.role_type = RoleType::DECODE;
+        parallelism.tp_size   = 1;
+        parallelism.dp_size = parallelism.world_size   = dp;
+        parallelism.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        parallelism.prefill_cp_config.prefill_cp_size  = 8;
+        auto config                                    = createResolvedConfig(model, parallelism, KVCacheConfig{});
+        EXPECT_EQ(config.cache_cp_size, 1u);
+        EXPECT_FALSE(config.request_projection_required);
+        for (const auto& group : config.groups()) {
+            const size_t expected = group.policy.group_type == CacheGroupType::FULL ? 128 : 1024;
+            EXPECT_EQ(config.globalSizePerBlock(group.tag), expected) << group.tag;
+        }
+        checkProductionRoundTrip(config, 1024, 1, 1024, /*verify_shorter_state=*/true);
+    }
+}
+
+TEST_F(DSV4AllocatorTest, PreciseSwaResumeValidatesOnlyRealWindowSlots) {
+    for (const uint32_t cp_size : {2u, 4u}) {
+        const auto  config = makeDSV4CpAllocatorConfig(cp_size);
+        const auto& group  = config.group("swa_kv");
+        ASSERT_EQ(group.policy.group_type, CacheGroupType::SWA);
+        ASSERT_EQ(group.policy.sliding_window_size, 128);
+        const size_t span            = config.globalSizePerBlock("swa_kv");
+        const int    local_two_slots = static_cast<int>(2 * group.seqSizePerBlock());
+        ASSERT_GT(span, 128u);
+        SWACacheManager manager(group, nullptr, 0);
+
+        // A resumed query after the boundary plus one full window only needs
+        // slot 1. The ordinary direct allocation contract remains strict.
+        const size_t one_slot_resume = span + 128;
+        ASSERT_EQ(config.endpointBlockPosition("swa_kv", one_slot_resume - 126), 1u);
+        ASSERT_EQ(config.endpointBlockPosition("swa_kv", one_slot_resume), 1u);
+        BlockIds one_slot;
+        one_slot.assign({NULL_BLOCK_IDX, 17});
+        EXPECT_THROW(manager.malloc(one_slot, local_two_slots), std::exception);
+        EXPECT_TRUE(manager.mallocWithHistory(one_slot, local_two_slots, false, 0, nullptr, {}, {1, 2}));
+        EXPECT_NO_THROW(manager.removeSkippedBlocksWithHistory(one_slot, false, 0, {1, 2}));
+        EXPECT_THROW(manager.removeSkippedBlocks(one_slot), std::exception);
+
+        // Immediately after a physical boundary, the 128-token window crosses
+        // both slots. A missing older slot is a real restoration error.
+        const size_t crossing_resume = span + 1;
+        ASSERT_EQ(config.endpointBlockPosition("swa_kv", crossing_resume - 126), 0u);
+        ASSERT_EQ(config.endpointBlockPosition("swa_kv", crossing_resume), 1u);
+        EXPECT_THROW(manager.mallocWithHistory(one_slot, local_two_slots, false, 0, nullptr, {}, {0, 2}),
+                     std::exception);
+        BlockIds crossing;
+        crossing.assign({16, 17});
+        EXPECT_TRUE(manager.mallocWithHistory(crossing, local_two_slots, false, 0, nullptr, {}, {0, 2}));
+
+        // A later allocation may add new tail slots. Cleanup before forward
+        // must retain the restored history slot even when it is no longer in
+        // the ordinary two-slot active tail.
+        BlockIds grown;
+        grown.assign({NULL_BLOCK_IDX, 17, 18, 19});
+        EXPECT_NO_THROW(manager.removeSkippedBlocksWithHistory(grown, false, 0, {1, 2}));
+        EXPECT_EQ(grown.blocks()[1], 17);
+        EXPECT_NO_THROW(manager.removeSkippedBlocksWithHistory(grown, false, 1, {1, 2}));
+    }
+}
+
+TEST_F(DSV4AllocatorTest, CoordinatorProjectsPreciseSwaHistoryAcrossCpRanks) {
+    for (const uint32_t cp_size : {2u, 4u}) {
+        auto model                         = makeProModelConfig();
+        model.attn_config.tokens_per_block = 256;
+        setDsv4KvCacheSpecs(model, makeProLayerCompressRatios());
+        ParallelismConfig parallelism;
+        parallelism.role_type                          = RoleType::PREFILL;
+        parallelism.tp_size                            = cp_size;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+        auto config                                    = createResolvedConfig(model, parallelism, KVCacheConfig{});
+        setGroupBlockNumsForTest(
+            config, config.groupTags(), std::vector<uint32_t>(static_cast<size_t>(config.groupNums()), 200u));
+        ASSERT_EQ(config.group("swa_kv").policy.cp_mapping, CpBlockMappingMode::COMPACT_LAST_RANK);
+        ASSERT_EQ(config.canonicalSizePerBlock(), 256u * cp_size);
+        ASSERT_NE(1300u % config.canonicalSizePerBlock(), 0u);
+        auto allocator = std::make_shared<TestDSV4HybridTypeAllocator>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+
+        const int input_length = cp_size == 4 ? 2000 : 1320;
+        const int base         = allocator->seqSizePerBlock();
+        auto      resource     = std::make_shared<BatchKVCacheResource>();
+        resource->resetBatchSize(1);
+        initDsv4BatchGroups(*resource, config);
+        auto tokens            = std::make_shared<CompleteTokenIds>(1, 1, input_length + base, base);
+        auto input             = std::make_shared<GenerateInput>();
+        input->input_ids       = torch::arange(input_length, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        tokens->init(input);
+
+        MallocInfo info{resource, tokens};
+        info.enable_cache_lookup          = false;
+        info.reuse_cache                  = false;
+        info.enable_remove_skipped_blocks = false;
+        info.request_layout               = snapshotGlobalCacheRequest(*resource, *tokens);
+        ASSERT_TRUE(allocator->malloc(info).success);
+
+        const size_t resumed_slot = config.endpointBlockPosition("swa_kv", 1300);
+        ASSERT_EQ(resumed_slot, cp_size == 4 ? 1u : 2u);
+        auto& swa_ids = resource->mutableBlockIds(0, "swa_kv");
+        ASSERT_GT(swa_ids.blocksNum(), resumed_slot);
+        const BlockIdxType old_history = swa_ids.blocks()[resumed_slot - 1];
+        ASSERT_FALSE(isNullBlockIdx(old_history));
+        bool released_history = false;
+        for (const auto& group : allocator->cacheGroups()) {
+            if (group->tag() == "swa_kv") {
+                group->unreference(BlockIndicesType{old_history});
+                released_history = true;
+                break;
+            }
+        }
+        ASSERT_TRUE(released_history);
+        swa_ids.setAt(resumed_slot - 1, NULL_BLOCK_IDX);
+
+        // Exact G1300 needs only its current physical slot. An earlier G1025
+        // spans this deliberately absent slot and must fail before allocation.
+        info.precise_resume_endpoint = 1300;
+        EXPECT_TRUE(allocator->malloc(info).success) << "CP=" << cp_size;
+        info.precise_resume_endpoint = 1025;
+        EXPECT_THROW((void)allocator->malloc(info), std::exception) << "CP=" << cp_size;
+        info.precise_resume_endpoint.reset();
+        EXPECT_THROW((void)allocator->malloc(info), std::exception) << "CP=" << cp_size;
+
+        allocator->free(FreeInfo{resource, tokens});
+    }
+}
 
 TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
     auto config    = makeDSV4AllocatorConfig();
@@ -3140,6 +3511,7 @@ TEST_F(DSV4AllocatorTest, ChunkMallocReservesSwaBanksUsingCpGroupGeometry) {
         info.reuse_cache                  = false;
         info.enable_remove_skipped_blocks = false;
         info.max_chunk_tokens             = 2 * group_spb;
+        info.request_layout               = snapshotGlobalCacheRequest(*resource, *tokens);
         ASSERT_TRUE(allocator->malloc(info).success);
         const auto& owning = resource->blocks(0, "swa_kv");
         ASSERT_EQ(owning.size(), 8u);
@@ -3183,6 +3555,26 @@ TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
 
     FreeInfo free_info{batch_res};
     allocator->free(free_info);
+}
+
+TEST_F(DSV4AllocatorTest, ExactEndpointUsesResolvedScaledStateSlot) {
+    auto model                         = makeProModelConfig();
+    model.attn_config.tokens_per_block = 256;
+    setDsv4KvCacheSpecs(model, makeProLayerCompressRatios());
+    for (const uint32_t cp_size : {2u, 4u}) {
+        KVCacheConfig     options;
+        ParallelismConfig parallelism;
+        parallelism.role_type                          = RoleType::PREFILL;
+        parallelism.tp_size                            = cp_size;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+        const auto   config                            = createResolvedConfig(model, parallelism, options);
+        const size_t state_stride                      = config.group("csa_state").seqSizePerBlock();
+        EXPECT_EQ(state_stride, static_cast<size_t>(256 * cp_size));
+        EXPECT_EQ(config.endpointBlockPosition("csa_state", 1100), cp_size == 2 ? 2u : 1u);
+        EXPECT_EQ(config.group("hca_state").seqSizePerBlock(), static_cast<size_t>(256 * cp_size));
+        EXPECT_EQ(config.endpointBlockPosition("hca_state", 600), cp_size == 2 ? 1u : 0u);
+    }
 }
 
 TEST_F(DSV4AllocatorTest, ExternalStateEntryRequestSnapshotPreservesMixedCpAllocationAndReserve) {
@@ -3311,6 +3703,7 @@ TEST_F(DSV4AllocatorTest, ExternalStateEntryFailedMixedAllocationRestoresEveryGr
     parallelism.role_type                          = RoleType::PREFILL;
     parallelism.tp_size                            = 2;
     parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     auto                  config                   = makeProjectedCpWarmupConfig(model, parallelism, 0, options);
     std::vector<uint32_t> block_nums(static_cast<size_t>(config.groupNums()), 8u);
     const auto            tags        = config.groupTags();
@@ -4295,6 +4688,7 @@ TEST(CacheConfigCreatorTest, CrossLayerCpProjectionComparesResolvedValues) {
     parallelism.role_type                          = RoleType::PREFILL;
     parallelism.tp_size                            = 2;
     parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
 
     const auto build = [&](const ModelConfig& model) {
         return CacheConfigCreator::createWarmupConfig(model, parallelism);
@@ -4407,6 +4801,7 @@ TEST(CacheConfigCreatorTest, CrossLayerProjectedMetadataMismatchRejected) {
     parallelism.tp_size                            = 2;
     parallelism.tp_rank                            = 1;
     parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     for (const std::string family : {"state", "byte", "compressed"}) {
         SCOPED_TRACE(family);
         KVCacheSpecDesc first;
@@ -4473,6 +4868,7 @@ TEST(CacheConfigCreatorTest, CrossLayerStateEntryTagsRespectSliceAndOrder) {
     parallelism.role_type                          = RoleType::PREFILL;
     parallelism.tp_size                            = 2;
     parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     for (const auto slice : {CpBlockSliceMode::NONE, CpBlockSliceMode::PAYLOAD_BYTES, CpBlockSliceMode::EQUAL_BYTES}) {
         for (const bool projected_first : {true, false}) {
             SCOPED_TRACE(static_cast<int>(slice));

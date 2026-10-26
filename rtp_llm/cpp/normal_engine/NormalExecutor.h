@@ -110,6 +110,7 @@ private:
     int                   tp_rank_             = 0;
     ParallelismConfig     parallelism_config_;
     RoleType              role_type_ = RoleType::PDFUSION;
+    bool                  partial_tail_reuse_ = false;
     std::function<void()> profile_step_start_;
     std::function<void()> profile_step_finish_;
 

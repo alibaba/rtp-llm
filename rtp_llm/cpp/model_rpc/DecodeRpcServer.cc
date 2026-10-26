@@ -653,6 +653,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
+    request.set_input_token_count(load_context.input_token_count);
     const auto route = projectLoadPeerRoute(load_context.prefill_cp_size,
                                             resource_.workers.size(),
                                             peer_addrs.size(),
@@ -685,12 +686,14 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
-    const auto route = projectLoadPeerRoute(load_context.prefill_cp_size,
-                                            resource_.workers.size(),
-                                            peer_addrs.size(),
-                                            static_cast<size_t>(index),
-                                            maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled(),
-                                            /*mla_request=*/false);
+    request.set_input_token_count(load_context.input_token_count);
+    const auto route = projectLoadPeerRoute(
+        load_context.prefill_cp_size,
+        resource_.workers.size(),
+        peer_addrs.size(),
+        static_cast<size_t>(index),
+        maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled(),
+        /*mla_request=*/false);
     request.set_partition_count(route.partition_count);
     request.set_partition_id(route.partition_id);
     for (const size_t peer : route.peer_indices) {
@@ -716,6 +719,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGene
     auto&       cache_keys      = generate_stream->cacheKeys(0);
     const auto& cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
     auto        group_block_ids = cache_resource.groupBlockIds();
+    const size_t input_tokens = static_cast<size_t>(std::max(0, generate_stream->inputLength()));
 
     const auto topology_error = validateRemoteLoadTopology(resource_.workers.size(), decode_context.peer_addrs.size());
     if (!topology_error.ok()) {
@@ -752,7 +756,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGene
                                     1,
                                     0,
                                     decode_context.server_context,
-                                    decode_context.prefill_cp_size};
+                                    decode_context.prefill_cp_size,
+                                    input_tokens};
 
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
@@ -1042,13 +1047,16 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         auto load_layer_cache =
             std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
         const bool use_kv_key_prefix = cfg.use_mla || cfg.use_opaque_kv_cache_store || cfg_use_hybrid;
+        const size_t first_required_page = firstRequiredSwaHandoffPage(
+            cfg.group(tag).policy, cfg.group(tag).seqSizePerBlock(), load_context.input_token_count);
         for (size_t logical_page : load_plan.logical_pages) {
-            if (!transferPageReadFromPeer(cfg.group(tag).policy,
-                                          logical_page,
-                                          cfg_use_hybrid,
-                                          load_context.prefill_cp_size,
-                                          peer_cnt,
-                                          peer_idx)) {
+            if (logical_page < first_required_page
+                || !transferPageReadFromPeer(cfg.group(tag).policy,
+                                             logical_page,
+                                             cfg_use_hybrid,
+                                             load_context.prefill_cp_size,
+                                             peer_cnt,
+                                             peer_idx)) {
                 continue;
             }
             const auto regions = cache_manager->queryDecodeCacheBlockRegions(static_cast<int>(global_layer_id),
@@ -1264,7 +1272,8 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                   request->partition_count(),
                                   request->partition_id(),
                                   server_context,
-                                  request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1});
+                                  request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1,
+                                  request->input_token_count()});
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(load_result.error_info.code()));
     response->mutable_error_info()->set_error_message(load_result.error_info.ToString());
     response->set_loaded_cache_block_count(static_cast<int64_t>(load_result.loaded_cache_block_count));

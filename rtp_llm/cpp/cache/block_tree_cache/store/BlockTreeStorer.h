@@ -39,7 +39,9 @@ public:
                                  const std::vector<std::vector<GroupSetResource>>& resources,
                                  Tier                                              target_tier,
                                  bool                                              is_resident,
-                                 size_t&                                           resident_prefix_length);
+                                 size_t&                                           resident_prefix_length,
+                                 const std::vector<std::vector<int>>*              token_segments = nullptr,
+                                 const std::vector<size_t>*                         token_ends = nullptr);
     void             stopAdmissionLocked();
 
 private:
@@ -49,14 +51,18 @@ private:
     void             publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          bool                                              is_resident,
-                                         size_t&                                           resident_prefix_length);
+                                         size_t&                                           resident_prefix_length,
+                                         const std::vector<std::vector<int>>*              token_segments,
+                                         const std::vector<size_t>*                         token_ends);
     StorageRequest   makeStorageRequest(const CacheKeysType&                              cache_keys,
-                                        const std::vector<std::vector<GroupSetResource>>& resources) const;
+                                        const std::vector<std::vector<GroupSetResource>>& resources,
+                                        const std::vector<size_t>*                         token_ends = nullptr) const;
     void             submitLowerTierLocked(const CacheKeysType&                              cache_keys,
                                            const std::vector<std::vector<GroupSetResource>>& resources,
                                            Tier                                              target_tier);
     void             runStoreTask(const StoreTaskPtr& task);
-    void             scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error);
+    void             scheduleStoreSettlement(const StoreTaskPtr& task,
+                                             ErrorInfo            error);
     void             settleTask(const StoreTask& task, bool copy_success);
     size_t           settleLocked(const StoreTask& task, bool publish);
 

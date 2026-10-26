@@ -1,7 +1,9 @@
 #pragma once
 
-#include <memory>
+#include <cstddef>
 #include <limits>
+#include <memory>
+#include <optional>
 
 #include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 
@@ -9,6 +11,12 @@ namespace rtp_llm {
 
 class SWACacheManager: public SingleTypeCacheManager {
 public:
+    // Half-open physical slot interval containing the restored prefix history
+    // needed by the first resumed query. It is validated, never backfilled.
+    struct HistorySlots {
+        size_t begin = 0;
+        size_t end   = 0;
+    };
     SWACacheManager(GroupBase          cache_group,
                     DeviceBlockPoolPtr block_pool,
                     int                group_id,
@@ -40,6 +48,15 @@ public:
                                    int                  reserve_step         = 0,
                                    std::vector<size_t>* backfilled_positions = nullptr) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
+    bool mallocWithHistory(BlockIds&                block_ids,
+                           int                      seq_len,
+                           bool                     enable_reuse_cache,
+                           int                      reserve_step,
+                           std::vector<size_t>*     backfilled_positions,
+                           const RequiredPositions& required_positions,
+                           HistorySlots             history);
+    void removeSkippedBlocksWithHistory(
+        BlockIds& block_ids, bool enable_reuse_cache, int reserve_step, HistorySlots history);
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,
                                 const BlockIndicesType& current_block_indices,
@@ -64,13 +81,20 @@ private:
     int  activeTailBlockCount() const;
     bool shouldCheckSWATailBlockIds() const;
     void checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const;
+    void checkHistoryBlockIds(const BlockIds& block_ids,
+                              HistorySlots    history,
+                              const char*     caller,
+                              bool            check_tail = true) const;
     bool mallocImpl(BlockIds&                block_ids,
                     int                      seq_len,
                     int                      reserve_step,
                     int                      tail_blocks,
                     bool                     is_prefill,
                     std::vector<size_t>*     backfilled_positions,
-                    const RequiredPositions& required_positions);
+                    const RequiredPositions& required_positions,
+                    std::optional<HistorySlots> history = std::nullopt);
+    void removeSkippedBlocksImpl(
+        BlockIds& block_ids, bool enable_reuse_cache, int reserve_step, std::optional<HistorySlots> history);
 
     int tail_blocks_;
 };

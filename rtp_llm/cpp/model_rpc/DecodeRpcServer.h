@@ -37,7 +37,8 @@ public:
                            int                      partition_count,
                            int                      partition_id,
                            grpc::ServerContext*     server_context,
-                           int32_t                  prefill_cp_size = 1):
+                           int32_t                  prefill_cp_size = 1,
+                           size_t                   input_token_count = 0):
             request_id(request_id),
             request_key(std::move(request_key)),
             peer_addrs(std::move(peer_addrs)),
@@ -48,6 +49,7 @@ public:
             partition_id(partition_id),
             server_context(server_context),
             prefill_cp_size(prefill_cp_size),
+            input_token_count(input_token_count),
             group_block_ids_(std::move(group_block_ids)) {
             group_block_ids_.validate();
         }
@@ -71,6 +73,7 @@ public:
 
         grpc::ServerContext* server_context;
         int32_t              prefill_cp_size;
+        size_t               input_token_count;
 
     private:
         GroupBlockIds group_block_ids_;

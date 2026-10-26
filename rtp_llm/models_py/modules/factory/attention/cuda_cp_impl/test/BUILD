@@ -87,3 +87,18 @@ py_test(
     ],
     exec_properties = {"gpu": "H20_CU13"},
 )
+
+py_test(
+    name = "test_cp_sharded_cache",
+    env = {"GPU_COUNT": "2", "WORLD_SIZE": "2"},
+    srcs = ["test_cp_sharded_cache.py"],
+    deps = py_test_deps + [":cp_test_utils"] + select({
+        "@//:using_cuda13_x86": flashinfer_deps_with_cubin,
+        "//conditions:default": [],
+    }),
+    tags = ["L20_CU13"],
+    exec_properties = {
+        "gpu": "L20_CU13",
+        "gpu_count": "2",
+    },
+)

@@ -49,6 +49,7 @@ cc_library(
         "*.cc",
     ], exclude = ["CompleteTokenIds.cc"]),
     deps = [
+        "//rtp_llm/cpp/cache:prefix_cache_registration",
         ":generate_types",
         ":generate_config",
         ":complete_token_ids",
@@ -56,6 +57,7 @@ cc_library(
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/models:logits_processor",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/models:dfa_utils",
         "@havenask//aios/autil:env_util",
         "@havenask//aios/autil:synchronized_queue",

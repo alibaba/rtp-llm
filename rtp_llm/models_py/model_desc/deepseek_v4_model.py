@@ -343,6 +343,12 @@ def _args_from_model_config(
 class DeepSeekV4Model(GptModelBase):
     """Framework-facing model: owns a V4Transformer, feeds framework IO into it."""
 
+    @property
+    def supports_sparse_cache_save(self) -> bool:
+        # The extra destination writer is implemented by the FP8 DSV4
+        # prefill producers. BF16 cache variants keep the executor's guard.
+        return bool(getattr(self.v4, "fp8_kv_cache", False))
+
     # Whether this model captures aux hidden features for DSpARK. The draft
     # carries the capture ids too (for the shared-buffer row-width
     # derivation) but never captures; DeepSeekV4DSparkModel overrides this.
@@ -1410,14 +1416,14 @@ class DeepSeekV4Model(GptModelBase):
         elif attn.is_prefill:
             with _profiler.moe_record_function_scope():
                 capture = self.capture_context(inputs.capture_hidden_states)
-            return forward_prefill(
-                self.v4,
-                self.kv_cache,
-                self.parallelism_config,
-                inputs,
-                prepare_hidden_fn=prep_prefill,
-                capture_context=capture,
-            )
+                return forward_prefill(
+                    self.v4,
+                    self.kv_cache,
+                    self.parallelism_config,
+                    inputs,
+                    prepare_hidden_fn=prep_prefill,
+                    capture_context=capture,
+                )
         else:
             return forward_decode(
                 self.v4,

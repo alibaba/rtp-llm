@@ -1,8 +1,12 @@
 #include "c10/util/intrusive_ptr.h"
 #include "torch/all.h"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <limits>
+#include <future>
+#include <thread>
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
@@ -10,6 +14,7 @@
 
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -143,6 +148,279 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
         EXPECT_TRUE(second_src.cpu().eq(22).all().item<bool>());
         EXPECT_TRUE(first_dst.cpu().eq(33).all().item<bool>());
         EXPECT_TRUE(second_dst.cpu().eq(invalid_row ? 44 : 22).all().item<bool>());
+    }
+}
+
+TEST_F(NormalEngineTest, testSparseSaveRequiresWriterBeforeForward) {
+    class SparseSaveProcessor: public NormalBatchStreamProcessor {
+    public:
+        SparseSaveProcessor(const ModelConfig& model, const CacheConfig& cache):
+            NormalBatchStreamProcessor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, false) {}
+
+        absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& groups,
+                                                        TensorHolder&       holder) const override {
+            auto result = NormalBatchStreamProcessor::gatherModelInput(groups, holder);
+            if (result.ok()) {
+                result->cache_save_positions = torch::tensor({5}, torch::kInt64).reshape({1, 1});
+                result->cache_save_block_ids = torch::tensor({2}, torch::kInt32).reshape({1, 1, 1});
+            }
+            return result;
+        }
+    };
+
+    ModelConfig model;
+    model.num_layers                          = 1;
+    model.max_seq_len                         = 16;
+    model.vocab_size                          = 16;
+    model.input_vocab_size                    = 16;
+    model.hidden_size                         = 4;
+    model.attn_config.head_num                = 1;
+    model.attn_config.kv_head_num             = 1;
+    model.attn_config.size_per_head           = 4;
+    model.attn_config.tokens_per_block        = 2;
+    model.attn_config.kernel_tokens_per_block = 2;
+    CacheConfig cache;
+    cache.layer_num          = 1;
+    cache.seq_size_per_block = 2;
+    cache.dtype              = DataType::TYPE_FP16;
+    cache.fromGroupedSpecs({test::makeResolvedMhaSpec(cache.dtype, 1, 4, 2, "full")}, {{0}}, {CacheGroupType::FULL});
+    cache.finalizeBlockNums(4, RuntimeConfig{});
+    auto manager = std::make_shared<KVCacheManager>(cache);
+    ASSERT_TRUE(manager->init());
+
+    EngineInitParams params;
+    params.model_config_ = model;
+    params.py_model      = py::none();
+    NormalExecutor executor(params, manager);
+    bool           reached_model = false;
+    executor.setModel(
+        std::make_unique<MockModel>(model.vocab_size, [&](const GptModelInputs&) { reached_model = true; }));
+    executor.setBatchProcessor(std::make_unique<SparseSaveProcessor>(model, cache));
+    auto query             = std::make_shared<GenerateInput>();
+    query->input_ids       = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+    query->generate_config = std::make_shared<GenerateConfig>();
+    auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+    BatchKVCacheResource resource;
+    resource.resetBatchSize(1);
+    resource.initGroups(cache.topologyPtr());
+    resource.mutableBlockIds(0, "full").assign({1, 2, 3});
+    stream->setKVCache(resource);
+    EXPECT_ANY_THROW((void)executor.process({stream}));
+    EXPECT_FALSE(reached_model);
+}
+
+TEST_F(NormalEngineTest, testFeaturePrefillWithoutWriterCannotPublishRegistration) {
+    class SparseSaveProcessor: public NormalBatchStreamProcessor {
+    public:
+        SparseSaveProcessor(const ModelConfig& model, const CacheConfig& cache):
+            NormalBatchStreamProcessor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, false) {}
+
+        absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& groups,
+                                                        TensorHolder&       holder) const override {
+            auto result = NormalBatchStreamProcessor::gatherModelInput(groups, holder);
+            if (result.ok()) {
+                result->cache_save_positions = torch::tensor({5}, torch::kInt64).reshape({1, 1});
+                result->cache_save_block_ids = torch::tensor({2}, torch::kInt32).reshape({1, 1, 1});
+            }
+            return result;
+        }
+    };
+
+    ModelConfig model;
+    model.num_layers                          = 1;
+    model.max_seq_len                         = 16;
+    model.vocab_size                          = 16;
+    model.input_vocab_size                    = 16;
+    model.hidden_size                         = 4;
+    model.attn_config.head_num                = 1;
+    model.attn_config.kv_head_num             = 1;
+    model.attn_config.size_per_head           = 4;
+    model.attn_config.tokens_per_block        = 2;
+    model.attn_config.kernel_tokens_per_block = 2;
+    CacheConfig cache;
+    cache.layer_num          = 1;
+    cache.seq_size_per_block = 2;
+    cache.dtype              = DataType::TYPE_FP16;
+    cache.fromGroupedSpecs({test::makeResolvedMhaSpec(cache.dtype, 1, 4, 2, "full")}, {{0}}, {CacheGroupType::FULL});
+    cache.finalizeBlockNums(8, RuntimeConfig{});
+
+    KVCacheConfig kv_config;
+    kv_config.reuse_cache                       = true;
+    kv_config.enable_prefill_partial_tail_reuse = true;
+    PDSepConfig pd_config;
+    pd_config.role_type = RoleType::PREFILL;
+    auto manager        = std::make_shared<KVCacheManager>(cache,
+                                                    false,
+                                                    nullptr,
+                                                    kv_config,
+                                                    ParallelismConfig{},
+                                                    RuntimeConfig{},
+                                                    SpeculativeExecutionConfig{},
+                                                    pd_config);
+    ASSERT_TRUE(manager->init());
+
+    EngineInitParams params;
+    params.model_config_   = model;
+    params.py_model        = py::none();
+    params.kv_cache_config = kv_config;
+    params.pd_sep_config   = pd_config;
+    NormalExecutor executor(params, manager);
+    bool           reached_model = false;
+    executor.setModel(
+        std::make_unique<MockModel>(model.vocab_size, [&](const GptModelInputs&) { reached_model = true; }));
+    executor.setBatchProcessor(std::make_unique<SparseSaveProcessor>(model, cache));
+
+    auto query             = std::make_shared<GenerateInput>();
+    query->input_ids       = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+    query->generate_config = std::make_shared<GenerateConfig>();
+    ResourceContext context;
+    context.cache_manager                     = manager;
+    context.reuse_cache                       = true;
+    context.role_type                         = RoleType::PREFILL;
+    context.ignore_request_cache_switches     = true;
+    context.enable_prefill_partial_tail_reuse = true;
+    auto  stream   = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, context, nullptr);
+    auto& resource = stream->streamCacheResource();
+    resource.init(1);
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+    EXPECT_ANY_THROW((void)executor.process({stream}));
+    EXPECT_FALSE(reached_model);
+    for (const auto& point : resource.prefixCacheRegistration()->points) {
+        for (const auto& binding : point.group_bindings) {
+            EXPECT_NE(binding.state, PrefixCacheSaveState::CONTENT_COMPLETE);
+        }
+    }
+    stream->releaseResource();
+}
+
+TEST_F(NormalEngineTest, testTailReuseCaptureErrorAndConcurrentCancelNeverPublish) {
+    class FailingSaveModel: public ModelBase {
+    public:
+        FailingSaveModel(GenerateStreamPtr stream, bool concurrent_cancel):
+            stream_(std::move(stream)), concurrent_cancel_(concurrent_cancel) {}
+
+        bool supportsSparseCacheSave() const override {
+            return true;
+        }
+
+        GptModelOutputs forward(const GptModelInputs& inputs) override {
+            EXPECT_TRUE(inputs.cache_save_positions.defined() && inputs.cache_save_positions.numel() > 0);
+            EXPECT_TRUE(inputs.cache_save_block_ids.defined() && inputs.cache_save_block_ids.numel() > 0);
+            // Submit real device work so the post-writer completion boundary
+            // and the cancellation guard both cover an in-flight CUDA stream.
+            writer_work_ = torch::ones({1024}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            if (concurrent_cancel_) {
+                stream_->reportError(ErrorCode::EXECUTION_EXCEPTION, "injected cancellation");
+                release_future_ = std::async(std::launch::async, [this]() {
+                    stream_->releaseResource();
+                    released_.store(true, std::memory_order_release);
+                });
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                EXPECT_FALSE(released_.load(std::memory_order_acquire));
+            }
+            return {};
+        }
+
+        std::optional<std::string> takeDeferredHiddenStateCaptureError() override {
+            return "injected deferred capture failure";
+        }
+
+        bool waitForConcurrentRelease() {
+            if (!concurrent_cancel_) {
+                return true;
+            }
+            if (release_future_.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
+                return false;
+            }
+            release_future_.get();
+            return released_.load(std::memory_order_acquire);
+        }
+
+    private:
+        GenerateStreamPtr stream_;
+        bool              concurrent_cancel_;
+        torch::Tensor     writer_work_;
+        std::future<void> release_future_;
+        std::atomic<bool> released_{false};
+    };
+
+    for (bool concurrent_cancel : {false, true}) {
+        ModelConfig model;
+        model.num_layers                          = 1;
+        model.max_seq_len                         = 16;
+        model.vocab_size                          = 16;
+        model.input_vocab_size                    = 16;
+        model.hidden_size                         = 4;
+        model.attn_config.head_num                = 1;
+        model.attn_config.kv_head_num             = 1;
+        model.attn_config.size_per_head           = 4;
+        model.attn_config.tokens_per_block        = 2;
+        model.attn_config.kernel_tokens_per_block = 2;
+        CacheConfig cache;
+        cache.layer_num          = 1;
+        cache.seq_size_per_block = 2;
+        cache.dtype              = DataType::TYPE_FP16;
+        cache.fromGroupedSpecs(
+            {test::makeResolvedMhaSpec(cache.dtype, 1, 4, 2, "full")}, {{0}}, {CacheGroupType::FULL});
+        cache.finalizeBlockNums(16, RuntimeConfig{});
+        KVCacheConfig kv_config;
+        kv_config.reuse_cache                       = true;
+        kv_config.enable_device_cache               = true;
+        kv_config.enable_prefill_partial_tail_reuse = true;
+        PDSepConfig pd_config;
+        pd_config.role_type = RoleType::PREFILL;
+        auto manager        = std::make_shared<KVCacheManager>(cache,
+                                                        false,
+                                                        nullptr,
+                                                        kv_config,
+                                                        ParallelismConfig{},
+                                                        RuntimeConfig{},
+                                                        SpeculativeExecutionConfig{},
+                                                        pd_config);
+        ASSERT_TRUE(manager->init());
+
+        ResourceContext context;
+        context.cache_manager                     = manager;
+        context.reuse_cache                       = true;
+        context.role_type                         = RoleType::PREFILL;
+        context.ignore_request_cache_switches     = true;
+        context.enable_prefill_partial_tail_reuse = true;
+        auto query                                = std::make_shared<GenerateInput>();
+        query->input_ids                          = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+        query->generate_config                    = std::make_shared<GenerateConfig>();
+        auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        auto& resource                   = stream->streamCacheResource();
+        resource.init(1);
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+        ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
+        CacheKeysType path;
+        for (const auto& point : resource.prefixCacheRegistration()->points) {
+            path.push_back(point.endpoint.key);
+        }
+
+        EngineInitParams params;
+        params.model_config_   = model;
+        params.py_model        = py::none();
+        params.kv_cache_config = kv_config;
+        params.pd_sep_config   = pd_config;
+        NormalExecutor executor(params, manager);
+        auto           failing_model     = std::make_unique<FailingSaveModel>(stream, concurrent_cancel);
+        auto*          failing_model_ptr = failing_model.get();
+        executor.setModel(std::move(failing_model));
+        const auto status = executor.process({stream});
+        EXPECT_TRUE(status.ok()) << status.ToString();
+        EXPECT_TRUE(failing_model_ptr->waitForConcurrentRelease());
+        EXPECT_TRUE(stream->hasError());
+        EXPECT_FALSE(resource.prefixCacheRegistration()->content_completed);
+        const auto found = manager->blockTreeCache()->tree()->findNode(path);
+        EXPECT_TRUE(found.size() < path.size() || found.back()->token_end != 5);
+        if (!concurrent_cancel) {
+            stream->releaseResource();
+        }
+        EXPECT_TRUE(resource.prefixCacheRegistration()->source_pins.empty());
     }
 }
 

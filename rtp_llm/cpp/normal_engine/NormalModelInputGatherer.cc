@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
@@ -73,6 +74,88 @@ bool asyncDebugEnabled() {
 bool deviceInputEnabled() {
     const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
     return env != nullptr && std::string(env) == "1";
+}
+
+bool hasExplicitSaveDestination(const PrefixCacheRegistrationPoint& point) {
+    return std::any_of(point.group_bindings.begin(), point.group_bindings.end(), [](const auto& binding) {
+        return binding.state == PrefixCacheSaveState::REGISTERED
+               && binding.ownership == PrefixCacheSaveOwnership::OPTIONAL_REQUEST
+               && binding.resource.hasCompleteDeviceValue();
+    });
+}
+
+size_t executedSaveEndpoint(const GenerateStreamPtr& stream) {
+    RTP_LLM_CHECK_WITH_INFO(stream->prefixLength() >= 0, "sparse save prefix length must be non-negative");
+    RTP_LLM_CHECK_WITH_INFO(stream->currentBatchSize() == 1,
+                            "registered sparse save requires one prefill sequence");
+    const auto& registration = stream->streamCacheResource().prefixCacheRegistration();
+    RTP_LLM_CHECK_WITH_INFO(registration.has_value(), "sparse save requires a request registration");
+    // This owner-side context token vector is global; CP sharding happens only
+    // inside the Python model after gather and TP input publication.
+    return std::min(registration->original_input_tokens,
+                    static_cast<size_t>(stream->prefixLength()) + stream->currentExecuteTokens(0).size());
+}
+
+size_t explicitSavePointCount(const GenerateStreamPtr& stream) {
+    const auto& registration = stream->streamCacheResource().prefixCacheRegistration();
+    if (!registration || !registration->prepared) {
+        return 0;
+    }
+    const size_t executed_end = executedSaveEndpoint(stream);
+    return std::count_if(registration->points.begin(), registration->points.end(), [&](const auto& point) {
+        return point.endpoint.pos > registration->prepared_resume_endpoint && point.endpoint.pos <= executed_end
+               && hasExplicitSaveDestination(point);
+    });
+}
+
+void fillSparseSaveInput(GptModelInputs&                      input,
+                         const GenerateStreamPtr&             stream,
+                         size_t                               context_row,
+                         const std::vector<std::string>&      payload_tags) {
+    if (!input.cache_save_positions.defined()) {
+        return;
+    }
+    const auto& registration = stream->streamCacheResource().prefixCacheRegistration();
+    if (!registration || !registration->prepared) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(stream->currentBatchSize() == 1,
+                            "sparse cache save requires one prefill sequence per request");
+    const auto cache = stream->streamCacheResource().resourceContext().cache_manager->blockTreeCache();
+    RTP_LLM_CHECK_WITH_INFO(cache != nullptr, "sparse cache save requires a block tree cache");
+    const auto& group_sets = cache->groupSets();
+    const auto  max_points = static_cast<size_t>(input.cache_save_positions.size(1));
+    const auto  executed_end = executedSaveEndpoint(stream);
+    size_t      column     = 0;
+    for (const auto& point : registration->points) {
+        if (point.endpoint.pos <= registration->prepared_resume_endpoint || point.endpoint.pos > executed_end
+            || !hasExplicitSaveDestination(point)) {
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(column < max_points, "sparse save point count exceeds allocated S");
+        input.cache_save_positions.data_ptr<int64_t>()[context_row * max_points + column] =
+            static_cast<int64_t>(point.endpoint.pos);
+        for (const auto& binding : point.group_bindings) {
+            if (binding.state != PrefixCacheSaveState::REGISTERED
+                || binding.ownership != PrefixCacheSaveOwnership::OPTIONAL_REQUEST
+                || !binding.resource.hasCompleteDeviceValue()) {
+                continue;
+            }
+            RTP_LLM_CHECK_WITH_INFO(binding.group_set_id < group_sets.size(), "sparse save GroupSet ID is invalid");
+            const auto& tags = group_sets[binding.group_set_id]->groupTags();
+            RTP_LLM_CHECK_WITH_INFO(tags.size() == binding.resource.device_blocks.size(),
+                                    "sparse save GroupSet member count changed");
+            for (size_t member = 0; member < tags.size(); ++member) {
+                const auto row = std::find(payload_tags.begin(), payload_tags.end(), tags[member]);
+                RTP_LLM_CHECK_WITH_INFO(row != payload_tags.end(), "sparse save references unknown payload tag");
+                const size_t tag_row = static_cast<size_t>(row - payload_tags.begin());
+                const size_t offset = (tag_row * static_cast<size_t>(input.cache_save_positions.size(0))
+                                       + context_row) * max_points + column;
+                input.cache_save_block_ids.data_ptr<int32_t>()[offset] = binding.resource.device_blocks[member];
+            }
+        }
+        ++column;
+    }
 }
 
 struct GatherModelInputContext {
@@ -391,6 +474,12 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     const size_t total_decode_batch_size  = stream_groups.totalDecodeBatchSize();
     const size_t total_context_batch_size = stream_groups.totalContextBatchSize();
     const size_t total_block_copy_num     = stream_groups.totalBlockUpdateCopyNum();
+    size_t max_sparse_save_points = 0;
+    if (!stream_groups.isFakeStream()) {
+        for (const auto& stream : stream_groups.contextStreams()) {
+            max_sparse_save_points = std::max(max_sparse_save_points, explicitSavePointCount(stream));
+        }
+    }
     const size_t max_blocks_num           = blockTableWidth(stream_groups, config_.kv_cache_group_tags, false);
     const size_t kernel_width             = blockTableWidth(stream_groups, config_.kv_cache_group_tags, true);
     const size_t max_cache_keys_num       = std::max(max_blocks_num, stream_groups.maxCacheKeysNum());
@@ -441,6 +530,13 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     }
     if (total_block_copy_num > 0) {
         model_input.kv_cache_update_mapping = torch::empty({(int64_t)total_block_copy_num, 3}, pinned_i32);
+    }
+    if (max_sparse_save_points > 0) {
+        model_input.cache_save_positions = torch::full({(int64_t)total_context_batch_size,
+                                                        (int64_t)max_sparse_save_points}, -1, pinned_i64);
+        model_input.cache_save_block_ids = torch::full({(int64_t)config_.kv_cache_group_nums,
+                                                        (int64_t)total_context_batch_size,
+                                                        (int64_t)max_sparse_save_points}, -1, pinned_i32);
     }
 
     if (need_cal_position_id) {
@@ -734,8 +830,17 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             ctx.token_idx += input_tokens.size();
         }
 
+        if (!model_input.is_fake_stream) {
+            fillSparseSaveInput(model_input,
+                                stream,
+                                static_cast<size_t>(ctx.batch_idx - stream->currentBatchSize()
+                                                    - stream_groups.totalDecodeBatchSize()),
+                                model_input.kv_cache_group_tags);
+        }
         addCacheUpdateCopy(
             ctx, stream->streamCacheResource().getKVBlockUpdateMapping(), model_input.kv_cache_group_tags);
+        addCacheUpdateCopy(
+            ctx, stream->streamCacheResource().registeredSaveCopyMapping(), model_input.kv_cache_group_tags);
         stream->step();
     }
 

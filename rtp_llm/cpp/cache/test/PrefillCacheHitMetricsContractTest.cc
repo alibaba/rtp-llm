@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -14,6 +15,7 @@
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm::test {
@@ -48,6 +50,121 @@ void expectField(const std::string& line, const std::string& field) {
 }
 
 }  // namespace
+
+TEST(KVCacheHashUtilTest, ExactEndpointUsesBaseSegmentsSeedAndImageIdentity) {
+    auto make_tokens = [](char digest_char) {
+        auto input               = std::make_shared<GenerateInput>();
+        input->input_ids         = torch::arange(16, torch::kInt32);
+        input->generate_config   = std::make_shared<GenerateConfig>();
+        auto          multimodal = std::make_shared<V41RequestInputs>();
+        V41ImageInput image;
+        image.start              = 4;
+        image.types              = torch::zeros({8}, torch::kInt32);
+        image.n_vit_h            = 2;
+        image.n_vit_w            = 2;
+        image.content_sha256     = std::string(64, digest_char);
+        image.processor_identity = std::string(64, 'p');
+        multimodal->images.push_back(image);
+        input->v41_inputs = multimodal;
+        auto tokens       = std::make_shared<CompleteTokenIds>(1, 1, 32, 4);
+        tokens->init(input);
+        return tokens;
+    };
+    auto tokens   = make_tokens('a');
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    auto              config = makeSimpleMhaCacheConfig(1, 16, 4, DataType::TYPE_FP16);
+    ParallelismConfig parallelism;
+    config.finalizeStorageLayout(parallelism);
+    resource->initGroups(config.topologyPtr());
+    constexpr int64_t seed = -77;
+    initCacheKeys(resource, tokens, 4, seed);
+    ASSERT_EQ(resource->cacheKeys(0).size(), 4u);
+    for (int endpoint : {4, 8, 12, 16}) {
+        EXPECT_EQ(cacheKeyAtTokenEnd(*tokens, 0, 4, endpoint, seed), resource->cacheKeys(0)[endpoint / 4 - 1]);
+    }
+    int64_t    expected = hashInt64Array(resource->cacheKeys(0)[1], tokens->data(0) + 8, tokens->data(0) + 10);
+    const auto identity = tokens->imageCacheIdentity(8, 2);
+    expected            = hashInt64Array(expected, identity.data(), identity.data() + identity.size());
+    EXPECT_EQ(cacheKeyAtTokenEnd(*tokens, 0, 4, 10, seed), expected);
+    EXPECT_NE(cacheKeyAtTokenEnd(*tokens, 0, 4, 10, seed), cacheKeyAtTokenEnd(*make_tokens('b'), 0, 4, 10, seed));
+    const auto             all_tokens = tokens->completeTokenIdsVec(0);
+    const std::vector<int> source_segment(all_tokens.begin() + 8, all_tokens.end());
+    EXPECT_EQ(cacheKeyForSourceSegment(*tokens, source_segment, 8, 4, resource->cacheKeys(0)[1]),
+              resource->cacheKeys(0).back());
+    EXPECT_NE(cacheKeyForSourceSegment(*make_tokens('b'), source_segment, 8, 4, resource->cacheKeys(0)[1]),
+              resource->cacheKeys(0).back());
+    EXPECT_EQ(tokens->maxValidReuseLength(10), 4);
+    EXPECT_EQ(tokens->maxValidReuseLength(16, 6), 4);
+    EXPECT_EQ(tokens->maxValidReuseLength(16), 16);
+    EXPECT_EQ(tokens->maxValidReuseLength(-1), 0);
+}
+
+TEST(KVCacheHashUtilTest, InteriorReuseBoundaryHandlesOverlappingAndMissingImageIdentity) {
+    auto input             = std::make_shared<GenerateInput>();
+    input->input_ids       = torch::arange(32, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    auto multimodal        = std::make_shared<V41RequestInputs>();
+    for (const int start : {4, 8}) {
+        V41ImageInput image;
+        image.start              = start;
+        image.types              = torch::zeros({8}, torch::kInt32);
+        image.content_sha256     = std::string(64, 'a');
+        image.processor_identity = std::string(64, 'p');
+        multimodal->images.push_back(image);
+    }
+    input->v41_inputs = multimodal;
+    CompleteTokenIds tokens(1, 1, 32, 4);
+    tokens.init(input);
+    EXPECT_EQ(tokens.maxValidReuseLength(14), 4);
+    EXPECT_TRUE(tokens.isValidReuseLength(tokens.maxValidReuseLength(14)));
+    EXPECT_EQ(tokens.maxValidReuseLength(16), 16);
+    multimodal->images[1].content_sha256.clear();
+    EXPECT_EQ(tokens.maxValidReuseLength(32), 4);
+    EXPECT_TRUE(tokens.isValidReuseLength(tokens.maxValidReuseLength(32)));
+}
+
+TEST(KVCacheHashUtilTest, IncrementalPrefillKeepsSeventhPartialBaseKeyForPD) {
+    constexpr int     base_tokens = 256;
+    constexpr int64_t seed        = -77;
+    auto              input       = std::make_shared<GenerateInput>();
+    input->input_ids              = torch::arange(1300, torch::kInt32);
+    input->generate_config        = std::make_shared<GenerateConfig>();
+    auto tokens                   = std::make_shared<CompleteTokenIds>(1, 1, 2048, base_tokens);
+    tokens->init(input);
+
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    auto              config = makeSimpleMhaCacheConfig(1, 32, base_tokens, DataType::TYPE_FP16);
+    ParallelismConfig parallelism;
+    config.finalizeStorageLayout(parallelism);
+    resource->initGroups(config.topologyPtr());
+    initCacheKeys(resource, tokens, base_tokens, seed);
+    ASSERT_EQ(resource->cacheKeys(0).size(), 6u);
+    EXPECT_FALSE(resource->lastBlockAligned());
+
+    int previous_end = 1300;
+    for (int token_end : {1301, 1320, 1536, 1544}) {
+        for (int pos = previous_end; pos < token_end; ++pos) {
+            tokens->data(0)[pos] = pos;
+        }
+        tokens->setSeqLength(token_end);
+        updateCacheKeys(resource, tokens, base_tokens, seed);
+        const auto& keys = resource->cacheKeys(0);
+        ASSERT_EQ(keys.size(), static_cast<size_t>((token_end + base_tokens - 1) / base_tokens));
+        EXPECT_EQ(resource->lastBlockAligned(), token_end % base_tokens == 0);
+        for (size_t index = 0; index < keys.size(); ++index) {
+            const int endpoint = std::min(token_end, static_cast<int>((index + 1) * base_tokens));
+            EXPECT_EQ(keys[index], cacheKeyAtTokenEnd(*tokens, 0, base_tokens, endpoint, seed));
+        }
+        previous_end = token_end;
+    }
+    ASSERT_EQ(resource->cacheKeys(0).size(), 7u);
+    EXPECT_EQ(resource->cacheKeys(0)[6], cacheKeyAtTokenEnd(*tokens, 0, base_tokens, 1544, seed));
+    dropLastPartialBlock(resource);
+    EXPECT_TRUE(resource->lastBlockAligned());
+    EXPECT_EQ(resource->cacheKeys(0).size(), 6u);
+}
 
 TEST(PrefillCacheHitMetricsContractTest, FixedTheoryOutputAndFirstAttemptRoleGate) {
     initLogger();

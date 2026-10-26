@@ -10,6 +10,7 @@ from rtp_llm.models_py.model_desc.deepseek_v4_model import (
     Dsv4MtpHiddenBufferSpec,
     Dsv4SharedRuntimeBufferStore,
 )
+from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import DeepSeekV4MtpModel
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
 
 
@@ -26,6 +27,59 @@ class _RuntimeModule(torch.nn.Module):
 
 
 class MtpHiddenBufferTest(unittest.TestCase):
+    def test_mtp_prefill_keeps_sparse_inputs_on_inherited_production_path(self) -> None:
+        """MTP's fusion hook must still enter the common sparse prefill writer."""
+        model = DeepSeekV4MtpModel.__new__(DeepSeekV4MtpModel)
+        torch.nn.Module.__init__(model)
+        model.v4 = types.SimpleNamespace(fp8_kv_cache=True)
+        model.kv_cache = object()
+        model.parallelism_config = None
+        model.capture_context = lambda _: None
+        positions = torch.tensor([[1301]], dtype=torch.int64)
+        destinations = torch.tensor([[7]], dtype=torch.int32)
+        inputs = types.SimpleNamespace(
+            input_ids=torch.tensor([1]),
+            attention_inputs={
+                "swa_kv": types.SimpleNamespace(
+                    is_prefill=True,
+                    cache_save_positions=positions,
+                    cache_save_block_ids=destinations,
+                )
+            },
+            capture_hidden_states=False,
+        )
+        result = object()
+
+        def capture_prefill(v4, kv_cache, parallelism, passed_inputs, **kwargs):
+            self.assertIs(v4, model.v4)
+            self.assertIs(kv_cache, model.kv_cache)
+            self.assertIs(passed_inputs, inputs)
+            self.assertIs(kwargs["prepare_hidden_fn"].__self__, model)
+            self.assertIs(
+                kwargs["prepare_hidden_fn"].__func__,
+                DeepSeekV4MtpModel._prepare_prefill_hidden,
+            )
+            self.assertIs(
+                passed_inputs.attention_inputs["swa_kv"].cache_save_positions, positions
+            )
+            self.assertIs(
+                passed_inputs.attention_inputs["swa_kv"].cache_save_block_ids,
+                destinations,
+            )
+            self.assertIs(model._cur_inputs, inputs)
+            return result
+
+        with patch(
+            "rtp_llm.models_py.model_desc.deepseek_v4_model.forward_prefill",
+            side_effect=capture_prefill,
+        ) as prefill:
+            self.assertIs(model.forward(inputs), result)
+        prefill.assert_called_once()
+        self.assertIsNone(model._cur_inputs)
+        self.assertTrue(model.supports_sparse_cache_save)
+        model.v4.fp8_kv_cache = False
+        self.assertFalse(model.supports_sparse_cache_save)
+
     def test_model_constructs_with_nonempty_hidden_state_capture_layers(self) -> None:
         model_config: Any = types.SimpleNamespace(
             num_layers=2,

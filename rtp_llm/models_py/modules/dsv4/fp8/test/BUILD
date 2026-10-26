@@ -55,6 +55,7 @@ _GPU_TESTS = [
 # Mock only non-target transport/kernel boundaries; these verify scheduling,
 # lifetime, and metadata contracts without loading a full DSv4 checkpoint.
 _CONTRACT_TESTS = [
+    "test_sparse_save_slots",
     "test_cp_pool_reader_owned_lens",
     "test_attention_cp_prefill_paths",
     "test_attention_csa_overlap",
@@ -87,6 +88,20 @@ _CONTRACT_TESTS = [
 
 dsv4_py_test(
     name = "test_indexer_cp_padded_gather_distributed",
+    gpu_count = 2,
+    tags = ["multi_device"],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_py_test(
+    name = "test_compressor_cp_state_read_distributed",
+    gpu_count = 2,
+    tags = ["multi_device"],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_py_test(
+    name = "test_sparse_cp_writers_distributed",
     gpu_count = 2,
     tags = ["multi_device"],
     deps = _DSV4_FP8_TEST_DEPS,

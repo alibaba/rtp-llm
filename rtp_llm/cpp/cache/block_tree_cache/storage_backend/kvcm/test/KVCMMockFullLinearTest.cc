@@ -131,6 +131,44 @@ TEST(KVCMMockFullLinearTest, ReadsCompleteMultiGroupLocationWithoutLocalReuse) {
     EXPECT_TRUE(read(*backend.backend, std::move(request), std::move(result.match_meta)));
 }
 
+TEST(KVCMMockFullLinearTest, MatchSdkFailureKeepsLocalBoundaryAndReportsQueryError) {
+    auto environment = makeMultiGroupBackendEnvironment(
+        "kvcm_storage_backend_full_linear_match_sdk_error", /*full_group_count=*/1, /*linear_group_count=*/2);
+    auto client_wrapper = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
+    auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+
+    ScopedReferencedBlocks source_blocks(environment, 1);
+    const auto&            block_ids = source_blocks.get();
+    EXPECT_CALL(*client_wrapper,
+                match(_, _, kv_cache_manager::QueryType::QT_PREFIX_MATCH, std::vector<int64_t>{101}, _, _))
+        .WillOnce(Return(std::make_pair(false, kv_cache_manager::Locations{})));
+    auto request = makeGroupedStorageRequest(environment, {101}, /*local_matched_blocks=*/0, block_ids);
+    auto result  = match(*backend.backend, request);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.matched_blocks_num, 0u);
+}
+
+TEST(KVCMMockFullLinearTest, LocalBoundaryIsNotReportedAsRemoteMiss) {
+    auto environment = makeMultiGroupBackendEnvironment(
+        "kvcm_storage_backend_full_linear_local_boundary", /*full_group_count=*/1, /*linear_group_count=*/2);
+    auto client_wrapper = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
+    auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+
+    ScopedReferencedBlocks source_blocks(environment, 1);
+    const auto&            block_ids = source_blocks.get();
+    EXPECT_CALL(*client_wrapper, match(_, _, _, _, _, _)).Times(0);
+    auto request = makeGroupedStorageRequest(environment, {101}, /*local_matched_blocks=*/1, block_ids);
+    auto result  = match(*backend.backend, request);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.matched_blocks_num, 1u);
+}
+
 TEST(KVCMMockFullLinearTest, ReadsOnlyThroughNewestCompleteLinearStateAfterLocalReuse) {
     auto environment = makeMultiGroupBackendEnvironment(
         "kvcm_storage_backend_full_linear_read_local", /*full_group_count=*/1, /*linear_group_count=*/2);

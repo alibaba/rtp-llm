@@ -191,6 +191,43 @@ void BlockTreeEvictor::onMatched(TreeNode* node, size_t group_set_id) {
     }
 }
 
+void BlockTreeEvictor::onMatched(const std::vector<TreeNode*>& path) {
+    const uint64_t access         = ++access_seq_;
+    const int64_t  access_time_us = currentTimeUs();
+    for (const GroupSetPtr& group_set : tree_->groupSets()) {
+        const size_t group_set_id = group_set->groupSetId();
+        const size_t reuse_count  = std::min(group_set->computeReuseBlockCount(path.size()), path.size());
+        for (size_t index = path.size() - reuse_count; index < path.size(); ++index) {
+            TreeNode*  node     = path[index];
+            auto&      resource = node->group_set_resources[group_set_id];
+            const Tier top      = resource.getTopTier();
+            if (top == Tier::NONE) {
+                continue;
+            }
+            resource.candidate_meta.last_access_seq     = access;
+            resource.candidate_meta.last_access_time_us = access_time_us;
+            ++resource.candidate_meta.hit_count;
+            heapFor(group_set_id, top)->updateIfPresent(node, resource.candidate_meta);
+        }
+    }
+}
+
+void BlockTreeEvictor::onMatchedResources(const std::vector<std::pair<TreeNode*, size_t>>& resources) {
+    const uint64_t access         = ++access_seq_;
+    const int64_t  access_time_us = currentTimeUs();
+    for (const auto& [node, group_set_id] : resources) {
+        auto&      resource = node->group_set_resources[group_set_id];
+        const Tier top      = resource.getTopTier();
+        if (top == Tier::NONE) {
+            continue;
+        }
+        resource.candidate_meta.last_access_seq     = access;
+        resource.candidate_meta.last_access_time_us = access_time_us;
+        ++resource.candidate_meta.hit_count;
+        heapFor(group_set_id, top)->updateIfPresent(node, resource.candidate_meta);
+    }
+}
+
 CandidateStats BlockTreeEvictor::candidateStats() const {
     CandidateStats stats;
     for (const auto& tier_heaps : heaps_) {
@@ -325,7 +362,8 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
     if (max_victim_count == 0) {
         return {};
     }
-    const Tier target_tier = watermarkTargetTier(source_tier);
+    const GroupSetPtr& group_set   = tree_->groupSets()[group_set_id];
+    const Tier         target_tier = group_set->localOnly() ? Tier::NONE : watermarkTargetTier(source_tier);
     if (target_tier == Tier::NONE) {
         size_t     scheduled_count = 0;
         const bool direct_progress = batchDropLocked(group_set_id, source_tier, max_victim_count, scheduled_count);
@@ -339,6 +377,14 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
     for (size_t victim_count = 0; victim_count < max_victim_count; ++victim_count) {
         auto eviction_desc = chooseVictim(group_set_id, source_tier, /*force_drop=*/false);
         if (!eviction_desc.has_value()) {
+            break;
+        }
+        if (eviction_desc->target_tier == Tier::NONE) {
+            if (descriptors.empty()) {
+                runDropTask(std::move(*eviction_desc), false);
+                settled_(false);
+                return {/*direct_progress=*/true, /*async_submitted=*/false, /*scheduled_count=*/1};
+            }
             break;
         }
         timings.emplace_back(eviction_desc->node->group_set_resources[eviction_desc->group_set_id].candidate_meta);
@@ -527,9 +573,10 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t group_se
         return std::nullopt;
     }
 
-    GroupSetResource& resource    = entry->node->group_set_resources[group_set_id];
-    Tier              target_tier = Tier::NONE;
-    if (!force_drop) {
+    GroupSetResource&  resource    = entry->node->group_set_resources[group_set_id];
+    Tier               target_tier = Tier::NONE;
+    const GroupSetPtr& group_set   = tree_->groupSets()[group_set_id];
+    if (!force_drop && !group_set->localOnly() && !tree_->isShortLeaf(entry->node)) {
         if (tier == Tier::DEVICE && is_tier_enabled_(Tier::HOST)) {
             target_tier = Tier::HOST;
         } else if ((tier == Tier::DEVICE || tier == Tier::HOST) && is_tier_enabled_(Tier::DISK)) {
@@ -670,8 +717,7 @@ void BlockTreeEvictor::updatePendingRelease(const std::vector<TransferDescriptor
 void BlockTreeEvictor::collectFullPrune(const TransferDescriptor&                  eviction_desc,
                                         EvictionDropTask&                          task,
                                         std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const {
-    if (task.hasFullPrune()
-        || tree_->groupSets()[eviction_desc.group_set_id]->groupType() != CacheGroupType::FULL) {
+    if (task.hasFullPrune() || tree_->groupSets()[eviction_desc.group_set_id]->groupType() != CacheGroupType::FULL) {
         return;
     }
 
@@ -804,7 +850,7 @@ void BlockTreeEvictor::completeEvict(const std::vector<TransferDescriptor>& desc
             continue;
         }
         resource.evictFromTier(desc.source_tier);
-        resource.transfer_state       = GroupSetTransferState::IDLE;
+        resource.transfer_state = GroupSetTransferState::IDLE;
         resource.setBlocks(desc.target_tier, desc.target_blocks);
         tree_->refreshPublishedState(desc.node);
         RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue(),
@@ -834,7 +880,7 @@ void BlockTreeEvictor::reserveSource(const std::vector<TransferDescriptor>& evic
     for (const TransferDescriptor& desc : eviction_descs) {
         GroupSetResource& resource = desc.node->group_set_resources[desc.group_set_id];
         suspendCandidate(desc.node, desc.group_set_id, desc.source_tier);
-        resource.transfer_state       = GroupSetTransferState::DEMOTING;
+        resource.transfer_state = GroupSetTransferState::DEMOTING;
         tree_->refreshPublishedState(desc.node);
     }
 }
@@ -854,7 +900,7 @@ std::vector<TransferDescriptor> BlockTreeEvictor::restoreSource(const std::vecto
             RTP_LLM_LOG_WARNING("state mismatch, group_set=%zu node_key=%ld", desc.group_set_id, desc.node->cache_key);
             continue;
         }
-        resource.transfer_state       = GroupSetTransferState::IDLE;
+        resource.transfer_state = GroupSetTransferState::IDLE;
         tree_->refreshPublishedState(desc.node);
         RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue(),
                                 "eviction rollback produced invalid steady state: group_set_id=%zu node_key=%ld",
@@ -873,13 +919,13 @@ void BlockTreeEvictor::discardDetachedTransfer(const std::vector<TransferDescrip
     }
 
     for (const TransferDescriptor& desc : transfer_descs) {
-        GroupSetResource&  resource  = desc.node->group_set_resources[desc.group_set_id];
-        const GroupSetPtr& group_set = tree_->groupSets()[desc.group_set_id];
+        GroupSetResource&       resource  = desc.node->group_set_resources[desc.group_set_id];
+        const GroupSetPtr&      group_set = tree_->groupSets()[desc.group_set_id];
         const MultiNodeResource source_holder{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
         group_set->unreferenceBlocks(source_holder, BlockTreeRefType::CACHE);
         resource.evictFromTier(desc.source_tier);
-        resource.transfer_state       = GroupSetTransferState::IDLE;
-        resource.transfer_detached    = false;
+        resource.transfer_state    = GroupSetTransferState::IDLE;
+        resource.transfer_detached = false;
         tree_->refreshPublishedState(desc.node);
     }
 }
@@ -987,8 +1033,8 @@ EvictionDropTask BlockTreeEvictor::createDropTask(TransferDescriptor eviction_de
             node, group_set_id, /*path_index=*/0, source_tier, target_tier, resource.getBlocks(source_tier));
     };
 
-    const bool primary_is_leaf        = tree_->isLeafAtTier(primary_node, primary_group_id, source_tier);
-    const CacheGroupType primary_type = group_sets[primary_group_id]->groupType();
+    const bool           primary_is_leaf = tree_->isLeafAtTier(primary_node, primary_group_id, source_tier);
+    const CacheGroupType primary_type    = group_sets[primary_group_id]->groupType();
     for (const GroupSetPtr& group_set : group_sets) {
         const size_t group_set_id = group_set->groupSetId();
         if (group_set_id == primary_group_id) {

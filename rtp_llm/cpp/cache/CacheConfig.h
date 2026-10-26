@@ -148,6 +148,10 @@ public:
         return key_count / scale + (key_count % scale != 0);
     }
 
+    bool groupUsesCompactTransferTail(const std::string& tag) const {
+        return group(tag).policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && groupKeyScale(tag) > 1;
+    }
+
     bool isStateEntryTag(const std::string& tag) const {
         const auto& g = group(tag);
         return g.spec->type == KVCacheSpecType::OpaqueState && g.policy.cp_slice == CpBlockSliceMode::PAYLOAD_BYTES;
@@ -169,13 +173,7 @@ public:
         const size_t canonical = canonicalSizePerBlock();
         RTP_LLM_CHECK_WITH_INFO(key_index < std::numeric_limits<size_t>::max() / canonical,
                                 "cache canonical endpoint overflows size_t");
-        const auto&  cache_group = group(tag);
-        const size_t stride      = cache_group.seqSizePerBlock();
-        RTP_LLM_CHECK_WITH_INFO(stride > 0, "tag=%s has zero cache block stride", tag.c_str());
-        const size_t global_slot = ((key_index + 1) * canonical - 1) / stride;
-        return cache_cp_size > 1 && cache_group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN ?
-                   global_slot / cache_cp_size :
-                   global_slot;
+        return endpointBlockPosition(tag, (key_index + 1) * canonical);
     }
 
     bool supportsCanonicalReuse() const {
@@ -187,6 +185,20 @@ public:
             }
         }
         return true;
+    }
+
+    // Project a saved global token endpoint through this tag's resolved physical
+    // geometry. A short endpoint need not end at a canonical CP key boundary.
+    size_t endpointBlockPosition(const std::string& tag, size_t token_end) const {
+        RTP_LLM_CHECK_WITH_INFO(token_end > 0, "zero endpoint has no cache block position");
+        const auto&  cache_group = group(tag);
+        const size_t stride      = cache_group.seqSizePerBlock();
+        RTP_LLM_CHECK_WITH_INFO(stride > 0, "tag=%s has zero cache block stride", tag.c_str());
+        const size_t global_slot = (token_end - 1) / stride;
+        if (cache_cp_size > 1 && cache_group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
+            return global_slot / cache_cp_size;
+        }
+        return global_slot;
     }
 
     int localAllocTokens(const std::string& tag, int global_tokens) const {

@@ -1187,12 +1187,13 @@ protected:
         resetGroup();
     }
 
-    void resetGroup(std::shared_ptr<HostBlockPool> host_pool = nullptr, BlockTreeDiskBlockPoolPtr disk_pool = nullptr) {
+    void resetGroup(std::shared_ptr<HostBlockPool> host_pool = nullptr,
+                    BlockTreeDiskBlockPoolPtr disk_pool      = nullptr) {
         group_ = std::make_shared<FullGroupSet>(
             std::vector<DeviceBlockPoolPtr>{device_pool_}, std::move(host_pool), std::move(disk_pool));
         initializeFullGroup(group_, device_pool_);
-        groups_  = {group_};
-        tree_    = std::make_unique<BlockTree>(groups_);
+        groups_ = {group_};
+        tree_   = std::make_unique<BlockTree>(groups_, 1);
         evictor_ = evictor_runtime_.make(tree_.get());
     }
 

@@ -820,7 +820,14 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
                 )
                 self.assertEqual(result["group_tags"], tags)
                 if skip_run:
-                    for name in ("physical", "kernel", "group_types", "copy_mapping"):
+                    for name in (
+                        "physical",
+                        "kernel",
+                        "group_types",
+                        "copy_mapping",
+                        "cache_save_positions",
+                        "cache_save_block_ids",
+                    ):
                         self.assertIsNone(result[name], name)
                 else:
                     physical = {"linear": [[31, 32]], "full": [[11, 12]]}
@@ -842,6 +849,17 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
                         torch.tensor(
                             [[tags.index("linear"), 3, 4], [tags.index("full"), 1, 2]],
                             dtype=torch.int32,
+                        ),
+                    )
+                    torch.testing.assert_close(
+                        result["cache_save_positions"],
+                        torch.tensor([[1536, 2000]], dtype=torch.int64),
+                    )
+                    expected_save_ids = {"linear": [[41, -1]], "full": [[-1, 51]]}
+                    torch.testing.assert_close(
+                        result["cache_save_block_ids"],
+                        torch.tensor(
+                            [expected_save_ids[tag] for tag in tags], dtype=torch.int32
                         ),
                     )
             if skip_run:
@@ -967,6 +985,17 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    @_skip_rocm_context_parallel
+    def test_exact_prefix_pd_gather_transfers_seven_keys(self) -> None:
+        owner = _extension.run_exact_prefix_pd_gather(0)
+        peer = _extension.run_exact_prefix_pd_gather(1)
+        self.assertEqual(owner["key_count"], 7)
+        self.assertEqual(peer["key_count"], 7)
+        self.assertEqual(owner["seventh_key"], peer["seventh_key"])
+        self.assertNotEqual(owner["seventh_key"], 0)
+        self.assertEqual(owner["sent_base_indices"], [0, 2, 4, 6])
+        self.assertEqual(peer["sent_base_indices"], [1, 3, 5])
+
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
     ) -> None:
@@ -1564,6 +1593,35 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(result["fake_tags"], [])
         self.assertFalse(result["fake_physical_defined"])
         self.assertFalse(result["fake_kernel_defined"])
+        self.assertTrue(result["real_cache_save_defined"])
+        self.assertFalse(result["fake_cache_save_defined"])
+
+    def test_sparse_save_microbatch_uses_prefill_rows_only(self) -> None:
+        result = run_scenario(CacheStoreForwardModel(), "sparse_save_split")
+        positions = result["source_cache_save_positions"]
+        block_ids = result["source_cache_save_block_ids"]
+        torch.testing.assert_close(
+            positions, torch.tensor([[3, -1], [5, 6]], dtype=torch.int64)
+        )
+        torch.testing.assert_close(
+            block_ids, torch.tensor([[[31, -1], [41, 42]]], dtype=torch.int32)
+        )
+
+        decode, mixed, prefill = result["batches"]
+        self.assertIsNone(decode["cache_save_positions"])
+        self.assertIsNone(decode["cache_save_block_ids"])
+        torch.testing.assert_close(
+            mixed["cache_save_positions"], positions.narrow(0, 0, 1)
+        )
+        torch.testing.assert_close(
+            mixed["cache_save_block_ids"], block_ids.narrow(1, 0, 1)
+        )
+        torch.testing.assert_close(
+            prefill["cache_save_positions"], positions.narrow(0, 1, 1)
+        )
+        torch.testing.assert_close(
+            prefill["cache_save_block_ids"], block_ids.narrow(1, 1, 1)
+        )
 
     def test_mtp_writer_uses_selected_sub_config_for_real_write(self) -> None:
         model = CacheStoreForwardModel()
