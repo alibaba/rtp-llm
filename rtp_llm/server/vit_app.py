@@ -321,4 +321,9 @@ class VitEndpointServer:
             self.mm_rpc_server.stop()
 
     def worker_status(self):
-        return {}
+        if self.mm_process_engine is None:
+            return {}
+        return {
+            "alive": True,
+            "mm_inflight_inputs": self.mm_process_engine.get_inflight_input_count(),
+        }

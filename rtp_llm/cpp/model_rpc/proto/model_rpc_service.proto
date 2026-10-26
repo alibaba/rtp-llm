@@ -676,6 +676,9 @@ message WorkerStatusPB {
     // avoid constructing a group that the Engine can never admit.
     int64 max_seq_len = 21;
     int64 max_batch_tokens_size = 22;
+    // ViT-owned, deduplicated media work: admitted queue + execution + publication.
+    // Absence means an old worker or an incomplete proxy snapshot, NOT zero load.
+    google.protobuf.Int64Value mm_inflight_inputs = 23;
     // Keep field 25 aligned with FlexLB's WorkerStatusPB.
     KvCacheGroupModePB kv_cache_group_mode = 25;
 }

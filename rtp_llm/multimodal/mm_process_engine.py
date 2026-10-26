@@ -357,6 +357,17 @@ class MMProcessEngine:
         with self.query_num_lock:
             return self.query_num
 
+    def get_inflight_input_count(self) -> int:
+        """Remote ViT media work, including executor queue and publication.
+
+        Count the admission ownership, not RPC waiters or scheduler batches.
+        Duplicate cache claims share one slot; a cancelled running computation
+        retains its slot until its actual completion callback releases it.
+        This scalar read never walks caches, waits for CUDA, or takes task locks.
+        """
+        with self._async_admission_lock:
+            return self._async_admitted
+
     def report_vit_error(
         self,
         error: Optional[Any] = None,

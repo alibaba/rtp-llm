@@ -93,6 +93,7 @@ class VitCacheDirectoryTest {
         request.setCacheAffinityKeys(List.of(keys));
         request.setGenerateTimeout(30000);
         BalanceContext context = new BalanceContext(new FlexlbConfig());
+        context.getConfig().getRouter().getRoles().getVit().setCacheAffinityEnabled(true);
         context.setRequest(request);
         return context;
     }
