@@ -187,6 +187,79 @@ def test_fused_recurrent_narrow_block_map_view():
     assert_close("narrow cache", contiguous_cache, narrow_cache, 0.0)
 
 
+def test_fused_recurrent_matches_serial_state_rounding():
+    torch.manual_seed(1701)
+    device = "cuda"
+    tokens, heads, value_heads, dim = 5, 8, 16, 128
+    for batch in (1, 3):
+        q = torch.randn(batch, tokens, heads, dim, device=device, dtype=torch.bfloat16)
+        k = torch.randn_like(q)
+        v = torch.randn(
+            batch, tokens, value_heads, dim, device=device, dtype=torch.bfloat16
+        )
+        g = -torch.rand(batch, tokens, value_heads, device=device)
+        beta = torch.rand_like(g)
+        initial = torch.randn(batch, value_heads, dim, dim, device=device) * 0.05
+        # Retain a padded row stride, as in CUDA graph block tables.
+        block_map = torch.zeros(batch, tokens + 4, device=device, dtype=torch.int32)
+        block_map[:, : tokens + 1] = torch.arange(
+            1, batch * (tokens + 1) + 1, device=device, dtype=torch.int32
+        ).reshape(batch, tokens + 1)
+        block_map = block_map[:, : tokens + 1]
+        for state_dtype in (torch.bfloat16, torch.float16, torch.float32):
+            for block_size in (1, 16):
+                cache = torch.zeros(
+                    batch * (tokens + 1) + 1,
+                    value_heads,
+                    dim,
+                    dim,
+                    device=device,
+                    dtype=state_dtype,
+                )
+                cache[block_map[:, 0].long()] = initial.to(state_dtype)
+                serial_cache = cache.clone()
+                actual, _ = fused_recurrent_gated_delta_rule(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta,
+                    initial_state=cache,
+                    inplace_final_state=True,
+                    block_map=block_map,
+                    seq_size_per_block=block_size,
+                    sequence_lengths=torch.full(
+                        (batch,), block_size + 1, device=device, dtype=torch.int32
+                    ),
+                    use_qk_l2norm_in_kernel=True,
+                )
+                outputs = []
+                for i in range(tokens):
+                    # Read the previous token's persisted state, including its
+                    # dtype conversion, and write the next verification slot.
+                    # Pack the single-token batch as the decode caller does.
+                    output, _ = fused_recurrent_gated_delta_rule(
+                        q[:, i : i + 1].contiguous(),
+                        k[:, i : i + 1].contiguous(),
+                        v[:, i : i + 1].contiguous(),
+                        g[:, i : i + 1],
+                        beta[:, i : i + 1],
+                        initial_state=serial_cache,
+                        inplace_final_state=True,
+                        block_map=block_map[:, i : i + 2],
+                        seq_size_per_block=1,
+                        sequence_lengths=torch.full(
+                            (batch,), 2, device=device, dtype=torch.int32
+                        ),
+                        use_qk_l2norm_in_kernel=True,
+                    )
+                    outputs.append(output)
+                expected = torch.cat(outputs, dim=1)
+                context = (batch, state_dtype, block_size)
+                assert torch.equal(actual, expected), ("decode output", context)
+                assert torch.equal(cache, serial_cache), ("persisted states", context)
+
+
 if __name__ == "__main__":
     H = 16
     HV = 32
@@ -200,3 +273,4 @@ if __name__ == "__main__":
                 bs, seq, H, HV, D, scale, gate_logit_normalizer, torch.bfloat16
             )
     test_fused_recurrent_narrow_block_map_view()
+    test_fused_recurrent_matches_serial_state_rounding()
