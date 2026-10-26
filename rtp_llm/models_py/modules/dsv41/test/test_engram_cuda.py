@@ -321,19 +321,29 @@ class EngramCudaTest(unittest.TestCase):
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
         torch.testing.assert_close(output[1], hidden[1], rtol=0, atol=0)
 
-    def _cpu_prefetch_model(self, capacity=128, *, deadline=False):
+    def _cpu_prefetch_model(self, capacity=128, *, deadline=False, packed=False):
         from rtp_llm.models_py.modules.dsv41.engram import prepare_engram_cpu_lookup
 
         layers = [SimpleNamespace(engram=None) for _ in range(15)]
         for index, layer_id in enumerate((1, 14)):
+            projection = (
+                V41MXFP8Linear(
+                    (torch.randn(640, 384, device="cuda") * 0.02).to(
+                        torch.float8_e4m3fn
+                    ),
+                    torch.ones(20, 12, device="cuda").to(torch.float8_e8m0fnu),
+                )
+                if packed
+                else torch.nn.Linear(
+                    384, 640, bias=False, device="cuda", dtype=torch.bfloat16
+                )
+            )
             layers[layer_id] = SimpleNamespace(
                 engram=Engram(
                     self.layout,
                     index,
                     self.embedding,
-                    torch.nn.Linear(
-                        384, 640, bias=False, device="cuda", dtype=torch.bfloat16
-                    ),
+                    projection,
                     torch.randn(4, 128, dtype=torch.bfloat16, device="cuda"),
                     torch.randn(4, 128, dtype=torch.bfloat16, device="cuda"),
                     1e-20,
@@ -394,6 +404,79 @@ class EngramCudaTest(unittest.TestCase):
             for result, reference in zip(actual, expected):
                 torch.testing.assert_close(result, reference, rtol=0, atol=0)
                 torch.testing.assert_close(result[~mask], hidden[~mask], rtol=0, atol=0)
+
+    @torch.inference_mode()
+    def test_long_cpu_prefetch_matches_gpu_with_bounded_staging_and_changed_inputs(
+        self,
+    ):
+        from rtp_llm.models_py.modules.dsv41.engram import EngramCPULookupPrefetch
+
+        # Fix each group's amax so the packed input and BF16 roundtrip have
+        # identical FP8/E8M0 bytes. This tests the long-request routing without
+        # widening the existing packed WKV numerical contract.
+        self.pinned.weight[:, 0] = 448.0
+        for packed in (False, True):
+            model = self._cpu_prefetch_model(65537, packed=packed)
+            runtime = model._engram_cpu_runtime
+            host_pointers = {
+                index: slot.host.data_ptr() for index, slot in runtime.slots.items()
+            }
+            for count in (32768, 32769, 53682, 65537, 32769):
+                with self.subTest(packed=packed, count=count):
+                    windows = torch.randint(-1, 32, (count, 8), dtype=torch.int32)[
+                        :, ::2
+                    ]
+                    windows[::7, 1] = 2**31 - 1
+                    windows[::3, 0] = 9
+                    gpu_windows = windows.cuda()
+                    hashes = self.hash(gpu_windows, gpu_windows == 9)
+                    mask = (gpu_windows[:, 0] >= 0) & (gpu_windows[:, 0] != 9)
+                    hidden = torch.randn(
+                        count, 4, 128, dtype=torch.bfloat16, device="cuda"
+                    )
+                    expected = []
+                    for layer_id, index in model._engram_layers:
+                        layer = model.v4.layers[layer_id]
+                        layer.engram_hashes = hashes[:, index].contiguous()
+                        expected.append(
+                            layer.engram(hidden.clone(), layer.engram_hashes, mask)
+                        )
+                    plan = EngramCPULookupPrefetch(model, windows, 9)
+                    self.assertEqual(len(plan.work), 2)
+                    for (layer_id, _), reference in zip(model._engram_layers, expected):
+                        layer = model.v4.layers[layer_id]
+                        work = layer.engram._cpu_lookup_work
+                        output_reference = weakref.ref(work.future.result())
+                        self.assertEqual(output_reference().shape[0], count)
+                        with patch.object(
+                            HostEngramEmbedding,
+                            "__call__",
+                            side_effect=AssertionError("Unexpected UVA lookup"),
+                        ):
+                            actual = layer.engram(
+                                hidden.clone(), layer.engram_hashes, mask
+                            )
+                        self.assertTrue(work.consumed)
+                        self.assertIsNone(work.future)
+                        torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+                        torch.testing.assert_close(
+                            actual[~mask], hidden[~mask], rtol=0, atol=0
+                        )
+                        runtime.executor.submit(lambda: None).result()
+                        self.assertIsNone(output_reference())
+                        slot = runtime.slots[layer_id]
+                        self.assertEqual(slot.host.shape[0], 32768)
+                        self.assertEqual(slot.host.data_ptr(), host_pointers[layer_id])
+                    plan.clear()
+                    self.assertEqual(runtime.retired, [])
+            # The request limit remains the startup bound, independent of the
+            # smaller host staging allocation.
+            plan = EngramCPULookupPrefetch(
+                model, torch.zeros((65538, 4), dtype=torch.int32), 9
+            )
+            self.assertEqual(plan.work, [])
+            plan.clear()
+            runtime.close()
 
     def test_cpu_prefetch_dynamic_outputs_reuse_without_cpu_synchronization(self):
         from rtp_llm.models_py.modules.dsv41.engram import EngramCPULookupPrefetch

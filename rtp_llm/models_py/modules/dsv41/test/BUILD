@@ -15,6 +15,16 @@ py_test(
     }),
 )
 
+_ENGRAM_SM100_TESTS = [
+    "test_engram",
+    "test_engram_cpu",
+    "test_engram_cpu_deadline",
+    "test_engram_cpu_native_packed",
+    "test_engram_cuda",
+    "test_engram_packed",
+    "test_engram_prefetch",
+]
+
 _TESTS = [
     "test_dspark_commit_wkv",
     "mega_moe_static_buf_test",
@@ -80,7 +90,7 @@ _TESTS = [
         }),
         legacy_create_init = 0,
     )
-    for name in _TESTS if name not in ["test_v41_mega_mhc", "test_mhc_moe_inputs", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup"]
+    for name in _TESTS if name not in ["test_v41_mega_mhc", "test_mhc_moe_inputs", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup"] + _ENGRAM_SM100_TESTS
 ]
 
 py_test(
@@ -113,5 +123,5 @@ py_test(
         tags = ["dsv41_cuda13"],
         legacy_create_init = 0,
     )
-    for name in ["test_v41_mega_mhc", "test_mhc_moe_inputs", "test_fake_balance_expert", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup"]
+    for name in ["test_v41_mega_mhc", "test_mhc_moe_inputs", "test_fake_balance_expert", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup"] + _ENGRAM_SM100_TESTS
 ]

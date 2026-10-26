@@ -660,7 +660,7 @@ class EngramLookupDefaultsTest(unittest.TestCase):
                     model = SimpleNamespace(
                         _is_decode_role=decode, _engram_cpu_runtime=None
                     )
-                    runtime = SimpleNamespace(capacity=16, slots={})
+                    runtime = SimpleNamespace(capacity=16, max_rows=16, slots={})
                     with (
                         patch.dict(os.environ, env, clear=True),
                         patch.object(
@@ -675,6 +675,32 @@ class EngramLookupDefaultsTest(unittest.TestCase):
                     else:
                         create.assert_not_called()
                         self.assertIsNone(model._engram_cpu_runtime)
+
+    def test_cpu_runtime_refreshes_request_bound_on_growth_and_shrinkage(self):
+        model = SimpleNamespace(_is_decode_role=False, _engram_cpu_runtime=None)
+        created = []
+
+        def create(model, count):
+            runtime = SimpleNamespace(
+                capacity=min(count, 32768), max_rows=count, slots={}, close=Mock()
+            )
+            created.append(runtime)
+            return runtime
+
+        with (
+            patch.dict(os.environ, {"DSV41_CPU_ENGRAM_LOOKUP": "1"}),
+            patch.object(engram, "EngramCPULookupRuntime", side_effect=create),
+        ):
+            for count in (32768, 53682, 53682, 32769, 16):
+                engram.prepare_engram_cpu_lookup(model, max_m=count)
+                self.assertEqual(model._engram_cpu_runtime.max_rows, count)
+                self.assertEqual(model._engram_cpu_runtime.capacity, min(count, 32768))
+        self.assertEqual(
+            [runtime.max_rows for runtime in created], [32768, 53682, 32769, 16]
+        )
+        for runtime in created[:-1]:
+            runtime.close.assert_called_once()
+        created[-1].close.assert_not_called()
 
 
 class EngramCPUPrefetchTest(unittest.TestCase):
@@ -1074,7 +1100,7 @@ class EngramCPUPrefetchTest(unittest.TestCase):
 
         executor.submit.side_effect = submit
         with patch.object(torch, "empty", side_effect=allocate):
-            for count in (1, 16384, 32768, 7):
+            for count in (1, 16384, 32768, 53682, 7):
                 work = engram._EngramCPULookupWork(slot, Tensor(count))
                 work.submit(executor, object(), count, None)
                 self.assertEqual(work.future.result().shape, (count, 6144))
@@ -1084,7 +1110,151 @@ class EngramCPUPrefetchTest(unittest.TestCase):
         self.assertEqual(2 * target_bytes, 384 * 1024**2)
         self.assertFalse(hasattr(slot, "output"))
 
+    def test_chunked_worker_waits_before_host_reuse_and_preserves_tail_rows(self):
+        for packed in (False, True):
+            for count in (4, 5, 11):
+                with self.subTest(packed=packed, count=count):
+                    slot = object.__new__(engram._EngramCPULookupSlot)
+                    slot.device, slot.hash_index = torch.device("cuda:0"), 0
+                    slot.collect_timing, slot.num_threads, slot.packed = (
+                        False,
+                        8,
+                        packed,
+                    )
+                    slot.embedding = SimpleNamespace(weight=object(), scales=object())
+                    dtype = torch.uint8 if packed else torch.bfloat16
+                    slot.host = torch.empty((4, 2), dtype=dtype)
+                    output = torch.empty((count, 2), dtype=dtype)
+                    hashes = Future()
+                    hashes.set_result(torch.arange(count).view(count, 1, 1))
+                    pending, chunk_sizes = [], []
+
+                    def finish_copy():
+                        # Model an asynchronous H2D that reads host storage
+                        # only at completion, exposing an early overwrite.
+                        for destination, host, expected in pending:
+                            torch.testing.assert_close(host, expected, rtol=0, atol=0)
+                            destination.copy_(host)
+                        pending.clear()
+
+                    def native(weight, scales, ids, host, *, num_threads):
+                        self.assertEqual(pending, [])
+                        self.assertEqual(num_threads, 8)
+                        self.assertTrue(ids.is_contiguous())
+                        chunk_sizes.append(ids.shape[0])
+                        host.copy_(ids.expand(-1, 2))
+
+                    slot.copied, slot.stream = Mock(), Mock()
+                    slot.copied.synchronize.side_effect = finish_copy
+                    slot._copy = lambda destination, host: pending.append(
+                        (destination, host, host.clone())
+                    )
+                    lookup = Mock(side_effect=native)
+                    unused = Mock(side_effect=AssertionError("wrong lookup format"))
+                    package = SimpleNamespace(
+                        lookup_host_rows_cpu=unused if packed else lookup,
+                        lookup_host_rows_cpu_packed=lookup if packed else unused,
+                    )
+                    with (
+                        patch.dict(
+                            sys.modules,
+                            {"rtp_llm.models_py.modules.dsv41.engram_cpu": package},
+                        ),
+                        patch.object(
+                            torch.cuda, "device", lambda device: nullcontext()
+                        ),
+                    ):
+                        self.assertIs(slot.run(hashes, output), output)
+                    finish_copy()
+                    expected = torch.arange(count).view(-1, 1).expand(-1, 2).to(dtype)
+                    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                    self.assertEqual(
+                        chunk_sizes,
+                        [min(4, count - start) for start in range(0, count, 4)],
+                    )
+                    self.assertEqual(slot.host.shape, (4, 2))
+                    slot.stream.synchronize.assert_not_called()
+
+    def test_long_forward_consumes_original_ids_once_then_slices_bf16_or_packed_rows(
+        self,
+    ):
+        for packed in (False, True):
+            for count in (32768, 32769, 53682, 65537):
+                with self.subTest(packed=packed, count=count):
+                    ids = torch.zeros((count, 1), dtype=torch.int64)
+                    hidden = torch.zeros((count, 1), dtype=torch.bfloat16)
+                    mask = torch.arange(count) % 3 != 0
+                    rows = (
+                        (torch.arange(count) % 127)
+                        .view(count, 1)
+                        .to(torch.uint8 if packed else torch.bfloat16)
+                    )
+                    work = Mock()
+                    work.consume.return_value = rows
+                    chunks = []
+                    wkv = Mock(side_effect=lambda values: values.to(torch.bfloat16))
+                    wkv.forward_quantized.side_effect = (
+                        lambda values, scales: values.to(torch.bfloat16)
+                    )
+                    module = SimpleNamespace(
+                        _cpu_lookup_work=work,
+                        _lookup_work=None,
+                        wkv=wkv,
+                        layout=SimpleNamespace(n_hash_cols=1, head_dim=32),
+                        q_weight=None,
+                        k_weight=None,
+                        eps=1e-20,
+                        embed_tokens=Mock(
+                            side_effect=AssertionError("Unexpected GPU lookup")
+                        ),
+                    )
+                    module._forward_rows = (
+                        lambda *args, **kwargs: engram.Engram._forward_rows(
+                            module, *args, **kwargs
+                        )
+                    )
+
+                    def gate(value, kv, q, k, eps, token_mask, *, out):
+                        chunks.append(value.shape[0])
+                        result = value + kv * token_mask[:, None]
+                        return result if out is None else out.copy_(result)
+
+                    unpack = Mock(
+                        side_effect=lambda values, heads, dim: (values, object())
+                    )
+                    with (
+                        patch.object(
+                            engram, "_engram_inject_supported", return_value=False
+                        ),
+                        patch.object(engram, "gated_engram_residual", side_effect=gate),
+                        patch.dict(
+                            sys.modules,
+                            {
+                                "rtp_llm.models_py.modules.dsv41._engram_packed_triton": SimpleNamespace(
+                                    unpack_packed_rows=unpack
+                                )
+                            },
+                        ),
+                    ):
+                        actual = engram.Engram.forward(module, hidden, ids, mask)
+                    work.consume.assert_called_once_with(ids, hidden)
+                    self.assertIsNone(module._cpu_lookup_work)
+                    self.assertEqual(
+                        chunks,
+                        [min(32768, count - start) for start in range(0, count, 32768)],
+                    )
+                    torch.testing.assert_close(
+                        actual, rows.to(torch.bfloat16) * mask[:, None], rtol=0, atol=0
+                    )
+                    self.assertEqual(unpack.call_count, len(chunks) if packed else 0)
+                    self.assertEqual(
+                        wkv.forward_quantized.call_count, len(chunks) if packed else 0
+                    )
+                    self.assertEqual(wkv.call_count, 0 if packed else len(chunks))
+
     def test_packed_slot_storage_and_request_bytes_without_device_allocation(self):
+        cuda_initialized = torch.cuda.is_initialized()
+
         class V41MXFP8Linear:
             pass
 
@@ -1146,7 +1316,7 @@ class EngramCPUPrefetchTest(unittest.TestCase):
         self.assertIs(allocation_stream, self.current)
         self.assertEqual(slots[0].allocated.record.call_count, 2)
         self.assertTrue(all(not hasattr(slot, "output") for slot in slots))
-        self.assertFalse(torch.cuda.is_initialized())
+        self.assertEqual(torch.cuda.is_initialized(), cuda_initialized)
 
     def test_runtime_warmup_does_not_retain_outputs_or_completed_futures(self):
         references = []
@@ -1223,7 +1393,7 @@ class EngramCPUPrefetchTest(unittest.TestCase):
             model = SimpleNamespace(
                 _engram_hash_state=self.state,
                 _engram_cpu_runtime=SimpleNamespace(
-                    capacity=8, executor=executor, slots=slots
+                    capacity=8, max_rows=8, executor=executor, slots=slots
                 ),
                 v4=SimpleNamespace(
                     layers={
@@ -1248,13 +1418,22 @@ class EngramCPUPrefetchTest(unittest.TestCase):
             plan.clear()
             self.assertEqual(order[-1], 14)
             self.assertEqual(order.count(1), 2)
+            model._engram_cpu_runtime.max_rows = 9
+            for layer in model.v4.layers.values():
+                layer.engram_hashes = Tensor(9, 6)
+            plan = engram.EngramCPULookupPrefetch(
+                model, torch.zeros((9, 4), dtype=torch.int32), 9
+            )
+            self.assertEqual(len(plan.work), 2)
+            plan.clear()
+            self.assertEqual(order[-2:], [1, 14])
 
     def test_cold_or_cuda_windows_fall_back_without_submission(self):
         executor = Mock()
         model = SimpleNamespace(
             _engram_hash_state=self.state,
             _engram_cpu_runtime=SimpleNamespace(
-                capacity=8, executor=executor, slots={}
+                capacity=8, max_rows=8, executor=executor, slots={}
             ),
         )
         for windows in (
