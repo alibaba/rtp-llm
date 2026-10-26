@@ -6,8 +6,12 @@ Model adapters select explicit symbols; this loader never imports SGLang Python.
 
 import hashlib
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock
+
+_build_lock = Lock()
 
 
 @lru_cache(maxsize=1)
@@ -41,14 +45,24 @@ def load_sglang_kernel(name, header, symbol, arch, extra_cuda_cflags=()):
     signature = hashlib.sha256(
         json.dumps([header, symbol, flags]).encode()
     ).hexdigest()[:12]
-    return load_inline(
-        f"rtp_sg_{name}_{arch[0]}{arch[1]}_{source_digest}_{signature}",
-        cpp_sources=[],
-        cuda_sources=[
-            f'#include "{source}"',
-            f"TVM_FFI_DLL_EXPORT_TYPED_FUNC(forward, ({symbol}));",
-        ],
-        extra_cflags=["-std=c++20", "-O3"],
-        extra_cuda_cflags=flags,
-        extra_include_paths=[str(root / "compat"), str(root / "include")],
-    )
+    # TVM FFI otherwise invokes nvidia-smi, which is absent on PPU hosts.
+    with _build_lock:
+        previous = os.environ.get("TVM_FFI_CUDA_ARCH_LIST")
+        os.environ["TVM_FFI_CUDA_ARCH_LIST"] = f"{arch[0]}.{arch[1]}"
+        try:
+            return load_inline(
+                f"rtp_sg_{name}_{arch[0]}{arch[1]}_{source_digest}_{signature}",
+                cpp_sources=[],
+                cuda_sources=[
+                    f'#include "{source}"',
+                    f"TVM_FFI_DLL_EXPORT_TYPED_FUNC(forward, ({symbol}));",
+                ],
+                extra_cflags=["-std=c++20", "-O3"],
+                extra_cuda_cflags=flags,
+                extra_include_paths=[str(root / "compat"), str(root / "include")],
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("TVM_FFI_CUDA_ARCH_LIST", None)
+            else:
+                os.environ["TVM_FFI_CUDA_ARCH_LIST"] = previous

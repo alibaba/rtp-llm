@@ -3,10 +3,11 @@
 import unittest
 
 import torch
+from rtp_llm.device.device_type import is_ppu
 
 @unittest.skipUnless(
-    torch.cuda.is_available() and torch.cuda.get_device_name() == "ZW-M890P",
-    "requires a PPU M890P",
+    is_ppu(),
+    "requires a PPU",
 )
 class FlashMlaRuntimeTest(unittest.TestCase):
     def test_sparse_prefill_with_sink_and_masked_indices(self):

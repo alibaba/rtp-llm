@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import torch
+from rtp_llm.device.device_type import is_ppu
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
 from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
 from rtp_llm.platforms.ppu.models.dsv4.ppu_wo_a import PpuWoAFp8Linear
@@ -64,8 +65,8 @@ class DecodeFp8PolicyTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    torch.cuda.is_available() and torch.cuda.get_device_name() == "ZW-M890P",
-    "requires a PPU M890P",
+    is_ppu(),
+    "requires a PPU",
 )
 class DecodeFp8GraphTest(unittest.TestCase):
     @torch.inference_mode()

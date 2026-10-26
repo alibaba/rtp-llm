@@ -2,6 +2,7 @@ import dataclasses
 import unittest
 
 import torch
+from rtp_llm.device.device_type import is_ppu
 
 from rtp_llm.platforms.ppu.models.dsv4.decode_query import slice_compressor_query
 
@@ -68,8 +69,8 @@ class QuerySliceTest(unittest.TestCase):
 @unittest.skipUnless(torch.cuda.is_available(), "requires a PPU test allocation")
 class C4SpeculativeRingTest(unittest.TestCase):
     def test_native_compression_across_blocks_and_mtp_rollback(self):
-        if torch.cuda.get_device_name() != "ZW-M890P":
-            self.skipTest("requires M890P native kernels")
+        if not is_ppu():
+            self.skipTest("requires PPU native kernels")
         from rtp_llm.platforms.ppu.kernels.cuda.ppu_fp4_indexer import compress4_decode
         from rtp_llm.platforms.ppu.kernels.ppu_fp4_indexer_cache import (
             build_decode_plan,

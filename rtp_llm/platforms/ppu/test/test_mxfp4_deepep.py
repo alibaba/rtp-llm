@@ -10,6 +10,7 @@ import unittest
 from datetime import timedelta
 
 import torch
+from rtp_llm.device.device_type import is_ppu
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
@@ -177,8 +178,8 @@ class Mxfp4DeepEPTest(unittest.TestCase):
             raise ValueError("The model-shape diagnostic requires EP4 or EP8")
         if not torch.cuda.is_available() or torch.cuda.device_count() < world:
             self.skipTest(f"requires {world} exclusively leased PPU GPUs")
-        if any(torch.cuda.get_device_name(i) != "ZW-M890P" for i in range(world)):
-            self.skipTest("requires PPU M890P")
+        if not is_ppu():
+            self.skipTest("requires PPU")
         with tempfile.TemporaryDirectory(prefix="rtp-ppu-deepep-") as directory:
             mp.spawn(
                 run_rank,

@@ -4,13 +4,14 @@ import unittest
 from unittest.mock import patch
 
 import torch
+from rtp_llm.device.device_type import is_ppu
 
 from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
 
 
 @unittest.skipUnless(
-    torch.cuda.is_available() and torch.cuda.get_device_name() == "ZW-M890P",
-    "requires a PPU M890P",
+    is_ppu(),
+    "requires a PPU",
 )
 class DecodeHCTest(unittest.TestCase):
     def test_prenorm_against_fp32_reference(self):

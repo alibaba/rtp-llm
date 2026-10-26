@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import torch
+from rtp_llm.device.device_type import is_ppu
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
 from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
 from rtp_llm.platforms.ppu.modules.linear.fp8_linear import (
@@ -37,7 +38,7 @@ class DecodeQKVContractTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    torch.cuda.is_available() and torch.cuda.get_device_name() == "ZW-M890P",
+    is_ppu(),
     "requires M890P",
 )
 class DecodeQKVGpuTest(unittest.TestCase):

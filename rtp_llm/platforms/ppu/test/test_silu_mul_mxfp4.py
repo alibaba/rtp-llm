@@ -3,13 +3,14 @@
 import unittest
 
 import torch
+from rtp_llm.device.device_type import is_ppu
 
 from rtp_llm.ops import rtp_llm_ops
 
 
 @unittest.skipUnless(
-    torch.cuda.is_available() and torch.cuda.get_device_name() == "ZW-M890P",
-    "requires a PPU M890P",
+    is_ppu(),
+    "requires a PPU",
 )
 class SiluMulMxfp4Test(unittest.TestCase):
     def test_rejects_misaligned_packed_rows(self):

@@ -4,8 +4,8 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4 import platform_provider, utils
-from rtp_llm.models_py.modules.dsv4.fp8 import attention
+from rtp_llm.platforms.ppu.models.dsv4.impl import platform_provider, utils
+from rtp_llm.platforms.ppu.models.dsv4.impl.fp8 import attention
 
 
 class PpuDeepGemmLayoutCompatTest(unittest.TestCase):

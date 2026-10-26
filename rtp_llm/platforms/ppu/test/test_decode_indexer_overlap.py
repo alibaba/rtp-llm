@@ -5,10 +5,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from rtp_llm.device.device_type import is_ppu
 
 
 @unittest.skipUnless(
-    torch.cuda.is_available() and torch.cuda.get_device_name() == "ZW-M890P",
+    is_ppu(),
     "requires M890P",
 )
 class DecodeIndexerGpuTest(unittest.TestCase):

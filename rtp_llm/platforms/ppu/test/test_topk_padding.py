@@ -3,13 +3,14 @@
 import unittest
 
 import torch
+from rtp_llm.device.device_type import is_ppu
 
 from rtp_llm.platforms.ppu.modules.fused_moe.mxfp4_low_latency import pad_topk
 
 
 @unittest.skipUnless(
-    torch.cuda.is_available() and torch.cuda.get_device_name() == "ZW-M890P",
-    "requires a PPU M890P",
+    is_ppu(),
+    "requires a PPU",
 )
 class TopkPaddingTest(unittest.TestCase):
     def assert_routes(self, indices, weights, output):

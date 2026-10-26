@@ -4,24 +4,20 @@ import unittest
 from unittest.mock import patch
 
 import torch
+from rtp_llm.device.device_type import is_ppu
 
-from rtp_llm.models_py.modules.dsv4.hc.base import HCUnitBase
+from rtp_llm.platforms.ppu.models.dsv4.ppu_hc import PpuHCUnit
 from rtp_llm.platforms.ppu.models.dsv4.ppu_decode_provider import PpuDecodeProvider
 from rtp_llm.platforms.ppu.models.dsv4.manifest import DECODE_EXECUTION_OPTIONS
 
 
 class HCNormDefaultTest(unittest.TestCase):
     def test_default_preserves_pre_then_tp_normalization(self):
-        unit = HCUnitBase(
-            None,
-            None,
-            None,
-            dim=4,
-            hc_mult=4,
-            hc_sinkhorn_iters=20,
-            norm_eps=1e-6,
-            hc_eps=1e-6,
-        )
+        # Exercise the PPU fallback boundary without initializing native kernels.
+        unit = object.__new__(PpuHCUnit)
+        torch.nn.Module.__init__(unit)
+        unit.dim = 4
+        unit._fuse_norm = False
         x = torch.empty((3, 4, 4))
         readout = torch.empty((3, 1, 4))
         normalized = torch.randn((3, 4))
@@ -50,8 +46,8 @@ class HCNormDefaultTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    torch.cuda.is_available() and torch.cuda.get_device_name() == "ZW-M890P",
-    "requires a PPU M890P",
+    is_ppu(),
+    "requires a PPU",
 )
 class HCNormGraphTest(unittest.TestCase):
     def unit(self, *, reduction="fused", norm="fused", zero=False, tp_size=1, tp_rank=0):

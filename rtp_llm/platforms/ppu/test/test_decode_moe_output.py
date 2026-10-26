@@ -1,10 +1,11 @@
 """Native BF16 combine storage must preserve the FP32 shared-add boundary."""
 
 import unittest
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
+from rtp_llm.device.device_type import is_ppu
 
 from rtp_llm.models_py.triton_kernels.moe.shared_expert import fused_moe_epilogue
 from rtp_llm.platforms.ppu.modules.fused_moe.mxfp4_low_latency import (
@@ -20,15 +21,17 @@ class MoeOutputContractTest(unittest.TestCase):
         ids = torch.zeros(2, 3, dtype=torch.int64)
         mask = torch.tensor([True, True, True, False, False, False])
         hc = SimpleNamespace(
-            pre_norm=lambda value, *args, **kwargs: (value, None, None),
+            pre=lambda value, *args, **kwargs: (value, None, None),
             post=lambda value, *args: value,
         )
-        ffn = Mock(return_value=x)
+        ffn = Mock(spec=[], return_value=x)
         block = SimpleNamespace(
             layer_id=0, tp_size=1, tp_rank=0, attn_hc=hc, ffn_hc=hc,
-            attn_norm=None, ffn_norm=None, ffn=ffn,
+            attn=SimpleNamespace(), attn_norm=lambda value: value,
+            ffn_norm=lambda value: value, ffn=ffn,
             _mega_csa_adapter=None, _mega_hca_adapter=None,
         )
+        block._hc_pre_norm = MethodType(Block._hc_pre_norm, block)
         with patch(
             "rtp_llm.models_py.modules.dsv4._record_tensor.should_record_layer",
             return_value=False,
@@ -60,8 +63,8 @@ class MoeOutputContractTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    torch.cuda.is_available() and torch.cuda.get_device_name() == "ZW-M890P",
-    "requires a PPU M890P",
+    is_ppu(),
+    "requires a PPU",
 )
 class MoeOutputGraphTest(unittest.TestCase):
     @torch.inference_mode()

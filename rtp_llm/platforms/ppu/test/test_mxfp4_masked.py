@@ -8,6 +8,7 @@ fixtures; this small arithmetic case runs without SGLang or a checkpoint.
 import unittest
 
 import torch
+from rtp_llm.device.device_type import is_ppu
 
 from rtp_llm.platforms.ppu.kernels.ppu_mxfp4_masked import mxfp4_experts_masked
 from rtp_llm.platforms.ppu.modules.fused_moe.mxfp4_low_latency import (
@@ -16,8 +17,8 @@ from rtp_llm.platforms.ppu.modules.fused_moe.mxfp4_low_latency import (
 
 
 @unittest.skipUnless(
-    torch.cuda.is_available() and torch.cuda.get_device_name() == "ZW-M890P",
-    "requires a PPU M890P",
+    is_ppu(),
+    "requires a PPU",
 )
 class Mxfp4MaskedTest(unittest.TestCase):
     def setUp(self):

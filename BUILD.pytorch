@@ -135,7 +135,11 @@ cc_library(
         "torch.libs/libgfortran*.so*",
         "torch.libs/libgomp*.so*",
         "torch.libs/libopenblasp*.so",
-    ]),
+    ]) + select({
+        # Vendor libtorch_cuda depends on this sibling library at link time.
+        "@//:using_ppu": ["torch/lib/libxformers_ppu.so"],
+        "//conditions:default": [],
+    }),
     # No -lnccl/-lcudnn: the engine references zero nccl/cudnn symbols, so
     # those flags only baked dead DT_NEEDED entries in and forced every build
     # host to carry nccl/cudnn libs on the link path.  The pip wheel deps in
