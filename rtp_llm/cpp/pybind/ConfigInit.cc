@@ -1,4 +1,5 @@
 #define PYBIND11_DETAILED_ERROR_MESSAGES
+#include <limits>
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/common/blockUtil.h"
@@ -509,7 +510,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::block_tree_disk_evict_low_watermark_ratio)
         .def_readwrite("block_tree_disk_evict_high_watermark_ratio",
                        &KVCacheConfig::block_tree_disk_evict_high_watermark_ratio)
-        .def_readwrite("linear_step", &KVCacheConfig::linear_step)
+        .def_readwrite("reuse_cache_tail_blocks", &KVCacheConfig::reuse_cache_tail_blocks)
+        .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
+        .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
@@ -581,7 +584,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      11,
+                                      12,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -590,7 +593,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.max_block_size_per_item,
                                       self.memory_cache_size_mb,
                                       self.memory_cache_sync_timeout_ms,
-                                      self.linear_step,
+                                      self.reuse_cache_tail_blocks,
                                       self.fp8_kv_cache,
                                       self.ssm_state_dtype,
                                       self.kv_cache_mem_mb,
@@ -654,11 +657,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_crc,
                                       self.kvcm_read_backend_type,
                                       self.kvcm_min_replica_count,
-                                      self.kv_cache_event_snapshot_interval_ms);
+                                      self.kv_cache_event_snapshot_interval_ms,
+                                      self.linear_pool_blocks,
+                                      self.swa_pool_blocks);
             },
             [](py::tuple t) {
-                if (t.size() != 75 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
-                    || t[0].cast<std::string>() != "KVCacheConfig" || t[1].cast<int>() != 11) {
+                if (t.size() != 77 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
+                    || t[0].cast<std::string>() != "KVCacheConfig" || t[1].cast<int>() != 12) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
@@ -672,7 +677,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.max_block_size_per_item                         = t[7].cast<int>();
                 c.memory_cache_size_mb                            = t[8].cast<int64_t>();
                 c.memory_cache_sync_timeout_ms                    = t[9].cast<int64_t>();
-                c.linear_step                                     = t[10].cast<int>();
+                c.reuse_cache_tail_blocks                         = t[10].cast<int>();
                 c.fp8_kv_cache                                    = t[11].cast<int>();
                 c.ssm_state_dtype                                 = t[12].cast<std::string>();
                 c.kv_cache_mem_mb                                 = t[13].cast<int64_t>();
@@ -737,6 +742,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.kvcm_read_backend_type                          = t[72].cast<int32_t>();
                 c.kvcm_min_replica_count                          = t[73].cast<int32_t>();
                 c.kv_cache_event_snapshot_interval_ms              = t[74].cast<int>();
+                c.linear_pool_blocks                              = t[75].cast<uint32_t>();
+                c.swa_pool_blocks                                 = t[76].cast<uint32_t>();
+                if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
+                    || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())
+                    || c.swa_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+                    throw std::runtime_error("invalid KVCacheConfig tail or pool blocks");
+                }
                 return c;
             }));
 

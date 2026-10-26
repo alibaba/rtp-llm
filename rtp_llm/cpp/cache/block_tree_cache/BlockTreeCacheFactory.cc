@@ -355,12 +355,36 @@ std::vector<BlockInfo> resolveStorageBuffers(const CacheConfig&                c
 
 }  // namespace
 
-size_t computeHostUsableBlockCount(size_t capacity_bytes, size_t combined_stride_bytes) {
-    if (combined_stride_bytes == 0) {
-        return 0;
+std::vector<size_t> computeTierBlockCounts(size_t                     capacity_bytes,
+                                           const std::vector<size_t>& device_block_counts,
+                                           const std::vector<size_t>& pool_strides) {
+    RTP_LLM_CHECK(device_block_counts.size() == pool_strides.size());
+    size_t weighted_bytes = 0;
+    for (size_t i = 0; i < device_block_counts.size(); ++i) {
+        RTP_LLM_CHECK(device_block_counts[i] > 0 && pool_strides[i] > 0);
+        RTP_LLM_CHECK_WITH_INFO(device_block_counts[i]
+                                    <= (std::numeric_limits<size_t>::max() - weighted_bytes) / pool_strides[i],
+                                "BlockTreeCache weighted lower-tier budget overflow at group_set=%zu",
+                                i);
+        weighted_bytes += device_block_counts[i] * pool_strides[i];
     }
-    const size_t physical_blocks = capacity_bytes / combined_stride_bytes;
-    return physical_blocks > 0 ? physical_blocks - 1 : 0;
+    std::vector<size_t> block_counts;
+    block_counts.reserve(device_block_counts.size());
+    for (size_t i = 0; i < device_block_counts.size(); ++i) {
+        const size_t physical_blocks =
+            static_cast<unsigned __int128>(capacity_bytes) * device_block_counts[i] / weighted_bytes;
+        RTP_LLM_CHECK_WITH_INFO(
+            physical_blocks >= 2 && physical_blocks <= static_cast<size_t>(std::numeric_limits<BlockIdxType>::max()),
+            "BlockTreeCache tier capacity out of range: group_set=%zu budget_bytes=%zu device_blocks=%zu "
+            "stride_bytes=%zu physical_blocks=%zu",
+            i,
+            capacity_bytes,
+            device_block_counts[i],
+            pool_strides[i],
+            physical_blocks);
+        block_counts.push_back(physical_blocks);
+    }
+    return block_counts;
 }
 
 std::vector<size_t> computeHostUsableBlockCounts(size_t                             capacity_bytes,
@@ -530,12 +554,13 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
 
     std::vector<BackingLayout> backing_layouts;
     backing_layouts.reserve(group_members.size());
-    size_t combined_stride = 0;
+    std::vector<size_t> device_block_counts;
+    std::vector<size_t> pool_strides;
     for (const std::vector<std::string>& members : group_members) {
         const auto layout = computeBackingLayout(cache_config, members, crc_backend_available, pool_alignment);
-        RTP_LLM_CHECK_WITH_INFO(layout.pool_stride <= std::numeric_limits<size_t>::max() - combined_stride,
-                                "BlockTreeCache combined lower-tier stride overflow");
-        combined_stride += layout.pool_stride;
+        device_block_counts.push_back(
+            poolForTag(cache_config.topology(), group_pools, members.front())->totalBlocksNum() + 1);
+        pool_strides.push_back(layout.pool_stride);
         backing_layouts.push_back(layout);
     }
 
@@ -548,8 +573,19 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             strides.push_back(backing_layouts[i].pool_stride);
             types.push_back(cache_config.topology().group(group_members[i].front()).policy.group_type);
         }
-        const auto usable =
-            computeHostUsableBlockCounts(bytes, strides, types, kv_cache_config.memory_cache_swa_block_ratio);
+        std::vector<size_t> usable;
+        const bool has_host_ratio = kv_cache_config.memory_cache_swa_block_ratio != 1.0
+                                    && std::find(types.begin(), types.end(), CacheGroupType::FULL) != types.end()
+                                    && std::find(types.begin(), types.end(), CacheGroupType::SWA) != types.end();
+        if (has_host_ratio) {
+            // Non-default HOST ratios override device proportions; 1.0 preserves the device ratio.
+            usable = computeHostUsableBlockCounts(bytes, strides, types, kv_cache_config.memory_cache_swa_block_ratio);
+        } else {
+            usable = computeTierBlockCounts(bytes, device_block_counts, pool_strides);
+            for (auto& count : usable) {
+                --count;  // Host pools reserve block zero separately.
+            }
+        }
         if (std::any_of(usable.begin(), usable.end(), [](size_t count) { return count == 0; })) {
             RTP_LLM_LOG_ERROR("HOST budget %zu bytes cannot hold a usable block per pool with SWA/full ratio %f",
                               bytes,
@@ -580,12 +616,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
 
     std::vector<BlockTreeDiskBlockPoolPtr> disk_pools(group_members.size());
     if (disk_enabled && !group_members.empty()) {
-        const size_t bytes  = static_cast<size_t>(kv_cache_config.disk_cache_size_mb) * 1024UL * 1024UL;
-        const size_t usable = computeHostUsableBlockCount(bytes, combined_stride);
-        if (usable == 0) {
-            RTP_LLM_LOG_ERROR("disk budget is too small for one complete tree coordinate");
-            return nullptr;
-        }
+        const size_t bytes        = static_cast<size_t>(kv_cache_config.disk_cache_size_mb) * 1024UL * 1024UL;
+        const auto   block_counts = computeTierBlockCounts(bytes, device_block_counts, pool_strides);
         auto guard =
             createDiskMountGuard(kv_cache_config, parallelism_config.local_world_size, parallelism_config.local_rank);
         if (!guard) {
@@ -596,11 +628,19 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             const GroupBase&                first   = cache_config.topology().group(members.front());
             const std::string               pool_name =
                 "block_tree_disk_" + std::string(metricCacheGroupTypeName(first.policy.group_type));
+            const size_t physical_blocks = block_counts[group_set_id];
+            RTP_LLM_LOG_INFO("%s device_blocks=%zu physical_blocks=%zu stride_bytes=%zu bytes=%zu budget_bytes=%zu",
+                             pool_name.c_str(),
+                             device_block_counts[group_set_id],
+                             physical_blocks,
+                             pool_strides[group_set_id],
+                             physical_blocks * pool_strides[group_set_id],
+                             bytes);
             disk_pools[group_set_id] = createDiskPool(kv_cache_config,
                                                       guard,
                                                       pool_name,
                                                       backing_layouts[group_set_id],
-                                                      usable,
+                                                      physical_blocks - 1,
                                                       parallelism_config.world_rank,
                                                       parallelism_config.local_rank);
             if (!disk_pools[group_set_id]) {

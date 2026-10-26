@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <sstream>
@@ -191,7 +192,9 @@ struct KVCacheConfig {
     double block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
     double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
     double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
-    int    linear_step                                  = 1;  // for linear attention cache reuse
+    int      reuse_cache_tail_blocks                      = std::numeric_limits<int>::max();
+    uint32_t linear_pool_blocks                           = 0;
+    uint32_t swa_pool_blocks                              = 0;
     // Fields merged from PyKvCacheConfig
     int fp8_kv_cache = 0;
     // "auto" preserves a model-declared recurrent-state dtype. Models
@@ -215,17 +218,18 @@ struct KVCacheConfig {
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
-    // linear-step-derived block count.
+    // automatically derived block count.
     uint32_t dsv4_fixed_pool_blocks = 0;
 
     // Optional V4.1 decoder-only SWA override, including reserved block zero.
     uint32_t dsv41_decoder_swa_pool_blocks = 0;
 
-    // Usable HOST SWA blocks per FULL block; does not change checkpoint spacing.
+    // 1.0 follows device pool proportions; other positive values override the
+    // usable HOST SWA blocks per FULL block without changing checkpoint spacing.
     double memory_cache_swa_block_ratio = 1.0;
 
     // Optional DSV4 HCA_STATE pool block count override. 0 means HCA_STATE
-    // follows dsv4_fixed_pool_blocks or the normal linear-step-derived count.
+    // follows dsv4_fixed_pool_blocks or the normal automatically derived count.
     uint32_t dsv4_hca_state_pool_blocks = 0;
 
     // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned

@@ -56,7 +56,7 @@ def _pace_suites():
     tests.append(_pace_smoke(
         "remote_cache_pace_hybrid_tp2",
         "data/model/qwen3_next/q_r_next_fp8_tp2_long_input_reuse_remote_only.json",
-        "--tp_size 2 --act_type BF16 --seq_size_per_block 2048 --linear_step 2 --reuse_cache 1 --enable_remote_cache 1 --kvcm_put_timeout_ms 17000 --kvcm_get_timeout_ms 17000 --kvcm_get_broadcast_timeout 20000 --kvcm_put_broadcast_timeout 20000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
+        "--tp_size 2 --act_type BF16 --seq_size_per_block 2048 --reuse_cache_tail_blocks 8 --reuse_cache 1 --enable_remote_cache 1 --kvcm_put_timeout_ms 17000 --kvcm_get_timeout_ms 17000 --kvcm_get_broadcast_timeout 20000 --kvcm_put_broadcast_timeout 20000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
         gpu_type = "H20_CU13", sleep_time_qr = 20,
     ))
     native.test_suite(name = "smoke_cuda_remote_cache_pace", tests = tests)

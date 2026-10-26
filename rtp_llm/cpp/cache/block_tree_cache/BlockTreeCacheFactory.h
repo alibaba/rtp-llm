@@ -15,7 +15,9 @@ namespace rtp_llm {
 class BroadcastManager;
 class StorageBackend;
 
-size_t computeHostUsableBlockCount(size_t capacity_bytes, size_t stride_bytes);
+std::vector<size_t> computeTierBlockCounts(size_t                     capacity_bytes,
+                                           const std::vector<size_t>& device_block_counts,
+                                           const std::vector<size_t>& pool_strides);
 
 // Ratios apply to usable blocks, while the byte budget also includes each
 // pool's reserved block zero. Without both FULL and SWA, preserve equal counts.
