@@ -54,6 +54,9 @@ class GptModelBase(nn.Module):
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()
+        self.draft_prefill_use_decode_buckets = getattr(
+            config, "draft_prefill_use_decode_buckets", False
+        )
         self.nvfp4_lm_head = None
         quant_config = getattr(config, "quant_config", None)
         if quant_config is not None and quant_config.get_method() == "modelopt_mixed":

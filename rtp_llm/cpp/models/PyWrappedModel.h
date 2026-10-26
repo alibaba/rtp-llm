@@ -297,6 +297,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
+        graph_params.draft_prefill_use_decode_buckets =
+            py::hasattr(py_instance, "draft_prefill_use_decode_buckets")
+            && py_instance.attr("draft_prefill_use_decode_buckets").cast<bool>();
         if (params.kv_cache_layer_layout.has_value()) {
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTagsSnapshot();
         }
