@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -119,6 +120,8 @@ public:
 
     ~BlockTreeCache();
     bool init();
+    // Retry deferred watermarks after external pins release. Safe inside a pool callback.
+    void onCapacityChanged();
     // Reject pending loads and wait for allocator callbacks before its members are destroyed.
     void shutdownLoads();
 
@@ -199,6 +202,8 @@ private:
     mutable std::mutex                             mutex_;
     BlockTreeEvictor                               evictor_;
     bool                                           initialized_{false};
+    std::atomic<bool>                              stopping_{false};
+    std::atomic<bool>                              watermark_check_pending_{false};
     BlockTreeLoader                                loader_;
     BlockTreeStorer                                storer_;
     std::unique_ptr<FullPrefixInvariantScanner>    full_prefix_scanner_;
