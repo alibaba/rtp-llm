@@ -104,6 +104,7 @@ bool BlockTreeCache::init() {
 }
 
 BlockTreeCache::~BlockTreeCache() {
+    stopping_.store(true);
     full_prefix_scanner_.reset();
     RTP_LLM_LOG_INFO("destroying, closing load tickets...");
     shutdownLoads();
@@ -130,6 +131,23 @@ BlockTreeCache::~BlockTreeCache() {
 
 void BlockTreeCache::shutdownLoads() {
     loader_.shutdown();
+}
+
+void BlockTreeCache::onCapacityChanged() {
+    if (stopping_.load() || watermark_check_pending_.exchange(true)) {
+        return;
+    }
+    // Capacity callbacks can run under mutex_ while tree references are released.
+    // Queue the check and coalesce wakeups instead of reacquiring that mutex inline.
+    if (!task_pool_->submitCompletion([this] {
+            watermark_check_pending_.store(false);
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!stopping_.load()) {
+                checkWatermark();
+            }
+        })) {
+        watermark_check_pending_.store(false);
+    }
 }
 
 TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
