@@ -215,8 +215,15 @@ py_library(
         "eplb/*.py",
     ]),
     deps = [
+        ":device",
+        ":torch",
         ":utils",
-    ],
+    ] + select({
+        "@//:using_cuda13_x86": [":deep_ep"],
+        "@//:using_cuda13_arm": [":deep_ep"],
+        "@//:using_cuda": [":deep_ep"],
+        "//conditions:default": [],
+    }) + triton_deps(["triton"]),
 )
 
 py_library(
@@ -324,7 +331,7 @@ py_library(
     }) + select({
         # cuda13 tests use the matching cubins from the pip lock.
         # The jit-cache wheel is installed through Requires-Dist in runtime images.
-        "@//:using_cuda13_x86": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "quack-kernels", "flash-attn-4", "flash-mla", "fast-hadamard-transform", "tilelang"],
+        "@//:using_cuda13_x86": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "quack-kernels", "flash-attn-4", "flash-mla", "flash-mla-legacy", "fast-hadamard-transform", "tilelang"],
         "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "quack-kernels", "flash-attn-4", "flash-mla", "flash-mla-legacy", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],

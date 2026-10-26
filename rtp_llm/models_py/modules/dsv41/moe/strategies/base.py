@@ -34,6 +34,8 @@ from typing import ClassVar, Dict, Optional, Type
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
+
 
 @dataclass(frozen=True)
 class MoeCfg:
@@ -60,6 +62,15 @@ class MoeCfg:
     dp_size: int = 1
     dp_rank: int = 0
     fake_balance_expert: bool = False
+    n_physical_experts: Optional[int] = None
+
+    @property
+    def physical_expert_num(self) -> int:
+        return (
+            self.n_routed_experts
+            if self.n_physical_experts is None
+            else self.n_physical_experts
+        )
 
 
 class RoutedExpertsStrategy(nn.Module):
@@ -93,8 +104,8 @@ class RoutedExpertsStrategy(nn.Module):
     define ``setup_weights`` + ``can_handle``.
     """
 
-    # Registered names currently include mega, mega_se, mega_fused,
-    # grouped_fp4, local_loop, and deepep.
+    # Registered names currently include mega, mega_se, grouped_fp4,
+    # local_loop, and deepep.
     name: ClassVar[str]
 
     # True when ``forward`` already returns ``routed + shared`` (the strategy
@@ -129,6 +140,16 @@ class RoutedExpertsStrategy(nn.Module):
         if self.fake_balance_expert is not None and indices.shape[0] > 0:
             self.fake_balance_expert(indices, weights)
 
+    def finalize_routing(self, indices, weights, eplb_layer=None) -> None:
+        """Finish logical routing, then map into the dispatch buffer in place.
+
+        MoE owns eplb_layer; this call only borrows it. Packed Mega/MHC views
+        must keep their addresses stable across CUDA graph replay.
+        """
+        self.apply_fake_balance(indices, weights)
+        if eplb_layer is not None:
+            indices.copy_(eplb_layer.map_ids(indices))
+
     def setup_weights(self, layer_weights: Dict) -> None:
         """Pop the strategy's own routed-expert stacks from ``layer_weights``
         (the framework's per-layer ``ModelWeights.weights[layer_id]`` dict
@@ -139,6 +160,10 @@ class RoutedExpertsStrategy(nn.Module):
         post-init audit can detect leftover keys (= bug).
         """
         raise NotImplementedError
+
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        """Borrow every resident routed weight/scale with physical experts on dim 0."""
+        raise NotImplementedError(f"{type(self).__name__} does not support EPLB")
 
     def setup_runtime(self) -> None:
         """Create non-weight state after :meth:`setup_weights` completes.
@@ -154,7 +179,9 @@ class RoutedExpertsStrategy(nn.Module):
         self,
         x: torch.Tensor,  # [N, D] BF16
         weights: torch.Tensor,  # [N, topk] FP32
-        indices: torch.Tensor,  # [N, topk] int64 GLOBAL expert id
+        indices: torch.Tensor,  # [N, topk] int64 logical expert id
+        expert_load: Optional[ExpertLoadContext] = None,
+        eplb_layer=None,
     ) -> torch.Tensor:  # [N, D] FP32
         """Route + compute. Returns per-token routed-expert sum in fp32."""
         raise NotImplementedError
@@ -172,6 +199,8 @@ class RoutedExpertsStrategy(nn.Module):
         x: torch.Tensor,
         gate,
         input_ids: torch.Tensor | None,
+        expert_load: Optional[ExpertLoadContext] = None,
+        eplb_layer=None,
     ) -> torch.Tensor:
         """Optional fast path that fuses router gate + MegaMoE input packing."""
         raise NotImplementedError(
@@ -295,11 +324,6 @@ def select_strategy(
         and os.environ.get("DSV41_MEGA_SHARED_EXPERT", "1") == "1"
         and os.environ.get("DSV4_USE_MEGA_MOE_SE", "1") != "0"
     )
-    if separate_shared and forced == "mega_fused":
-        raise ValueError(
-            "V4.1 MXFP8 shared experts cannot use mega_fused's block-128 "
-            "weight recipe; use DSV4_MOE_STRATEGY=mega"
-        )
     if separate_shared and forced == "mega_se" and not native_shared_enabled:
         raise ValueError(
             "V4.1 MegaMoE-SE requires "
@@ -310,31 +334,14 @@ def select_strategy(
         and native_shared_enabled
         and forced in (None, "mega", "mega_se")
     ):
-        if os.environ.get("DSV4_USE_MEGA_MOE_FUSED", "0") == "1":
-            raise RuntimeError(
-                "DSV41_MEGA_SHARED_EXPERT=1 conflicts with DSV4_USE_MEGA_MOE_FUSED=1"
-            )
         forced, strict = "mega_se", True
 
-    # The current DeepGEMM shared-expert API and the older experimental fused
-    # API use incompatible buffers. Never allow both variants to race.
     if cfg.ep_size > 1 and not explicit_env and not separate_shared:
-        from rtp_llm.models_py.modules.dsv41.moe.mega_fused_buf import (
-            mega_moe_fused_requested,
-        )
         from rtp_llm.models_py.modules.dsv41.moe.mega_se_buf import (
             mega_moe_se_requested,
         )
 
-        se_requested = mega_moe_se_requested()
-        fused_requested = mega_moe_fused_requested()
-        if se_requested and fused_requested:
-            raise RuntimeError(
-                "DSV4_USE_MEGA_MOE_SE (defaults to 1) conflicts with "
-                "DSV4_USE_MEGA_MOE_FUSED=1; set DSV4_USE_MEGA_MOE_SE=0 "
-                "to select the older fused variant."
-            )
-        if se_requested:
+        if mega_moe_se_requested():
             if forced not in (None, "mega", "mega_se"):
                 raise RuntimeError(
                     "DSV4_USE_MEGA_MOE_SE=1 conflicts with requested MoE "
@@ -342,33 +349,11 @@ def select_strategy(
                 )
             forced, strict = "mega_se", True
 
-    # ``DSV4_USE_MEGA_MOE_FUSED=1`` opts the EP routed path into the fused
-    # Mega kernel. It is a Mega variant, so it only kicks in where the
-    # non-fused Mega would (ep_size > 1) and replaces an unspecified/"mega"
-    # selection. Strict so an unavailable fused kernel fails loudly rather
-    # than silently downgrading to non-fused (which would invalidate tests).
-    if (
-        cfg.ep_size > 1
-        and forced in (None, "mega")
-        and not explicit_env
-        and not separate_shared
-    ):
-        from rtp_llm.models_py.modules.dsv41.moe.mega_fused_buf import (
-            mega_moe_fused_requested,
-        )
-
-        if mega_moe_fused_requested():
-            forced, strict = "mega_fused", True
-
     if forced is not None:
         for cls in _STRATEGY_PRIORITY:
             if cls.name == forced:
                 if cls.can_handle(cfg):
-                    if cfg.ep_size > 1 and cls.name not in (
-                        "mega",
-                        "mega_fused",
-                        "mega_se",
-                    ):
+                    if cfg.ep_size > 1 and cls.name not in ("mega", "mega_se"):
                         raise RuntimeError(
                             "DSV4 EP MoE requires MegaMoEStrategy. "
                             f"Requested strategy {forced!r} would bypass Mega "

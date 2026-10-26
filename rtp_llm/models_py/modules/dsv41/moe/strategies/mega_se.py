@@ -144,7 +144,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         self._mega_group = group
         self._mega_buf = _get_or_create_mega_se_buf(
             group=group,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
             num_topk=cfg.n_activated_experts,
             hidden=D,
@@ -255,7 +255,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         return int(
             deep_gemm.get_block_m_for_mega_moe(
                 self.cfg.ep_size,
-                self.cfg.n_routed_experts,
+                self.cfg.physical_expert_num,
                 self._mega_buf.num_max_tokens_per_rank,
                 int(tokens),
                 self.cfg.n_activated_experts,
@@ -276,7 +276,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         if callable(get_block_m):
             block_m_resolver = lambda tokens: get_block_m(
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 max_tokens_per_rank,
                 tokens,
                 cfg.n_activated_experts,
@@ -284,7 +284,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             )
         return generate_mega_moe_se_jit_token_counts(
             num_ranks=cfg.ep_size,
-            num_experts=cfg.n_routed_experts,
+            num_experts=cfg.physical_expert_num,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
             intermediate_hidden=cfg.moe_inter_dim,
@@ -313,7 +313,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         warmup_key = (
             "mega_se",
             cfg.ep_size,
-            cfg.n_routed_experts,
+            cfg.physical_expert_num,
             cfg.n_local_experts,
             cfg.n_activated_experts,
             cfg.dim,
@@ -340,7 +340,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                 format_token_counts(token_counts),
                 cfg.max_tokens_per_rank,
                 cfg.ep_size,
-                cfg.n_routed_experts,
+                cfg.physical_expert_num,
                 cfg.n_activated_experts,
                 cfg.dim,
                 cfg.moe_inter_dim,
@@ -430,13 +430,21 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             and (_get_mega_se_gate_pack_kernels() is not None)
         )
 
-    def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
+    def _launch(
+        self,
+        y: torch.Tensor,
+        tokens: int,
+        device: torch.device,
+        expert_load=None,
+        eplb_layer=None,
+    ) -> None:
         import deep_gemm
 
-        if self.fake_balance_expert is not None:
-            self.apply_fake_balance(
-                self._mega_buf.topk_idx[:tokens], self._mega_buf.topk_weights[:tokens]
-            )
+        self.finalize_routing(
+            self._mega_buf.topk_idx[:tokens],
+            self._mega_buf.topk_weights[:tokens],
+            eplb_layer,
+        )
         self._maybe_pre_kernel_barrier(tokens)
         sync_cuda_graph_warmup_ranks(
             f"dsv4.mega_moe_se.layer{self.cfg.layer_id}.before_deepgemm", device
@@ -454,16 +462,21 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
+            cumulative_local_expert_recv_stats=(
+                expert_load.expert_token_counts if expert_load is not None else None
+            ),
             **self._shared_recipe_kwargs,
         )
 
-    def forward(self, x, weights, indices):
+    def forward(self, x, weights, indices, expert_load=None, eplb_layer=None):
         """Return BF16 routed+shared output; participate even for local T=0."""
         tokens = x.size(0)
         block_m = self._block_m(tokens)
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
         y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        self._launch(
+            y, tokens, x.device, expert_load=expert_load, eplb_layer=eplb_layer
+        )
         return y
 
     def prepare_mhc_inputs(self, x: torch.Tensor) -> MegaMoEInputs | None:
@@ -492,7 +505,14 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             block_m=self._block_m(tokens),
         )
 
-    def forward_from_mhc(self, x: torch.Tensor, gate, inputs: MegaMoEInputs):
+    def forward_from_mhc(
+        self,
+        x: torch.Tensor,
+        gate,
+        inputs: MegaMoEInputs,
+        expert_load=None,
+        eplb_layer=None,
+    ):
         """Route BF16 and consume the FP8/SF already written by MegaMHC."""
         from ..mega_gate import mega_gate
 
@@ -511,10 +531,14 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                 out=(inputs.topk_idx, inputs.topk_weights),
             )
         y = self._mega_y[: x.shape[0]]
-        self._launch(y, x.shape[0], x.device)
+        self._launch(
+            y, x.shape[0], x.device, expert_load=expert_load, eplb_layer=eplb_layer
+        )
         return y
 
-    def forward_with_gate_pack(self, x, gate, input_ids):
+    def forward_with_gate_pack(
+        self, x, gate, input_ids, expert_load=None, eplb_layer=None
+    ):
         kernels = _get_mega_se_gate_pack_kernels()
         pack_nonhash, pack_hash, _ = kernels
         tokens = x.size(0)
@@ -553,7 +577,9 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
                 )
-        self._launch(y, tokens, x.device)
+        self._launch(
+            y, tokens, x.device, expert_load=expert_load, eplb_layer=eplb_layer
+        )
         return y
 
 

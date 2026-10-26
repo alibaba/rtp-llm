@@ -63,7 +63,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         self.dp_rank = config.dp_rank
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
-        self.expert_num = config.expert_num
+        self.expert_num = config.physical_expert_num
         self.expert_num_per_rank = self.expert_num // self.ep_size
         self.num_dispatchers = config.world_size // config.tp_size
         self.rank_expert_offset = self.ep_rank * self.expert_num_per_rank
@@ -181,6 +181,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             expert_tokens_meta=ExpertTokensMetadata(
                 expert_num_tokens=expert_num_tokens,
                 expert_num_tokens_cpu=num_recv_tokens_per_expert_list,
+                counts_are_padded=self.expert_alignment > 1,
             ),
         )
 

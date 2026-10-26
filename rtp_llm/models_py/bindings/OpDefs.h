@@ -366,6 +366,9 @@ struct PyModelInputs {
     // Internal homogeneous-batch signal; not part of the Generate RPC/config surface.
     bool capture_hidden_states = false;
 
+    // Fixed-address int32 [layers, local_experts] accumulators; undefined when monitoring is disabled.
+    torch::Tensor expert_token_counts;
+
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
     }

@@ -92,29 +92,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                 metrics_reporter_);
     }
 
-    if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
-        // use first moe layer weight as moe weight type
-        int         first_moe_layer = params.model_config_.moe_layer_index.front();
-        const auto& moe_kernel      = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
-        auto        moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
-        bool        is_gated_activation = params.model_config_.isGatedActivation();
-        auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
-
-        expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
-                                                       params.eplb_config.phy_exp_num(params.model_config_.expert_num),
-                                                       params.model_config_.num_layers,
-                                                       moe_inter_size,
-                                                       params.model_config_.hidden_size,
-                                                       params.parallelism_config.ep_rank,
-                                                       params.parallelism_config.ep_size,
-                                                       params.parallelism_config.world_size,
-                                                       params.py_eplb,
-                                                       moe_weight_type,
-                                                       params.model_config_.quant_algo,
-                                                       metrics_reporter_,
-                                                       params.eplb_config);
-    }
-
     // Scheduler limits the number of streams, but a stream may fan out into more sampler rows
     // through num_return_sequences or variable beams. Preallocate the common case and grow safely.
     const auto initial_sampler_batch_size =
@@ -143,6 +120,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.quant_algo       = params.model_config_.quant_algo;
+    model_init_params.eplb_config      = params.eplb_config;
+    if (warm_up_) {
+        // Disable EPLB metrics during warmup.
+        model_init_params.eplb_config.eplb_metrics_report_interval = 0;
+    }
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
         role_type_,
@@ -326,11 +309,6 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
-    if (expert_balancer_) {
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
-        executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
 
     if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
         cudaSyncAndCheck();
@@ -475,10 +453,7 @@ void NormalExecutor::reportMetrics(const StreamGroups&                        st
 }
 
 bool NormalExecutor::updateEplbConfig(const EPLBConfig& config) {
-    if (expert_balancer_) {
-        return expert_balancer_->updateEplbConfig(config);
-    }
-    return true;
+    return model_ ? model_->updateEplbConfig(config) : true;
 }
 
 bool NormalExecutor::useStreamAsync() const {

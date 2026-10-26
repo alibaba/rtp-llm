@@ -1189,6 +1189,11 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
     } else {
         prepareInputData(inputs, state);
     }
+    {
+        const size_t graph_idx =
+            is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
+        checkGraphInputStable(inputs, graph_instances_[graph_idx].mem_hold_.py_model_inputs_);
+    }
     if (is_prefill_cuda_graph_mode_) {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
@@ -1872,6 +1877,7 @@ void CudaGraphRunner::initCapture() {
         max_num_token_ = isGenerationPrefillCudaGraph() ? capture_range_.back() : max_bs_ * num_tokens_per_bs_;
 
         PyModelInputs inputs;
+        inputs.expert_token_counts = capture_mem_hold_.py_model_inputs_.expert_token_counts;
         // Allocate top-level model inputs here. initCaptureAttentionInputs()
         // owns only attention metadata and must not replace this tensor because
         // the captured graph retains its address.
@@ -2156,7 +2162,28 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("replay end check for %s %d", key_type, key);
 }
 
+void CudaGraphRunner::checkGraphInputStable(const PyModelInputs& inputs, const PyModelInputs& captured_inputs) const {
+    // prepareInputData() does not copy this externally owned buffer. Replay
+    // writes directly into the allocation captured for the selected graph.
+    const auto& captured = captured_inputs.expert_token_counts;
+    const auto& replay   = inputs.expert_token_counts;
+    if (!captured.defined() && !replay.defined()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(captured.defined() == replay.defined(),
+                            "expert token counts presence changed after CUDA graph capture");
+    RTP_LLM_CHECK_WITH_INFO(captured.data_ptr() == replay.data_ptr(),
+                            "expert token counts buffer changed after CUDA graph capture: capture=%p replay=%p",
+                            static_cast<const void*>(captured.data_ptr()),
+                            static_cast<const void*>(replay.data_ptr()));
+    RTP_LLM_CHECK_WITH_INFO(captured.sizes() == replay.sizes() && captured.scalar_type() == replay.scalar_type()
+                                && captured.device() == replay.device()
+                                && captured.is_contiguous() == replay.is_contiguous(),
+                            "expert token counts metadata changed after CUDA graph capture");
+}
+
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
+    inputs.expert_token_counts = capture_mem_hold_.py_model_inputs_.expert_token_counts;
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
     inputs.attention_inputs.is_target_verify = is_target_verify_;

@@ -136,6 +136,7 @@ class Qwen3VLMoeModel(GptModelBase):
                 hidden_states,
                 residual,
                 layer_fmha_impl,
+                expert_load=None,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
             hidden_states = self.multimodal_deepstack_injector(

@@ -29,12 +29,11 @@ from .base import (
 # (high→low):
 from .mega import MegaMoEStrategy  # noqa: F401  ep_size>1 + SM100 + dist
 from .mega_se import MegaMoEStrategySE  # noqa: F401  explicit fused-SE opt-in
-from .mega_fused import MegaMoEFusedStrategy  # noqa: F401  ep_size>1 + fused opt-in
 from .grouped_fp4 import (  # noqa: F401  ep_size==1 + kernel
     GroupedFP4Strategy,
     _has_fp8_fp4_grouped_kernel,
 )
-from .deepep import DeepEPStrategy  # noqa: F401  ep_size>1 fallback
+from .deepep import DeepEPStrategy  # noqa: F401  targeted tests/experiments
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
 
 __all__ = [

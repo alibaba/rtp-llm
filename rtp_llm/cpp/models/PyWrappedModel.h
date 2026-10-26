@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/models/HiddenStateCapturePublisher.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
+#include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
@@ -76,7 +77,7 @@ class PyWrappedModel: public ModelBase {
 public:
     // py_instance is `py_model` indeedly.
     PyWrappedModel(const GptModelInitParams& params,
-                   py::object                py_instance,
+                   const py::object&         py_instance,
                    bool                      is_prefill_cuda_graph_mode   = false,
                    bool                      use_spec_decoding            = false,
                    DSparkModelRole           dspark_model_role            = DSparkModelRole::NONE,
@@ -95,6 +96,7 @@ public:
                                                       bool                  skip_forward_event_sync,
                                                       const GptModelInputs* cache_store_host_inputs = nullptr);
     void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    bool                       updateEplbConfig(const EPLBConfig& config) override;
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
@@ -162,6 +164,7 @@ private:
     torch::Tensor                                   residual_scale_;
     TensorHolder                                    buffer_holder_;
 
+    ExpertBalancer             expert_balancer_;
     std::unique_ptr<GraphBase> graph_runner_;
     std::unique_ptr<GraphBase> generation_prefill_graph_runner_;
     py::object                 py_model_;
@@ -203,7 +206,7 @@ private:
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
 inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
-                                      py::object                py_instance,
+                                      const py::object&         py_instance,
                                       bool                      is_prefill_cuda_graph_mode,
                                       bool                      use_spec_decoding,
                                       DSparkModelRole           dspark_model_role,
@@ -224,6 +227,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     layer_num_(params.weights.layers.size()),
     description_(params.description),
     cache_manager_(params.cache_manager),
+    expert_balancer_(description_.ffn_conf.moe_configs, params),
     owns_generation_prefill_cuda_graph_(shouldCreateGenerationPrefillCudaGraph(params.hw_kernel_config,
                                                                                allow_cuda_graph,
                                                                                is_prefill_cuda_graph_mode,
@@ -321,12 +325,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         residual_scale_fp32_ = residual_tensor;
         residual_scale_      = residual_tensor.to(dataTypeToTorchType(description_.data_type));
     }
-    if (params.description.ffn_conf.moe_configs.has_value()) {
-        auto moe_conf         = params.description.ffn_conf.moe_configs.value();
-        overall_expert_stats_ = execCreateMoeExpertStates(
-            {layer_num_, moe_conf.ep_size, moe_conf.expert_num, moe_conf.expert_num + moe_conf.extra_expert_num});
-    }
-
     if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
         RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
     } else {
@@ -360,6 +358,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
+    expert_balancer_.initialize(py_model_);
     // Registration enables the handler; only batches with selected prefill rows invoke it.
     if (py::hasattr(py_model_, "custom_output_handler")) {
         initializeCustomOutput();
@@ -384,6 +383,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         // Create GraphParams from individual config fields
         GraphParams graph_params;
+        graph_params.expert_token_counts          = expert_balancer_.stable_expert_token_counts();
         graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
         graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
@@ -682,6 +682,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         }
     }
 
+    // Graph initialization calls Python directly and may leave warmup counts.
+    expert_balancer_.step(true);
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
     (void)construction_guard.release();
 }

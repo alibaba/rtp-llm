@@ -257,6 +257,7 @@ class GateRoutingMetadataTest(unittest.TestCase):
                             torch.arange(3),
                             torch.tensor([0, 3]),
                             None,
+                            expert_token_counts=None,
                         )
 
                 else:
@@ -270,6 +271,7 @@ class GateRoutingMetadataTest(unittest.TestCase):
                             SimpleNamespace(
                                 batch_size=1, q_len_per_req=3, is_cuda_graph=False
                             ),
+                            expert_token_counts=None,
                         )
 
                 with _CountComparisons() as count:
@@ -334,7 +336,13 @@ class GateRoutingMetadataTest(unittest.TestCase):
                         )
                     )
                     prefill.forward_layers(
-                        model, None, ids, torch.arange(2), torch.tensor([0, 2]), None
+                        model,
+                        None,
+                        ids,
+                        torch.arange(2),
+                        torch.tensor([0, 2]),
+                        None,
+                        expert_token_counts=None,
                     )
                     initial = model.embed(ids).unsqueeze(-2)
                 else:
@@ -352,6 +360,7 @@ class GateRoutingMetadataTest(unittest.TestCase):
                         SimpleNamespace(
                             batch_size=1, q_len_per_req=2, is_cuda_graph=False
                         ),
+                        expert_token_counts=None,
                     )
                     self.assertEqual(
                         [
@@ -393,10 +402,15 @@ class GateRoutingMetadataTest(unittest.TestCase):
             with self.subTest(mode=mode), _CountComparisons() as count:
                 seen.clear()
                 if mode == "prefill":
-                    V4Transformer.forward(model, ids, apply_lm_head=False)
+                    V4Transformer.forward(
+                        model, ids, apply_lm_head=False, expert_token_counts=None
+                    )
                 else:
                     V4Transformer.forward_decode(
-                        model, ids, SimpleNamespace(batch_size=1, q_len_per_req=3)
+                        model,
+                        ids,
+                        SimpleNamespace(batch_size=1, q_len_per_req=3),
+                        expert_token_counts=None,
                     )
             self.assertEqual(count.count, 1)
             self.assertIs(seen[0], seen[1])

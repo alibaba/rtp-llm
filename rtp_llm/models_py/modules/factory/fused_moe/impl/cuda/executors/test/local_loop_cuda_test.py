@@ -192,12 +192,12 @@ class LocalLoopCudaIndexValidationTest(unittest.TestCase):
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):
                 for _ in range(3):
-                    executor(x, weights, indices)
+                    executor(x, weights, indices, expert_load=None)
             torch.cuda.current_stream().wait_stream(stream)
 
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                graph_output = executor(x, weights, indices)
+                graph_output = executor(x, weights, indices, expert_load=None)
             initial_output = graph_output.clone()
 
             x.copy_(torch.randn_like(x) * 0.2)
@@ -206,7 +206,7 @@ class LocalLoopCudaIndexValidationTest(unittest.TestCase):
             indices.add_(1).remainder_(experts)
             executor._W1_w.view(torch.uint8)[0, 0, 0].bitwise_xor_(1)
 
-            expected = executor(x, weights, indices).clone()
+            expected = executor(x, weights, indices, expert_load=None).clone()
             # Replay must write the captured allocation, independently of eager.
             graph_output.fill_(float("nan"))
             graph.replay()
@@ -247,12 +247,12 @@ class LocalLoopCudaIndexValidationTest(unittest.TestCase):
                 stream.wait_stream(torch.cuda.current_stream())
                 with torch.cuda.stream(stream):
                     for _ in range(3):
-                        executor(x, weights, indices)
+                        executor(x, weights, indices, expert_load=None)
                 torch.cuda.current_stream().wait_stream(stream)
 
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
-                    graph_output = executor(x, weights, indices)
+                    graph_output = executor(x, weights, indices, expert_load=None)
                 if x.size(0) == 1:
                     first_graph = graph
                     first_graph_output = graph_output
@@ -266,7 +266,7 @@ class LocalLoopCudaIndexValidationTest(unittest.TestCase):
             new_weights = torch.rand_like(weights1)
             weights1.copy_(new_weights / new_weights.sum(dim=-1, keepdim=True))
             indices1.add_(1).remainder_(experts)
-            expected = executor(x1, weights1, indices1).clone()
+            expected = executor(x1, weights1, indices1, expert_load=None).clone()
 
             # A later capture and eager call must not invalidate the first graph.
             first_graph_output.fill_(float("nan"))
@@ -294,7 +294,7 @@ class LocalLoopCudaIndexValidationTest(unittest.TestCase):
             torch.cuda.reset_peak_memory_stats()
             for executor in layers:
                 # The strategy consumes the FP32 result and returns BF16.
-                output = executor(x, weights, indices).to(x.dtype)
+                output = executor(x, weights, indices, expert_load=None).to(x.dtype)
                 del output
             torch.cuda.synchronize()
             return (
@@ -304,7 +304,7 @@ class LocalLoopCudaIndexValidationTest(unittest.TestCase):
 
         with torch.inference_mode():
             # Exclude one-time GEMM initialization from workspace measurements.
-            executors[0](x, weights, indices)
+            executors[0](x, weights, indices, expert_load=None)
             one_peak, one_steady = measure(executors[:1])
             many_peak, many_steady = measure(executors)
 
@@ -326,7 +326,7 @@ class LocalLoopCudaIndexValidationTest(unittest.TestCase):
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):
                 for x, weights, indices in inputs:
-                    executor(x, weights, indices)
+                    executor(x, weights, indices, expert_load=None)
             torch.cuda.current_stream().wait_stream(stream)
             torch.cuda.synchronize()
             baseline = torch.cuda.memory_allocated()
@@ -334,7 +334,7 @@ class LocalLoopCudaIndexValidationTest(unittest.TestCase):
             for x, weights, indices in inputs:
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
-                    output = executor(x, weights, indices)
+                    output = executor(x, weights, indices, expert_load=None)
                 graph.replay()
                 torch.cuda.synchronize()
                 del output, graph

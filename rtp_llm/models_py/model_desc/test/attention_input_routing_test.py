@@ -313,7 +313,9 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         outputs = model.forward(
             SimpleNamespace(
-                input_ids=torch.tensor([1, 2]), capture_hidden_states=False
+                input_ids=torch.tensor([1, 2]),
+                capture_hidden_states=False,
+                expert_token_counts=None,
             ),
             fmha_impl,
         )
@@ -512,7 +514,8 @@ class AttentionInputRoutingTest(unittest.TestCase):
         csa_inputs = SimpleNamespace(tag="csa_kv")
         swa_inputs = SimpleNamespace(tag="swa_kv")
         inputs = SimpleNamespace(
-            attention_inputs={"csa_kv": csa_inputs, "swa_kv": swa_inputs}
+            attention_inputs={"csa_kv": csa_inputs, "swa_kv": swa_inputs},
+            expert_token_counts=None,
         )
 
         def make_writer(group_inputs, kv_cache):

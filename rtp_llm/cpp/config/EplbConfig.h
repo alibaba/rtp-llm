@@ -1,46 +1,35 @@
 #pragma once
+#include <cstdint>
 #include <string>
-#include <vector>
 
 namespace rtp_llm {
 
 enum class EplbMode {
     NONE,
-    STATS,  // stats, only
-    EPLB,   // load balance, only
-    ALL     // stats + load balance
+    STATS,  // Sample only; allow online switching to EPLB or ALL.
+    EPLB,   // Sample and rearrange experts.
+    ALL     // Same runtime behavior as EPLB.
 };
 
 struct EPLBConfig {
-    int64_t          eplb_update_time = 5000;
-    EplbMode         eplb_mode        = EplbMode::NONE;
-    int64_t          redundant_expert = 0;
-    std::string      balance_method = "mix";
-    int64_t          eplb_force_repack = 0;
-    int64_t          eplb_stats_window_size = 10;
-    int              eplb_control_step = 100;
-    bool             eplb_test_mode = false;
-    int              eplb_balance_layer_per_step = 1;
+    // Zero disables rearrangement; positive intervals require 1 <= window <= interval.
+    int64_t  eplb_update_time             = 0;
+    EplbMode eplb_mode                    = EplbMode::NONE;
+    int64_t  redundant_expert             = 0;
+    int64_t  eplb_stats_window_size       = 100;
+    int      eplb_control_step            = 100;
+    bool     eplb_rearrange_after_prefill = false;
+    int      eplb_rearrange_p2p_groups    = 1;
+    // Independent of eplb_mode. Fixed before graph capture; 0 disables collection.
+    int eplb_metrics_report_interval    = 0;
+    int eplb_metrics_snapshot_max_files = 0;
     template<typename... CheckModes>
     bool checkEplbMode(EplbMode mode, CheckModes... modes) {
         return ((mode == modes) || ...);
     }
 
-    std::vector<int> toList() const {
-        std::vector<int> list;
-        list.push_back((int)eplb_mode);
-        list.push_back((int)eplb_update_time);
-        return list;
-    }
-
-    static EPLBConfig fromList(const int* list) {
-        EPLBConfig data;
-        data.eplb_mode = (EplbMode)list[0];
-        data.eplb_update_time = list[1];
-        return data;
-    }
-
-    // Getter methods
+    // STATS also requires a supported runtime model and full EP=WORLD experts.
+    // Independent monitoring uses NONE with eplb_metrics_report_interval > 0.
     bool enable_eplb() const {
         return eplb_mode != EplbMode::NONE;
     }

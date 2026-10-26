@@ -33,3 +33,15 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "rtp_llm_eplb_metrics_test",
+    srcs = [
+        "RtpLLMEplbMetricsTest.cc",
+    ],
+    deps = [
+        ":metrics",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
