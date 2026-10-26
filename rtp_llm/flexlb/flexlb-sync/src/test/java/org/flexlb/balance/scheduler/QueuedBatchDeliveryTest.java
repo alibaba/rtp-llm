@@ -74,8 +74,11 @@ class QueuedBatchDeliveryTest {
             sent = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     @BeforeEach
-    void setUp() {
+    void setUp(org.junit.jupiter.api.TestInfo test) {
         config = org.mockito.Mockito.spy(SchedulingTestConfig.batchConfig());
+        if (test.getTags().contains("non-batch")) {
+            config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+        }
         var sizing = org.mockito.Mockito.spy(config.getInternalRuntime());
         org.mockito.Mockito.doReturn(1).when(sizing).getBatchDispatchThreads();
         org.mockito.Mockito.doReturn(1).when(sizing).getBatchDispatchQueueCapacity();
@@ -150,6 +153,9 @@ class QueuedBatchDeliveryTest {
                                 ledger.prefill));
         ReflectionTestUtils.setField(prefill, "batcher", worker);
         ReflectionTestUtils.setField(prefill, "ownership", ledger.prefill);
+        if (config.getDispatcher().getType() == org.flexlb.config.DispatcherConfig.Type.NON_BATCH) {
+            return;
+        }
         CountDownLatch entered = new CountDownLatch(1);
         registry.runtime
                 .deliveries()
@@ -998,8 +1004,8 @@ class QueuedBatchDeliveryTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Tag("non-batch")
     void singleNonBatchDecisionCanBypassOnlyOnce() {
-        config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
         enableBypass(true);
         worker =
                 new WorkerBatcher(
@@ -1026,6 +1032,59 @@ class QueuedBatchDeliveryTest {
             assertEquals(List.of(head, next), ledger.prefill.captureQueue(10).items());
             assertFalse(worker.canBypass(head, next));
             assertEquals(0, ledger.prefill.stats().batchCount());
+            verify(registry.runtime.deliveries(), org.mockito.Mockito.never()).tryReserveDelivery();
+            verify(prefill, org.mockito.Mockito.never()).reserveBatch(any(), anyLong(), anyInt());
+            verifyNoInteractions(grpc);
+        } finally {
+            decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void bypassReusesPredictionOnlyWhenTheEntireSelectedGroupCommits(boolean truncated) {
+        enableBypass(true);
+        var evaluator = org.mockito.Mockito.spy(DeliveryTestSupport.EVALUATOR);
+        var predictor = mock(org.flexlb.balance.prediction.PrefillTimePredictor.class);
+        when(predictor.evaluator()).thenReturn(evaluator);
+        ReflectionTestUtils.setField(prefill, "predictor", predictor);
+        worker =
+                new WorkerBatcher(
+                        "predicted-bypass",
+                        prefill,
+                        new QueueExecutionSettings(
+                                true,
+                                config.getDispatcher().getType(),
+                                org.flexlb.config.DecisionPolicyConfig.Type.FIXED_WINDOW,
+                                3,
+                                0L,
+                                1_000L),
+                        dispatcher,
+                        ledger.prefill);
+        var head = item(1L);
+        var other = anotherDecode();
+        var first = item(2L, null, other, 50);
+        var second = item(3L, null, truncated ? other : anotherDecode(), 50);
+        var committed = new java.util.concurrent.atomic.AtomicReference<PrefillState.CommitPlan>();
+        when(prefill.commitLocked(any()))
+                .thenAnswer(
+                        call -> {
+                            var plan = call.getArgument(0, PrefillState.CommitPlan.class);
+                            committed.set(plan);
+                            return ledger.commit(plan);
+                        });
+        var blocker = blockDecode();
+        try {
+            cycle();
+            assertEquals(
+                    truncated ? List.of(first) : List.of(first, second), committed.get().items());
+            assertEquals(
+                    first.seqLen() + (truncated ? 0L : second.seqLen()),
+                    committed.get().predictions()[0]);
+            verify(evaluator, times(truncated ? 6 : 5)).predictBatchMs(any());
+            assertEquals(
+                    truncated ? List.of(head, second) : List.of(head),
+                    ledger.prefill.captureQueue(10).items());
         } finally {
             decode.release(blocker, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         }
@@ -1170,7 +1229,8 @@ class QueuedBatchDeliveryTest {
     private void submit(List<RequestRoute> items) {
         var evaluator = new FormulaPredictor("100 * batchSize");
         org.junit.jupiter.api.Assertions.assertNull(
-                worker.processSelection(items, "queued-race", evaluator, OptionalLong.empty()));
+                worker.processSelection(
+                        items, "queued-race", evaluator, OptionalLong.empty(), null));
     }
 
     private void awaitDispatchTasks() throws Exception {

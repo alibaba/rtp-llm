@@ -347,7 +347,7 @@ class QueuedDeliveryWithdrawalRaceTest {
 
         void select(PrefillTimePredictor.Evaluator evaluator) {
             batcher.processSelection(
-                    List.of(route), "single_request", evaluator, OptionalLong.empty());
+                    List.of(route), "single_request", evaluator, OptionalLong.empty(), null);
         }
 
         void assertDelivered() throws Exception {

@@ -140,7 +140,7 @@ class PrefillPlanningInputChangeTest {
                             return null;
                         })
                 .when(worker)
-                .processSelection(anyList(), anyString(), any(), any());
+                .processSelection(anyList(), anyString(), any(), any(), any());
         RequestContext context = new RequestContext(config);
         context.data()
                 .setRequest(Request.builder().requestId(51L).rawPriority(0).seqLen(10L).build());

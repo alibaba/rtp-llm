@@ -69,6 +69,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isA;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyInt;
@@ -91,6 +92,32 @@ import static org.mockito.Mockito.when;
 /** The production Worker -> Dispatcher -> Runtime path; only protocol owners and transport are simulated. */
 @Timeout(15)
 class BatchDeliveryTest {
+    @Test
+    void singleDecisionStillUsesBatchOwnershipAndEngineAcknowledgement() {
+        try (var f =
+                new LinearDeliveryFixture(
+                        true,
+                        config ->
+                                config.decisionPolicy()
+                                        .setType(
+                                                org.flexlb.config.DecisionPolicyConfig.Type
+                                                        .SINGLE))) {
+            var first = f.item(1L, 10L);
+            f.item(2L, 20L);
+            ReflectionTestUtils.invokeMethod(f.worker, "processQueue");
+            f.drain();
+            assertEquals(List.of(first), f.committedItems);
+            assertEquals(List.of(1L), f.sentIds());
+            assertEquals(1, f.sent.size());
+            assertEquals(701L, f.claims.getFirst().batchId());
+            assertEquals(DeliveryClaimKind.BATCH_ENQUEUE, f.claims.getFirst().kind());
+            assertEquals(DeliveryResult.Status.DELIVERED, f.result(1L).status());
+            verify(f.runtime.deliveries()).tryReserveDelivery();
+            verify(f.prefill).reserveBatch(eq(first), eq(701L), anyInt());
+            verify(f.owner, never()).onDeliveryEvidence(any(), isA(RouteDelivered.class));
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void byteBudgetSplitsLargeImageRequestsButPreservesTextBatchCount(boolean images)
@@ -554,10 +581,18 @@ final class LinearDeliveryFixture implements AutoCloseable {
     final List<DecodeEndpoint> realEndpoints = new ArrayList<>();
 
     LinearDeliveryFixture(boolean batch) {
+        this(batch, config -> {});
+    }
+
+    LinearDeliveryFixture(boolean batch, Consumer<FlexlbConfig> configure) {
         config = spy(SchedulingTestConfig.batchConfig());
         if (!batch) {
             config.getDispatcher().setType(DispatcherConfig.Type.NON_BATCH);
         }
+        configure.accept(config);
+        var predictor = mock(PrefillTimePredictor.class);
+        when(predictor.evaluator()).thenReturn(evaluator);
+        ReflectionTestUtils.setField(prefill, "predictor", predictor);
         var sizing = spy(config.getInternalRuntime());
         doReturn(1).when(sizing).getBatchDispatchThreads();
         doReturn(8).when(sizing).getBatchDispatchQueueCapacity();
@@ -805,7 +840,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
     }
 
     CapacityBoundary process(List<RequestRoute> items, OptionalLong prediction) {
-        return worker.processSelection(items, "contract", evaluator, prediction);
+        return worker.processSelection(items, "contract", evaluator, prediction, null);
     }
 
     void drain() {

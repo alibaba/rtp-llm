@@ -181,7 +181,8 @@ class RejectedDeliveryWithdrawalRaceTest {
                                 List.of(item),
                                 "withdrawal-race",
                                 new FormulaPredictor("100"),
-                                OptionalLong.empty()));
+                                OptionalLong.empty(),
+                                null));
             } finally {
                 ReflectionTestUtils.setField(
                         owner.runtime.deliveries(), "dispatchExecutor", actualExecutor);

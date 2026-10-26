@@ -619,7 +619,7 @@ class WorkerBatcherSchedulingTest {
                             return CapacityBoundary.OWNERSHIP_LOST;
                         })
                 .when(worker)
-                .processSelection(any(), anyString(), any(), any());
+                .processSelection(any(), anyString(), any(), any(), any());
         worker.start();
         assertTrue(worker.offer(item(config, endpoint, 32L, 50, System.currentTimeMillis())));
         await(waiting);
@@ -1058,7 +1058,7 @@ class WorkerBatcherSchedulingTest {
                                             call.getArgument(2),
                                             call.getArgument(3)))
                     .when(worker)
-                    .processSelection(any(), anyString(), any(), any());
+                    .processSelection(any(), anyString(), any(), any(), any());
             doAnswer(call -> capacityAvailable(call.getArgument(0), call.getArgument(1)))
                     .when(worker)
                     .capacityAvailable(any(), any());

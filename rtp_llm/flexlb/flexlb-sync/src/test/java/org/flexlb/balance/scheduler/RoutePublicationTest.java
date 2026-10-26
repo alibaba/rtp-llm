@@ -44,6 +44,91 @@ import static org.mockito.Mockito.when;
 @Timeout(15)
 class RoutePublicationTest {
     @Test
+    void nonBatchBudgetUsesTheSumOfIndividualPredictions() {
+        try (var f =
+                new LinearDeliveryFixture(
+                        false,
+                        config -> {
+                            config.decisionPolicy().setMaxRequests(2);
+                            config.decisionPolicy().setMaxCollectionWaitMs(60_000L);
+                            config.decisionPolicy().setMaxPredictedExecutionMs(25L);
+                        })) {
+            var first = f.item(1L, 10L);
+            var second = f.item(2L, 20L);
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                    f.worker, "processQueue");
+            assertEquals(List.of(first), f.committedItems);
+            assertEquals(List.of(1L), f.claimIds());
+            assertArrayEquals(new long[] {10L}, f.committedRoutePredictions);
+            verify(f.decode, never()).acquireDispatchPermit(eq(second.decodeReservation()), any());
+            verify(f.evaluator, never()).predictBatchMs(any());
+            verifyNoInteractions(f.grpc);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {0L, 1_000L})
+    void invalidSuffixPredictionFailsThatRequestWithoutTerminatingTheValidPrefix(long budget) {
+        try (var f =
+                new LinearDeliveryFixture(
+                        false,
+                        config -> {
+                            config.decisionPolicy().setMaxRequests(2);
+                            config.decisionPolicy().setMaxCollectionWaitMs(0L);
+                            config.decisionPolicy()
+                                    .setMaxPredictedExecutionMs(budget == 0L ? null : budget);
+                        })) {
+            var first = f.item(1L, 10L);
+            var second = f.item(2L, 20L);
+            org.mockito.Mockito.doReturn(-1L).when(f.evaluator).estimateMs(20L, 0L);
+            when(f.handoff.removedFailedMember()).thenReturn(budget == 0L);
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                    f.worker, "processQueue");
+            if (budget > 0L) {
+                assertEquals(List.of(first), f.queueOwnership.captureQueue(10).items());
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                        f.worker, "processQueue");
+            }
+            assertEquals(List.of(1L), f.claimIds());
+            assertEquals(java.util.Set.of(2L), f.preparationFailures.keySet());
+            verify(f.owner, times(1)).onDeliveryEvidence(isNull(), isA(PreparationFailure.class));
+            verify(f.decode, never()).acquireDispatchPermit(eq(second.decodeReservation()), any());
+            verify(f.permits.get(1L)).release();
+        }
+    }
+
+    @Test
+    void fixedWindowGroupsRouteDecisionsWithoutCreatingAnEngineBatch() {
+        try (var f =
+                new LinearDeliveryFixture(
+                        false,
+                        config -> {
+                            config.decisionPolicy().setMaxRequests(2);
+                            config.decisionPolicy().setMaxCollectionWaitMs(60_000L);
+                            config.decisionPolicy().setMaxPredictedExecutionMs(1_000L);
+                        })) {
+            var first = f.item(1L, 10L);
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                    f.worker, "processQueue");
+            assertTrue(f.claims.isEmpty(), "NON_BATCH must still honor its decision window");
+            var second = f.item(2L, 20L);
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                    f.worker, "processQueue");
+            assertEquals(List.of(first, second), f.committedItems);
+            assertEquals(List.of(1L, 2L), f.claimIds());
+            assertArrayEquals(new long[] {10L, 20L}, f.committedRoutePredictions);
+            assertEquals(10L, f.predictions.get(1L));
+            assertEquals(30L, f.predictions.get(2L));
+            verify(f.evaluator, never()).predictBatchMs(any());
+            verify(f.prefill, never())
+                    .reserveBatch(any(), anyLong(), org.mockito.ArgumentMatchers.anyInt());
+            verify(f.runtime.deliveries(), never()).tryReserveDelivery();
+            verify(f.runtime.deliveries(), never()).nextBatchId();
+            verifyNoInteractions(f.grpc);
+        }
+    }
+
+    @Test
     void removingFailedSuffixPublishesCapacityChangeOnceAndStillDeliversPrefix() {
         try (var f = new LinearDeliveryFixture(false)) {
             var first = f.item(1, 10);

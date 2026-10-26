@@ -50,7 +50,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     public PrefillState.CommittedHandoff commitLocked(PrefillState.CommitPlan plan) {
         ownership.queueGuard().requireHeld();
-        if (plan.kind() != PrefillState.CommitKind.DIRECT
+        if (plan.kind() == PrefillState.CommitKind.QUEUED
                 && !ownership.ownsSelectionLocked(plan.items(), plan.selectionTimeMs())) {
             return null;
         }

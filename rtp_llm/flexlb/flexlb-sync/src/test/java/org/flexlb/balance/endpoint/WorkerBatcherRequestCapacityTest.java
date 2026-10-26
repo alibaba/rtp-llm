@@ -146,6 +146,37 @@ class WorkerBatcherRequestCapacityTest {
         }
     }
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void staleQueuedCommitReturnsNoHandoffAndDoesNotConsumeRequestCapacity(boolean expired) {
+        FlexlbConfig config = productionConfig();
+        config.setDispatcher(ConfigTestSupport.nonBatch());
+        try (Fixture fixture = fixture(config)) {
+            var route = item(config, fixture.endpoint, 1L);
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, route));
+            if (expired) {
+                ReflectionTestUtils.setField(
+                        route.ctx().data(),
+                        "schedulingMetadata",
+                        SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1L));
+            } else {
+                assertTrue(fixture.endpoint.control(route, WorkerBatcher.Control.REMOVE));
+            }
+            assertNull(
+                    fixture.endpoint.commit(
+                            new PrefillState.CommitPlan(
+                                    PrefillState.CommitKind.QUEUED,
+                                    List.of(route),
+                                    List.of(),
+                                    null,
+                                    new long[] {100L},
+                                    null,
+                                    System.currentTimeMillis())));
+            assertTrue(fixture.endpoint.ownership.requestCapacityAvailable(1, 1));
+            assertEquals(0, fixture.endpoint.ownership.stats().batchCount());
+        }
+    }
+
     private static FlexlbConfig preemptionConfig() {
         FlexlbConfig config = productionConfig();
         config.setDispatcher(ConfigTestSupport.nonBatch());

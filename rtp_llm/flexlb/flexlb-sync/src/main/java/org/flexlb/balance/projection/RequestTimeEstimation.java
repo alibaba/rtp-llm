@@ -236,9 +236,13 @@ public final class RequestTimeEstimation {
 
             @Override
             public double append(RequestRoute added, List<RequestRoute> items) {
-                totalMs +=
-                        PrefillPredictionBoundary.predictSingleRequestMs(
-                                evaluator, added.seqLen(), added.hitCache());
+                try {
+                    totalMs +=
+                            PrefillPredictionBoundary.predictSingleRequestMs(
+                                    evaluator, added.seqLen(), added.hitCache());
+                } catch (org.flexlb.balance.prediction.InvalidPrefillPredictionException failure) {
+                    throw failure.atMember(items.size() - 1);
+                }
                 return PrefillPredictionBoundary.requireValidDecisionGroupMs(totalMs);
             }
         };

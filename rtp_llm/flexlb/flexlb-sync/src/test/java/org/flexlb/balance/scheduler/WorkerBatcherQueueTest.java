@@ -107,6 +107,7 @@ class WorkerBatcherQueueTest {
                             org.mockito.ArgumentMatchers.any(),
                             org.mockito.ArgumentMatchers.any(),
                             org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.any(),
                             org.mockito.ArgumentMatchers.any());
             doAnswer(
                             call -> {
