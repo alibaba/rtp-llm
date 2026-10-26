@@ -83,10 +83,16 @@ class Dsv4ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "DeepEP"):
             self.build()
 
-    def test_reuse_is_explicitly_rejected(self):
+    def test_reuse_requires_explicit_opt_in(self):
         self.module.validate_cache_config(NS(reuse_cache=False))
         with self.assertRaisesRegex(ValueError, "prefix reuse"):
             self.module.validate_cache_config(NS(reuse_cache=True))
+        with patch.dict(os.environ, {"DSV4_PPU_PREFIX_REUSE": "1"}):
+            self.module.validate_cache_config(NS(reuse_cache=True))
+        for value in ("0", "true", ""):
+            with patch.dict(os.environ, {"DSV4_PPU_PREFIX_REUSE": value}):
+                with self.assertRaisesRegex(ValueError, "prefix reuse"):
+                    self.module.validate_cache_config(NS(reuse_cache=True))
 
     def test_unsupported_execution_option(self):
         os.environ["DSV4_MHC_POST_PDL"] = "1"

@@ -17,8 +17,9 @@ def _check_execution_options(options, required):
 
 
 def validate_cache_config(kv_cache_config):
-    if kv_cache_config is not None and kv_cache_config.reuse_cache:
-        raise ValueError("PPU DSV4 prefix reuse is not supported in this implementation")
+    if (kv_cache_config is not None and kv_cache_config.reuse_cache
+            and os.environ.get("DSV4_PPU_PREFIX_REUSE") != "1"):
+        raise ValueError("PPU DSV4 prefix reuse requires experimental DSV4_PPU_PREFIX_REUSE=1")
 
 
 def build_provider(model_config, parallelism, moe_config, max_generate_batch_size):
