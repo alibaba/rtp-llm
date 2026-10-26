@@ -13,9 +13,20 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <limits>
 
 namespace rtp_llm {
 namespace {
+
+void expandPositionBases(const int32_t* src, int32_t* dst, size_t batch_size, size_t factor, int64_t width) {
+    for (size_t batch = 0; batch < batch_size; ++batch) {
+        for (int64_t step = 0; step < width; ++step) {
+            for (size_t dim = 0; dim < factor; ++dim) {
+                dst[(batch * width + step) * factor + dim] = static_cast<int32_t>(src[batch * factor + dim] + step);
+            }
+        }
+    }
+}
 
 void prepareDraftPrefillMultimodalInput(GptModelInputs& input, const torch::Tensor& input_lengths) {
     if (!input.text_tokens_mask.defined()) {
@@ -86,6 +97,29 @@ torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start
 
 }  // namespace
 
+bool MtpBatchStreamProcessor::expandTargetVerifyPositionIdsForPrepare(GptModelInputs& model_input,
+                                                                      size_t          batch_size) const {
+    const auto&  bases  = model_input.combo_position_ids;
+    const size_t factor = model_input_gatherer_config_.position_id_len_factor;
+    if (!bases.defined() || !bases.device().is_cpu() || bases.scalar_type() != torch::kInt32 || !bases.is_contiguous()
+        || batch_size == 0 || factor == 0 || propose_step_ < 0 || static_cast<size_t>(bases.numel()) % factor != 0
+        || static_cast<size_t>(bases.numel()) / factor != batch_size) {
+        return false;
+    }
+
+    const auto* src = bases.data_ptr<int32_t>();
+    for (int64_t i = 0; i < bases.numel(); ++i) {
+        if (src[i] > std::numeric_limits<int32_t>::max() - propose_step_) {
+            return false;
+        }
+    }
+    const int64_t width = static_cast<int64_t>(propose_step_) + 1;
+    auto          expanded = torch::empty({bases.numel() * width}, bases.options().pinned_memory(true));
+    expandPositionBases(src, expanded.data_ptr<int32_t>(), batch_size, factor, width);
+    model_input.combo_position_ids = std::move(expanded);
+    return true;
+}
+
 void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& stream_groups,
                                                             GptModelInputs&     model_input) const {
     if (!model_input.combo_position_ids.defined()) {
@@ -94,9 +128,9 @@ void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& 
 
     const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
     const size_t batch_size             = model_input.combo_position_ids.numel() / position_id_len_factor;
-    auto         target_combo_position_ids =
-        torch::empty({(int64_t)(batch_size * (propose_step_ + 1) * position_id_len_factor)}, torch::kInt32)
-            .pin_memory();
+    const int64_t width                  = static_cast<int64_t>(propose_step_) + 1;
+    auto          target_combo_position_ids =
+        torch::empty({(int64_t)(batch_size * width * position_id_len_factor)}, torch::kInt32).pin_memory();
 
     int* dst_position_ids = target_combo_position_ids.data_ptr<int>();
     if (stream_groups.empty()) {
@@ -110,14 +144,9 @@ void MtpBatchStreamProcessor::expandTargetVerifyPositionIds(const StreamGroups& 
     size_t batch_idx = 0;
     // Speculative decoding rejects num_return_sequences > 1 and beam search before this path.
     for (const auto& stream : stream_groups.allStreams()) {
-        int* base_position_ids = dst_position_ids + batch_idx * (propose_step_ + 1) * position_id_len_factor;
+        int* base_position_ids = dst_position_ids + batch_idx * width * position_id_len_factor;
         stream->generateNextPositionId(base_position_ids);
-        for (int step = 0; step < propose_step_ + 1; ++step) {
-            int* step_position_ids = base_position_ids + step * position_id_len_factor;
-            for (size_t dim = 0; dim < position_id_len_factor; ++dim) {
-                step_position_ids[dim] = base_position_ids[dim] + step;
-            }
-        }
+        expandPositionBases(base_position_ids, base_position_ids, 1, position_id_len_factor, width);
         batch_idx++;
     }
 

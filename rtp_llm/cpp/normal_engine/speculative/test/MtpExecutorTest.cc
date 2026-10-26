@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
@@ -185,6 +186,10 @@ public:
                          inputs.sequence_lengths_plus_1,
                          expected_inputs.sequence_lengths_plus_1);
         checkTensorField("prepared lm_output_indexes", inputs.lm_output_indexes, expected_inputs.lm_output_indexes);
+        if (expected_inputs.combo_position_ids.defined()) {
+            checkTensorField(
+                "prepared combo_position_ids", inputs.combo_position_ids, expected_inputs.combo_position_ids);
+        }
     }
 
     void checkTensorField(const char* name, const torch::Tensor& actual, const torch::Tensor& expected) {
@@ -635,6 +640,58 @@ public:
         return output;
     }
 };
+
+TEST_F(MtpExecutorTest, testPrepareTargetVerifyPositionsBeforeAttention) {
+    // The dedicated BUILD targets run this in fresh processes: the feature
+    // switches are cached on first use and cannot be toggled within a process.
+    for (const bool dspark : {false, true}) {
+        for (const size_t propose_step : {1u, 4u}) {
+            SCOPED_TRACE(::testing::Message() << "dspark=" << dspark << " propose_step=" << propose_step);
+            MtpExecutorTestConfig test_config;
+            test_config.gen_num_per_cycle      = propose_step;
+            test_config.vocab_size_override    = test_config.vocab_size;
+            test_config.mm_position_ids_style  = MROPE;
+            test_config.position_id_len_factor = 3;
+            test_config.sp_type                = dspark ? SP_TYPE_DSPARK : SP_TYPE_MTP;
+            test_config.dspark_mask_token_id   = dspark ? 3 : -1;
+            auto  components                   = createMtpExecutorComponents(test_config);
+            auto* target_model                 = components.fake_target_model.get();
+            components.executor->setTargetModel(std::move(components.fake_target_model));
+
+            const auto     bases = torch::tensor({7, 11, 29, 101, 103, 107}, torch::kInt32);
+            GptModelInputs input;
+            input.combo_position_ids = bases;
+            input.prefix_lengths     = torch::tensor({6, 100}, torch::kInt32).to(torch::kCUDA);
+            input.sequence_lengths   = input.prefix_lengths + 1;
+
+            const int64_t  width = static_cast<int64_t>(propose_step + 1);
+            GptModelInputs expected;
+            expected.input_lengths           = torch::full({2}, width, torch::kInt32);
+            expected.prefix_lengths          = torch::tensor({6, 100}, torch::kInt32);
+            expected.sequence_lengths_plus_1 = torch::tensor({7, 101}, torch::kInt32);
+            expected.lm_output_indexes       = torch::tensor({0, static_cast<int32_t>(width)}, torch::kInt32);
+            // The guarded modes retain one base per request, even when async
+            // prepare itself is enabled. Verify the actual worker's input.
+            const bool stale_host_bases =
+                components.executor->useStreamAsync() && components.executor->useDropBroadSync();
+            if (!dspark && propose_step > 1 && !stale_host_bases) {
+                expected.combo_position_ids =
+                    torch::tensor({7,   11,  29,  8,   12,  30,  9,   13,  31,  10,  14,  32,  11,  15,  33,
+                                   101, 103, 107, 102, 104, 108, 103, 105, 109, 104, 106, 110, 105, 107, 111},
+                                  torch::kInt32);
+            } else {
+                expected.combo_position_ids = bases.clone();
+            }
+            target_model->setPrepareInputs({expected});
+
+            components.executor->launchTargetVerifyPrepareAsync(input, 2);
+            components.executor->target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+            EXPECT_EQ(target_model->hasPendingPrepareInputs(), !components.executor->useAsyncPrepare());
+            EXPECT_EQ(input.combo_position_ids.data_ptr(), bases.data_ptr());
+            checkTensorEqual(input.combo_position_ids, torch::tensor({7, 11, 29, 101, 103, 107}, torch::kInt32));
+        }
+    }
+}
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     MtpExecutorTestConfig test_config;
