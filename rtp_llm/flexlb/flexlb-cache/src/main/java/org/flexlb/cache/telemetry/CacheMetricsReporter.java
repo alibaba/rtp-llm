@@ -511,7 +511,7 @@ public class CacheMetricsReporter {
     }
     public void reportClusterRecentCacheKeyHitMetrics(RecentCacheKeyWindow.Snapshot snapshot,
                                                      long hitTokens, long inputTokens) {
-        FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", String.valueOf(snapshot.getTimeWindowMs()));
+        FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", String.valueOf(snapshot.getTimeWindowMs()), "isMaster", "true");
         monitor.report(CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS, tags, snapshot.getHistoryCoverageMs());
         monitor.report(CACHE_CLUSTER_RECENT_HISTORY_READY, tags, snapshot.isHistoryComplete() ? 1L : 0L);
         if (snapshot.isHistoryComplete() && inputTokens > 0L) {

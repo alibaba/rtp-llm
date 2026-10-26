@@ -94,7 +94,7 @@ class CacheMetricsReporterTest {
         when(snapshot.getTimeWindowMs()).thenReturn(1800000L);
         when(snapshot.getHistoryCoverageMs()).thenReturn(1000L);
         reporter.reportClusterRecentCacheKeyHitMetrics(snapshot, 0L, 216513L);
-        FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000");
+        FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000", "isMaster", "true");
         verify(monitor).report(CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS, tags, 1000L);
         verify(monitor).report(CACHE_CLUSTER_RECENT_HISTORY_READY, tags, 0L);
         verifyNoMoreInteractions(monitor);
@@ -108,7 +108,7 @@ class CacheMetricsReporterTest {
         when(snapshot.isHistoryComplete()).thenReturn(true);
         reporter.reportClusterRecentCacheKeyHitMetrics(snapshot, 0L, 300L);
         reporter.reportClusterRecentCacheKeyHitMetrics(snapshot, 216064L, 216513L);
-        FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000");
+        FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000", "isMaster", "true");
         verify(monitor).report(CACHE_CLUSTER_RECENT_HIT_TOKENS, tags, 0L);
         verify(monitor).report(CACHE_CLUSTER_RECENT_INPUT_TOKENS, tags, 300L);
         verify(monitor).report(CACHE_CLUSTER_RECENT_HIT_TOKENS, tags, 216064L);
