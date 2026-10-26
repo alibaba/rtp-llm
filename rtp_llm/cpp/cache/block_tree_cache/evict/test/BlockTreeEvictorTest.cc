@@ -3412,6 +3412,33 @@ TEST_F(BlockTreeEvictorTest, DemotionExcludesSourceAndRollbackOrSuccessRestoresO
     group_->releaseSingleBlock(Tier::HOST, target_block, BlockTreeRefType::CACHE);
 }
 
+TEST_F(BlockTreeEvictorTest, FrozenCandidateRemainsIneligibleAfterOrdinaryHoldsAreReleased) {
+    auto host_pool = makePinnedHostPool(1);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+    const auto block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(block));
+    auto result = insert({100}, {{makeResource(Tier::HOST, block)}});
+    ASSERT_NE(insertedNode(result), nullptr);
+    host_pool->incTreeRef(block, BlockTreeRefType::LOAD);
+    host_pool->freezeBlock(block);
+    host_pool->freezeBlock(block);
+    EXPECT_FALSE(evictor_->chooseVictim(0, Tier::HOST).has_value());
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+
+    host_pool->decTreeRef(block, BlockTreeRefType::LOAD);
+    EXPECT_TRUE(host_pool->isFrozen(block));
+    EXPECT_FALSE(evictor_->chooseVictim(0, Tier::HOST).has_value());
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+
+    evictor_->suspendCandidate(insertedNode(result), 0, Tier::HOST);
+    insertedNode(result)->group_set_resources[0].evictFromTier(Tier::HOST);
+    group_->releaseSingleBlock(Tier::HOST, block, BlockTreeRefType::CACHE);
+    EXPECT_TRUE(host_pool->isAllocated(block));
+    EXPECT_TRUE(host_pool->isFrozen(block));
+    EXPECT_EQ(host_pool->freeBlocksNum(), host_pool->totalBlocksNum() - 1);
+}
+
 TEST_F(BlockTreeEvictorTest, ChooseVictimKeepsCandidateUntilTaskActivation) {
     auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
