@@ -50,7 +50,7 @@ def test_linear_row_positions_and_batch_buckets(dtype, shape):
         x.double(), weight.double(), bias.double()
     ).float()
     torch.testing.assert_close(ref, expected, atol=2e-5, rtol=2e-4)
-    for batch in (2, 7, 15, 16, 17, 31, 32, 33, 64):
+    for batch in (2, 7, 15, 16, 17, 31, 32, 33, 64, 127, 128, 129, 257):
         packed = torch.randn(batch, k, device="cuda", dtype=dtype)
         for idx in (0, batch // 2, batch - 1):
             packed[idx].copy_(x[0])
@@ -206,3 +206,118 @@ def test_factory_policy_isolation_and_live_weight_update():
         pytest.raises(ValueError, match="compatible Linear"),
     ):
         LinearFactory.create_linear(weight.half(), None, None, None)
+
+
+@pytest.mark.parametrize(
+    "heads,kv_heads,dim", [(8, 2, 64), (28, 4, 128), (8, 8, 256), (32, 1, 128)]
+)
+def test_unified_packed_ragged_chunks_and_uninitialized_tail(heads, kv_heads, dim):
+    """Packed Tensor Core rows must agree with isolated/reordered query rows."""
+    torch.manual_seed(137)
+    lengths, prefixes, page = [65, 129, 3], [31, 896, 7], 16
+    blocks = (max(n + p for n, p in zip(lengths, prefixes)) + page - 1) // page
+    table = torch.arange(3 * blocks, dtype=torch.int32, device="cuda").view(3, blocks)
+    cache = torch.randn(
+        3 * blocks, 2, kv_heads, page, dim, device="cuda", dtype=torch.bfloat16
+    )
+    # No kernel may read uninitialized entries past the last logical KV token.
+    for req, (n, p) in enumerate(zip(lengths, prefixes)):
+        for pos in range(n + p, blocks * page):
+            cache[req * blocks + pos // page, :, :, pos % page] = float("nan")
+    q = torch.randn(sum(lengths), heads, dim, device="cuda", dtype=torch.bfloat16)
+    requests = torch.repeat_interleave(
+        torch.arange(3, device="cuda", dtype=torch.int32),
+        torch.tensor(lengths, device="cuda"),
+    )
+    positions = torch.cat(
+        [
+            torch.arange(p, p + n, device="cuda", dtype=torch.int32)
+            for n, p in zip(lengths, prefixes)
+        ]
+    )
+    starts = torch.tensor([0, 65, 194, 197], dtype=torch.int32, device="cuda")
+    expected = paged_attention(q, cache, table, requests, positions)
+    actual = paged_attention(q, cache, table, requests, positions, query_start=starts)
+    same_bits(expected, actual)
+    permutation = torch.randperm(len(q), device="cuda")
+    same_bits(
+        expected[permutation],
+        paged_attention(
+            q[permutation], cache, table, requests[permutation], positions[permutation]
+        ),
+    )
+    start = 0
+    for req, length in enumerate(lengths):
+        for chunk in (1, 3, 17, 64):
+            parts = []
+            for i in range(0, length, chunk):
+                end = min(i + chunk, length)
+                part = slice(start + i, start + end)
+                parts.append(
+                    paged_attention(
+                        q[part],
+                        cache,
+                        table[req : req + 1],
+                        torch.zeros(end - i, device="cuda", dtype=torch.int32),
+                        positions[part],
+                        query_start=torch.tensor(
+                            [0, end - i], device="cuda", dtype=torch.int32
+                        ),
+                    )
+                )
+            same_bits(expected[start : start + length], torch.cat(parts))
+        start += length
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        paged_attention(q, cache, table, requests, positions, query_start=starts)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = paged_attention(
+            q, cache, table, requests, positions, query_start=starts
+        )
+    graph.replay()
+    same_bits(expected, captured)
+    positions.sub_(1)
+    graph.replay()
+    same_bits(paged_attention(q, cache, table, requests, positions), captured)
+
+
+@pytest.mark.parametrize("transposed", [False, True])
+@pytest.mark.parametrize("output_dtype", [torch.bfloat16, torch.float32])
+def test_blas_strides_alignment_graph_and_global_isolation(transposed, output_dtype):
+    torch.manual_seed(211)
+    k, n = 512, 1024
+    w = torch.randn(k, n, device="cuda", dtype=torch.bfloat16).T
+    if not transposed:
+        w = w.contiguous()
+    # A nonzero storage offset exercises the plan's pointer alignment key.
+    storage = torch.randn(1 + 129 * k, device="cuda", dtype=torch.bfloat16)
+    x = storage[1:].view(129, k)
+    before = (
+        torch.backends.cuda.preferred_blas_library(),
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
+        torch.backends.cuda.matmul.fp32_precision,
+    )
+    result = linear(x, w, output_dtype=output_dtype)
+    for i in (0, 7, 64, 128):
+        same_bits(result[i : i + 1], linear(x[i : i + 1], w, output_dtype=output_dtype))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        linear(x, w, output_dtype=output_dtype)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = linear(x, w, output_dtype=output_dtype)
+    graph.replay()
+    same_bits(result, captured)
+    w.zero_()
+    graph.replay()
+    same_bits(torch.zeros_like(result), captured)
+    assert before == (
+        torch.backends.cuda.preferred_blas_library(),
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
+        torch.backends.cuda.matmul.fp32_precision,
+    )

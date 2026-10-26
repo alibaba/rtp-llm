@@ -183,31 +183,51 @@ def validate(model):
             ref,
             tuple(torch.cat([p[j] for p in parts]) for j in range(3)),
         )
-    # Capture and replay the complete Python model, reusing planned metadata.
-    h.run([seq[:32]])
-    inputs = h.inputs([[seq[32]]], prefixes=[32], decode=True)
-    fmha = h.model.prepare_fmha_impl(inputs, is_cuda_graph=True)
+    # Each graph keeps its capture-time metadata planner, as the native engine
+    # does. The host planner narrows page buffers; switching that live graph to
+    # the device planner's worst-case capacities is not a supported transition.
+    for device_metadata in (False, True):
+        suffix = "-device-metadata" if device_metadata else ""
 
-    def forward():
-        hidden = h.model.forward(inputs, fmha).hidden_states
-        logits = h.model.batch_invariant_lm_head(hidden, model.lm_head_weight)
-        return hidden, logits, selected_logprobs(logits, inputs.input_ids)
+        def graph_inputs(position):
+            inputs = h.inputs([[seq[position]]], prefixes=[position], decode=True)
+            if device_metadata:
+                a = inputs.attention_inputs
+                a.input_lengths = a.input_lengths.cuda()
+                a.prefix_lengths = a.prefix_lengths.cuda()
+                a.sequence_lengths = a.sequence_lengths.cuda()
+            return inputs
 
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        forward()
-    torch.cuda.current_stream().wait_stream(stream)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        outputs = forward()
-    graph.replay()
-    h.check("full-model-graph-replay", tuple(t[32:33] for t in ref), outputs)
-    updated = h.inputs([[seq[33]]], prefixes=[33], decode=True)
-    inputs.input_ids.copy_(updated.input_ids)
-    fmha.prepare_cuda_graph(updated.attention_inputs)
-    graph.replay()
-    h.check("full-model-graph-new-position", tuple(t[33:34] for t in ref), outputs)
+        h.run([seq[:32]])
+        inputs = graph_inputs(32)
+        fmha = h.model.prepare_fmha_impl(inputs, is_cuda_graph=True)
+
+        def forward():
+            hidden = h.model.forward(inputs, fmha).hidden_states
+            logits = h.model.batch_invariant_lm_head(hidden, model.lm_head_weight)
+            return hidden, logits, selected_logprobs(logits, inputs.input_ids)
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            forward()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            outputs = forward()
+        graph.replay()
+        h.check(
+            "full-model-graph-replay" + suffix, tuple(t[32:33] for t in ref), outputs
+        )
+        updated = graph_inputs(33)
+        inputs.input_ids.copy_(updated.input_ids)
+        fmha.prepare_cuda_graph(updated.attention_inputs)
+        graph.replay()
+        h.check(
+            "full-model-graph-new-position" + suffix,
+            tuple(t[33:34] for t in ref),
+            outputs,
+        )
     return h.checks
 
 

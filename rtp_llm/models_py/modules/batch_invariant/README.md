@@ -45,13 +45,19 @@ than one and model execution classes without the capability are rejected.
 
 ## Arithmetic and transport
 
-* Linear uses a fixed 16x64x32 GEMM tiling with FP32 accumulation and no split-K
-  or shape-dependent autotuning. LM head uses the same implementation, including
-  when called through C++.
+* On Hopper/Blackwell, BF16 Linear with N/K divisible by eight uses cuBLASLt with operation-local FP32
+  compute, zero workspace and explicit rejection of split-K/reduction algorithms,
+  following vLLM's BLAS strategy. The Blackwell M=1 heuristic follows PyTorch
+  2.11's GEMV avoidance. A bounded descriptor cache contains no weight pointers.
+  Odd feature widths, other architectures and FP32 operator tests use the adapted vLLM persistent
+  Triton GEMM with fixed K partitions. LM head uses these same paths with FP32
+  output, including when called through C++. No global BLAS flags are changed.
 * RMSNorm and Q/K norm use a fixed per-row reduction.
-* Prefill and decode share one attention implementation. Every query visits
-  logical causal KV blocks of 32 in the same order, independent of other queries,
-  physical page addresses and future tokens. RoPE uses a fixed cache.
+* Prefill and decode share the causal BF16 subset of vLLM's 2D unified
+  attention. Tensor Core QK/PV and grouped query tiles share KV loads. Logical KV
+  blocks of 32 retain the same traversal/softmax partition in both phases; no
+  split-KV path is enabled. The adapter computes ragged query offsets on device
+  and supplies absolute positions and HND cache strides. RoPE uses a fixed cache.
 * Vocabulary logsumexp uses fixed 1024-element partitions and a fixed merge.
   Native prompt scoring and generation consume these same normalizers.
 * RPC carries the selected FP32 raw logprob directly. The token client preserves
@@ -59,9 +65,10 @@ than one and model execution classes without the capability are rejected.
   Older servers without this field retain the existing probability fallback;
   that fallback does not provide this feature's strict transport contract.
 
-These kernels prioritize an auditable numerical path. They run batched work on
-the GPU, but are not a throughput optimization. Further tuning must retain the
-same reduction topology or introduce a separately validated profile.
+See [UPSTREAM.md](UPSTREAM.md) for source versions, hashes and adaptations.
+Performance changes must pass the same zero-byte-difference checks and an
+independent numerical reference. Kernel speedups alone do not establish
+end-to-end rollout or RL training throughput.
 
 ## Validation
 
@@ -83,7 +90,30 @@ selected logprobs as byte arrays, including changed metadata on actual Graph
 replay. It never starts training, evaluation datasets or checkpoint creation.
 RPC transport tests live in `rtp_llm/RL/test/token_rpc_client_test.py`.
 
-The initial validation on L20B / SM 10.3, Torch 2.11 / CUDA 13 includes:
+The vLLM-derived revision was validated on L20B / SM 10.3, Torch 2.11 / CUDA 13:
+
+* 24 CUDA/operator-policy checks and 17 token RPC client tests passed. Coverage
+  includes GEMM tile boundaries, sliced-buffer alignment, row/column-major
+  weights, live weight updates, unchanged global BLAS settings, ragged attention,
+  GQA ratios including seven, head dimensions 64/128/256 and KV lengths to 1025.
+* Qwen3-8B passed 26 full-model checks with zero unequal bytes in hidden states,
+  full-vocabulary logits and selected FP32 raw logprobs. The 20 standard checks
+  use 65 tokens; six extended checks compare the final position of a 1025-token
+  sequence across peers, page placement and chunk boundaries.
+* A seeded small Qwen2 fixture with QKV bias and without Q/K norm passed the
+  same 20 standard checks and a separate Hugging Face eager numerical reference.
+  Maximum absolute differences were 0.01163 for logits and 0.005094 for logprobs.
+  This is structural coverage, not acceptance of a pretrained Qwen2 checkpoint.
+* Native RPC passed FIFO/eager and ratio/decode-Graph checks, including real
+  multi-request batches, Graph padding, serial/concurrent scoring, reordering,
+  decode-versus-prefill rescoring and equality across both server modes.
+* Host and device metadata planners each passed full-model Graph capture/replay
+  with changing positions. A live graph must retain its capture-time planner;
+  switching between the planners' buffer-capacity conventions is unsupported.
+
+The original implementation at `08bd92d9` was validated on L20B / SM 10.3,
+Torch 2.11 / CUDA 13 as follows (historical results, not a substitute for
+revalidating the updated kernels):
 
 * 16 CUDA/operator-policy checks and 17 token RPC client tests.
 * 18 full-model checks on Qwen3-8B, comparing hidden states, full-vocabulary
@@ -98,5 +128,7 @@ The initial validation on L20B / SM 10.3, Torch 2.11 / CUDA 13 includes:
   rescoring. The Graph capture buckets are 1/2/4/8.
 
 These are bounded conformance checks, not exhaustive qualification of all
-sequence lengths, checkpoints or architectures. The initial model checker uses
-a 65-token target sequence; attention operator checks extend to 97 tokens.
+sequence lengths, checkpoints or architectures. The v1 attention operator checks
+extended to 97 tokens; the updated checks extend to 1025 tokens. Other GPUs and
+cuBLAS releases must be qualified independently. No RL effect or end-to-end
+rollout performance acceptance is implied.

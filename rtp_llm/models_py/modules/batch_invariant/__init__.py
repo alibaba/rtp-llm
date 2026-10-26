@@ -70,6 +70,13 @@ class BatchInvariantPolicy:
 
         if attn_kv_dtype(attn) != torch.bfloat16:
             raise ValueError("batch invariant dense-gqa-v1 requires BF16 KV cache")
+        if torch.cuda.get_device_capability()[0] in (9, 10):
+            from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+            if not hasattr(rtp_llm_ops, "batch_invariant_cublaslt_gemm"):
+                raise RuntimeError(
+                    "batch invariant requires rebuilt native libraries with the scoped cuBLASLt operation"
+                )
 
 
 _construction_policy = ContextVar(

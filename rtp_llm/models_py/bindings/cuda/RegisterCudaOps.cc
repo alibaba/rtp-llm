@@ -14,6 +14,12 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("batch_invariant_cublaslt_gemm",
+                  &torch_ext::batch_invariant_cublaslt_gemm,
+                  "BF16 cuBLASLt GEMM with FP32 accumulation, no split-K and no workspace",
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("fp32_output") = false);
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,
                   "cuBLAS BF16 x BF16 GEMM with FP32 accumulation and FP32 output",

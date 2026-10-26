@@ -32,6 +32,7 @@ class BatchInvariantAttention(FMHAImplBase):
         )
         self.writer.set_params(self.params)
         self.block_table = None
+        self.query_start = None
         self.prepare(inputs)
 
     def prepare(self, inputs, replay=False):
@@ -108,6 +109,29 @@ class BatchInvariantAttention(FMHAImplBase):
             self.block_table.copy_(table, non_blocking=True)
         else:
             self.block_table = table.to(device="cuda", dtype=torch.int32).clone()
+        batch = table.shape[0]
+        if inputs.input_lengths.numel() != batch:
+            raise ValueError("batch invariant query lengths must match the block table")
+        if not replay:
+            self.query_start = torch.empty(batch + 1, device="cuda", dtype=torch.int32)
+        elif self.query_start.numel() != batch + 1:
+            raise ValueError(
+                "batch invariant Graph replay requires the captured batch size"
+            )
+        # The MHA device planner deliberately leaves MLA's qo_indptr untouched.
+        # Build our packed offsets from the actual query lengths on device,
+        # preserving the allocation across replay and host/device metadata paths.
+        lengths = inputs.input_lengths.to(device="cuda", dtype=torch.int32)
+        decode_count = (
+            inputs.sequence_lengths.numel()
+            if inputs.sequence_lengths is not None
+            else 0
+        )
+        if decode_count:
+            lengths = lengths.clone()
+            lengths[:decode_count] = 1
+        self.query_start[:1].zero_()
+        torch.cumsum(lengths, dim=0, dtype=torch.int32, out=self.query_start[1:])
         self.inputs = inputs
         self.write_cache_store_impl = common.create_write_cache_store_impl(inputs)
 
@@ -149,4 +173,5 @@ class BatchInvariantAttention(FMHAImplBase):
             self.block_table,
             self.params.batch_indice_d[:rows],
             self.params.positions_d[:rows],
+            query_start=self.query_start,
         )
