@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import json
 import os
@@ -446,7 +447,25 @@ class OpenaiGenerateConfigTest(TestCase):
             request, input_ids=input_ids, renderer=renderer
         )
 
+    def test_default_public_name_does_not_expose_factory_class_name(self):
+        config = self._make_default_model_config()
+        config.model_name = "Qwen3Next"  # ModelFactory's existing internal fallback.
+        config.model_type = "qwen_3_next"
+        endpoint = self._make_openai_endpoint(config)
+        self.assertEqual(endpoint.model_name, "")
+        models = asyncio.run(endpoint.list_models())
+        self.assertEqual(models.data[0].id, "qwen_3_next")
 
+    def test_explicit_public_name_overrides_models_and_response_name(self):
+        config = self._make_default_model_config()
+        config.model_type = "qwen_3_next"
+        config.apply_override_args('{"model_name":"served-preview"}')
+        endpoint = self._make_openai_endpoint(config)
+        self.assertEqual(endpoint.model_name, "served-preview")
+        self.assertEqual(
+            asyncio.run(endpoint.list_models()).data[0].id, "served-preview"
+        )
+        self.assertEqual(config.model_name, "served-preview")
 
     def test_extra_configs_keeps_role_addr_objects_and_request_isolation(self):
         from rtp_llm.ops import RoleType

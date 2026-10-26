@@ -157,7 +157,8 @@ class OpenaiEndpoint(object):
             else None
         )
         self.max_seq_len = model_config.max_seq_len
-        self.model_name = model_config.model_name
+        self.model_name = model_config.served_model_name or ""
+        self.model_type = model_config.model_type
         self.special_tokens = model_config.special_tokens
         template_type = model_config.template_type
         ckpt_path = model_config.ckpt_path
@@ -255,7 +256,7 @@ class OpenaiEndpoint(object):
         )
 
     async def list_models(self):
-        model_card = ModelCard(id=self.model_name)
+        model_card = ModelCard(id=self.model_name or self.model_type)
         return ModelList(data=[model_card])
 
     def _dedup_stop_words_list(
@@ -836,6 +837,7 @@ class OpenaiEndpoint(object):
         choice_generator: Optional[AsyncGenerator[StreamResponseObject, None]],
         debug_info: Optional[DebugInfo],
         tokenizer: Optional[Any] = None,
+        model_name: str = "",
     ) -> ChatCompletionResponse:
         all_choices = []
         usage = None
@@ -929,7 +931,7 @@ class OpenaiEndpoint(object):
             choices=all_choices,
             usage=usage,
             aux_info=aux_info,
-            model="",
+            model=model_name,
             debug_info=debug_info,
             extra_outputs=extra_outputs,
         )
@@ -939,6 +941,7 @@ class OpenaiEndpoint(object):
         choice_generator: AsyncGenerator[StreamResponseObject, None],
         debug_info: Optional[DebugInfo],
         tokenizer: Optional[Any] = None,
+        model_name: str = "",
     ) -> CompleteResponseAsyncGenerator:
         # prompt_logits is attached by renderer.generate_choice on the last StreamResponseObject;
         # capture it here so collect_with_prompt_logits can attach it to the final ChatCompletionResponse.
@@ -965,6 +968,7 @@ class OpenaiEndpoint(object):
                     captured_prompt_logits["data"] = response.prompt_logits
 
                 yield ChatCompletionStreamResponse(
+                    model=model_name,
                     choices=response.choices,
                     usage=response.usage,
                     aux_info=response.aux_info,
@@ -975,7 +979,10 @@ class OpenaiEndpoint(object):
 
         async def collect_with_prompt_logits(generator):
             resp = await OpenaiEndpoint._collect_complete_response(
-                generator, debug_info=debug_info, tokenizer=tokenizer
+                generator,
+                debug_info=debug_info,
+                tokenizer=tokenizer,
+                model_name=model_name,
             )
             if "data" in captured_prompt_logits:
                 resp.prompt_logprobs = captured_prompt_logits["data"]
@@ -1119,7 +1126,7 @@ class OpenaiEndpoint(object):
         )
 
         return self._complete_stream_response(
-            choice_generator, debug_info, self.tokenizer
+            choice_generator, debug_info, self.tokenizer, self.model_name
         )
 
     def _prepare_chat_input(self, request_id: int, chat_request):
@@ -1182,7 +1189,7 @@ class OpenaiEndpoint(object):
             merged_gen, chat_request, generate_config
         )
         resp = await self._collect_complete_response(
-            choice_generator, None, self.tokenizer
+            choice_generator, None, self.tokenizer, self.model_name
         )
         if prompt_logits_data is not None:
             resp.prompt_logprobs = prompt_logits_data
