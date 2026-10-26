@@ -351,31 +351,32 @@ def throughput_config(
     if schedule_trace:
         if (
             (not adaptive and policy != "prefill-first")
-            or not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", trace_run_id)
-            or trace_run_id == "unset"
+            or (
+                trace_run_id not in ("", "unset")
+                and not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", trace_run_id)
+            )
+            or (trace_run_id in ("", "unset") and coord_mode != "cadence")
         ):
             raise ValueError(
                 "schedule trace requires ratio scheduler and a safe, explicit run ID"
             )
-        args += f" --pdfusion_schedule_trace 1 --pdfusion_trace_run_id {trace_run_id}"
+        args += " --pdfusion_schedule_trace 1"
+        if trace_run_id not in ("", "unset"):
+            args += f" --pdfusion_trace_run_id {trace_run_id}"
     if coord_mode not in ("off", "cadence"):
         raise ValueError("unknown coordinator mode")
-    if coord_mode == "cadence":
-        if (
-            not schedule_trace
-            or len(trace_run_id) > 63
-            or (
-                not adaptive
-                and (
-                    policy != "prefill-first"
-                    or not ratio.isdigit()
-                    or not 1 <= int(ratio) <= 1000000
-                )
-            )
-        ):
-            raise ValueError(
-                "global cadence requires trace and a unique <=63-character run ID; legacy mode also requires integer ratio >=1"
-            )
+    if (
+        coord_mode == "cadence"
+        and not adaptive
+        and (
+            policy != "prefill-first"
+            or not ratio.isdigit()
+            or not 1 <= int(ratio) <= 1000000
+        )
+    ):
+        raise ValueError(
+            "legacy global cadence requires the ratio scheduler and integer ratio >=1"
+        )
     env = dict(env, **values)
     args += f" --pdfusion_coord_mode {coord_mode}"
     # concurrency_limit=4 also sets max_generate_batch_size in engine_config.
@@ -936,13 +937,37 @@ CLIENT_PROCESS_ORIGIN = None
 CLIENT_ABORT_EVENT = None
 
 
+def read_cadence_group_id(out):
+    """Read the server-generated identity; trace labels never authorize a drain."""
+    groups = set()
+    paths = list((out / "fusion_logs").rglob("*")) + list(
+        (out / "logs").glob("engine.log*")
+    )
+    for path in paths:
+        if not path.is_file() or path.suffix in (".gz", ".zip"):
+            continue
+        with path.open(errors="replace") as stream:
+            for line in stream:
+                match = re.search(
+                    r"(?:PDFUSION_COORD_BOOTSTRAP|create global PDFUSION cadence scheduler,) group=([a-f0-9]{32})(?:\s|$)",
+                    line,
+                )
+                if match:
+                    groups.add(match[1])
+    if len(groups) != 1:
+        raise RuntimeError(
+            f"expected one initialized cadence group, found {sorted(groups)}"
+        )
+    return groups.pop()
+
+
 def signal_cadence_drain(out, phase, elapsed_s, load_end_s):
     """Publish a run-bound tail signal only after the shared submission deadline."""
     path = CLIENT_OPTIONS.get("cadence_drain_file")
     if not path or elapsed_s < load_end_s:
         return False
     marker = Path(path)
-    token = CLIENT_OPTIONS["cadence_run_id"]
+    token = CLIENT_OPTIONS["cadence_group_id"]
     if marker.exists():
         if marker.read_text() != token + "\n":
             raise RuntimeError("foreign cadence drain marker")
@@ -953,7 +978,7 @@ def signal_cadence_drain(out, phase, elapsed_s, load_end_s):
     save(
         out / (phase + "-drain.json"),
         dict(
-            run_id=token,
+            group_id=token,
             wall=time.time(),
             elapsed_s=elapsed_s,
             load_end_s=load_end_s,
@@ -2665,9 +2690,7 @@ def run_worker(a):
             raise RuntimeError(
                 "existing cadence drain marker; use a fresh output directory"
             )
-        CLIENT_OPTIONS.update(
-            cadence_drain_file=drain_file, cadence_run_id=a.trace_run_id
-        )
+        CLIENT_OPTIONS.update(cadence_drain_file=drain_file)
         env["PDFUSION_CADENCE_DRAIN_FILE"] = drain_file
     env, args = capacity_config(
         env,
@@ -2960,6 +2983,17 @@ def run_worker(a):
             raise RuntimeError("service readiness failed: " + str(ready))
         report["pids"] = {name: m.server_pid for name, m in managers}
         report["pid"] = manager.server_pid
+        if getattr(a, "coord_mode", "off") == "cadence" and (
+            drain_file
+            or (
+                getattr(a, "schedule_trace", 0)
+                and getattr(a, "trace_run_id", "unset") in ("", "unset")
+            )
+        ):
+            group_id = read_cadence_group_id(out)
+            report["cadence_group_id"] = group_id
+            if drain_file:
+                CLIENT_OPTIONS["cadence_group_id"] = group_id
         if getattr(a, "coord_checks", 0):
             report["phase"] = "coordinator_checks"
             save(out / "result.json", report)
@@ -3237,9 +3271,18 @@ def run_worker(a):
             report["speculative"] = speculative_summary(
                 report["requests"], a.mtp_tokens
             )
-        if getattr(a, "coord_mode", "off") == "cadence":
+        if getattr(a, "coord_mode", "off") == "cadence" and getattr(
+            a, "schedule_trace", 0
+        ):
             report["cadence"] = cadence_trace_evidence(
-                out, a.trace_run_id, pd_count, a.decode_prefill_ratio
+                out,
+                (
+                    a.trace_run_id
+                    if a.trace_run_id not in ("", "unset")
+                    else report["cadence_group_id"]
+                ),
+                pd_count,
+                a.decode_prefill_ratio,
             )
         report["performance"] = performance_summary(report)
         save(out / "performance.json", report["performance"])

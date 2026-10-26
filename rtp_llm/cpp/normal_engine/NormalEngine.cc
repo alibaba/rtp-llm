@@ -237,7 +237,8 @@ void NormalEngine::initScheduler() {
         RTP_LLM_CHECK_WITH_INFO(
             (normal && normal->supportsCoordinatedSchedule()) || (mtp && mtp->supportsCoordinatedSchedule()),
             "global cadence requires synchronous host dispatch; MTP supports one through four draft tokens");
-        RTP_LLM_CHECK_WITH_INFO(fifo.pdfusion_trace_run_id != "unset", "global cadence requires a unique run id");
+        RTP_LLM_CHECK_WITH_INFO(!fifo.pdfusion_coord_group_id.empty(),
+                                "global cadence requires an internally initialized control group");
         scheduler_.reset(
             new PDFusionCoordinatedScheduler(runtime_config,
                                              model_config_,
@@ -248,7 +249,7 @@ void NormalEngine::initScheduler() {
                                              metrics_reporter_,
                                              propose_params_ ? static_cast<int>(sp_config.gen_num_per_cycle) : 0,
                                              cadence_config));
-        RTP_LLM_LOG_INFO("create global PDFUSION cadence scheduler, run=%s", fifo.pdfusion_trace_run_id.c_str());
+        RTP_LLM_LOG_INFO("create global PDFUSION cadence scheduler, group=%s", fifo.pdfusion_coord_group_id.c_str());
         return;
     }
     const auto pdfusion_scheduler_mode =
@@ -650,8 +651,13 @@ absl::Status NormalEngine::step() try {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
-    const bool              schedule_trace       = runtime_config.fifo_scheduler_config.pdfusion_schedule_trace;
-    auto*                   coordinated          = dynamic_cast<PDFusionCoordinatedScheduler*>(scheduler_.get());
+    const bool  schedule_trace = runtime_config.fifo_scheduler_config.pdfusion_schedule_trace;
+    auto*       coordinated    = dynamic_cast<PDFusionCoordinatedScheduler*>(scheduler_.get());
+    const auto& fifo           = runtime_config.fifo_scheduler_config;
+    const auto& trace_run_id =
+        coordinated && (fifo.pdfusion_trace_run_id.empty() || fifo.pdfusion_trace_run_id == "unset") ?
+            fifo.pdfusion_coord_group_id :
+            fifo.pdfusion_trace_run_id;
     int64_t                 control_epoch        = schedule_trace && !coordinated ? ++trace_control_epoch_ : 0;
     int64_t                 tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     list<GenerateStreamPtr> streams;
@@ -729,7 +735,7 @@ absl::Status NormalEngine::step() try {
                          "debt_before_scaled=%ld debt_after_scaled=%ld charged_plan=%ld admit_before=%ld "
                          "admit_credit_before_scaled=%ld admit_credit_after_scaled=%ld "
                          "local_draining=%ld drain_mask=%ld max_context_batch_size=%ld",
-                         runtime_config.fifo_scheduler_config.pdfusion_trace_run_id.c_str(),
+                         trace_run_id.c_str(),
                          parallelism_config.dp_rank,
                          control_epoch,
                          model_step_id,
@@ -834,7 +840,7 @@ absl::Status NormalEngine::step() try {
         if (schedule_trace) {
             RTP_LLM_LOG_INFO("SCHEDULE_TRACE v=1 event=end run=%s rank=%d control_epoch=%ld model_step_id=%ld "
                              "end_us=%ld output_tokens=%ld ok=%d timing=host_executor_wall",
-                             runtime_config.fifo_scheduler_config.pdfusion_trace_run_id.c_str(),
+                             trace_run_id.c_str(),
                              parallelism_config.dp_rank,
                              control_epoch,
                              model_step_id,

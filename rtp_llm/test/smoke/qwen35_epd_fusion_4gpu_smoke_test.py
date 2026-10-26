@@ -204,7 +204,7 @@ class FusionSmokeTest(unittest.TestCase):
             marker = out / "cadence-drain"
             with mock.patch.dict(
                 smoke.CLIENT_OPTIONS,
-                dict(cadence_drain_file=str(marker), cadence_run_id="this-run"),
+                dict(cadence_drain_file=str(marker), cadence_group_id="this-run"),
             ):
                 self.assertFalse(
                     smoke.signal_cadence_drain(out, "steady", 1499.999, 1500)
@@ -616,11 +616,11 @@ class FusionSmokeTest(unittest.TestCase):
                 )
             )
 
-    def test_adaptive_auto_selection_retains_trace_and_mtp_safety_checks(self):
+    def test_adaptive_auto_selection_makes_trace_optional_and_retains_mtp_checks(self):
         with mock.patch.dict(os.environ, PDFUSION_CADENCE_ADAPTIVE="1", clear=True):
             for trace, run_id in ((0, "automatic"), (1, "unset"), (1, "x" * 64)):
-                with self.assertRaises(ValueError):
-                    smoke.throughput_config({}, "", "fifo", "0", trace, run_id)
+                _, args = smoke.throughput_config({}, "", "fifo", "0", trace, run_id)
+                self.assertIn("--pdfusion_coord_mode cadence", args)
             with mock.patch.object(
                 smoke, "run_launcher", side_effect=smoke.bazel_command
             ):
@@ -1142,8 +1142,6 @@ class FusionSmokeTest(unittest.TestCase):
         for ratio, trace, run in (
             ("0", 1, "x"),
             ("1/2", 1, "x"),
-            ("16", 0, "x"),
-            ("16", 1, "x" * 64),
         ):
             with self.assertRaises(ValueError):
                 smoke.throughput_config(
@@ -1170,6 +1168,47 @@ class FusionSmokeTest(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 smoke.throughput_config(env, original, policy, ratio, 1, run)
+
+    def test_cadence_needs_neither_trace_nor_user_identity(self):
+        for adaptive in ("0", "1"):
+            with mock.patch.dict(os.environ, PDFUSION_CADENCE_ADAPTIVE=adaptive):
+                env, original = smoke.server_config(
+                    "0,1", "baseline", "mega_moe_fp8", 1
+                )
+                _, args = smoke.throughput_config(
+                    env, original, "prefill-first", "2", 0, "unset", "cadence"
+                )
+                self.assertNotIn("--pdfusion_schedule_trace", args)
+                self.assertNotIn("--pdfusion_trace_run_id", args)
+                _, traced = smoke.throughput_config(
+                    env, original, "prefill-first", "2", 1, "unset", "cadence"
+                )
+                self.assertIn("--pdfusion_schedule_trace 1", traced)
+                self.assertNotIn("--pdfusion_trace_run_id", traced)
+                # A trace label no longer has the control packet's 63-byte limit.
+                _, named = smoke.throughput_config(
+                    env, original, "prefill-first", "2", 1, "x" * 64, "cadence"
+                )
+                self.assertIn("--pdfusion_trace_run_id " + "x" * 64, named)
+
+    def test_cadence_group_discovery_ignores_trace_labels_and_rejects_ambiguity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            logs = out / "fusion_logs"
+            logs.mkdir()
+            log = logs / "process.log"
+            group_id = "a" * 32
+            log.write_text("SCHEDULE_TRACE run=display-name rank=0\n")
+            with self.assertRaises(RuntimeError):
+                smoke.read_cadence_group_id(out)
+            log.write_text(
+                f"PDFUSION_COORD_BOOTSTRAP group={group_id}\ncreate global PDFUSION cadence scheduler, group={group_id}\n"
+            )
+            self.assertEqual(smoke.read_cadence_group_id(out), group_id)
+            with log.open("a") as stream:
+                stream.write("PDFUSION_COORD_BOOTSTRAP group=" + "b" * 32 + "\n")
+            with self.assertRaises(RuntimeError):
+                smoke.read_cadence_group_id(out)
 
     def test_throughput_policy_and_balanced_sweep(self):
         env, original = smoke.server_config("0,1,2,3", "baseline", "mega_moe_fp8", 1)

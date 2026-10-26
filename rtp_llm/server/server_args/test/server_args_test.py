@@ -801,6 +801,34 @@ class ServerArgsSetTest(TestCase):
         with self.assertRaises(SystemExit):
             rtp_llm.server.server_args.server_args.setup_args()
 
+    def test_pdfusion_internal_group_pickle_is_independent_of_trace(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = setup_args(
+                ["--pdfusion_coord_mode=cadence"]
+            ).runtime_config.fifo_scheduler_config
+        self.assertFalse(config.pdfusion_schedule_trace)
+        self.assertEqual(config.pdfusion_trace_run_id, "unset")
+        config.pdfusion_coord_group_id = "internal-group"
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.pdfusion_coord_group_id, "internal-group")
+        self.assertFalse(restored.pdfusion_schedule_trace)
+        self.assertEqual(restored.pdfusion_trace_run_id, "unset")
+        # The previous 12-field pickle still loads, with no invented group identity.
+        old = type(config).__new__(type(config))
+        old.__setstate__(
+            (1, 0, "ratio", "1", True, 0, 0, False, True, "old-trace", "cadence", 30000)
+        )
+        self.assertEqual(old.pdfusion_coord_group_id, "")
+        self.assertEqual(old.pdfusion_trace_run_id, "old-trace")
+
+    def test_pdfusion_internal_group_is_not_a_user_argument(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with self.assertRaises(SystemExit):
+            setup_args(["--pdfusion_coord_group_id=user-supplied"])
+
     def test_gpu_batch_vit_args_parse(self):
         from rtp_llm.config.py_config_modules import PyEnvConfigs
         from rtp_llm.server.server_args.server_args import (

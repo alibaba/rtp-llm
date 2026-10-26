@@ -314,15 +314,15 @@ PDFusionScheduleCoordinator::packet(int64_t epoch, int64_t phase, const PDFusion
     msg.rank_count     = rank_count_;
     msg.mtp_tokens     = mtp_tokens_;
     msg.cadence_config = cadence_config_;
-    std::memcpy(msg.run_id, run_id_.c_str(), run_id_.size() + 1);
+    std::memcpy(msg.group_id, group_id_.c_str(), group_id_.size() + 1);
     msg.state = state;
     return msg;
 }
 void PDFusionScheduleCoordinator::validate(const Packet& msg, int rank, int64_t epoch, int64_t phase) const {
     if (msg.magic != Packet{}.magic || msg.rank != rank || msg.epoch != epoch || msg.phase != phase
         || msg.decode_steps != decode_steps_ || msg.rank_count != rank_count_ || msg.mtp_tokens != mtp_tokens_
-        || !(msg.cadence_config == cadence_config_) || std::memcmp(msg.run_id, packet(0, 0, {}).run_id, 64) != 0) {
-        fail("run/rank/epoch/phase/config mismatch");
+        || !(msg.cadence_config == cadence_config_) || std::memcmp(msg.group_id, packet(0, 0, {}).group_id, 64) != 0) {
+        fail("group/rank/epoch/phase/config mismatch");
     }
     const auto& s = msg.state;
     if (s.ready_prefill < 0 || s.ready_decode < 0 || s.input_tokens < 0 || s.oldest_ready_us < 0
@@ -331,7 +331,7 @@ void PDFusionScheduleCoordinator::validate(const Packet& msg, int rank, int64_t 
         fail("invalid prepared state");
     }
 }
-PDFusionScheduleCoordinator::PDFusionScheduleCoordinator(std::string           run_id,
+PDFusionScheduleCoordinator::PDFusionScheduleCoordinator(std::string           group_id,
                                                          int                   rank,
                                                          int64_t               decode_steps,
                                                          int                   timeout_ms,
@@ -339,7 +339,7 @@ PDFusionScheduleCoordinator::PDFusionScheduleCoordinator(std::string           r
                                                          int                   rank_count,
                                                          int                   mtp_tokens,
                                                          PDFusionCadenceConfig cadence_config):
-    run_id_(std::move(run_id)),
+    group_id_(std::move(group_id)),
     rank_(rank),
     rank_count_(rank_count),
     mtp_tokens_(mtp_tokens),
@@ -348,8 +348,8 @@ PDFusionScheduleCoordinator::PDFusionScheduleCoordinator(std::string           r
     timeout_ms_(timeout_ms) {
     cadence_config_.validate();
     if ((rank_count != 2 && rank_count != 4) || rank < 0 || rank >= rank_count || mtp_tokens < 0 || mtp_tokens > 4
-        || run_id_.empty() || run_id_.size() > 63
-        || run_id_.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.")
+        || group_id_.empty() || group_id_.size() > 63
+        || group_id_.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.")
                != std::string::npos
         || decode_steps_ < 1 || decode_steps_ > 1000000 || timeout_ms < 1 || timeout_ms > 600000
         || startup_timeout_ms < 1 || startup_timeout_ms > 600000) {
@@ -382,7 +382,7 @@ void PDFusionScheduleCoordinator::abort() noexcept {
 void PDFusionScheduleCoordinator::connectGroup(int startup_timeout_ms) {
     sockaddr_un address{};
     address.sun_family = AF_UNIX;
-    const auto name    = "rtp-pdfusion-" + std::to_string(::geteuid()) + "-" + run_id_;
+    const auto name    = "rtp-pdfusion-" + std::to_string(::geteuid()) + "-" + group_id_;
     if (name.size() + 1 > sizeof(address.sun_path)) {
         fail("control address too long");
     }
@@ -393,7 +393,7 @@ void PDFusionScheduleCoordinator::connectGroup(int startup_timeout_ms) {
         listener_ = ::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
         if (listener_ < 0 || ::bind(listener_, reinterpret_cast<sockaddr*>(&address), size) != 0
             || ::listen(listener_, rank_count_) != 0) {
-            fail("leader bind/listen failed; run identity must be unique");
+            fail("leader bind/listen failed; control group identity must be unique");
         }
         for (int count = 0; count < rank_count_ - 1; ++count) {
             waitReady(listener_, POLLIN, deadline);

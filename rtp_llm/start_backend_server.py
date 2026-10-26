@@ -16,6 +16,7 @@ from setproctitle import setproctitle
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
+from rtp_llm.config.pdfusion_coordination import initialize_pdfusion_coordination
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     load_gpu_nic_affinity,
@@ -27,6 +28,7 @@ from rtp_llm.utils.concurrency_controller import (
     set_global_controller,
 )
 from rtp_llm.utils.oom_diag import install_oom_dump
+from rtp_llm.utils.parent_death_signal import run_with_parent_death_signal
 from rtp_llm.utils.process_manager import ProcessManager
 from rtp_llm.utils.util import copy_gemm_config
 
@@ -177,8 +179,15 @@ def _create_rank_processes(
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
         proc = ctx.Process(
-            target=local_rank_start,
-            args=(global_controller, py_env_configs, world_rank, writer),
+            target=run_with_parent_death_signal,
+            args=(
+                os.getpid(),
+                local_rank_start,
+                global_controller,
+                py_env_configs,
+                world_rank,
+                writer,
+            ),
             name=f"rank-{world_rank}",
         )
         processes.append(proc)
@@ -379,6 +388,7 @@ def start_backend_server(
     signal.signal(signal.SIGINT, abort)
 
     logging.info(f"[PROCESS_START]Start backend server process")
+    initialize_pdfusion_coordination(py_env_configs)
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()

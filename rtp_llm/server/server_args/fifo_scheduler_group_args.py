@@ -79,7 +79,7 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         bind_to=[(fifo_scheduler_config, "pdfusion_schedule_trace")],
         type=str2bool,
         default=False,
-        help="Emit scheduling decisions and explicit engine step IDs without changing policy.",
+        help="Optional scheduling diagnostics, disabled by default. Cadence does not require tracing.",
     )
     fifo_scheduler_group.add_argument(
         "--pdfusion_trace_run_id",
@@ -87,7 +87,7 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         bind_to=[(fifo_scheduler_config, "pdfusion_trace_run_id")],
         type=str,
         default="unset",
-        help="Shared run identity for cross-rank trace validation.",
+        help="Optional trace label only; never selects a control group. Cadence defaults to its internal group ID.",
     )
     fifo_scheduler_group.add_argument(
         "--pdfusion_coord_mode",

@@ -56,8 +56,8 @@ TEST_F(NormalEngineTest, testAdaptiveAutomaticallySelectsCoordinatorWithoutLegac
     parallel.pp_size                = 1;
     auto& fifo                      = engine->runtime_config.fifo_scheduler_config;
     fifo.max_context_batch_size     = 1;
-    fifo.pdfusion_schedule_trace    = true;
-    fifo.pdfusion_trace_run_id      = "adaptive-selection-unit-test";
+    fifo.pdfusion_schedule_trace    = false;
+    fifo.pdfusion_coord_group_id    = "adaptive-selection-unit-test";
     fifo.pdfusion_coord_mode        = "off";
     fifo.pdfusion_scheduler_mode    = "";
     for (int ranks : {2, 4}) {
@@ -97,9 +97,9 @@ TEST_F(NormalEngineTest, testDisabledAdaptivePreservesFifoRatioAndExplicitCadenc
     parallel.tp_size = parallel.pp_size = 1;
     parallel.dp_size = parallel.ep_size = parallel.world_size = parallel.local_world_size = 4;
     fifo.max_context_batch_size                                                           = 1;
-    fifo.pdfusion_schedule_trace                                                          = true;
-    fifo.pdfusion_trace_run_id = "legacy-selection-unit-test";
-    fifo.pdfusion_coord_mode   = "cadence";
+    fifo.pdfusion_schedule_trace                                                          = false;
+    fifo.pdfusion_coord_group_id = "legacy-selection-unit-test";
+    fifo.pdfusion_coord_mode     = "cadence";
     engine->initScheduler();
     auto* coordinated = dynamic_cast<PDFusionCoordinatedScheduler*>(engine->scheduler_.get());
     ASSERT_NE(coordinated, nullptr);

@@ -71,7 +71,7 @@ public:
         PREPARE = 1,
         COMMIT  = 2
     };
-    PDFusionScheduleCoordinator(std::string           run_id,
+    PDFusionScheduleCoordinator(std::string           group_id,
                                 int                   rank,
                                 int64_t               decode_steps,
                                 int                   timeout_ms         = 30000,
@@ -91,7 +91,7 @@ private:
         int64_t               rank = 0, epoch = 0, phase = 0, decode_steps = 0;
         int64_t               rank_count = 4, mtp_tokens = 0;
         PDFusionCadenceConfig cadence_config;
-        char                  run_id[64] = {};
+        char                  group_id[64] = {};
         PDFusionPreparedState state;
     };
     using Packets  = std::array<Packet, 4>;
@@ -104,7 +104,7 @@ private:
     void                  checkPeer(int fd);
     static Deadline       deadlineAfter(int timeout_ms);
     static void           waitReady(int fd, short events, Deadline deadline);
-    std::string           run_id_;
+    std::string           group_id_;
     int                   rank_;
     int                   rank_count_, mtp_tokens_;
     int64_t               decode_steps_;

@@ -28,6 +28,7 @@ from rtp_llm.config.server_config_setup import (
 from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
+from rtp_llm.utils.parent_death_signal import run_with_parent_death_signal
 from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_ENV,
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
@@ -127,8 +128,14 @@ def start_backend_server_impl(
     )
     try:
         backend_process = torch.multiprocessing.Process(
-            target=start_backend_server,
-            args=(global_controller, py_env_configs, pipe_writer),
+            target=run_with_parent_death_signal,
+            args=(
+                os.getpid(),
+                start_backend_server,
+                global_controller,
+                py_env_configs,
+                pipe_writer,
+            ),
             name="backend_manager",
         )
         backend_process.start()

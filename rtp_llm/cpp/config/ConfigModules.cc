@@ -395,6 +395,7 @@ std::string FIFOSchedulerConfig::to_string() const {
         << "pdfusion_schedule_trace: " << pdfusion_schedule_trace << "\n"
         << "pdfusion_trace_run_id: " << pdfusion_trace_run_id << "\n"
         << "pdfusion_coord_mode: " << pdfusion_coord_mode << "\n"
+        << "pdfusion_coord_group_id: " << pdfusion_coord_group_id << "\n"
         << "pdfusion_coord_timeout_ms: " << pdfusion_coord_timeout_ms << "\n"
         << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
         << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams << "\n"

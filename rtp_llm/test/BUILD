@@ -162,6 +162,18 @@ py_test(
 )
 
 py_test(
+    name = "pdfusion_coordination_startup_test",
+    srcs = ["pdfusion_coordination_startup_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "parent_death_signal_test",
+    srcs = ["parent_death_signal_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "prompt_scoring_test",
     srcs = [
         "prompt_scoring_test.py",

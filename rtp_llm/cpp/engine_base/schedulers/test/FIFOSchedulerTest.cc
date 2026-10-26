@@ -1007,7 +1007,8 @@ TEST_F(FIFOSchedulerTest, testCurrentKVAdmissionInCoordinatedScheduler) {
         runtime.max_generate_batch_size                       = 3;
         runtime.fifo_scheduler_config.max_batch_tokens_size   = 8192;
         runtime.fifo_scheduler_config.max_context_batch_size  = 1;
-        runtime.fifo_scheduler_config.pdfusion_schedule_trace = true;
+        runtime.fifo_scheduler_config.pdfusion_schedule_trace = false;
+        runtime.fifo_scheduler_config.pdfusion_coord_group_id = "kv-admission-unit-test";
         PDFusionCoordinatedScheduler scheduler(runtime, model, makePDFusionPDSepConfig(), {}, {}, cache);
         auto                         first = makeStream({1, 2, 3, 4}, model, runtime, resource, 64);
         ASSERT_TRUE(scheduler.enqueue(first).ok());
@@ -4886,7 +4887,8 @@ struct CoordTestState {
     ResourceContext                               resource;
     std::shared_ptr<KVCacheManager>               cache;
     std::unique_ptr<PDFusionCoordinatedScheduler> scheduler;
-    explicit CoordTestState(int capacity = 4, int context_batch = 1, bool adaptive = false, int token_budget = 8192) {
+    explicit CoordTestState(
+        int capacity = 4, int context_batch = 1, bool adaptive = false, int token_budget = 8192, bool trace = false) {
         cache = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 64, 8, DataType::TYPE_FP16, 1, 4));
         if (!cache->init()) {
             throw std::runtime_error("test cache initialization failed");
@@ -4897,8 +4899,8 @@ struct CoordTestState {
         runtime.fifo_scheduler_config.max_batch_tokens_size   = token_budget;
         runtime.fifo_scheduler_config.max_context_batch_size  = context_batch;
         runtime.fifo_scheduler_config.decode_prefill_ratio    = "2";
-        runtime.fifo_scheduler_config.pdfusion_schedule_trace = true;
-        runtime.fifo_scheduler_config.pdfusion_trace_run_id   = "unit-test";
+        runtime.fifo_scheduler_config.pdfusion_schedule_trace = trace;
+        runtime.fifo_scheduler_config.pdfusion_coord_group_id = "unit-test";
         PDFusionCadenceConfig cadence;
         cadence.adaptive = adaptive;
         scheduler        = std::make_unique<PDFusionCoordinatedScheduler>(runtime,
@@ -4993,7 +4995,7 @@ TEST_F(FIFOSchedulerTest, testCoordAdaptiveTopUpCountsReadyAndDecodeAgainstConcu
 }
 
 TEST_F(FIFOSchedulerTest, testCoordAdaptiveTopUpPreservesTokenBudgetAndSingleRequestException) {
-    CoordTestState f(8, 4, true, 6);
+    CoordTestState f(8, 4, true, 6, true);
     ASSERT_TRUE(f.scheduler->enqueue(f.stream()).ok());
     ASSERT_EQ(f.scheduler->prepareLocal(1).ready_prefill, 1);
     f.scheduler->commitLocal(1, PDFusionPlan::DECODE);
@@ -5019,7 +5021,7 @@ TEST_F(FIFOSchedulerTest, testCoordAdaptiveTokenOnlyUsesPackedLengthsAcrossReser
     for (int token_budget : {9, 10}) {
         SCOPED_TRACE(token_budget);
         // Even an explicit legacy count of one must not cap the packed batch.
-        CoordTestState f(8, 1, true, token_budget);
+        CoordTestState f(8, 1, true, token_budget, true);
         auto           first = f.stream();
         ASSERT_TRUE(f.scheduler->enqueue(first).ok());
         ASSERT_EQ(f.scheduler->prepareLocal(1).ready_prefill, 1);
@@ -5047,9 +5049,9 @@ TEST_F(FIFOSchedulerTest, testCoordAdaptiveTokenOnlyUsesPackedLengthsAcrossReser
 
 TEST_F(FIFOSchedulerTest, testCoordAdaptivePackedBudgetSkipsUnfitRequest) {
     CoordTestState f(8, 1, true, 8);
-    auto long_request = makeStream(std::vector<int>(6, 1), f.model, f.runtime, f.resource, 16);
-    auto unfit = makeStream(std::vector<int>(3, 1), f.model, f.runtime, f.resource, 16);
-    auto short_request = makeStream({1}, f.model, f.runtime, f.resource, 16);
+    auto           long_request  = makeStream(std::vector<int>(6, 1), f.model, f.runtime, f.resource, 16);
+    auto           unfit         = makeStream(std::vector<int>(3, 1), f.model, f.runtime, f.resource, 16);
+    auto           short_request = makeStream({1}, f.model, f.runtime, f.resource, 16);
     for (const auto& stream : {long_request, unfit, short_request}) {
         ASSERT_TRUE(f.scheduler->enqueue(stream).ok());
     }
@@ -5066,7 +5068,7 @@ TEST_F(FIFOSchedulerTest, testCoordAdaptivePackedBudgetSkipsUnfitRequest) {
 }
 
 TEST_F(FIFOSchedulerTest, testCoordAdaptivePackedBudgetIncludesExpandedSequences) {
-    CoordTestState f(8, 1, true, 7);
+    CoordTestState                 f(8, 1, true, 7, true);
     std::vector<GenerateStreamPtr> streams;
     for (int i = 0; i < 2; ++i) {
         auto stream = makeStream({1, 2}, f.model, f.runtime, f.resource, 16, 2);
@@ -5084,7 +5086,7 @@ TEST_F(FIFOSchedulerTest, testCoordAdaptivePackedBudgetIncludesExpandedSequences
 }
 
 TEST_F(FIFOSchedulerTest, testCoordAdaptiveTopUpIncludesReadyReservationInKVPeak) {
-    CoordTestState f(8, 4, true);
+    CoordTestState f(8, 4, true, 8192, true);
     // Each request fits the 63 usable eight-token blocks, but their combined peak does not.
     auto first  = makeStream({1, 2}, f.model, f.runtime, f.resource, 400);
     auto second = makeStream({1, 2}, f.model, f.runtime, f.resource, 400);
@@ -5529,7 +5531,7 @@ TEST_F(FIFOSchedulerTest, testCoordUntimedReservationFlushesOnlyAfterRunBoundDra
     f.scheduler->completeModelStep();
     {
         std::ofstream marker(path);
-        marker << f.scheduler->run_id_ << '\n';
+        marker << f.scheduler->group_id_ << '\n';
     }
     state = f.scheduler->prepareLocal(3);
     EXPECT_EQ(state.draining, 1);
@@ -5590,6 +5592,23 @@ TEST_F(FIFOSchedulerTest, testAdaptiveConstructorAndReservationIgnoreLegacyRatio
         EXPECT_TRUE(f.scheduler->commitLocal(1, PDFusionPlan::PREFILL).empty());
         f.scheduler->completeModelStep();
     }
+}
+
+TEST_F(FIFOSchedulerTest, testCoordControlIdentityIsIndependentOfTrace) {
+    CoordTestState f;
+    EXPECT_FALSE(f.runtime.fifo_scheduler_config.pdfusion_schedule_trace);
+    EXPECT_EQ(f.runtime.fifo_scheduler_config.pdfusion_trace_run_id, "unset");
+    EXPECT_EQ(f.scheduler->group_id_, "unit-test");
+    auto& fifo                   = f.runtime.fifo_scheduler_config;
+    fifo.pdfusion_schedule_trace = true;
+    fifo.pdfusion_trace_run_id   = "human readable trace label";
+    auto create                  = [&]() {
+        return std::make_unique<PDFusionCoordinatedScheduler>(
+            f.runtime, f.model, makePDFusionPDSepConfig(), ParallelismConfig{}, ModelSpecificConfig{}, f.cache);
+    };
+    EXPECT_EQ(create()->group_id_, "unit-test");
+    fifo.pdfusion_coord_group_id.clear();
+    EXPECT_THROW(create(), std::invalid_argument);
 }
 
 TEST_F(FIFOSchedulerTest, testDisabledCoordinatedConstructorRetainsLegacyRatioValidation) {

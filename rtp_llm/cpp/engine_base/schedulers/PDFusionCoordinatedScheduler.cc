@@ -35,7 +35,7 @@ PDFusionCoordinatedScheduler::PDFusionCoordinatedScheduler(const RuntimeConfig& 
                                                            int                                    mtp_tokens,
                                                            PDFusionCadenceConfig                  cadence_config):
     PDFusionRatioScheduler(schedulerRuntime(runtime, cadence_config), model, pd, parallel, specific, cache, reporter),
-    run_id_(runtime.fifo_scheduler_config.pdfusion_trace_run_id),
+    group_id_(runtime.fifo_scheduler_config.pdfusion_coord_group_id),
     rank_(parallel.dp_rank),
     rank_count_(parallel.dp_size),
     mtp_tokens_(mtp_tokens),
@@ -48,8 +48,8 @@ PDFusionCoordinatedScheduler::PDFusionCoordinatedScheduler(const RuntimeConfig& 
         || runtime.fifo_scheduler_config.pdfusion_coord_timeout_ms > 600000) {
         throw std::invalid_argument("global control timeout outside [1,600000] ms");
     }
-    if (!runtime.fifo_scheduler_config.pdfusion_schedule_trace) {
-        throw std::invalid_argument("global cadence requires schedule trace");
+    if (group_id_.empty()) {
+        throw std::invalid_argument("global cadence requires an initialized control group");
     }
     if (max_context_batch_size_ < 1 || (!cadence_config_.adaptive && max_context_batch_size_ != 1)) {
         throw std::invalid_argument("adaptive cadence requires context batch limit >=1; legacy cadence requires 1");
@@ -86,8 +86,8 @@ bool PDFusionCoordinatedScheduler::observeDrainMarker() {
     // Bind the marker to this control group, so a stale/foreign run cannot drain it.
     std::ifstream marker(drain_file_);
     std::string   token;
-    if (!std::getline(marker, token) || token != run_id_ || marker.peek() != std::char_traits<char>::eof()) {
-        throw std::runtime_error("invalid cadence drain marker run identity");
+    if (!std::getline(marker, token) || token != group_id_ || marker.peek() != std::char_traits<char>::eof()) {
+        throw std::runtime_error("invalid cadence drain marker group identity");
     }
     draining_ = true;
     return true;
@@ -313,7 +313,7 @@ absl::StatusOr<std::list<GenerateStreamPtr>> PDFusionCoordinatedScheduler::sched
         // First connection happens on the engine loop, after normal warmup/capture.
         if (!coordinator_) {
             coordinator_ = std::make_unique<PDFusionScheduleCoordinator>(
-                run_id_, rank_, decode_steps_, timeout_ms_, 300000, rank_count_, mtp_tokens_, cadence_config_);
+                group_id_, rank_, decode_steps_, timeout_ms_, 300000, rank_count_, mtp_tokens_, cadence_config_);
         }
         ++epoch_;
         const auto begin    = nowUs();

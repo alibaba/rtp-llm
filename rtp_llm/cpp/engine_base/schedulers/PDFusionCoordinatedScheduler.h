@@ -69,7 +69,7 @@ private:
         return "PDFusionCoordinatedScheduler";
     }
     PDFusionPreparedState                        last_prepared_;
-    std::string                                  run_id_;
+    std::string                                  group_id_;
     int                                          rank_, rank_count_, mtp_tokens_, timeout_ms_;
     int64_t                                      decode_steps_;
     std::unique_ptr<PDFusionScheduleCoordinator> coordinator_;

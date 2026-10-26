@@ -1,13 +1,66 @@
+import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.ops import RoleType
-from rtp_llm.start_server import start_server
+from rtp_llm.start_backend_server import (
+    _create_rank_processes,
+    local_rank_start,
+    start_backend_server,
+)
+from rtp_llm.start_server import start_backend_server_impl, start_server
+from rtp_llm.utils.parent_death_signal import run_with_parent_death_signal
 from rtp_llm.utils.process_manager import ProcessManager
 
 
 class StartServerFailureTest(unittest.TestCase):
+    def test_backend_manager_is_bound_to_server_parent(self):
+        config = PyEnvConfigs()
+        reader, writer = Mock(), Mock()
+        with (
+            patch.dict(os.environ),
+            patch(
+                "rtp_llm.start_server.torch.multiprocessing.Pipe",
+                return_value=(reader, writer),
+            ),
+            patch("rtp_llm.start_server.torch.multiprocessing.Process") as process,
+        ):
+            result = start_backend_server_impl(None, config)
+        process.assert_called_once_with(
+            target=run_with_parent_death_signal,
+            args=(os.getpid(), start_backend_server, None, config, writer),
+            name="backend_manager",
+        )
+        self.assertIs(result, process.return_value)
+        result.start.assert_called_once_with()
+        writer.close.assert_called_once_with()
+
+    def test_every_rank_is_bound_to_backend_manager_parent(self):
+        config = PyEnvConfigs()
+        ctx = Mock()
+        pipes = [(Mock(), Mock()), (Mock(), Mock())]
+        ctx.Pipe.side_effect = pipes
+        processes, readers = [], []
+        with (
+            patch.dict(os.environ),
+            patch("rtp_llm.start_backend_server._get_local_world_size", return_value=2),
+            patch(
+                "rtp_llm.start_backend_server._get_cuda_device_list",
+                return_value=["0", "1"],
+            ),
+        ):
+            _create_rank_processes(None, config, ctx, processes, readers)
+        self.assertEqual(len(processes), 2)
+        self.assertEqual(readers, [reader for reader, _ in pipes])
+        for rank, call in enumerate(ctx.Process.call_args_list):
+            self.assertIs(call.kwargs["target"], run_with_parent_death_signal)
+            self.assertEqual(
+                call.kwargs["args"],
+                (os.getpid(), local_rank_start, None, config, rank, pipes[rank][1]),
+            )
+            pipes[rank][1].close.assert_called_once_with()
+
     def test_health_check_failure_requests_failure_shutdown_and_exits_nonzero(self):
         py_env_configs = PyEnvConfigs()
         py_env_configs.role_config.role_type = RoleType.VIT
