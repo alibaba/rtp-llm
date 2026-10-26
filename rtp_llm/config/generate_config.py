@@ -1,8 +1,10 @@
 import copy
 import hashlib
+import json
 import logging
 import time
 from enum import IntEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from pydantic import (
@@ -515,6 +517,11 @@ class GenerateConfig(BaseModel):
         """Normalize fields whose Pydantic validators assignment bypasses."""
         if key in ("json_schema", "structural_tag"):
             return parse_json_grammar_value(key, value)
+        if key == "role_addrs":
+            return [
+                addr if isinstance(addr, RoleAddr) else RoleAddr.model_validate(addr)
+                for addr in value
+            ]
         if key == "response_format":
             try:
                 return parse_response_format(value)
@@ -524,6 +531,35 @@ class GenerateConfig(BaseModel):
                     f"response_format must be valid: {str(e)}",
                 ) from e
         return value
+
+    @classmethod
+    def from_generation_config_path(cls, config_dir: Optional[str]):
+        config = cls()
+        if config_dir:
+            path = Path(config_dir) / "generation_config.json"
+            try:
+                stream = path.open()
+            except FileNotFoundError:
+                logging.warning("Generation config %s is absent; using defaults", path)
+                return config
+            with stream:
+                values = json.load(stream)
+                # These fields describe an individual response rather than a
+                # model default. Inheriting them changes raw/chat API shapes.
+                for key in (
+                    "num_return_sequences",
+                    "return_incremental",
+                    "is_streaming",
+                ):
+                    if key in values:
+                        logging.warning(
+                            "Ignoring request-only %s in generation config %s",
+                            key,
+                            path,
+                        )
+                        values.pop(key)
+                config.update(values)
+        return config
 
     def update(self, new: Dict[str, Any]):
         """批量更新字段。

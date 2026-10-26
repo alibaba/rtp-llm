@@ -151,6 +151,11 @@ class OpenaiEndpoint(object):
     ):
         # Get values from model_config
         self.generate_env_config = model_config.generate_env_config
+        self.default_generate_config = GenerateConfig.from_generation_config_path(
+            self.generate_env_config.generation_config_path
+            if self.generate_env_config is not None
+            else None
+        )
         self.max_seq_len = model_config.max_seq_len
         self.model_name = model_config.model_name
         self.special_tokens = model_config.special_tokens
@@ -563,27 +568,46 @@ class OpenaiEndpoint(object):
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
         renderer = renderer or self.chat_renderer
-        config = request.extra_configs or GenerateConfig()
+        defaults = getattr(self, "default_generate_config", None) or GenerateConfig()
+        config = defaults.model_copy(deep=True)
+        if request.extra_configs is not None:
+            # Start with the validated request object: model_dump recursively
+            # erases RoleAddr and drops validation state such as automatic ban
+            # downgrade intent. Fill only server defaults the request omitted.
+            extra = request.extra_configs
+            missing_defaults = defaults.model_fields_set - extra.model_fields_set
+            values = {key: getattr(config, key) for key in missing_defaults}
+            if "enable_cross_sequence_ban" in values and defaults._ban_auto_downgraded:
+                values["enable_cross_sequence_ban"] = True
+            config = extra.model_copy(deep=True)
+            config.update(values)
         if request.extra_configs is not None and (
-            config.response_format is not None
-            or GrammarConstraint.collect_from_config(config)
+            request.extra_configs.response_format is not None
+            or GrammarConstraint.collect_from_config(request.extra_configs)
         ):
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "structured output must use top-level response_format, not extra_configs",
             )
         if request.response_format is not None:
+            GrammarConstraint.clear_from_config(config)
             config.response_format = request.response_format
         elif request.json_format:
+            GrammarConstraint.clear_from_config(config)
             config.response_format = ResponseFormat(type="json_object")
         if request.trace_id != None:
             config.trace_id = request.trace_id
         if request.stream == True:
             config.is_streaming = True
-        if request.temperature != None:
-            config.temperature = request.temperature
-        if request.top_p != None:
-            config.top_p = request.top_p
+        for field in ("temperature", "top_p"):
+            value = getattr(request, field)
+            # Request-model defaults only apply when neither the service nor
+            # extra_configs supplied this field. Explicit null inherits it.
+            if value is not None and (
+                field in request.model_fields_set
+                or field not in config.model_fields_set
+            ):
+                setattr(config, field, value)
         if request.top_k != None:
             config.top_k = request.top_k
         if request.presence_penalty is not None:
@@ -594,7 +618,7 @@ class OpenaiEndpoint(object):
             config.repetition_penalty = request.repetition_penalty
         self._warn_on_repetition_collapse_risk(config, renderer)
         if request.n != None:
-            config.num_return_sequences = request.n
+            config.update({"num_return_sequences": request.n})
         request_stop_words_list = request.stop if request.stop != None else []
         if isinstance(request_stop_words_list, str):
             request_stop_words_list = [request_stop_words_list]
@@ -645,8 +669,7 @@ class OpenaiEndpoint(object):
 
         if (
             request.extra_configs
-            and request.extra_configs.max_thinking_tokens is not None
-            and isinstance(request.extra_configs.max_thinking_tokens, int)
+            and "max_thinking_tokens" in request.extra_configs.model_fields_set
         ):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         if request.thinking_budget is not None:
