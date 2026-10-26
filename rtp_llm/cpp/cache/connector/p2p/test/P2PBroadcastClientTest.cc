@@ -11,6 +11,31 @@
 
 namespace rtp_llm {
 
+TEST(P2PBroadcastDiagnosticsTest, BusinessErrorKeepsOtherRankConnectFailureContext) {
+    using Result         = P2PBroadcastClient::TpBroadcastResult;
+    auto first           = std::make_shared<Result::WorkerRpcContext>();
+    auto second          = std::make_shared<Result::WorkerRpcContext>();
+    first->status        = grpc::Status::OK;
+    auto* business_error = first->response.mutable_p2p_response();
+    business_error->set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED));
+    business_error->set_error_message("worker business failure");
+    second->status      = grpc::Status(grpc::StatusCode::UNAVAILABLE, "Connect Failed");
+    second->server_addr = "worker-1";
+    auto broadcast =
+        std::make_shared<Result>(std::vector<std::shared_ptr<Result::WorkerRpcContext>>{first, second}, 73, "PEER2D");
+    broadcast->finishRank(0, true);
+    broadcast->finishRank(1, true);
+    P2PBroadcastClient::Result result("unique-key", broadcast, 73);
+    EXPECT_EQ(result.errorCode(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    EXPECT_EQ(result.requestId(), 73);
+    const auto message = result.errorMessage();
+    EXPECT_NE(message.find("worker business failure"), std::string::npos);
+    EXPECT_NE(message.find("Connect Failed"), std::string::npos);
+    EXPECT_NE(message.find("request_id=73"), std::string::npos);
+    EXPECT_NE(message.find("direction=PEER2D"), std::string::npos);
+    EXPECT_NE(message.find("target_rank=1"), std::string::npos);
+}
+
 class P2PBroadcastClientTest: public ::testing::Test {
 protected:
     void SetUp() override {

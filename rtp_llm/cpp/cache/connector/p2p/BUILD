@@ -139,6 +139,7 @@ cc_library(
     ],
     deps = [
         ":components",
+        "//rtp_llm/cpp/metrics:metrics",
         ":layer_block_converter",
         ":layer_cache_buffer",
         ":metrics",

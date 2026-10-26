@@ -105,7 +105,8 @@ P2PConnectorSchedulerPrefill::waitForBroadcastCompletion(const std::shared_ptr<P
             RTP_LLM_LOG_WARNING("sendKVCache: request cancelled by client, request_id: %ld, unique_key: %s",
                                 request_id,
                                 unique_key.c_str());
-            cancel_result = tp_broadcast_client_->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_HANDLE_READ);
+            cancel_result =
+                tp_broadcast_client_->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_HANDLE_READ, request_id);
         }
         if (!cancel_result && currentTimeMs() >= deadline_ms) {
             RTP_LLM_LOG_WARNING(
@@ -113,7 +114,8 @@ P2PConnectorSchedulerPrefill::waitForBroadcastCompletion(const std::shared_ptr<P
                 deadline_ms,
                 request_id,
                 unique_key.c_str());
-            cancel_result = tp_broadcast_client_->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_HANDLE_READ);
+            cancel_result =
+                tp_broadcast_client_->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_HANDLE_READ, request_id);
             if (deadline_exceeded_out) {
                 *deadline_exceeded_out = true;
             }

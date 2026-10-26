@@ -28,8 +28,11 @@ public:
             FINISHED
         };
 
-        Task(Tier target, CacheKeysType keys, std::chrono::milliseconds timeout):
-            target_tier(target), cache_keys(std::move(keys)), transfer_task({}, timeout) {}
+        Task(Tier                      target,
+             CacheKeysType             keys,
+             std::chrono::milliseconds timeout,
+             std::optional<int64_t>    request_id = {}):
+            target_tier(target), cache_keys(std::move(keys)), transfer_task({}, timeout, request_id) {}
 
         const std::vector<TransferDescriptor>& descriptors() const {
             return transfer_task.descriptors();

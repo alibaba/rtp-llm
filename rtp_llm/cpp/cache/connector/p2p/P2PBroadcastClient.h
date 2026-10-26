@@ -6,7 +6,9 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,8 +19,9 @@ class P2PBroadcastClient {
 public:
     using TpBroadcastResult = ::rtp_llm::BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
 
-    explicit P2PBroadcastClient(const std::vector<std::string>& worker_addrs,
-                                int64_t                         cancel_broadcast_timeout_ms = 1000);
+    explicit P2PBroadcastClient(const std::vector<std::string>&         worker_addrs,
+                                int64_t                                 cancel_broadcast_timeout_ms = 1000,
+                                std::function<void(const std::string&)> connect_failure_reporter    = {});
     ~P2PBroadcastClient() = default;
 
 public:
@@ -26,8 +29,13 @@ public:
     bool init();
 
     struct Result {
-        Result(const std::string& unique_key, const std::shared_ptr<TpBroadcastResult>& tp_broadcast_result):
-            unique_key_(unique_key), tp_broadcast_result_(tp_broadcast_result), start_time_us_(currentTimeUs()) {}
+        Result(const std::string&                        unique_key,
+               const std::shared_ptr<TpBroadcastResult>& tp_broadcast_result,
+               std::optional<int64_t>                    request_id = std::nullopt):
+            unique_key_(unique_key),
+            tp_broadcast_result_(tp_broadcast_result),
+            start_time_us_(currentTimeUs()),
+            request_id_(request_id) {}
         ~Result() {}
 
         std::string uniqueKey() const {
@@ -46,12 +54,16 @@ public:
 
         ErrorCode   errorCode() const;
         std::string errorMessage() const;
+        std::optional<int64_t> requestId() const {
+            return request_id_;
+        }
 
     private:
         std::string                        unique_key_;
         std::shared_ptr<TpBroadcastResult> tp_broadcast_result_;
         int64_t                            start_time_us_;
         int64_t                            total_cost_time_us_{0};
+        std::optional<int64_t>             request_id_;
     };
 
     /// @brief 向所有 TP worker 广播 KV cache 传输请求
@@ -64,7 +76,9 @@ public:
                                       int                                                   remote_tp_size = 0);
 
     /// @brief 向所有 TP worker 广播 cancel 请求
-    std::shared_ptr<Result> cancel(const std::string& unique_key, P2PConnectorBroadcastType type);
+    std::shared_ptr<Result> cancel(const std::string&        unique_key,
+                                   P2PConnectorBroadcastType type,
+                                   std::optional<int64_t>    request_id = std::nullopt);
 
 private:
     void genBroadcastRequest(FunctionRequestPB&                                    request,
@@ -77,10 +91,11 @@ private:
                              int                                                   remote_tp_size);
 
 private:
-    std::vector<std::string>          worker_addrs_;
-    int64_t                           cancel_broadcast_timeout_ms_;
-    std::shared_ptr<RPCPool>          rpc_pool_;
-    std::shared_ptr<BroadcastManager> tp_broadcast_manager_;
+    std::vector<std::string>                worker_addrs_;
+    int64_t                                 cancel_broadcast_timeout_ms_;
+    std::function<void(const std::string&)> connect_failure_reporter_;
+    std::shared_ptr<RPCPool>                rpc_pool_;
+    std::shared_ptr<BroadcastManager>       tp_broadcast_manager_;
 };
 
 }  // namespace rtp_llm
