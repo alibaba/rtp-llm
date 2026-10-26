@@ -719,24 +719,222 @@ TEST(BlockTreeTest, RemoveNodeAndEmptyAncestorsStopsAtBusyEmptyNode) {
     EXPECT_EQ(node->parent, tree.root());
 }
 
+TEST(BlockTreeTest, PrefixObservabilityDisabledHasNoIntervalBookkeeping) {
+    BlockTree tree(makeGroupSets(1));
+    tree.insertNode({100, 200, 300}, make2DResources(1, 3, 10), false, false);
+
+    const auto snapshot = tree.observabilitySnapshot();
+    EXPECT_EQ(snapshot.node_count, 3u);
+    EXPECT_EQ(snapshot.leaf_count, 0u);
+    EXPECT_EQ(snapshot.branch_count, 0u);
+    EXPECT_EQ(snapshot.content.count, 0u);
+    EXPECT_EQ(snapshot.recovery.count, 0u);
+    EXPECT_EQ(snapshot.tier[0].count, 0u);
+    EXPECT_EQ(snapshot.tier[1].count, 0u);
+    EXPECT_EQ(snapshot.tier[2].count, 0u);
+    EXPECT_FALSE(snapshot.content.mean_age_us.has_value());
+    EXPECT_FALSE(snapshot.content.max_age_us.has_value());
+}
+
+TEST(BlockTreeTest, PrefixObservabilityEnabledSummarizesContentAndTiers) {
+    BlockTree tree(makeGroupSets(1), 1, true);
+    tree.insertNode({100, 200, 300}, make2DResources(1, 3, 10), false, false);
+
+    const auto snapshot = tree.observabilitySnapshot();
+    EXPECT_EQ(snapshot.node_count, 3u);
+    EXPECT_EQ(snapshot.leaf_count, 1u);
+    EXPECT_EQ(snapshot.branch_count, 0u);
+    EXPECT_EQ(snapshot.content.count, 3u);
+    EXPECT_EQ(snapshot.tier[0].count, 3u);
+    ASSERT_TRUE(snapshot.content.mean_age_us.has_value());
+    ASSERT_TRUE(snapshot.content.max_age_us.has_value());
+    EXPECT_GE(*snapshot.content.max_age_us, *snapshot.content.mean_age_us);
+    ASSERT_TRUE(snapshot.tier[0].mean_age_us.has_value());
+    ASSERT_TRUE(snapshot.tier[0].max_age_us.has_value());
+}
+
+TEST(BlockTreeTest, ContentMatchIncludesTailAndPartialTokenInsideNode) {
+    BlockTree                           tree(makeGroupSets(1), 1, true);
+    const std::vector<std::vector<int>> segments{{1, 2}, {3, 4}};
+    tree.insertNode({100, 200}, make2DResources(1, 2, 10), false, false, &segments);
+
+    EXPECT_EQ(tree.contentMatchPos({1, 2, 3, 4}), 4u);
+    EXPECT_EQ(tree.contentMatchPos({1, 2, 3, 9}), 3u);
+    EXPECT_EQ(tree.contentMatchPos({9, 2, 3, 4}), 0u);
+}
+
+TEST(BlockTreeTest, ObservationDisabledPreservesTokenSegments) {
+    BlockTree                           tree(makeGroupSets(1));
+    const std::vector<std::vector<int>> segments{{1, 2}};
+    const auto result = tree.insertNode({100}, make2DResources(1, 1, 10), false, false, &segments);
+    ASSERT_EQ(result.inserted_nodes.size(), 1u);
+    EXPECT_EQ(result.inserted_nodes.front()->token_ids, (std::vector<int>{1, 2}));
+    EXPECT_EQ(tree.contentMatchPos({1, 2}), 2u);
+}
+
 TEST(BlockTreeTest, InsertBackfillsTokenSegmentsOnAdoptedNode) {
-    BlockTree                                  tree(makeGroupSets(1), 2);
+    BlockTree                                  tree(makeGroupSets(1), 2, true);
     std::vector<std::vector<GroupSetResource>> original(1, std::vector<GroupSetResource>(1));
     TreeNode*                                  node = insertAndGetNode(tree, {100}, original);
     ASSERT_NE(node, nullptr);
     EXPECT_TRUE(node->token_ids.empty());
 
     const std::vector<std::vector<int>> segments{{1, 2}};
-    const std::vector<size_t>           token_ends{2};
-    const BlockTreeInsertResult         result = tree.insertNode(
-        {100}, make2DResources(1, 1, 20), /*collect_path=*/false, /*is_resident=*/false, &segments, &token_ends);
+    const BlockTreeInsertResult         result =
+        tree.insertNode({100}, make2DResources(1, 1, 20), /*collect_path=*/false, /*is_resident=*/false, &segments);
     ASSERT_EQ(result.adopted_nodes.size(), 1u);
     EXPECT_EQ(result.adopted_nodes[0].first, node);
     EXPECT_EQ(node->token_ids, (std::vector<int>{1, 2}));
+    EXPECT_EQ(tree.contentMatchPos({1, 2}), 2u);
+}
+
+TEST(BlockTreeTest, PrefixObservabilityCountsBranchAndLeaves) {
+    BlockTree tree(makeGroupSets(1), 1, true);
+    tree.insertNode({100, 200}, make2DResources(1, 2, 10), false, false);
+    tree.insertNode({100, 300}, make2DResources(1, 2, 20), false, false);
+
+    const auto snapshot = tree.observabilitySnapshot();
+    EXPECT_EQ(snapshot.node_count, 3u);
+    EXPECT_EQ(snapshot.branch_count, 1u);
+    EXPECT_EQ(snapshot.leaf_count, 2u);
+    EXPECT_EQ(snapshot.content.count, 3u);
+}
+
+TEST(BlockTreeTest, PrefixPlanProjectsOnlyNewJointRecoveryPointAndClosesAfterInsert) {
+    BlockTree tree(makeGroupSets(1), 2, true);
+    tree.insertNode({100}, make2DResources(1, 1, 10), false, false);
+
+    const std::vector<std::vector<int>> segments{{1, 2}, {3, 4}};
+    const auto                          resources = make2DResources(1, 2, 20);
+    const auto                          plan = tree.planRecoveryPoints({100, 200}, resources, &segments, Tier::DEVICE);
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan[0].index, 1u);
+    EXPECT_EQ(plan[0].key, 200);
+    EXPECT_EQ(plan[0].pos, 4u);
+
+    const auto unfulfilled_before = tree.unfulfilledPlanPoints(plan, {100, 200});
+    ASSERT_EQ(unfulfilled_before.size(), 1u);
+    EXPECT_EQ(unfulfilled_before[0].key, 200);
+
+    tree.insertNode({100, 200}, resources, false, false, &segments);
+    EXPECT_TRUE(tree.unfulfilledPlanPoints(plan, {100, 200}).empty());
+}
+
+TEST(BlockTreeTest, PrefixPlanLegacyTailContentDoesNotMoveCompleteEndpoint) {
+    BlockTree                     tree(makeGroupSets(1), 256, true);
+    const CacheKeysType           keys{1, 2, 3, 4, 5};
+    const auto                    resources = make2DResources(1, 5, 20);
+    std::vector<std::vector<int>> segments(5, std::vector<int>(256, 1));
+    segments.back().resize(277, 1);  // Request has 1301 live tokens, last key ends at1280.
+    const auto plan = tree.planRecoveryPoints(keys, resources, &segments, Tier::DEVICE);
+    ASSERT_EQ(plan.size(), 5u);
+    EXPECT_EQ(plan.back().pos, 1280u);
+    tree.insertNode(keys, resources, false, false, &segments);
+    EXPECT_EQ(tree.findNode(keys).back()->token_end, 1280u);
+    EXPECT_TRUE(tree.unfulfilledPlanPoints(plan, keys).empty());
+}
+
+TEST(BlockTreeTest, PrefixPlanUsesActualShortSwaSpan) {
+    auto      groups = makeFullSwaGroupSets();
+    BlockTree tree(groups, 256, true);
+    auto      resources = make2DResources(2, 3, 20);
+    resources[0][1].device_blocks.clear();
+    resources[1][1].device_blocks.clear();
+    const std::vector<std::vector<int>> segments{
+        std::vector<int>(256, 1), std::vector<int>(256, 1), std::vector<int>(88, 1)};
+    const std::vector<size_t> endpoints{256, 512, 600};
+    const CacheKeysType       keys{1, 2, 3};
+    EXPECT_TRUE(tree.planRecoveryPoints(keys, resources, &segments, Tier::DEVICE, &endpoints).empty());
+    tree.insertNode(keys, resources, false, false, &segments, &endpoints);
+    const std::vector<PrefixCachePlanPoint> requested{{2, 3, 600}};
+    EXPECT_EQ(tree.unfulfilledPlanPoints(requested, keys).size(), 1u);
+
+    // Supply the missing previous-window slot. The 88-token leaf is now ready.
+    resources[1][1].device_blocks = {21};
+    const auto plan               = tree.planRecoveryPoints(keys, resources, &segments, Tier::DEVICE, &endpoints);
+    ASSERT_FALSE(plan.empty());
+    EXPECT_EQ(plan.back().pos, 600u);
+    tree.insertNode(keys, resources, false, false, &segments, &endpoints);
+    EXPECT_TRUE(tree.unfulfilledPlanPoints(requested, keys).empty());
+    auto path                                         = tree.findNode(keys);
+    path[1]->group_set_resources[1].transfer_detached = true;
+    EXPECT_EQ(tree.unfulfilledPlanPoints(requested, keys).size(), 1u);
+    path[1]->group_set_resources[1].transfer_detached = false;
+}
+
+TEST(BlockTreeTest, PrefixPlanAllowsLaterLinearStateAndAlignedHcaNoDemand) {
+    std::vector<GroupSetPtr> groups{
+        std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr),
+        std::make_shared<SWAGroupSet>(
+            128,
+            256,
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(1)},
+            nullptr,
+            nullptr),
+        std::make_shared<LinearGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(2)}, nullptr, nullptr)};
+    block_tree_cache_test::prepareGroupSetsForTest(groups);
+    groups[1]->initialize(1, groups[1]->topologyPtr(), groups[1]->groupTags(), {}, true);
+    BlockTree tree(groups, 256, true);
+    auto      resources = make2DResources(3, 2, 20);
+    resources[0][1].device_blocks.clear();
+    resources[1][1].device_blocks.clear();
+    resources[0][2].device_blocks.clear();
+    const CacheKeysType                 keys{1, 2};
+    const std::vector<std::vector<int>> segments{std::vector<int>(256, 1), std::vector<int>(256, 1)};
+    const auto                          plan = tree.planRecoveryPoints(keys, resources, &segments, Tier::DEVICE);
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan.front().pos, 512u);
+    EXPECT_EQ(tree.unfulfilledPlanPoints(plan, keys).size(), 1u);
+    tree.insertNode(keys, resources, false, false, &segments);
+    EXPECT_TRUE(tree.unfulfilledPlanPoints(plan, keys).empty());
+}
+
+TEST(BlockTreeTest, PrefixObservabilityDisabledDoesNotFormPlanPoints) {
+    BlockTree  tree(makeGroupSets(1), 2, false);
+    const auto plan = tree.planRecoveryPoints({100}, make2DResources(1, 1, 10), nullptr, Tier::DEVICE);
+    EXPECT_TRUE(plan.empty());
+    EXPECT_TRUE(tree.unfulfilledPlanPoints({{0, 100, 0}}, {100}).empty());
+}
+
+TEST(BlockTreeTest, PrefixObservabilityEndsContentIntervalWhenNodeIsRemoved) {
+    BlockTree                                        tree(makeGroupSets(1), 1, true);
+    const std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    const auto                                       insert_result = tree.insertNode({100}, resources, false, false);
+    ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
+    EXPECT_EQ(tree.observabilitySnapshot().content.count, 1u);
+
+    tree.removeNodeAndEmptyAncestors(insert_result.inserted_nodes.front());
+    const auto snapshot = tree.observabilitySnapshot();
+    EXPECT_EQ(snapshot.node_count, 0u);
+    EXPECT_EQ(snapshot.content.count, 0u);
+    EXPECT_FALSE(snapshot.content.mean_age_us.has_value());
+    EXPECT_FALSE(snapshot.content.max_age_us.has_value());
+}
+
+TEST(BlockTreeTest, ContentMatchInfoCarriesKeyOffsetAndPartialFlag) {
+    BlockTree                           tree(makeGroupSets(1), 1, true);
+    const std::vector<std::vector<int>> segments{{1, 2}, {3, 4}};
+    tree.insertNode({100, 200}, make2DResources(1, 2, 10), false, false, &segments);
+
+    const auto complete = tree.contentMatchInfo({1, 2, 3, 4});
+    ASSERT_TRUE(complete.has_value());
+    EXPECT_EQ(complete->pos, 4u);
+    EXPECT_EQ(complete->key, 200);
+    EXPECT_EQ(complete->node_offset, 2u);
+    EXPECT_FALSE(complete->partial);
+
+    const auto partial = tree.contentMatchInfo({1, 2, 3, 9});
+    ASSERT_TRUE(partial.has_value());
+    EXPECT_EQ(partial->pos, 3u);
+    EXPECT_EQ(partial->key, 200);
+    EXPECT_EQ(partial->node_offset, 1u);
+    EXPECT_TRUE(partial->partial);
 }
 
 TEST(BlockTreeTest, AuthenticatedRangesReportOnlyFarthestStrictInteriorFork) {
-    BlockTree                           tree(makeGroupSets(1), 256);
+    BlockTree                           tree(makeGroupSets(1), 256, false);
     const std::vector<std::vector<int>> segments{
         std::vector<int>(256, 1), std::vector<int>(256, 2), std::vector<int>(256, 3)};
     const std::vector<size_t> ends{256, 512, 768};
@@ -780,7 +978,7 @@ TEST(BlockTreeTest, AuthenticatedRangesReportOnlyFarthestStrictInteriorFork) {
 }
 
 TEST(BlockTreeTest, CompetingAuthenticatedBranchesKeepOnlyTheFarthestFork) {
-    BlockTree                     tree(makeGroupSets(1), 256);
+    BlockTree                     tree(makeGroupSets(1), 256, false);
     std::vector<std::vector<int>> near(4, std::vector<int>(256, 1));
     std::fill(near.back().begin() + 32, near.back().end(), 9);
     const std::vector<size_t> near_ends{256, 512, 768, 1024};
@@ -806,7 +1004,7 @@ TEST(BlockTreeTest, CompetingAuthenticatedBranchesKeepOnlyTheFarthestFork) {
 }
 
 TEST(BlockTreeTest, CpForkKeepsExactBoundaryAndRejectsDifferentImageIdentity) {
-    BlockTree                           tree(makeGroupSets(1), 512);
+    BlockTree                           tree(makeGroupSets(1), 512, false);
     const std::vector<std::vector<int>> segments{std::vector<int>(512, 1), std::vector<int>(512, 2)};
     const std::vector<size_t>           ends{512, 1024};
     ASSERT_EQ(
@@ -833,6 +1031,7 @@ TEST(BlockTreeTest, CpForkKeepsExactBoundaryAndRejectsDifferentImageIdentity) {
     EXPECT_EQ(fork->index, 0u);
 
     std::fill(request.begin() + 512, request.begin() + 600, 2);
+    EXPECT_EQ(tree.contentMatchPos(request), 600u);  // Placeholder tokens alone appear to match.
     const auto different_image_key = [](size_t end) { return static_cast<CacheKeyType>(end == 512 ? 1512 : end); };
     const auto ranges              = tree.contentMatchRanges(request, different_image_key, source_identity, &fork);
     EXPECT_TRUE(ranges.empty());
@@ -841,7 +1040,7 @@ TEST(BlockTreeTest, CpForkKeepsExactBoundaryAndRejectsDifferentImageIdentity) {
 
 TEST(BlockTreeTest, LargeCpBlocksKeepExactContentAndForkOffsets) {
     constexpr size_t                    unit = 1024 * 8;  // Base block 1024 with CP8.
-    BlockTree                           tree(makeGroupSets(1), unit);
+    BlockTree                           tree(makeGroupSets(1), unit, false);
     const std::vector<std::vector<int>> segments{std::vector<int>(unit, 11), std::vector<int>(unit, 22)};
     const std::vector<size_t>           ends{unit, 2 * unit};
     tree.insertNode({unit, 2 * unit}, makeEmpty2DResources(2), false, false, &segments, &ends);
@@ -862,6 +1061,7 @@ TEST(BlockTreeTest, LargeCpBlocksKeepExactContentAndForkOffsets) {
         request[mismatch]  = 99;
         const auto ranges  = tree.contentMatchRanges(request, key, identity, &fork);
         SCOPED_TRACE(mismatch);
+        EXPECT_EQ(tree.contentMatchPos(request), mismatch);
         if (mismatch == 0) {
             EXPECT_TRUE(ranges.empty());
             EXPECT_FALSE(fork.has_value());
@@ -876,9 +1076,11 @@ TEST(BlockTreeTest, LargeCpBlocksKeepExactContentAndForkOffsets) {
         request[mismatch] = original;
     }
 
+    EXPECT_EQ(tree.contentMatchPos(request), 2 * unit);
     tree.contentMatchRanges(request, key, identity, &fork);
     EXPECT_FALSE(fork.has_value());  // The source ends before B's extra 17 tokens.
     const std::vector<int> truncated(request.begin(), request.begin() + unit + 37);
+    EXPECT_EQ(tree.contentMatchPos(truncated), truncated.size());
     tree.contentMatchRanges(truncated, key, identity, &fork);
     EXPECT_FALSE(fork.has_value());  // B ends inside a source segment, without a next token to differ.
 
@@ -888,7 +1090,7 @@ TEST(BlockTreeTest, LargeCpBlocksKeepExactContentAndForkOffsets) {
 }
 
 TEST(BlockTreeTest, ShortLeavesRemainTerminalWhileCompleteSiblingContinues) {
-    BlockTree                           tree(makeGroupSets(1), 256);
+    BlockTree                           tree(makeGroupSets(1), 256, false);
     const std::vector<std::vector<int>> prefix{std::vector<int>(256, 1), std::vector<int>(256, 2)};
     const std::vector<size_t>           prefix_ends{256, 512};
     tree.insertNode({256, 512}, makeEmpty2DResources(2), false, false, &prefix, &prefix_ends);
@@ -913,6 +1115,7 @@ TEST(BlockTreeTest, ShortLeavesRemainTerminalWhileCompleteSiblingContinues) {
     std::fill(request.begin() + 256, request.begin() + 512, 2);
     std::fill(request.begin() + 512, request.begin() + 768, 3);
     std::fill(request.begin() + 768, request.end(), 4);
+    EXPECT_EQ(tree.contentMatchPos(request), 900u);
     const auto candidates =
         tree.contentMatchCandidates(request, [](size_t end) { return static_cast<CacheKeyType>(end); });
     std::vector<size_t> endpoints;
@@ -937,7 +1140,7 @@ TEST(BlockTreeTest, ShortLeavesRemainTerminalWhileCompleteSiblingContinues) {
 }
 
 TEST(BlockTreeTest, RootShortLeafAndCPBaseAlignedShortEndpointStayLocal) {
-    BlockTree                           tree(makeGroupSets(1), 512);
+    BlockTree                           tree(makeGroupSets(1), 512, false);
     const std::vector<std::vector<int>> root_segment{std::vector<int>(128, 7)};
     const std::vector<size_t>           root_end{128};
     auto root_short = tree.insertNode({128}, makeEmpty2DResources(1), false, false, &root_segment, &root_end);
@@ -967,7 +1170,7 @@ TEST(BlockTreeTest, RootShortLeafAndCPBaseAlignedShortEndpointStayLocal) {
 }
 
 TEST(BlockTreeTest, ShortKeyStaysOutOfSnapshotAndPublicationAcrossDeletion) {
-    BlockTree tree(makeGroupSets(1), 256);
+    BlockTree tree(makeGroupSets(1), 256, false);
     auto      publisher = std::make_shared<ShortLeafRecordingPublisher>();
     tree.setEventPublisher(publisher, {"group0"});
     const std::vector<std::vector<int>> short_segment{std::vector<int>(128, 1)};
@@ -1003,7 +1206,7 @@ TEST(BlockTreeTest, ShortKeyStaysOutOfSnapshotAndPublicationAcrossDeletion) {
 }
 
 TEST(BlockTreeTest, ExactKeyConflictCannotAdoptResourcesOrChangeLeafIdentity) {
-    BlockTree                           tree(makeGroupSets(1), 256);
+    BlockTree                           tree(makeGroupSets(1), 256, false);
     const std::vector<std::vector<int>> first_segment{std::vector<int>(100, 1)};
     const std::vector<size_t>           first_end{100};
     auto first = tree.insertNode({42}, makeEmpty2DResources(1), false, false, &first_segment, &first_end);
@@ -1030,7 +1233,7 @@ TEST(BlockTreeTest, ExactKeyConflictCannotAdoptResourcesOrChangeLeafIdentity) {
 }
 
 TEST(BlockTreeTest, ShortLeafRejectsNonDeviceResource) {
-    BlockTree                           tree(makeGroupSets(1), 256);
+    BlockTree                           tree(makeGroupSets(1), 256, false);
     const std::vector<std::vector<int>> segment{std::vector<int>(100, 1)};
     const std::vector<size_t>           endpoint{100};
     auto                                resources = makeEmpty2DResources(1);

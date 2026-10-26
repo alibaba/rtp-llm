@@ -76,6 +76,12 @@ bool BlockTreeCache::init() {
         RTP_LLM_LOG_ERROR("failed to start task pool, size=%d", config_.task_pool_size);
         return false;
     }
+    if (config_.enable_prefix_cache_observability) {
+        RTP_LLM_LOG_INFO("event=prefix_cache_observation payload={\"kind\":\"startup\","
+                         "\"schema_version\":1,\"enabled\":true,\"instance\":\"%s\","
+                         "\"output\":\"info\",\"role\":\"PREFILL\",\"allocator_owner\":true}",
+                         config_.prefix_observability_instance.c_str());
+    }
     RTP_LLM_LOG_INFO("initialized with %zu group sets, %zu reusable topology groups, "
                      "pool_threads=%d, storage_backend=%s, "
                      "device=%s, host=%s, disk=%s, remote=%s",
@@ -148,11 +154,12 @@ TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               cache_keys,
                                            const std::function<bool(size_t)>& valid_prefix,
+                                           const std::vector<int>*            request_tokens,
                                            const PartialTailMatchRequest*     partial_tail) {
     BlockTreeMatchResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        result = loader_.matchLocked(cache_keys, valid_prefix, partial_tail);
+        result = loader_.matchLocked(cache_keys, valid_prefix, request_tokens, partial_tail);
     }
     metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics_snapshots);
     return result;
@@ -160,8 +167,9 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               ca
 
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                             const std::vector<std::vector<GroupSetResource>>& resources,
-                            Tier                                              target_tier) {
-    (void)insert(cache_keys, resources, target_tier, false, nullptr);
+                            Tier                                              target_tier,
+                            PrefixCachePlanState*                             prefix_plan_state) {
+    (void)insert(cache_keys, resources, target_tier, false, nullptr, prefix_plan_state);
 }
 
 size_t BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
@@ -169,7 +177,9 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
                               Tier                                              target_tier,
                               bool                                              is_resident,
                               const std::vector<std::vector<int>>*              token_segments,
+                              PrefixCachePlanState*                             prefix_plan_state,
                               const std::vector<size_t>*                         token_ends,
+                              std::optional<int64_t> observation_request_id,
                               bool internal_fork,
                               bool* ready_after_insert) {
     size_t           resident_prefix_length = 0;
@@ -180,22 +190,31 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (internal_fork) {
+            const std::optional<size_t> fork_endpoint =
+                token_ends != nullptr && !token_ends->empty() ?
+                    std::optional<size_t>(token_ends->back()) : std::nullopt;
             // Recheck the proposed branch under the same mutation lock as the
             // existing storer. A short endpoint cannot become visible with
             // only a subset of the required group histories.
             if (target_tier != Tier::DEVICE || token_ends == nullptr || token_segments == nullptr
                 || cache_keys.empty() || cache_keys.size() != resources.size()
                 || cache_keys.size() != token_ends->size() || cache_keys.size() != token_segments->size()) {
+                storer_.observePublicationSkipped(observation_request_id, target_tier, "invalid_internal_fork_path",
+                                                  fork_endpoint);
                 return 0;
             }
             const auto existing = tree_->findNode(cache_keys);
             const size_t ancestor_count = cache_keys.size() - 1;
             if (existing.size() < ancestor_count || (ancestor_count > 0 && tree_->isShortLeaf(existing[ancestor_count - 1]))) {
+                storer_.observePublicationSkipped(observation_request_id, target_tier, "missing_internal_fork_ancestor",
+                                                  fork_endpoint);
                 return 0;
             }
             for (size_t index = 0; index < ancestor_count; ++index) {
                 if (existing[index]->token_end != (*token_ends)[index]
                     || existing[index]->token_ids != (*token_segments)[index]) {
+                    storer_.observePublicationSkipped(observation_request_id, target_tier, "stale_internal_fork_ancestor",
+                                                      fork_endpoint);
                     return 0;
                 }
             }
@@ -208,9 +227,13 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
             const TreeNode* present = existing.size() == cache_keys.size() ? existing.back() : nullptr;
             if (present != nullptr && (present->token_end != projected.token_end
                                        || present->token_ids != token_segments->back())) {
+                storer_.observePublicationSkipped(observation_request_id, target_tier, "internal_fork_identity_conflict",
+                                                  fork_endpoint);
                 return 0;
             }
             if (resources.back().size() != tree_->groupSets().size()) {
+                storer_.observePublicationSkipped(observation_request_id, target_tier, "invalid_internal_fork_groups",
+                                                  fork_endpoint);
                 return 0;
             }
             for (size_t group_id = 0; group_id < tree_->groupSets().size(); ++group_id) {
@@ -223,6 +246,8 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
             projected_path.push_back(&projected);
             for (const auto& group : tree_->groupSets()) {
                 if (!group->hasDeviceCoverage(projected_path, projected.token_end)) {
+                    storer_.observePublicationSkipped(observation_request_id, target_tier,
+                                                      "internal_fork_not_jointly_ready", fork_endpoint);
                     return 0;
                 }
             }
@@ -234,7 +259,9 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
                                is_resident,
                                resident_prefix_length,
                                token_segments,
+                               prefix_plan_state,
                                token_ends,
+                                observation_request_id,
                                 internal_fork,
                                 ready_after_insert);
     }
@@ -341,6 +368,14 @@ CachedPrefixResources BlockTreeCache::pinRegisteredGroups(const std::vector<int>
     return result;
 }
 
+void BlockTreeCache::observePublicationSkipped(std::optional<int64_t> request_id,
+                                                Tier tier,
+                                                const char* reason,
+                                                std::optional<size_t> internal_fork_pos) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    storer_.observePublicationSkipped(request_id, tier, reason, internal_fork_pos);
+}
+
 int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!config_.isTierEnabled(Tier::DEVICE)) {
@@ -400,6 +435,11 @@ CacheStats BlockTreeCache::getStats() const {
 std::vector<BlockTreePoolMetricsSnapshot> BlockTreeCache::poolMetricsSnapshots() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return metrics_reporter_->collectPoolMetricsSnapshots(tree_->groupSets());
+}
+
+BlockTreeObservabilitySnapshot BlockTreeCache::observabilitySnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return tree_->observabilitySnapshot();
 }
 
 void BlockTreeCache::reportMetrics() const {

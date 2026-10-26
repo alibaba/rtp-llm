@@ -605,6 +605,37 @@ custom_smoke_test(
     data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
 )
 
+# Manual fixed-request feature toggle evidence; both P and D load real weights.
+custom_smoke_test(
+    name = "tail_reuse_benefit_pd_sm103",
+    main = "tail_reuse_benefit_test.py",
+    args = ["TailReuseBenefitNonCPTest.test_fixed_requests"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = ["//rtp_llm:sdk", "deepseek_v4_tail_reuse_4layer_test.py"],
+)
+
+custom_smoke_test(
+    name = "common_prefix_f800_benefit_pd_sm103",
+    main = "tail_reuse_benefit_test.py",
+    args = ["TailReuseBenefitNonCPTest.test_internal_fork_benefit"],
+    smoke_args = "--world_size 2 --tp_size 1 --ep_size 1 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_common_prefix"],
+    data = ["//rtp_llm:sdk", "deepseek_v4_tail_reuse_4layer_test.py"],
+)
+
+custom_smoke_test(
+    name = "tail_reuse_benefit_cp2_pd_sm103",
+    main = "tail_reuse_benefit_test.py",
+    args = ["TailReuseBenefitCP2Test.test_fixed_requests"],
+    smoke_args = "--world_size 3 --tp_size 2 --ep_size 2 --dp_size 1 --max_seq_len 2048 --fp8_kv_cache 1",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual", "dsv4_tail_reuse"],
+    data = ["//rtp_llm:sdk", "deepseek_v4_tail_reuse_4layer_test.py"],
+)
+
 # Four-layer variant includes the first FULL layer in the hybrid CP model.
 custom_smoke_test(
     name = "qwen35_tail_reuse_cp2_full_linear_cuda13",

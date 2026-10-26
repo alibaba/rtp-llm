@@ -243,23 +243,25 @@ protected:
     std::mutex malloc_mutex_;
 
     struct PreparedKVCache {
-        std::optional<PrefixCachePlanPoint>  farthest_fork;
-        size_t                               matched_device_blocks   = 0;
-        size_t                               matched_device_endpoint = 0;
-        bool                                 precise_local           = false;
-        std::shared_ptr<PinnedLocalFallback> local_fallback;
-        size_t                               total_logical_blocks = 0;
-        std::vector<RequiredPositions>       required_positions;
-        std::vector<BlockIndicesType>        referenced_blocks;
-        std::vector<size_t>                  original_sizes;
-        MallocStatus                         materialize_status = MallocStatus::NONE;
+        std::optional<PrefixCachePlanPoint>        farthest_fork;
+        std::optional<PrefixCacheMatchObservation> match_observation;
+        size_t                                     matched_device_blocks   = 0;
+        size_t                                     matched_device_endpoint = 0;
+        bool                                       precise_local           = false;
+        std::shared_ptr<PinnedLocalFallback>       local_fallback;
+        size_t                                     total_logical_blocks = 0;
+        std::vector<RequiredPositions>             required_positions;
+        std::vector<BlockIndicesType>              referenced_blocks;
+        std::vector<size_t>                        original_sizes;
+        MallocStatus                               materialize_status = MallocStatus::NONE;
     };
 
     std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&               cache_keys,
                                                      BatchKVCacheResource&              kv_resource,
                                                      PreparedKVCache&                   prepared,
-                                                     const std::function<bool(size_t)>& valid_prefix = {},
-                                                     const PartialTailMatchRequest*     partial_tail = nullptr);
+                                                     const std::function<bool(size_t)>& valid_prefix   = {},
+                                                     const std::vector<int>*            request_tokens = nullptr,
+                                                     const PartialTailMatchRequest*     partial_tail   = nullptr);
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,
                                                                LoadAsyncContext* context,

@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
+#include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -74,6 +75,7 @@ StoreEnvironment makeStoreEnvironment(const std::string&              name,
                                       int                             task_pool_size    = 4,
                                       std::shared_ptr<StorageBackend> storage_backend   = nullptr,
                                       TierWatermark                   device_watermark  = {},
+                                      bool                            observability     = false,
                                       int                             host_timeout_ms   = 10000) {
     StoreEnvironment env;
     for (size_t group_set_id = 0; group_set_id < lower_tier_blocks.size(); ++group_set_id) {
@@ -96,6 +98,7 @@ StoreEnvironment makeStoreEnvironment(const std::string&              name,
     config.watermark_device         = device_watermark;
     config.task_pool_size           = task_pool_size;
     config.host_cache_sync_timeout_ms = host_timeout_ms;
+    config.enable_prefix_cache_observability = observability;
     std::vector<GroupSetPtr> groups = env.groups;
     env.cache = makeBlockTreeCacheForTest(std::move(groups), std::move(config), std::move(storage_backend));
     RTP_LLM_CHECK(env.cache != nullptr);
@@ -249,6 +252,15 @@ deviceSourceResources(const std::vector<std::vector<BlockIdxType>>& per_group_bl
         resources[0][group_set_id].device_blocks = per_group_blocks[group_set_id];
     }
     return resources;
+}
+
+size_t logOccurrenceCount(const std::string& content, const std::string& needle) {
+    size_t count = 0;
+    for (size_t position = content.find(needle); position != std::string::npos;
+         position = content.find(needle, position + needle.size())) {
+        ++count;
+    }
+    return count;
 }
 
 size_t candidateCountForTier(const BlockTreeCache& cache, Tier tier) {
@@ -997,7 +1009,9 @@ TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
                                                         /*lower_tier_blocks=*/{1},
                                                         /*task_pool_size=*/4,
                                                         /*storage_backend=*/nullptr,
-                                                        /*device_watermark=*/{});
+                                                        /*device_watermark=*/{},
+                                                        /*observability=*/true);
+            test::TestLogCapture log_capture("store_copy_failure");
             auto                 engine = installStoreTransferEngine(env, action);
 
             const size_t target_free_before = env.poolFor(target_tier).freeBlocksNum();
@@ -1006,7 +1020,7 @@ TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
             MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
             ASSERT_EQ(request_holder.size(), 1u);
 
-            env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier, false);
+            env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier, false, nullptr, nullptr, nullptr, 771);
             block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
             EXPECT_EQ(engine->submittedBatchCount(), 1u);
@@ -1016,6 +1030,16 @@ TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
 
             releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
             EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before);
+
+            const std::string content = log_capture.content();
+            EXPECT_EQ(logOccurrenceCount(content, "\"request_id\":771"), 3u) << content;
+            EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"publication\""), 1u) << content;
+            EXPECT_NE(content.find("\"insert_attempted\":false"), std::string::npos) << content;
+            EXPECT_NE(content.find("\"accepted_resources\":0"), std::string::npos) << content;
+            EXPECT_EQ(content.find("\"used_pos\":"), std::string::npos) << content;
+            EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan\""), 1u) << content;
+            EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan_unfulfilled\""), 1u) << content;
+            EXPECT_NE(content.find("\"reason\":\"copy_failed\""), std::string::npos) << content;
         }
     }
 }
@@ -1028,25 +1052,34 @@ TEST(BlockTreeStorerTest, StoreQueueRejectionClosesPlanExactlyOnce) {
                                                 /*lower_tier_blocks=*/{1},
                                                 /*task_pool_size=*/4,
                                                 /*storage_backend=*/nullptr,
-                                                /*device_watermark=*/{});
+                                                /*device_watermark=*/{},
+                                                /*observability=*/true);
+    test::TestLogCapture log_capture("store_queue_rejection");
     auto                 engine = installStoreTransferEngine(env, TransferCopyAction::Succeed);
 
     MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
     ASSERT_EQ(request_holder.size(), 1u);
     const size_t host_free_before = env.host_pools[0]->freeBlocksNum();
 
+    PrefixCachePlanState plan_state = PrefixCachePlanState::NOT_FORMED;
     {
         BlockTreeCacheTestPeer::ScopedQueueRejectionGuard rejection_guard(*env.cache);
         ASSERT_TRUE(rejection_guard.armed());
-        env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST);
+        env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST, &plan_state);
     }
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
+    EXPECT_EQ(plan_state, PrefixCachePlanState::FORMED);
     EXPECT_EQ(engine->submittedBatchCount(), 0u);
     EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
     EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before);
     EXPECT_EQ(env.storeRefCount(), 0u);
     releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
+
+    const std::string content = log_capture.content();
+    EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan\""), 1u) << content;
+    EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan_unfulfilled\""), 1u) << content;
+    EXPECT_NE(content.find("\"reason\":\"queue_rejected\""), std::string::npos) << content;
 }
 
 TEST(BlockTreeStorerTest, StoreQueueTimeoutClosesPlanExactlyOnce) {
@@ -1058,21 +1091,30 @@ TEST(BlockTreeStorerTest, StoreQueueTimeoutClosesPlanExactlyOnce) {
                                                 /*task_pool_size=*/4,
                                                 /*storage_backend=*/nullptr,
                                                 /*device_watermark=*/{},
+                                                /*observability=*/true,
                                                 /*host_timeout_ms=*/0);
+    test::TestLogCapture log_capture("store_queue_timeout");
     auto                 engine = installStoreTransferEngine(env, TransferCopyAction::Succeed);
 
     MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
     ASSERT_EQ(request_holder.size(), 1u);
     const size_t host_free_before = env.host_pools[0]->freeBlocksNum();
 
-    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST);
+    PrefixCachePlanState plan_state = PrefixCachePlanState::NOT_FORMED;
+    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST, &plan_state);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
+    EXPECT_EQ(plan_state, PrefixCachePlanState::FORMED);
     EXPECT_EQ(engine->submittedBatchCount(), 0u);
     EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
     EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before);
     EXPECT_EQ(env.storeRefCount(), 0u);
     releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
+
+    const std::string content = log_capture.content();
+    EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan\""), 1u) << content;
+    EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan_unfulfilled\""), 1u) << content;
+    EXPECT_NE(content.find("\"reason\":\"store_timeout\""), std::string::npos) << content;
 }
 
 TEST(BlockTreeStorerTest, DuplicateStoreSettlementSettlesTaskOnce) {
@@ -1083,7 +1125,9 @@ TEST(BlockTreeStorerTest, DuplicateStoreSettlementSettlesTaskOnce) {
                                                 /*lower_tier_blocks=*/{1},
                                                 /*task_pool_size=*/4,
                                                 /*storage_backend=*/nullptr,
-                                                /*device_watermark=*/{});
+                                                /*device_watermark=*/{},
+                                                /*observability=*/true);
+    test::TestLogCapture log_capture("store_duplicate_settlement");
     auto                 engine = installStoreTransferEngine(env, TransferCopyAction::Succeed);
 
     MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
@@ -1092,13 +1136,14 @@ TEST(BlockTreeStorerTest, DuplicateStoreSettlementSettlesTaskOnce) {
     const size_t host_free_before = env.host_pools[0]->freeBlocksNum();
 
     auto task = std::make_shared<StoreTaskRunner::Task>(
-        Tier::HOST, CacheKeysType{100}, std::chrono::seconds(30));
+        Tier::HOST, CacheKeysType{100}, std::chrono::seconds(30), std::vector<std::vector<int>>{{1}},
+        std::vector<PrefixCachePlanPoint>{{0, 100, 1}});
     ASSERT_TRUE(env.cache->storer_.store_task_runner_.prepareTask(*task, resources));
     EXPECT_EQ(env.storeRefCount(), 2u);
 
     const ErrorInfo error(ErrorCode::EXECUTION_EXCEPTION, "injected duplicate settlement failure");
-    env.cache->storer_.scheduleStoreSettlement(task, error);
-    env.cache->storer_.scheduleStoreSettlement(task, error);
+    env.cache->storer_.scheduleStoreSettlement(task, error, "copy_failed");
+    env.cache->storer_.scheduleStoreSettlement(task, error, "copy_failed");
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
     EXPECT_EQ(task->phase.load(), StoreTaskRunner::Task::Phase::FINISHED);
@@ -1107,6 +1152,10 @@ TEST(BlockTreeStorerTest, DuplicateStoreSettlementSettlesTaskOnce) {
     EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before);
     EXPECT_EQ(env.storeRefCount(), 0u);
     releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
+
+    const std::string content = log_capture.content();
+    EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan_unfulfilled\""), 1u) << content;
+    EXPECT_NE(content.find("\"reason\":\"copy_failed\""), std::string::npos) << content;
 }
 
 TEST(BlockTreeStorerTest, StoreShutdownClosesLowerTierPlanExactlyOnce) {
@@ -1117,7 +1166,9 @@ TEST(BlockTreeStorerTest, StoreShutdownClosesLowerTierPlanExactlyOnce) {
                                                 /*lower_tier_blocks=*/{1},
                                                 /*task_pool_size=*/4,
                                                 /*storage_backend=*/nullptr,
-                                                /*device_watermark=*/{});
+                                                /*device_watermark=*/{},
+                                                /*observability=*/true);
+    test::TestLogCapture log_capture("store_shutdown");
     auto                 engine = installStoreTransferEngine(env, TransferCopyAction::Succeed);
 
     MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
@@ -1125,14 +1176,21 @@ TEST(BlockTreeStorerTest, StoreShutdownClosesLowerTierPlanExactlyOnce) {
     const size_t host_free_before = env.host_pools[0]->freeBlocksNum();
 
     BlockTreeCacheTestPeer::beginStoreShutdownForTest(*env.cache);
-    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST);
+    PrefixCachePlanState plan_state = PrefixCachePlanState::NOT_FORMED;
+    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST, &plan_state);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
 
+    EXPECT_EQ(plan_state, PrefixCachePlanState::FORMED);
     EXPECT_EQ(engine->submittedBatchCount(), 0u);
     EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
     EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before);
     EXPECT_EQ(env.storeRefCount(), 0u);
     releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
+
+    const std::string content = log_capture.content();
+    EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan\""), 1u) << content;
+    EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan_unfulfilled\""), 1u) << content;
+    EXPECT_NE(content.find("\"reason\":\"store_stopped\""), std::string::npos) << content;
 }
 
 TEST(BlockTreeStorerTest, DeviceInsertDuringShutdownPreservesPublicationAndClosesPlan) {
@@ -1143,21 +1201,78 @@ TEST(BlockTreeStorerTest, DeviceInsertDuringShutdownPreservesPublicationAndClose
                                                 /*lower_tier_blocks=*/{1},
                                                 /*task_pool_size=*/4,
                                                 /*storage_backend=*/nullptr,
-                                                /*device_watermark=*/{});
+                                                /*device_watermark=*/{},
+                                                /*observability=*/true);
+    test::TestLogCapture log_capture("device_store_shutdown");
     auto                 engine = installStoreTransferEngine(env, TransferCopyAction::Succeed);
 
     MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
     ASSERT_EQ(request_holder.size(), 1u);
 
     BlockTreeCacheTestPeer::beginStoreShutdownForTest(*env.cache);
-    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DEVICE);
+    PrefixCachePlanState plan_state = PrefixCachePlanState::NOT_FORMED;
+    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DEVICE, &plan_state);
 
+    EXPECT_EQ(plan_state, PrefixCachePlanState::FORMED);
     const std::vector<TreeNode*> path = env.cache->tree()->findNode({100});
     ASSERT_EQ(path.size(), 1u);
     EXPECT_EQ(path.back()->group_set_resources[0].getTopTier(), Tier::DEVICE);
     EXPECT_EQ(candidateCountForTier(*env.cache, Tier::DEVICE), 1u);
     EXPECT_EQ(env.device_pools[0]->treeRefCount(request_holder[0][0]), 1u);
     EXPECT_EQ(env.storeRefCount(), 0u);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
+
+    const std::string content = log_capture.content();
+    EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan\""), 1u) << content;
+    EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan_unfulfilled\""), 0u) << content;
+}
+
+TEST(BlockTreeStorerTest, PrefixPlanOutputMarksEmptyFormedPlan) {
+    StoreEnvironment env = makeStoreEnvironment("store_empty_plan",
+                                                /*device_cache_on=*/true,
+                                                /*host_cache_on=*/false,
+                                                /*disk_cache_on=*/false,
+                                                /*lower_tier_blocks=*/{1},
+                                                /*task_pool_size=*/4,
+                                                /*storage_backend=*/nullptr,
+                                                /*device_watermark=*/{},
+                                                /*observability=*/true);
+    test::TestLogCapture log_capture("store_empty_plan");
+    MultiNodeBlocks      request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
+    ASSERT_EQ(request_holder.size(), 1u);
+
+    PrefixCachePlanState initial_plan_state = PrefixCachePlanState::NOT_FORMED;
+    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DEVICE, false, nullptr, &initial_plan_state, nullptr, 881);
+    PrefixCachePlanState empty_plan_state = PrefixCachePlanState::NOT_FORMED;
+    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DEVICE, false, nullptr, &empty_plan_state, nullptr, 882);
+
+    EXPECT_EQ(initial_plan_state, PrefixCachePlanState::FORMED);
+    EXPECT_EQ(empty_plan_state, PrefixCachePlanState::FORMED);
+    const std::string content = log_capture.content();
+    EXPECT_EQ(logOccurrenceCount(content, "\"request_id\":881"), 2u) << content;
+    EXPECT_EQ(logOccurrenceCount(content, "\"request_id\":882"), 2u) << content;
+    EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"publication\""), 2u) << content;
+    EXPECT_EQ(logOccurrenceCount(content, "\"inserted_nodes\":1"), 1u) << content;
+    EXPECT_EQ(logOccurrenceCount(content, "\"inserted_nodes\":0"), 1u) << content;
+    EXPECT_NE(content.find("\"accepted_resources\":0"), std::string::npos) << content;
+    EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan\""), 2u) << content;
+    EXPECT_EQ(logOccurrenceCount(content, "\"kind\":\"plan_unfulfilled\""), 0u) << content;
+
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
+}
+
+TEST(BlockTreeStorerTest, PrefixPlanOutputRemainsNotFormedWhenObservabilityIsDisabled) {
+    StoreEnvironment env = makeStoreEnvironment("store_plan_disabled",
+                                                /*device_cache_on=*/true,
+                                                /*host_cache_on=*/false,
+                                                /*disk_cache_on=*/false);
+    MultiNodeBlocks      request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
+    ASSERT_EQ(request_holder.size(), 1u);
+
+    PrefixCachePlanState plan_state = PrefixCachePlanState::NOT_FORMED;
+    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DEVICE, &plan_state);
+    EXPECT_EQ(plan_state, PrefixCachePlanState::NOT_FORMED);
+
     releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
 }
 

@@ -26,6 +26,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -249,6 +250,19 @@ protected:
         prepareResourceWithCacheConfig(init_config(), input_tokens, reuse_cache, role_type);
     }
 
+    void preparePrefixObservationResource(bool     reuse_cache = false,
+                                          RoleType role_type   = RoleType::PREFILL,
+                                          int      tp_rank     = 0) {
+        autil::EnvUtil::setEnv("RTP_LLM_PREFIX_CACHE_OBSERVABILITY", "true");
+        prepareResourceWithCacheConfig(
+            init_config(), {1, 2, 3, 4, 5, 6}, reuse_cache, role_type, KVCacheConfig{}, tp_rank);
+        autil::EnvUtil::unsetEnv("RTP_LLM_PREFIX_CACHE_OBSERVABILITY");
+    }
+
+    void enablePrefixObservation() {
+        cache_manager_->blockTreeCache()->config_.enable_prefix_cache_observability = true;
+    }
+
     void prepareHybridResourceWithInputTokens(const std::vector<int>& input_tokens,
                                               bool                    reuse_cache = false,
                                               RoleType                role_type   = RoleType::PDFUSION) {
@@ -311,12 +325,14 @@ protected:
     std::shared_ptr<StreamReadStorageBackend> prepareStorageBackendResource(bool     block_matches,
                                                                             bool     seed_host = false,
                                                                             RoleType role_type = RoleType::PDFUSION,
-                                                                            int      cp_size   = 0) {
+                                                                            int      cp_size   = 0,
+                                                                            bool enable_prefix_observability = false) {
         KVCacheConfig kv_cache_config;
-        kv_cache_config.enable_remote_cache   = true;
-        kv_cache_config.enable_memory_cache   = seed_host;
-        kv_cache_config.memory_cache_size_mb  = seed_host ? 1 : 0;
-        KVCacheConfig manager_kv_cache_config = kv_cache_config;
+        kv_cache_config.enable_remote_cache               = true;
+        kv_cache_config.enable_prefix_cache_observability = enable_prefix_observability;
+        kv_cache_config.enable_memory_cache               = seed_host;
+        kv_cache_config.memory_cache_size_mb              = seed_host ? 1 : 0;
+        KVCacheConfig manager_kv_cache_config             = kv_cache_config;
         // The manager must not construct a real KVCM client before this test
         // replaces its BlockTreeCache with the controllable fake backend.
         manager_kv_cache_config.enable_remote_cache = false;
@@ -640,11 +656,14 @@ TEST_F(StreamCacheResourceTest, CacheOwnedLayoutDrivesStreamInitIncrementAndRele
 }
 
 TEST_F(StreamCacheResourceTest, PartialTailRegistrationIsGatedAndIndependentOfObservation) {
-    {
+    for (const bool observation : {false, true}) {
         prepareResourceWithInputTokens({1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
         auto& resource                                               = stream_->streamCacheResource();
         resource.resource_context_.ignore_request_cache_switches     = true;
         resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+        if (observation) {
+            enablePrefixObservation();
+        }
         ASSERT_TRUE(resource.initKVBlock().ok());
         ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
         const auto original = *resource.prefixCacheRegistration();
@@ -811,8 +830,9 @@ TEST_F(StreamCacheResourceTest, InternalForkFullAliasPublishesForLaterMatchingRe
     auto& resource                                                   = stream_->streamCacheResource();
     resource.resource_context_.ignore_request_cache_switches         = true;
     resource.resource_context_.enable_prefill_common_prefix_recovery = true;
-    auto                                       tokens                = stream_->completeTokenIdsPtr();
-    const auto                                 prefix_key            = cacheKeyAtTokenEnd(*tokens, 0, 2, 2, 0);
+    enablePrefixObservation();
+    auto                                       tokens     = stream_->completeTokenIdsPtr();
+    const auto                                 prefix_key = cacheKeyAtTokenEnd(*tokens, 0, 2, 2, 0);
     const auto                                 source_key = cacheKeyForSourceSegment(*tokens, {3, 4}, 2, 2, prefix_key);
     auto                                       cache      = cache_manager_->blockTreeCache();
     std::vector<std::vector<GroupSetResource>> empty(2, std::vector<GroupSetResource>(cache->groupSets().size()));
@@ -828,6 +848,10 @@ TEST_F(StreamCacheResourceTest, InternalForkFullAliasPublishesForLaterMatchingRe
     ASSERT_TRUE(resource.prefixCacheRegistration().has_value());
     const auto fork = resource.prefixCacheRegistration()->points.back().endpoint;
     ASSERT_EQ(fork.pos, 3u);
+    const auto summary = resource.prefixObservationSummaryPayload("ready");
+    EXPECT_NE(summary.find("\"farthest_fork_pos\":3"), std::string::npos);
+    EXPECT_NE(summary.find("\"fork_save_decision\":\"registered\""), std::string::npos);
+    EXPECT_NE(summary.find("\"purpose\":\"internal\""), std::string::npos);
     ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
     resource.prepareRegisteredSave();
     ASSERT_TRUE(resource.prefixCacheRegistration()->prepared);
@@ -854,7 +878,7 @@ TEST_F(StreamCacheResourceTest, InternalForkFullAliasPublishesForLaterMatchingRe
     later.valid_endpoint           = [](size_t end) { return end > 0 && end < 5; };
     later.preceding_valid_endpoint = [](size_t upper) { return std::min(upper, size_t{4}); };
     later.reuse_unit_tokens        = 2;
-    auto later_match               = cache->match({}, {}, &later);
+    auto later_match               = cache->match({}, {}, &later_tokens, &later);
     EXPECT_EQ(later_match.matched_device_endpoint, 3u);
     for (const auto& pinned : later_match.matched_device_resources) {
         cache->groupSets()[pinned.group_set_id]->unreferenceBlocks(pinned);
@@ -866,7 +890,7 @@ TEST_F(StreamCacheResourceTest, InternalForkFullAliasPublishesForLaterMatchingRe
     later.tokens                   = &ends_at_fork;
     later.valid_endpoint           = [](size_t end) { return end > 0 && end < 3; };
     later.preceding_valid_endpoint = [](size_t upper) { return std::min(upper, size_t{2}); };
-    auto exact_end_match           = cache->match({}, {}, &later);
+    auto exact_end_match           = cache->match({}, {}, &ends_at_fork, &later);
     EXPECT_LT(exact_end_match.matched_device_endpoint, fork.pos);
     for (const auto& pinned : exact_end_match.matched_device_resources) {
         cache->groupSets()[pinned.group_set_id]->unreferenceBlocks(pinned);
@@ -926,7 +950,7 @@ TEST_F(StreamCacheResourceTest, FirstBlockLinearForkSavesOneTokenBeyondResume) {
     later.valid_endpoint           = [](size_t end) { return end > 0 && end < 3; };
     later.preceding_valid_endpoint = [](size_t upper) { return std::min(upper, size_t{2}); };
     later.reuse_unit_tokens        = 2;
-    auto later_match               = cache->match({}, {}, &later);
+    auto later_match               = cache->match({}, {}, &later_tokens, &later);
     EXPECT_EQ(later_match.matched_device_endpoint, 1u);
     for (const auto& pinned : later_match.matched_device_resources) {
         cache->groupSets()[pinned.group_set_id]->unreferenceBlocks(pinned);
@@ -1048,8 +1072,9 @@ TEST_F(StreamCacheResourceTest, InternalForkObservationMarksOriginalPointDedupli
     auto& resource                                                   = stream_->streamCacheResource();
     resource.resource_context_.ignore_request_cache_switches         = true;
     resource.resource_context_.enable_prefill_common_prefix_recovery = true;
-    auto                                       tokens                = stream_->completeTokenIdsPtr();
-    const auto                                 prefix_key            = cacheKeyAtTokenEnd(*tokens, 0, 2, 2, 0);
+    enablePrefixObservation();
+    auto                                       tokens     = stream_->completeTokenIdsPtr();
+    const auto                                 prefix_key = cacheKeyAtTokenEnd(*tokens, 0, 2, 2, 0);
     const auto                                 source_key = cacheKeyForSourceSegment(*tokens, {8, 4}, 2, 2, prefix_key);
     auto                                       cache      = cache_manager_->blockTreeCache();
     std::vector<std::vector<GroupSetResource>> empty(2, std::vector<GroupSetResource>(cache->groupSets().size()));
@@ -1069,6 +1094,10 @@ TEST_F(StreamCacheResourceTest, InternalForkObservationMarksOriginalPointDedupli
                             registration.points.end(),
                             [](const auto& point) { return point.internal_only; }),
               0);
+    const auto summary = resource.prefixObservationSummaryPayload("ready");
+    EXPECT_NE(summary.find("\"farthest_fork_pos\":2"), std::string::npos);
+    EXPECT_NE(summary.find("\"fork_save_decision\":\"deduplicated_original\""), std::string::npos);
+    EXPECT_NE(summary.find("\"purpose\":\"original_internal\""), std::string::npos);
     stream_->releaseResource();
 }
 
@@ -1094,7 +1123,8 @@ TEST_F(StreamCacheResourceTest, ImageInteriorForkIsNotSavedOrReplacedByAlignedPo
     resource.resource_context_.ignore_request_cache_switches         = true;
     resource.resource_context_.enable_prefill_partial_tail_reuse     = true;
     resource.resource_context_.enable_prefill_common_prefix_recovery = true;
-    auto tokens                                                      = stream_->completeTokenIdsPtr();
+    enablePrefixObservation();
+    auto tokens = stream_->completeTokenIdsPtr();
     ASSERT_FALSE(tokens->imageCacheIdentity(2, 2).empty());
     ASSERT_FALSE(tokens->isValidReuseLength(3, 0));
     ASSERT_TRUE(tokens->isValidReuseLength(4, 0));
@@ -1125,6 +1155,9 @@ TEST_F(StreamCacheResourceTest, ImageInteriorForkIsNotSavedOrReplacedByAlignedPo
                             registration.points.end(),
                             [](const auto& point) { return point.internal_only; }),
               0);
+    const auto summary = resource.prefixObservationSummaryPayload("ready");
+    EXPECT_NE(summary.find("\"farthest_fork_pos\":3"), std::string::npos);
+    EXPECT_NE(summary.find("\"fork_save_decision\":\"invalid_exact_endpoint\""), std::string::npos);
 
     ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
     resource.prepareRegisteredSave();
@@ -1221,7 +1254,7 @@ TEST_F(StreamCacheResourceTest, InternalForkYieldsAfterEvictionFundsOriginalAndT
     cached_resource[0][0].device_blocks = {*cached};
     const std::vector<std::vector<int>> unrelated_segments{{42, 43}};
     const std::vector<size_t>           unrelated_ends{2};
-    cache->insert({unrelated_key}, cached_resource, Tier::DEVICE, false, &unrelated_segments, &unrelated_ends);
+    cache->insert({unrelated_key}, cached_resource, Tier::DEVICE, false, &unrelated_segments, nullptr, &unrelated_ends);
     pool->decRef(*cached);
     ASSERT_TRUE(pool->isAllocated(*cached));
     ASSERT_EQ(pool->refCount(*cached), 1u);
@@ -1756,7 +1789,7 @@ TEST_F(StreamCacheResourceTest, CachedRegistrationPinsSwaHistoryAndYieldsToRunti
                 }
                 const std::vector<std::vector<int>> tokens{{1, 2}, {3, 4}, {5, 6}, {7}};
                 const std::vector<size_t>           endpoints{2, 4, 6, 7};
-                cache->insert(probe.base_keys, stored, Tier::DEVICE, false, &tokens, &endpoints);
+                cache->insert(probe.base_keys, stored, Tier::DEVICE, false, &tokens, nullptr, &endpoints);
                 full_pool->decRef(*full_blocks);
                 swa_pool->decRef(*swa_blocks);
                 ASSERT_EQ(cache->tree()->size(), 4u);
@@ -2696,8 +2729,248 @@ TEST_F(StreamCacheResourceTest, testReleasePendingAllocatorLoadDoesNotFinalizeMe
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
 }
 
+TEST_F(StreamCacheResourceTest, PrefixObservationRespectsDefaultAndRoleBoundaries) {
+    prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    auto& default_resource = stream_->streamCacheResource();
+    default_resource.reportCacheReuseMetrics();
+    EXPECT_FALSE(cache_manager_->blockTreeCache()->prefixObservabilityEnabled());
+    EXPECT_FALSE(default_resource.prefix_summary_emitted_);
+
+    preparePrefixObservationResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& decode_resource = stream_->streamCacheResource();
+    decode_resource.reportCacheReuseMetrics();
+    EXPECT_FALSE(cache_manager_->blockTreeCache()->prefixObservabilityEnabled());
+    EXPECT_FALSE(decode_resource.prefix_summary_emitted_);
+
+    preparePrefixObservationResource(/*reuse_cache=*/true, RoleType::PDFUSION);
+    auto& pdfusion_resource = stream_->streamCacheResource();
+    pdfusion_resource.reportCacheReuseMetrics();
+    EXPECT_FALSE(cache_manager_->blockTreeCache()->prefixObservabilityEnabled());
+    EXPECT_FALSE(pdfusion_resource.prefix_summary_emitted_);
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationRequiresAllocatorOwner) {
+    preparePrefixObservationResource(/*reuse_cache=*/true, RoleType::PREFILL, /*tp_rank=*/1);
+    auto& resource = stream_->streamCacheResource();
+
+    resource.reportCacheReuseMetrics();
+
+    EXPECT_FALSE(cache_manager_->blockTreeCache()->prefixObservabilityEnabled());
+    EXPECT_FALSE(resource.prefix_summary_emitted_);
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationStatusDerivesTerminalStreamStatus) {
+    preparePrefixObservationResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    StreamCacheResource& resource = stream_->streamCacheResource();
+
+    // A still-running stream has no final reuse result yet.
+    stream_->generate_status_->status = StreamState::RUNNING;
+    EXPECT_STREQ(resource.prefixObservationStatus(), "terminal_unformed");
+
+    stream_->generate_status_->status = StreamState::FINISHED;
+    EXPECT_STREQ(resource.prefixObservationStatus(), "ready");
+
+    // Stream errors take precedence over the state machine value.
+    stream_->reportError(ErrorCode::CANCELLED, "cancelled before cache reuse");
+    EXPECT_STREQ(resource.prefixObservationStatus(), "cancelled");
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationStatusDerivesNonCancelledError) {
+    preparePrefixObservationResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    StreamCacheResource& resource     = stream_->streamCacheResource();
+    stream_->generate_status_->status = StreamState::FINISHED;
+
+    stream_->reportError(ErrorCode::EXECUTION_EXCEPTION, "allocator load failed");
+    EXPECT_STREQ(resource.prefixObservationStatus(), "failed");
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationMetricsSummaryUsesDerivedStatus) {
+    preparePrefixObservationResource(/*reuse_cache=*/false, RoleType::PREFILL);
+    StreamCacheResource& resource     = stream_->streamCacheResource();
+    stream_->generate_status_->status = StreamState::RUNNING;
+
+    // reportCacheReuseMetrics must not assume a ready summary before the stream is terminal.
+    resource.reportCacheReuseMetrics();
+    EXPECT_TRUE(resource.prefix_summary_emitted_);
+
+    preparePrefixObservationResource(/*reuse_cache=*/false, RoleType::PREFILL);
+    StreamCacheResource& cancelled_resource = stream_->streamCacheResource();
+    stream_->reportError(ErrorCode::CANCELLED, "cancelled before cache reuse");
+
+    cancelled_resource.reportCacheReuseMetrics();
+    EXPECT_TRUE(cancelled_resource.prefix_summary_emitted_);
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationEmitsOneRequestSummary) {
+    preparePrefixObservationResource(/*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+
+    const std::string payload = resource.prefixObservationSummaryPayload("ready");
+    EXPECT_NE(payload.find("\"kind\":\"request\""), std::string::npos);
+    EXPECT_NE(payload.find("\"registration\":null"), std::string::npos);
+    EXPECT_NE(payload.find("\"status\":\"ready\""), std::string::npos);
+    EXPECT_NE(payload.find("\"instance\":"), std::string::npos);
+    EXPECT_NE(payload.find("\"observation_time_us\":"), std::string::npos);
+    EXPECT_NE(payload.find("\"used_pos\":"), std::string::npos);
+    EXPECT_NE(payload.find("\"plan_state\":\"not_formed\""), std::string::npos);
+
+    resource.reportCacheReuseMetrics();
+    EXPECT_TRUE(resource.prefix_summary_emitted_);
+    resource.reportCacheReuseMetrics();
+    EXPECT_TRUE(resource.prefix_summary_emitted_);
+}
+
 // Serialization contract only: injected binding states below are not evidence
 // that a producer completed, a copy succeeded, or a save entered the tree.
+TEST_F(StreamCacheResourceTest, PrefixObservationRegistrationSnapshotPreservesIntentAndStates) {
+    prepareResourceWithInputTokens({1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource                                               = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches     = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    enablePrefixObservation();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.prefix_cache_registration_.has_value());
+    const auto original = *resource.prefix_cache_registration_;
+    ASSERT_EQ(original.points.size(), 3u);
+    ASSERT_FALSE(original.points[0].group_bindings.empty());
+    ASSERT_FALSE(original.points[1].group_bindings.empty());
+    ASSERT_FALSE(original.points[2].group_bindings.empty());
+
+    auto& registration                                          = *resource.prefix_cache_registration_;
+    registration.points[1].group_bindings[0].state              = PrefixCacheSaveState::CONTENT_COMPLETE;
+    registration.points[2].group_bindings[0].state              = PrefixCacheSaveState::UNFULFILLED;
+    registration.points[2].group_bindings[0].unfulfilled_reason = "runtime_priority\"\n";
+    const std::string payload                                   = resource.prefixObservationSummaryPayload("failed");
+    EXPECT_NE(payload.find("\"sample_stage\":\"request_summary\""), std::string::npos);
+    EXPECT_NE(payload.find("\"original_input_tokens\":5"), std::string::npos);
+    EXPECT_NE(payload.find("\"prepared\":false,\"prepared_resume_endpoint\":0"), std::string::npos);
+    EXPECT_NE(payload.find("\"pos\":2,\"groups\":["), std::string::npos);
+    EXPECT_NE(payload.find("\"pos\":4,\"groups\":["), std::string::npos);
+    EXPECT_NE(payload.find("\"pos\":5,\"groups\":["), std::string::npos);
+    EXPECT_NE(payload.find("\"state\":\"registered\",\"unfulfilled_reason\":null"), std::string::npos);
+    EXPECT_NE(payload.find("\"state\":\"content_complete\",\"unfulfilled_reason\":null"), std::string::npos);
+    EXPECT_NE(payload.find("\"state\":\"unfulfilled\",\"unfulfilled_reason\":\"runtime_priority\\\"\\n\""),
+              std::string::npos);
+    EXPECT_NE(payload.find("\"used_pos\":null"), std::string::npos);
+    EXPECT_EQ(registration.points[0].group_bindings[0].state, PrefixCacheSaveState::REGISTERED);
+    EXPECT_EQ(registration.points[2].group_bindings[0].unfulfilled_reason, "runtime_priority\"\n");
+    resource.prefix_cache_registration_ = original;
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationRegistrationRetainsOriginalTailAfterGrowth) {
+    prepareResourceWithInputTokens({1, 2, 3, 4, 5}, /*reuse_cache=*/true, RoleType::PREFILL);
+    auto& resource                                               = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches     = true;
+    resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+    enablePrefixObservation();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->completeTokenIdsPtr()->data(0)[5] = 6;
+    stream_->setSeqLength(6);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    const std::string payload = resource.prefixObservationSummaryPayload("cancelled");
+    EXPECT_NE(payload.find("\"original_input_tokens\":5"), std::string::npos);
+    EXPECT_NE(payload.find("\"pos\":5,\"groups\":["), std::string::npos);
+    EXPECT_EQ(payload.find("\"pos\":6,\"groups\":["), std::string::npos);
+    EXPECT_NE(payload.find("\"used_pos\":null"), std::string::npos);
+    stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationPublicationIsCorrelatedAfterEitherSummaryExit) {
+    for (const bool report_first : {false, true}) {
+        for (const bool cancelled : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "report_first=" << report_first << " cancelled=" << cancelled);
+            preparePrefixObservationResource(/*reuse_cache=*/true, RoleType::PREFILL);
+            auto& resource = stream_->streamCacheResource();
+            ASSERT_TRUE(resource.initKVBlock().ok());
+            test::TestLogCapture capture("prefix_publication_exits");
+            if (cancelled) {
+                stream_->reportError(ErrorCode::CANCELLED, "cancel before publication");
+            } else {
+                stream_->generate_status_->status = StreamState::FINISHED;
+            }
+            if (report_first) {
+                resource.reportCacheReuseMetrics();
+            }
+            stream_->releaseResource();
+            resource.reportCacheReuseMetrics();
+            const std::string logs  = capture.content();
+            const auto        count = [&](const std::string& needle) {
+                size_t matches = 0;
+                for (size_t pos = logs.find(needle); pos != std::string::npos; pos = logs.find(needle, pos + 1)) {
+                    ++matches;
+                }
+                return matches;
+            };
+            EXPECT_EQ(count("\"kind\":\"request\""), 1u) << logs;
+            EXPECT_EQ(count("\"kind\":\"publication\""), 1u) << logs;
+            EXPECT_LT(logs.find("\"kind\":\"request\""), logs.find("\"kind\":\"publication\"")) << logs;
+            const std::string id = "\"request_id\":" + std::to_string(stream_->streamId());
+            EXPECT_GE(count(id), 2u) << logs;
+            if (cancelled) {
+                EXPECT_NE(logs.find("\"reason\":\"request_error\""), std::string::npos) << logs;
+                EXPECT_NE(logs.find("\"insert_attempted\":false"), std::string::npos) << logs;
+                EXPECT_NE(logs.find("\"used_pos\":null"), std::string::npos) << logs;
+            } else {
+                EXPECT_NE(logs.find("\"insert_attempted\":true"), std::string::npos) << logs;
+            }
+        }
+    }
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationTerminalSummaryKeepsUnformedFieldsNull) {
+    preparePrefixObservationResource(/*reuse_cache=*/false, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+
+    const std::string payload = resource.prefixObservationSummaryPayload("cancelled");
+    EXPECT_NE(payload.find("\"status\":\"cancelled\""), std::string::npos);
+    EXPECT_NE(payload.find("\"match\":null"), std::string::npos);
+    EXPECT_NE(payload.find("\"used_pos\":null"), std::string::npos);
+    EXPECT_NE(payload.find("\"plan_state\":\"terminal_unformed\""), std::string::npos);
+
+    stream_->reportError(ErrorCode::CANCELLED, "cancelled before cache reuse");
+    resource.releaseResource();
+    EXPECT_TRUE(resource.prefix_summary_emitted_);
+    EXPECT_FALSE(resource.remote_observation_.effective.has_value());
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationClosesEmptyPlanWhenStoreIsDisabled) {
+    preparePrefixObservationResource(/*reuse_cache=*/false, RoleType::PREFILL);
+    auto& resource                    = stream_->streamCacheResource();
+    stream_->generate_status_->status = StreamState::FINISHED;
+
+    resource.tryReleaseKVBlock(0);
+    EXPECT_TRUE(resource.prefix_plan_event_emitted_);
+    const std::string payload = resource.prefixObservationSummaryPayload("ready");
+    EXPECT_NE(payload.find("\"plan_state\":\"formed\""), std::string::npos);
+}
+
+TEST_F(StreamCacheResourceTest, PrefixObservationRemoteReadFallbackIsNotEffective) {
+    auto  backend  = prepareStorageBackendResource(/*block_matches=*/false,
+                                                 /*seed_host=*/false,
+                                                 RoleType::PREFILL,
+                                                 /*cp_size=*/0,
+                                                 /*enable_prefix_observability=*/true);
+    auto& resource = stream_->streamCacheResource();
+    backend->blockReads();
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    backend->waitForReads(1);
+    auto context = std::dynamic_pointer_cast<LoadAsyncContext>(resource.allocator_load_context_);
+    ASSERT_NE(context, nullptr);
+
+    resource.releaseResource();
+    EXPECT_TRUE(resource.prefix_summary_emitted_);
+    ASSERT_TRUE(resource.remote_observation_.effective.has_value());
+    EXPECT_FALSE(*resource.remote_observation_.effective);
+
+    backend->releaseReads();
+    context->waitDone();
+    EXPECT_TRUE(context->success());
+    EXPECT_FALSE(*resource.remote_observation_.effective);
+}
 
 TEST_F(StreamCacheResourceTest, testLoadCacheDone_PendingAllocatorLoad_ReturnsFalse) {
     prepareResource(/*reuse_cache=*/true);
@@ -2715,7 +2988,8 @@ TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompl
     auto  backend  = prepareStorageBackendResource(/*block_matches=*/false,
                                                  /*seed_host=*/false,
                                                  RoleType::PDFUSION,
-                                                 /*cp_size=*/0);
+                                                 /*cp_size=*/0,
+                                                 /*enable_prefix_observability=*/true);
     auto& resource = stream_->streamCacheResource();
     backend->blockReads();
 
@@ -2742,13 +3016,16 @@ TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompl
     EXPECT_EQ(resource.kvCache().cacheResource(0).memoryReuseBlockNum(), 0u);
     EXPECT_EQ(resource.kvCache().cacheResource(0).diskReuseBlockNum(), 0u);
     EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 2u);
+    ASSERT_TRUE(resource.remote_observation_.effective.has_value());
+    EXPECT_TRUE(*resource.remote_observation_.effective);
 }
 
 TEST_F(StreamCacheResourceTest, RemoteQuerySelectingLocalShortLeafKeepsExactDeviceReuse) {
     auto  backend     = prepareStorageBackendResource(/*block_matches=*/false,
                                                  /*seed_host=*/false,
                                                  RoleType::PREFILL,
-                                                 /*cp_size=*/0);
+                                                 /*cp_size=*/0,
+                                                 /*enable_prefix_observability=*/true);
     auto& resource    = stream_->streamCacheResource();
     auto  coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
@@ -2776,6 +3053,9 @@ TEST_F(StreamCacheResourceTest, RemoteQuerySelectingLocalShortLeafKeepsExactDevi
     EXPECT_EQ(stream_->remoteReuseLength(), 0);
     EXPECT_EQ(resource.kvCache().cacheResource(0).deviceReuseBlockNum(), 2u);
     EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 0u);
+    EXPECT_EQ(resource.remote_observation_.query_status, PrefixCacheRemoteQueryStatus::HIT);
+    ASSERT_TRUE(resource.remote_observation_.effective.has_value());
+    EXPECT_FALSE(*resource.remote_observation_.effective);
     coordinator->shutdown();
 }
 

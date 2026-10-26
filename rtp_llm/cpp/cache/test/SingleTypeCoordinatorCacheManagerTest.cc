@@ -705,6 +705,93 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, LegacyDenseSwaPublishesOnlySafePhy
     EXPECT_EQ(pool->freeBlocksNum(), free_before);
 }
 
+TEST_F(SingleTypeCoordinatorCacheManagerTest, NoFullCanonicalStateRoundTrip) {
+    for (const size_t physical : {4u, 8u}) {
+        for (const int mode : {0, 1, 2, 3}) {
+            const bool observe    = (mode & 1) != 0;
+            const bool registered = (mode & 2) != 0;
+            SCOPED_TRACE(::testing::Message() << "P=" << physical << " mode=" << mode);
+            auto config               = makeSimpleLinearCacheConfig(1, 16, physical, DataType::TYPE_FP16);
+            config.seq_size_per_block = 4;
+            ParallelismConfig parallelism;
+            parallelism.tp_size                            = 2;
+            parallelism.prefill_cp_config.kv_cache_sharded = true;
+            parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+            config.finalizeStorageLayout(parallelism);
+            allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+            KVCacheConfig options;
+            options.enable_prefix_cache_observability = observe;
+            allocator_->setBlockTreeCacheConfigForTest(options);
+            ASSERT_TRUE(allocator_->init());
+            const auto   pool        = allocator_->groupBlockPools().front();
+            const size_t free_before = pool->freeBlocksNum();
+            auto         runtime     = std::make_shared<BatchKVCacheResource>();
+            runtime->resetBatchSize(1);
+            runtime->initGroups(config.topologyPtr());
+            auto tokens = createCompleteTokenIds(1, 9, 4);
+            initCacheKeys(runtime, tokens, 4);
+            auto blocks = pool->malloc(2);
+            ASSERT_TRUE(blocks.has_value());
+            pool->incRef(*blocks);
+            runtime->setBatchBlocks(0, "linear", *blocks);
+            runtime->setLastBlockAligned(false);
+            const size_t               slot = config.endpointBlockPosition("linear", 8);
+            const std::vector<uint8_t> expected{8, 7, 6, 5, 4, 3, 2, 1};
+            for (size_t index = 0; index < blocks->size(); ++index) {
+                auto buffer = allocator_->convertIndexToBuffer(0, "linear", (*blocks)[index]);
+                ASSERT_FALSE(buffer.empty());
+                writeDeviceBytes(buffer.front().addr, index == slot ? expected : std::vector<uint8_t>(8, 99));
+            }
+            PrefixCacheRegistration registration;
+            if (registered) {
+                registration.original_input_tokens       = 9;
+                registration.token_ids                   = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+                registration.base_keys                   = runtime->cacheKeys(0);
+                registration.required_continuation_ready = true;
+                PrefixCacheRegistrationPoint point;
+                point.endpoint.pos = 8;
+                point.group_bindings.resize(1);
+                registration.points.push_back(std::move(point));
+                allocator_->prepareRegisteredSave(registration, *runtime, 0);
+                ASSERT_TRUE(registration.prepared);
+                allocator_->blockBatchCopyByGroup(registration.copy_mappings, true);
+                runtimeSyncAndCheck();
+                registration.points.front().group_bindings.front().state = PrefixCacheSaveState::CONTENT_COMPLETE;
+                registration.content_completed                           = true;
+            }
+            InsertInfo info{runtime, tokens, false, Tier::DEVICE};
+            info.prefix_cache_registration = registered ? &registration : nullptr;
+            size_t resident                = 0;
+            allocator_->insertIntoCache(info, resident);
+            const CacheKeysType keys{runtime->cacheKeys(0)[1]};
+            const auto&         cache = allocator_->blockTreeCacheOwner();
+            const auto          path  = cache->tree()->findNode(keys);
+            EXPECT_EQ(path.size(), 1u);
+            if (path.size() == 1) {
+                EXPECT_EQ(path.front()->token_end, 8u);
+                EXPECT_EQ(path.front()->token_ids, (std::vector<int>{1, 2, 3, 4, 5, 6, 7, 8}));
+            }
+            auto match = cache->match(keys);
+            EXPECT_EQ(match.matched_device_endpoint, 8u);
+            EXPECT_EQ(match.matched_device_resources.size(), 1u);
+            if (match.matched_device_resources.size() == 1) {
+                const auto restored = match.matched_device_resources.front().node_blocks.back().second.front();
+                auto       buffer   = allocator_->convertIndexToBuffer(0, "linear", restored);
+                EXPECT_EQ(readDeviceBytes(buffer.front().addr, expected.size()), expected);
+            }
+            for (const auto& resource : match.matched_device_resources) {
+                cache->groupSets()[resource.group_set_id]->unreferenceBlocks(resource);
+            }
+            allocator_->releaseRegisteredSave(registration);
+            pool->decRef(*blocks);
+            runtime->clearBlocks();
+            cache->evictForGroup("linear", pool->totalBlocksNum());
+            EXPECT_EQ(pool->freeBlocksNum(), free_before);
+            allocator_.reset();
+        }
+    }
+}
+
 TEST_F(SingleTypeCoordinatorCacheManagerTest, RemoteSwaCoverageClipsBeforeReadAndKeepsExactLocalFallback) {
     for (const int window : {4, 8}) {
         SCOPED_TRACE(window);
@@ -752,7 +839,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, RemoteSwaCoverageClipsBeforeReadAn
         const std::vector<size_t>           ends{3};
         const std::vector<std::vector<int>> segments{{1, 2, 3}};
         const CacheKeysType                 short_keys{cacheKeyAtTokenEnd(*tokens, 0, 4, 3)};
-        cache->insert(short_keys, resources, Tier::DEVICE, false, &segments, &ends);
+        cache->insert(short_keys, resources, Tier::DEVICE, false, &segments, nullptr, &ends);
         ASSERT_EQ(cache->tree()->findNode(short_keys).size(), 1u);
         pool->decRef(*saved);
         MallocInfo info{runtime, tokens};
@@ -972,7 +1059,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, FullRuntimeAliasSurvivesBeamDropAn
     partial.endpoint_key      = [&](size_t endpoint) {
         return cacheKeyAtTokenEnd(*tokens, 0, 4, static_cast<int>(endpoint));
     };
-    auto matched = allocator_->blockTreeCacheOwner()->match(runtime->cacheKeys(0), {}, &partial);
+    auto matched = allocator_->blockTreeCacheOwner()->match(runtime->cacheKeys(0), {}, nullptr, &partial);
     ASSERT_EQ(matched.matched_device_endpoint, 7u);
     ASSERT_EQ(matched.matched_device_resources.size(), 1u);
     ASSERT_EQ(matched.matched_device_resources.front().node_blocks.back().second, BlockIndicesType{original});
@@ -1108,7 +1195,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, RejectedInternalForkReleasesOption
     const std::vector<std::vector<int>> segments{{1, 2, 3, 4}, {5, 6, 7}};
     const std::vector<size_t>           ends{4, 7};
     bool                                ready = true;
-    cache->insert({11, 22}, resources, Tier::DEVICE, false, &segments, &ends, true, &ready);
+    cache->insert({11, 22}, resources, Tier::DEVICE, false, &segments, nullptr, &ends, std::nullopt, true, &ready);
     EXPECT_FALSE(ready);
     EXPECT_TRUE(cache->tree()->findNode({11, 22}).empty());
     for (size_t id = 0; id < groups.size(); ++id) {

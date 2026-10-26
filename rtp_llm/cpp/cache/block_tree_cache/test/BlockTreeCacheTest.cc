@@ -24,6 +24,7 @@
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
@@ -324,7 +325,7 @@ TEST_F(BlockTreeCacheTest, ShortLeafCompetesWithRemoteWithoutPendingHostLoadOrPi
 
     for (size_t remote_keys : {0u, 3u}) {
         backend->matched_keys = remote_keys;
-        auto result           = cache_->match({1, 2, 5}, {}, &request);
+        auto result           = cache_->match({1, 2, 5}, {}, nullptr, &request);
         ASSERT_NE(result.async_context, nullptr);
         ASSERT_NE(result.local_fallback, nullptr);
         EXPECT_TRUE(result.async_context->loadDescs().empty());
@@ -348,7 +349,7 @@ TEST_F(BlockTreeCacheTest, ShortLeafCompetesWithRemoteWithoutPendingHostLoadOrPi
         EXPECT_EQ(device_pool->refCount(44), 1u);
         EXPECT_EQ(host_pool->treeRefCount(host_block), 1u);
     }
-    auto cancelled = cache_->match({1, 2, 5}, {}, &request);
+    auto cancelled = cache_->match({1, 2, 5}, {}, nullptr, &request);
     ASSERT_NE(cancelled.local_fallback, nullptr);
     EXPECT_EQ(device_pool->refCount(44), 2u);
     ASSERT_TRUE(cancelled.async_context->abortPending());
@@ -360,7 +361,7 @@ TEST_F(BlockTreeCacheTest, ShortLeafCompetesWithRemoteWithoutPendingHostLoadOrPi
     // established HOST restore path instead of reloading it from REMOTE.
     auto short_node                                      = cache_->tree()->findNode({1, 2, 3}).back();
     short_node->group_set_resources[0].transfer_detached = true;
-    auto complete                                        = cache_->match({1, 2, 5}, {}, &request);
+    auto complete                                        = cache_->match({1, 2, 5}, {}, nullptr, &request);
     ASSERT_NE(complete.async_context, nullptr);
     EXPECT_EQ(complete.local_fallback, nullptr);
     EXPECT_EQ(complete.matched_device_blocks, 2u);
@@ -404,7 +405,7 @@ TEST_F(BlockTreeCacheTest, DenseFullReusesInteriorOfLongerCachedLeaf) {
         request.preceding_valid_endpoint = [&tokens](size_t upper) { return std::min(upper, tokens.size() - 1); };
         request.reuse_unit_tokens        = 256;
         const size_t expected            = length == 900 ? 650 : length - 1;
-        auto         result              = cache_->match({}, {}, &request);
+        auto         result              = cache_->match({}, {}, nullptr, &request);
         EXPECT_EQ(result.matched_device_endpoint, expected);
         if (expected != 0) {
             EXPECT_TRUE(result.precise_local);
@@ -427,7 +428,7 @@ TEST_F(BlockTreeCacheTest, DenseFullReusesInteriorOfLongerCachedLeaf) {
         if (explicit_rejection) {
             rejected.source_identity = [](size_t, const std::vector<int>&, CacheKeyType) { return false; };
         }
-        auto result = cache_->match({}, {}, &rejected);
+        auto result = cache_->match({}, {}, nullptr, &rejected);
         EXPECT_EQ(result.matched_device_endpoint, 512u);
         releaseRequestRefsForTest(*cache_, result.matched_device_resources);
     }
@@ -471,7 +472,7 @@ TEST_F(BlockTreeCacheTest, HcaZeroPendingInteriorBoundaryNeedsNoSnapshot) {
             request.valid_endpoint           = [](size_t end) { return end > 0 && end < 900; };
             request.preceding_valid_endpoint = [](size_t upper) { return upper; };
             request.reuse_unit_tokens        = 256;
-            auto result                      = cache->match({}, {}, &request);
+            auto result                      = cache->match({}, {}, nullptr, &request);
             EXPECT_EQ(result.matched_device_endpoint, two_windows ? 384u : 640u);
             ASSERT_EQ(result.matched_device_resources.size(), 1u);
             EXPECT_EQ(result.matched_device_resources.front().group_set_id, 0u);
@@ -503,7 +504,7 @@ TEST_F(BlockTreeCacheTest, NoncompactSwaCannotReuseEarlierPhysicalSlotInCanonica
         request.valid_endpoint           = [](size_t end) { return end > 0 && end < 600; };
         request.preceding_valid_endpoint = [](size_t upper) { return upper; };
         request.reuse_unit_tokens        = 512;
-        auto result                      = cache->match({}, {}, &request);
+        auto result                      = cache->match({}, {}, nullptr, &request);
         EXPECT_EQ(result.matched_device_endpoint, common >= 383 ? common : 0u);
         releaseRequestRefsForTest(*cache, result.matched_device_resources);
         EXPECT_EQ(pool->refCount(42), 1u);
@@ -561,7 +562,7 @@ TEST_F(BlockTreeCacheTest, RegisteredGroupPinsRequireTheSamePhysicalCoverageAsMa
         // request. In particular, N513 carries key512 even though its SWA window
         // still needs the missing [129,256) physical slot.
         const CacheKeysType keys   = length == 513 ? CacheKeysType{512} : CacheKeysType{512, 700};
-        auto                result = cache->match(keys, {}, &request);
+        auto                result = cache->match(keys, {}, nullptr, &request);
         EXPECT_EQ(result.matched_device_endpoint, length == 513 ? 0u : 700u);
         releaseRequestRefsForTest(*cache, result.matched_device_resources);
     }
@@ -602,7 +603,8 @@ TEST_F(BlockTreeCacheTest, InternalForkInsertRequiresJointlyReadyPathUnderLock) 
     auto                 pool = makeStructuralDevicePool(0);
     auto                 full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool}, nullptr, nullptr);
     BlockTreeCacheConfig config;
-    auto                 cache = makeBlockTreeCacheForTest({full}, config, nullptr, nullptr, nullptr, 256);
+    config.enable_prefix_cache_observability = true;
+    auto cache = makeBlockTreeCacheForTest({full}, config, nullptr, nullptr, nullptr, 256);
     std::vector<std::vector<GroupSetResource>> parent_resource(1, std::vector<GroupSetResource>(1));
     pool->incRef(42);
     parent_resource[0][0].device_blocks = {42};
@@ -619,15 +621,26 @@ TEST_F(BlockTreeCacheTest, InternalForkInsertRequiresJointlyReadyPathUnderLock) 
     const std::vector<std::vector<int>>        segments{std::vector<int>(256, 1), std::vector<int>(44, 2)};
     const std::vector<size_t>                  ends{256, 300};
     bool                                       ready = true;
-    cache->insert(keys, resources, Tier::DEVICE, false, &segments, &ends, true, &ready);
+    test::TestLogCapture                       capture("internal_fork_publication");
+    cache->insert(keys, resources, Tier::DEVICE, false, &segments, nullptr, &ends, std::nullopt, true, &ready);
     EXPECT_FALSE(ready);
     EXPECT_EQ(cache->tree()->findNode(keys).size(), 1u);
+    const auto skipped = capture.content();
+    EXPECT_NE(skipped.find("\"internal_fork\":true,\"internal_fork_pos\":300,\"internal_fork_ready\":null"),
+              std::string::npos);
+    EXPECT_NE(skipped.find("\"reason\":\"internal_fork_not_jointly_ready\""), std::string::npos);
+    const auto first_publication = skipped.find("\"kind\":\"publication\"");
+    ASSERT_NE(first_publication, std::string::npos);
+    EXPECT_EQ(skipped.find("\"kind\":\"publication\"", first_publication + 1), std::string::npos);
 
     pool->incRef(43);
     resources[1][0].device_blocks = {43};
-    cache->insert(keys, resources, Tier::DEVICE, false, &segments, &ends, true, &ready);
+    cache->insert(keys, resources, Tier::DEVICE, false, &segments, nullptr, &ends, std::nullopt, true, &ready);
     EXPECT_TRUE(ready);
     ASSERT_EQ(cache->tree()->findNode(keys).size(), 2u);
+    const auto logs = capture.content();
+    EXPECT_NE(logs.find("\"internal_fork\":true,\"internal_fork_pos\":300,\"internal_fork_ready\":true"),
+              std::string::npos);
     pool->decRef(43);
 }
 
@@ -635,14 +648,15 @@ TEST_F(BlockTreeCacheTest, InternalForkInsertSkipsAfterAncestorEvictionWithoutTa
     auto                 pool = makeStructuralDevicePool(0);
     auto                 full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool}, nullptr, nullptr);
     BlockTreeCacheConfig config;
-    auto                 cache = makeBlockTreeCacheForTest({full}, config, nullptr, nullptr, nullptr, 256);
+    config.enable_prefix_cache_observability = true;
+    auto cache = makeBlockTreeCacheForTest({full}, config, nullptr, nullptr, nullptr, 256);
 
     std::vector<std::vector<GroupSetResource>> parent(1, std::vector<GroupSetResource>(1));
     pool->incRef(42);
     parent[0][0].device_blocks = {42};
     const std::vector<std::vector<int>> parent_segments{std::vector<int>(256, 1)};
     const std::vector<size_t>           parent_ends{256};
-    cache->insert({256}, parent, Tier::DEVICE, false, &parent_segments, &parent_ends);
+    cache->insert({256}, parent, Tier::DEVICE, false, &parent_segments, nullptr, &parent_ends);
     pool->decRef(42);
     ASSERT_EQ(cache->tree()->findNode({256}).size(), 1u);
     ASSERT_EQ(cache->evictForGroup(full->groupTags().front(), 1), 1u);
@@ -653,7 +667,7 @@ TEST_F(BlockTreeCacheTest, InternalForkInsertSkipsAfterAncestorEvictionWithoutTa
     pool->incRef(44);
     unrelated[0][0].device_blocks = {44};
     const std::vector<std::vector<int>> unrelated_segments{std::vector<int>(256, 9)};
-    cache->insert({900}, unrelated, Tier::DEVICE, false, &unrelated_segments, &parent_ends);
+    cache->insert({900}, unrelated, Tier::DEVICE, false, &unrelated_segments, nullptr, &parent_ends);
     pool->decRef(44);
 
     std::vector<std::vector<GroupSetResource>> fork(2, std::vector<GroupSetResource>(1));
@@ -662,11 +676,17 @@ TEST_F(BlockTreeCacheTest, InternalForkInsertSkipsAfterAncestorEvictionWithoutTa
     const std::vector<std::vector<int>> fork_segments{std::vector<int>(256, 1), std::vector<int>(44, 2)};
     const std::vector<size_t>           fork_ends{256, 300};
     bool                                ready = true;
-    cache->insert({256, 300}, fork, Tier::DEVICE, false, &fork_segments, &fork_ends, true, &ready);
+    test::TestLogCapture                capture("internal_fork_stale_ancestor");
+    cache->insert(
+        {256, 300}, fork, Tier::DEVICE, false, &fork_segments, nullptr, &fork_ends, std::nullopt, true, &ready);
     EXPECT_FALSE(ready);
     EXPECT_TRUE(cache->tree()->findNode({256, 300}).empty());
     EXPECT_EQ(cache->tree()->findNode({900}).size(), 1u);
     EXPECT_EQ(pool->refCount(43), 1u);  // Only the caller's reference remains.
+    const auto skipped = capture.content();
+    EXPECT_NE(skipped.find("\"internal_fork\":true,\"internal_fork_pos\":300,\"internal_fork_ready\":null"),
+              std::string::npos);
+    EXPECT_NE(skipped.find("\"reason\":\"missing_internal_fork_ancestor\""), std::string::npos);
     pool->decRef(43);
     EXPECT_FALSE(pool->isAllocated(43));
 }
@@ -683,7 +703,7 @@ TEST_F(BlockTreeCacheTest, ConcurrentInternalForkPublicationHasOneOwnerAndEvicti
     const CacheKeysType                 keys{256, 300};
     const std::vector<std::vector<int>> parent_segments{segments.front()};
     const std::vector<size_t>           parent_ends{256};
-    cache->insert({256}, parent, Tier::DEVICE, false, &parent_segments, &parent_ends);
+    cache->insert({256}, parent, Tier::DEVICE, false, &parent_segments, nullptr, &parent_ends);
     ASSERT_EQ(cache->tree()->findNode({256}).size(), 1u);
 
     std::vector<std::vector<GroupSetResource>> first(2, std::vector<GroupSetResource>(1));
@@ -706,11 +726,11 @@ TEST_F(BlockTreeCacheTest, ConcurrentInternalForkPublicationHasOneOwnerAndEvicti
     };
     std::thread first_producer([&] {
         await_start();
-        cache->insert(keys, first, Tier::DEVICE, false, &segments, &ends, true, &first_ready);
+        cache->insert(keys, first, Tier::DEVICE, false, &segments, nullptr, &ends, std::nullopt, true, &first_ready);
     });
     std::thread second_producer([&] {
         await_start();
-        cache->insert(keys, second, Tier::DEVICE, false, &segments, &ends, true, &second_ready);
+        cache->insert(keys, second, Tier::DEVICE, false, &segments, nullptr, &ends, std::nullopt, true, &second_ready);
     });
     {
         std::unique_lock<std::mutex> lock(start_mutex);
@@ -742,7 +762,7 @@ TEST_F(BlockTreeCacheTest, ConcurrentInternalForkPublicationHasOneOwnerAndEvicti
     later.valid_endpoint           = [](size_t end) { return end > 0 && end < 320; };
     later.preceding_valid_endpoint = [](size_t upper) { return std::min(upper, size_t{319}); };
     later.reuse_unit_tokens        = 256;
-    auto hit                       = cache->match({256}, {}, &later);
+    auto hit                       = cache->match({256}, {}, &later_tokens, &later);
     EXPECT_EQ(hit.matched_device_endpoint, 300u);
     releaseRequestRefsForTest(*cache, hit.matched_device_resources);
 
@@ -751,7 +771,7 @@ TEST_F(BlockTreeCacheTest, ConcurrentInternalForkPublicationHasOneOwnerAndEvicti
     ASSERT_EQ(cache->evictForGroup(full->groupTags().front(), 1), 1u);
     EXPECT_EQ(cache->tree()->findNode(keys).size(), 1u);
     EXPECT_FALSE(pool->isAllocated(retained));
-    auto after_evict = cache->match({256}, {}, &later);
+    auto after_evict = cache->match({256}, {}, &later_tokens, &later);
     EXPECT_EQ(after_evict.matched_device_endpoint, 256u);
     releaseRequestRefsForTest(*cache, after_evict.matched_device_resources);
     pool->decRef(42);
@@ -771,21 +791,21 @@ TEST_F(BlockTreeCacheTest, InternalForkWaitsForEveryGroupAtFinalPublication) {
     parent[0][0].device_blocks = {42};
     const std::vector<std::vector<int>> parent_segments{segments.front()};
     const std::vector<size_t>           parent_ends{256};
-    cache->insert({256}, parent, Tier::DEVICE, false, &parent_segments, &parent_ends);
+    cache->insert({256}, parent, Tier::DEVICE, false, &parent_segments, nullptr, &parent_ends);
     full_pool->decRef(42);
 
     std::vector<std::vector<GroupSetResource>> fork(2, std::vector<GroupSetResource>(2));
     full_pool->incRef(43);
     fork.back()[0].device_blocks = {43};
     bool ready                   = true;
-    cache->insert(keys, fork, Tier::DEVICE, false, &segments, &ends, true, &ready);
+    cache->insert(keys, fork, Tier::DEVICE, false, &segments, nullptr, &ends, std::nullopt, true, &ready);
     EXPECT_FALSE(ready);
     EXPECT_EQ(cache->tree()->findNode(keys).size(), 1u);
     EXPECT_EQ(full_pool->refCount(43), 1u);
 
     linear_pool->incRef(44);
     fork.back()[1].device_blocks = {44};
-    cache->insert(keys, fork, Tier::DEVICE, false, &segments, &ends, true, &ready);
+    cache->insert(keys, fork, Tier::DEVICE, false, &segments, nullptr, &ends, std::nullopt, true, &ready);
     EXPECT_TRUE(ready);
     ASSERT_EQ(cache->tree()->findNode(keys).size(), 2u);
     full_pool->decRef(43);
@@ -802,7 +822,7 @@ TEST_F(BlockTreeCacheTest, InternalForkWaitsForEveryGroupAtFinalPublication) {
     later.valid_endpoint           = [](size_t end) { return end > 0 && end < 320; };
     later.preceding_valid_endpoint = [](size_t upper) { return std::min(upper, size_t{319}); };
     later.reuse_unit_tokens        = 256;
-    auto hit                       = cache->match({256}, {}, &later);
+    auto hit                       = cache->match({256}, {}, &later_tokens, &later);
     EXPECT_EQ(hit.matched_device_endpoint, 300u);
     releaseRequestRefsForTest(*cache, hit.matched_device_resources);
 }
@@ -839,7 +859,7 @@ TEST_F(BlockTreeCacheTest, LegacyCompleteKeyRemoteMissRejectsIncompleteSwaWindow
     request.valid_endpoint    = [](size_t end) { return end > 0 && end < 513; };
     request.reuse_unit_tokens = 512;
     request.remote_ceiling    = 512;
-    auto result               = cache->match({512, 613}, {}, &request);
+    auto result               = cache->match({512, 613}, {}, nullptr, &request);
     ASSERT_NE(result.async_context, nullptr);
     EXPECT_EQ(result.matched_device_endpoint, 0u);
     EXPECT_EQ(result.async_context->loadDescs().size(), 0u);
@@ -894,11 +914,7 @@ TEST_F(BlockTreeCacheTest, Dsv4MixedSwaKvAndCompressorStateRestoresExact1300) {
             policy.sliding_window_size        = 128;  // Actual shared model attention policy.
             policy.cp_mapping                 = CpBlockMappingMode::COMPACT_LAST_RANK;
             policy.cp_slice = i == 0 ? CpBlockSliceMode::EQUAL_BYTES : CpBlockSliceMode::PAYLOAD_BYTES;
-            members.push_back(
-                GroupBase{tags[i],
-                          SpecBuilder::build(desc, context),
-                          policy,
-                          128});
+            members.push_back(GroupBase{tags[i], SpecBuilder::build(desc, context), policy, 128});
         }
         mixed->initialize(0, CacheTopology::create(members, {{0, tags}}), tags);
         auto                          cache = makeBlockTreeCacheForTest({mixed}, {}, nullptr, nullptr, nullptr, span);
@@ -946,7 +962,7 @@ TEST_F(BlockTreeCacheTest, Dsv4MixedSwaKvAndCompressorStateRestoresExact1300) {
         request.preceding_valid_endpoint = [](size_t upper) { return upper; };
         request.reuse_unit_tokens        = span;
         CacheKeysType complete_keys(keys.begin(), keys.end() - 1);
-        auto          result = cache->match(complete_keys, {}, &request);
+        auto          result = cache->match(complete_keys, {}, nullptr, &request);
         EXPECT_EQ(result.matched_device_endpoint, 1300u);
         EXPECT_TRUE(result.precise_local);
         releaseRequestRefsForTest(*cache, result.matched_device_resources);
@@ -1029,11 +1045,10 @@ TEST_F(BlockTreeCacheTest, OpaqueSwaInteriorMatchRequiresRetainedRingWindow) {
         parallelism.tp_size                            = byte_sliced_cp ? 2 : 1;
         parallelism.prefill_cp_config.kv_cache_sharded = true;
         context.parallelism_config                     = &parallelism;
-        member.spec       = SpecBuilder::build(desc, context);
-        const auto* state = dynamic_cast<const FixedStateCacheSpec*>(member.spec.get());
+        member.spec                                    = SpecBuilder::build(desc, context);
+        const auto* state                              = dynamic_cast<const FixedStateCacheSpec*>(member.spec.get());
         ASSERT_NE(state, nullptr);
-        ASSERT_NE(state->swaByteLayout(), nullptr);
-        EXPECT_EQ(state->swaByteLayout()->full_entries, 130u);
+        EXPECT_EQ(state->entriesPerBlock(), 130u);
         EXPECT_EQ(member.spec->block_payload_bytes(), 130u);
         EXPECT_EQ(member.spec->block_size_bytes(), byte_sliced_cp ? 65u : 130u);
         swa->initialize(0, CacheTopology::create({member}, {{0, {member.tag}}}), {member.tag});
@@ -1067,7 +1082,7 @@ TEST_F(BlockTreeCacheTest, OpaqueSwaInteriorMatchRequiresRetainedRingWindow) {
             request.valid_endpoint           = [](size_t end) { return end > 0 && end < 900; };
             request.preceding_valid_endpoint = [](size_t upper) { return upper; };
             request.reuse_unit_tokens        = 256;
-            auto result                      = cache->match({}, {}, &request);
+            auto result                      = cache->match({}, {}, nullptr, &request);
             EXPECT_EQ(result.matched_device_endpoint, common == 697 ? 697u : 512u);
             releaseRequestRefsForTest(*cache, result.matched_device_resources);
             for (const BlockIdxType block : {42, 43, 44}) {
@@ -1139,7 +1154,7 @@ TEST_F(BlockTreeCacheTest, DenseSwaAndExactLinearIntersectAcrossSiblingLeaves) {
             };
             request.preceding_valid_endpoint = [&tokens](size_t upper) { return std::min(upper, tokens.size() - 1); };
             request.reuse_unit_tokens        = 256;
-            auto result                      = cache->match({}, {}, &request);
+            auto result                      = cache->match({}, {}, nullptr, &request);
             EXPECT_TRUE(result.precise_local);
             EXPECT_EQ(result.matched_device_endpoint, include_linear ? 600u : 650u);
             if (include_linear) {
@@ -1173,7 +1188,7 @@ TEST_F(BlockTreeCacheTest, DenseSwaAndExactLinearIntersectAcrossSiblingLeaves) {
             // endpoint; at 650 the entire required window is in the longer leaf.
             auto previous                                      = cache->tree()->findNode({256, 512}).back();
             previous->group_set_resources[0].transfer_detached = true;
-            auto hole                                          = cache->match({}, {}, &request);
+            auto hole                                          = cache->match({}, {}, nullptr, &request);
             EXPECT_EQ(hole.matched_device_endpoint, include_linear ? 256u : 650u);
             releaseRequestRefsForTest(*cache, hole.matched_device_resources);
             previous->group_set_resources[0].transfer_detached = false;
@@ -1230,14 +1245,14 @@ TEST_F(BlockTreeCacheTest, PreciseLocalMatchChoosesFarthestJointReadyEndpoint) {
     };
     request.valid_endpoint    = [](size_t endpoint) { return endpoint < 769; };
     request.reuse_unit_tokens = 256;
-    auto farthest             = cache_->match({1, 2, 5}, {}, &request);
+    auto farthest             = cache_->match({1, 2, 5}, {}, nullptr, &request);
     EXPECT_TRUE(farthest.precise_local);
     EXPECT_EQ(farthest.matched_device_endpoint, 768u);
     releaseRequestRefsForTest(*cache_, farthest.matched_device_resources);
 
     auto* complete_leaf                                     = cache_->tree()->findNode({1, 2, 5}).back();
     complete_leaf->group_set_resources[0].transfer_detached = true;
-    auto short_match                                        = cache_->match({}, {}, &request);
+    auto short_match                                        = cache_->match({}, {}, nullptr, &request);
     EXPECT_TRUE(short_match.precise_local);
     // FULL at 650 covers 640, where HCA has no pending state at all.
     EXPECT_EQ(short_match.matched_device_endpoint, 640u);
@@ -1304,7 +1319,7 @@ TEST_F(BlockTreeCacheTest, PreciseSwaMatchRequiresBothPhysicalSlotsAcrossBoundar
         };
         request.valid_endpoint    = [](size_t endpoint) { return endpoint <= 1025; };
         request.reuse_unit_tokens = 256;
-        auto match                = cache->match({1, 2, 3, 4, 5}, {}, &request);
+        auto match                = cache->match({1, 2, 3, 4, 5}, {}, nullptr, &request);
         if (has_previous_slot) {
             EXPECT_TRUE(match.precise_local);
             EXPECT_EQ(match.matched_device_endpoint, 1025u);
@@ -1363,7 +1378,7 @@ TEST_F(BlockTreeCacheTest, PreciseMixedSwaLinearShortLeavesRequireJointStateAndR
         request.valid_endpoint    = [](size_t endpoint) { return endpoint < 900; };
         request.reuse_unit_tokens = 256;
         const auto verify_match   = [&](size_t expected) {
-            auto result = cache->match({}, {}, &request);
+            auto result = cache->match({}, {}, nullptr, &request);
             EXPECT_TRUE(result.precise_local);
             EXPECT_EQ(result.matched_device_endpoint, expected);
             releaseRequestRefsForTest(*cache, result.matched_device_resources);
@@ -1371,7 +1386,7 @@ TEST_F(BlockTreeCacheTest, PreciseMixedSwaLinearShortLeavesRequireJointStateAndR
         verify_match(600);  // Farther 700 has no LINEAR state.
         auto previous                                      = cache->tree()->findNode({1, 2}).back();
         previous->group_set_resources[0].transfer_detached = true;
-        auto missing_window                                = cache->match({}, {}, &request);
+        auto missing_window                                = cache->match({}, {}, nullptr, &request);
         EXPECT_NE(missing_window.matched_device_endpoint, 600u);  // 88 tokens do not cover W128.
         EXPECT_NE(missing_window.matched_device_endpoint, 700u);  // No cross-endpoint LINEAR stitching.
         releaseRequestRefsForTest(*cache, missing_window.matched_device_resources);
@@ -1399,10 +1414,42 @@ TEST_F(BlockTreeCacheTest, PreciseMixedSwaLinearShortLeavesRequireJointStateAndR
     }
 }
 
+TEST_F(BlockTreeCacheTest, PrefixMatchObservationSeparatesContentAndReusableEndpoint) {
+    resetCache();
+    BlockTreeCacheConfig config;
+    config.enable_prefix_cache_observability = true;
+    auto full_group                          = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+    auto cache = makeBlockTreeCacheForTest({std::move(full_group)}, config, nullptr, nullptr, nullptr);
+    ASSERT_NE(cache, nullptr);
+
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    resources[1][0].device_blocks = {43};
+    const std::vector<std::vector<int>> segments{{1, 2}, {3, 4}};
+    cache->insert({100, 200}, resources, Tier::DEVICE, false, &segments);
+
+    const std::vector<int> request_tokens{1, 2, 3, 4};
+    const auto             result = cache->match({100, 200}, {}, &request_tokens);
+    ASSERT_TRUE(result.match_observation.has_value());
+    EXPECT_EQ(result.match_observation->input_tokens, 4);
+    ASSERT_TRUE(result.match_observation->content_pos.has_value());
+    EXPECT_EQ(*result.match_observation->content_pos, 4u);
+    ASSERT_TRUE(result.match_observation->local_valid_pos.has_value());
+    EXPECT_EQ(*result.match_observation->local_valid_pos, 3u);
+    ASSERT_EQ(result.match_observation->groups.size(), 1u);
+    ASSERT_TRUE(result.match_observation->groups[0].max_pos[0].has_value());
+    EXPECT_EQ(*result.match_observation->groups[0].max_pos[0], 3u);
+    ASSERT_TRUE(result.match_observation->groups[0].max_key[0].has_value());
+    EXPECT_EQ(*result.match_observation->groups[0].max_key[0], 200);
+    EXPECT_EQ(result.match_observation->medium_status[0], PrefixCacheMediumStatus::CHECKED);
+}
+
 TEST_F(BlockTreeCacheTest, PreciseForkObservationUsesAuthenticatedContentAndKeepsReuseUnchanged) {
-    {
+    for (const bool observe : {false, true}) {
         BlockTreeCacheConfig config;
-        auto                 full = std::make_shared<FullGroupSet>(
+        config.enable_prefix_cache_observability = observe;
+        auto full                                = std::make_shared<FullGroupSet>(
             std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)}, nullptr, nullptr);
         auto cache = makeBlockTreeCacheForTest({full}, config, nullptr, nullptr, nullptr, 2);
         std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
@@ -1410,8 +1457,8 @@ TEST_F(BlockTreeCacheTest, PreciseForkObservationUsesAuthenticatedContentAndKeep
         const std::vector<std::vector<int>> segments{{1, 2}, {3, 4}};
         const std::vector<std::vector<int>> longer_segments{{1, 2}, {3, 9}};
         const std::vector<size_t>           ends{2, 4};
-        cache->insert({100, 200}, resources, Tier::DEVICE, false, &segments, &ends);
-        cache->insert({100, 201}, resources, Tier::DEVICE, false, &longer_segments, &ends);
+        cache->insert({100, 200}, resources, Tier::DEVICE, false, &segments, nullptr, &ends);
+        cache->insert({100, 201}, resources, Tier::DEVICE, false, &longer_segments, nullptr, &ends);
 
         const std::vector<int>  request_tokens{1, 2, 3, 9, 5};
         PartialTailMatchRequest request;
@@ -1426,13 +1473,79 @@ TEST_F(BlockTreeCacheTest, PreciseForkObservationUsesAuthenticatedContentAndKeep
         };
         request.valid_endpoint    = [](size_t endpoint) { return endpoint > 0 && endpoint < 5; };
         request.reuse_unit_tokens = 2;
-        auto result               = cache->match({}, {}, &request);
+        auto result               = cache->match({}, {}, &request_tokens, &request);
         EXPECT_TRUE(result.precise_local);
         EXPECT_EQ(result.matched_device_endpoint, 2u);
         ASSERT_TRUE(result.farthest_fork.has_value());
         EXPECT_EQ(result.farthest_fork->pos, 3u);
+        if (observe) {
+            ASSERT_TRUE(result.match_observation.has_value());
+            EXPECT_EQ(result.match_observation->content_pos, std::optional<size_t>(4));
+            EXPECT_EQ(result.match_observation->local_valid_pos, std::optional<size_t>(2));
+            EXPECT_EQ(result.match_observation->content_key, std::optional<CacheKeyType>(201));
+            EXPECT_FALSE(result.match_observation->content_partial);
+        } else {
+            EXPECT_FALSE(result.match_observation.has_value());
+        }
         releaseRequestRefsForTest(*cache, result.matched_device_resources);
     }
+}
+
+TEST_F(BlockTreeCacheTest, PrefixObservabilityDoesNotChangeDeviceReuseOrResourceState) {
+    const auto make_cache = [](bool enable_observability) {
+        BlockTreeCacheConfig config;
+        config.enable_prefix_cache_observability = enable_observability;
+        auto full_group                          = std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+        return makeBlockTreeCacheForTest({std::move(full_group)}, config, nullptr, nullptr, nullptr);
+    };
+
+    auto disabled_cache = make_cache(false);
+    auto enabled_cache  = make_cache(true);
+    ASSERT_NE(disabled_cache, nullptr);
+    ASSERT_NE(enabled_cache, nullptr);
+
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    resources[1][0].device_blocks = {43};
+    const std::vector<std::vector<int>> segments{{1, 2}, {3, 4}};
+    const std::vector<int>              request_tokens{1, 2, 3, 4};
+
+    disabled_cache->insert({100, 200}, resources, Tier::DEVICE, false, &segments);
+    enabled_cache->insert({100, 200}, resources, Tier::DEVICE, false, &segments);
+
+    const auto disabled_result = disabled_cache->match({100, 200}, {}, &request_tokens);
+    const auto enabled_result  = enabled_cache->match({100, 200}, {}, &request_tokens);
+    EXPECT_EQ(disabled_result.matched_device_blocks, enabled_result.matched_device_blocks);
+    EXPECT_EQ(disabled_result.matched_device_resources.size(), enabled_result.matched_device_resources.size());
+    for (size_t resource_index = 0; resource_index < disabled_result.matched_device_resources.size();
+         ++resource_index) {
+        const auto& disabled_resource = disabled_result.matched_device_resources[resource_index];
+        const auto& enabled_resource  = enabled_result.matched_device_resources[resource_index];
+        EXPECT_EQ(disabled_resource.group_set_id, enabled_resource.group_set_id);
+        EXPECT_EQ(disabled_resource.tier, enabled_resource.tier);
+        ASSERT_EQ(disabled_resource.node_blocks.size(), enabled_resource.node_blocks.size());
+        for (size_t node_index = 0; node_index < disabled_resource.node_blocks.size(); ++node_index) {
+            EXPECT_EQ(disabled_resource.node_blocks[node_index].second,
+                      enabled_resource.node_blocks[node_index].second);
+        }
+    }
+
+    const auto disabled_pool_metrics = disabled_cache->poolMetricsSnapshots();
+    const auto enabled_pool_metrics  = enabled_cache->poolMetricsSnapshots();
+    ASSERT_EQ(disabled_pool_metrics.size(), enabled_pool_metrics.size());
+    for (size_t pool_index = 0; pool_index < disabled_pool_metrics.size(); ++pool_index) {
+        EXPECT_EQ(disabled_pool_metrics[pool_index].used_blocks, enabled_pool_metrics[pool_index].used_blocks);
+        EXPECT_EQ(disabled_pool_metrics[pool_index].free_blocks, enabled_pool_metrics[pool_index].free_blocks);
+        EXPECT_EQ(disabled_pool_metrics[pool_index].request_ref_blocks,
+                  enabled_pool_metrics[pool_index].request_ref_blocks);
+        EXPECT_EQ(disabled_pool_metrics[pool_index].block_cache_ref_blocks,
+                  enabled_pool_metrics[pool_index].block_cache_ref_blocks);
+        EXPECT_EQ(disabled_pool_metrics[pool_index].load_ref_blocks, enabled_pool_metrics[pool_index].load_ref_blocks);
+    }
+
+    EXPECT_FALSE(disabled_result.match_observation.has_value());
+    EXPECT_TRUE(enabled_result.match_observation.has_value());
 }
 
 TEST_F(BlockTreeCacheTest, IncompleteResidentInsertKeepsPrefixProtectedAndRetrySucceeds) {

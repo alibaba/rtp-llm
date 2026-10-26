@@ -198,6 +198,11 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
                     if f800_writer_fault
                     else ""
                 ),
+                "RTP_LLM_PREFIX_CACHE_OBSERVABILITY": (
+                    "true"
+                    if ac02 or f800_writer_fault
+                    else "false"
+                ),
             },
             device_ids=cards[:1],
             port=prefill_port,
@@ -816,12 +821,30 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
             "injected F800 selected-state writer post-CUDA failure", prefill_log
         )
         self.assertIn("SIGABRT", prefill_log, "backend fatal exit was not observed")
+        observations = []
+        for line in prefill_log.splitlines():
+            marker_text = "event=prefix_cache_observation payload="
+            if marker_text not in line:
+                continue
+            payload, _ = json.JSONDecoder().raw_decode(line.split(marker_text, 1)[1])
+            observations.append(payload)
+        self.assertTrue(observations, "prefix observation was not active")
+        f_publications = [
+            event
+            for event in observations
+            if event.get("kind") == "publication"
+            and event.get("internal_fork_pos") == 800
+            and event.get("insert_attempted") is True
+        ]
+        self.assertFalse(f_publications, "failed B published its F800 point")
         (self.output_dir / "f800_fatal_forward_evidence.json").write_text(
             json.dumps(
                 {
                     "failed_request": failure,
                     "writer_marker": marker,
                     "backend_sigabrt": True,
+                    "observations": observations,
+                    "f800_insertions": f_publications,
                     "publication_boundary": "NormalExecutor::model_->forward precedes markComplete and completeRegisteredSave",
                 },
                 indent=2,

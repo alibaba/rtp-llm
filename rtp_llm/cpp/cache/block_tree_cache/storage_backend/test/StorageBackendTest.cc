@@ -320,6 +320,11 @@ public:
         fail_match_ = true;
     }
 
+    void setNextQueryStatus(PrefixCacheRemoteQueryStatus status) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        next_query_status_ = status;
+    }
+
     void failNextRead() {
         fail_read_ = true;
     }
@@ -376,6 +381,7 @@ protected:
         cv_.wait(lock, [this] { return match_released_; });
         StorageMatchResult result;
         result.matched_blocks_num = request.handles.size();
+        result.query_status       = next_query_status_;
         return result;
     }
 
@@ -405,19 +411,20 @@ protected:
     }
 
 private:
-    mutable std::mutex      mutex_;
-    std::condition_variable cv_;
-    bool                    match_released_{true};
-    bool                    match_entered_{false};
-    bool                    fail_match_{false};
-    bool                    fail_read_{false};
-    bool                    fail_write_{false};
-    size_t                  read_calls_{0};
-    size_t                  write_handle_count_{0};
-    bool                    init_result_{true};
-    size_t                  init_calls_{0};
-    void*                   init_resolved_address_{nullptr};
-    std::atomic<bool>       shutdown_called_{false};
+    mutable std::mutex           mutex_;
+    std::condition_variable      cv_;
+    bool                         match_released_{true};
+    bool                         match_entered_{false};
+    bool                         fail_match_{false};
+    PrefixCacheRemoteQueryStatus next_query_status_{PrefixCacheRemoteQueryStatus::UNSET};
+    bool                         fail_read_{false};
+    bool                         fail_write_{false};
+    size_t                       read_calls_{0};
+    size_t                       write_handle_count_{0};
+    bool                         init_result_{true};
+    size_t                       init_calls_{0};
+    void*                        init_resolved_address_{nullptr};
+    std::atomic<bool>            shutdown_called_{false};
 };
 
 class QuarantineObservingBackend: public TestBackend {
@@ -629,7 +636,7 @@ TEST(StorageBackendTest, CallbackExceptionsSettleTasksAndPreserveExecutor) {
         auto block = pool->malloc().value();
         pool->incRef(block);
         size_t callbacks = 0;
-        backend.match(makeRequest(block), [&](size_t, auto, bool) {
+        backend.match(makeRequest(block), [&](size_t, auto, bool, PrefixCacheRemoteQueryStatus) {
             ++callbacks;
             throw std::runtime_error("match callback failure");
         });
@@ -641,7 +648,7 @@ TEST(StorageBackendTest, CallbackExceptionsSettleTasksAndPreserveExecutor) {
         EXPECT_NO_THROW(executor->runAll());
         EXPECT_EQ(callbacks, 2u);
         EXPECT_EQ(pool->refCount(block), 1u);
-        backend.match(makeRequest(block), [&](size_t, auto, bool success) {
+        backend.match(makeRequest(block), [&](size_t, auto, bool success, PrefixCacheRemoteQueryStatus) {
             EXPECT_TRUE(success);
             ++callbacks;
         });
@@ -657,6 +664,35 @@ TEST(StorageBackendTest, CallbackExceptionsSettleTasksAndPreserveExecutor) {
     test.get();
 }
 
+TEST(StorageBackendTest, MatchQueryStatusIsDiagnosticAndDoesNotChangeSuccess) {
+    auto        pool     = std::make_shared<TestBlockPool>();
+    auto        executor = std::make_shared<HoldingExecutor>();
+    TestBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+
+    bool                         success = false;
+    PrefixCacheRemoteQueryStatus status  = PrefixCacheRemoteQueryStatus::UNSET;
+    backend.setNextQueryStatus(PrefixCacheRemoteQueryStatus::ERROR);
+    backend.match(makeRequest(NULL_BLOCK_IDX),
+                  [&](size_t, auto, bool current_success, PrefixCacheRemoteQueryStatus current_status) {
+                      success = current_success;
+                      status  = current_status;
+                  });
+    ASSERT_TRUE(executor->runAll());
+    EXPECT_TRUE(success);
+    EXPECT_EQ(status, PrefixCacheRemoteQueryStatus::ERROR);
+
+    backend.failNextMatch();
+    backend.match(makeRequest(NULL_BLOCK_IDX),
+                  [&](size_t, auto, bool current_success, PrefixCacheRemoteQueryStatus current_status) {
+                      success = current_success;
+                      status  = current_status;
+                  });
+    ASSERT_TRUE(executor->runAll());
+    EXPECT_FALSE(success);
+    EXPECT_EQ(status, PrefixCacheRemoteQueryStatus::ERROR);
+}
+
 TEST(StorageBackendTest, DefaultExecutorRunsOperationsAsynchronously) {
     auto        pool = std::make_shared<TestBlockPool>();
     TestBackend backend;
@@ -665,7 +701,7 @@ TEST(StorageBackendTest, DefaultExecutorRunsOperationsAsynchronously) {
 
     std::promise<void> completed;
     auto               future = completed.get_future();
-    backend.match(makeRequest(NULL_BLOCK_IDX, 2), [&](size_t count, auto, bool success) {
+    backend.match(makeRequest(NULL_BLOCK_IDX, 2), [&](size_t count, auto, bool success, PrefixCacheRemoteQueryStatus) {
         EXPECT_EQ(count, 2u);
         EXPECT_TRUE(success);
         completed.set_value();
@@ -685,10 +721,11 @@ TEST(StorageBackendTest, DefaultExecutorShutdownSettlesQueuedOperationsAndPins) 
     auto completions = std::make_shared<std::atomic<size_t>>(0);
     backend->blockMatch();
     ASSERT_TRUE(initBackend(*backend, pool));
-    backend->match(makeRequest(NULL_BLOCK_IDX), [completions](size_t, auto, bool success) {
-        EXPECT_TRUE(success);
-        completions->fetch_add(1);
-    });
+    backend->match(makeRequest(NULL_BLOCK_IDX),
+                   [completions](size_t, auto, bool success, PrefixCacheRemoteQueryStatus) {
+                       EXPECT_TRUE(success);
+                       completions->fetch_add(1);
+                   });
     if (!backend->waitUntilMatchEntered()) {
         backend->releaseMatch();
         FAIL() << "match did not occupy the worker";
@@ -720,7 +757,7 @@ TEST(StorageBackendTest, CustomExecutorControlsScheduling) {
     ASSERT_TRUE(initBackend(backend, pool));
 
     bool completed = false;
-    backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t count, auto, bool success) {
+    backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t count, auto, bool success, PrefixCacheRemoteQueryStatus) {
         EXPECT_EQ(count, 1u);
         EXPECT_TRUE(success);
         completed = true;
@@ -762,7 +799,7 @@ TEST(StorageBackendTest, SubmissionFailureCompletesOnceAndReleasesPins) {
     EXPECT_EQ(pool->refCount(block), 1u);
 
     size_t match_completions = 0;
-    backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success) {
+    backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success, PrefixCacheRemoteQueryStatus) {
         ++match_completions;
         EXPECT_FALSE(success);
     });
@@ -773,7 +810,7 @@ TEST(StorageBackendTest, SubmissionFailureCompletesOnceAndReleasesPins) {
 
     executor->setReject(false);
     executor->setThrowOnSubmit(true);
-    backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success) {
+    backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success, PrefixCacheRemoteQueryStatus) {
         ++match_completions;
         EXPECT_FALSE(success);
     });
@@ -804,7 +841,8 @@ TEST(StorageBackendTest, IoExceptionsPropagateFailureAndReleasePins) {
 
     backend.failNextMatch();
     bool match_success = true;
-    backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success) { match_success = success; });
+    backend.match(makeRequest(NULL_BLOCK_IDX),
+                  [&](size_t, auto, bool success, PrefixCacheRemoteQueryStatus) { match_success = success; });
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_FALSE(match_success);
     pool->decRef(block);
@@ -872,7 +910,8 @@ TEST(StorageBackendTest, AsyncWriteDuringStoppingIsRejectedAndReleasesPins) {
     auto backend  = std::make_shared<TestBackend>(/*init_result=*/true, executor);
     backend->blockMatch();
     ASSERT_TRUE(initBackend(*backend, pool));
-    backend->match(makeRequest(NULL_BLOCK_IDX), [](size_t, auto, bool success) { EXPECT_TRUE(success); });
+    backend->match(makeRequest(NULL_BLOCK_IDX),
+                   [](size_t, auto, bool success, PrefixCacheRemoteQueryStatus) { EXPECT_TRUE(success); });
 
     BoundedThread<void> shutdown([backend] { backend->shutdown(); });
     if (!backend->waitUntilMatchEntered()) {
@@ -924,7 +963,8 @@ TEST(StorageBackendTest, AsyncWriteFromOwnCallbacksQueuesWithoutBlocking) {
         if (read) {
             backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) { done(error.ok()); });
         } else {
-            backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success) { done(success); });
+            backend.match(makeRequest(NULL_BLOCK_IDX),
+                          [&](size_t, auto, bool success, PrefixCacheRemoteQueryStatus) { done(success); });
         }
         ASSERT_TRUE(executor->runNext());
         EXPECT_TRUE(called);
@@ -967,7 +1007,8 @@ TEST(StorageBackendTest, ShutdownDrainsAcceptedTasksAndRejectsNewOnes) {
     ASSERT_TRUE(initBackend(backend, pool));
 
     std::atomic<bool> completed{false};
-    backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success) { completed.store(success); });
+    backend.match(makeRequest(NULL_BLOCK_IDX),
+                  [&](size_t, auto, bool success, PrefixCacheRemoteQueryStatus) { completed.store(success); });
     ASSERT_EQ(executor->pendingCount(), 1u);
 
     auto shutdown = std::async(std::launch::async, [&] { backend.shutdown(); });
@@ -979,7 +1020,7 @@ TEST(StorageBackendTest, ShutdownDrainsAcceptedTasksAndRejectsNewOnes) {
     std::promise<void> release_rejection;
     auto               release_rejection_future = release_rejection.get_future().share();
     auto               rejection                = std::async(std::launch::async, [&] {
-        backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success) {
+        backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success, PrefixCacheRemoteQueryStatus) {
             EXPECT_FALSE(success);
             rejection_entered.set_value();
             release_rejection_future.wait();
@@ -995,7 +1036,7 @@ TEST(StorageBackendTest, ShutdownDrainsAcceptedTasksAndRejectsNewOnes) {
     EXPECT_TRUE(backend.shutdownCalled());
 
     size_t rejected = 0;
-    backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success) {
+    backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success, PrefixCacheRemoteQueryStatus) {
         EXPECT_FALSE(success);
         ++rejected;
     });
@@ -1010,7 +1051,7 @@ TEST(StorageBackendTest, ShutdownFromCompletionIsRejectedWithoutDeadlock) {
     ASSERT_TRUE(initBackend(backend, pool));
 
     bool rejected = false;
-    backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success) {
+    backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success, PrefixCacheRemoteQueryStatus) {
         EXPECT_TRUE(success);
         try {
             backend.shutdown();

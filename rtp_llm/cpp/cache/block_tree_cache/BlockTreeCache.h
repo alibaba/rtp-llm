@@ -73,6 +73,11 @@ struct BlockTreeCacheConfig {
     // The factory zeroes this on ranks that do not own a mutable BlockTree.
     int64_t full_prefix_scan_interval_ms{0};  // 0 = disabled, no thread
 
+    // Startup-resolved complete prefix-cache observation switch. It never
+    // participates in recovery/allocation decisions.
+    bool enable_prefix_cache_observability{false};
+    std::string prefix_observability_instance;
+
     // ---- Query helpers ----
     bool isTierEnabled(Tier tier) const {
         switch (tier) {
@@ -125,17 +130,21 @@ public:
 
     BlockTreeMatchResult match(const CacheKeysType&               cache_keys,
                                const std::function<bool(size_t)>& valid_prefix = {},
+                               const std::vector<int>*            request_tokens = nullptr,
                                const PartialTailMatchRequest*     partial_tail = nullptr);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
-                                Tier                                              target_tier);
+                                Tier                                              target_tier,
+                                PrefixCachePlanState*                             prefix_plan_state = nullptr);
     // Returns the resident key-prefix count, including nodes that were already resident.
     size_t insert(const CacheKeysType&                              cache_keys,
                   const std::vector<std::vector<GroupSetResource>>& resources,
                   Tier                                              target_tier,
                   bool                                              is_resident,
                   const std::vector<std::vector<int>>*              token_segments = nullptr,
+                  PrefixCachePlanState*                             prefix_plan_state = nullptr,
                   const std::vector<size_t>*                         token_ends = nullptr,
+                  std::optional<int64_t> observation_request_id = std::nullopt,
                   bool internal_fork = false,
                   bool* ready_after_insert = nullptr);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
@@ -149,10 +158,15 @@ public:
                                                const std::vector<PrefixCachePlanPoint>* exact_points = nullptr,
                                                const std::function<bool(size_t, const std::vector<int>&, CacheKeyType)>&
                                                    source_identity = {});
+    void observePublicationSkipped(std::optional<int64_t> request_id,
+                                   Tier tier,
+                                   const char* reason,
+                                   std::optional<size_t> internal_fork_pos = std::nullopt);
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
 
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
+    BlockTreeObservabilitySnapshot            observabilitySnapshot() const;
     void                                      reportMetrics() const;
     BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
@@ -194,6 +208,12 @@ public:
 
     const BlockTreeCacheConfig& config() const {
         return config_;
+    }
+    bool prefixObservabilityEnabled() const {
+        return config_.enable_prefix_cache_observability;
+    }
+    const std::string& prefixObservabilityInstance() const {
+        return config_.prefix_observability_instance;
     }
 
 private:

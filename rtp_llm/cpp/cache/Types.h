@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -61,6 +62,19 @@ struct GroupBlockIdPair {
 static_assert(sizeof(GroupBlockIdPair) == 3 * sizeof(int32_t),
               "GroupBlockIdPair must match the three-column int32 tensor layout");
 
+enum class PrefixCacheMediumStatus : uint8_t {
+    NOT_CHECKED = 0,
+    DISABLED,
+    CHECKED,
+};
+
+struct PrefixCacheGroupObservation {
+    size_t                                 group_set_id{0};
+    std::vector<std::string>              member_tags;
+    std::array<std::optional<size_t>, 3>  max_pos;
+    std::array<std::optional<CacheKeyType>, 3> max_key;
+};
+
 struct PrefixCachePlanPoint {
     size_t       index{0};
     CacheKeyType key{0};
@@ -80,6 +94,51 @@ enum class PrefixCacheSaveOwnership : uint8_t {
     OPTIONAL_REQUEST,  // This registration owns a separate request reference until T04 releases it.
     CACHED_REQUEST,    // cached_path_indices refer to shared registration-owned cached source pins.
     PINNED_RUNTIME,    // Dense SWA runtime value protected by shared registration-owned pins; no snapshot.
+};
+
+enum class PrefixCachePlanState : uint8_t {
+    NOT_FORMED = 0,
+    FORMED,
+    TERMINAL_UNFORMED,
+};
+
+inline const char* prefixCachePlanStateName(PrefixCachePlanState state) {
+    switch (state) {
+        case PrefixCachePlanState::FORMED:
+            return "formed";
+        case PrefixCachePlanState::TERMINAL_UNFORMED:
+            return "terminal_unformed";
+        case PrefixCachePlanState::NOT_FORMED:
+            break;
+    }
+    return "not_formed";
+}
+
+enum class PrefixCacheRemoteQueryStatus : uint8_t {
+    UNSET = 0,
+    NOT_QUERIED,
+    HIT,
+    MISS,
+    ERROR,
+};
+
+struct PrefixCacheRemoteObservation {
+    PrefixCacheRemoteQueryStatus query_status{PrefixCacheRemoteQueryStatus::NOT_QUERIED};
+    std::optional<size_t>        candidate_pos;
+    std::optional<bool>          effective;
+};
+
+struct PrefixCacheMatchObservation {
+    int64_t                                input_tokens{0};
+    std::optional<size_t>                  content_pos;
+    std::optional<CacheKeyType>            content_key;
+    size_t                                 content_node_offset{0};
+    bool                                   content_partial{false};
+    std::optional<size_t>                  local_valid_pos;
+    std::optional<CacheKeyType>            local_valid_key;
+    std::array<PrefixCacheMediumStatus, 3> medium_status;
+    std::vector<PrefixCacheGroupObservation> groups;
+    int64_t                                match_time_us{0};
 };
 
 struct MallocInfo {
@@ -107,7 +166,9 @@ struct MallocInfo {
     // freshly computed keys.
     struct RequestLayout {
         CacheKeysType match_keys;  // full global cumulative hashes
-        // Owned token snapshot for functional local short-leaf lookup.
+        // Owned full-input token snapshot, populated when complete prefix
+        // observability is enabled OR partial tail reuse needs it. Empty means
+        // content matching is unformed.
         std::vector<int> token_ids;
         // Functional local short-leaf lookup uses this immutable first-prefill
         // view even when prefix observability is disabled.
@@ -172,6 +233,10 @@ struct MallocResult {
     int64_t load_prepare_latency_us = 0;
     int64_t device_input_length     = 0;
     bool    load_attempted          = false;
+
+    // Diagnostic-only value snapshot; absence means the match observation is
+    // not formed rather than a zero endpoint.
+    std::optional<PrefixCacheMatchObservation> match_observation;
 };
 
 struct FreeInfo {
@@ -186,7 +251,11 @@ struct InsertInfo {
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
     Tier                    target_tier{Tier::DEVICE};
+    // Optional request-owned plan-state sink. The cache writes only the state;
+    // plan points remain owned by the store task.
+    PrefixCachePlanState*   prefix_plan_state{nullptr};
     const PrefixCacheRegistration* prefix_cache_registration{nullptr};
+    std::optional<int64_t> observation_request_id{std::nullopt};
 };
 
 }  // namespace rtp_llm

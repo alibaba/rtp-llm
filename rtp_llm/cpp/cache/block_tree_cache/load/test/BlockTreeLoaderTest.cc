@@ -38,6 +38,58 @@ using block_tree_cache_test::makeStructuralDevicePool;
 using block_tree_cache_test::releaseDeviceBlocks;
 using block_tree_cache_test::unreferenceDeviceBlocksForTest;
 
+TEST(BlockTreeLoaderTest, LoadMutationBatchDoesNotRestartDependencyInterval) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    FullSWAEnvironmentOptions options;
+    options.path_length = 1;
+    options.enable_disk = false;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+
+    BlockTree                     observation_tree(environment->groups, 1, true);
+    std::vector<GroupSetResource> resources(environment->groups.size());
+    const MultiNodeBlocks         full_device_blocks =
+        allocateDeviceBlocksForTest(*environment->groups[0], 1, BlockTreeRefType::CACHE);
+    const MultiNodeBlocks swa_device_blocks =
+        allocateDeviceBlocksForTest(*environment->groups[1], 1, BlockTreeRefType::CACHE);
+    ASSERT_EQ(full_device_blocks.size(), 1u);
+    ASSERT_EQ(swa_device_blocks.size(), 1u);
+    resources[0].device_blocks = full_device_blocks.front();
+    resources[1].device_blocks = swa_device_blocks.front();
+    const auto inserted =
+        observation_tree.insertNode({100}, {resources}, /*collect_path=*/false, /*is_resident=*/false);
+    ASSERT_EQ(inserted.inserted_nodes.size(), 1u);
+    unreferenceDeviceBlocksForTest(*environment->groups[0], full_device_blocks, BlockTreeRefType::CACHE);
+    unreferenceDeviceBlocksForTest(*environment->groups[1], swa_device_blocks, BlockTreeRefType::CACHE);
+    TreeNode* node = inserted.inserted_nodes.front();
+    ASSERT_NE(node, nullptr);
+    const int64_t initial_recovery_since_us = node->observation.recovery_since_us;
+    ASSERT_GE(initial_recovery_since_us, 0);
+
+    {
+        BlockTree::ObservationBatch observation_batch(observation_tree);
+        node->group_set_resources[0].transfer_detached = true;
+        observation_tree.refreshPublishedState(node, true, "load");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        node->group_set_resources[0].transfer_detached = false;
+        observation_tree.refreshPublishedState(node, true, "load");
+    }
+    EXPECT_EQ(node->observation.recovery_since_us, initial_recovery_since_us);
+    EXPECT_EQ(observation_tree.observabilitySnapshot().recovery.count, 1u);
+
+    {
+        BlockTree::ObservationBatch observation_batch(observation_tree);
+        node->group_set_resources[0].transfer_detached = true;
+        observation_tree.refreshPublishedState(node, true, "load");
+    }
+    EXPECT_EQ(node->observation.recovery_since_us, -1);
+    EXPECT_EQ(observation_tree.observabilitySnapshot().recovery.count, 0u);
+    node->group_set_resources[0].transfer_detached = false;
+}
+
 class ReadFailureBackend final: public StorageBackend {
 public:
     ~ReadFailureBackend() override {
@@ -77,7 +129,7 @@ protected:
         if (request.keys->empty() || request.local_matched_blocks_num != 0) {
             throw std::runtime_error("expected remote first-block match");
         }
-        return {1, nullptr};
+        return {1, nullptr, PrefixCacheRemoteQueryStatus::HIT};
     }
     void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>&) override {
         ++read_calls;
@@ -517,8 +569,9 @@ TEST(BlockTreeLoaderTest, MatchObservationSkipsIncompleteTokenMetadata) {
     std::vector<GroupSetPtr> groups = {full};
 
     BlockTreeCacheConfig config;
-    config.enable_device_cache = true;
-    auto cache                 = block_tree_cache_test::makeBlockTreeCacheForTest(groups, config);
+    config.enable_device_cache               = true;
+    config.enable_prefix_cache_observability = true;
+    auto cache                               = block_tree_cache_test::makeBlockTreeCacheForTest(groups, config);
     ASSERT_NE(cache, nullptr);
 
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(groups.size()));
@@ -531,8 +584,10 @@ TEST(BlockTreeLoaderTest, MatchObservationSkipsIncompleteTokenMetadata) {
     ASSERT_EQ(path.size(), 2u);
     ASSERT_TRUE(path[1]->token_ids.empty());
 
-    const auto result = cache->match({100, 200}, {});
+    const std::vector<int> request_tokens{1, 2, 3, 4};
+    const auto             result = cache->match({100, 200}, {}, &request_tokens);
     EXPECT_EQ(result.matched_device_blocks, 2u);
+    EXPECT_FALSE(result.match_observation.has_value());
 }
 
 TEST(BlockTreeLoaderTest, RemoteCompetitionReportsAuthenticatedLocalContent) {
@@ -546,7 +601,8 @@ TEST(BlockTreeLoaderTest, RemoteCompetitionReportsAuthenticatedLocalContent) {
     environment->insertRequestPath();  // Allocate request-owned blocks before rebuilding the observable tree.
 
     BlockTreeCacheConfig config;
-    config.enable_device_cache = true;
+    config.enable_device_cache               = true;
+    config.enable_prefix_cache_observability = true;
     environment->cache.reset();
     environment->cache =
         block_tree_cache_test::makeBlockTreeCacheForTest(environment->groups, config, nullptr, nullptr, nullptr, 256);
@@ -561,7 +617,7 @@ TEST(BlockTreeLoaderTest, RemoteCompetitionReportsAuthenticatedLocalContent) {
         }
     }
     environment->cache->insert(
-        environment->keys, source_resources, Tier::DEVICE, false, &source_segments, &source_ends);
+        environment->keys, source_resources, Tier::DEVICE, false, &source_segments, nullptr, &source_ends);
     // A different first-block identity has equal tokens and a longer token-only
     // match. It must not contribute to authenticated M or the strict F value.
     const CacheKeysType           foreign_keys{environment->keys[0] + 100000, environment->keys[1] + 100000};
@@ -601,9 +657,12 @@ TEST(BlockTreeLoaderTest, RemoteCompetitionReportsAuthenticatedLocalContent) {
     request.remote_ceiling           = 512;
 
     const CacheKeysType request_keys{environment->keys[0], 512};
-    auto                result = environment->cache->match(request_keys, {}, &request);
+    auto                result = environment->cache->match(request_keys, {}, &tokens, &request);
     ASSERT_TRUE(result.farthest_fork.has_value());
     EXPECT_EQ(result.farthest_fork->pos, 400u);
+    ASSERT_TRUE(result.match_observation.has_value());
+    EXPECT_EQ(result.match_observation->content_pos, 400u);
+    EXPECT_EQ(result.match_observation->local_valid_pos, 256u);
     ASSERT_NE(result.async_context, nullptr);
     EXPECT_TRUE(result.async_context->needBackendMatch());
     EXPECT_TRUE(result.async_context->abortPending());
@@ -636,8 +695,9 @@ TEST_P(BlockTreeLoaderRemoteForkTest, RemoteAncestorBelowAuthenticatedForkSettle
 
     auto                 backend = std::make_shared<ForkRemoteBackend>(fail_read);
     BlockTreeCacheConfig config;
-    config.enable_device_cache = true;
-    config.enable_remote_cache = true;
+    config.enable_device_cache               = true;
+    config.enable_remote_cache               = true;
+    config.enable_prefix_cache_observability = true;
     auto cache = block_tree_cache_test::makeBlockTreeCacheForTest({full}, config, backend, nullptr, nullptr, 256);
     ASSERT_NE(cache, nullptr);
 
@@ -670,11 +730,13 @@ TEST_P(BlockTreeLoaderRemoteForkTest, RemoteAncestorBelowAuthenticatedForkSettle
     request.remote_ceiling           = 512;
 
     const CacheKeysType request_keys{environment->keys[0], 400};
-    auto                result = cache->match(request_keys, {}, &request);
+    auto                result = cache->match(request_keys, {}, &tokens, &request);
     EXPECT_EQ(result.matched_device_endpoint, 0u);
     ASSERT_TRUE(result.farthest_fork.has_value());
     EXPECT_EQ(result.farthest_fork->pos, 400u);
     EXPECT_EQ(result.farthest_fork->key, 400);
+    ASSERT_TRUE(result.match_observation.has_value());
+    EXPECT_EQ(result.match_observation->content_pos, 400u);
     auto context = result.async_context;
     ASSERT_NE(context, nullptr);
     ASSERT_TRUE(context->needBackendMatch());
@@ -700,6 +762,7 @@ TEST_P(BlockTreeLoaderRemoteForkTest, RemoteAncestorBelowAuthenticatedForkSettle
     EXPECT_EQ(backend->read_calls.load(), 1u);
     EXPECT_EQ(context->success(), !fail_read);
     EXPECT_EQ(context->matchedTokenEndpoint(256), fail_read ? 0u : 256u);
+    EXPECT_EQ(context->remoteObservation(256).candidate_pos, 256u);
     EXPECT_EQ(cache->tree()->findNode({environment->keys[0], 400}).size(), 1u);
 
     if (!fail_read && context->success()) {
@@ -710,8 +773,13 @@ TEST_P(BlockTreeLoaderRemoteForkTest, RemoteAncestorBelowAuthenticatedForkSettle
         ancestor_resources[0][0].device_blocks = remote_blocks.front();
         const std::vector<std::vector<int>> ancestor_segments{source_segments[0]};
         const std::vector<size_t>           ancestor_ends{256};
-        cache->insert(
-            {environment->keys[0]}, ancestor_resources, Tier::DEVICE, false, &ancestor_segments, &ancestor_ends);
+        cache->insert({environment->keys[0]},
+                      ancestor_resources,
+                      Tier::DEVICE,
+                      false,
+                      &ancestor_segments,
+                      nullptr,
+                      &ancestor_ends);
 
         const auto fork_blocks = allocateDeviceBlocksForTest(*full, 1);
         ASSERT_EQ(fork_blocks.size(), 1u);
@@ -726,7 +794,9 @@ TEST_P(BlockTreeLoaderRemoteForkTest, RemoteAncestorBelowAuthenticatedForkSettle
                       Tier::DEVICE,
                       false,
                       &fork_segments,
+                      nullptr,
                       &fork_ends,
+                      std::nullopt,
                       /*internal_fork=*/true,
                       &ready_after_insert);
         unreferenceDeviceBlocksForTest(*full, fork_blocks);
@@ -737,7 +807,7 @@ TEST_P(BlockTreeLoaderRemoteForkTest, RemoteAncestorBelowAuthenticatedForkSettle
             std::vector<int> later_tokens = tokens;
             std::fill(later_tokens.begin() + 400, later_tokens.end(), 8);
             request.tokens = &later_tokens;
-            auto later     = cache->match({environment->keys[0], 400}, {}, &request);
+            auto later     = cache->match({environment->keys[0], 400}, {}, &later_tokens, &request);
             ASSERT_NE(later.local_fallback, nullptr);
             ASSERT_NE(later.async_context, nullptr);
             EXPECT_EQ(later.local_fallback->endpoint, 400u);
@@ -751,6 +821,7 @@ TEST_P(BlockTreeLoaderRemoteForkTest, RemoteAncestorBelowAuthenticatedForkSettle
             later.async_context->waitDone();
             EXPECT_TRUE(later.async_context->success());
             EXPECT_EQ(later.async_context->matchedTokenEndpoint(256), 400u);
+            EXPECT_EQ(later.async_context->remoteObservation(256).candidate_pos, 256u);
             EXPECT_EQ(backend->read_calls.load(), 1u);  // B only; C chose its farther local F.
             later.local_fallback.reset();
             later.async_context.reset();
@@ -797,7 +868,7 @@ TEST(BlockTreeLoaderTest, StrictForkSurvivesMatchWithoutReadyDevicePrefix) {
     request.preceding_valid_endpoint = [](size_t upper) { return upper; };
     request.reuse_unit_tokens        = 256;
 
-    const auto result = cache->match({}, {}, &request);
+    const auto result = cache->match({}, {}, &request_tokens, &request);
     EXPECT_EQ(result.matched_device_endpoint, 0u);
     ASSERT_TRUE(result.farthest_fork.has_value());
     EXPECT_EQ(result.farthest_fork->pos, 400u);
@@ -846,7 +917,7 @@ TEST(BlockTreeLoaderTest, InvalidReuseEndpointForkIsNotReplacedByLegalEarlierEnd
     request.valid_endpoint           = [](size_t end) { return end > 0 && end <= 384; };
     request.preceding_valid_endpoint = [](size_t upper) { return std::min(upper, size_t{384}); };
     request.reuse_unit_tokens        = 256;
-    const auto result                = cache->match({256, 384}, {}, &request);
+    const auto result                = cache->match({256, 384}, {}, &tokens, &request);
     EXPECT_EQ(result.matched_device_endpoint, 384u);
     ASSERT_TRUE(result.farthest_fork.has_value());
     EXPECT_EQ(result.farthest_fork->pos, 400u);
@@ -928,7 +999,7 @@ TEST(BlockTreeLoaderTest, FarthestStrictForkSurvivesEarlierForkAndEarlierReadySt
     request.valid_endpoint           = [](size_t end) { return end > 0 && end < 2000; };
     request.preceding_valid_endpoint = [](size_t upper) { return upper; };
     request.reuse_unit_tokens        = 256;
-    const auto result                = cache->match({}, {}, &request);
+    const auto result                = cache->match({}, {}, &b, &request);
     EXPECT_EQ(result.matched_device_endpoint, 1100u);
     ASSERT_TRUE(result.farthest_fork.has_value());
     EXPECT_EQ(result.farthest_fork->pos, 1300u);
@@ -977,7 +1048,7 @@ TEST(BlockTreeLoaderTest, ReadyContinuationBeyondForkReportsBothEndpoints) {
     request.valid_endpoint           = [](size_t end) { return end > 0 && end < 600; };
     request.preceding_valid_endpoint = [](size_t upper) { return upper; };
     request.reuse_unit_tokens        = 256;
-    const auto result                = cache->match({256, 512}, {}, &request);
+    const auto result                = cache->match({256, 512}, {}, &request_tokens, &request);
     EXPECT_EQ(result.matched_device_endpoint, 512u);
     ASSERT_TRUE(result.farthest_fork.has_value());
     EXPECT_EQ(result.farthest_fork->pos, 400u);
@@ -1273,9 +1344,9 @@ TEST_P(BlockTreeLoaderInternalForkLowerTierTest, AuthenticatedForkSurvivesAncest
             resources[path_index][group_id].device_blocks = environment->request_blocks[group_id][path_index];
         }
     }
-    EXPECT_EQ(
-        environment->cache->insert(environment->keys, resources, Tier::DEVICE, false, &source_segments, &source_ends),
-        0u);  // Non-resident insert reports resident prefix length, not node count.
+    EXPECT_EQ(environment->cache->insert(
+                  environment->keys, resources, Tier::DEVICE, false, &source_segments, nullptr, &source_ends),
+              0u);  // Non-resident insert reports resident prefix length, not node count.
     const auto inserted = environment->cache->tree()->findNode(environment->keys);
     ASSERT_EQ(inserted.size(), 2u);
     EXPECT_EQ(inserted[0]->token_ids, source_segments[0]);
@@ -1304,7 +1375,7 @@ TEST_P(BlockTreeLoaderInternalForkLowerTierTest, AuthenticatedForkSurvivesAncest
     request.preceding_valid_endpoint = [](size_t upper) { return upper; };
     request.reuse_unit_tokens        = 256;
 
-    auto result = environment->cache->match({environment->keys[0]}, {}, &request);
+    auto result = environment->cache->match({environment->keys[0]}, {}, &request_tokens, &request);
     ASSERT_TRUE(result.farthest_fork.has_value());
     EXPECT_EQ(result.farthest_fork->pos, 400u);
     EXPECT_EQ(result.farthest_fork->key, 400);
@@ -1335,7 +1406,7 @@ TEST_P(BlockTreeLoaderInternalForkLowerTierTest, AuthenticatedForkSurvivesAncest
         }
     }
     if (fail_transfer) {
-        auto failed_retry = environment->cache->match({}, {}, &request);
+        auto failed_retry = environment->cache->match({}, {}, &request_tokens, &request);
         EXPECT_EQ(failed_retry.matched_device_endpoint, 0u);
         ASSERT_TRUE(failed_retry.farthest_fork.has_value());
         EXPECT_EQ(failed_retry.farthest_fork->pos, 400u);
@@ -1356,7 +1427,9 @@ TEST_P(BlockTreeLoaderInternalForkLowerTierTest, AuthenticatedForkSurvivesAncest
                                    Tier::DEVICE,
                                    false,
                                    &fork_segments,
+                                   nullptr,
                                    &fork_ends,
+                                   std::nullopt,
                                    /*internal_fork=*/true,
                                    &ready_after_insert);
         unreferenceDeviceBlocksForTest(*environment->groups[0], full_f);
@@ -1367,7 +1440,7 @@ TEST_P(BlockTreeLoaderInternalForkLowerTierTest, AuthenticatedForkSurvivesAncest
             std::vector<int> later_tokens = request_tokens;
             std::fill(later_tokens.begin() + 400, later_tokens.end(), 8);
             request.tokens = &later_tokens;
-            auto later     = environment->cache->match({environment->keys[0], 400}, {}, &request);
+            auto later     = environment->cache->match({environment->keys[0], 400}, {}, &later_tokens, &request);
             EXPECT_EQ(later.matched_device_endpoint, 400u);
             environment->releaseMatch(later);
         }
