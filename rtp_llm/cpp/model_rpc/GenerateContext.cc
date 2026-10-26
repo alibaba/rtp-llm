@@ -3,7 +3,9 @@
 namespace rtp_llm {
 
 GenerateContext::~GenerateContext() {
-    if (stream_ && stream_->getStatus() != StreamState::FINISHED) {
+    // GenerateDone is consumer-visible before the scheduler commits FINISHED.
+    // Cancelling that successful stream would prevent its KV cache publication.
+    if (stream_ && stream_->getStatus() != StreamState::FINISHED && !stream_->hasEvent(StreamEvents::GenerateDone)) {
         stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
     }
     stopStream();
@@ -86,7 +88,7 @@ void GenerateContext::stopStream() {
     if (stream_) {
         // if is waiting, cancel it
         meta->dequeue(request_id, stream_);
-        if (stream_->getStatus() != StreamState::FINISHED) {
+        if (stream_->getStatus() != StreamState::FINISHED && !stream_->hasEvent(StreamEvents::GenerateDone)) {
             stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
         }
         // if is running, waiting util done
