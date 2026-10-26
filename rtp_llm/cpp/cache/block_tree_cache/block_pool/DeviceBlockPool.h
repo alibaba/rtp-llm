@@ -71,6 +71,7 @@ public:
                                      BlockIndicesType&                          replacements,
                                      int&                                       required_free_blocks);
     bool isExclusiveRequestBlock(BlockIdxType block) const;
+    bool hasRequestRef(BlockIdxType block) const;
 
     uint32_t refCount(BlockIdxType block) const;
     using IBlockPool::referencedBlocksNum;
