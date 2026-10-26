@@ -30,8 +30,10 @@ class CandidateDeepSelectTest(unittest.TestCase):
         if torch.cuda.get_device_capability() not in ((10, 0), (10, 3)):
             raise unittest.SkipTest("SM100/SM103 required")
         available = getattr(rtp_llm_ops, "deepselect_bf16_available", None)
-        if not callable(available) or not available() or not callable(
-            getattr(rtp_llm_ops, "deepselect_bf16_candidates", None)
+        if (
+            not callable(available)
+            or not available()
+            or not callable(getattr(rtp_llm_ops, "deepselect_bf16_candidates", None))
         ):
             raise unittest.SkipTest("Rebuild the native candidate binding first")
 
@@ -57,7 +59,11 @@ class CandidateDeepSelectTest(unittest.TestCase):
                 self.assertFalse(native.is_supported(scores, ends, 8, 2048))
         with mock.patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_DEEPSELECT": "0"}):
             self.assertFalse(native.is_supported(scores, ends, 8, 2048))
-        with mock.patch.object(rtp_llm_ops, "deepselect_bf16_candidates", side_effect=RuntimeError("native failure")):
+        with mock.patch.object(
+            rtp_llm_ops,
+            "deepselect_bf16_candidates",
+            side_effect=RuntimeError("native failure"),
+        ):
             with self.assertRaisesRegex(RuntimeError, "native failure"):
                 native.select(scores, ends)
 
@@ -66,11 +72,15 @@ class CandidateDeepSelectTest(unittest.TestCase):
         # contents must not enter ties with real -INF values or become indices.
         for width in (2560, 4096, 16896, 32768):
             ends = torch.tensor(
-                [0, 1, 2047, 2048, 2049, width - 1, width], device="cuda", dtype=torch.int32
+                [0, 1, 2047, 2048, 2049, width - 1, width],
+                device="cuda",
+                dtype=torch.int32,
             )
             for value in (-float("inf"), float("inf"), float("nan"), -3.0):
                 with self.subTest(width=width, value=value):
-                    scores = torch.full((7, width), value, dtype=torch.bfloat16, device="cuda")
+                    scores = torch.full(
+                        (7, width), value, dtype=torch.bfloat16, device="cuda"
+                    )
                     # Poison the masked part, even when it shares a TMA tile.
                     columns = torch.arange(width, device="cuda")
                     scores.masked_fill_(columns[None] >= ends[:, None], float("nan"))
@@ -96,7 +106,9 @@ class CandidateDeepSelectTest(unittest.TestCase):
     def test_score_multiset_and_last_block_pin(self):
         torch.manual_seed(2048)
         scores = torch.randn((4, 32768), dtype=torch.bfloat16, device="cuda")
-        ends = torch.tensor([2049, 4097, 16385, 32767], dtype=torch.int32, device="cuda")
+        ends = torch.tensor(
+            [2049, 4097, 16385, 32767], dtype=torch.int32, device="cuda"
+        )
         for row, end in enumerate(ends.tolist()):
             scores[row, end - 1] = float("inf")
         output = native.select(scores, ends)
@@ -109,14 +121,20 @@ class CandidateDeepSelectTest(unittest.TestCase):
     def test_pool_dispatch_has_no_prefix_or_eager_flags_and_replays(self):
         logits = torch.randn((4, 32768), device="cuda", dtype=torch.bfloat16)
         lengths = torch.full((4,), 32768, device="cuda", dtype=torch.int32)
-        with mock.patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_DEEPSELECT": "1"}), mock.patch.object(
+        with mock.patch.dict(
+            os.environ, {"DSV41_DECODE_CANDIDATE_DEEPSELECT": "1"}
+        ), mock.patch.object(
             selector, "_candidate_store_prefix_kernel"
-        ) as legacy, mock.patch.object(selector, "build_candidate_flags") as eager_flags:
+        ) as legacy, mock.patch.object(
+            selector, "build_candidate_flags"
+        ) as eager_flags:
             side = torch.cuda.Stream()
             side.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(side):
                 for _ in range(3):
-                    selector.select_candidates(logits, lengths, 8, 2048, complete=True, build_flags=False)
+                    selector.select_candidates(
+                        logits, lengths, 8, 2048, complete=True, build_flags=False
+                    )
             torch.cuda.current_stream().wait_stream(side)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=side):
@@ -144,7 +162,8 @@ class CandidateDeepSelectTest(unittest.TestCase):
                     torch.testing.assert_close(
                         pooled[ids].sort().values,
                         pooled[:visible].topk(count).values.sort().values,
-                        rtol=0, atol=0,
+                        rtol=0,
+                        atol=0,
                     )
             legacy.__getitem__.assert_not_called()
             eager_flags.assert_not_called()

@@ -288,8 +288,11 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("logits"),
                   py::arg("ends"),
                   py::arg("output"));
-    rtp_ops_m.def("deepselect_bf16_candidates", &deepselect_bf16_candidates,
-                  py::arg("scores"), py::arg("ends"), py::arg("output"));
+    rtp_ops_m.def("deepselect_bf16_candidates",
+                  &deepselect_bf16_candidates,
+                  py::arg("scores"),
+                  py::arg("ends"),
+                  py::arg("output"));
     rtp_ops_m.def("deepselect_bf16_dense",
                   &deepselect_bf16_dense,
                   py::arg("logits"),

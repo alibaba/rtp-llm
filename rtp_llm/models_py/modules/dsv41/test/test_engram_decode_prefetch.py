@@ -31,19 +31,26 @@ class DecodePrefetchCPU(unittest.TestCase):
             q_weight=SimpleNamespace(is_cuda=True),
             embed_tokens=SimpleNamespace(_uva=object(), _pinned=object()),
         )
-        with patch.dict(os.environ, {"DSV41_DECODE_ENGRAM_PREFETCH": "1"}), patch.object(
+        with patch.dict(
+            os.environ, {"DSV41_DECODE_ENGRAM_PREFETCH": "1"}
+        ), patch.object(
             torch.cuda, "is_current_stream_capturing", return_value=True
-        ), patch.object(torch.cuda, "Stream") as stream:
+        ), patch.object(
+            torch.cuda, "Stream"
+        ) as stream:
             self.assertIsNone(prefetch.prepare(module))
         stream.assert_not_called()
 
     def test_replay_preparation_rejects_reload_before_metadata_update(self):
         root = Path(__file__).resolve().parents[1]
         for source in ("decode/decode_fmha_impl.py", "fp8/decode/decode_fmha_impl.py"):
-            tree = ast.parse((root/source).read_text())
+            tree = ast.parse((root / source).read_text())
             method = next(
-                node for cls in tree.body if isinstance(cls, ast.ClassDef)
-                for node in cls.body if isinstance(node, ast.FunctionDef)
+                node
+                for cls in tree.body
+                if isinstance(cls, ast.ClassDef)
+                for node in cls.body
+                if isinstance(node, ast.FunctionDef)
                 and node.name == "prepare_cuda_graph"
             )
             for node in ast.walk(method):
@@ -51,11 +58,20 @@ class DecodePrefetchCPU(unittest.TestCase):
                     node.annotation = None
             method.returns = None
             namespace = {}
-            exec(compile(ast.Module(body=[method], type_ignores=[]), source, "exec"), namespace)
-            owner = SimpleNamespace(validate=Mock(side_effect=RuntimeError("stale table")))
-            runner = SimpleNamespace(metadata=SimpleNamespace(_engram_decode_tables=owner))
+            exec(
+                compile(ast.Module(body=[method], type_ignores=[]), source, "exec"),
+                namespace,
+            )
+            owner = SimpleNamespace(
+                validate=Mock(side_effect=RuntimeError("stale table"))
+            )
+            runner = SimpleNamespace(
+                metadata=SimpleNamespace(_engram_decode_tables=owner)
+            )
             kwargs = {"valid_request_count": 1} if source.startswith("fp8/") else {}
-            with self.subTest(source=source), self.assertRaisesRegex(RuntimeError, "stale table"):
+            with self.subTest(source=source), self.assertRaisesRegex(
+                RuntimeError, "stale table"
+            ):
                 namespace["prepare_cuda_graph"](runner, None, **kwargs)
             owner.validate.assert_called_once()
 
@@ -66,7 +82,9 @@ class DecodePrefetchCPU(unittest.TestCase):
         model.layers = [SimpleNamespace(engram=module)]
         state = prefetch._LookupStream.__new__(prefetch._LookupStream)
         state.embedding, state.uva, state.pinned = (
-            embedding, embedding._uva, embedding._pinned
+            embedding,
+            embedding._uva,
+            embedding._pinned,
         )
         resources = prefetch._GraphTables(model, ((0, module, state),))
         reference = weakref.ref(state)
@@ -80,7 +98,9 @@ class DecodePrefetchCPU(unittest.TestCase):
                     module.embed_tokens = object()
                 else:
                     model.layers[0].engram = object()
-                with self.assertRaisesRegex(RuntimeError, "recreate decode CUDA graphs"):
+                with self.assertRaisesRegex(
+                    RuntimeError, "recreate decode CUDA graphs"
+                ):
                     resources.validate()
                 embedding._uva = original_uva
                 module.embed_tokens = embedding
@@ -111,7 +131,10 @@ class DecodePrefetchCPU(unittest.TestCase):
 class DecodePrefetchCUDA(unittest.TestCase):
     def setUp(self):
         from rtp_llm.models_py.modules.dsv41.engram import (
-            Engram, EngramLayout, HostEngramEmbedding, NgramHashState,
+            Engram,
+            EngramLayout,
+            HostEngramEmbedding,
+            NgramHashState,
             _PinnedSharedTable,
         )
 
@@ -120,26 +143,43 @@ class DecodePrefetchCUDA(unittest.TestCase):
         self.addCleanup(self.context.stop)
         os.environ.pop("DSV41_ENGRAM_DEVICE_SCALES", None)
         torch.manual_seed(20261022)
-        self.layout = EngramLayout(dict(
-            engram_layer_ids=[1, 14], engram_num_embeddings=[4000, 4000],
-            engram_max_ngram_size=4, engram_n_heads=2, engram_head_dim=32,
-            engram_compressed_vocab_size=32, engram_pad_token_id=2,
-            engram_vocab_size=32,
-        ))
-        self.hash = NgramHashState(self.layout, token_map=list(range(32)), device="cuda")
+        self.layout = EngramLayout(
+            dict(
+                engram_layer_ids=[1, 14],
+                engram_num_embeddings=[4000, 4000],
+                engram_max_ngram_size=4,
+                engram_n_heads=2,
+                engram_head_dim=32,
+                engram_compressed_vocab_size=32,
+                engram_pad_token_id=2,
+                engram_vocab_size=32,
+            )
+        )
+        self.hash = NgramHashState(
+            self.layout, token_map=list(range(32)), device="cuda"
+        )
         self.model = torch.nn.Module()
-        self.model.layers = [SimpleNamespace(engram=None, engram_hashes=None) for _ in range(15)]
+        self.model.layers = [
+            SimpleNamespace(engram=None, engram_hashes=None) for _ in range(15)
+        ]
         self.sources = []
         for index, layer in enumerate((1, 14)):
             weight = torch.randn(4000, 32).to(torch.float8_e4m3fn)
             scales = torch.randint(125, 129, (4000, 1), dtype=torch.uint8)
-            pinned = _PinnedSharedTable(weight, scales, "decode-test-"+uuid.uuid4().hex, "cuda")
+            pinned = _PinnedSharedTable(
+                weight, scales, "decode-test-" + uuid.uuid4().hex, "cuda"
+            )
             embedding = HostEngramEmbedding(pinned.weight, pinned.scales, pinned=pinned)
             module = Engram(
-                self.layout, index, embedding,
-                torch.nn.Linear(192, 96, bias=False, device="cuda", dtype=torch.bfloat16),
+                self.layout,
+                index,
+                embedding,
+                torch.nn.Linear(
+                    192, 96, bias=False, device="cuda", dtype=torch.bfloat16
+                ),
                 torch.randn(2, 32, device="cuda", dtype=torch.bfloat16),
-                torch.randn(2, 32, device="cuda", dtype=torch.bfloat16), 1e-20,
+                torch.randn(2, 32, device="cuda", dtype=torch.bfloat16),
+                1e-20,
             )
             self.model.layers[layer].engram = module
             self.sources.append((weight, scales))
@@ -186,7 +226,11 @@ class DecodePrefetchCUDA(unittest.TestCase):
                 if plan is not None:
                     plan.before_layer(index)
                 if layer.engram is not None:
-                    outputs.append(layer.engram(hidden.clone(), layer.engram_hashes, windows[:, 0] >= 0))
+                    outputs.append(
+                        layer.engram(
+                            hidden.clone(), layer.engram_hashes, windows[:, 0] >= 0
+                        )
+                    )
             return outputs
         finally:
             if plan is not None:
@@ -212,10 +256,21 @@ class DecodePrefetchCUDA(unittest.TestCase):
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=stream):
                 outputs = self._run(windows, hidden, metadata, asynchronous)
-            graphs.append((graph, metadata, windows, hidden, outputs, [x.data_ptr() for x in outputs]))
+            graphs.append(
+                (
+                    graph,
+                    metadata,
+                    windows,
+                    hidden,
+                    outputs,
+                    [x.data_ptr() for x in outputs],
+                )
+            )
         for replay in range(12):
             # Revisit smaller graphs after larger ones; output storage is per graph.
-            for graph, metadata, windows, hidden, outputs, pointers in graphs[::(-1 if replay % 2 else 1)]:
+            for graph, metadata, windows, hidden, outputs, pointers in graphs[
+                :: (-1 if replay % 2 else 1)
+            ]:
                 windows.fill_((replay * 7 + 3) % 32)
                 windows[::3] = -1
                 hidden.normal_()
@@ -256,11 +311,20 @@ class DecodePrefetchCUDA(unittest.TestCase):
             expected = self._run(windows, hidden, metadata, False)[0]
             torch.cuda.synchronize()
             torch.testing.assert_close(output, expected, rtol=0, atol=0)
-            self.assertTrue(all(layer.engram._lookup_work is None for layer in self.model.layers if layer.engram is not None))
+            self.assertTrue(
+                all(
+                    layer.engram._lookup_work is None
+                    for layer in self.model.layers
+                    if layer.engram is not None
+                )
+            )
 
     @torch.inference_mode()
     def test_reload_keeps_old_uva_alive_and_recaptures_new_table(self):
-        from rtp_llm.models_py.modules.dsv41.engram import HostEngramEmbedding, _PinnedSharedTable
+        from rtp_llm.models_py.modules.dsv41.engram import (
+            HostEngramEmbedding,
+            _PinnedSharedTable,
+        )
 
         metadata = SimpleNamespace(batch_size=2, q_len_per_req=6)
         windows = torch.full((12, 4), 7, device="cuda", dtype=torch.int32)
@@ -279,9 +343,15 @@ class DecodePrefetchCUDA(unittest.TestCase):
         module = self.model.layers[14].engram
         old_pinned = weakref.ref(module.embed_tokens._pinned)
         weight, scales = self.sources[1]
-        replacement = _PinnedSharedTable((-weight.float()).to(torch.float8_e4m3fn), scales,
-                                        "decode-reload-"+uuid.uuid4().hex, "cuda")
-        module.embed_tokens = HostEngramEmbedding(replacement.weight, replacement.scales, pinned=replacement)
+        replacement = _PinnedSharedTable(
+            (-weight.float()).to(torch.float8_e4m3fn),
+            scales,
+            "decode-reload-" + uuid.uuid4().hex,
+            "cuda",
+        )
+        module.embed_tokens = HostEngramEmbedding(
+            replacement.weight, replacement.scales, pinned=replacement
+        )
         gc.collect()
         self.assertIsNotNone(old_pinned())
         with self.assertRaisesRegex(RuntimeError, "recreate decode CUDA graphs"):

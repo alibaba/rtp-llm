@@ -155,7 +155,9 @@ class DSv4DecodeFmhaImplFP8:
             capture_full_width_lengths=True,
         )
 
-    def prepare_cuda_graph(self, attn_inputs: Any, *, valid_request_count: int | None = None) -> None:
+    def prepare_cuda_graph(
+        self, attn_inputs: Any, *, valid_request_count: int | None = None
+    ) -> None:
         """Called by ``CudaGraphRunner::prepareInputs`` between every
         replay.
 
@@ -173,7 +175,9 @@ class DSv4DecodeFmhaImplFP8:
         if valid_request_count is None:
             # An older C++ runner cannot infer live rows from padded tensor
             # shapes. Fail rather than silently retain capture-time validity.
-            raise ValueError("CUDA Graph replay requires the live request count from the matching C++ runner")
+            raise ValueError(
+                "CUDA Graph replay requires the live request count from the matching C++ runner"
+            )
         paged_block_tables = self._extract_paged_block_tables(attn_inputs)
         update_decode_metadata_in_place_fp8(
             self.metadata,

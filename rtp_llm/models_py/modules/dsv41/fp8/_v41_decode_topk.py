@@ -21,9 +21,11 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_deepselect as deepselect
+from rtp_llm.models_py.modules.dsv41.fp8 import (
+    _v41_candidate_deepselect as candidate_deepselect,
+)
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_candidate_topk_v3 as candidate_topk
-from rtp_llm.models_py.modules.dsv41.fp8 import _v41_candidate_deepselect as candidate_deepselect
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_deepselect as deepselect
 from rtp_llm.models_py.modules.dsv41.fp8.indexer import _TOPK_V3_OK, _get_topk_workspace
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -214,8 +216,12 @@ def _candidate_store_flags_kernel(
 
 @triton.jit
 def _candidate_store_prefix_kernel(
-    candidates, flags, block_lengths,
-    K: tl.constexpr, NBLOCKS: tl.constexpr, SEARCH_STEPS: tl.constexpr,
+    candidates,
+    flags,
+    block_lengths,
+    K: tl.constexpr,
+    NBLOCKS: tl.constexpr,
+    SEARCH_STEPS: tl.constexpr,
 ):
     """Publish sorted visible IDs, not score-filtered holes (decode only)."""
     row = tl.program_id(0).to(tl.int64)
@@ -247,11 +253,19 @@ def _candidate_store_prefix_kernel(
         present = tl.gather(values, tl.minimum(lo, K - 1), 0) == lanes
         fillers = tl.sort(tl.where((lanes < expected) & ~present, lanes, 2147483647))
         filler = tl.gather(fillers, tl.maximum(lanes - count, 0), 0)
-        values = tl.sort(tl.where(lanes < expected, tl.where(lanes < count, values, filler), 2147483647))
+        values = tl.sort(
+            tl.where(
+                lanes < expected, tl.where(lanes < count, values, filler), 2147483647
+            )
+        )
     # Preserve the partial context tail even if NaN scores displaced its +inf
     # pin. It is the largest logical ID, so replacing the last slot stays sorted.
-    has_last = tl.sum(((lanes < expected) & (values == visible - 1)).to(tl.int32), 0) != 0
-    values = tl.where((expected > 0) & ~has_last & (lanes == expected - 1), visible - 1, values)
+    has_last = (
+        tl.sum(((lanes < expected) & (values == visible - 1)).to(tl.int32), 0) != 0
+    )
+    values = tl.where(
+        (expected > 0) & ~has_last & (lanes == expected - 1), visible - 1, values
+    )
     valid = lanes < expected
     tl.store(candidates + row * K + lanes, tl.where(valid, values, -1))
     tl.debug_barrier()
@@ -259,7 +273,9 @@ def _candidate_store_prefix_kernel(
 
 
 @triton.jit
-def _candidate_prefix_flags_kernel(candidates, flags, K: tl.constexpr, NBLOCKS: tl.constexpr):
+def _candidate_prefix_flags_kernel(
+    candidates, flags, K: tl.constexpr, NBLOCKS: tl.constexpr
+):
     """Compatibility bitmap only; do not sort or modify an existing prefix."""
     row = tl.program_id(0).to(tl.int64)
     offsets = tl.arange(0, 1024)
@@ -275,9 +291,15 @@ def _candidate_prefix_flags_kernel(candidates, flags, K: tl.constexpr, NBLOCKS: 
 def build_candidate_flags(candidates, width, block_size):
     """Materialize only for dense consumers; graph replay clears stale bits."""
     nblocks = triton.cdiv(width, block_size)
-    flags = torch.empty((candidates.shape[0], nblocks), dtype=torch.uint8, device=candidates.device)
+    flags = torch.empty(
+        (candidates.shape[0], nblocks), dtype=torch.uint8, device=candidates.device
+    )
     _candidate_prefix_flags_kernel[(candidates.shape[0],)](
-        candidates, flags, candidates.shape[1], nblocks, num_warps=4,
+        candidates,
+        flags,
+        candidates.shape[1],
+        nblocks,
+        num_warps=4,
     )
     return flags
 
@@ -383,7 +405,9 @@ def select_candidates(
     lengths: torch.Tensor,
     block_size: int,
     topk_blocks: int,
-    *, complete: bool = False, build_flags: bool = True,
+    *,
+    complete: bool = False,
+    build_flags: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """``complete`` publishes sorted valid-prefix IDs for the decode source.
 
@@ -415,8 +439,10 @@ def select_candidates(
     # mostly-empty static grid (see _candidate_pool_bounded_kernel). The
     # scores.topk fallback and the nblocks<=count dense epilogue read the full
     # score row and keep the padded static kernel.
-    use_candidate_v3 = not use_deepselect and topk_blocks == 2048 and candidate_topk.is_available(
-        "decode", logits.device
+    use_candidate_v3 = (
+        not use_deepselect
+        and topk_blocks == 2048
+        and candidate_topk.is_available("decode", logits.device)
     )
     bounded_pool = use_deepselect or (
         nblocks > count
@@ -454,7 +480,11 @@ def select_candidates(
         # reads so the allocator contents in the padded tail are never ranked.
         # No FP32->BF16 cast kernel: BF16-source block maxima are stored directly.
         candidates = candidate_deepselect.select(score_storage, block_lengths)
-        flags = build_candidate_flags(candidates, width, block_size) if build_flags else None
+        flags = (
+            build_candidate_flags(candidates, width, block_size)
+            if build_flags
+            else None
+        )
         return candidates, flags
     if use_candidate_v3:
         # Full K2048 output already has the packed layout used by publication.
@@ -480,7 +510,13 @@ def select_candidates(
     flags = torch.empty((rows, nblocks), dtype=torch.uint8, device=logits.device)
     if complete:
         _candidate_store_prefix_kernel[(rows,)](
-            candidates, flags, block_lengths, count, nblocks, count.bit_length(), num_warps=8,
+            candidates,
+            flags,
+            block_lengths,
+            count,
+            nblocks,
+            count.bit_length(),
+            num_warps=8,
         )
     else:
         _candidate_store_flags_kernel[(rows,)](

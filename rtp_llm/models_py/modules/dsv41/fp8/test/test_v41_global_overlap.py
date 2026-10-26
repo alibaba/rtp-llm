@@ -445,14 +445,22 @@ class FullOverlapCPUTest(unittest.TestCase):
         main, glob, aux = Mock(), Mock(), Mock()
         logits, lengths, candidates = (Mock() for _ in range(3))
         work = full_overlap.FullDecodeWork(main, glob, aux)
-        with patch("torch.cuda.stream", return_value=contextlib.nullcontext()), patch.object(
-            full_overlap._v41_decode_topk, "select_candidates", return_value=(candidates, None)
+        with patch(
+            "torch.cuda.stream", return_value=contextlib.nullcontext()
+        ), patch.object(
+            full_overlap._v41_decode_topk,
+            "select_candidates",
+            return_value=(candidates, None),
         ) as select:
             self.assertEqual(
-                work.select_candidates(logits, lengths, 8, 2048, complete=True, build_flags=False),
+                work.select_candidates(
+                    logits, lengths, 8, 2048, complete=True, build_flags=False
+                ),
                 (candidates, None),
             )
-        select.assert_called_once_with(logits, lengths, 8, 2048, complete=True, build_flags=False)
+        select.assert_called_once_with(
+            logits, lengths, 8, 2048, complete=True, build_flags=False
+        )
         self.assertEqual(work.outputs, [candidates])
         work.finish()
         candidates.record_stream.assert_called_once_with(main)

@@ -930,7 +930,8 @@ def _warm_candidate_topk(device):
     from . import _v41_candidate_topk_v3
 
     if not any(
-        _v41_candidate_topk_v3.is_available(phase, device) for phase in ("prefill", "decode")
+        _v41_candidate_topk_v3.is_available(phase, device)
+        for phase in ("prefill", "decode")
     ):
         return
     scores = torch.zeros((1, 4096), dtype=torch.float32, device=device)

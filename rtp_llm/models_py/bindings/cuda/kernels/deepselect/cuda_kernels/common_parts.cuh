@@ -1173,29 +1173,29 @@ public:
 
     // Candidate-only boundary pairs: padding must not consume an equality quota
     // when real scores are -INF. Interior pairs keep the vectorized fast path.
-    static __device__ __forceinline__ void append_valid_candidate_pair(uint32_t& dst_ptr,
-                                                                       uint32_t& eq_quota,
+    static __device__ __forceinline__ void append_valid_candidate_pair(uint32_t&    dst_ptr,
+                                                                       uint32_t&    eq_quota,
                                                                        nv_bfloat162 values,
-                                                                       uint32_t pivot_bits,
-                                                                       uint32_t index0,
-                                                                       uint32_t index1,
-                                                                       uint32_t valid_mask) {
+                                                                       uint32_t     pivot_bits,
+                                                                       uint32_t     index0,
+                                                                       uint32_t     index1,
+                                                                       uint32_t     valid_mask) {
         uint32_t bits = bf16x2_to_u32(values);
         uint32_t gt_mask, eq_mask;
         asm("set.gt.s32.bf16x2 %0, %2, %3;\n"
             "set.eq.s32.bf16x2 %1, %2, %3;"
-            : "=&r"(gt_mask), "=&r"(eq_mask) : "r"(bits), "r"(pivot_bits));
+            : "=&r"(gt_mask), "=&r"(eq_mask)
+            : "r"(bits), "r"(pivot_bits));
         CUTE_UNROLL
         for (uint32_t i = 0; i < 2; ++i) {
             uint32_t value_bits = (bits >> (i * 16)) & 0xffffu;
-            bool gt = ((gt_mask >> (i * 16)) & 0xffffu) != 0;
-            bool eq = ((eq_mask >> (i * 16)) & 0xffffu) != 0;
+            bool     gt         = ((gt_mask >> (i * 16)) & 0xffffu) != 0;
+            bool     eq         = ((eq_mask >> (i * 16)) & 0xffffu) != 0;
             if ((valid_mask & (1u << i)) && (gt || (eq && eq_quota))) {
                 if (eq)
                     --eq_quota;
                 uint32_t index = i == 0 ? index0 : index1;
-                asm volatile("st.shared.v2.u32 [%0], {%1, %2};" ::
-                             "r"(dst_ptr), "r"(index), "r"(value_bits) : "memory");
+                asm volatile("st.shared.v2.u32 [%0], {%1, %2};" ::"r"(dst_ptr), "r"(index), "r"(value_bits) : "memory");
                 dst_ptr += sizeof(uint64_t);
             }
         }
@@ -1219,7 +1219,7 @@ public:
                                                                             uint32_t              warp_idx,
                                                                             uint32_t              lane_idx,
                                                                             SharedMemoryPlanBase& smem,
-                                                                            uint32_t padding_count = 0) {
+                                                                            uint32_t              padding_count = 0) {
         if (warp_idx == 0) {
             Base::template find_pivot_in_histogram<false>(smem, smem.reconstruct_bucket_counter[0], topk, lane_idx);
         }
@@ -1424,13 +1424,13 @@ public:
             // rank whose visit range mostly overlaps the padded tail). In that case the pivot
             // selection must degrade to "select all real elements": cap the K used in the pivot /
             // quota computation at the real count
-            uint32_t effective_topk = min(topk, num_real_init_elems);
+            uint32_t effective_topk   = min(topk, num_real_init_elems);
             uint32_t my_padding_count = 0;
             if constexpr (Config::pin_last_index) {
                 static_assert(!USE_CLUSTER_ADDRESSING);
                 uint32_t padding_begin = max(my_elem_start_idx, num_local_tail_elems);
-                uint32_t padding_end = min(my_elem_start_idx + num_my_elems, num_local_tail_elems_padded);
-                my_padding_count = padding_end > padding_begin ? padding_end - padding_begin : 0u;
+                uint32_t padding_end   = min(my_elem_start_idx + num_my_elems, num_local_tail_elems_padded);
+                my_padding_count       = padding_end > padding_begin ? padding_end - padding_begin : 0u;
             }
             auto [pivot_value_x2_bits, start_pos_in_collector, eq_quota, cnt_nan] =
                 compute_pivot_and_quota<USE_CLUSTER_ADDRESSING, NUM_UINT32_IN_INIT_WINDOW_PER_THREAD, 4>(
@@ -1470,8 +1470,13 @@ public:
                     nv_bfloat162 cur_value = init_values[i];  // two bf16 payloads packed as bf16x2
                     if constexpr (Config::pin_last_index) {
                         if (index1 >= end_vocab_idx) {
-                            append_valid_candidate_pair(out_ptr, eq_quota, cur_value, pivot_value_x2_bits,
-                                                        index0, index1, index0 < end_vocab_idx ? 1u : 0u);
+                            append_valid_candidate_pair(out_ptr,
+                                                        eq_quota,
+                                                        cur_value,
+                                                        pivot_value_x2_bits,
+                                                        index0,
+                                                        index1,
+                                                        index0 < end_vocab_idx ? 1u : 0u);
                             continue;
                         }
                     }
@@ -1538,9 +1543,8 @@ public:
             if constexpr (Config::pin_last_index) {
                 my_padding_count = (cur_extra_len & 1u) && num_my_units && unit_base + num_my_units == num_uint32;
             }
-            auto [pivot_value_x2_bits, out_prefix, eq_quota, cnt_nan] =
-                compute_pivot_and_quota<USE_CLUSTER_ADDRESSING>(
-                    topk, values, num_my_units, warp_idx, lane_idx, smem, my_padding_count);
+            auto [pivot_value_x2_bits, out_prefix, eq_quota, cnt_nan] = compute_pivot_and_quota<USE_CLUSTER_ADDRESSING>(
+                topk, values, num_my_units, warp_idx, lane_idx, smem, my_padding_count);
             // Every NaN that the main loop collected is part of the buffer this census just walked (the hit
             // test is `.gtu`, so NaN always becomes an incomer).
             have_nan |= cnt_nan != 0;
@@ -1556,8 +1560,8 @@ public:
                         if ((cur_extra_len & 1u) && unit_base + m + 1 == num_uint32) {
                             uint32_t pair2[4];
                             ld_shared<4>(pair2, (const uint32_t*)unit_to_pair_addr(unit_base + m));
-                            append_valid_candidate_pair(out_ptr, eq_quota, values[m], pivot_value_x2_bits,
-                                                        pair2[0], pair2[2], 1u);
+                            append_valid_candidate_pair(
+                                out_ptr, eq_quota, values[m], pivot_value_x2_bits, pair2[0], pair2[2], 1u);
                             continue;
                         }
                     }

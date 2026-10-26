@@ -54,6 +54,8 @@ def select(scores, lengths):
     It overwrites every output slot on each replay, including zero/short rows;
     there is no GPU predicate read on the host and no launch-error fallback.
     """
-    output = torch.empty((scores.shape[0], 2048), dtype=torch.int32, device=scores.device)
+    output = torch.empty(
+        (scores.shape[0], 2048), dtype=torch.int32, device=scores.device
+    )
     rtp_llm_ops.deepselect_bf16_candidates(scores, lengths, output)
     return output

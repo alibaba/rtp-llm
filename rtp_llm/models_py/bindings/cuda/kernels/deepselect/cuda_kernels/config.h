@@ -37,5 +37,5 @@ struct TopkSelectConfig {
     static constexpr bool filter_finite    = filter_finite_;
     // Complete decode candidates: replace the greatest selected ID with the
     // last visible block, after index ordering. Token selectors leave this off.
-    static constexpr bool pin_last_index   = pin_last_index_;
+    static constexpr bool pin_last_index = pin_last_index_;
 };

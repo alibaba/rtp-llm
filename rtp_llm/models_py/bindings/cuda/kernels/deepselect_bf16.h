@@ -38,8 +38,6 @@ void deepselect_bf16_dense_sorted(const torch::Tensor& logits, const torch::Tens
 // The last visible block is always included (replaces the greatest selected ID
 // if absent), matching complete decode candidate publication. Same BF16 input
 // alignment/ends contract as above; output is int32 [M,2048].
-void deepselect_bf16_candidates(const torch::Tensor& scores,
-                                const torch::Tensor& ends,
-                                torch::Tensor&       output);
+void deepselect_bf16_candidates(const torch::Tensor& scores, const torch::Tensor& ends, torch::Tensor& output);
 
 }  // namespace torch_ext

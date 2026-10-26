@@ -61,7 +61,9 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
     TORCH_CHECK(output.dim() == 2 && output.size(0) == rows && output.size(1) == topk && output.stride(1) == 1
                     && output.stride(0) >= topk && output.stride(0) % 8 == 0
                     && reinterpret_cast<uintptr_t>(output.data_ptr()) % 32 == 0,
-                "DeepSelect output must be [M,", topk, "] with unit inner stride and 32B row/base alignment");
+                "DeepSelect output must be [M,",
+                topk,
+                "] with unit inner stride and 32B row/base alignment");
     at::assert_no_overlap(output, logits);
     at::assert_no_overlap(output, ends);
     const c10::cuda::CUDAGuard device_guard(logits.device());
@@ -91,9 +93,22 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
         // Upstream normal BF16 has capacity buckets 512/1024/4096, not 2048.
         // Select runtime K2048 using the 4096 bucket. Keep occupancy at one:
         // its survivor buffers are larger than the token K512 instantiations.
-        using Config = TopkSelectConfig<nv_bfloat16, int32_t, false, true, false,
-                                        4096, 256, 1, 4096, 4096, 4, 512, 1,
-                                        true, false, true>;
+        using Config = TopkSelectConfig<nv_bfloat16,
+                                        int32_t,
+                                        false,
+                                        true,
+                                        false,
+                                        4096,
+                                        256,
+                                        1,
+                                        4096,
+                                        4096,
+                                        4,
+                                        512,
+                                        1,
+                                        true,
+                                        false,
+                                        true>;
         topk_select_bf16_normal::run_topk_select_kernel<Config>(args);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
         return;
@@ -168,9 +183,7 @@ void deepselect_bf16_dense(const torch::Tensor& logits,
     deepselect_bf16_impl<true>(logits, ends, output, filter_finite);
 }
 
-void deepselect_bf16_candidates(const torch::Tensor& scores,
-                                const torch::Tensor& ends,
-                                torch::Tensor&       output) {
+void deepselect_bf16_candidates(const torch::Tensor& scores, const torch::Tensor& ends, torch::Tensor& output) {
     deepselect_bf16_impl<true, true>(scores, ends, output, false);
 }
 

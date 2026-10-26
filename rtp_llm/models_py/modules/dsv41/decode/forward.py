@@ -338,7 +338,9 @@ def forward_layers(
                     attn_metadata,
                     input_ids,
                     next_layer=(
-                        v4.layers[layer_idx + 1] if layer_idx + 1 < len(v4.layers) else None
+                        v4.layers[layer_idx + 1]
+                        if layer_idx + 1 < len(v4.layers)
+                        else None
                     ),
                     preserve_output=_rt_on,
                     kv_cache=kv_cache,

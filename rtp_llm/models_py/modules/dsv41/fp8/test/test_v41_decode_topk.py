@@ -87,11 +87,15 @@ class DecodeTopKTest(unittest.TestCase):
     def test_complete_candidates_are_sorted_and_only_pad_after_visible_prefix(self):
         for k in (512, 1024, 2048):
             source = torch.randn(6, 32768, device="cuda")
-            lengths = torch.tensor([0, 1, 513, 4096, 32761, 32768], device="cuda", dtype=torch.int32)
+            lengths = torch.tensor(
+                [0, 1, 513, 4096, 32761, 32768], device="cuda", dtype=torch.int32
+            )
             source[3].fill_(-torch.inf)
             source[4, :8192] = torch.nan
             source[5].fill_(-torch.inf)
-            candidates, flags = selector.select_candidates(source, lengths, 8, k, complete=True)
+            candidates, flags = selector.select_candidates(
+                source, lengths, 8, k, complete=True
+            )
             for row, length in enumerate(lengths.tolist()):
                 visible = (length + 7) // 8
                 count = min(visible, k)
@@ -783,9 +787,7 @@ class DecodeTopKTest(unittest.TestCase):
 
         with patch.dict(
             os.environ, {"DSV41_PREFILL_CANDIDATE_TOPK_V3": "1"}
-        ), patch.object(
-            rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3
-        ) as native:
+        ), patch.object(rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3) as native:
             warmup._warm_candidate_topk(torch.device("cuda"))
             native.assert_called_once()
         with patch.dict(
