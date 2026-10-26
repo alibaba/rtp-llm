@@ -25,11 +25,12 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 74)
-                self.assertEqual(state[:2], ("KVCacheConfig", 10))
+                self.assertEqual(len(state), 75)
+                self.assertEqual(state[:2], ("KVCacheConfig", 11))
                 self.assertEqual(
-                    state[64:69], tuple(KV_CACHE_EVENT_FIELD_VALUES.values())
+                    state[64:69], tuple(list(KV_CACHE_EVENT_FIELD_VALUES.values())[:5])
                 )
+                self.assertEqual(state[74], config.kv_cache_event_snapshot_interval_ms)
                 self.assertIs(state[71], enable_crc)
                 self.assertEqual(state[72:74], tuple(KVCM_PICKLE_FIELD_VALUES.values()))
                 # Restoring configuration must not mutate the supplied tuple.
