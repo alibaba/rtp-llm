@@ -553,15 +553,11 @@ void runSingleMaintenance(FullSWAEnvironment& environment, Tier tier, double rat
 }
 
 void demoteSwaSuffixKeepingFullDevice(FullSWAEnvironment& environment) {
-    // REQUEST references no longer mask candidates. Temporarily make the FULL
-    // resources non-evictable so two targeted SWA demotions create the partial
-    // ready boundary exercised by these load tests.
+    // Keep FULL request ownership and the caller's matched SWA prefix, but release
+    // the original SWA request so only its unheld suffix can migrate.
+    environment.releaseRequestRefsForGroup(1);
     const std::vector<TreeNode*> path = environment.cache->tree()->findNode(environment.keys);
     EXPECT_EQ(path.size(), kPathLength);
-    for (TreeNode* node : path) {
-        node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
-        BlockTreeCacheTestPeer::refreshCandidateForTest(*environment.cache, node, /*group_set_id=*/0);
-    }
     const bool first_demoted =
         BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment.cache, /*group_set_id=*/1, Tier::DEVICE);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment.cache);
@@ -569,8 +565,8 @@ void demoteSwaSuffixKeepingFullDevice(FullSWAEnvironment& environment) {
         BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment.cache, /*group_set_id=*/1, Tier::DEVICE);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment.cache);
     for (TreeNode* node : path) {
-        node->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
-        BlockTreeCacheTestPeer::refreshCandidateForTest(*environment.cache, node, /*group_set_id=*/0);
+        EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
+        EXPECT_TRUE(node->group_set_resources[0].hasTier(Tier::DEVICE));
     }
     EXPECT_TRUE(first_demoted);
     EXPECT_TRUE(second_demoted);
@@ -1353,7 +1349,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
     EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
 }
 
-TEST_F(BlockTreeCacheIntegrationTest, EvictorDemotesRequestReferencedBlock) {
+TEST_F(BlockTreeCacheIntegrationTest, EvictorPreservesRequestReferencedBlocksUntilRelease) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1366,12 +1362,17 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictorDemotesRequestReferencedBlock) {
 
     environment->scripted_per_rank_transfer_engine->clear();
     environment->demoteAll(Tier::DEVICE);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
+    EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
+    environment->expectPayloads();
+    environment->expectPoolFreeCounts({12, 12, 12}, {16, 16}, {16, 16});
+
+    environment->releaseRequestRefs();
+    environment->expectPoolFreeCounts({12, 12, 12}, {16, 16}, {16, 16});
+    environment->demoteAll(Tier::DEVICE);
     EXPECT_GT(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::HOST));
     environment->expectPayloads();
-    environment->expectPoolFreeCounts({12, 12, 12}, {12, 12}, {16, 16});
-
-    environment->releaseRequestRefs();
     environment->expectPoolFreeCounts({16, 16, 16}, {12, 12}, {16, 16});
     environment->reclaimAll();
     environment->expectFullyReclaimed();
