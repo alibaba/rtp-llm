@@ -122,7 +122,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               total_blocks,
                               tierName(target_tier));
             if (target_tier != Tier::NONE) {
-                InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
+                InsertInfo insert_info{
+                    batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, stream_->streamId()};
                 size_t     resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
