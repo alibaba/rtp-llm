@@ -23,10 +23,13 @@ def _load_attention():
     tree = ast.parse(source.read_text())
     functions = {
         "_use_small_cp_x_gather",
+        "_prefill_x_group_fits",
+        "_prefill_projected_group_fits",
         "_prefill_x_group_plan",
         "_prefill_raw_x_groups",
         "_prefill_projected_x_groups",
         "_prefill_x_tile_plan",
+        "_prefill_x_tiles",
         "_start_prefill_x_gather_async",
         "_wait_prefill_x_gather",
         "rms_norm",
@@ -146,6 +149,437 @@ class CPRawGroupsCPU(unittest.TestCase):
         ceiling = patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 65536)
         ceiling.start()
         self.addCleanup(ceiling.stop)
+
+    @contextmanager
+    def _projected_transport(self, cp, local, ratio, groups=None, whole_groups=False):
+        """Run both production iterators with an independent rank-packed oracle."""
+        weights = (torch.eye(4).bfloat16(),)
+        if ratio == 2:
+            weights += (weights[0] / 8,)
+        calls, projected_shapes = [], []
+        gather_groups = iter(
+            group
+            for group in groups or ()
+            if ATTENTION._prefill_projected_group_fits(
+                cp, group[1] - group[0], group[3] - group[2], 4 * ratio
+            )
+        )
+
+        def project(raw, weight):
+            self.assertEqual(raw.dtype, torch.bfloat16)
+            self.assertTrue(raw.is_contiguous())
+            projected_shapes.append((tuple(raw.shape), tuple(weight.shape)))
+            return F.linear(raw.float(), weight.float())
+
+        def oracle(raw):
+            values = raw.float()
+            return values if ratio == 1 else torch.cat((values, values / 8), 1)
+
+        def start(send, actual_cp, tile, buffer, projection_weights=()):
+            owner, row, rows = tile
+            self.assertIs(actual_cp, cp)
+            self.assertEqual(buffer.dtype, torch.float32)
+            if owner is None:
+                l0, l1, _, _ = next(gather_groups)
+                self.assertEqual(tuple(send.shape), (l1 - l0, 4 * ratio))
+                projected = []
+                for rank in range(4):
+                    values = oracle(local[rank][l0:l1])
+                    # Padding is never projected or exposed to a consumer.
+                    values[(local[rank][l0:l1] == -999).all(dim=1)] = 0
+                    projected.append(values)
+                torch.testing.assert_close(send, projected[cp.cp_rank], rtol=0, atol=0)
+                buffer.copy_(torch.cat(projected))
+            else:
+                self.assertEqual(len(projection_weights), ratio)
+                if owner == cp.cp_rank:
+                    for column, weight in enumerate(projection_weights):
+                        buffer[:rows, column * 4 : (column + 1) * 4].copy_(
+                            project(send[row : row + rows], weight)
+                        )
+                    torch.testing.assert_close(
+                        buffer[:rows],
+                        oracle(local[owner][row : row + rows]),
+                        rtol=0,
+                        atol=0,
+                    )
+                buffer[:rows].copy_(oracle(local[owner][row : row + rows]))
+            calls.append((owner, row, rows))
+            return types.SimpleNamespace(gathered=buffer[:rows])
+
+        compressor = types.ModuleType(COMPRESSOR_NAME)
+        compressor._linear_bf16_bf16_fp32 = project
+        with _cpu_compressor(compressor), patch.object(
+            ATTENTION, "_start_prefill_x_gather_async", new=start
+        ), patch.object(
+            ATTENTION, "_wait_prefill_x_gather", new=lambda handle: handle.gathered
+        ):
+            if groups is None:
+                plan = iter(ATTENTION._prefill_x_tile_plan(cp))
+                buffers = [
+                    torch.empty(ATTENTION._PRODUCE_GLOBAL_TILE_ROWS, 4 * ratio)
+                    for _ in range(2)
+                ]
+                pending = start(local[cp.cp_rank], cp, next(plan), buffers[0], weights)
+                iterator = ATTENTION._prefill_x_tiles(
+                    local[cp.cp_rank], cp, plan, pending, buffers, weights
+                )
+            else:
+                iterator = ATTENTION._prefill_projected_x_groups(
+                    local[cp.cp_rank], cp, groups, weights, whole_groups=whole_groups
+                )
+            try:
+                yield iterator, calls, projected_shapes
+            finally:
+                iterator.close()
+
+    def test_mixed_owner_plan_preserves_boundaries_and_existing_fallbacks(self):
+        with patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 32):
+            for lengths in ([5, 6, 65, 7, 2], [65, 5, 6], [5, 6, 65], [65, 81, 5]):
+                cp, local, _ = _case(lengths)
+                plans = []
+                for rank in range(4):
+                    cp.cp_rank = rank
+                    self.assertIsNone(ATTENTION._prefill_x_group_plan(local[rank], cp))
+                    plan = ATTENTION._prefill_x_group_plan(
+                        local[rank], cp, allow_owner_tiles=True
+                    )
+                    self.assertIsNotNone(plan)
+                    plans.append(plan)
+                    cursor = (0, 0)
+                    oversized = []
+                    for l0, l1, r0, r1 in plan:
+                        self.assertEqual((l0, r0), cursor)
+                        cursor = (l1, r1)
+                        if not ATTENTION._prefill_x_group_fits(
+                            local[rank], cp, l1 - l0, r1 - r0
+                        ):
+                            oversized.append(r1 - r0)
+                    self.assertEqual(cursor, (cp.chunk_length, cp.seq_len_full))
+                    self.assertEqual(oversized, [n for n in lengths if n > 32])
+                self.assertTrue(all(plan == plans[0] for plan in plans))
+            for lengths in ([65], [65, 81], [0, 65, 5]):
+                cp, local, _ = _case(lengths)
+                self.assertIsNone(
+                    ATTENTION._prefill_x_group_plan(
+                        local[0], cp, allow_owner_tiles=True
+                    )
+                )
+            cp, local, _ = _case([7, 9, 2, 11, 15])
+            self.assertEqual(
+                ATTENTION._prefill_x_group_plan(local[0], cp, allow_owner_tiles=True),
+                ATTENTION._prefill_x_group_plan(local[0], cp),
+            )
+
+    def test_observed_long_mixed_batch_96_broadcasts_become_four_or_three_gathers(self):
+        lengths = [
+            503,
+            159,
+            3263,
+            583,
+            8127,
+            1940,
+            5177,
+            8370,
+            2913,
+            159357,
+            14606,
+            9695,
+        ]
+        cp, local, expected = _case(lengths)
+        original_restore = cp.unpad_restore.clone()
+        with patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 131072):
+            expected_plans = {
+                1: (
+                    (0, 7766, 0, 31035),
+                    (7766, 47606, 31035, 190392),
+                    (47606, 53682, 190392, 214693),
+                ),
+                2: (
+                    (0, 7766, 0, 31035),
+                    (7766, 27686, 31035, 110715),
+                    (27686, 47606, 110715, 190392),
+                    (47606, 53682, 190392, 214693),
+                ),
+            }
+            # Real output widths and the production 1281.5 MiB budget determine
+            # the expected plan; narrow CPU tensors test transport independently.
+            for ratio, expected_plan in expected_plans.items():
+                plan = ATTENTION._prefill_x_group_plan(
+                    local[0], cp, allow_owner_tiles=True, output_width=512 * ratio
+                )
+                self.assertEqual(plan, expected_plan)
+                self.assertTrue(
+                    all(
+                        ATTENTION._prefill_projected_group_fits(
+                            cp, l1 - l0, r1 - r0, 512 * ratio
+                        )
+                        for l0, l1, r0, r1 in plan
+                    )
+                )
+            with patch.object(ATTENTION, "_CP_X_GROUP_MAX_BYTES", 10 * 1024**2):
+                self._check_observed_transport(cp, local, expected, expected_plans)
+        torch.testing.assert_close(cp.unpad_restore, original_restore, rtol=0, atol=0)
+
+    def _check_observed_transport(self, cp, local, expected, expected_plans):
+        for ratio, expected_plan in expected_plans.items():
+            plan = ATTENTION._prefill_x_group_plan(
+                local[0], cp, allow_owner_tiles=True, output_width=4 * ratio
+            )
+            self.assertEqual(plan, expected_plan)
+            for rank in range(4):
+                cp.cp_rank = rank
+                with self._projected_transport(cp, local, ratio) as (
+                    tiles,
+                    baseline_calls,
+                    baseline_shapes,
+                ):
+                    baseline = [(offset, tile.clone()) for offset, tile in tiles]
+                self.assertEqual(len(baseline_calls), 96)
+                references = []
+                with self._projected_transport(cp, local, ratio, plan) as (
+                    tiles,
+                    calls,
+                    shapes,
+                ):
+                    actual = []
+                    for offset, tile in tiles:
+                        self.assertEqual(tile.dtype, torch.float32)
+                        actual.append((offset, tile.clone()))
+                        references.append(
+                            weakref.ref(tile._base if tile._base is not None else tile)
+                        )
+                        del tile
+                    self.assertEqual(len(calls), 4 if ratio == 2 else 3)
+                    self.assertTrue(all(c[0] is None for c in calls))
+                    self.assertEqual(shapes, baseline_shapes)
+                self.assertTrue(all(ref() is None for ref in references))
+                torch.testing.assert_close(actual, baseline, rtol=0, atol=0)
+                rows = torch.cat([tile for _, tile in actual])
+                torch.testing.assert_close(
+                    rows,
+                    (
+                        torch.cat((expected.float(), expected.float() / 8), 1)
+                        if ratio == 2
+                        else expected.float()
+                    ),
+                    rtol=0,
+                    atol=0,
+                )
+
+    def test_mixed_transport_preserves_producer_state_and_segment_carry(self):
+        for lengths in (
+            [5, 6, 65, 7, 2],
+            [65, 5, 6],
+            [5, 6, 65],
+            [65, 81, 5],
+            [65],
+            [65, 81],
+        ):
+            cp, local, _ = _case(lengths)
+            with patch.object(
+                ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 32
+            ), patch.object(ATTENTION, "_PRODUCE_GLOBAL_TILE_ROWS", 3), patch.object(
+                ATTENTION, "_CP_X_GROUP_MAX_BYTES", 4300
+            ):
+                for ratio in (1, 2):
+                    plan = ATTENTION._prefill_x_group_plan(
+                        local[0], cp, allow_owner_tiles=True, output_width=4 * ratio
+                    )
+                    self.assertIsNotNone(plan)
+                    with self._projected_transport(cp, local, ratio) as (tiles, _, _):
+                        baseline = self._produce(cp, local[0], ratio, projected=tiles)
+                    with self._projected_transport(cp, local, ratio, plan) as (
+                        tiles,
+                        calls,
+                        _,
+                    ):
+                        actual = self._produce(cp, local[0], ratio, projected=tiles)
+                        self.assertTrue(all(call[0] is None for call in calls))
+                    torch.testing.assert_close(actual[:2], baseline[:2], rtol=0, atol=0)
+                    self.assertEqual(actual[3], baseline[3])
+                with self._projected_transport(
+                    cp, local, 2, plan, whole_groups=True
+                ) as (tiles, _, _):
+                    with self.assertRaisesRegex(ValueError, "whole-group"):
+                        list(tiles)
+
+    def test_mixed_owner_buffers_wait_for_prefetch_on_close_and_exception(self):
+        cp, local, _ = _case([5, 6, 65, 7, 2])
+        with patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 32), patch.object(
+            ATTENTION, "_PRODUCE_GLOBAL_TILE_ROWS", 3
+        ), patch.object(ATTENTION, "_CP_X_GROUP_MAX_BYTES", 2000):
+            plan = ATTENTION._prefill_x_group_plan(
+                local[0], cp, allow_owner_tiles=True, output_width=8
+            )
+            for throw in (False, True):
+                waits, buffers = [], []
+                with self._projected_transport(cp, local, 2, plan) as (tiles, calls, _):
+                    start = ATTENTION._start_prefill_x_gather_async
+
+                    def observe_start(x, context, tile, buffer, weights=()):
+                        if tile[0] is not None:
+                            buffers.append(weakref.ref(buffer))
+                        return start(x, context, tile, buffer, weights)
+
+                    def wait(handle):
+                        waits.append(id(handle))
+                        return handle.gathered
+
+                    with patch.object(
+                        ATTENTION, "_start_prefill_x_gather_async", new=observe_start
+                    ), patch.object(ATTENTION, "_wait_prefill_x_gather", new=wait):
+                        for offset, tile in tiles:
+                            del tile
+                            if offset == 11:
+                                break
+                        # The first owner tile has been consumed; its successor
+                        # has already launched into the other allocation.
+                        self.assertEqual(len(calls), len(waits) + 1)
+                        self.assertEqual(len(buffers), 2)
+                        self.assertTrue(all(ref() is not None for ref in buffers))
+                        if throw:
+                            with self.assertRaisesRegex(
+                                RuntimeError, "consumer failed"
+                            ):
+                                tiles.throw(RuntimeError("consumer failed"))
+                        else:
+                            tiles.close()
+                        self.assertEqual(len(calls), len(waits))
+                        self.assertTrue(all(ref() is None for ref in buffers))
+
+    def test_single_all_long_and_oversized_half_plans_use_projected_byte_budget(self):
+        for lengths, width, count in (
+            ([159357], 1024, 2),
+            ([159357], 512, 1),
+            ([159357, 159361], 1024, 4),
+            ([264001], 1024, 2),
+            ([400001], 1024, None),
+            ([400001], 512, 2),
+        ):
+            cp, local, _ = _case(lengths)
+            plans = []
+            for rank in range(4):
+                cp.cp_rank = rank
+                plan = ATTENTION._prefill_x_group_plan(
+                    local[rank], cp, allow_owner_tiles=True, output_width=width
+                )
+                plans.append(plan)
+                if count is None:
+                    self.assertIsNone(plan)
+                    continue
+                self.assertEqual(len(plan), count)
+                cursor = (0, 0)
+                for l0, l1, r0, r1 in plan:
+                    self.assertEqual((l0, r0), cursor)
+                    cursor = (l1, r1)
+                    self.assertTrue(
+                        ATTENTION._prefill_projected_group_fits(
+                            cp, l1 - l0, r1 - r0, width
+                        )
+                    )
+                self.assertEqual(cursor, (cp.chunk_length, cp.seq_len_full))
+            self.assertTrue(all(plan == plans[0] for plan in plans))
+
+        # A huge request may retain broadcasts without penalizing its neighbors.
+        cp, local, _ = _case([5, 6, 400001, 7, 2])
+        plan = ATTENTION._prefill_x_group_plan(
+            local[0], cp, allow_owner_tiles=True, output_width=1024
+        )
+        self.assertEqual(
+            [
+                ATTENTION._prefill_projected_group_fits(cp, b - a, d - c, 1024)
+                for a, b, c, d in plan
+            ],
+            [True, False, False, True],
+        )
+
+    def test_projected_budget_exact_boundary_and_disable(self):
+        cp, local, _ = _case([159357])
+        half = cp.chunk_length // 2
+        rows = cp.cp_size * half
+        required = (half + 2 * rows) * 1024 * 4 + 3 * rows * 8
+        for budget, expected in ((required - 1, False), (required, True)):
+            with patch.object(ATTENTION, "_CP_X_GROUP_MAX_BYTES", budget):
+                self.assertEqual(
+                    ATTENTION._prefill_projected_group_fits(cp, half, rows, 1024),
+                    expected,
+                )
+        for width in (0, -1):
+            self.assertIsNone(
+                ATTENTION._prefill_x_group_plan(
+                    local[0], cp, allow_owner_tiles=True, output_width=width
+                )
+            )
+        with patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 0):
+            self.assertIsNone(
+                ATTENTION._prefill_x_group_plan(
+                    local[0], cp, allow_owner_tiles=True, output_width=1024
+                )
+            )
+        cp, local, _ = _case(_mixed(576))
+        self.assertEqual(
+            ATTENTION._prefill_x_group_plan(
+                local[0], cp, allow_owner_tiles=True, output_width=1024
+            ),
+            ATTENTION._prefill_x_group_plan(local[0], cp),
+        )
+
+    def test_half_gather_keeps_multi_tile_owner_gemm_shapes(self):
+        cp, local, _ = _case([264001])
+        # Each owner half has 33001 rows: retain 32768 + 233 rather than
+        # resizing either GEMM to an all-gather transport window.
+        with patch.object(ATTENTION, "_CP_X_GROUP_MAX_BYTES", 16 * 1024**2):
+            for ratio in (1, 2):
+                plan = ATTENTION._prefill_x_group_plan(
+                    local[0], cp, allow_owner_tiles=True, output_width=4 * ratio
+                )
+                self.assertEqual(len(plan), ratio)
+                for rank in range(4):
+                    cp.cp_rank = rank
+                    with self._projected_transport(cp, local, ratio) as (
+                        tiles,
+                        _,
+                        shapes,
+                    ):
+                        baseline = [(offset, tile.clone()) for offset, tile in tiles]
+                        baseline_shapes = list(shapes)
+                    with self._projected_transport(cp, local, ratio, plan) as (
+                        tiles,
+                        calls,
+                        shapes,
+                    ):
+                        actual = [(offset, tile.clone()) for offset, tile in tiles]
+                        self.assertEqual(shapes, baseline_shapes)
+                        self.assertEqual(len(calls), ratio)
+                        self.assertTrue(all(call[0] is None for call in calls))
+                    torch.testing.assert_close(actual, baseline, rtol=0, atol=0)
+                    self.assertEqual(baseline_shapes[0][0][0], 32768)
+                    self.assertEqual(baseline_shapes[ratio][0][0], 233)
+
+    def test_half_gather_releases_storage_on_close_and_consumer_exception(self):
+        cp, local, _ = _case([65])
+        with patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 32), patch.object(
+            ATTENTION, "_CP_X_GROUP_MAX_BYTES", 3500
+        ):
+            plan = ATTENTION._prefill_x_group_plan(
+                local[0], cp, allow_owner_tiles=True, output_width=8
+            )
+            self.assertEqual(len(plan), 2)
+            for throw in (False, True):
+                with self._projected_transport(cp, local, 2, plan) as (tiles, calls, _):
+                    _, tile = next(tiles)
+                    ref = weakref.ref(tile._base)
+                    del tile
+                    self.assertIsNotNone(ref())
+                    self.assertEqual(len(calls), 1)
+                    if throw:
+                        with self.assertRaisesRegex(RuntimeError, "consumer failed"):
+                            tiles.throw(RuntimeError("consumer failed"))
+                    else:
+                        tiles.close()
+                    self.assertIsNone(ref())
+                    self.assertEqual(len(calls), 1)
 
     def test_large_batch_gather_keeps_single_request_boundary(self):
         with patch.object(ATTENTION, "_SMALL_CP_X_GATHER_MAX_ROWS", 131072):
