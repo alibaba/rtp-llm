@@ -625,6 +625,82 @@ TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyPopulateDiskWithIndependentPool
     EXPECT_FALSE(snapshots[2].write_bandwidth_bytes_per_sec.has_value());
 }
 
+TEST(BlockTreeCacheMetricsTest, FrozenMetricIsOwnerOnlyAndIncludesZeroForEveryTier) {
+    auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    RtpLLMCachePoolMetricsCollector collector;
+    auto*                           metrics = reporter->getMetricsGroup<RtpLLMCachePoolMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    for (const Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+        kmonitor::MetricsTags tags("pool_name", "shared_name");
+        tags.AddTag("tier", tierName(tier));
+        collector.report_frozen_ref_blocks = false;
+        collector.frozen_ref_blocks        = 9;
+        const auto series_before           = metricSeriesCount(metrics->frozen_ref_blocks_metric);
+        ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
+        EXPECT_EQ(metricSeriesCount(metrics->frozen_ref_blocks_metric), series_before);
+        collector.report_frozen_ref_blocks = true;
+        collector.frozen_ref_blocks        = 0;
+        ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
+        EXPECT_EQ(metricSeriesCount(metrics->frozen_ref_blocks_metric), series_before + 1);
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->frozen_ref_blocks_metric, tags), 0);
+        collector.frozen_ref_blocks = 2;
+        ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->frozen_ref_blocks_metric, tags), 2);
+    }
+    EXPECT_EQ(metricSeriesCount(metrics->frozen_ref_blocks_metric), 3u);
+    EXPECT_EQ(metricSeriesCount(metrics->eviction_target_ref_blocks_metric), 0u);
+    EXPECT_EQ(metricSeriesCount(metrics->store_ref_blocks_metric), 3u);
+}
+
+TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
+    auto device = makeDevicePool({{16, 0}}, 4, "shared_frozen_device");
+    auto host   = makeHostPool(16, 4);
+    auto disk   = makeDiskPool(16, 4, std::make_unique<MemoryDiskBlockIO>());
+    auto group  = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device}, host, disk);
+    BlockTreeCacheMetricsReporter  reporter(nullptr);
+    const std::vector<GroupSetPtr> groups{
+        group, std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device}, nullptr, nullptr)};
+    const auto before = reporter.collectPoolMetricsSnapshots(groups);
+    ASSERT_EQ(before.size(), 3u);
+    for (const auto& snapshot : before) {
+        EXPECT_EQ(snapshot.frozen_ref_blocks, 0u);
+    }
+    std::vector<std::pair<IBlockPool*, BlockIdxType>> frozen_blocks;
+    for (IBlockPool* pool : {static_cast<IBlockPool*>(device.get()),
+                             static_cast<IBlockPool*>(host.get()),
+                             static_cast<IBlockPool*>(disk.get())}) {
+        auto block = pool->malloc();
+        ASSERT_TRUE(block.has_value());
+        pool->incTreeRef(*block, BlockTreeRefType::STORE);
+        pool->freezeBlock(*block);
+        pool->freezeBlock(*block);
+        pool->decTreeRef(*block, BlockTreeRefType::STORE);
+        EXPECT_EQ(pool->treeRefCount(*block), 2u);
+        frozen_blocks.emplace_back(pool, *block);
+    }
+    const auto after = reporter.collectPoolMetricsSnapshots(groups);
+    ASSERT_EQ(after.size(), 3u);
+    for (const auto& snapshot : after) {
+        EXPECT_EQ(snapshot.frozen_ref_blocks, 1u);
+        EXPECT_EQ(snapshot.store_ref_blocks, 0u);
+        EXPECT_EQ(snapshot.load_ref_blocks, 0u);
+        EXPECT_EQ(snapshot.eviction_target_ref_blocks, 0u);
+    }
+    for (const auto& [pool, block] : frozen_blocks) {
+        pool->decTreeRef(block, BlockTreeRefType::FROZEN);
+        EXPECT_EQ(pool->treeRefCount(block), 1u);
+    }
+    for (const auto& snapshot : reporter.collectPoolMetricsSnapshots(groups)) {
+        EXPECT_EQ(snapshot.frozen_ref_blocks, 1u);
+    }
+    for (const auto& [pool, block] : frozen_blocks) {
+        pool->decTreeRef(block, BlockTreeRefType::FROZEN);
+    }
+    for (const auto& snapshot : reporter.collectPoolMetricsSnapshots(groups)) {
+        EXPECT_EQ(snapshot.frozen_ref_blocks, 0u);
+    }
+}
+
 TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyReportPopulatedValues) {
     auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     for (const Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {

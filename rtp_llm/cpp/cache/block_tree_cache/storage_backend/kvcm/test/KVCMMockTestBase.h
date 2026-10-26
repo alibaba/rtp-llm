@@ -43,6 +43,7 @@ struct KVCMBroadcastState {
     std::mutex                            mutex;
     std::vector<RemoteOperationRequestPB> requests;
     bool                                  fail{false};
+    grpc::StatusCode                      failure_code{grpc::StatusCode::INTERNAL};
 };
 
 class KVCMBroadcastRpcService final: public RpcService::Service {
@@ -61,7 +62,7 @@ public:
             state_->requests.push_back(remote_request);
         }
         if (state_->fail) {
-            return grpc::Status(grpc::StatusCode::INTERNAL, "injected KVCM broadcast failure");
+            return grpc::Status(state_->failure_code, "injected KVCM broadcast failure");
         }
         if (remote_request.op() == REMOTE_OPERATION_WRITE) {
             auto* remote_response = response->mutable_remote_response();

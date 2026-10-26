@@ -38,8 +38,8 @@ enum class StorageQuarantineReason {
 };
 
 // The backend accepted an operation but cannot prove that DMA/RDMA has
-// stopped touching its buffers. StorageBackend keeps the already-acquired
-// request pins until shutdown drains the transport.
+// stopped touching its buffers. StorageBackend replaces request pins with
+// permanent FROZEN references for the lifetime of the block pool.
 class StorageOperationCompletionUnknown: public std::runtime_error {
 public:
     StorageOperationCompletionUnknown(const std::string& message, StorageQuarantineReason reason):
@@ -182,10 +182,11 @@ private:
     Lifecycle               lifecycle_{Lifecycle::CREATED};
     size_t                  in_flight_{0};
 
-    std::mutex                                                             quarantine_mutex_;
-    std::vector<std::shared_ptr<storage_backend_detail::StorageTaskState>> quarantined_tasks_;
-    size_t                                                                 quarantined_block_count_{0};
-    uint64_t                                                               quarantine_generation_{0};
+    std::mutex quarantine_mutex_;
+    // Preserve the per-operation quarantine metrics and abort threshold.
+    size_t   quarantined_task_count_{0};
+    size_t   quarantined_block_count_{0};
+    uint64_t quarantine_generation_{0};
 
     friend class LoadAsyncContext;
 };
