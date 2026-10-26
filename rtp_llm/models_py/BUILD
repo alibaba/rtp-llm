@@ -71,6 +71,13 @@ filegroup(
 
 
 filegroup(
+    name = "flash_mla_prefill_api_test_sources",
+    srcs = ["modules/kimi_k3/mla.py"],
+    visibility = ["//rtp_llm/models_py/modules/kimi_k3/test:__pkg__"],
+)
+
+
+filegroup(
     name = "cutlass_moe_config",
     srcs = glob(["kernels/cuda/fp8_kernel/cutlass_groupgemm/*"]),
     visibility = ["//visibility:public"],

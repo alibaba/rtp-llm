@@ -24,6 +24,12 @@ py_test(
 )
 
 py_test(
+    name = "flash_mla_prefill_api_test",
+    srcs = ["flash_mla_prefill_api_test.py"],
+    data = ["//rtp_llm/models_py:flash_mla_prefill_api_test_sources"],
+)
+
+py_test(
     name = "bounded_projection_jit_gpu_test",
     srcs = [
         "test_bounded_projection_jit_gpu.py",
