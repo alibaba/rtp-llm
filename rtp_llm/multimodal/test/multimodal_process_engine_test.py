@@ -738,6 +738,30 @@ class MMProcessEngineGpuBatchTest(TestCase):
                 torch.equal(actual.feature_hashes[0], first.feature_hashes[0])
             )
 
+    def test_sync_cache_hit_refills_evicted_hash_without_recomputing_embedding(self):
+        engine, part = self._make_engine(
+            mm_cache_cpu_max_bytes=4096, mm_hash_key_cache_max_bytes=4096
+        )
+        first = self._embed(engine, ["fake://1"])
+        key = engine._hash_key_cache.keys()[0]
+        entry = engine._embedding_cache.peek(key)
+        engine._hash_key_cache.clear()
+        cached = self._embed(engine, ["fake://1"])
+        self.assertEqual(part.embedding_calls, 1)
+        self.assertTrue(torch.equal(first.feature_hashes[0], cached.feature_hashes[0]))
+        self.assertTrue(
+            torch.equal(
+                engine._hash_key_cache.get(key, entry.generation)[0],
+                first.feature_hashes[0],
+            )
+        )
+        with patch(
+            "rtp_llm.multimodal.mm_work_item._feature_hashes_from_result",
+            side_effect=AssertionError("refilled hashes must be reused"),
+        ):
+            again = self._embed(engine, ["fake://1"])
+        self.assertTrue(torch.equal(again.feature_hashes[0], first.feature_hashes[0]))
+
     def test_hash_cache_can_be_disabled_independently(self):
         engine, part = self._make_engine(
             mm_cache_cpu_max_bytes=4096, mm_hash_key_cache_max_bytes=0
@@ -909,6 +933,89 @@ class FakeSlowEmbeddingInterface(FakeMultiModalEmbeddingInterface):
     def embedding(self, data, **kwargs):
         time.sleep(self.delay)
         return torch.tensor([[1]]), None
+
+
+class MMWorkItemCachePublicationTest(TestCase):
+    def make_item(self, embedding_bytes=4096, hash_bytes=4096, defer=False):
+        embeddings = MMEmbeddingAsyncCache(
+            gpu_max_bytes=0, cpu_max_bytes=embedding_bytes
+        )
+        hashes = MMHashKeyCache(max_bytes=hash_bytes)
+        inp = MultimodalInput(
+            "fake://publication",
+            MMUrlType.IMAGE,
+            torch.empty(0),
+            MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000),
+        )
+        key = inp.cache_key()
+        state, entry = embeddings.try_acquire(key)
+        item = MMWorkItem(
+            [inp],
+            embedding_cache=embeddings,
+            hash_key_cache=hashes,
+            cache_claim=(key, entry, state),
+            defer_cache_complete=defer,
+        )
+        item.feature_hashes = [torch.tensor([1, 2], dtype=torch.int32)]
+        return item, embeddings, hashes, entry, key
+
+    def test_deferred_publication_and_duplicate_completion(self):
+        item, embeddings, hashes, entry, key = self.make_item(defer=True)
+        result = (torch.ones(2, 4), None)
+        with patch.object(hashes, "put_for_entry", wraps=hashes.put_for_entry) as put:
+            item.complete_cache(result)
+            self.assertFalse(entry.is_done)
+            put.assert_not_called()
+            entry.set_greennet_verdict(GreenNetVerdict(passed=True))
+            item.complete_cache(result, force=True)
+            self.assertTrue(entry.is_done)
+            self.assertEqual(hashes.get(key, entry.generation)[0].tolist(), [1, 2])
+            self.assertTrue(hashes.greennet_passed(key))
+            item.complete_cache(result, force=True)
+            put.assert_called_once()
+
+    def test_failed_completion_never_publishes_hashes(self):
+        item, embeddings, hashes, entry, key = self.make_item()
+        with patch.object(
+            embeddings, "_on_complete", side_effect=RuntimeError("storage failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "storage failed"):
+                item.complete_cache((torch.ones(2, 4), None))
+        with self.assertRaisesRegex(RuntimeError, "storage failed"):
+            entry.wait(timeout=0)
+        self.assertFalse(hashes.contains(key))
+
+    def test_failed_or_replaced_entry_cannot_publish_hashes(self):
+        for failed in (True, False):
+            with self.subTest(failed=failed):
+                item, embeddings, hashes, entry, key = self.make_item()
+                if failed:
+                    item.fail_cache(RuntimeError("inspection rejected"))
+                else:
+                    embeddings.remove(key)
+                    _, replacement = embeddings.try_acquire(key)
+                    replacement.complete((torch.ones(2, 4), None))
+                    hashes.put_for_entry(
+                        key, [torch.tensor([9, 8])], replacement, embeddings
+                    )
+                item.complete_cache((torch.ones(2, 4), None))
+                self.assertIsNone(hashes.get(key, entry.generation))
+                if not failed:
+                    self.assertEqual(
+                        hashes.get(key, replacement.generation)[0].tolist(), [9, 8]
+                    )
+
+    def test_disabled_or_oversized_cache_keeps_result_available(self):
+        for embedding_bytes, hash_bytes in ((0, 4096), (8, 4096), (4096, 0), (4096, 4)):
+            with self.subTest(embedding_bytes=embedding_bytes, hash_bytes=hash_bytes):
+                item, embeddings, hashes, entry, key = self.make_item(
+                    embedding_bytes, hash_bytes
+                )
+                result = (torch.ones(2, 4), None)
+                item.complete_cache(result)
+                self.assertTrue(torch.equal(entry.wait(timeout=0)[0], result[0]))
+                self.assertEqual(item.feature_hashes[0].tolist(), [1, 2])
+                self.assertFalse(hashes.contains(key))
 
 
 class MMEmbeddingCacheEntryTest(TestCase):
@@ -1178,6 +1285,72 @@ class EmptyEmbeddingResultTest(TestCase):
 
 
 class AsyncSubmitGetEmbeddingTest(TestCase):
+    def test_waiters_cannot_observe_ready_before_hash_publication(self):
+        engine = self._make_engine()
+        inp = self._make_input("fake://publication-race")
+        publishing, release, all_waiting = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+        waiter_lock = threading.Lock()
+        waiter_count = 0
+        original_put = engine._hash_key_cache.put_for_entry
+
+        def put(*args, **kwargs):
+            publishing.set()
+            if not release.wait(timeout=10):
+                raise TimeoutError("publisher was not released")
+            return original_put(*args, **kwargs)
+
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+        try:
+            with patch.object(
+                engine._hash_key_cache, "put_for_entry", side_effect=put
+            ) as publish, patch(
+                "rtp_llm.multimodal.mm_work_item._feature_hashes_from_result",
+                return_value=[torch.tensor([7], dtype=torch.int32)],
+            ) as hash_op:
+                engine.async_submit([inp])
+                self.assertTrue(publishing.wait(timeout=5))
+                entry = engine._embedding_cache.peek(inp.cache_key())
+                self.assertIsNotNone(entry)
+                self.assertFalse(entry.is_done)
+                original_wait = entry.wait_ready
+
+                def wait(*args, **kwargs):
+                    nonlocal waiter_count
+                    with waiter_lock:
+                        waiter_count += 1
+                        if waiter_count == 8:
+                            all_waiting.set()
+                    return original_wait(*args, **kwargs)
+
+                with patch.object(entry, "wait_ready", side_effect=wait):
+                    futures = [
+                        pool.submit(
+                            engine.get_embedding_result,
+                            [inp],
+                            hashes_only=True,
+                            timeout_ms=10000,
+                        )
+                        for _ in range(8)
+                    ]
+                    self.assertTrue(all_waiting.wait(timeout=5))
+                    self.assertTrue(all(not f.done() for f in futures))
+                    self.assertEqual(hash_op.call_count, 1)
+                    release.set()
+                    results = [future.result(timeout=5) for future in futures]
+                self.assertEqual(hash_op.call_count, 1)
+                publish.assert_called_once()
+                self.assertTrue(
+                    all(r[0].feature_hashes[0].tolist() == [7] for r in results)
+                )
+        finally:
+            release.set()
+            pool.shutdown(wait=True)
+            engine.stop()
+
     def test_empty_embedding_fails_without_publishing_cache_or_hashes(self):
         for cache_enabled in (False, True):
             for async_mode in (False, True):
