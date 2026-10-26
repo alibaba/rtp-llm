@@ -378,7 +378,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     RuntimeConfig stream_runtime_config                            = runtime_config;
     stream_runtime_config.fifo_scheduler_config.prefill_chunk_size = 0;
 
-    auto stream = std::make_shared<NormalGenerateStream>(generate_input,
+    auto       stream       = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
                                                          stream_runtime_config,
                                                          resource_context_,
@@ -549,14 +549,14 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     RTP_LLM_FAIL("prefillWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    const int64_t token_budget = runtime_config.fifo_scheduler_config.prefill_chunk_size;
-    const bool use_global_budget_warmup = token_budget > 0 && !runtime_config.warm_up_with_loss;
-    const int64_t token_heavy_seq_len = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
+    const int64_t token_budget             = runtime_config.fifo_scheduler_config.prefill_chunk_size;
+    const bool    use_global_budget_warmup = token_budget > 0 && !runtime_config.warm_up_with_loss;
+    const int64_t token_heavy_seq_len      = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
 
     auto fake_input = makeFakeInput(static_cast<size_t>(token_heavy_seq_len));
     fake_input->generate_config->num_return_sequences =
         use_global_budget_warmup ? 1 : runtime_config.fifo_scheduler_config.max_context_batch_size;
-    fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
+    fake_input->generate_config->calculate_loss = int(runtime_config.warm_up_with_loss);
     if (!use_global_budget_warmup) {
         const bool generation_prefill_cuda_graph_requested =
             shouldCreateGenerationPrefillCudaGraph(params.hw_kernel_config,
@@ -644,9 +644,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         max_consumed = memory_tracker->maxConsumedBytes();
         token_heavy_result.value().reset();
 
-        const int64_t block_size       = model_config_.attn_config.tokens_per_block;
-        const int64_t row_count =
-            std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
+        const int64_t block_size = model_config_.attn_config.tokens_per_block;
+        const int64_t row_count  = std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
         const int64_t row_heavy_tokens = std::min(token_budget, token_heavy_seq_len);
         const int64_t row_heavy_reuse  = (token_heavy_seq_len - row_heavy_tokens) / block_size * block_size;
         auto          row_heavy_input  = makeFakeInput(static_cast<size_t>(row_heavy_reuse + row_heavy_tokens));
@@ -654,8 +653,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 
         // Conservatively combine multiple rows with a full chunk per row and a long prefix.
         // Run once without splitting by the scheduler's global token budget.
-        auto row_heavy_result = runPrefillWarmupShape(
-            row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
+        auto row_heavy_result =
+            runPrefillWarmupShape(row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
         THROW_IF_STATUSOR_ERROR(row_heavy_result);
         max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
         row_heavy_result.value().reset();
