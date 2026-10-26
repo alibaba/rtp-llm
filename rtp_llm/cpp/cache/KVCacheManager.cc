@@ -134,6 +134,8 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.total_blocks                      = static_cast<int64_t>(pool_snapshot.total_blocks);
     pool_collector.reserve_blocks                    = static_cast<int64_t>(pool_snapshot.reserve_blocks);
     pool_collector.request_ref_blocks                = static_cast<int64_t>(pool_snapshot.request_ref_blocks);
+    pool_collector.remote_connector_ref_blocks       = static_cast<int64_t>(pool_snapshot.remote_connector_ref_blocks);
+    pool_collector.pd_connector_ref_blocks           = static_cast<int64_t>(pool_snapshot.pd_connector_ref_blocks);
     pool_collector.block_cache_ref_blocks            = static_cast<int64_t>(pool_snapshot.block_cache_ref_blocks);
     pool_collector.load_ref_blocks                   = static_cast<int64_t>(pool_snapshot.load_ref_blocks);
     pool_collector.eviction_target_ref_blocks        = static_cast<int64_t>(pool_snapshot.eviction_target_ref_blocks);
