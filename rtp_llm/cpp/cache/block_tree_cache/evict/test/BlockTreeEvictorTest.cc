@@ -2545,6 +2545,33 @@ TEST_F(BlockTreeEvictorTest, DropLockedDropsSelectedVictim) {
     EXPECT_EQ(device_pool_->freeBlocksNum(), 128u);
 }
 
+TEST_F(BlockTreeEvictorTest, ChooseVictimAllowsRequestHeldDeviceMigrationButSkipsDirectDrop) {
+    auto host_pool = makePinnedHostPool(1);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+    const MultiNodeBlocks blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
+    ASSERT_EQ(blocks.size(), 1u);
+    ASSERT_EQ(blocks.front().size(), 1u);
+    const BlockIdxType source = blocks.front().front();
+    auto              result = insert({100}, {{makeResource(Tier::DEVICE, source)}});
+    ASSERT_NE(insertedNode(result), nullptr);
+    unreferenceDeviceBlocksForTest(*group_, blocks, BlockTreeRefType::CACHE);
+    device_pool_->incRef(source);
+
+    const auto migration = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/false);
+    ASSERT_TRUE(migration.has_value());
+    EXPECT_EQ(migration->node, insertedNode(result));
+    EXPECT_EQ(migration->target_tier, Tier::HOST);
+    EXPECT_FALSE(evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/true).has_value());
+    EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::DEVICE), 1u);
+    EXPECT_EQ(device_pool_->refCount(source), 2u);
+
+    device_pool_->decRef(source);
+    EXPECT_TRUE(evictor_->dropLocked(/*group_set_id=*/0, Tier::DEVICE, /*notify_settled=*/false));
+    EXPECT_FALSE(device_pool_->isAllocated(source));
+    EXPECT_EQ(tree_->size(), 0u);
+}
+
 TEST_F(BlockTreeEvictorTest, ChooseVictimUsesNearestEnabledTargetTier) {
     MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
     ASSERT_EQ(device_blocks.size(), 1u);
