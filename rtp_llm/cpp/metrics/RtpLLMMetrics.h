@@ -1205,6 +1205,22 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMCacheInsertMetricsCollector final {
+public:
+    std::string existing_tier;
+    std::string transfer_state;
+};
+
+class RtpLLMCacheInsertMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheInsertMetricsCollector* collector);
+
+private:
+    kmonitor::MutableMetric* insert_hard_stop_qps_metric = nullptr;
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMTierStoreMetricsCollector final {
 public:
     std::string target_tier;
