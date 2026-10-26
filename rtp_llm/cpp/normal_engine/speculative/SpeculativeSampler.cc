@@ -31,8 +31,12 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
                                                     const torch::Tensor& temperature,
                                                     const torch::Tensor& markov_w1,
                                                     const torch::Tensor& markov_w2,
-                                                    size_t               draft_vocab_size) const {
+                                                    size_t               draft_vocab_size,
+                                                    size_t               sampled_prefix_steps) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.sample_dspark_draft");
+    const size_t sample_steps = sampled_prefix_steps == 0 ? propose_step_ : sampled_prefix_steps;
+    RTP_LLM_CHECK_WITH_INFO(sample_steps > 0 && sample_steps <= propose_step_,
+                            "DSpARK sampled prefix must be in [1, gamma]");
     RTP_LLM_CHECK_WITH_INFO(temperature.defined() && temperature.is_cuda() && temperature.is_contiguous()
                                 && temperature.scalar_type() == torch::kFloat32 && temperature.dim() == 1,
                             "DSpARK draft temperatures must be contiguous CUDA FP32 [B]");
@@ -48,10 +52,10 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
 
     auto previous_tokens = anchors.reshape({batch_size}).to(torch::kLong);
     auto all_probabilities =
-        torch::empty({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)},
+        torch::empty({batch_size, static_cast<int64_t>(sample_steps), static_cast<int64_t>(draft_vocab_size)},
                      torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
     std::vector<torch::Tensor> token_columns;
-    token_columns.reserve(propose_step_);
+    token_columns.reserve(sample_steps);
     // lm_head shards are padded to a TP alignment before gather. Sampling
     // must ignore those synthetic tail columns just like the regular target
     // sampler ignores padded vocabulary rows.
@@ -60,7 +64,7 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
             .view({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)});
     auto temperature_column = temperature.unsqueeze(1);
 
-    for (int64_t step = 0; step < static_cast<int64_t>(propose_step_); ++step) {
+    for (int64_t step = 0; step < static_cast<int64_t>(sample_steps); ++step) {
         auto markov_embedding = markov_w1.index_select(0, previous_tokens);
         auto markov_bias      = torch::mm(markov_embedding, markov_w2.transpose(0, 1)).to(torch::kFloat32);
         auto logits           = proposal_logits.select(1, step) + markov_bias;

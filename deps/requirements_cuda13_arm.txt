@@ -1,13 +1,18 @@
 # CUDA 13 / aarch64 (GB200 / GB300) dep set.
 # Matches the x86 cuda13 pattern: only self-built wheels against torch 2.11+cu130.
-# Packages that link libcudart.so.12 (flash_attn, fast_hadamard,
-# nvidia_cutlass_dsl) are deferred.
+# Packages that link libcudart.so.12 (flash_attn, fast_hadamard)
+# are deferred unless rebuilt for CUDA 13.
 -r requirements_base.txt
 torch==2.11.0+cu130
 torchvision==0.26.0+cu130
 mysql-connector-python
 flashinfer-python==0.6.9+8c4f4dcf
 flashinfer-cubin==0.6.9+8c4f4dcf
+
+# MiniMax M3.1 CP Prefill FMHA; universal Python/JIT source wheel.
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/fmha_sm100-0.1.1-py3-none-any.whl
+quack-kernels==0.4.1
+nvidia-cutlass-dsl==4.5.3
 
 # Self-built wheels against torch 2.11+cu130; SHAs encoded in filename.
 deep-gemm==2.8.1+057ca59
@@ -34,4 +39,4 @@ tile-kernels==0.1.dev0+ali.git36d9e45
 safetensors==0.7.0
 tabulate==0.9.0
 
-# flash_attn / flash_attn_3 / fast_hadamard / nvidia_cutlass_dsl are deferred.
+# flash_attn / flash_attn_3 / fast_hadamard are deferred.

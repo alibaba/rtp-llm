@@ -1,0 +1,307 @@
+"""Real preview2 dense/SWA layer building block, independent of model wiring.
+
+The caller supplies already-fused context features and an explicit attention
+mask/window contract. This module does not guess auxiliary normalization,
+target feature capture boundaries, query alignment, or CP cache ownership.
+"""
+
+import importlib
+import logging
+
+import flashinfer
+import torch
+import triton
+import triton.language as tl
+from torch import nn
+
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.modules import LinearFactory
+from rtp_llm.models_py.modules.minimax_m31.dspark.dspark_gemma_rope import (
+    dspark_gemma_qk_norm_rope,
+    dspark_rope_inv_freq,
+)
+from rtp_llm.models_py.modules.minimax_m31.dspark.dspark_swa import (
+    DSparkGemmaRMSNorm,
+    commit_paged_gqa_kv,
+    paged_gqa_swa,
+)
+from rtp_llm.models_py.modules.minimax_m31.minimax_m31_mlp import M31DenseMLP
+from rtp_llm.utils.model_weight import W
+
+
+def _select_swa_kernel(device):
+    if torch.cuda.get_device_capability(device)[0] != 10:
+        return paged_gqa_swa
+    try:
+        # This import selects the FA4 package path before probing its interface.
+        from rtp_llm.models_py.modules.minimax_m31.dspark.dspark_swa_fa4 import (
+            paged_gqa_swa_fa4,
+        )
+
+        getattr(importlib.import_module("flash_attn.cute.interface"), "_flash_attn_fwd")
+    except (ImportError, AttributeError):
+        logging.getLogger(__name__).warning(
+            "MiniMax M3.1 DSpark FA4 is unavailable; using the SWA kernel"
+        )
+        return paged_gqa_swa
+    return paged_gqa_swa_fa4
+
+
+@triton.jit
+def _add_mask_proposal_rows(
+    HIDDEN, MLP, LENS, OUT, WIDTH: tl.constexpr, DIM: tl.constexpr, BLOCK: tl.constexpr
+):
+    row = tl.program_id(0)
+    col = tl.arange(0, BLOCK)
+    valid = row % WIDTH < tl.load(LENS + row // WIDTH)
+    lhs = tl.load(HIDDEN + row.to(tl.int64) * DIM + col, mask=col < DIM, other=0).to(
+        tl.float32
+    )
+    rhs = tl.load(MLP + row.to(tl.int64) * DIM + col, mask=col < DIM, other=0).to(
+        tl.float32
+    )
+    tl.store(
+        OUT + row.to(tl.int64) * DIM + col,
+        tl.where(valid, lhs + rhs, 0).to(OUT.dtype.element_ty),
+        mask=col < DIM,
+    )
+
+
+def _add_and_mask_proposals(
+    hidden: torch.Tensor, mlp: torch.Tensor, query_lens: torch.Tensor, width: int
+) -> torch.Tensor:
+    rows, dim = hidden.shape
+    output = torch.empty_like(hidden)
+    _add_mask_proposal_rows[(rows,)](
+        hidden,
+        mlp,
+        query_lens,
+        output,
+        WIDTH=width,
+        DIM=dim,
+        BLOCK=triton.next_power_of_2(dim),
+        num_warps=8,
+    )
+    return output.view(query_lens.shape[0], width, dim)
+
+
+@triton.jit
+def _add_post_norm(
+    HIDDEN,
+    OUTPUT,
+    WEIGHT,
+    RESIDUAL,
+    NORM,
+    DIM: tl.constexpr,
+    EPS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    col = tl.arange(0, BLOCK)
+    offset = row * DIM + col
+    lhs = tl.load(HIDDEN + offset, col < DIM, other=0).to(tl.float32)
+    rhs = tl.load(OUTPUT + offset, col < DIM, other=0).to(tl.float32)
+    # Match torch.add's BF16 output before the existing FP32 RMS reduction.
+    residual = (lhs + rhs).to(tl.bfloat16)
+    tl.store(RESIDUAL + offset, residual, col < DIM)
+    x = residual.to(tl.float32)
+    weight = tl.load(WEIGHT + col, col < DIM, other=0).to(tl.float32)
+    inv = tl.rsqrt(tl.sum(x * x, axis=0) / DIM + EPS)
+    tl.store(NORM + offset, (x * inv) * (1.0 + weight), col < DIM)
+
+
+def _fused_add_post_norm(hidden, output, post_norm):
+    rows, dim = hidden.shape
+    if (
+        not hidden.is_cuda
+        or hidden.dtype != torch.bfloat16
+        or output.shape != hidden.shape
+        or output.dtype != torch.bfloat16
+        or output.device != hidden.device
+        or not hidden.is_contiguous()
+        or not output.is_contiguous()
+        or dim <= 0
+        or dim > 16384
+        or post_norm.weight.dtype != torch.bfloat16
+        or post_norm.weight.device != hidden.device
+        or not post_norm.weight.is_contiguous()
+    ):
+        residual = hidden + output
+        return residual, post_norm(residual)
+    residual = torch.empty_like(hidden)
+    norm = torch.empty_like(hidden)
+    if rows:
+        block = triton.next_power_of_2(dim)
+        _add_post_norm[(rows,)](
+            hidden,
+            output,
+            post_norm.weight,
+            residual,
+            norm,
+            dim,
+            post_norm.eps,
+            block,
+            num_warps=4 if block <= 1024 else 8,
+            enable_fp_fusion=False,
+        )
+    return residual, norm
+
+
+class MiniMaxM31DSparkLayer(nn.Module):
+    """One loaded MXFP8 projection + BF16 GQA SWA + dense SwiGLU-OAI layer."""
+
+    def __init__(self, config, parallelism, weights, hw_kernel_config=None):
+        super().__init__()
+        self.tp_size = parallelism.get_attn_tp_size()
+        attn = config.getAttentionConfigs(self.tp_size)
+        self.heads, self.kv_heads = attn.head_num, attn.kv_head_num
+        self.dim = attn.size_per_head
+        self.query_attention = _select_swa_kernel(weights[W.q_ln_gamma].device)
+        self.q_size, self.kv_size = self.heads * self.dim, self.kv_heads * self.dim
+        self.rope_dim = config.attn_config.rope_config.dim
+        self.rope_theta = config.attn_config.rope_config.base
+        if config.quant_config.get_method() != "MXFP8" or self.dim != 128:
+            raise ValueError("preview2 draft layer requires MXFP8 and head_dim=128")
+
+        def linear(mapping, weight, scale):
+            return LinearFactory.create_linear_from_weights(
+                mapping,
+                weight,
+                scale,
+                quant_config=config.quant_config,
+                hw_kernel_config=hw_kernel_config,
+            )
+
+        self.qkv_proj = linear(weights, W.attn_qkv_w, W.attn_qkv_s)
+        self.o_proj = linear(weights, W.attn_o_w, W.attn_o_s)
+        # Commit has no Q consumer. Slice the loaded tensor, not a copy, and
+        # avoid computing/discarding 64 Q heads for each committed feature row.
+        kv_weights = {
+            W.attn_qkv_w: weights[W.attn_qkv_w][self.q_size :],
+            W.attn_qkv_s: weights[W.attn_qkv_s][self.q_size :],
+        }
+        self.kv_proj = linear(kv_weights, W.attn_qkv_w, W.attn_qkv_s)
+        self.input_norm = DSparkGemmaRMSNorm(
+            weights[W.pre_ln_gamma], config.layernorm_eps
+        )
+        self.post_norm = DSparkGemmaRMSNorm(
+            weights[W.post_ln_gamma], config.layernorm_eps
+        )
+        self.q_norm = DSparkGemmaRMSNorm(weights[W.q_ln_gamma], config.layernorm_eps)
+        self.k_norm = DSparkGemmaRMSNorm(weights[W.k_ln_gamma], config.layernorm_eps)
+        self.register_buffer(
+            "rope_inv_freq",
+            dspark_rope_inv_freq(float(self.rope_theta), weights[W.q_ln_gamma].device),
+            persistent=False,
+        )
+        self.mlp = M31DenseMLP(
+            config.activation_type,
+            parallelism,
+            weights,
+            config.quant_config,
+            hw_kernel_config=hw_kernel_config,
+            alpha=config.swiglu_alpha,
+            limit=config.swiglu_limit,
+        )
+
+    def _rope(self, q, k, positions):
+        flashinfer.apply_rope_pos_ids_inplace(
+            q,
+            k,
+            positions,
+            rotary_dim=self.rope_dim,
+            interleave=False,
+            rope_theta=self.rope_theta,
+        )
+
+    def project_context_kv(self, features, positions, *, input_scales=None):
+        """Project the same fused context features independently at each layer.
+
+        No layer input norm or attention/MLP is applied to these features.
+        An optional MXFP8 input + packed scales lets all five layers reuse one
+        feature quantization. Cache ownership/mapping remains the caller's job.
+        """
+        if features.ndim != 2 or positions.shape != (features.shape[0],):
+            raise ValueError("context features/positions must be [T,H] and [T]")
+        if input_scales is not None and features.dtype != torch.float8_e4m3fn:
+            raise ValueError("prequantized context scales require E4M3 features")
+        if features.shape[0] == 0:
+            empty = torch.empty(
+                0, self.kv_heads, self.dim, dtype=torch.bfloat16, device=features.device
+            )
+            return empty, empty
+        kv = self.kv_proj(features, input_scales=input_scales)
+        k, v = kv.split(self.kv_size, dim=-1)
+        k = self.k_norm(k.reshape(-1, self.dim)).view(-1, self.kv_heads, self.dim)
+        # The paged writer and CP stack accept this interleaved row stride.
+        v = v.reshape(-1, self.kv_heads, self.dim)
+        # FlashInfer accepts independent Q/K head counts, including zero Q
+        # heads. Only K rotates; no dummy Q allocation proportional to tokens.
+        empty_q = k.new_empty(k.shape[0], 0, self.dim)
+        self._rope(empty_q, k, positions)
+        return k, v
+
+    def commit(
+        self, features, positions, cache, slot_ids, valid_mask, *, input_scales=None
+    ):
+        k, v = self.project_context_kv(features, positions, input_scales=input_scales)
+        commit_paged_gqa_kv(k, v, cache, slot_ids, valid_mask)
+
+    def forward(
+        self,
+        hidden,
+        positions,
+        cache,
+        block_table,
+        context_lens,
+        query_lens,
+        *,
+        causal: bool,
+        window_left: int,
+    ):
+        """Run query-block math; transient tail KV never overwrites history.
+
+        Feature commit replaces tail rows before they become accepted history.
+        Temporary proposal KV is not published to the PD cache store.
+        """
+        batch, width, hidden_dim = hidden.shape
+        if batch == 0:
+            return hidden
+        residual = hidden.reshape(-1, hidden_dim)
+        qkv = self.qkv_proj(self.input_norm(residual))
+        q, k, v = qkv.split((self.q_size, self.kv_size, self.kv_size), dim=-1)
+        # Query Q/K retain FP32 normalization through RoPE in the demo.
+        # Context injection intentionally keeps its separate BF16 K-norm path.
+        q, k = dspark_gemma_qk_norm_rope(
+            q.reshape(-1, self.heads, self.dim),
+            k.reshape(-1, self.kv_heads, self.dim),
+            self.q_norm.weight,
+            self.k_norm.weight,
+            positions.reshape(-1),
+            eps=self.q_norm.eps,
+            rope_theta=self.rope_theta,
+            rotary_dim=self.rope_dim,
+            inv_freq=self.rope_inv_freq,
+        )
+        # FA4's validated native-cache ABI uses page128. Preserve the old
+        # reader for other configured page sizes rather than failing at runtime.
+        attention = self.query_attention if cache.shape[3] == 128 else paged_gqa_swa
+        query_v = v.reshape(batch, width, self.kv_heads, self.dim)
+        if attention is paged_gqa_swa:
+            query_v = query_v.contiguous()
+        output = attention(
+            q.view(batch, width, self.heads, self.dim),
+            k.view(batch, width, self.kv_heads, self.dim),
+            query_v,
+            cache,
+            block_table,
+            context_lens,
+            query_lens,
+            causal=causal,
+            window_left=window_left,
+        )
+        output = self.o_proj(output.reshape(batch * width, self.q_size))
+        if self.tp_size > 1:
+            output = all_reduce(output, group=Group.TP)
+        hidden, post_norm = _fused_add_post_norm(residual, output, self.post_norm)
+        return _add_and_mask_proposals(hidden, self.mlp(post_norm), query_lens, width)

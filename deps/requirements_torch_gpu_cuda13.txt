@@ -5,7 +5,7 @@ opentelemetry-exporter-otlp-proto-http==1.15.0
 # CUDA 13.2 / torch 2.11+cu130 / triton 3.6.0 dep set.
 # Includes official DeepEP main@a56d6156 built against NCCL 2.30.4 and
 # NVSHMEM 3.5.19, plus the RTP FlashInfer 0.6.9 CUDA 13.2 wheels.
-# FlashAttention 3 and nvidia_cutlass_dsl remain deferred.
+# FlashAttention 3 remains deferred.
 
 # Core torch stack — wheels mirrored to OSS by us; upstream is
 # https://download.pytorch.org/whl/cu130/.
@@ -26,6 +26,11 @@ triton==3.6.0
 # CUDA-graph smoke case generation_prefill_cuda_graph_sm120 (cuda13/sm12x).
 flashinfer-python==0.6.9+8c4f4dcf
 flashinfer-cubin==0.6.9+8c4f4dcf
+
+# MiniMax M3.1 CP Prefill FMHA; universal Python/JIT source wheel.
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/fmha_sm100-0.1.1-py3-none-any.whl
+quack-kernels==0.4.1
+nvidia-cutlass-dsl==4.4.2
 
 # Upstream v1.1.0.post2@e7706faf, rebuilt for torch 2.11+cu130.
 fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue

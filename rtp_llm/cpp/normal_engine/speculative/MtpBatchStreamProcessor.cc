@@ -870,12 +870,12 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1, "stream tile num must be 1 in ScoreExecutor");
     }
 
-    size_t score_len        = propose_step_ + 1;
+    size_t score_len        = verify_step_ + 1;
     size_t total_batch_size = stream_groups.size() * score_len;
 
     SamplerInputs sampler_inputs =
-        allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
-    fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
+        allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, verify_step_);
+    fillSamplerCommonInputs(sampler_inputs, all_streams, true, verify_step_);
 
     int64_t batch_idx = 0;
     for (auto& stream : all_streams) {
@@ -885,10 +885,10 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         copyScoreSamplerTokenIds(
             sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
         RTP_LLM_CHECK_WITH_INFO(
-            seq_len + static_cast<int64_t>(propose_step_) <= static_cast<int64_t>(sampler_inputs.step + 1),
+            seq_len + static_cast<int64_t>(verify_step_) <= static_cast<int64_t>(sampler_inputs.step + 1),
             "MTP verify sampler history exceeds its allocated width: seq_len=%ld gamma=%zu step=%zu",
             seq_len,
-            propose_step_,
+            verify_step_,
             sampler_inputs.step);
         batch_idx += static_cast<int64_t>(score_len);
         RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
@@ -911,7 +911,7 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     }
 
     const auto batch_size = static_cast<int64_t>(stream_groups.size());
-    const auto gamma      = static_cast<int64_t>(propose_step_);
+    const auto gamma      = static_cast<int64_t>(verify_step_);
     const auto rows       = static_cast<int64_t>(score_len);
     RTP_LLM_CHECK_WITH_INFO(draft_token_ids.defined() && draft_token_ids.scalar_type() == torch::kInt32
                                 && draft_token_ids.dim() == 2 && draft_token_ids.size(0) == batch_size
@@ -1449,20 +1449,20 @@ void MtpBatchStreamProcessor::prepareDSparkTargetVerifyModelInput(const DSparkRo
     const int64_t batch_size = round_state.anchors.numel();
 
     RTP_LLM_CHECK_WITH_INFO(proposals.defined() && proposals.dim() == 2 && proposals.size(0) == batch_size
-                                && proposals.size(1) == propose_step_,
+                                && proposals.size(1) == verify_step_,
                             "dspark verify: round-head proposals must be [%ld, %d]",
                             batch_size,
-                            propose_step_);
+                            verify_step_);
 
     auto anchor_col = round_state.anchors.reshape({batch_size, 1});
     auto verify     = torch::cat({anchor_col, proposals.to(torch::kInt32)}, 1).reshape({-1});
     if (round_state.engram_windows.defined()) {
         model_input.engram_token_windows = makeEngramVerifyWindows(toCudaInt32(round_state.engram_windows, host_holder),
-                                                                   verify.reshape({batch_size, propose_step_ + 1}));
+                                                                   verify.reshape({batch_size, verify_step_ + 1}));
     }
     model_input.prefix_lengths = round_state.committed_ends;
-    setVerifyPairInputs(model_input, std::move(verify), batch_size, propose_step_ + 1, host_holder);
-    model_input.combo_position_ids = expandDSparkPositionIds(round_state.position_bases, propose_step_ + 1);
+    setVerifyPairInputs(model_input, std::move(verify), batch_size, verify_step_ + 1, host_holder);
+    model_input.combo_position_ids = expandDSparkPositionIds(round_state.position_bases, verify_step_ + 1);
     model_input.is_target_verify   = true;
 }
 
@@ -1483,13 +1483,13 @@ void MtpBatchStreamProcessor::expandDSparkTargetVerifyPositionIdsFromProposal(Gp
                             proposal_width,
                             position_factor);
     auto bases = model_input.combo_position_ids.reshape({batch_size, proposal_width, position_factor}).select(1, 0);
-    model_input.combo_position_ids = expandDSparkPositionIds(bases, propose_step_ + 1);
+    model_input.combo_position_ids = expandDSparkPositionIds(bases, verify_step_ + 1);
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
                                                                 const torch::Tensor& target_features,
                                                                 size_t               batch_size) {
-    const int64_t verify_width = propose_step_ + 1;
+    const int64_t verify_width = verify_step_ + 1;
     RTP_LLM_CHECK_WITH_INFO(target_features.defined(),
                             "dspark decode tail: target MTP hidden buffer did not provide aux features");
     RTP_LLM_CHECK_WITH_INFO(target_features.size(0) == static_cast<int64_t>(batch_size) * verify_width,
@@ -1788,7 +1788,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
             accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
         StreamSpecUpdateInfo spec_update_info{
             accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
-        spec_update_info.speculative_propose_step = propose_step_;
+        spec_update_info.speculative_propose_step = verify_step_;
         spec_update_info.accepted_draft_tokens    = std::max(0, cur_accept_len - 1);
         // Per-stream verify errors from SpecLogitsVerifyRunner ride the update
         // path so grammar/think mask failures reach the stream (main #1006).

@@ -613,7 +613,7 @@ torch::Tensor PyWrappedModel::runCustomOutput(const torch::Tensor& rows) {
 
 std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareWriteCacheParams");
-    if (inputs.warmup || inputs.skip_lm_head) {
+    if (inputs.warmup || inputs.skip_lm_head || inputs.is_fake_stream) {
         return std::nullopt;
     }
     if (!inputs.pd_separation || !inputs.request_id.defined() || inputs.request_id.numel() == 0) {
@@ -725,7 +725,8 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         }
     }
 
-    const bool                has_cache_store_work = !inputs.warmup && !inputs.skip_lm_head && inputs.pd_separation;
+    const bool has_cache_store_work =
+        !inputs.warmup && !inputs.skip_lm_head && !inputs.is_fake_stream && inputs.pd_separation;
     CacheStoreWriteCycleGuard cache_store_write_cycle(
         cache_store_async_writer_, has_cache_store_work, track_cache_store_completion_);
 
@@ -1080,7 +1081,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 }
             }
         }
-        const bool                has_cache_store_work = !inputs.warmup && !inputs.skip_lm_head && inputs.pd_separation;
+        const bool has_cache_store_work =
+            !inputs.warmup && !inputs.skip_lm_head && !inputs.is_fake_stream && inputs.pd_separation;
         CacheStoreWriteCycleGuard cache_store_write_cycle(
             cache_store_async_writer_, has_cache_store_work, track_cache_store_completion_);
 
