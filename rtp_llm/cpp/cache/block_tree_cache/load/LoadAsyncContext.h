@@ -81,6 +81,9 @@ public:
     bool         completeTransfers(size_t count, bool success);
     void         cancelUnsubmittedTransfers();
     bool         aggregateSuccess() const;
+    bool         localTransfersSucceeded() const;
+    bool         localLoadSucceeded() const;
+    bool         backendTimedOut() const;
     bool         settle(bool success);
     bool         onTaskFail();
     void         waitDone() override;
@@ -130,7 +133,9 @@ private:
     size_t                    remaining_transfer_count_{0};
     std::atomic<size_t>       remaining_join_count_{0};
     int64_t                   join_start_time_us_{0};
-    bool                      has_failure_{false};
+    bool                      has_local_failure_{false};
+    bool                      local_load_succeeded_{false};
+    ErrorInfo                 backend_error_{ErrorInfo::OkStatus()};
     ErrorInfo                 error_info_{ErrorInfo::OkStatus()};
     bool                      settlement_ready_{false};
     SettlementReadyCallback   settlement_ready_callback_;
