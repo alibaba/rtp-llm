@@ -397,8 +397,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 74)
-        self.assertEqual(state[:2], ("KVCacheConfig", 10))
+        self.assertEqual(len(state), 75)
+        self.assertEqual(state[:2], ("KVCacheConfig", 11))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)

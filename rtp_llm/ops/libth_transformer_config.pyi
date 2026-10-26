@@ -821,6 +821,7 @@ class KVCacheConfig:
     kv_cache_event_instance_group: str
     kv_cache_event_instance_id: str
     kv_cache_event_host_ip_port: str
+    kv_cache_event_snapshot_interval_ms: int
     ssm_state_dtype: str
     test_block_num: int
     use_block_cache: int
