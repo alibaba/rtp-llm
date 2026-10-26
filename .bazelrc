@@ -351,6 +351,10 @@ build:arm --copt=-Wno-array-parameter # boringssl
 # remote_kv_cache
 build:remote_kv_cache --define=use_remote_kv_cache=true
 
+# rdma: no platform config enables this — default OFF everywhere; only the
+# internal overlay builds select the RDMA impls behind this flag.
+build:rdma --define=use_rdma=true
+
 build:debug --copt -g --copt -O0 --copt -U_FORTIFY_SOURCE --copt -DEXCLUDE_SM_100=1 --copt -DEXCLUDE_SM_120=1
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
 

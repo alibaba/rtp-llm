@@ -1,5 +1,9 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
 
+# accl/solar/tnet/ali-rdma-core RPMs are permanently internal-only closed deps.
+# Do NOT add fetch rules for them here: RDMA impls are only buildable with the
+# internal overlay, and no public target may depend on accl.
+
 def clean_dep(dep):
     return str(Label(dep))
 
