@@ -78,6 +78,100 @@ TEST_F(LinearKVCacheGroupTest, DefaultPolicyDrivesBehaviorInterfaces) {
     EXPECT_FALSE(disabled_group.prefixReusable());
 }
 
+TEST_F(LinearKVCacheGroupTest, LongNonReuseLifetimeKeepsBoundedPhysicalPeak) {
+    auto pool = createBlockPool();
+    ASSERT_TRUE(pool->init());
+    LinearKVCacheGroup group({}, makeTestLinearSpec(1), pool, 0, 8);
+    ASSERT_TRUE(group.init());
+    // A large output limit must not require quadratic work or a dense physical pool.
+    EXPECT_EQ(group.estimateInitialBatchPeakNeedBlocks(256, 256, 1 << 20, 0, false, 1), 3);
+    BlockIds blocks;
+    ASSERT_TRUE(group.malloc(blocks, 256, false));
+    const auto free_before = pool->freeBlocksNum();
+    EXPECT_EQ(group.estimatePeakNeedBlocks(256, blocks.blocks(), 1 << 20, 0, false), 2);
+    size_t min_free = free_before;
+    for (int seq_len = 257; seq_len < 512; ++seq_len) {
+        ASSERT_TRUE(group.malloc(blocks, seq_len, false));
+        min_free = std::min(min_free, pool->freeBlocksNum());
+        group.removeSkippedBlocks(blocks, false);
+    }
+    EXPECT_EQ(free_before - min_free, 2u);
+    group.free(blocks.blocks());
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+}
+
+TEST_F(LinearKVCacheGroupTest, PeakEstimateIncludesExistingNullActiveTail) {
+    auto pool = createBlockPool();
+    ASSERT_TRUE(pool->init());
+    LinearKVCacheGroup group({}, makeTestLinearSpec(4), pool, 0, 2);
+    ASSERT_TRUE(group.init());
+
+    auto allocated = pool->malloc(3);
+    ASSERT_EQ(allocated.size(), 3u);
+    BlockIds blocks;
+    blocks.assign({allocated[0], allocated[1], allocated[2], NULL_BLOCK_IDX});
+
+    const auto free_before = pool->freeBlocksNum();
+    EXPECT_EQ(group.estimatePeakNeedBlocks(13, blocks.blocks(), 0, 0, false), 1);
+    EXPECT_EQ(group.estimateNextNeedBlocks(13, blocks.blocks(), 0, false), 1);
+    ASSERT_TRUE(group.malloc(blocks, 13, false));
+    EXPECT_EQ(free_before - pool->freeBlocksNum(), 1u);
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks().back()));
+    EXPECT_EQ(group.estimatePeakNeedBlocks(13, blocks.blocks(), 0, 0, false), 0);
+
+    group.free(blocks.blocks());
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+}
+
+TEST_F(LinearKVCacheGroupTest, PeakEstimateDoesNotReclaimExternallyReferencedTail) {
+    for (bool connector_pin : {false, true}) {
+        SCOPED_TRACE(connector_pin);
+        auto pool = createBlockPool();
+        ASSERT_TRUE(pool->init());
+        LinearKVCacheGroup group({}, makeTestLinearSpec(4), pool, 0, 4);
+        ASSERT_TRUE(group.init());
+        const auto allocated = pool->malloc(2);
+        ASSERT_EQ(allocated.size(), 2u);
+        BlockIds blocks;
+        blocks.assign(allocated);
+        const auto tail = allocated[0];
+        const auto pin  = [&] {
+            if (connector_pin) {
+                pool->connectorReference(tail);
+            } else {
+                pool->requestReference(tail);
+            }
+        };
+        const auto unpin = [&] {
+            if (connector_pin) {
+                pool->connectorFree(tail);
+            } else {
+                pool->requestFree(tail);
+            }
+        };
+
+        EXPECT_EQ(group.estimatePeakNeedBlocks(9, blocks.blocks(), 16, 0, true), 2);
+        pin();
+        EXPECT_EQ(group.estimatePeakNeedBlocks(9, blocks.blocks(), 16, 0, true), 3);
+        EXPECT_EQ(group.estimateNextNeedBlocks(9, blocks.blocks(), 0, true), 1);
+        unpin();
+        EXPECT_EQ(group.estimatePeakNeedBlocks(9, blocks.blocks(), 16, 0, true), 2);
+        pin();
+
+        const auto available_before = pool->availableBlocksNum();
+        auto       min_available    = available_before;
+        for (int seq_len = 9; seq_len <= 25; ++seq_len) {
+            ASSERT_TRUE(group.malloc(blocks, seq_len, true));
+            min_available = std::min(min_available, pool->availableBlocksNum());
+            group.removeSkippedBlocks(blocks, true);
+        }
+        EXPECT_EQ(available_before - min_available, 3u);
+        unpin();
+        group.free(blocks.blocks());
+        EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+    }
+}
+
 TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseDisabledCountsLastTwoTailAndReserveStep) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
@@ -289,13 +383,16 @@ TEST_F(LinearKVCacheGroupTest, EstimatePeakNeedBlocksIncludesTransientTailAlloca
     LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    const BlockIndicesType current_blocks = {NULL_BLOCK_IDX, 0, 1};
+    const auto allocated = block_pool->malloc(2);
+    ASSERT_EQ(allocated.size(), 2u);
+    const BlockIndicesType current_blocks = {NULL_BLOCK_IDX, allocated[0], allocated[1]};
 
     // Three logical slots currently contain two physical tail blocks.
     // Decoding across the next block still allocates the new tail before sparse cleanup releases the old one.
     EXPECT_EQ(group.estimatePeakNeedBlocks(
                   /*seq_len=*/12, current_blocks, /*remaining_tokens=*/4, /*reserve_step=*/0, false),
               1);
+    block_pool->requestFree(allocated);
 }
 
 TEST_F(LinearKVCacheGroupTest, EstimateInitialBatchPeakKeepsSharedAndPrivateTailsDistinct) {
@@ -361,12 +458,16 @@ TEST_F(LinearKVCacheGroupTest, EstimatePeakNeedBlocksIncludesTransientReserveAll
     LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    const BlockIndicesType current_blocks = {NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 0, 1};
+    const auto allocated = block_pool->malloc(2);
+    ASSERT_EQ(allocated.size(), 2u);
+    const BlockIndicesType current_blocks = {
+        NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, allocated[0], allocated[1]};
 
     // With reserve_step=2, only the new reserve tail is allocated before cleanup.
     EXPECT_EQ(group.estimatePeakNeedBlocks(
                   /*seq_len=*/16, current_blocks, /*remaining_tokens=*/4, /*reserve_step=*/2, false),
               1);
+    block_pool->requestFree(allocated);
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocBackfillsExistingNullReadSlot) {

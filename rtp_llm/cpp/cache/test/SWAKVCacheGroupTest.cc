@@ -121,6 +121,119 @@ TEST_F(SWAKVCacheGroupTest, NeedBlocksNum_WithReserveStep) {
     EXPECT_EQ(group.needBlocksNum(8, 0, 5), 4);  // ceil((8+5)/4) = 4
 }
 
+TEST_F(SWAKVCacheGroupTest, HcaStateEstimatesPhysicalTailInsteadOfLogicalPrompt) {
+    auto            spec = makeDsv4StateSpec("hca_state", 256);
+    SWAKVCacheGroup group({}, spec, block_pool_, 0, 1, shared_cache_.get(), nullptr, makePolicy(true));
+    ASSERT_TRUE(group.init());
+    EXPECT_EQ(group.estimateInitialBatchPeakNeedBlocks(16384, 16384, 0, 0, true, 1), 1);
+    EXPECT_EQ(group.estimateInitialBatchPeakNeedBlocks(16384, 16384, 1024, 0, true, 1), 2);
+    BlockIds   blocks;
+    const auto free_before = block_pool_->freeBlocksNum();
+    ASSERT_TRUE(group.malloc(blocks, 16384, true));
+    EXPECT_EQ(free_before - block_pool_->freeBlocksNum(), 1u);
+    EXPECT_EQ(group.estimateNextNeedBlocks(16384, blocks.blocks(), 0, true), 0);
+    EXPECT_EQ(group.estimateNextNeedBlocks(16385, blocks.blocks(), 0, true), 1);
+    EXPECT_EQ(group.estimatePeakNeedBlocks(16385, blocks.blocks(), 1024, 0, true), 1);
+    size_t min_free = block_pool_->freeBlocksNum();
+    for (int seq_len = 16385; seq_len <= 17408; ++seq_len) {
+        const auto expected_next = group.estimateNextNeedBlocks(seq_len, blocks.blocks(), 0, true);
+        const auto before        = block_pool_->freeBlocksNum();
+        ASSERT_TRUE(group.malloc(blocks, seq_len, true));
+        EXPECT_EQ(before - block_pool_->freeBlocksNum(), static_cast<size_t>(expected_next));
+        min_free = std::min(min_free, block_pool_->freeBlocksNum());
+        group.removeSkippedBlocks(blocks, true);
+    }
+    EXPECT_EQ(free_before - min_free, 2u);
+    group.free(blocks.blocks());
+    EXPECT_EQ(block_pool_->freeBlocksNum(), free_before);
+}
+
+TEST_F(SWAKVCacheGroupTest, SparsePeakBoundsRealAllocationWithReuseAndReserve) {
+    for (bool reuse : {false, true}) {
+        for (bool skip_prefix_reuse : {false, true}) {
+            for (int reserve_step : {0, 5}) {
+                SCOPED_TRACE(::testing::Message()
+                             << "reuse=" << reuse << " skip=" << skip_prefix_reuse << " reserve=" << reserve_step);
+                auto pool =
+                    std::make_shared<BlockPool>(createTestConfig(512, 512, 0, 0, DataType::TYPE_FP16, 1, 4, 128));
+                ASSERT_TRUE(pool->init());
+                auto            spec = makeDsv4StateSpec("hca_state", 4);
+                SWAKVCacheGroup group({}, spec, pool, 0, 3, nullptr, nullptr, makePolicy(skip_prefix_reuse));
+                ASSERT_TRUE(group.init());
+                const auto free_before = pool->freeBlocksNum();
+                const auto estimate    = group.estimateInitialBatchPeakNeedBlocks(40, 40, 40, reserve_step, reuse, 1);
+                BlockIds   blocks;
+                ASSERT_TRUE(group.malloc(blocks, 40, reuse));
+                ASSERT_TRUE(group.malloc(blocks, 40, reuse, reserve_step));
+                size_t min_free = pool->freeBlocksNum();
+                for (int seq_len = 41; seq_len <= 80; ++seq_len) {
+                    const auto before = pool->freeBlocksNum();
+                    const auto need   = group.estimateNextNeedBlocks(seq_len, blocks.blocks(), reserve_step, reuse);
+                    ASSERT_TRUE(group.malloc(blocks, seq_len, reuse, reserve_step));
+                    EXPECT_EQ(before - pool->freeBlocksNum(), static_cast<size_t>(need));
+                    min_free = std::min(min_free, pool->freeBlocksNum());
+                    group.removeSkippedBlocks(blocks, reuse, reserve_step);
+                }
+                EXPECT_LE(free_before - min_free, static_cast<size_t>(estimate));
+                group.free(blocks.blocks());
+                EXPECT_EQ(pool->freeBlocksNum(), free_before);
+            }
+        }
+    }
+}
+
+TEST_F(SWAKVCacheGroupTest, PeakEstimateKeepsExternallyPinnedBlocksAcrossInitialCleanup) {
+    for (bool connector_pin : {false, true}) {
+        SCOPED_TRACE(connector_pin);
+        auto policy                 = makePolicy();
+        policy.active_tail_blocks   = 1;
+        policy.validate_tail_blocks = false;
+        SWAKVCacheGroup group({}, makeDsv4StateSpec("hca_state", 4), block_pool_, 0, 4, nullptr, nullptr, policy);
+        ASSERT_TRUE(group.init());
+        const auto allocated = block_pool_->malloc(2);
+        ASSERT_EQ(allocated.size(), 2u);
+        BlockIds blocks;
+        blocks.assign(allocated);
+        const auto tail = allocated[0];
+        const auto pin  = [&] {
+            if (connector_pin) {
+                block_pool_->connectorReference(tail);
+            } else {
+                block_pool_->requestReference(tail);
+            }
+        };
+        const auto unpin = [&] {
+            if (connector_pin) {
+                block_pool_->connectorFree(tail);
+            } else {
+                block_pool_->requestFree(tail);
+            }
+        };
+
+        // The next allocation expires slot 0 immediately; its external reference
+        // must survive both that cleanup and the remaining lifetime simulation.
+        EXPECT_EQ(group.estimatePeakNeedBlocks(9, blocks.blocks(), 16, 0, true), 1);
+        pin();
+        EXPECT_EQ(group.estimatePeakNeedBlocks(9, blocks.blocks(), 16, 0, true), 2);
+        EXPECT_EQ(group.estimateNextNeedBlocks(9, blocks.blocks(), 0, true), 1);
+        unpin();
+        EXPECT_EQ(group.estimatePeakNeedBlocks(9, blocks.blocks(), 16, 0, true), 1);
+        pin();
+
+        const auto available_before = block_pool_->availableBlocksNum();
+        auto       min_available    = available_before;
+        for (int seq_len = 9; seq_len <= 25; ++seq_len) {
+            ASSERT_TRUE(group.malloc(blocks, seq_len, true));
+            min_available = std::min(min_available, block_pool_->availableBlocksNum());
+            group.removeSkippedBlocks(blocks, true);
+        }
+        EXPECT_EQ(available_before - min_available, 2u);
+        unpin();
+        group.free(blocks.blocks());
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+    }
+}
+
 // ==================== getNeedBlocks ====================
 
 TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_SeqLenZero) {
