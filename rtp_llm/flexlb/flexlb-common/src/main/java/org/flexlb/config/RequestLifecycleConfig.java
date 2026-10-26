@@ -17,12 +17,11 @@ public final class RequestLifecycleConfig {
         /** Maximum silence since registration or the latest matching Engine request status. */
         private Long timeoutMs;
         /**
-         * Number of Engine status polls (each workerRegistry.health.statusPollIntervalMs apart) allowed
-         * after delivery starts before the first matching Engine status must have arrived; the wait is
-         * count x poll interval. Heartbeats and delivery acknowledgement do not count. Changes apply to
-         * requests registered afterwards.
+         * Milliseconds allowed after delivery starts before the first matching Engine request status.
+         * Independent of workerRegistry.health.statusPollIntervalMs. Heartbeats and delivery
+         * acknowledgement do not count.
          */
-        private Long dispatchConfirmTimeoutPolls = 4L;
+        private Long statusUpdateTimeoutMs = 1_000L;
     }
 
     @Getter

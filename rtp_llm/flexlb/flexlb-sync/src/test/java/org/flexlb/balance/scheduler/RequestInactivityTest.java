@@ -55,8 +55,7 @@ class RequestInactivityTest {
     void setUp() throws Exception {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         config.getRequestLifecycle().getRequest().setTimeoutMs(TIMEOUT_MS);
-        config.getRequestLifecycle().getRequest().setDispatchConfirmTimeoutPolls(
-                TIMEOUT_MS / config.getWorkerRegistry().getHealth().getStatusPollIntervalMs());
+        config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(TIMEOUT_MS);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         registry = new RequestRegistry(service, mock(BatchSchedulerReporter.class),

@@ -290,8 +290,8 @@ public final class FlexlbConfigValidator {
         require(lifecycle != null, "requestLifecycle", "is required");
         require(lifecycle.getRequest() != null, "requestLifecycle.request", "is required");
         requiredPositive(lifecycle.getRequest().getTimeoutMs(), "requestLifecycle.request.timeoutMs");
-        requiredPositive(lifecycle.getRequest().getDispatchConfirmTimeoutPolls(),
-                "requestLifecycle.request.dispatchConfirmTimeoutPolls");
+        requiredPositive(lifecycle.getRequest().getStatusUpdateTimeoutMs(),
+                "requestLifecycle.request.statusUpdateTimeoutMs");
         require(lifecycle.getDecision() != null, "requestLifecycle.decision", "is required");
         Double lifetime = lifecycle.getDecision().getLifetime();
         require(lifetime != null, "requestLifecycle.decision.lifetime", "is required");

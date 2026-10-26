@@ -16,7 +16,6 @@ import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.RequestLifecycleConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -358,7 +357,7 @@ public class RequestRegistry {
                 synchronized (slot) {
                     var requestLifecycle = context.getConfig().getRequestLifecycle().getRequest();
                     slot.configureInactivityTimeout(requestLifecycle.getTimeoutMs());
-                    slot.configureDispatchConfirmTimeout(dispatchConfirmTimeoutMs(context, requestLifecycle));
+                    slot.configureDispatchConfirmTimeout(requestLifecycle.getStatusUpdateTimeoutMs());
                     phaseSlots.put(context.getRequestId(), slot);
                     registered = true;
                 }
@@ -394,13 +393,6 @@ public class RequestRegistry {
             return CompletableFuture.completedFuture(buildErrorResponse(
                     StrategyErrorType.DISPATCH_FAILED, detail));
         }
-    }
-
-    /** Wait for the first Engine status: timeout polls x status poll interval. */
-    private static long dispatchConfirmTimeoutMs(BalanceContext context,
-                                                 RequestLifecycleConfig.RequestConfig requestLifecycle) {
-        long pollIntervalMs = context.getConfig().getWorkerRegistry().getHealth().getStatusPollIntervalMs();
-        return requestLifecycle.getDispatchConfirmTimeoutPolls() * pollIntervalMs;
     }
 
     void attachRequestExpiration(BalanceContext context, CompletableFuture<Response> future) {

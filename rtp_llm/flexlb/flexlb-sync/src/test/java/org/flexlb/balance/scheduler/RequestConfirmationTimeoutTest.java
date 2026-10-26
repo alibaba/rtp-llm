@@ -50,8 +50,7 @@ class RequestConfirmationTimeoutTest {
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
         config.getRequestLifecycle().getRequest().setTimeoutMs(TIMEOUT_MS);
         long confirmTimeoutMs = waiting == ConfirmationWait.AUTOMATIC_TIMER ? 300L : TIMEOUT_MS;
-        config.getRequestLifecycle().getRequest().setDispatchConfirmTimeoutPolls(
-                confirmTimeoutMs / config.getWorkerRegistry().getHealth().getStatusPollIntervalMs());
+        config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(confirmTimeoutMs);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         var reporter = mock(BatchSchedulerReporter.class);

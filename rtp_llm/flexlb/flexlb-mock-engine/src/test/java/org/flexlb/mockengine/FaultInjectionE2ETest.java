@@ -292,8 +292,7 @@ class FaultInjectionE2ETest {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
                 BASE_PORT + 80, 2, 1, "5", 1.0, true, DecisionPolicyConfig.single())) {
             h.config.getRequestLifecycle().getRequest().setTimeoutMs(2_000L);
-            h.config.getRequestLifecycle().getRequest().setDispatchConfirmTimeoutPolls(
-                    (2_000L) / h.config.getWorkerRegistry().getHealth().getStatusPollIntervalMs());
+            h.config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(2_000L);
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             PrefillEndpoint prefillEndpoint = h.prefillEndpoint(0);

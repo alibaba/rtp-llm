@@ -40,8 +40,7 @@ class LeakCanaryLongRunE2ETest {
     void prefillRejectionRetainsDecodeUntilInactivityExpiry() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "5", 1.0, true)) {
             h.config.getRequestLifecycle().getRequest().setTimeoutMs(2_000L);
-            h.config.getRequestLifecycle().getRequest().setDispatchConfirmTimeoutPolls(
-                    (2_000L) / h.config.getWorkerRegistry().getHealth().getStatusPollIntervalMs());
+            h.config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(2_000L);
             h.fixedWindowDecision().setMaxRequests(1);
             h.prefillEngines.get(0).setFaultConfig(FaultInjectionConfig.builder()
                     .failOnEnqueue(true).enqueueErrorMessage("reject before admission").build());
@@ -71,8 +70,7 @@ class LeakCanaryLongRunE2ETest {
             h.fixedWindowDecision().setMaxRequests(4);
             h.fixedWindowDecision().setMaxCollectionWaitMs(5);
             h.config.getRequestLifecycle().getRequest().setTimeoutMs(INACTIVITY_TIMEOUT_MS);
-            h.config.getRequestLifecycle().getRequest().setDispatchConfirmTimeoutPolls(
-                    (INACTIVITY_TIMEOUT_MS) / h.config.getWorkerRegistry().getHealth().getStatusPollIntervalMs());
+            h.config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(INACTIVITY_TIMEOUT_MS);
             h.prefillSelector = ctx -> Math.floorMod(
                     ctx.getRequestId().hashCode(), 2);
             h.startAutoPump(10);

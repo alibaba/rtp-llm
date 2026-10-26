@@ -754,7 +754,7 @@ public class MetricConstant {
 
     /**
      * Requests whose local tracking ended because no matching Engine status arrived within
-     * requestLifecycle.request.dispatchConfirmTimeoutPolls status polls after delivery started.
+     * requestLifecycle.request.statusUpdateTimeoutMs milliseconds after delivery started.
      */
     public static final String REQUEST_DISPATCH_CONFIRM_TIMEOUT_COUNT = "auto_tpm.request.dispatch_confirm_timeout.count";
 

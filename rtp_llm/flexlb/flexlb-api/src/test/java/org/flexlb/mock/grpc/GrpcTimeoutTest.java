@@ -36,8 +36,7 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
     protected FlexlbConfig createConfig() {
         FlexlbConfig config = super.createConfig();
         config.getRequestLifecycle().getRequest().setTimeoutMs(1_800L);
-        config.getRequestLifecycle().getRequest().setDispatchConfirmTimeoutPolls(
-                (1_800L) / config.getWorkerRegistry().getHealth().getStatusPollIntervalMs());
+        config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(1_800L);
         return config;
     }
 
