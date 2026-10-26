@@ -12,6 +12,7 @@ import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient.CancelReply;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.telemetry.FlexlbTrace;
@@ -61,6 +62,7 @@ import static org.flexlb.balance.scheduler.ContextResult.ResponseSelection;
 import static org.flexlb.balance.scheduler.ContextResult.RouteDelivered;
 import static org.flexlb.balance.scheduler.ContextResult.RoutePermit;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
+import static org.flexlb.balance.scheduler.ContextResult.Snapshot;
 import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
 import static org.flexlb.balance.scheduler.ContextResult.Update;
 import static org.flexlb.balance.scheduler.ContextResult.UpdateKind;
@@ -361,28 +363,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                     && update.before().deadlines() == after.deadlines()) {
                 return;
             }
-            accepted.submit(
-                    () -> {
-                        Throwable failure = Failures.run(null, () -> reconcilePreemption(ctx));
-                        var current = ctx.snapshot();
-                        if (current.pendingEnd() != null) {
-                            failure =
-                                    Failures.run(
-                                            failure,
-                                            () -> closeRequest(ctx, current.pendingEnd(), null));
-                        }
-                        failure = Failures.run(failure, () -> confirmDelivery(ctx));
-                        failure =
-                                Failures.run(
-                                        failure,
-                                        () ->
-                                                runtime.deadlines()
-                                                        .update(ctx, ctx.snapshot().deadlines()));
-                        if (ctx.snapshot().phase() == Phase.ENDING) {
-                            failure = Failures.run(failure, () -> requestCleanup(ctx));
-                        }
-                        Failures.rethrow(failure, "Engine evidence continuation failed");
-                    });
+            accepted.submit(() -> advanceRequest(ctx, ctx.snapshot()));
         } catch (Throwable failure) {
             runtime.recordFailure(failure);
             Logger.error("Engine evidence processing failed", failure);
@@ -801,33 +782,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (update.kind() == UpdateKind.STALE) {
                 return;
             }
-            var after = update.after();
-            if (evidence instanceof CleanupAcknowledgement ack
-                    && after.cancellation() != null
-                    && (ack.kind() == CancelEvidenceKind.CLEANED
-                            || ack.kind() == CancelEvidenceKind.FENCED)) {
-                closeRequest(
-                        ctx,
-                        EndEvidence.failure(
-                                after.route(),
-                                EndKind.FRONTEND,
-                                after.cancellation().errorType(),
-                                after.cancellation().detail()),
-                        null);
-            }
-            if (after.pendingEnd() != null && after.pendingEnd().kind() == EndKind.INACTIVITY) {
-                closeRequest(ctx, after.pendingEnd(), null);
-                runtime.deadlines().update(ctx, ctx.snapshot().deadlines());
-                return;
-            }
-            if (after.pendingEnd() != null) {
-                closeRequest(ctx, after.pendingEnd(), null);
-            }
-            confirmDelivery(ctx);
-            runtime.deadlines().update(ctx, ctx.snapshot().deadlines());
-            if (ctx.snapshot().phase() == Phase.ENDING) {
-                requestCleanup(ctx);
-            }
+            advanceRequest(ctx, update.after());
         }
     }
 
@@ -958,102 +913,124 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             boolean release,
             DecodeEndpoint endpoint,
             DecodeResources.ReservationHandle reservation,
-            String detail) {}
-
-    public static PreemptionRegistration.Reply applyCancelReply(
-            PreemptionRegistration attempt,
-            DecodeEndpoint endpoint,
-            org.flexlb.engine.grpc.EngineGrpcClient.CancelReply reply,
-            String detail) {
-        var owner = attempt.owner().data().getScheduler();
-        var phase =
-                switch (reply) {
-                    case ACCEPTED, REQUEST_FENCED -> PreemptionCancelPhase.CANCEL_REQUESTED;
-                    case NOT_FOUND -> PreemptionCancelPhase.NOT_FOUND_STALE;
-                    case FAILED, UNSUPPORTED -> PreemptionCancelPhase.CANCEL_UNKNOWN;
-                    case REQUEST_CLEANED -> null;
-                };
-        boolean cleaned =
-                reply == org.flexlb.engine.grpc.EngineGrpcClient.CancelReply.REQUEST_CLEANED;
-        boolean applied =
-                owner.onPreemption(
-                        attempt,
-                        new PreemptionEvent(
-                                phase,
-                                false,
-                                cleaned ? endpoint : null,
-                                cleaned ? attempt.reservation() : null,
-                                cleaned ? detail : null));
-        if (!applied) {
-            owner.onPreemption(
-                    attempt,
-                    new PreemptionEvent(
-                            PreemptionCancelPhase.CANCEL_UNKNOWN, false, null, null, null));
-            return PreemptionRegistration.Reply.UNKNOWN;
+            String detail,
+            CleanupAcknowledgement cleanup) {
+        public PreemptionEvent(
+                PreemptionCancelPhase phase,
+                boolean release,
+                DecodeEndpoint endpoint,
+                DecodeResources.ReservationHandle reservation,
+                String detail) {
+            this(phase, release, endpoint, reservation, detail, null);
         }
-        return reply == org.flexlb.engine.grpc.EngineGrpcClient.CancelReply.NOT_FOUND
-                ? PreemptionRegistration.Reply.NOT_FOUND
-                : PreemptionRegistration.Reply.WAITING;
+
+        static PreemptionEvent receipt(
+                PreemptionRegistration attempt,
+                DecodeEndpoint endpoint,
+                CancelReply reply,
+                String detail,
+                DeliveryClaim delivery) {
+            var phase =
+                    switch (reply) {
+                        case ACCEPTED, REQUEST_FENCED -> PreemptionCancelPhase.CANCEL_REQUESTED;
+                        case NOT_FOUND -> PreemptionCancelPhase.NOT_FOUND_STALE;
+                        case FAILED, UNSUPPORTED -> PreemptionCancelPhase.CANCEL_UNKNOWN;
+                        case REQUEST_CLEANED -> null;
+                    };
+            return new PreemptionEvent(
+                    phase,
+                    false,
+                    reply == CancelReply.REQUEST_CLEANED ? endpoint : null,
+                    reply == CancelReply.REQUEST_CLEANED ? attempt.reservation() : null,
+                    reply == CancelReply.REQUEST_CLEANED ? detail : null,
+                    delivery == null ? null : acknowledgement(delivery, reply));
+        }
+
+        static CleanupAcknowledgement acknowledgement(DeliveryClaim delivery, CancelReply reply) {
+            return new CleanupAcknowledgement(
+                    delivery,
+                    switch (reply) {
+                        case REQUEST_CLEANED -> CancelEvidenceKind.CLEANED;
+                        case REQUEST_FENCED -> CancelEvidenceKind.FENCED;
+                        case ACCEPTED -> CancelEvidenceKind.ACKNOWLEDGED;
+                        case NOT_FOUND -> CancelEvidenceKind.NOT_FOUND;
+                        case UNSUPPORTED -> CancelEvidenceKind.UNSUPPORTED;
+                        case FAILED -> CancelEvidenceKind.UNKNOWN;
+                    },
+                    System.currentTimeMillis());
+        }
+
+        PreemptionRegistration.Reply progress(boolean applied) {
+            return !applied
+                    ? PreemptionRegistration.Reply.UNKNOWN
+                    : phase == PreemptionCancelPhase.NOT_FOUND_STALE
+                            ? PreemptionRegistration.Reply.NOT_FOUND
+                            : PreemptionRegistration.Reply.WAITING;
+        }
     }
 
     public boolean onPreemption(PreemptionRegistration attempt, PreemptionEvent event) {
         var ctx = attempt.owner();
-        Update update;
+        boolean applied = false, recorded = false, committed = false;
         synchronized (ctx) {
             if (!requests.isCurrent(ctx) || ctx.data().getScheduler() != this) {
                 return false;
             }
             var current = ctx.snapshot();
-            if (current.preemption() == null
-                    || current.preemption().identity() != attempt
-                    || event.endpoint() != null
-                            && (current.route().decodeEp() != event.endpoint()
-                                    || !Objects.equals(
+            if (current.preemption() != null
+                    && current.preemption().identity() == attempt
+                    && (event.endpoint() == null
+                            || current.route().decodeEp() == event.endpoint()
+                                    && Objects.equals(
                                             current.route().decodeReservation(),
                                             event.reservation()))) {
-                return false;
+                committed =
+                        event.endpoint() != null
+                                && event.endpoint()
+                                        .updatePreemption(
+                                                attempt.attemptToken(),
+                                                DecodeResources.PreemptionUpdate.fenced(
+                                                        event.reservation()))
+                                        .status()
+                                        .applied();
+                var terminal =
+                        !committed
+                                ? null
+                                : new EndEvidence(
+                                        current.route(),
+                                        EndKind.PRIORITY,
+                                        null,
+                                        false,
+                                        0L,
+                                        StrategyErrorType.PRIORITY_PREEMPTED,
+                                        event.detail(),
+                                        false,
+                                        true);
+                var update =
+                        ctx.completePreemption(
+                                attempt,
+                                new PreemptionReport(
+                                        event.endpoint() != null && !committed
+                                                ? PreemptionCancelPhase.CANCEL_UNKNOWN
+                                                : event.phase(),
+                                        committed,
+                                        committed,
+                                        event.release(),
+                                        terminal),
+                                System.currentTimeMillis());
+                recorded = update.kind() == UpdateKind.APPLIED;
+                applied = recorded && (event.endpoint() == null || committed);
             }
-            boolean committed =
-                    event.endpoint() != null
-                            && event.endpoint()
-                                    .updatePreemption(
-                                            attempt.attemptToken(),
-                                            DecodeResources.PreemptionUpdate.fenced(
-                                                    event.reservation()))
-                                    .status()
-                                    .applied();
-            if (event.endpoint() != null && !committed) {
-                return false;
+            // A stale attempt must not discard a current delivery's cleanup proof.
+            if (event.cleanup() != null) {
+                recorded |= ctx.recordDeliveryResult(event.cleanup()).kind() != UpdateKind.STALE;
             }
-            var terminal =
-                    event.endpoint() == null
-                            ? null
-                            : new EndEvidence(
-                                    current.route(),
-                                    EndKind.PRIORITY,
-                                    null,
-                                    false,
-                                    0L,
-                                    StrategyErrorType.PRIORITY_PREEMPTED,
-                                    event.detail(),
-                                    false,
-                                    true);
-            update =
-                    ctx.completePreemption(
-                            attempt,
-                            new PreemptionReport(
-                                    event.phase(),
-                                    committed,
-                                    event.endpoint() != null,
-                                    event.release(),
-                                    terminal),
-                            System.currentTimeMillis());
         }
-        if (update.kind() != UpdateKind.APPLIED) {
+        if (!recorded) {
             return false;
         }
         Throwable failure =
-                event.endpoint() == null
+                !committed
                         ? null
                         : Failures.run(
                                 null,
@@ -1062,21 +1039,61 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                                 .publishCapacity(
                                                         org.flexlb.balance.endpoint.DecodeEndpoint
                                                                 .CapacityEdge.BOTH));
-        failure = Failures.run(failure, () -> reconcilePreemption(ctx));
-        var after = ctx.snapshot();
-        if (after.pendingEnd() != null) {
-            failure = Failures.run(failure, () -> closeRequest(ctx, after.pendingEnd(), null));
-        } else {
-            failure = Failures.run(failure, () -> confirmDelivery(ctx));
+        failure = Failures.run(failure, () -> advanceRequest(ctx, ctx.snapshot()));
+        Failures.rethrow(failure, "preemption continuation failed");
+        return applied;
+    }
+
+    /** Facts are committed before effects run; the caller holds no Context monitor. */
+    private void advanceRequest(RequestContext ctx, Snapshot state) {
+        Throwable failure = null;
+        if (state.preemption() != null) {
+            try {
+                reconcilePreemption(ctx);
+            } catch (RuntimeException | Error failed) {
+                failure = failed;
+            }
+            state = ctx.snapshot();
         }
-        if (after.cancellation() != null) {
-            failure = Failures.run(failure, () -> cancel(ctx, 0L, after.cancellation().reason()));
+        var end =
+                state.cancellation() != null
+                                && state.delivery() != null
+                                && state.delivery().prefillProof()
+                        ? EndEvidence.failure(
+                                state.route(),
+                                EndKind.FRONTEND,
+                                state.cancellation().errorType(),
+                                state.cancellation().detail())
+                        : state.pendingEnd();
+        try {
+            if (end != null) {
+                closeRequest(ctx, end, null);
+            } else {
+                confirmDelivery(ctx);
+            }
+        } catch (RuntimeException | Error failed) {
+            failure = Failures.append(failure, failed);
+        }
+        if (state.preemption() != null && state.cancellation() != null) {
+            try {
+                cancel(ctx, 0L, state.cancellation().reason());
+            } catch (RuntimeException | Error failed) {
+                failure = Failures.append(failure, failed);
+            }
+        }
+        try {
+            runtime.deadlines().update(ctx, ctx.snapshot().deadlines());
+        } catch (RuntimeException | Error failed) {
+            failure = Failures.append(failure, failed);
         }
         if (ctx.snapshot().phase() == Phase.ENDING) {
-            failure = Failures.run(failure, () -> requestCleanup(ctx));
+            try {
+                requestCleanup(ctx);
+            } catch (RuntimeException | Error failed) {
+                failure = Failures.append(failure, failed);
+            }
         }
-        Failures.rethrow(failure, "preemption continuation failed");
-        return true;
+        Failures.rethrow(failure, "request continuation failed");
     }
 
     /** Reconcile the real Decode ledger first, then commit only that exact attempt's state. */

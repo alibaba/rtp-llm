@@ -1674,6 +1674,109 @@ class DeliveryClaimTest {
     }
 
     @Test
+    void combinedReceiptRecordsBothFactsBeforeItsOnlyContinuation() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var grant =
+                    f.context.beginPreemption(
+                            f.reservation,
+                            91L,
+                            new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
+            var registration = ((ContextResult.Granted<PreemptionRegistration>) grant).value();
+            f.owner.onPreemption(
+                    registration,
+                    new AbstractRequestScheduler.PreemptionEvent(
+                            org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT,
+                            false,
+                            null,
+                            null,
+                            null));
+            var timer = org.mockito.Mockito.spy(f.owner.runtime.deadlines());
+            ReflectionTestUtils.setField(f.owner.runtime, "timer", timer);
+            doAnswer(
+                            call -> {
+                                assertFalse(Thread.holdsLock(f.context));
+                                var state = f.context.snapshot();
+                                assertEquals(
+                                        org.flexlb.balance.preemption.PreemptionCancelPhase
+                                                .CANCEL_REQUESTED,
+                                        state.preemption().phase());
+                                assertTrue(
+                                        state.delivery().prefillProof(),
+                                        "proof must precede continuation");
+                                assertFalse(
+                                        state.delivery().decodeProof(),
+                                        "FENCED is not Decode release proof");
+                                return call.callRealMethod();
+                            })
+                    .when(timer)
+                    .update(eq(f.context), any());
+            try {
+                var response =
+                        SchedulerTestSupport.dispatcher(f.owner.runtime)
+                                .preempt(registration, 1000L);
+                verify(f.channel, timeout(2000)).cancelAsync(any(), anyInt(), any(), anyLong());
+                f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
+                assertEquals(
+                        PreemptionRegistration.Reply.WAITING, response.get(2, TimeUnit.SECONDS));
+                SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+                verify(timer, times(1)).update(eq(f.context), any());
+                verify(f.owner, never())
+                        .onDeliveryEvidence(
+                                eq(f.claim), isA(ContextResult.CleanupAcknowledgement.class));
+                assertFalse(f.context.data().getFuture().isDone());
+                assertTrue(f.decodeOwned.get());
+            } finally {
+                org.mockito.Mockito.doCallRealMethod().when(timer).update(any(), any());
+            }
+            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryEvidence(
+                    f.claim,
+                    new ContextResult.TransportResult(
+                            f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+            f.owner.onDeliveryEvidence(
+                    f.claim,
+                    new ContextResult.CleanupAcknowledgement(
+                            f.claim,
+                            ContextResult.CancelEvidenceKind.CLEANED,
+                            System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @Test
+    void staleAttemptStillRecordsCleanupForTheCurrentDelivery() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var stale =
+                    new PreemptionRegistration(
+                            f.context,
+                            91L,
+                            f.reservation,
+                            new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
+            var response = SchedulerTestSupport.dispatcher(f.owner.runtime).preempt(stale, 1000L);
+            verify(f.channel, timeout(2000)).cancelAsync(any(), anyInt(), any(), anyLong());
+            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            assertEquals(PreemptionRegistration.Reply.UNKNOWN, response.get(2, TimeUnit.SECONDS));
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            assertNull(f.context.snapshot().preemption());
+            assertTrue(f.context.snapshot().delivery().prefillProof());
+            assertTrue(f.context.snapshot().delivery().decodeProof());
+            assertFalse(f.settlement().isDone(), "sender has not exited");
+            verify(f.decode, never()).updatePreemption(anyLong(), any());
+            verify(f.owner, never())
+                    .onDeliveryEvidence(
+                            eq(f.claim), isA(ContextResult.CleanupAcknowledgement.class));
+            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryEvidence(
+                    f.claim,
+                    new ContextResult.TransportResult(
+                            f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @Test
     void cancellationQueuedBehindPreemptionInitializesItsOwnDeadlineBeforeAdvancing()
             throws Exception {
         try (var f = new Fixture()) {
