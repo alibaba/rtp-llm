@@ -289,6 +289,7 @@ TEST_F(P2PConnectorTest, EnabledWriteCommandsDispatchOnlyToMatchingRole) {
         write->set_type(role == RoleType::PREFILL ? HANDLE_WRITE : WRITE);
         write->set_unique_key("empty_write_rank");
         write->set_deadline_ms(currentTimeMs() + 5000);
+        write->set_transfer_timeout_ms(5000);
         FunctionResponsePB response;
         ASSERT_TRUE(connector->executeFunction(request, response));
         EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);

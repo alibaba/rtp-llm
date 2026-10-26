@@ -49,7 +49,7 @@ void WriteTaskGroup::watchTask(const std::string& key, const transfer::IKVCacheR
 
 ErrorInfo WriteTaskGroup::waitDone() {
     std::unique_lock<std::mutex> lock(mutex);
-    const auto deadline = std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms));
+    const auto deadline = std::chrono::steady_clock::time_point(std::chrono::milliseconds(stop_at_ms));
     if (!cv.wait_until(lock, deadline, [this]() { return lease->isStopped() || cancelled || error.hasError(); })
         && error.ok()) {
         error = ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "write transfer deadline exceeded");
@@ -88,6 +88,7 @@ bool WriteTaskGroup::beginSourceTransfer(int64_t deadline) {
         return false;
     }
     deadline_ms = std::min(deadline_ms, deadline);
+    stop_at_ms = std::min(stop_at_ms, writebackSteadyDeadline(deadline));
     source_submitted_ = true;
     return true;
 }

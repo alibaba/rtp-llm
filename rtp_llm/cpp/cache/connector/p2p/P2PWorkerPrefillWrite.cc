@@ -53,7 +53,7 @@ ErrorInfo P2PWorkerPrefillWrite::handleWrite(int64_t,
     {
         std::lock_guard<std::mutex> lock(group->mutex);
         for (auto& unit : units) {
-            if (group->cancelled || currentTimeMs() >= group->deadline_ms) {
+            if (group->cancelled || P2PNotification::nowMs() >= group->stop_at_ms) {
                 group->error = ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "write registration expired or cancelled");
                 break;
             }
@@ -156,11 +156,11 @@ void P2PWorkerPrefillWrite::removeRecvTasks(const std::shared_ptr<p2p_internal::
 
 void P2PWorkerPrefillWrite::cleanup() {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto                  now_ms = currentTimeMs();
+    const auto                  now_ms = P2PNotification::nowMs();
     for (auto it = groups_.begin(); it != groups_.end();) {
         auto& group   = it->second;
         bool  stopped = group->lease->isStopped();
-        if (!stopped && now_ms >= group->deadline_ms) {
+        if (!stopped && now_ms >= group->stop_at_ms) {
             group->cancel();
             removeRecvTasks(group);
             stopped = group->lease->isStopped();
@@ -169,8 +169,8 @@ void P2PWorkerPrefillWrite::cleanup() {
             removeRecvTasks(group);
             group->releaseStoppedTasks();
         }
-        if (stopped && now_ms >= group->deadline_ms
-            && now_ms - group->deadline_ms >= std::max<int64_t>(1, config_.p2p_cancelled_keys_ttl_ms)) {
+        if (stopped && now_ms >= group->stop_at_ms
+            && now_ms - group->stop_at_ms >= std::max<int64_t>(1, config_.p2p_cancelled_keys_ttl_ms)) {
             it = groups_.erase(it);
         } else {
             ++it;

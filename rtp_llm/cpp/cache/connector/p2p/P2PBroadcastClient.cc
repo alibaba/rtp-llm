@@ -82,7 +82,10 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
         auto* p2p_request = request.mutable_p2p_request();
         if (p2p_request->type() == P2PConnectorBroadcastType::READ
             || p2p_request->type() == P2PConnectorBroadcastType::HANDLE_READ
-            || p2p_request->type() == P2PConnectorBroadcastType::HANDLE_READ_NO_TRANSFER) {
+            || p2p_request->type() == P2PConnectorBroadcastType::HANDLE_READ_NO_TRANSFER
+            || p2p_request->type() == P2PConnectorBroadcastType::WRITE
+            || p2p_request->type() == P2PConnectorBroadcastType::HANDLE_WRITE
+            || p2p_request->type() == P2PConnectorBroadcastType::HANDLE_WRITE_READY) {
             p2p_request->set_transfer_timeout_ms(timeout_ms);
         }
     }

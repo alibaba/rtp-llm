@@ -45,7 +45,7 @@ bool P2PSchedulerDecodeWrite::init() {
     }
     auto async_write_pool = std::make_shared<autil::LockFreeThreadPool>(
         kP2PDecodeKickoffThreadCount, kP2PDecodeKickoffQueueSize, nullptr, "P2PAsyncWriteKickoff");
-    if (!async_write_pool->start() || !checker_.init()) {
+    if (!async_write_pool->start() || !checker_.init(config_)) {
         return false;
     }
     async_write_pool_ = std::move(async_write_pool);
@@ -244,7 +244,8 @@ std::shared_ptr<P2PConnectorAsyncWriteContext> P2PSchedulerDecodeWrite::asyncWri
                                                                   config_.p2p_cancel_broadcast_timeout_ms,
                                                                   config_.p2p_lease_query_timeout_ms,
                                                                   release_source,
-                                                                  metrics_reporter_);
+                                                                  metrics_reporter_,
+                                                                  source_group->sourceResource());
         if (!checker_.addContext(context)) {
             context->finishWithoutTransfer(
                 ErrorInfo(ErrorCode::OUTPUT_QUEUE_FULL, "writeback checker stopped or duplicate key"));
@@ -257,10 +258,9 @@ std::shared_ptr<P2PConnectorAsyncWriteContext> P2PSchedulerDecodeWrite::asyncWri
              token_ids = std::move(token_ids),
              input_length,
              kv_ready_token_count,
-             routing = std::move(routing),
-             deadline]() {
+             routing = std::move(routing)]() {
                 startAsyncWriteCalls(
-                    context, source_group, token_ids, input_length, kv_ready_token_count, routing, deadline);
+                    context, source_group, token_ids, input_length, kv_ready_token_count, routing);
             },
             false,
             false);
@@ -292,8 +292,7 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
                                                    const std::vector<int>&                               token_ids,
                                                    int                                                   input_length,
                                                    size_t                         kv_ready_token_count,
-                                                   const Meta::P2PRoutingContext& routing,
-                                                   int64_t                        deadline_ms) {
+                                                   const Meta::P2PRoutingContext& routing) {
     if (!context->beginKickoff()) {
         return;
     }
@@ -365,7 +364,7 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
             }
         }
         context->setPlannedBytes(planned_bytes);
-        if (!source_group->beginSourceTransfer(deadline_ms)) {
+        if (!source_group->beginSourceTransfer(context->deadlineMs())) {
             return context->finishWithoutTransfer(ErrorInfo(ErrorCode::CANCELLED, "writeback cancelled before start"));
         }
         const auto prefill_addr = formatGrpcHostPort(routing.prefill_addr.first, routing.prefill_addr.second);
@@ -378,16 +377,16 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
                     return std::shared_ptr<DecodeWriteHelper::CancelResult>{};
                 }
                 const auto deadline  = owner->deadlineMs();
-                const auto remaining = deadline + config_.p2p_lease_query_timeout_ms - currentTimeMs();
                 return server_caller_.cancel(
-                    prefill_addr, key, deadline, std::min(remaining, config_.p2p_cancel_broadcast_timeout_ms));
+                    prefill_addr, key, deadline,
+                    std::min(config_.p2p_lease_query_timeout_ms, config_.p2p_cancel_broadcast_timeout_ms));
             })) {
             return context->finishWithoutTransfer(context->errorInfo());
         }
 
         // step 3. call the prefill worker to start the writeback, which will trigger the prefill worker to broadcast the request to all decode workers.
         context->setPeerCallResult(server_caller_.write(
-            routing.prefill_addr.first, routing.prefill_addr.second, std::move(request), deadline_ms));
+            routing.prefill_addr.first, routing.prefill_addr.second, std::move(request), context->deadlineMs()));
     } catch (const std::exception& e) {
         context->cancel(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, e.what()));
         context->finishWithoutTransfer(context->errorInfo());

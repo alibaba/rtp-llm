@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWritebackResourceUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PNotification.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+#include <cstdlib>
 #include <map>
 #include <set>
 
@@ -57,6 +60,62 @@ bool writebackKeepsKvReserveAfterRelease(const std::vector<SingleTypeCacheManage
         }
     }
     return poolsKeepReserve(pools, reserve_ratio);
+}
+
+bool WritebackRetainedKv::init(const std::shared_ptr<const CacheTopology>& topology,
+                               int threshold_percent,
+                               bool prefill) {
+    if (!topology || threshold_percent < 1 || threshold_percent > 100) {
+        return false;
+    }
+    group_block_bytes_.clear();
+    total_bytes_ = 0;
+    for (const auto& group : topology->groups()) {
+        if (group.policy.memory_placement != CacheMemoryPlacement::DEVICE) {
+            continue;
+        }
+        const size_t bytes = topology->blockSizeBytesForGroup(group.tag);
+        group_block_bytes_.emplace(group.tag, bytes);
+        total_bytes_ += bytes * group.block_num;
+    }
+    threshold_percent_ = threshold_percent;
+    prefill_ = prefill;
+    return total_bytes_ > 0;
+}
+
+void WritebackRetainedKv::check(const std::vector<KVCacheResourcePtr>& resources) {
+    std::map<std::string, std::set<BlockIdxType>> held_blocks;
+    for (const auto& resource : resources) {
+        for (const auto& [tag, bytes] : group_block_bytes_) {
+            for (const auto block : resource->blocks(tag)) {
+                if (!isNullBlockIdx(block)) {
+                    held_blocks[tag].insert(block);
+                }
+            }
+        }
+    }
+    size_t held_bytes = 0;
+    for (const auto& [tag, blocks] : held_blocks) {
+        held_bytes += blocks.size() * group_block_bytes_.at(tag);
+    }
+    const auto now_ms = P2PNotification::nowMs();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (held_bytes > 0 && (last_log_ms_ == 0 || now_ms - last_log_ms_ >= 30000)) {
+        RTP_LLM_LOG_WARNING("writeback retained KV: role=%s contexts=%zu held_bytes=%zu total_bytes=%zu threshold=%d",
+                            prefill_ ? "PREFILL" : "DECODE", resources.size(), held_bytes, total_bytes_, threshold_percent_);
+        last_log_ms_ = now_ms;
+    } else if (held_bytes == 0 && last_log_ms_ != 0) {
+        RTP_LLM_LOG_INFO("writeback retained KV released after physical stop, role=%s", prefill_ ? "PREFILL" : "DECODE");
+        last_log_ms_ = 0;
+    }
+    const size_t threshold_bytes = total_bytes_ / 100 * threshold_percent_
+                                   + total_bytes_ % 100 * threshold_percent_ / 100;
+    if (held_bytes > threshold_bytes) {
+        RTP_LLM_LOG_ERROR("writeback retained KV exceeded exit threshold; aborting with KV held: "
+                          "role=%s held_bytes=%zu total_bytes=%zu threshold=%d",
+                          prefill_ ? "PREFILL" : "DECODE", held_bytes, total_bytes_, threshold_percent_);
+        std::abort();
+    }
 }
 
 }  // namespace rtp_llm
