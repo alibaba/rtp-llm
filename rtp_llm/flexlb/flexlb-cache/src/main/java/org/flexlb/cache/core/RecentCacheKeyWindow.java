@@ -49,15 +49,28 @@ public class RecentCacheKeyWindow {
         this(
                 resolveTimeWindowMs(configService),
                 resolveMaxCacheKeys(configService),
+                configService == null
+                        || configService.loadBalanceConfig() == null
+                        || configService
+                                .loadBalanceConfig()
+                                .getObservability()
+                                .getCacheHit()
+                                .getRecentKeyWindow()
+                                .isWriteEnabled(),
                 System::currentTimeMillis);
     }
 
     RecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
+        this(timeWindowMs, maxCacheKeys, true, nowSupplier);
+    }
+
+    private RecentCacheKeyWindow(
+            long timeWindowMs, long maxCacheKeys, boolean writeEnabled, LongSupplier nowSupplier) {
         this.timeWindowMs = normalizeTimeWindowMs(timeWindowMs);
-        this.maxCacheKeys = normalizeCapacity(maxCacheKeys);
+        this.maxCacheKeys = writeEnabled ? normalizeCapacity(maxCacheKeys) : 0;
         this.nowSupplier = nowSupplier;
 
-        int hashTableCapacity = hashTableCapacityFor(this.maxCacheKeys);
+        int hashTableCapacity = writeEnabled ? hashTableCapacityFor(this.maxCacheKeys) : 0;
         this.tableMask = hashTableCapacity - 1;
         this.cacheKeyRing = new long[this.maxCacheKeys];
         this.entryTimestampMs = new long[this.maxCacheKeys];
@@ -68,7 +81,8 @@ public class RecentCacheKeyWindow {
         this.tableStates = new byte[hashTableCapacity];
 
         log.info(
-                "Recent cache-key pool config: timeWindowMs={}, maxCacheKeys={}, hashTableCapacity={}",
+                "Recent cache-key pool config: writeEnabled={}, timeWindowMs={}, maxCacheKeys={}, hashTableCapacity={}",
+                writeEnabled,
                 this.timeWindowMs,
                 this.maxCacheKeys,
                 hashTableCapacity);
@@ -79,6 +93,9 @@ public class RecentCacheKeyWindow {
     }
 
     Snapshot record(List<Long> cacheKeys, long nowMs) {
+        if (maxCacheKeys == 0) {
+            return new Snapshot(timeWindowMs, 0L, 0L);
+        }
         long requestOccurrences;
         long requestHitOccurrences;
         synchronized (this) {
