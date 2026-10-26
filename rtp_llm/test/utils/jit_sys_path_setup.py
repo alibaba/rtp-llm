@@ -8,6 +8,7 @@ This is particularly useful in testing environments where you want to use
 a specific version of flashinfer different from the system-installed one.
 """
 
+import hashlib
 import importlib.metadata
 import logging
 import os
@@ -89,9 +90,22 @@ def _build_variant(source_path):
 
 def _cache_key(package_name, version, source_path):
     variant = _build_variant(source_path)
-    if variant is None:
-        return "%s_python-%s" % (package_name, version)
-    return "%s_python-%s__%s" % (package_name, version, variant)
+    key = "%s_python-%s" % (package_name, version)
+    if variant is not None:
+        key += "__" + variant
+    if package_name == "deep_gemm":
+        # Header patches keep the wheel version; Bazel runfiles omit RECORD.
+        includes = Path(source_path) / "include" / "deep_gemm"
+        if includes.is_dir():
+            digest = hashlib.sha256()
+            for header in sorted(includes.rglob("*")):
+                if header.is_file():
+                    digest.update(
+                        header.relative_to(includes).as_posix().encode() + b"\0"
+                    )
+                    digest.update(header.read_bytes() + b"\0")
+            key += "__" + digest.hexdigest()[:16]
+    return key
 
 
 def copy_package_with_lock(package_name, cache_dir):
@@ -110,7 +124,7 @@ def copy_package_with_lock(package_name, cache_dir):
 
     logging.info(f"[Package Copy] Found {package_name} v{version} at {source_path}")
 
-    # Keyed on version AND build variant; see _build_variant.
+    # Include the build variant and any patched DeepGEMM headers.
     cache_key = _cache_key(package_name, version, source_path)
     target_base = Path(cache_dir) / cache_key
     target_site_packages = target_base / "site-packages"

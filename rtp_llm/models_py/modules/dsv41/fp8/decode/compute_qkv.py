@@ -124,7 +124,9 @@ def decode_compute_qkv(
         or (merged is not None and os.environ.get("DSV41_FUSED_QB_KV", "0") == "1")
     )
     native_qkv = (
-        None if needs_raw_kv else try_project_qkv_to_cache(
+        None
+        if needs_raw_kv
+        else try_project_qkv_to_cache(
             attn, x, freqs_cis, swa_pool, swa_slots, shared_input_quant
         )
     )
@@ -231,7 +233,8 @@ def decode_compute_qkv(
                 )
                 # The custom consumer does not opt into PDL. Preserve the
                 # official wait-enabled DeepGEMM consumer for a PDL producer.
-                if reindex and rd == 64 and not qb_pdl else None
+                if reindex and rd == 64 and not qb_pdl
+                else None
             )
             if prepared is None:
                 q, index_q = merged.forward_quantized(
@@ -278,6 +281,14 @@ def decode_compute_qkv(
             swa_slots,
             eps=attn.eps,
             freqs_cis=freqs_cis,
+            # The quantized-Q producer orders QA before QB. Other projection
+            # paths do not establish that raw KV is ready for an early launch.
+            kv_ready=(
+                qb_pdl
+                and qr_quantized is not None
+                and fused_qkv is not None
+                and not reindex
+            ),
             **(
                 {"apply_q_rope": False, "pad_query_heads": mega_attention.padded_heads}
                 if mega_attention is not None
@@ -286,8 +297,15 @@ def decode_compute_qkv(
         )
         if fused is not None:
             return DecodeQKV(
-                qr, fused.q, fused.kv, fused.freqs_cis, qr_quantized, True, index_q, head_weights,
-                index_prepared
+                qr,
+                fused.q,
+                fused.kv,
+                fused.freqs_cis,
+                qr_quantized,
+                True,
+                index_q,
+                head_weights,
+                index_prepared,
             )
     if mega_attention is None:
         if getattr(attn, "skip_post_q_norm", False):
