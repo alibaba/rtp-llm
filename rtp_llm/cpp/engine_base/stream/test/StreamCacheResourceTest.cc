@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/PrefillResultStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -329,6 +330,7 @@ protected:
         generate_input->generate_config = generate_config;
         ModelConfig model_config;
         model_config.attn_config.tokens_per_block = 2;
+        model_config.vocab_size = 128;
         RuntimeConfig runtime_config;
         model_config.vocab_size = 1024;
         model_config.max_seq_len = 2048;
@@ -1342,22 +1344,99 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadContextGatesReadinessUntilDone)
     EXPECT_FALSE(stream_->hasError());
 }
 
+TEST_F(StreamCacheResourceTest, WritebackAccountingWaitsForSuccessfulAllocationAndPersistsPerRequest) {
+    prepareResource(true, RoleType::PREFILL);
+    auto&        resource = stream_->streamCacheResource();
+    MallocResult matched{true, 4};
+    matched.reuse_accounting.unaccounted_block_indices = {1};
+    auto allocator             = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_)).WillRepeatedly(testing::Return(matched));
+    EXPECT_CALL(*allocator, incrMalloc(testing::_))
+        .WillOnce(testing::Return(MallocResult{false, 0, 0, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}))
+        .WillOnce(testing::Return(MallocResult{true, 0}));
+    EXPECT_CALL(*allocator, free(testing::_)).Times(1);
+
+    EXPECT_FALSE(resource.initKVBlock().ok());
+    EXPECT_EQ(stream_->writebackFirstUseLength(), 0);
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    EXPECT_EQ(stream_->initialReuseLength(), 4);
+    EXPECT_EQ(stream_->reuseLength(), 4);
+    EXPECT_EQ(stream_->writebackFirstUseLength(), 2);
+    resource.finalizeReuseAccounting();
+    EXPECT_EQ(stream_->writebackFirstUseLength(), 2);
+    auto next_request = matched.reuse_accounting;
+    EXPECT_EQ(next_request.unaccountedBlocks(2), 1u);
+}
+
+TEST_F(StreamCacheResourceTest, WritebackAccountingUsesCanonicalCpBlocks) {
+    prepareResource(true, RoleType::PREFILL);
+    auto& resource                  = stream_->streamCacheResource();
+    cache_manager_->cp_slot_mapper_ = std::make_shared<CPSlotMapper>(0, 2, 2);
+    ASSERT_EQ(resource.reuseBlockTokens(), 4);
+    stream_->setInitialReuseLength(4);
+    resource.reuse_accounting_.unaccounted_block_indices = {0};
+    resource.finalizeReuseAccounting();
+    EXPECT_EQ(stream_->writebackFirstUseLength(), 4);
+    EXPECT_EQ(stream_->initialReuseLength(), 4);
+}
+
+TEST_F(StreamCacheResourceTest, OnlySuccessfulPrefillReleaseRequestsAccountingCommit) {
+    for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        prepareResource(true, role);
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        const auto actual_allocator = cache_manager_->coordinator_manager_;
+        auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+        EXPECT_CALL(*allocator, insertIntoCache(testing::_, testing::_))
+            .WillOnce(testing::Invoke([&](const InsertInfo& info, size_t& resident_prefix_length) {
+                EXPECT_EQ(info.account_for_prefill, role == RoleType::PREFILL);
+                actual_allocator->insertIntoCache(info, resident_prefix_length);
+            }));
+        EXPECT_CALL(*allocator, free(testing::_)).WillOnce(testing::Invoke([&](const FreeInfo& info) {
+            actual_allocator->free(info);
+        }));
+        cache_manager_->coordinator_manager_ = allocator;
+        stream_->generate_status_->status = StreamState::FINISHED;
+        resource.releaseResource();
+        cache_manager_->coordinator_manager_ = actual_allocator;
+    }
+}
+
+TEST_F(StreamCacheResourceTest, WritebackAccountingLoadFailureOnlyCountsSurvivingDevicePrefix) {
+    prepareResource(true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    stream_->setInitialReuseLength(2);
+    resource.reuse_accounting_.unaccounted_block_indices = {0, 1};
+    auto context                      = makeAllocatorLoadContext(2, {Tier::DEVICE, Tier::HOST});
+    resource.allocator_load_context_  = context;
+    EXPECT_FALSE(resource.loadCacheDone());
+    EXPECT_EQ(stream_->writebackFirstUseLength(), 0);
+    ASSERT_TRUE(context->completeTransfers(1, false));
+    ASSERT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(stream_->writebackFirstUseLength(), 2);
+    EXPECT_TRUE(resource.reuse_accounting_.unaccounted_block_indices.empty());
+}
+
 TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
     prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
 
     auto load_context =
         makeAllocatorLoadContext(/*matched_blocks=*/3, {Tier::DEVICE, Tier::HOST, Tier::DISK}, /*commit=*/false);
-    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    auto allocator             = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
     cache_manager_->coordinator_manager_ = allocator;
-    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
-        .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/2, 0, load_context}));
+    MallocResult matched{true, 2, 0, load_context};
+    matched.reuse_accounting.unaccounted_block_indices = {1, 2};
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_)).WillOnce(testing::Return(matched));
     EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
 
     ASSERT_TRUE(resource.initKVBlock().ok());
     EXPECT_EQ(stream_->reuseLength(), 2);
     EXPECT_EQ(stream_->hostReuseLength(), 0);
     EXPECT_EQ(stream_->diskReuseLength(), 0);
+
+    EXPECT_EQ(stream_->writebackFirstUseLength(), 0);
 
     EXPECT_TRUE(load_context->completeTransfers(1, true));
     EXPECT_TRUE(load_context->completeTransfers(1, true));
@@ -1368,6 +1447,8 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
     EXPECT_EQ(stream_->hostReuseLength(), 2);
     EXPECT_EQ(stream_->diskReuseLength(), 2);
     EXPECT_EQ(stream_->deviceReuseLength(), 2);
+    EXPECT_EQ(stream_->writebackFirstUseLength(), 4);
+    EXPECT_TRUE(resource.reuse_accounting_.unaccounted_block_indices.empty());
 }
 
 TEST_F(StreamCacheResourceTest, testInitRejectsSuccessfulNonLoadAllocatorContext) {
@@ -1739,6 +1820,8 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenEnqueuesDecodeDuplicateForSuppr
     server_result->side_channel_payload.has_data        = true;
     server_result->side_channel_payload.has_first_token = true;
     server_result->side_channel_payload.first_token_id   = 7;
+    server_result->side_channel_payload.total_reuse_len  = 4;
+    server_result->side_channel_payload.writeback_first_use_len = 2;
     auto collector                                       = std::make_shared<P2PConnectorMetricsCollector>();
     auto context   = std::make_shared<P2PConnectorAsyncReadContext>(matched_resource,
                                                                     broadcast_result,
@@ -1757,6 +1840,8 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenEnqueuesDecodeDuplicateForSuppr
     EXPECT_EQ(stream_->last_output_pos_, old_output_pos + 1);
     EXPECT_EQ(stream_->last_output_pos_, stream_->seqLength());
     EXPECT_TRUE(stream_->hasOutput());
+    EXPECT_EQ(stream_->prefillTotalReuseLen(), 4);
+    EXPECT_EQ(stream_->prefillWritebackFirstUseLength(), 2);
 }
 
 TEST_F(StreamCacheResourceTest, testP2PDsparkHandoffAcceptsAbsentAndZeroElementTensors) {
@@ -1968,6 +2053,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenFinishesSingleTokenRequestAfter
     prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
     stream_->generateConfig()->pd_separation = true;
     auto& resource = stream_->streamCacheResource();
+    stream_->generateConfig()->pd_separation = true;
     stream_->generateConfig()->max_new_tokens = 1;
     stream_->generate_status_->status         = StreamState::LOADING_CACHE;
 

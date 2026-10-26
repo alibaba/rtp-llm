@@ -56,7 +56,8 @@ public:
     BlockTreeInsertResult insertNode(const CacheKeysType&                              cache_keys,
                                      const std::vector<std::vector<GroupSetResource>>& resources,
                                      bool                                              collect_path,
-                                     bool                                              is_resident);
+                                     bool                                              is_resident,
+                                     bool                                              account_for_prefill = false);
 
     bool      isRemovable(TreeNode* node) const;
     void      removePendingNodes(const std::unordered_set<TreeNode*>& nodes);
@@ -105,7 +106,8 @@ private:
     BlockTreeInsertResult insertNodeImpl(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          bool                                              collect_path,
-                                         bool                                              is_resident);
+                                         bool                                              is_resident,
+                                         bool                                              account_for_prefill);
 
     void      removeNode(TreeNode* node);
     TreeNode* createNode(CacheKeyType key, TreeNode* parent);

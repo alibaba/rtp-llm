@@ -198,6 +198,26 @@ TEST(DecodeRpcServerTest, UpdateAuxInfoUsesPrefillReuseAsTopLevelAndPreservesDec
     EXPECT_EQ(aux_info.decode_disk_reuse_len(), 2);
 }
 
+TEST(DecodeRpcServerTest, WritebackFirstUseIsDeductedAfterMergingPhysicalReuse) {
+    for (bool independent : {false, true}) {
+        for (int decode_total : {64, 128, 256}) {
+            DecodeRpcServer server;
+            auto            stream = makeStream({11, 12, 13});
+            stream->setPrefillReuseLength(128, 32, 96, 8, 4, independent, 32);
+            for (size_t chunk = 0; chunk < 2; ++chunk) {
+                auto outputs = makeOutputsWithDecodeReuse(decode_total, 16, decode_total - 16, 2, 1);
+                server.updateAuxInfo(outputs, stream);
+                const auto& aux    = outputs.flatten_output().aux_info(0);
+                const int   actual = independent && decode_total > 128 ? decode_total : 128;
+                EXPECT_EQ(aux.total_reuse_len(), actual - 32);
+                EXPECT_EQ(aux.writeback_first_use_len(), 32);
+                EXPECT_EQ(aux.prefill_total_reuse_len(), 128);
+                EXPECT_EQ(aux.decode_total_reuse_len(), decode_total);
+            }
+        }
+    }
+}
+
 TEST(DecodeRpcServerTest, IndependentPrefillPoolsExposeTheLongerReusePhase) {
     for (bool independent : {false, true}) {
         for (int decode_total : {64, 128, 256}) {

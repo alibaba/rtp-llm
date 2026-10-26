@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -97,6 +98,277 @@ bool CoordinatorCacheManager::init() {
     }
 
     return true;
+}
+
+ErrorInfo CoordinatorCacheManager::populateMatchedBlocks(const BlockTreeMatchResult& match_result,
+                                                         KVCacheResource&            resource) const {
+    using ResourceSlot = std::pair<std::string, size_t>;
+    std::map<ResourceSlot, BlockIdxType> assignments;
+    const int cp_size = cp_slot_mapper_ ? cp_slot_mapper_->cpSize() : 1;
+
+    // check that all matched blocks are not conflicting with the current resource, and collect the matched blocks into
+    // the resource.
+    const auto collect_blocks =
+        [&](size_t group_set_id, size_t path_index, const BlockIndicesType& blocks) -> ErrorInfo {
+        const auto& group_tags = block_tree_cache_->groupSets()[group_set_id]->groupTags();
+        for (size_t member = 0; member < group_tags.size(); ++member) {
+            const auto& tag = group_tags[member];
+            const auto& target = resource.blocks(tag);
+            const auto position = loadTargetPosition(path_index, tag, cp_slot_mapper_, cp_size);
+            if (position >= target.size()) {
+                return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "matched KV cache position out of range");
+            }
+            const auto current = target[position];
+            if (!isNullBlockIdx(current) && current != blocks[member]) {
+                return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "matched KV cache block changed");
+            }
+            if (!assignments.emplace(ResourceSlot{tag, position}, blocks[member]).second) {
+                return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "duplicate matched KV cache block mapping");
+            }
+        }
+        return ErrorInfo::OkStatus();
+    };
+
+    const auto fail = [&](const ErrorInfo& error) {
+        releaseMatchedBlockReferences(match_result);
+        return error;
+    };
+
+    for (const auto& matched_resource : match_result.matched_device_resources) {
+        const size_t first = match_result.matched_device_blocks - matched_resource.node_blocks.size();
+        for (size_t i = 0; i < matched_resource.node_blocks.size(); ++i) {
+            const auto error =
+                collect_blocks(matched_resource.group_set_id, first + i, matched_resource.node_blocks[i].second);
+            if (error.hasError()) {
+                return fail(error);
+            }
+        }
+    }
+    if (const auto& context = match_result.async_context) {
+        for (size_t i = 0; i < context->loadDescs().size(); ++i) {
+            const auto& desc = context->loadDescs()[i];
+            if (desc.source_tier == Tier::DEVICE) {
+                const auto error = collect_blocks(desc.group_set_id, desc.path_index, desc.source_blocks);
+                if (error.hasError()) {
+                    return fail(error);
+                }
+            } else if (context->joinedLoads()[i]) {
+                const auto error = collect_blocks(desc.group_set_id, desc.path_index, desc.target_blocks);
+                if (error.hasError()) {
+                    return fail(error);
+                }
+            }
+        }
+    }
+    for (const auto& [slot, block] : assignments) {
+        resource.mutableBlockIds(slot.first).setAt(slot.second, block);
+    }
+    return ErrorInfo::OkStatus();
+}
+
+void CoordinatorCacheManager::releaseMatchedBlockReferences(const BlockTreeMatchResult& match_result) const {
+    const auto& group_sets = block_tree_cache_->groupSets();
+    if (match_result.async_context) {
+        RTP_LLM_CHECK_WITH_INFO(block_tree_cache_->abortPendingLoad(match_result.async_context),
+                                "failed to abort rejected KV cache match");
+    }
+    for (const auto& resource : match_result.matched_device_resources) {
+        group_sets[resource.group_set_id]->unreferenceBlocks(resource);
+    }
+    if (!match_result.async_context) {
+        return;
+    }
+    const auto& load_descs  = match_result.async_context->loadDescs();
+    const auto& joined_load = match_result.async_context->joinedLoads();
+    for (size_t i = 0; i < load_descs.size(); ++i) {
+        const auto& desc = load_descs[i];
+        if (!joined_load[i] && desc.source_tier != Tier::DEVICE) {
+            continue;
+        }
+        const auto& blocks = joined_load[i] ? desc.target_blocks : desc.source_blocks;
+        group_sets[desc.group_set_id]->unreferenceBlocks(
+            MultiNodeResource{desc.group_set_id, Tier::DEVICE, {{desc.node, blocks}}});
+    }
+}
+
+ErrorInfo CoordinatorCacheManager::mallocAndBindLoadTargets(KVCacheResource&  resource,
+                                                            bool              enable_reuse_cache,
+                                                            LoadAsyncContext* load_context) const {
+    const auto groups = cacheGroups();
+    const int cp_size = cp_slot_mapper_ ? cp_slot_mapper_->cpSize() : 1;
+    std::unordered_map<std::string, RequiredPositions> required_positions;
+    for (const auto& group : groups) {
+        if (!group->prefixReuseEnabled() || group->policy().group_type == CacheGroupType::FULL) {
+            continue;
+        }
+        const size_t blocks = resource.blocks(group->tag()).size();
+        const size_t tail   = group->activeTailBlocks();
+        const size_t first  = tail > 0 && blocks > tail ? blocks - tail : 0;
+        for (size_t index = first; index < blocks; ++index) {
+            required_positions[group->tag()].insert(index);
+        }
+    }
+    if (load_context) {
+        for (const auto& desc : load_context->loadDescs()) {
+            for (const auto& tag : block_tree_cache_->groupSets()[desc.group_set_id]->groupTags()) {
+                required_positions[tag].insert(loadTargetPosition(desc.path_index, tag, cp_slot_mapper_, cp_size));
+            }
+        }
+    }
+    for (const auto& group : groups) {
+        if (!group->prefixReuseEnabled()) {
+            continue;
+        }
+        if (!group->malloc(resource.mutableBlockIds(group->tag()),
+                           resource.blocks(group->tag()).size() * group->seqSizePerBlock(),
+                           enable_reuse_cache,
+                           0,
+                           nullptr,
+                           required_positions[group->tag()])) {
+            return ErrorInfo(ErrorCode::MALLOC_FAILED, "failed to materialize matched KV cache blocks");
+        }
+    }
+    if (!load_context) {
+        return ErrorInfo::OkStatus();
+    }
+    for (size_t i = 0; i < load_context->loadDescs().size(); ++i) {
+        const auto&      desc = load_context->loadDescs()[i];
+        BlockIndicesType targets;
+        for (const auto& tag : block_tree_cache_->groupSets()[desc.group_set_id]->groupTags()) {
+            const auto& blocks = resource.blocks(tag);
+            const auto position = loadTargetPosition(desc.path_index, tag, cp_slot_mapper_, cp_size);
+            if (position >= blocks.size() || isNullBlockIdx(blocks[position])) {
+                return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "invalid KV cache load target");
+            }
+            targets.push_back(blocks[position]);
+        }
+        if (load_context->joinedLoads()[i] && targets != desc.target_blocks) {
+            return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "joined KV cache load target changed");
+        }
+        if (!load_context->joinedLoads()[i]) {
+            load_context->setTargetBlocks(i, std::move(targets));
+        }
+    }
+    return ErrorInfo::OkStatus();
+}
+
+ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType&               cache_keys,
+                                                             size_t                             required_prefix_blocks,
+                                                             KVCacheResourcePtr&                resource,
+                                                             size_t&                            start_block,
+                                                             std::shared_ptr<LoadAsyncContext>& load_context) {
+    resource.reset();
+    load_context.reset();
+    start_block = 0;
+    if (!block_tree_cache_ || !block_tree_cache_->isDeviceCacheEnabled() || allocation_type_ != AllocationType::DEVICE) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert requires reusable DEVICE groups");
+    }
+    const size_t block_size = seqSizePerBlock();
+    const size_t cp_size = cp_slot_mapper_ ? cp_slot_mapper_->cpSize() : 1;
+    if (block_size == 0 || cp_size == 0 || cache_keys.size() % cp_size != 0
+        || required_prefix_blocks > cache_keys.size()) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert requires complete CP canonical units");
+    }
+    for (const auto& group : config_.topology().groups()) {
+        if (!group.policy.enable_prefix_reuse) {
+            continue;
+        }
+        const auto mapping = group.policy.cp_mapping;
+        const bool compact_swa =
+            group.policy.group_type == CacheGroupType::SWA && mapping == CpBlockMappingMode::COMPACT_LAST_RANK;
+        if (group.policy.memory_placement != CacheMemoryPlacement::DEVICE
+            || (group.policy.group_type == CacheGroupType::FULL && group.policy.active_tail_blocks != 0)
+            || (group.seqSizePerBlock() != block_size
+                && !(cp_size > 1 && compact_swa && group.seqSizePerBlock() == block_size * cp_size))
+            || (cp_size > 1 && group.policy.group_type == CacheGroupType::FULL
+                && mapping != CpBlockMappingMode::BLOCK_ROUND_ROBIN)
+            || (cp_size > 1 && group.policy.group_type != CacheGroupType::FULL && mapping != CpBlockMappingMode::NONE
+                && !compact_swa)) {
+            return ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported writeback group layout: " + group.tag);
+        }
+    }
+    if (cache_keys.size() > static_cast<size_t>(std::numeric_limits<int>::max() / seqSizePerBlock())) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert key range is too large");
+    }
+    const auto groups = cacheGroups();
+
+    KVCacheResourcePtr owner(new KVCacheResource, [groups](KVCacheResource* resource) {
+        for (const auto& group : groups) {
+            group->unreference(resource->blocks(group->tag()));
+        }
+        delete resource;
+    });
+    owner->initGroups(config_.topologyPtr());
+    owner->setCacheKeys(cache_keys);
+    owner->setLastBlockAligned(true);
+    BlockTreeMatchResult match_result;
+    const auto tree_keys = cp_size > 1 ? cp_slot_mapper_->canonicalCacheKeys(cache_keys) : cache_keys;
+
+    // step 1. match the existing blocks in the cache, admission control and hold the resource with the matched blocks
+    const auto error = block_tree_cache_->matchForExternalInsert(tree_keys, required_prefix_blocks / cp_size, match_result);
+    if (error.hasError()) {
+        return error;
+    }
+    auto         local_load     = match_result.async_context;
+    const size_t matched_blocks = local_load ? local_load->localMatchedBlocks() : match_result.matched_device_blocks;
+
+    // match() already owns these request references; transfer them into the resource without incrementing again.
+    for (const auto& group : groups) {
+        const size_t count = tree_keys.empty() ?
+                                 0 :
+                                 loadTargetPosition(tree_keys.size() - 1, group->tag(), cp_slot_mapper_, cp_size) + 1;
+        owner->mutableBlockIds(group->tag()).assign(BlockIndicesType(count, NULL_BLOCK_IDX));
+    }
+
+    // step 2. bind the matched blocks to the resource
+    const auto populate_error = populateMatchedBlocks(match_result, *owner);
+    if (populate_error.hasError()) {
+        return populate_error;
+    }
+
+    // step 3. malloc the remaining blocks and bind them to the resource and load context
+    const auto malloc_error = mallocAndBindLoadTargets(*owner, false, local_load.get());
+    if (malloc_error.hasError()) {
+        return malloc_error;
+    }
+    resource     = std::move(owner);
+    start_block  = matched_blocks * cp_size;
+    load_context = std::move(local_load);
+    return ErrorInfo::OkStatus();
+}
+
+ErrorInfo CoordinatorCacheManager::commitWriteBackDecodeCache(const KVCacheResource& resource,
+                                                              size_t                 start_block,
+                                                              int64_t                deadline_ms) {
+    const size_t cp_size = cp_slot_mapper_ ? cp_slot_mapper_->cpSize() : 1;
+    if (start_block > resource.cacheKeys().size() || resource.groupNums() != cacheGroups().size()
+        || start_block % cp_size != 0 || resource.cacheKeys().size() % cp_size != 0) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported external insert resource");
+    }
+    const auto&                                groups = block_tree_cache_->groupSets();
+    const auto tree_keys = cp_size > 1 ? cp_slot_mapper_->canonicalCacheKeys(resource.cacheKeys()) : resource.cacheKeys();
+    std::vector<std::vector<GroupSetResource>> resources(tree_keys.size(),
+                                                         std::vector<GroupSetResource>(groups.size()));
+    for (size_t gid = 0; gid < groups.size(); ++gid) {
+        for (size_t i = start_block / cp_size; i < resources.size(); ++i) {
+            auto& blocks = resources[i][gid].device_blocks;
+            for (const auto& tag : groups[gid]->groupTags()) {
+                const auto& source = resource.blocks(tag);
+                const auto position = loadTargetPosition(i, tag, cp_slot_mapper_, cp_size);
+                if (source.size() <= position) {
+                    return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert has missing blocks");
+                }
+                blocks.push_back(source[position]);
+            }
+            if (groups[gid]->groupType() != CacheGroupType::FULL
+                && std::all_of(blocks.begin(), blocks.end(), isNullBlockIdx)) {
+                blocks.clear();
+            } else if (std::any_of(blocks.begin(), blocks.end(), [](BlockIdxType block) { return block <= 0; })) {
+                return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert has missing blocks");
+            }
+        }
+    }
+    return block_tree_cache_->insertExternalBlocks(tree_keys, start_block / cp_size, resources, deadline_ms);
 }
 
 MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) {
@@ -399,6 +671,7 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
     }
     const int                         cp_scale     = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
     BlockTreeMatchResult              match_result = block_tree_cache_->match(cache_keys, valid_prefix);
+    prepared.reuse_accounting = std::move(match_result.reuse_accounting);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
@@ -523,6 +796,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                             load_context};
         result.match_end_time_us = match_end_time_us;
         result.load_attempted    = load_attempted;
+        result.reuse_accounting  = std::move(deferred_prepared->reuse_accounting);
         return result;
     }
 
@@ -533,6 +807,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
         true, static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens, match_cost_time_us, load_context};
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
+    result.reuse_accounting  = std::move(prepared.reuse_accounting);
     return result;
 }
 
@@ -914,10 +1189,10 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         resources.resize(publish_prefix);
         if (insert_info.is_resident) {
             const size_t batch_resident_prefix_length =
-                block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, true);
+                block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, true, insert_info.account_for_prefill);
             resident_prefix_length += batch_resident_prefix_length;
         } else {
-            block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier);
+            block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, false, insert_info.account_for_prefill);
         }
     }
 }

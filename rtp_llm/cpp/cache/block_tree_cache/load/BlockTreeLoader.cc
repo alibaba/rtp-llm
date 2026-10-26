@@ -47,14 +47,15 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
         })) {}
 
 BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&               cache_keys,
-                                                  const std::function<bool(size_t)>& valid_prefix) {
+                                                  const std::function<bool(size_t)>& valid_prefix,
+                                                  bool allow_storage_backend_lookup) {
     if (cache_keys.empty()) {
         RTP_LLM_LOG_DEBUG("empty cache_keys, returning empty result");
         return {};
     }
 
     std::vector<TreeNode*> path   = tree_->findNode(cache_keys);
-    BlockTreeMatchResult   result = createMatchResult(path, cache_keys, valid_prefix);
+    BlockTreeMatchResult   result = createMatchResult(path, cache_keys, valid_prefix, allow_storage_backend_lookup);
     RTP_LLM_LOG_DEBUG("matched %zu device blocks, cache_keys=%zu, tree_nodes=%zu",
                       result.matched_device_blocks,
                       cache_keys.size(),
@@ -146,13 +147,20 @@ std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> BlockTreeLoader::collectReus
 
 BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>&            path,
                                                         const CacheKeysType&               cache_keys,
-                                                        const std::function<bool(size_t)>& valid_prefix) {
+                                                        const std::function<bool(size_t)>& valid_prefix,
+                                                        bool allow_storage_backend_lookup) {
     BlockTreeMatchResult result;
     std::vector<bool>    candidate_valid;
-    if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix) && !storage_backend_) {
+    if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix) && (!storage_backend_ || !allow_storage_backend_lookup)) {
         return result;
     }
     const int64_t access_time_us = currentTimeUs();
+
+    for (size_t index = 0; index < path.size(); ++index) {
+        if (!path[index]->is_accounted) {
+            result.reuse_accounting.unaccounted_block_indices.push_back(index);
+        }
+    }
 
     for (size_t candidate_count = path.size(); candidate_count > 0; --candidate_count) {
         if (!candidate_valid[candidate_count - 1]) {
@@ -221,7 +229,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
     evictor_.onMatched(path);
 
     StorageRequest storage_request;
-    if (storage_backend_ && path.size() < cache_keys.size()) {
+    if (allow_storage_backend_lookup && storage_backend_ && path.size() < cache_keys.size()) {
         storage_request = makeStorageRequest(cache_keys, path.size());
     }
     const bool use_storage = !storage_request.empty();

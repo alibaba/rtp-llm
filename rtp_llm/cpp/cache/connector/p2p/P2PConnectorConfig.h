@@ -11,6 +11,14 @@
 
 namespace rtp_llm {
 
+constexpr size_t kP2PDecodeKickoffThreadCount = 4;
+constexpr size_t kP2PDecodeKickoffQueueSize   = 1024;
+
+// Also rejects NaN; an out-of-range ratio would make the reserve's size_t conversion undefined.
+inline bool validWritebackKvReserveRatio(double reserve_ratio) {
+    return reserve_ratio >= 0.0 && reserve_ratio <= 1.0;
+}
+
 inline int64_t getP2PTransferListenPort(int64_t cache_store_listen_port) {
     // Reuse the reserved per-worker slot right after cache_store_listen_port.
     // Keep port 0 unchanged so tests can still request an ephemeral port.
@@ -25,8 +33,11 @@ struct P2PConnectorSchedulerConfig {
     int                      p2p_kv_leak_exit_threshold_percent            = 30;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
     int64_t                     p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
+    int64_t                     p2p_writeback_timeout_ms     = 5000;
+    double                               p2p_writeback_kv_reserve_ratio               = 0.1;
     std::shared_ptr<const CacheTopology> topology;
     size_t                               cache_key_tokens_per_block = 1;
+    int64_t                              cache_key_hash_seed = 0;
     int                                  cp_rank = 0;
     int                                  cp_size = 1;
 
@@ -50,6 +61,8 @@ struct P2PConnectorSchedulerConfig {
         config.p2p_kv_leak_exit_threshold_percent = cache_store_config.p2p_kv_leak_exit_threshold_percent;
         config.p2p_cancel_broadcast_timeout_ms = cache_store_config.p2p_cancel_broadcast_timeout_ms;
         config.p2p_cancelled_keys_ttl_ms       = cache_store_config.p2p_cancelled_keys_ttl_ms;
+        config.p2p_writeback_timeout_ms        = cache_store_config.p2p_writeback_timeout_ms;
+        config.p2p_writeback_kv_reserve_ratio  = cache_store_config.p2p_writeback_kv_reserve_ratio;
         return config;
     }
 };
@@ -60,6 +73,7 @@ struct P2PConnectorWorkerConfig {
     int p2p_prefill_sender_thread_count = 4;
     int p2p_prefill_sender_queue_size   = 10000;
 
+    int     p2p_writeback_cleanup_interval_ms = 100;
     int64_t p2p_cancelled_keys_ttl_ms                = 3600 * 1000;
     int64_t load_cache_timeout_ms = 5000;
 
@@ -112,6 +126,7 @@ struct P2PConnectorWorkerConfig {
 };
 
 struct P2PConnectorConfig {
+    bool     p2p_writeback_enable = false;
     RoleType role_type = RoleType::PDFUSION;
     int      tp_rank   = 0;
 
@@ -125,6 +140,7 @@ struct P2PConnectorConfig {
                                      uint32_t                 layer_all_num,
                                      size_t                   llm_kv_block_size_bytes) {
         P2PConnectorConfig config;
+        config.p2p_writeback_enable = cache_store_config.p2p_writeback_enable;
         config.role_type = pd_sep_config.role_type;
         config.tp_rank   = parallelism_config.tp_rank;
         config.scheduler_config =

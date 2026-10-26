@@ -356,6 +356,8 @@ message AuxInfoPB {
     int32 disk_reuse_len = 31;
     int32 prefill_disk_reuse_len = 32;
     int32 decode_disk_reuse_len = 33;
+    reserved 34;
+    int32 writeback_first_use_len = 35;
 }
 
 message PromptLogitsOutputPB {
@@ -821,6 +823,13 @@ enum P2PConnectorBroadcastType {
     CANCEL_HANDLE_READ = 3;
     QUERY_LEASE_STATUS = 4;
     HANDLE_READ_NO_TRANSFER = 5;
+    HANDLE_WRITE = 6;
+    WRITE = 7;
+    CANCEL_WRITE = 8;
+    CANCEL_HANDLE_WRITE = 9;
+    reserved 10, 11;
+    reserved "QUERY_WRITE_STATUS", "QUERY_HANDLE_WRITE_STATUS";
+    HANDLE_WRITE_READY = 12;
 }
 
 // One transfer route as minted by KVCacheTransferPlanner, projected onto the side that
@@ -888,6 +897,9 @@ message P2PConnectorBroadcastTpRequestPB {
     // CANCEL_READ only: remaining request lifetime for an early-cancel fence.
     // This is a retention budget, never evidence that a physical read has stopped.
     int64 cancel_retention_ms = 14;
+    reserved "write_operation";
+    P2PConnectorBroadcastType lease_operation = 16;
+    int32 worker_rank = 15;
 }
 
 // GetPeerInfo: Decode queries the selected Prefill for its TP/CP layout before recv registration.
@@ -908,8 +920,10 @@ message GetPeerInfoResponsePB {
 message P2PConnectorBroadcastTpResponsePB {
     ErrorCodePB error_code = 1;
     string error_message = 2;
-    // Populated when request type == QUERY_LEASE_STATUS
+    // Populated for lease queries and cancellation acknowledgements.
     LeaseStatusResponsePB lease_status = 3;
+    reserved 4;
+    reserved "write_success";
 }
 
 message LeaseStatusResponsePB {
@@ -917,6 +931,43 @@ message LeaseStatusResponsePB {
     int32 started_ops = 2;
     int32 finished_ops = 3;
     bool stopped = 4;      // sealed && started_ops == finished_ops
+}
+
+message P2PConnectorWriteSourcePB {
+    string worker_addr = 1;
+    repeated TransferRoutePB routes = 2;
+}
+
+message P2PConnectorStartWriteRequestPB {
+    int64 request_id = 1;
+    string unique_key = 2;
+    int64 timeout_ms = 3;
+    repeated int64 cache_keys = 4;
+    int32 decode_tp_size = 5;
+    reserved 6;
+    repeated int32 token_ids = 9;
+    int32 input_length = 10;
+    reserved 11;
+    int64 deadline_ms = 12;
+    repeated P2PConnectorWriteSourcePB decode_workers = 13;
+    uint64 plan_digest = 14;
+}
+
+message P2PConnectorStartWriteResponsePB {
+    int32 error_code = 1;
+    string error_message = 2;
+    int32 accepted_start_block = 3;
+    int32 accepted_block_count = 4;
+    reserved 5;
+    uint64 plan_digest = 6;
+    bool stopped = 7;
+}
+
+
+
+message P2PConnectorCancelWriteRequestPB {
+    string unique_key = 1;
+    int64 deadline_ms = 2;
 }
 
 message P2PConnectorStartLoadRequestPB {
@@ -965,6 +1016,7 @@ message SideChannelPayloadPB {
     uint64 rng_offset = 12;
     // Prefill owns embedding-derived media lengths; Decode has no embedding.
     map<int32, int32> multimodal_lengths = 13;
+    int32 writeback_first_use_len = 14;
 }
 
 message P2PConnectorStartLoadResponsePB {
@@ -1146,6 +1198,8 @@ service RpcService {
 
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
+    rpc StartWrite(P2PConnectorStartWriteRequestPB) returns (P2PConnectorStartWriteResponsePB);
+    rpc CancelWrite(P2PConnectorCancelWriteRequestPB) returns (P2PConnectorStartWriteResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
     rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
     rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);

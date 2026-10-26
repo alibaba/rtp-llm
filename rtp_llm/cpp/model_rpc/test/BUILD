@@ -171,6 +171,15 @@ cc_test(
 )
 
 cc_test(
+    name = "decode_completion_race_test",
+    srcs = ["DecodeCompletionRaceTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "A10"},
+)
+
+cc_test(
     name = "rpc_server_runtime_meta_test",
     srcs = [
         "RpcServerRuntimeMetaTest.cc",
@@ -193,6 +202,20 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
+)
+
+cc_test(
+    name = "decode_rpc_server_test",
+    srcs = ["DecodeRpcServerTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/engine_base/schedulers",
+        "//rtp_llm/cpp/engine_base/stream:stream",
+        "@havenask//aios/autil:net",
+    ],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20"},
 )
 
 cc_test(

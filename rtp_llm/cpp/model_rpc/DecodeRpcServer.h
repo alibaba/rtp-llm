@@ -29,6 +29,8 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer);
 
+public:
+
 private:
     std::unique_ptr<PDCancelRegistry> cancel_registry_;
     autil::LoopThreadPtr              cancel_cleanup_thread_;

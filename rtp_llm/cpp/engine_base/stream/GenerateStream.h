@@ -51,6 +51,7 @@ struct StreamUpdateInfo {
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     // Appended to preserve existing aggregate initializers. CPU context rows.
     const torch::Tensor custom_output{};
+    int kv_ready_token_count = -1;
 };
 
 struct StreamSpecUpdateInfo {
@@ -75,6 +76,7 @@ struct StreamSpecUpdateInfo {
     // updates leave speculative_propose_step at zero and are not counted.
     int speculative_propose_step = 0;
     int accepted_draft_tokens    = 0;
+    int  kv_ready_token_count   = -1;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -170,6 +172,9 @@ public:
     void specUpdate(const StreamSpecUpdateInfo& update_info);
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
     void updateWithoutLock(const StreamUpdateInfo& update_info);
+    int          writebackKVReadyTokenCount() const {
+        return writeback_kv_ready_token_count_;
+    }
 
     virtual size_t scoreLen() const {
         return score_len_ == 0 ? 1 : score_len_;
@@ -250,9 +255,17 @@ public:
     void    setDiskReuseLength(int length);
     int     diskReuseLength() const;
     void    setInitialReuseLength(int initial_reuse_length);
+    void    setWritebackFirstUseLength(int length);
+    int     writebackFirstUseLength() const;
     void    incLastOutputPos();
-    void    setPrefillReuseLength(
-           int64_t total, int64_t local, int64_t remote, int64_t memory, int64_t disk, bool independent_pools);
+    void    setPrefillReuseLength(int64_t total,
+                                  int64_t local,
+                                  int64_t remote,
+                                  int64_t memory,
+                                  int64_t disk,
+                                  bool    independent_pools,
+                                  int     writeback_first_use_len = 0);
+    int     prefillWritebackFirstUseLength() const;
     int64_t prefillTotalReuseLen() const;
     int64_t prefillLocalReuseLen() const;
     int64_t prefillRemoteReuseLen() const;
@@ -564,6 +577,14 @@ public:
 
     int64_t enqueueTime() const {
         return generate_input_->begin_time_us;
+    }
+    int64_t beginTimeUs() const {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        return begin_time_us_;
+    }
+    void checkTimeout() {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        checkTimeoutWithoutLock();
     }
     int64_t schedulerEnqueueTimeUs() const {
         return scheduler_enqueue_time_us_ > 0 ? scheduler_enqueue_time_us_ : enqueueTime();
@@ -923,6 +944,7 @@ protected:
     std::vector<int32_t>               speculative_accepted_tokens_per_pos_;
     size_t                             last_output_pos_      = 0;
     int                                initial_reuse_length_ = 0;
+    int                                writeback_first_use_length_ = 0;
     int                                reuse_length_         = 0;
     int                                local_reuse_length_   = 0;
     int                                device_reuse_length_  = 0;
@@ -931,6 +953,7 @@ protected:
     int                                disk_reuse_length_    = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     bool    prefill_independent_block_pools_ = false;
+    int     prefill_writeback_first_use_length_ = 0;
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;
     int64_t prefill_remote_reuse_len_ = 0;
@@ -1022,6 +1045,7 @@ protected:
 
     // prefill TP size queried from prefill server (used for asymmetric TP)
     int prefill_tp_size_ = -1;
+    int writeback_kv_ready_token_count_ = 0;
     // Effective Prefill KV-cache CP size; independent from TP size.
     int prefill_cp_size_ = -1;
 };

@@ -1054,7 +1054,7 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         std::vector<torch::Tensor> sequence_lengths_gpu;
         propose_slices_gpu.reserve(batch_size);
         sequence_lengths_gpu.reserve(batch_size);
-        if (!all_streams.empty()
+        if (useMtpDeviceState() && !all_streams.empty()
             && collectMtpStateProposeSlices(all_streams, propose_slices_gpu, &sequence_lengths_gpu)) {
             auto combo_tokens_gpu         = torch::cat(propose_slices_gpu, 0).to(torch::kInt32);
             model_input.combo_tokens      = std::move(combo_tokens_gpu);
@@ -1717,6 +1717,7 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         }
 
         spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        spec_update_infos.back().kv_ready_token_count = stream->seqLength();
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -1775,6 +1776,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         if (stream_idx < spec_decode_output.processor_errors.size()) {
             spec_update_info.error_info = spec_decode_output.processor_errors[stream_idx];
         }
+        spec_update_info.kv_ready_token_count = stream->seqLength() + cur_accept_len - 1;
         spec_update_infos.push_back(std::move(spec_update_info));
 
         // Draft hidden layout differs per mode: the device-state path keeps a
@@ -1797,7 +1799,7 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
     // or first-step streams without published device state.
     auto pick_hidden_states = [](const GenerateStreamPtr& stream) -> torch::Tensor {
         auto dev = stream->getLastHiddenStatesGpu();
-        if (dev.defined()) {
+        if (useMtpDeviceState() && dev.defined()) {
             return dev;
         }
         return stream->getSPOutputBuffer()->hidden_states;

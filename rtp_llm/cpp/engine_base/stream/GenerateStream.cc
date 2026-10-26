@@ -548,8 +548,26 @@ void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
     initial_reuse_length_ = initial_reuse_length;
 }
 
-void GenerateStream::setPrefillReuseLength(
-    int64_t total, int64_t local, int64_t remote, int64_t memory, int64_t disk, bool independent_pools) {
+void GenerateStream::setWritebackFirstUseLength(int length) {
+    writeback_first_use_length_ = length;
+}
+
+int GenerateStream::writebackFirstUseLength() const {
+    return writeback_first_use_length_;
+}
+
+int GenerateStream::prefillWritebackFirstUseLength() const {
+    return prefill_writeback_first_use_length_;
+}
+
+void GenerateStream::setPrefillReuseLength(int64_t total,
+                                           int64_t local,
+                                           int64_t remote,
+                                           int64_t memory,
+                                           int64_t disk,
+                                           bool    independent_pools,
+                                           int     writeback_first_use_len) {
+    prefill_writeback_first_use_length_ = writeback_first_use_len;
     prefill_independent_block_pools_ = independent_pools;
     prefill_total_reuse_len_  = total;
     prefill_local_reuse_len_  = local;
@@ -1220,6 +1238,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   torch::Tensor(),
                   update_info.update_remote_generate,
                   update_info.force_update_info});
+    if (update_info.kv_ready_token_count >= 0) {
+        writeback_kv_ready_token_count_ = std::min(update_info.kv_ready_token_count, seqLength() - 1);
+    }
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
@@ -1285,6 +1306,9 @@ void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
 
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
+    if (update_info.kv_ready_token_count >= 0) {
+        writeback_kv_ready_token_count_ = std::min(update_info.kv_ready_token_count, seqLength() - 1);
+    }
 
     // checkFinished() 已将本轮 updateOutput 中上报的 GenerateDone/Error 事件应用到状态上，
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。

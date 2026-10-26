@@ -27,6 +27,7 @@ struct P2PSideChannelPayload {
     bool                            has_first_token                      = false;
     int64_t              first_token_id   = 0;
     int32_t              total_reuse_len  = 0;
+    int32_t                         writeback_first_use_len              = 0;
     int32_t              local_reuse_len  = 0;
     int32_t              remote_reuse_len = 0;
     int32_t              memory_reuse_len = 0;

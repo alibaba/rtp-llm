@@ -107,3 +107,13 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     tags = ["manual"],
 )
+
+py_test(
+    name = "backend_manager_shutdown_test",
+    srcs = ["backend_manager_shutdown_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm/server:server",
+    ],
+)

@@ -1,11 +1,13 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWriteRpcUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <algorithm>
 #include <cstdlib>
+#include <exception>
 #include <functional>
 #include <limits>
 #include <set>
@@ -888,6 +890,506 @@ void P2PConnectorAsyncReadContextChecker::checkOnce() {
         collector->decode_scheduler_check_once_cost_time_us = currentTimeUs() - start_time_us;
         collector->decode_scheduler_inflight_context_count  = inflight_after;
         metrics_reporter_->report<P2PConnectorMetrics, P2PConnectorMetricsCollector>(nullptr, collector.get());
+    }
+}
+
+P2PConnectorAsyncWriteContext::P2PConnectorAsyncWriteContext(std::string                         unique_key,
+                                                             int64_t                             deadline_ms,
+                                                             std::shared_ptr<P2PBroadcastClient> client,
+                                                             int64_t                             control_timeout_ms,
+                                                             int64_t                             lease_query_timeout_ms,
+                                                             std::function<void()>               on_released,
+                                                             kmonitor::MetricsReporterPtr        metrics_reporter):
+    unique_key_(std::move(unique_key)),
+    deadline_ms_(deadline_ms),
+    client_(std::move(client)),
+    control_timeout_ms_(control_timeout_ms),
+    lease_query_timeout_ms_(lease_query_timeout_ms),
+    metrics_reporter_(std::move(metrics_reporter)),
+    on_released_(std::move(on_released)) {}
+
+bool P2PConnectorAsyncWriteContext::done() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return done_;
+}
+
+bool P2PConnectorAsyncWriteContext::success() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return done_ && error_.ok();
+}
+
+void P2PConnectorAsyncWriteContext::waitDone() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this]() { return done_; });
+}
+
+void P2PConnectorAsyncWriteContext::onDone(DoneCallback callback) {
+    if (!callback)
+        return;
+    ErrorInfo error;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!done_) {
+            done_callbacks_.push_back(std::move(callback));
+            return;
+        }
+        error = error_;
+    }
+    callback(std::move(error));
+}
+
+void P2PConnectorAsyncWriteContext::dispatchDoneCallbacks() {
+    std::vector<DoneCallback> callbacks;
+    ErrorInfo                 error;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!done_)
+            return;
+        callbacks.swap(done_callbacks_);
+        error = error_;
+    }
+    for (auto& callback : callbacks)
+        callback(error);
+}
+
+bool P2PConnectorAsyncWriteContext::beginKickoff() {
+    DoneNotifier                done_notifier{*this};
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (kickoff_started_ || released_)
+        return false;
+    if (cancelled_ || currentTimeMs() >= deadline_ms_) {
+        tryFinishLocked(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback expired or cancelled before start"));
+        return false;
+    }
+    kickoff_started_ = true;
+    return true;
+}
+
+void P2PConnectorAsyncWriteContext::checkDone() {
+    DoneNotifier                done_notifier{*this};
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (released_)
+        return;
+    if (peer_result_) {
+        const auto first = peer_result_->firstError();
+        if (first.error.hasError())
+            failLocked(first.error);
+    }
+    checkPeerResultLocked();
+    if (peer_pending_)
+        tryFinishLocked(error_);
+}
+
+void P2PConnectorAsyncWriteContext::expireTransferDeadlineIfNeeded() {
+    checkDone();
+    DoneNotifier                done_notifier{*this};
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!released_ && currentTimeMs() >= deadline_ms_) {
+        failLocked(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback transfer deadline exceeded"));
+    }
+}
+
+ErrorInfo P2PConnectorAsyncWriteContext::errorInfo() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return error_;
+}
+
+void P2PConnectorAsyncWriteContext::cancel(const ErrorInfo& error) {
+    DoneNotifier                done_notifier{*this};
+    checkDone();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (released_)
+        return;
+    failLocked(error);
+    done_ = true;
+    cv_.notify_all();
+    if (!kickoff_started_)
+        tryFinishLocked(error_);
+}
+
+void P2PConnectorAsyncWriteContext::checkCancelDone() {
+    DoneNotifier                done_notifier{*this};
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (released_)
+        return;
+    bool completed = false;
+    if (peer_cancel_result_ && peer_cancel_result_->done()) {
+        if (peer_cancel_result_->success() && peer_cancel_result_->responses().size() == 1)
+            peer_stopped_ = peer_stopped_ || peer_cancel_result_->responses().front().stopped();
+        peer_cancel_result_.reset();
+        completed = true;
+    }
+    if (control_result_ && control_result_->done()) {
+        bool stopped = control_result_->success();
+        for (const auto& response : control_result_->responses())
+            stopped = stopped && response.has_p2p_response();
+        transfer_stopped_ = transfer_stopped_ || stopped;
+        control_result_.reset();
+        completed = true;
+    }
+    if (completed && !control_result_ && !peer_cancel_result_) {
+        control_next_ms_     = currentTimeMs() + control_interval_ms_;
+        control_interval_ms_ = std::min(control_interval_ms_ * 2, kLeasePollMaxIntervalMs);
+    }
+    if (transfer_stopped_ || cancelled_)
+        tryFinishLocked(error_);
+}
+
+void P2PConnectorAsyncWriteContext::failStopIfLeaseUnconfirmed() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (released_ || currentTimeMs() < holdUntilMsLocked())
+        return;
+    RTP_LLM_LOG_ERROR("failStopIfLeaseUnconfirmed: D+query timeout reached without a valid all-rank stopped result; "
+                      "aborting rank 0 without releasing writeback resources, unique_key=%s fail_stop_ms=%ld",
+                      unique_key_.c_str(),
+                      holdUntilMsLocked());
+    std::abort();
+}
+
+bool P2PConnectorAsyncWriteContext::resourceHoldPending() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !released_;
+}
+
+std::function<void()> P2PConnectorAsyncWriteContext::completionCallback() const {
+    std::weak_ptr<P2PNotification> weak = std::atomic_load(&notification_);
+    return [weak] {
+        if (auto notification = weak.lock())
+            notification->notify();
+    };
+}
+
+void P2PConnectorAsyncWriteContext::notify() const {
+    if (auto notification = std::atomic_load(&notification_))
+        notification->notify();
+}
+
+void P2PConnectorAsyncWriteContext::setNotification(const std::shared_ptr<P2PNotification>& notification) {
+    std::atomic_store(&notification_, notification);
+    std::lock_guard<std::mutex> lock(mutex_);
+    registerWriteCompletionCallbacksLocked();
+}
+
+void P2PConnectorAsyncWriteContext::registerWriteCompletionCallbacksLocked() {
+    const auto notify_done = completionCallback();
+    if (peer_result_)
+        peer_result_->setProgressCallback(notify_done);
+    notify_done();
+}
+
+int64_t P2PConnectorAsyncWriteContext::nextWakeupMs() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto                  hold_until = holdUntilMsLocked();
+    if (released_)
+        return hold_until;
+    if (!cancelled_)
+        return deadline_ms_;
+    auto next = hold_until;
+    if (!control_submitting_ && !control_result_ && !peer_cancel_result_) {
+        const bool peer_control   = peer_pending_ && !peer_stopped_ && peer_cancel_;
+        const bool worker_control = peer_pending_ && !transfer_stopped_ && client_;
+        if (peer_control || worker_control)
+            next = std::min(next, control_next_ms_);
+    }
+    return next;
+}
+
+void P2PConnectorAsyncWriteContext::runControl(const std::shared_ptr<autil::ThreadPool>& control_pool) {
+    bool       worker_control;
+    PeerCancel peer_cancel;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (released_ || !cancelled_ || control_submitting_ || control_result_ || peer_cancel_result_
+            || currentTimeMs() < control_next_ms_)
+            return;
+        if (peer_pending_ && !peer_stopped_)
+            peer_cancel = peer_cancel_;
+        worker_control = peer_pending_ && !transfer_stopped_ && client_;
+        if (!peer_cancel && !worker_control)
+            return;
+        control_submitting_ = true;
+    }
+    auto submit = [self = shared_from_this(), peer_cancel = std::move(peer_cancel), worker_control] {
+        int64_t timeout;
+        int64_t deadline;
+        {
+            std::lock_guard<std::mutex> lock(self->mutex_);
+            deadline = self->deadline_ms_;
+            timeout  = std::min(self->holdUntilMsLocked() - currentTimeMs(), self->control_timeout_ms_);
+        }
+        std::shared_ptr<DecodeWriteHelper::CancelResult>       peer_result;
+        std::shared_ptr<P2PBroadcastClient::TpBroadcastResult> worker_result;
+        std::string                                            failure;
+        if (worker_control && timeout > 0) {
+            worker_result = p2p_internal::callForResult(
+                [&] { return self->client_->controlWriteAsync(self->unique_key_, CANCEL_WRITE, deadline, timeout); },
+                failure);
+            if (!worker_result)
+                RTP_LLM_LOG_WARNING(
+                    "writeback worker cancel failed, unique_key=%s: %s", self->unique_key_.c_str(), failure.c_str());
+        }
+        if (peer_cancel) {
+            peer_result = p2p_internal::callForResult(peer_cancel, failure);
+            if (!peer_result)
+                RTP_LLM_LOG_WARNING(
+                    "writeback peer cancel failed, unique_key=%s: %s", self->unique_key_.c_str(), failure.c_str());
+        }
+        std::lock_guard<std::mutex> lock(self->mutex_);
+        self->peer_cancel_result_ = std::move(peer_result);
+        self->control_result_     = std::move(worker_result);
+        self->control_submitting_ = false;
+        self->control_next_ms_    = currentTimeMs() + self->control_interval_ms_;
+        if (!self->peer_cancel_result_ && !self->control_result_)
+            self->control_interval_ms_ = std::min(self->control_interval_ms_ * 2, kLeasePollMaxIntervalMs);
+        const auto notify_done    = self->completionCallback();
+        if (self->peer_cancel_result_)
+            self->peer_cancel_result_->setProgressCallback(notify_done);
+        if (self->control_result_)
+            self->control_result_->setProgressCallback(notify_done);
+        notify_done();
+    };
+    if (control_pool && control_pool->pushTask(submit, false, false) == autil::ThreadPoolBase::ERROR_NONE)
+        return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    control_submitting_ = false;
+    control_next_ms_     = currentTimeMs() + control_interval_ms_;
+    control_interval_ms_ = std::min(control_interval_ms_ * 2, kLeasePollMaxIntervalMs);
+    notify();
+}
+
+void P2PConnectorAsyncWriteContext::finishWithoutTransfer(const ErrorInfo& error) {
+    DoneNotifier                done_notifier{*this};
+    std::lock_guard<std::mutex> lock(mutex_);
+    tryFinishLocked(error.ok() && currentTimeMs() >= deadline_ms_ ?
+                        ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback expired before completion") :
+                        error);
+}
+
+int64_t P2PConnectorAsyncWriteContext::deadlineMs() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return deadline_ms_;
+}
+
+void P2PConnectorAsyncWriteContext::setPlannedBytes(int64_t bytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    metrics_.planned_bytes = bytes;
+}
+
+bool P2PConnectorAsyncWriteContext::beginPeerCall(PeerCancel cancel) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (cancelled_ || released_)
+        return false;
+    peer_pending_      = true;
+    metrics_.submitted = true;
+    peer_cancel_       = std::move(cancel);
+    return true;
+}
+
+void P2PConnectorAsyncWriteContext::setPeerCallResult(std::shared_ptr<DecodeWriteHelper::Result> result) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    peer_result_ = std::move(result);
+    if (!peer_result_) {
+        failLocked(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "StartWrite submission failed"));
+    }
+    registerWriteCompletionCallbacksLocked();
+}
+
+void P2PConnectorAsyncWriteContext::failLocked(const ErrorInfo& error) {
+    if (error_.ok())
+        error_ = error;
+    if (!cancelled_) {
+        cancelled_ = true;
+        done_      = true;
+        cv_.notify_all();
+        notify();
+    }
+}
+
+void P2PConnectorAsyncWriteContext::checkPeerResultLocked() {
+    if (!peer_pending_ || peer_stopped_ || !peer_result_ || !peer_result_->done())
+        return;
+    if (peer_result_->rpcSuccess() && peer_result_->responses().size() == 1) {
+        const auto response = peer_result_->responses().front();
+        peer_stopped_       = response.stopped();
+        if (response.error_code() != ErrorCodePB::NONE_ERROR) {
+            failLocked(ErrorInfo(transRPCErrorCode(static_cast<ErrorCodePB>(response.error_code())),
+                                 response.error_message()));
+        } else if (!peer_stopped_) {
+            failLocked(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                 "StartWrite returned before receive stopped"));
+        } else {
+            transfer_stopped_    = true;
+            metrics_.no_transfer = response.accepted_block_count() == 0;
+        }
+    } else {
+        failLocked(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "StartWrite RPC failed"));
+    }
+    peer_result_.reset();
+}
+
+void P2PConnectorAsyncWriteContext::tryFinishLocked(const ErrorInfo& error) {
+    if (released_)
+        return;
+    if (error_.ok())
+        error_ = error;
+    if (!peer_pending_) {
+        transfer_stopped_    = true;
+        metrics_.no_transfer = error_.ok();
+    }
+    if (!transfer_stopped_ || (peer_pending_ && !peer_stopped_))
+        return;
+    finishLocked(error_);
+}
+
+void P2PConnectorAsyncWriteContext::finishLocked(const ErrorInfo& error) {
+    if (released_)
+        return;
+    if (error_.ok())
+        error_ = error;
+    if (!error_.ok()) {
+        RTP_LLM_LOG_WARNING("writeback failed: unique_key=%s error=%s", unique_key_.c_str(), error_.ToString().c_str());
+    }
+    done_     = true;
+    released_ = true;
+    if (on_released_) {
+        on_released_();
+        on_released_ = {};
+    }
+    peer_cancel_   = {};
+    peer_result_.reset();
+    peer_cancel_result_.reset();
+    if (metrics_reporter_) {
+        metrics_.error              = error_;
+        metrics_.total_cost_time_us = currentTimeUs() - start_time_us_;
+        metrics_.hold_time_us       = metrics_.total_cost_time_us;
+        metrics_reporter_->report<P2PConnectorMetrics, WriteSchedulerMetricsCollector>(nullptr, &metrics_);
+    }
+    control_result_.reset();
+    cv_.notify_all();
+    notify();
+}
+
+int64_t P2PConnectorAsyncWriteContext::holdUntilMsLocked() const {
+    return lease_query_timeout_ms_ > std::numeric_limits<int64_t>::max() - deadline_ms_ ?
+               std::numeric_limits<int64_t>::max() :
+               deadline_ms_ + lease_query_timeout_ms_;
+}
+
+bool P2PConnectorAsyncWriteContext::retentionExpired() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return released_ && currentTimeMs() >= holdUntilMsLocked();
+}
+
+P2PConnectorAsyncWriteContextChecker::~P2PConnectorAsyncWriteContextChecker() {
+    stop();
+}
+
+bool P2PConnectorAsyncWriteContextChecker::init() {
+    if (thread_.joinable())
+        return false;
+    control_pool_ = std::make_shared<autil::ThreadPool>(4, 1024, nullptr, "P2PWriteControl");
+    if (!control_pool_->start())
+        return false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        accepting_ = true;
+    }
+    stopping_.store(false);
+    thread_ = std::thread([this] {
+        while (!stopping_.load()) {
+            const auto generation = notification_->generation();
+            checkOnce();
+            if (!stopping_.load())
+                notification_->waitUntil(generation, nextWakeupMs());
+        }
+    });
+    return true;
+}
+
+bool P2PConnectorAsyncWriteContextChecker::addContext(const std::shared_ptr<P2PConnectorAsyncWriteContext>& context) {
+    if (!context)
+        return false;
+    context->setNotification(notification_);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!accepting_)
+            return false;
+        const auto it = contexts_.find(context->uniqueKey());
+        if (it != contexts_.end() && it->second->retentionExpired())
+            contexts_.erase(it);
+        if (!contexts_.emplace(context->uniqueKey(), context).second)
+            return false;
+    }
+    notification_->notify();
+    return true;
+}
+
+void P2PConnectorAsyncWriteContextChecker::cancelAll() {
+    std::vector<std::shared_ptr<P2PConnectorAsyncWriteContext>> contexts;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        accepting_ = false;
+        for (const auto& [key, context] : contexts_)
+            contexts.push_back(context);
+    }
+    for (const auto& context : contexts)
+        context->cancel();
+    notification_->notify();
+}
+
+void P2PConnectorAsyncWriteContextChecker::stop() {
+    cancelAll();
+    stopping_.store(true);
+    notification_->notify();
+    if (thread_.joinable())
+        thread_.join();
+    while (inflightContextCount() != 0) {
+        const auto generation = notification_->generation();
+        checkOnce();
+        if (inflightContextCount() != 0)
+            notification_->waitUntil(generation, nextWakeupMs());
+    }
+    if (control_pool_)
+        control_pool_->stop(autil::ThreadPoolBase::STOP_AFTER_QUEUE_EMPTY);
+}
+
+size_t P2PConnectorAsyncWriteContextChecker::inflightContextCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return std::count_if(
+        contexts_.begin(), contexts_.end(), [](const auto& item) { return item.second->resourceHoldPending(); });
+}
+
+int64_t P2PConnectorAsyncWriteContextChecker::nextWakeupMs() const {
+    auto                        next = std::numeric_limits<int64_t>::max();
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& [key, context] : contexts_)
+        next = std::min(next, context->nextWakeupMs());
+    if (next == std::numeric_limits<int64_t>::max())
+        return next;
+    const auto delay_ms = std::max<int64_t>(0, next - currentTimeMs());
+    const auto now_ms   = P2PNotification::nowMs();
+    return now_ms + std::min(delay_ms, std::numeric_limits<int64_t>::max() - now_ms);
+}
+
+void P2PConnectorAsyncWriteContextChecker::checkOnce() {
+    std::vector<std::shared_ptr<P2PConnectorAsyncWriteContext>> contexts;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& [key, context] : contexts_)
+            contexts.push_back(context);
+    }
+    for (const auto& context : contexts) {
+        context->checkDone();
+        context->expireTransferDeadlineIfNeeded();
+        context->checkCancelDone();
+        context->failStopIfLeaseUnconfirmed();
+        context->runControl(control_pool_);
+        if (context->retentionExpired()) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto                  it = contexts_.find(context->uniqueKey());
+            if (it != contexts_.end() && it->second == context)
+                contexts_.erase(it);
+        }
     }
 }
 

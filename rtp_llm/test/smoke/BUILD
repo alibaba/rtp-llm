@@ -54,10 +54,51 @@ py_test(
     ],
 )
 
+py_test(
+    name = "v4_cp_writeback_acceptance_test",
+    srcs = [
+        "v4_cp_writeback_acceptance.py",
+        "v4_cp_writeback_acceptance_test.py",
+    ],
+)
+
+py_test(
+    name = "asymmetric_tp_writeback_acceptance_test",
+    srcs = [
+        "asymmetric_tp_writeback_acceptance.py",
+        "asymmetric_tp_writeback_acceptance_test.py",
+        "v4_cp_writeback_acceptance.py",
+    ],
+)
+
 exports_files([
     "entry.py",
     "data/prompt_candidates.json",
 ])
+
+py_test(
+    name = "writeback_smoke_test",
+    srcs = glob(["*.py"], exclude = ["entry.py"]),
+    main = "writeback_smoke_test.py",
+    imports = [".."],
+    data = ["data/model/qwen25/q_r_dp_sep_p2p_writeback.json"],
+    deps = [
+        "//rtp_llm/test/utils:device_resource",
+        "//rtp_llm/test/utils:maga_server_manager",
+        "//rtp_llm/test/utils:test_util",
+        "//rtp_llm:dashscope",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:jieba",
+        "//rtp_llm:json5",
+        "//rtp_llm:openai",
+        "//rtp_llm:partial_json_parser",
+        "//rtp_llm:psutil",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:testlib",
+        "//rtp_llm:tiktoken",
+        "//rtp_llm:uvicorn",
+    ],
+)
 
 filegroup(
     name = "smoke_model_configs",

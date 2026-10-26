@@ -58,6 +58,21 @@ public:
             }
         }
 
+        bool rpcSuccess() const {
+            if (locally_completed_) {
+                return true;
+            }
+            if (!tp_broadcast_result_ || !tp_broadcast_result_->done() || !tp_broadcast_result_->rpcSuccess()) {
+                return false;
+            }
+            for (const auto& response : tp_broadcast_result_->responses()) {
+                if (!response.has_p2p_response()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         int64_t totalCostTimeUs() const {
             return total_cost_time_us_.load();
         }
@@ -93,6 +108,7 @@ public:
         std::vector<std::pair<std::string, uint32_t>> peer_workers;
         RankRoutes                                    routes;
         uint64_t                                      plan_digest{0};
+        int                                           worker_rank{0};
     };
 
     std::shared_ptr<Result> broadcast(BroadcastParams params);
@@ -134,7 +150,18 @@ public:
     /// @param poll_timeout_ms 单次 broadcast 的 gRPC 超时（毫秒）
     LeaseStatusResult queryLeaseStatus(const std::string& unique_key, int64_t poll_timeout_ms);
 
+public:
+    std::shared_ptr<TpBroadcastResult> controlWriteAsync(const std::string&        unique_key,
+                                                         P2PConnectorBroadcastType type,
+                                                         int64_t                   transfer_deadline_ms,
+                                                         int64_t                   control_timeout_ms);
+    std::shared_ptr<TpBroadcastResult>
+    queryLeaseStatusAsync(const std::string& unique_key, P2PConnectorBroadcastType operation, int64_t poll_timeout_ms);
+    static LeaseStatusResult leaseStatus(const std::shared_ptr<TpBroadcastResult>& result);
+
 private:
+    std::shared_ptr<TpBroadcastResult> broadcastRpc(const std::vector<FunctionRequestPB>& requests, int64_t timeout_ms);
+
     std::shared_ptr<Result> broadcastRequests(std::vector<FunctionRequestPB> requests,
                                               const std::string&             unique_key,
                                               int64_t                        deadline_ms);

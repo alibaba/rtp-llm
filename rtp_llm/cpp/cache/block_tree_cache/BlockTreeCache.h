@@ -123,6 +123,13 @@ public:
     void shutdownLoads();
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys, const std::function<bool(size_t)>& valid_prefix = {});
+    ErrorInfo            matchForExternalInsert(const CacheKeysType&  cache_keys,
+                                                size_t                required_prefix_blocks,
+                                                BlockTreeMatchResult& match_result);
+    ErrorInfo            insertExternalBlocks(const CacheKeysType&                              cache_keys,
+                                              size_t                                            start_block,
+                                              const std::vector<std::vector<GroupSetResource>>& resources,
+                                              int64_t                                           deadline_ms);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);
@@ -130,7 +137,8 @@ public:
     size_t insert(const CacheKeysType&                              cache_keys,
                   const std::vector<std::vector<GroupSetResource>>& resources,
                   Tier                                              target_tier,
-                  bool                                              is_resident);
+                  bool                                              is_resident,
+                  bool                                              account_for_prefill = false);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
@@ -181,7 +189,8 @@ public:
     }
 
 private:
-    void checkWatermark();
+    ErrorInfo validateDevicePrefixLocked(const CacheKeysType& cache_keys, size_t required_prefix_blocks) const;
+    void      checkWatermark();
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool check_watermark);
 
