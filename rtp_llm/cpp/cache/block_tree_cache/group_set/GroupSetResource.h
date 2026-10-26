@@ -29,6 +29,20 @@ enum class GroupSetTransferState : uint8_t {
     LOADING        // Host/Disk -> Device
 };
 
+inline const char* transferStateName(GroupSetTransferState state) {
+    switch (state) {
+        case GroupSetTransferState::IDLE:
+            return "IDLE";
+        case GroupSetTransferState::DEMOTING:
+            return "DEMOTING";
+        case GroupSetTransferState::LOAD_PENDING:
+            return "LOAD_PENDING";
+        case GroupSetTransferState::LOADING:
+            return "LOADING";
+    }
+    return "UNKNOWN";
+}
+
 // Per-GroupSet data location across storage tiers.
 // Each GroupSetResource corresponds to one GroupSet on one TreeNode.
 struct GroupSetResource {
