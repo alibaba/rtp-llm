@@ -3173,6 +3173,15 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionKeepsRequestSourc
     for (const auto& [pool, block] : device_sources) {
         EXPECT_EQ(pool->refCount(block), 1u);
     }
+    // The FULL drop would cascade to freshly loaded SWA blocks still held by
+    // this request. Preserve the entire plan until those holders are released.
+    const auto version_before_reclaim = environment->cache->getKeySnapshot().version;
+    EXPECT_EQ(environment->cache->evictForGroup("group0", 2), 0);
+    EXPECT_EQ(environment->cache->getKeySnapshot().version, version_before_reclaim);
+    for (const auto& [pool, block] : request_target_blocks) {
+        EXPECT_EQ(pool->refCount(block), 2u);
+        releaseDeviceBlocks(*environment->cache, pool, {block});
+    }
     EXPECT_EQ(environment->cache->evictForGroup("group0", 2), 2);
     for (const auto& [pool, block] : device_sources) {
         EXPECT_FALSE(pool->isAllocated(block));
@@ -3182,9 +3191,6 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionKeepsRequestSourc
     EXPECT_TRUE(context->success());
     context.reset();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
-    for (const auto& [pool, block] : request_target_blocks) {
-        releaseDeviceBlocks(*environment->cache, pool, {block});
-    }
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }
