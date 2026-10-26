@@ -43,6 +43,7 @@ from rtp_llm.server.vit_proxy_server import (
     resolve_default_rpc_timeout_seconds,
 )
 from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
+from rtp_llm.server.vit_rpc_control import create_vit_rpc_server
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
 
 
@@ -451,6 +452,134 @@ class WorkerCountMetricsTest(TestCase):
 
 
 class VitProxyRpcServerStatusTest(TestCase):
+    def test_worker_status_exposes_admission_count_including_zero(self):
+        engine = MagicMock()
+        engine.get_inflight_input_count.return_value = 13
+        server = MultimodalRpcServer(engine)
+        result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        self.assertTrue(result.HasField("mm_inflight_inputs"))
+        self.assertEqual(result.mm_inflight_inputs.value, 13)
+        engine.get_inflight_input_count.return_value = 0
+        result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        self.assertTrue(result.HasField("mm_inflight_inputs"))
+        self.assertEqual(result.mm_inflight_inputs.value, 0)
+
+    def test_load_sums_all_children_and_does_not_turn_missing_sample_into_zero(self):
+        first = WorkerStatusPB(role="VIT", alive=True, status_version=1)
+        second = WorkerStatusPB(role="VIT", alive=True, status_version=1)
+        first.mm_inflight_inputs.value = 5
+        second.mm_inflight_inputs.value = 7
+        server = self._make_server(
+            {
+                "a": self._make_status_stub(first),
+                "b": self._make_status_stub(second),
+            }
+        )
+        result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        self.assertEqual(result.mm_inflight_inputs.value, 12)
+        server._last_worker_status.pop("b")
+        self.assertFalse(
+            server._aggregate_worker_status(first).HasField("mm_inflight_inputs")
+        )
+        server._last_worker_status["b"] = (time.monotonic() - 2, second)
+        self.assertFalse(
+            server._aggregate_worker_status(first).HasField("mm_inflight_inputs")
+        )
+
+    def test_transient_deadline_keeps_recent_health_but_not_stale_load(self):
+        status = WorkerStatusPB(role="VIT", alive=True, status_version=1)
+        status.mm_inflight_inputs.value = 5
+        stub = self._make_status_stub(status)
+        server = self._make_server({"a": stub})
+        server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        server._last_worker_status["a"] = (time.monotonic() - 2, status)
+        stub.GetWorkerStatus.future.return_value = FakeGrpcFuture(
+            error=RpcDeadlineExceeded()
+        )
+        result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        self.assertTrue(result.alive)
+        self.assertEqual(server.load_balancer.get_alive_worker_addresses(), ["a"])
+        self.assertFalse(result.HasField("mm_inflight_inputs"))
+        server._last_worker_status["a"] = (time.monotonic() - 6, status)
+        result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        self.assertFalse(result.alive)
+        self.assertEqual(server.load_balancer.get_alive_worker_addresses(), [])
+
+    def test_explicit_not_alive_is_not_masked_by_timeout_grace(self):
+        status = WorkerStatusPB(role="VIT", alive=True, status_version=1)
+        stub = self._make_status_stub(status)
+        server = self._make_server({"a": stub})
+        server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        stub.GetWorkerStatus.future.return_value = FakeGrpcFuture(
+            response=WorkerStatusPB(role="VIT", alive=False, status_version=1)
+        )
+        self.assertFalse(server.GetWorkerStatus(StatusVersionPB(), FakeContext()).alive)
+        self.assertNotIn("a", server._last_worker_status)
+
+    def test_probe_start_failure_invalidates_prior_success(self):
+        for error in (RpcUnavailable(), RuntimeError("probe setup failed")):
+            with self.subTest(error=type(error).__name__):
+                status = WorkerStatusPB(role="VIT", alive=True, status_version=1)
+                stub = self._make_status_stub(status)
+                server = self._make_server({"a": stub})
+                server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+                stub.GetWorkerStatus.future.side_effect = error
+                self.assertFalse(
+                    server.GetWorkerStatus(StatusVersionPB(), FakeContext()).alive
+                )
+                self.assertNotIn("a", server._last_worker_status)
+                self.assertEqual(server.load_balancer.get_alive_worker_addresses(), [])
+                # A following timeout must not resurrect the invalidated sample.
+                stub.GetWorkerStatus.future.side_effect = RpcDeadlineExceeded()
+                self.assertFalse(
+                    server.GetWorkerStatus(StatusVersionPB(), FakeContext()).alive
+                )
+
+    def test_probe_start_deadline_uses_same_bounded_health_grace(self):
+        status = WorkerStatusPB(role="VIT", alive=True, status_version=1)
+        status.mm_inflight_inputs.value = 5
+        stub = self._make_status_stub(status)
+        server = self._make_server({"a": stub})
+        server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        server._last_worker_status["a"] = (time.monotonic() - 2, status)
+        stub.GetWorkerStatus.future.side_effect = RpcDeadlineExceeded()
+        result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        self.assertTrue(result.alive)
+        self.assertFalse(result.HasField("mm_inflight_inputs"))
+        self.assertEqual(server.load_balancer.get_alive_worker_addresses(), ["a"])
+
+    def test_health_rpc_runs_while_data_executor_is_saturated(self):
+        entered, release = threading.Event(), threading.Event()
+
+        class BlockingWorker(MultimodalRpcServiceServicer):
+            def RemoteMultimodalEmbedding(self, request, context):
+                entered.set()
+                release.wait(5)
+                return MultimodalOutputPB()
+
+            def GetWorkerStatus(self, request, context):
+                return WorkerStatusPB(role="VIT", alive=True, status_version=1)
+
+        server = create_vit_rpc_server(max_workers=1)
+        add_MultimodalRpcServiceServicer_to_server(BlockingWorker(), server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        channel = grpc.insecure_channel(f"127.0.0.1:{port}")
+        stub = MultimodalRpcServiceStub(channel)
+        try:
+            work = stub.RemoteMultimodalEmbedding.future(
+                MultimodalInputsPB(), timeout=5
+            )
+            self.assertTrue(entered.wait(2))
+            self.assertTrue(stub.GetWorkerStatus(StatusVersionPB(), timeout=1).alive)
+            self.assertFalse(work.done())
+            release.set()
+            work.result(timeout=2)
+        finally:
+            release.set()
+            channel.close()
+            server.stop(0).wait()
+
     def _make_status_stub(self, worker_status=None, error=None, done=True):
         stub = MagicMock()
         stub.GetWorkerStatus.future.return_value = FakeGrpcFuture(
