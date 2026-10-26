@@ -3,6 +3,7 @@ package org.flexlb.metric;
 import com.google.common.util.concurrent.AtomicDouble;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
@@ -13,6 +14,7 @@ import org.flexlb.enums.FlexPriorityType;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -63,6 +65,8 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     private final MeterRegistry meterRegistry;
     private final ConcurrentHashMap<String, FlexMetricType> metricTypes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<MetricKey, GaugeEntry> gaugeCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Meter.Id, ConcurrentLinkedQueue<AtomicDouble>> gaugeSources =
+            new ConcurrentHashMap<>();
     private final ConcurrentHashMap<MetricKey, Counter> counterCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<MetricKey, Timer> timerCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<FlexMetricTags, Tags> tagsCache = new ConcurrentHashMap<>();
@@ -194,15 +198,14 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     }
 
     /**
-     * Report a gauge value. Uses an AtomicDouble per metric-name+tags combination
-     * as the gauge reference object, so each unique tag set gets its own gauge.
+     * Replace this source's latest value. Sources collapsed by registry filters are summed on scrape.
      *
      * @param value absolute gauge value
      */
     private void reportGauge(MetricKey key, double value) {
         GaugeEntry entry = gaugeEntry(key);
         if (entry != null) {
-            entry.value().set(value);
+            entry.value.set(value);
         }
     }
 
@@ -210,12 +213,17 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         return gaugeCache.computeIfAbsent(
                 key,
                 ignored -> {
-                    AtomicDouble value = new AtomicDouble(0.0);
+                    GaugeEntry entry = new GaugeEntry();
                     Gauge gauge =
-                            Gauge.builder(key.name(), value, AtomicDouble::get)
+                            Gauge.builder(key.name(), entry, GaugeEntry::read)
                                     .tags(resolveTags(key.metricsTags()))
                                     .register(meterRegistry);
-                    return new GaugeEntry(value, gauge);
+                    // Registration returns the canonical meter after all tag filters have run.
+                    entry.sources =
+                            gaugeSources.computeIfAbsent(
+                                    gauge.getId(), unused -> new ConcurrentLinkedQueue<>());
+                    entry.sources.add(entry.value);
+                    return entry;
                 });
     }
 
@@ -236,9 +244,29 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         return tags;
     }
 
-    private record MetricKey(String name, FlexMetricTags metricsTags) {}
+    private record MetricKey(String name, FlexMetricTags metricsTags) {
+        private MetricKey {
+            if (metricsTags != null && metricsTags.isEmpty()) {
+                metricsTags = null;
+            }
+        }
+    }
 
-    private record GaugeEntry(AtomicDouble value, Gauge gauge) {}
+    private static final class GaugeEntry {
+        private final AtomicDouble value = new AtomicDouble(0.0);
+        private volatile ConcurrentLinkedQueue<AtomicDouble> sources;
+
+        private double read() {
+            var current = sources;
+            double total = 0.0;
+            if (current != null) {
+                for (var source : current) {
+                    total += source.get();
+                }
+            }
+            return total;
+        }
+    }
 
     @Override
     public String toString() {
