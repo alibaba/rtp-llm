@@ -3860,10 +3860,25 @@ TEST_F(BlockTreeCacheTest, EventPublicationTracksComponentsIndependently) {
     EXPECT_EQ(publisher->events.back().group_index, 0u);
 
     publisher->result = PublishResult::QUEUE_FULL;
-    EXPECT_EQ(cache->evictForGroup("group1", 2), 2);
+    // Dropping a non-leaf SWA component leaves the FULL history published.
+    EXPECT_EQ(cache->evictForGroup("group1", 1), 1);
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_groups,
+              (std::map<int64_t, std::vector<size_t>>{{100, {1}}, {200, {1}}, {300, {0, 1}}}));
+    EXPECT_EQ(publisher->events.back().type, KVCacheEventType::BLOCK_DELETE);
+    EXPECT_EQ(publisher->events.back().group_index, 0u);
+
+    // The final SWA leaf also drops its FULL sibling and unreachable ancestors.
+    EXPECT_EQ(cache->evictForGroup("group1", 1), 1);
     const auto snapshot = cache->logicalCacheSnapshot();
     EXPECT_TRUE(cache->getKeySnapshot().keys.empty());
     EXPECT_TRUE(snapshot.block_groups.empty());
+    EXPECT_EQ(cache->getStats().tree_node_count, 0u);
+    for (const auto block : {42, 43, 44}) {
+        EXPECT_FALSE(pools[0]->isAllocated(block));
+    }
+    for (const auto block : {45, 46}) {
+        EXPECT_FALSE(pools[1]->isAllocated(block));
+    }
     std::map<int64_t, std::vector<size_t>> replayed;
     for (const auto& event : publisher->events) {
         auto& components = replayed[event.block_key];
