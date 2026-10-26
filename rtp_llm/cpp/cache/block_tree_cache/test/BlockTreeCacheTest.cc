@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/metrics/RpcFailureMetrics.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
@@ -701,6 +702,56 @@ TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
     }
 }
 
+TEST(BlockTreeCacheMetricsTest, ExternalOwnerSnapshotsAndMetricsUseExistingPoolTags) {
+    auto        pools = makeStructuralDevicePools(1, "external_owner_metrics");
+    const auto& pool  = pools.front();
+    auto        group = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);
+    initializeTestGroupSet(group, pools);
+    const auto blocks = pool->malloc(2).value();
+    pool->incRef(blocks.front());
+    pool->incRef(blocks.front(), DeviceBlockRefType::REMOTE_CONNECTOR);
+    pool->incRef(blocks.back(), DeviceBlockRefType::REMOTE_CONNECTOR);
+    pool->incRef(blocks.back(), DeviceBlockRefType::PD_CONNECTOR);
+
+    BlockTreeCacheMetricsReporter snapshot_reporter(nullptr);
+    const auto                    snapshots = snapshot_reporter.collectPoolMetricsSnapshots({group});
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots.front().request_ref_blocks, 1u);
+    EXPECT_EQ(snapshots.front().remote_connector_ref_blocks, 2u);
+    EXPECT_EQ(snapshots.front().pd_connector_ref_blocks, 1u);
+    EXPECT_EQ(snapshots.front().active_blocks, 2u);
+
+    auto                  reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto*                 metrics  = reporter->getMetricsGroup<RtpLLMCachePoolMetrics>();
+    kmonitor::MetricsTags tags("pool_name", pool->poolName());
+    tags.AddTag("tier", "DEVICE");
+    RtpLLMCachePoolMetricsCollector collector;
+    collector.request_ref_blocks          = snapshots.front().request_ref_blocks;
+    collector.remote_connector_ref_blocks = snapshots.front().remote_connector_ref_blocks;
+    collector.pd_connector_ref_blocks     = snapshots.front().pd_connector_ref_blocks;
+    ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->request_ref_blocks_metric, tags, "rtp_llm_kv_cache_request_ref_blocks"), 1);
+    EXPECT_DOUBLE_EQ(
+        snapshotQps(metrics->remote_connector_ref_blocks_metric, tags, "rtp_llm_kv_cache_remote_connector_ref_blocks"),
+        2);
+    EXPECT_DOUBLE_EQ(
+        snapshotQps(metrics->pd_connector_ref_blocks_metric, tags, "rtp_llm_kv_cache_pd_connector_ref_blocks"), 1);
+
+    pool->decRef(blocks.front());
+    pool->decRef(blocks, DeviceBlockRefType::REMOTE_CONNECTOR);
+    pool->decRef(blocks.back(), DeviceBlockRefType::PD_CONNECTOR);
+    collector.request_ref_blocks          = 0;
+    collector.remote_connector_ref_blocks = 0;
+    collector.pd_connector_ref_blocks     = 0;
+    ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->request_ref_blocks_metric, tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->remote_connector_ref_blocks_metric, tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->pd_connector_ref_blocks_metric, tags), 0);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+    EXPECT_TRUE(reporter->getTags().FindTag("tier").empty());
+    EXPECT_TRUE(reporter->getTags().FindTag("pool_name").empty());
+}
+
 TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyReportPopulatedValues) {
     auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     for (const Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
@@ -741,6 +792,72 @@ TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyReportPopulatedValues) {
     EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bytes_metric, tags), 8192);
     EXPECT_DOUBLE_EQ(snapshotQps(metrics->read_bandwidth_bytes_per_sec_metric, tags), 0);
     EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bandwidth_bytes_per_sec_metric, tags), 0);
+}
+
+TEST(BlockTreeCacheMetricsTest, InsertHardStopReportsTierStateAndPreservesCommonTags) {
+    kmonitor::MetricsTags         common_tags("dp_rank", "7");
+    auto                          metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", common_tags);
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
+    BlockTreeCacheMetricsReporter disabled(nullptr);
+    disabled.reportInsertHardStop({Tier::HOST, GroupSetTransferState::IDLE});
+
+    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheInsertMetrics>()->insert_hard_stop_qps_metric;
+    EXPECT_EQ(metric->GetMetricType(), kmonitor::QPS);
+    EXPECT_EQ(metricSeriesCount(metric), 0u);
+    for (const auto& [tier, tier_label] : {std::make_pair(Tier::DEVICE, "DEVICE"),
+                                           std::make_pair(Tier::HOST, "HOST"),
+                                           std::make_pair(Tier::DISK, "DISK"),
+                                           std::make_pair(Tier::NONE, "NONE")}) {
+        for (const auto& [state, state_label] : {std::make_pair(GroupSetTransferState::IDLE, "IDLE"),
+                                                 std::make_pair(GroupSetTransferState::DEMOTING, "DEMOTING"),
+                                                 std::make_pair(GroupSetTransferState::LOAD_PENDING, "LOAD_PENDING"),
+                                                 std::make_pair(GroupSetTransferState::LOADING, "LOADING")}) {
+            const BlockTreeInsertHardStopInfo hard_stop{tier, state};
+            reporter.reportInsertHardStop(hard_stop);
+            reporter.reportInsertHardStop(hard_stop);
+            auto tags = common_tags;
+            tags.AddTag("existing_tier", tier_label);
+            tags.AddTag("transfer_state", state_label);
+            EXPECT_DOUBLE_EQ(snapshotQps(metric, tags, "rtp_llm_kv_cache_insert_hard_stop_qps"), 2);
+        }
+    }
+    EXPECT_EQ(metricSeriesCount(metric), 16u);
+    EXPECT_EQ(metrics_reporter->getTags().FindTag("dp_rank"), "7");
+    EXPECT_TRUE(metrics_reporter->getTags().FindTag("existing_tier").empty());
+    EXPECT_TRUE(metrics_reporter->getTags().FindTag("transfer_state").empty());
+}
+
+TEST_F(BlockTreeCacheTest, InsertHardStopReportsOnceEvenWithoutAcceptedResources) {
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    std::vector<GroupSetPtr> groups;
+    for (size_t index = 0; index < 2; ++index) {
+        groups.push_back(std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(index)}, nullptr, nullptr));
+    }
+    cache_ = makeBlockTreeCacheForTest(std::move(groups), BlockTreeCacheConfig{}, nullptr, nullptr, metrics_reporter);
+    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheInsertMetrics>()->insert_hard_stop_qps_metric;
+
+    GroupSetResource device;
+    device.device_blocks = {42};
+    cache_->insert({100}, {{device, device}}, Tier::DEVICE);
+    EXPECT_EQ(metricSeriesCount(metric), 0u);
+    auto* node = cache_->tree()->findNode({100}).front();
+    for (size_t index = 0; index < 2; ++index) {
+        auto& resource = node->group_set_resources[index];
+        cache_->groupSets()[index]->unreferenceBlocks(
+            MultiNodeResource{index, Tier::DEVICE, {{node, resource.device_blocks}}}, BlockTreeRefType::CACHE);
+        resource.evictFromTier(Tier::DEVICE);
+        resource.host_block = 7;
+    }
+
+    cache_->insert({100, 200}, {{device, device}, {device, device}}, Tier::DEVICE);
+    cache_->insert({100, 200}, {{device, device}, {device, device}}, Tier::DEVICE);
+
+    kmonitor::MetricsTags tags("existing_tier", "HOST");
+    tags.AddTag("transfer_state", "IDLE");
+    EXPECT_EQ(metricSeriesCount(metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(metric, tags), 2);
+    EXPECT_TRUE(node->children.empty());
 }
 
 TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPool) {
@@ -826,6 +943,25 @@ TEST(BlockTreeCacheMetricsTest, QueueBacklogReportsLoadBackgroundAndCompletion) 
     EXPECT_DOUBLE_EQ(backlog("load"), 2);
     EXPECT_DOUBLE_EQ(backlog("background"), 3);
     EXPECT_DOUBLE_EQ(backlog("completion"), 4);
+}
+
+TEST(BlockTreeCacheMetricsTest, ConnectFailureQpsUsesOnlyDirectionAndPreservesCommonTags) {
+    auto  reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags("hippo_app", "test"));
+    auto  report   = makeConnectFailureReporter(reporter);
+    auto* metric   = reporter->getMetricsGroup<RtpLLMGrpcConnectFailureMetrics>()->connect_failed_qps_metric;
+    report("H2D");
+    report("H2D");
+    report("D2H");
+    EXPECT_EQ(metricSeriesCount(metric), 2u);
+    kmonitor::MetricsTags tags("hippo_app", "test");
+    tags.AddTag("direction", "H2D");
+    EXPECT_DOUBLE_EQ(snapshotQps(metric, tags, "rtp_llm_rank_broadcast_grpc_connect_failed_qps"), 2);
+    kmonitor::MetricsTags d2h_tags("hippo_app", "test");
+    d2h_tags.AddTag("direction", "D2H");
+    EXPECT_DOUBLE_EQ(snapshotQps(metric, d2h_tags, "rtp_llm_rank_broadcast_grpc_connect_failed_qps"), 1);
+    EXPECT_EQ(reporter->getTags().FindTag("hippo_app"), "test");
+    EXPECT_TRUE(reporter->getTags().FindTag("direction").empty());
+    EXPECT_FALSE(makeConnectFailureReporter(nullptr));
 }
 
 TEST(BlockTreeCacheMetricsTest, LoadJoinMetricsKeepRequestAndDependencyGranularity) {
@@ -2883,6 +3019,20 @@ static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadCache(std::vector<DeviceB
     return cache;
 }
 
+TEST_F(BlockTreeCacheTest, QueryContextSurvivesMatchAndLocalLoadTaskCreation) {
+    auto cache  = makeHostOnlyLoadCache();
+    auto result = cache->match({200}, {}, false, 73);
+    auto load   = takeLoadContext(result);
+    ASSERT_NE(load, nullptr);
+    EXPECT_EQ(load->requestId(), 73);
+    LoadTaskRunner runner(cache->groupSets(), 1000, 1000);
+    auto           task = runner.createTask(load);
+    ASSERT_NE(task, nullptr);
+    EXPECT_EQ(task->host_to_device_task.requestId(), 73);
+    EXPECT_EQ(task->disk_to_device_task.requestId(), 73);
+    EXPECT_TRUE(load->abortPending());
+}
+
 TEST_F(BlockTreeCacheTest, PendingLoadContextHardStopsSecondMatchUntilAbort) {
     std::unique_ptr<BlockTreeCache> cache = makeHostOnlyLoadCache();
     ASSERT_NE(cache, nullptr);
@@ -3712,8 +3862,8 @@ TEST_F(BlockTreeCacheTest, EventPublicationTracksComponentsIndependently) {
     publisher->result = PublishResult::QUEUE_FULL;
     EXPECT_EQ(cache->evictForGroup("group1", 2), 2);
     const auto snapshot = cache->logicalCacheSnapshot();
-    EXPECT_EQ(snapshot.block_groups,
-              (std::map<int64_t, std::vector<size_t>>{{100, {1}}, {200, {1}}, {300, {1}}}));
+    EXPECT_TRUE(cache->getKeySnapshot().keys.empty());
+    EXPECT_TRUE(snapshot.block_groups.empty());
     std::map<int64_t, std::vector<size_t>> replayed;
     for (const auto& event : publisher->events) {
         auto& components = replayed[event.block_key];

@@ -22,6 +22,7 @@ class MetricsReporter;
 
 namespace rtp_llm {
 
+struct BlockTreeInsertHardStopInfo;
 struct BlockTreeQueueSizes;
 
 struct BlockTreePoolMetricsSnapshot {
@@ -34,6 +35,8 @@ struct BlockTreePoolMetricsSnapshot {
     size_t      available_blocks{0};
     size_t      active_blocks{0};
     size_t      request_ref_blocks{0};
+    size_t      remote_connector_ref_blocks{0};
+    size_t      pd_connector_ref_blocks{0};
     size_t      block_cache_ref_blocks{0};
     size_t      load_ref_blocks{0};
     size_t      eviction_target_ref_blocks{0};
@@ -112,6 +115,7 @@ public:
 
     void reportLoadJoin(size_t dependency_count) const;
     void reportLoadJoinWait(int64_t join_wait_latency_us) const;
+    void reportInsertHardStop(const BlockTreeInsertHardStopInfo& hard_stop) const;
 
     int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
     // Report once after all batches/ranks of a logical copy have completed.

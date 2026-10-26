@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -56,6 +57,8 @@ BlockTreePoolMetricsSnapshot makePoolMetricsSnapshot(Tier tier, const IBlockPool
 BlockTreePoolMetricsSnapshot makeDevicePoolMetricsSnapshot(const DeviceBlockPool& pool) {
     BlockTreePoolMetricsSnapshot snapshot = makePoolMetricsSnapshot(Tier::DEVICE, pool);
     snapshot.request_ref_blocks           = pool.referencedBlocksNum();
+    snapshot.remote_connector_ref_blocks  = pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR);
+    snapshot.pd_connector_ref_blocks      = pool.referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR);
     return snapshot;
 }
 
@@ -309,6 +312,16 @@ void BlockTreeCacheMetricsReporter::reportEvictedDescriptor(const TransferDescri
     collector.block_lifetime_ms = std::max<int64_t>(0, (timing.selected_time_us - timing.tier_enter_time_us) / 1000);
     collector.block_idletime_ms = (timing.selected_time_us - timing.last_access_time_us) / 1000;
     metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
+}
+
+void BlockTreeCacheMetricsReporter::reportInsertHardStop(const BlockTreeInsertHardStopInfo& hard_stop) const {
+    if (metrics_reporter_ == nullptr) {
+        return;
+    }
+    RtpLLMCacheInsertMetricsCollector collector;
+    collector.existing_tier  = tierName(hard_stop.existing_tier);
+    collector.transfer_state = transferStateName(hard_stop.transfer_state);
+    metrics_reporter_->report<RtpLLMCacheInsertMetrics, RtpLLMCacheInsertMetricsCollector>(nullptr, &collector);
 }
 
 void BlockTreeCacheMetricsReporter::reportLoadJoin(size_t dependency_count) const {

@@ -25,6 +25,7 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
     local_matched_blocks_(local_matched_blocks),
     matched_blocks_(local_matched_blocks),
     storage_backend_(std::move(storage_backend)),
+    request_id_(storage_request.request_id),
     storage_request_(std::move(storage_request)),
     need_backend_match_(storage_backend_ && !storage_request_.empty()),
     backend_pending_(need_backend_match_),

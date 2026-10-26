@@ -3,6 +3,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -26,6 +27,11 @@ struct ReusableGroupLocation {
 
 using ReusableGroupLocations = std::unordered_map<std::string, ReusableGroupLocation>;
 
+struct BlockTreeInsertHardStopInfo {
+    Tier                  existing_tier;
+    GroupSetTransferState transfer_state;
+};
+
 struct BlockTreeInsertResult {
     std::vector<TreeNode*>                                 path;
     std::vector<TreeNode*>                                 inserted_nodes;
@@ -35,6 +41,7 @@ struct BlockTreeInsertResult {
     // Number of logical GroupSetResources the tree took BLOCK_CACHE ownership of.
     size_t accepted_resource_count{0};
     size_t resident_prefix_length{0};
+    std::optional<BlockTreeInsertHardStopInfo> hard_stop;
 };
 
 struct BlockTreeNodeRangeResult {

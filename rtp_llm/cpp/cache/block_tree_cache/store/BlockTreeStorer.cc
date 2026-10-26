@@ -43,7 +43,8 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               const std::vector<std::vector<GroupSetResource>>& resources,
                                               Tier                                              target_tier,
                                               bool                                              is_resident,
-                                              size_t& resident_prefix_length) {
+                                              size_t&                                           resident_prefix_length,
+                                              std::optional<int64_t>                            request_id) {
     resident_prefix_length = 0;
     assert(!is_resident || target_tier == Tier::DEVICE);
     RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK,
@@ -52,10 +53,10 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
     if (target_tier == Tier::DEVICE) {
         publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length);
     } else {
-        submitLowerTierLocked(cache_keys, resources, target_tier);
+        submitLowerTierLocked(cache_keys, resources, target_tier, request_id);
         return {};
     }
-    return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources)) :
+    return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources, request_id)) :
                               StorageWriteTask{};
 }
 
@@ -64,6 +65,9 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
                                           bool                                              is_resident,
                                           size_t&                                           resident_prefix_length) {
     const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false, is_resident);
+    if (insert_result.hard_stop) {
+        metrics_reporter_.reportInsertHardStop(*insert_result.hard_stop);
+    }
     const bool resources_inserted = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
     if (resources_inserted || !insert_result.newly_resident_nodes.empty()) {
         evictor_.onInserted(insert_result);
@@ -75,9 +79,11 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
 }
 
 StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&                              cache_keys,
-                                                   const std::vector<std::vector<GroupSetResource>>& resources) const {
+                                                   const std::vector<std::vector<GroupSetResource>>& resources,
+                                                   const std::optional<int64_t>&                     request_id) const {
     StorageRequest request{std::make_shared<CacheKeysType>(cache_keys),
                            std::vector<std::vector<StorageBlockHandle>>(cache_keys.size())};
+    request.request_id = request_id;
     for (size_t key_index = 0; key_index < resources.size(); ++key_index) {
         auto& key_handles = request.handles[key_index];
         for (size_t group_set = 0; group_set < tree_->groupSets().size(); ++group_set) {
@@ -96,7 +102,8 @@ StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&         
 
 void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                              cache_keys,
                                             const std::vector<std::vector<GroupSetResource>>& resources,
-                                            Tier                                              target_tier) {
+                                            Tier                                              target_tier,
+                                            std::optional<int64_t>                            request_id) {
     if (stopping_.load()) {
         return;
     }
@@ -104,7 +111,8 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     StoreTaskPtr task = std::make_shared<StoreTask>(
         target_tier,
         cache_keys,
-        std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_));
+        std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_),
+        request_id);
 
     block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() { settleLocked(*task, /*publish=*/false); });
 
