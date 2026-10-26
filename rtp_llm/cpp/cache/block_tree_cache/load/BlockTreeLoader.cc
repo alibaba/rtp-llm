@@ -47,14 +47,15 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
         })) {}
 
 BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&               cache_keys,
-                                                  const std::function<bool(size_t)>& valid_prefix) {
+                                                  const std::function<bool(size_t)>& valid_prefix,
+                                                  bool                               enable_storage_backend) {
     if (cache_keys.empty()) {
         RTP_LLM_LOG_DEBUG("empty cache_keys, returning empty result");
         return {};
     }
 
     std::vector<TreeNode*> path   = tree_->findNode(cache_keys);
-    BlockTreeMatchResult   result = createMatchResult(path, cache_keys, valid_prefix);
+    BlockTreeMatchResult   result = createMatchResult(path, cache_keys, valid_prefix, enable_storage_backend);
     RTP_LLM_LOG_DEBUG("matched %zu device blocks, cache_keys=%zu, tree_nodes=%zu",
                       result.matched_device_blocks,
                       cache_keys.size(),
@@ -143,7 +144,8 @@ void BlockTreeLoader::collectReuseTimeSnapshots(TreeNode*                       
 
 BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>&            path,
                                                         const CacheKeysType&               cache_keys,
-                                                        const std::function<bool(size_t)>& valid_prefix) {
+                                                        const std::function<bool(size_t)>& valid_prefix,
+                                                        bool                               enable_storage_backend) {
     BlockTreeMatchResult result;
     std::vector<bool>    candidate_valid;
     if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix) && !storage_backend_) {
@@ -222,7 +224,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
     }
 
     StorageRequest storage_request;
-    if (storage_backend_ && path.size() < cache_keys.size()) {
+    if (enable_storage_backend && storage_backend_ && path.size() < cache_keys.size()) {
         storage_request = makeStorageRequest(cache_keys, path.size());
     }
     const bool use_storage = !storage_request.empty();
@@ -481,7 +483,7 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
 void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&           task,
                                                 const std::shared_ptr<LoadAsyncContext>& context) {
     auto settle = [this, task, context]() {
-        bool                                           settlement_success = context->aggregateSuccess();
+        bool                                           settlement_success = context->localTransfersSucceeded();
         std::vector<std::shared_ptr<LoadAsyncContext>> joined_contexts;
         if (task) {
             {
