@@ -17,6 +17,7 @@
 namespace rtp_llm {
 
 class AsyncContext;
+class LoadAsyncContext;
 class GenerateStream;
 struct MallocResult;
 
@@ -170,6 +171,7 @@ private:
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
     absl::Status prepareLinearReplayResources(bool prepare_tails = true);
+    void         publishAllocatorReuse(const LoadAsyncContext& context, bool local_only);
 
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
@@ -182,6 +184,7 @@ private:
     bool                             fake_inited_           = false;
     bool                             resource_released_     = false;
     bool                             deferred_cache_prune_  = false;
+    bool                             skip_remote_cache_     = false;
     std::shared_ptr<AsyncContext>    allocator_load_context_;
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                          malloc_begin_time_us_    = 0;
