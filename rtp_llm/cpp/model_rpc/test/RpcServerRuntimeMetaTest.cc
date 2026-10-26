@@ -44,9 +44,10 @@ public:
     }
 };
 
-std::shared_ptr<RuntimeMetaTestStream> makeInitialCacheHitTestStream(int64_t request_id) {
+std::shared_ptr<RuntimeMetaTestStream> makeInitialCacheHitTestStream(int64_t request_id, int32_t priority = 0) {
     auto input             = std::make_shared<GenerateInput>();
     input->request_id      = request_id;
+    input->priority        = priority;
     input->generate_config = std::make_shared<GenerateConfig>();
     input->input_ids       = torch::arange(1, 13, torch::TensorOptions().dtype(torch::kInt32));
     return std::make_shared<RuntimeMetaTestStream>(input);
@@ -105,12 +106,13 @@ TEST(RpcServerRuntimeMetaTest, EnqueueConvertsWaitTimeFromMicrosecondsToMillisec
 TEST(RpcServerRuntimeMetaTest, RunningInfoRefreshesInitialCacheHitAfterEnqueue) {
     RpcServerRuntimeMeta meta;
     const int64_t        request_id = 104;
-    auto                 stream     = makeInitialCacheHitTestStream(request_id);
+    auto                 stream     = makeInitialCacheHitTestStream(request_id, /*priority=*/37);
 
     meta.enqueue(request_id, stream);
     auto before_cache_hit = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(before_cache_hit.running_task_info_list.size(), 1);
     EXPECT_EQ(before_cache_hit.running_task_info_list[0].prefix_length, 0);
+    EXPECT_EQ(before_cache_hit.running_task_info_list[0].priority, 37);
 
     advanceInitialCacheHit(stream);
     ASSERT_EQ(stream->reuseLength(), 8);
@@ -118,17 +120,19 @@ TEST(RpcServerRuntimeMetaTest, RunningInfoRefreshesInitialCacheHitAfterEnqueue) 
     auto running = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(running.running_task_info_list.size(), 1);
     EXPECT_EQ(running.running_task_info_list[0].prefix_length, 4);
+    EXPECT_EQ(running.running_task_info_list[0].priority, 37);
 
     meta.dequeue(request_id, stream);
     auto finished = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(finished.finished_task_info_list.size(), 1);
     EXPECT_EQ(finished.finished_task_info_list[0].prefix_length, 4);
+    EXPECT_EQ(finished.finished_task_info_list[0].priority, 37);
 }
 
 TEST(RpcServerRuntimeMetaTest, FinishTaskRefreshesInitialCacheHitAfterEnqueue) {
     RpcServerRuntimeMeta meta;
     const int64_t        request_id = 105;
-    auto                 stream     = makeInitialCacheHitTestStream(request_id);
+    auto                 stream     = makeInitialCacheHitTestStream(request_id, /*priority=*/61);
 
     meta.enqueue(request_id, stream);
 
@@ -146,6 +150,7 @@ TEST(RpcServerRuntimeMetaTest, FinishTaskRefreshesInitialCacheHitAfterEnqueue) {
     ASSERT_EQ(info.finished_task_info_list.size(), 1);
     const auto& finished = info.finished_task_info_list[0];
     EXPECT_EQ(finished.prefix_length, 4);
+    EXPECT_EQ(finished.priority, 61);
     EXPECT_EQ(finished.error_code, 14);
     EXPECT_EQ(finished.error_message, "remote load failed");
 }
