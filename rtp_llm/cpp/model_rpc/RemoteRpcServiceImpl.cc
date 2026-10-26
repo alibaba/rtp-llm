@@ -1,4 +1,5 @@
 #include <memory>
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -23,6 +24,9 @@ void RemoteRpcServiceImpl::startDeferredServices() {
 grpc::Status RemoteRpcServiceImpl::init(const EngineInitParams&                                maga_init_params,
                                         py::object                                             mm_process_engine,
                                         std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
+    perf_local_decode_requests_ = maga_init_params.pd_sep_config.role_type == RoleType::DECODE
+                                  && maga_init_params.runtime_config.use_batch_decode_scheduler
+                                  && autil::EnvUtil::getEnv("RTP_LLM_PERF_LOCAL_REQUESTS", false);
     if (maga_init_params.pd_sep_config.role_type == RoleType::PREFILL) {
         prefill_server_ = std::make_shared<PrefillBatchRpcServer>();
         local_server_   = prefill_server_;

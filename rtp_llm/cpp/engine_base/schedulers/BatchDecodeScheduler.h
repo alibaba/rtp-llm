@@ -1,6 +1,7 @@
 #pragma once
 
 #include "autil/legacy/jsonizable.h"
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
@@ -12,6 +13,7 @@
 #include <list>
 #include <memory>
 #include <unordered_set>
+#include <c10/core/impl/VirtualGuardImpl.h>
 
 namespace rtp_llm {
 
@@ -38,6 +40,8 @@ public:
         batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
         scheduler_type_   = SchedulerType::kBatchDecode;
         dp_rank_          = dp_rank;
+        perf_local_requests_ = runtime_config.use_batch_decode_scheduler
+                               && autil::EnvUtil::getEnv("RTP_LLM_PERF_LOCAL_REQUESTS", false);
         const char* env   = std::getenv("RTP_LLM_WORKER_STATUS_SNAPSHOT");
         worker_status_snapshot_enabled_ = env != nullptr && std::strcmp(env, "1") == 0;
         publishWorkerStatusSnapshotLocked();
@@ -147,6 +151,28 @@ public:
         if (new_streams.size() >= batch_size_) {
             for (auto& stream : new_streams) {
                 stream->reportEvent(StreamEvents::CanRun);
+                if (perf_local_requests_ && scheduler_type_ == SchedulerType::kBatchDecode
+                    && stream->resourceContext().role_type == RoleType::DECODE) {
+                    // No prefill peer exists in this synthetic perf path. Use real
+                    // blocks so the normal state machine can grow/release them.
+                    if (!perf_cache_initialized_) {
+                        for (auto& buffer : cache_manager_->gpuCacheTensors()) {
+                            buffer.zero_();
+                            c10::impl::VirtualGuardImpl(buffer.device().type())
+                                .getStream(buffer.device()).synchronize();
+                        }
+                        perf_cache_initialized_ = true;
+                    }
+                    stream->setPerfTest(true);
+                    stream->setIsContextStream(false);
+                    const auto status = stream->initKVBlock();
+                    if (status.ok()) {
+                        stream->reportEvent(StreamEvents::LoadInitiated);
+                        stream->reportEvent(StreamEvents::CachePrepared);
+                    } else {
+                        stream->reportError(ErrorCode::MALLOC_FAILED, std::string(status.message()));
+                    }
+                }
                 // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
                 while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -276,6 +302,8 @@ private:
     SchedulerType                                      scheduler_type_;
     int                                                dp_rank_                        = 0;
     bool                                               worker_status_snapshot_enabled_ = false;
+    bool                                               perf_local_requests_ = false;
+    bool                                               perf_cache_initialized_ = false;
     std::shared_ptr<const std::unordered_set<int64_t>> worker_status_running_task_ids_snapshot_;
 };
 
