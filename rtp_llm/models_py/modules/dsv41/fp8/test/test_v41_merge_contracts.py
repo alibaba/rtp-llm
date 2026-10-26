@@ -23,6 +23,11 @@ from rtp_llm.models_py.modules.dsv41.fp8.decode import (
 
 
 class MergeContractsCPU(unittest.TestCase):
+    def test_projection_apis_use_runtime_deepgemm(self):
+        import deep_gemm
+
+        self.assertIs(qb_kv._ops(), deep_gemm)
+
     def test_prepared_reindex_query_reuses_payload_and_head_weights(self):
         x = torch.zeros(1, 2, 8, dtype=torch.bfloat16)
         qr = torch.zeros(1, 2, 16, dtype=torch.bfloat16)
@@ -205,7 +210,7 @@ class MergeContractsCPU(unittest.TestCase):
             supports_decode=Mock(return_value=True),
         )
         ops = SimpleNamespace(
-            dsv41_qb_kv_available=lambda: True,
+            dsv41_qb_out=Mock(),
             dsv41_qb_kv_index_out=Mock(),
         )
         with patch.dict(

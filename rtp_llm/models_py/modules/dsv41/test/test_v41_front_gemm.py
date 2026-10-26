@@ -1,4 +1,4 @@
-"""Numerics and capture-stable reload contract for the native front GEMM."""
+"""Numerics and capture-stable reload contract for DeepGEMM front projection."""
 import os
 import unittest
 from types import SimpleNamespace
@@ -18,10 +18,10 @@ class FrontGemmTest(unittest.TestCase):
         props = torch.cuda.get_device_properties(0)
         if (props.major, props.minor, props.multi_processor_count) != (10, 3, 148):
             self.skipTest("SM103 / 148 SMs required")
-        from rtp_llm.ops.compute_ops import rtp_llm_ops
+        import deep_gemm
 
-        self.assertTrue(hasattr(rtp_llm_ops, "v41_front_gemm"), "native front GEMM was not built")
-        self.op = rtp_llm_ops.v41_front_gemm
+        self.assertTrue(hasattr(deep_gemm, "dsv41_front_gemm"), "DeepGEMM projection API required")
+        self.op = deep_gemm.dsv41_front_gemm
 
     def make_attention(self):
         def linear(n, k):
@@ -37,6 +37,9 @@ class FrontGemmTest(unittest.TestCase):
         )
         front.prepare(attn)
         self.assertIsNotNone(getattr(attn, "_front_weights", None))
+        import deep_gemm
+
+        self.assertIs(attn._front_weights.op, deep_gemm.dsv41_front_gemm)
         return attn
 
     def reference(self, attn, x):
