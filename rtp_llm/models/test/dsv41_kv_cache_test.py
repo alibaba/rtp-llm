@@ -75,7 +75,7 @@ class Dsv41KvCacheConfigTest(TestCase):
                 self.assertEqual(capacity(by_tag["csa_state"]), 768)
                 self.assertEqual(capacity(by_tag["decoder_swa_kv"]), 128)
                 self.assertFalse(by_tag["decoder_swa_kv"].reuse.enable_prefix_reuse)
-                self.assertIsNone(capacity(by_tag["global_kv_1"]))
+                self.assertIsNone(capacity(by_tag["hca_kv"]))
 
     def test_explicit_config_can_replace_defaults_and_fallback_is_idempotent(self):
         with patch.dict(os.environ, {"DSV41_SWA_BOUNDED_REPLAY": "1"}, clear=True):
