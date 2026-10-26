@@ -3,11 +3,11 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
+import org.flexlb.balance.scheduler.PrefillQueueRunner;
+import org.flexlb.balance.scheduler.PrefillQueueRunnerTestSupport;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.balance.scheduler.WorkerBatcher;
-import org.flexlb.balance.scheduler.WorkerBatcherTestSupport;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -45,7 +45,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** The configured limit, real worker publication lock and canonical request ledger together. */
-class WorkerBatcherRequestCapacityTest {
+class PrefillQueueRunnerRequestCapacityTest {
 
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
@@ -74,8 +74,9 @@ class WorkerBatcherRequestCapacityTest {
                             org.mockito.Mockito.isNull());
             assertFalse(
                     fixture.endpoint.control(
-                            item(config, fixture.endpoint, 1L), WorkerBatcher.Control.REMOVE));
-            assertTrue(fixture.endpoint.control(routes.getFirst(), WorkerBatcher.Control.REMOVE));
+                            item(config, fixture.endpoint, 1L), PrefillQueueRunner.Control.REMOVE));
+            assertTrue(
+                    fixture.endpoint.control(routes.getFirst(), PrefillQueueRunner.Control.REMOVE));
             assertEquals(7, fixture.endpoint.ownership.captureQueue(20).items().size());
         }
     }
@@ -160,7 +161,7 @@ class WorkerBatcherRequestCapacityTest {
                         "schedulingMetadata",
                         SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1L));
             } else {
-                assertTrue(fixture.endpoint.control(route, WorkerBatcher.Control.REMOVE));
+                assertTrue(fixture.endpoint.control(route, PrefillQueueRunner.Control.REMOVE));
             }
             assertNull(
                     fixture.endpoint.commit(
@@ -197,8 +198,8 @@ class WorkerBatcherRequestCapacityTest {
         when(predictor.evaluator()).thenReturn(mock(PrefillTimePredictor.Evaluator.class));
         ReflectionTestUtils.setField(endpoint, "predictor", predictor);
         var requests = EndpointTestSupport.requestRuntime();
-        WorkerBatcher runtime =
-                WorkerBatcherTestSupport.create(
+        PrefillQueueRunner runtime =
+                PrefillQueueRunnerTestSupport.create(
                         "failed-reservation",
                         endpoint,
                         config,
@@ -213,7 +214,7 @@ class WorkerBatcherRequestCapacityTest {
                             invocation -> {
                                 assertEquals(
                                         1L,
-                                        WorkerBatcherTestSupport.state(runtime)
+                                        PrefillQueueRunnerTestSupport.state(runtime)
                                                 .admissionSummary(0, 0L)
                                                 .occupiedRequests(),
                                         "eligibility failure must happen before queue publication");
@@ -225,10 +226,10 @@ class WorkerBatcherRequestCapacityTest {
             assertSame(
                     failure,
                     assertThrows(IllegalStateException.class, () -> runtime.offer(incoming)));
-            assertEquals(List.of(previous), WorkerBatcherTestSupport.capture(runtime).items());
+            assertEquals(List.of(previous), PrefillQueueRunnerTestSupport.capture(runtime).items());
             assertEquals(
                     1L,
-                    WorkerBatcherTestSupport.state(runtime)
+                    PrefillQueueRunnerTestSupport.state(runtime)
                             .admissionSummary(0, 0L)
                             .occupiedRequests());
             verify(requests.events(), times(0))
@@ -242,10 +243,11 @@ class WorkerBatcherRequestCapacityTest {
             RequestRoute next = item(config, endpoint, 3L);
             assertTrue(runtime.offer(next));
             assertEquals(
-                    List.of(previous, next), WorkerBatcherTestSupport.capture(runtime).items());
+                    List.of(previous, next),
+                    PrefillQueueRunnerTestSupport.capture(runtime).items());
             assertEquals(
                     2L,
-                    WorkerBatcherTestSupport.state(runtime)
+                    PrefillQueueRunnerTestSupport.state(runtime)
                             .admissionSummary(0, 0L)
                             .occupiedRequests());
         } finally {
@@ -263,8 +265,8 @@ class WorkerBatcherRequestCapacityTest {
                         WorkerStatus.createDiscovered(
                                 RoleType.PREFILL, "test", "127.0.0.1", 8080, 9090, "test"));
         var requests = EndpointTestSupport.requestRuntime();
-        WorkerBatcher runtime =
-                WorkerBatcherTestSupport.create(
+        PrefillQueueRunner runtime =
+                PrefillQueueRunnerTestSupport.create(
                         "retiring-publication",
                         endpoint,
                         config,
@@ -274,7 +276,7 @@ class WorkerBatcherRequestCapacityTest {
                         invocation -> {
                             assertEquals(
                                     0L,
-                                    WorkerBatcherTestSupport.state(runtime)
+                                    PrefillQueueRunnerTestSupport.state(runtime)
                                             .admissionSummary(0, 0L)
                                             .occupiedRequests(),
                                     "retirement rejects queue publication before occupying a request seat");
@@ -288,10 +290,10 @@ class WorkerBatcherRequestCapacityTest {
             assertFalse(runtime.offer(item));
             assertEquals(
                     0L,
-                    WorkerBatcherTestSupport.state(runtime)
+                    PrefillQueueRunnerTestSupport.state(runtime)
                             .admissionSummary(0, 0L)
                             .occupiedRequests());
-            assertTrue(WorkerBatcherTestSupport.capture(runtime).items().isEmpty());
+            assertTrue(PrefillQueueRunnerTestSupport.capture(runtime).items().isEmpty());
             assertFalse(endpoint.release(null, item));
         } finally {
             assertNull(runtime.stopAndAwait());
@@ -311,7 +313,7 @@ class WorkerBatcherRequestCapacityTest {
             AtomicInteger groupSize = new AtomicInteger();
             fixture.endpoint.enableQueueRuntime(
                     org.flexlb.balance.scheduler.QueueExecutionSettings.capture(config));
-            var worker = EndpointTestSupport.batcher(fixture.endpoint);
+            var worker = EndpointTestSupport.queueRunner(fixture.endpoint);
             org.flexlb.balance.scheduler.DeliveryTestSupport.selectWith(
                     worker,
                     (items, reason, evaluator, prediction, real) -> {

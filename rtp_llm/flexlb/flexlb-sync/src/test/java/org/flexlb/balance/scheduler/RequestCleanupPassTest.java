@@ -29,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -225,7 +226,7 @@ class RequestCleanupPassTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void lateAcquisitionInExactPlacementScopeKeepsTerminalNotificationOwnerAndProgress(
+    void lateAcquisitionPreservesTerminalProgressAndRequiresFreshNotificationClaim(
             boolean notificationsFinished) {
         var context = new RequestContext(mock(FlexlbConfig.class));
         context.register(994L, 1000L, 100_000L, 10_000L);
@@ -265,11 +266,7 @@ class RequestCleanupPassTest {
                 afterAcquisition.route(),
                 "real acquisition remains owned despite denying publication");
         assertSame(acquired, afterAcquisition.placement().acquired());
-        if (notificationsFinished) {
-            assertNull(afterAcquisition.close().endOperation());
-        } else {
-            assertSame(terminal, afterAcquisition.close().endOperation());
-        }
+        assertNull(afterAcquisition.close().endOperation());
         assertSame(outcome, afterAcquisition.outcome());
         assertEquals(notificationsFinished, afterAcquisition.close().notificationsDone());
         assertTrue(afterAcquisition.close().notificationsAttempted());
@@ -284,8 +281,19 @@ class RequestCleanupPassTest {
                 "the producer still owns placement completion");
         context.completePlacement(placement, PublicationResult.FAILED, 1003L);
         if (!notificationsFinished) {
+            assertEquals(
+                    UpdateKind.STALE,
+                    context.completeClose(
+                                    terminal,
+                                    new CloseProgress(
+                                            ProgressKind.NOTIFICATIONS, false, false, true, true),
+                                    1004L)
+                            .kind());
+            var continuation = granted(context.beginClose(null, 1004L));
+            assertNotSame(terminal, continuation);
+            assertSame(acquired, continuation.route());
             context.completeClose(
-                    terminal,
+                    continuation,
                     new CloseProgress(ProgressKind.NOTIFICATIONS, false, false, true, true),
                     1004L);
         }

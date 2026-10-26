@@ -59,7 +59,7 @@ import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
  * later requests from trying the same worker with different resource demands.
  * Planning is bounded and parallel; completed plans are published without waiting
  * for earlier planners. Arrivals and wakeups do not invalidate in-flight work.
- * WorkerBatcher owns SINGLE/FIXED_WINDOW grouping.</p>
+ * PrefillQueueRunner owns SINGLE/FIXED_WINDOW grouping.</p>
  */
 public final class QueuedRequestScheduler extends AbstractRequestScheduler
         implements AutoCloseable {
@@ -257,8 +257,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                                     cancelled.errorType(),
                                     cancelled.detail(),
                                     false,
-                                    false),
-                    null);
+                                    false));
         }
         if (shuttingDown) {
             closeRequest(
@@ -272,8 +271,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                             StrategyErrorType.DISPATCH_FAILED,
                             "request scheduler is shutting down",
                             false,
-                            false),
-                    null);
+                            false));
         }
         return true;
     }

@@ -11,6 +11,10 @@ reporting dependencies are mocked. Scheduler threads and RPCs are disabled; queu
 mutation goes through `PrefillState` under its actual ownership lock. Reflection constructs the package-private endpoint and accesses its ledger/lock
 during fixture setup and controlled mutations. It does not depend on batcher projection APIs.
 
+The runner adapts the `WorkerBatcher` to `PrefillQueueRunner` rename separately for
+each revision, including the endpoint's private field name. The measured workload
+is unchanged.
+
 Cases cover 10/100 endpoints, 32/1024 active requests, 1/64 planner threads, and
 maxRequests=1024 with a 700 ms prediction budget. Each round changes scheduling
 inputs or removes/reinserts one member per endpoint, then runs concurrent scans.

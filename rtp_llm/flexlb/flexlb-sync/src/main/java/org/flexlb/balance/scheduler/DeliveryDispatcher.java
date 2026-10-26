@@ -398,10 +398,13 @@ public class DeliveryDispatcher {
                 }
             }
             try {
-                publish(
-                        claim,
-                        new ContextResult.TransportResult(
-                                claim, result, System.currentTimeMillis()));
+                claim.owner()
+                        .data()
+                        .getScheduler()
+                        .onDeliveryEvidence(
+                                claim,
+                                new ContextResult.TransportResult(
+                                        claim, result, System.currentTimeMillis()));
             } catch (Throwable failure) {
                 claim.owner().data().getScheduler().runtime.recordFailure(failure);
                 logFailure(
@@ -409,16 +412,9 @@ public class DeliveryDispatcher {
                         batchId,
                         failure);
             } finally {
-                var state = claim.owner().snapshot();
-                if (state.phase() != ContextResult.Phase.CLOSED
-                        && state.delivery() != null
-                        && state.delivery().identity() == claim
-                        && state.delivery().abandonment() != null) {
-                    stop(claim);
-                    var task = sessions.get(claim);
-                    if (task != null) {
-                        task.post(() -> {});
-                    }
+                var task = sessions.get(claim);
+                if (task != null) {
+                    task.post(() -> {});
                 }
             }
         }
@@ -721,19 +717,6 @@ public class DeliveryDispatcher {
         Failures.rethrow(problem, "delivery stop callbacks did not drain");
     }
 
-    static void publish(DeliveryClaim claim, ContextResult.DeliveryEvidence evidence) {
-        Throwable failure = null;
-        for (int attempt = 0; attempt < 3; attempt++) {
-            try {
-                claim.owner().data().getScheduler().onDeliveryEvidence(claim, evidence);
-                return;
-            } catch (RuntimeException failed) {
-                failure = Failures.append(failure, failed);
-            }
-        }
-        throw Failures.propagate(failure, "delivery fact could not be applied");
-    }
-
     private final class StopTask {
         private final Object key;
         private final DeliveryClaim claim;
@@ -973,26 +956,18 @@ public class DeliveryDispatcher {
             Runnable apply =
                     () -> {
                         var progress = PreemptionRegistration.Reply.UNKNOWN;
-                        Throwable failure = null;
                         boolean applied = false;
-                        for (int retry = 0; retry < 3; retry++) {
-                            try {
-                                var scheduler = context.data().getScheduler();
-                                if (event != null) {
-                                    progress =
-                                            event.progress(
-                                                    scheduler.onPreemption(registration, event));
-                                } else if (acknowledgement != null) {
-                                    scheduler.onDeliveryEvidence(claim, acknowledgement);
-                                }
-                                applied = true;
-                                break;
-                            } catch (RuntimeException failed) {
-                                failure = Failures.append(failure, failed);
+                        try {
+                            var scheduler = context.data().getScheduler();
+                            if (event != null) {
+                                progress =
+                                        event.progress(scheduler.onPreemption(registration, event));
+                            } else if (acknowledgement != null) {
+                                scheduler.onDeliveryEvidence(claim, acknowledgement);
                             }
-                        }
-                        if (!applied) {
-                            runtime.recordFailure(failure);
+                            applied = true;
+                        } catch (RuntimeException failed) {
+                            runtime.recordFailure(failed);
                         }
                         var evidence = applied ? reply : EngineGrpcClient.CancelReply.FAILED;
                         response.complete(progress);

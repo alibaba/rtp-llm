@@ -451,7 +451,7 @@ class BatchDeliveryTest {
     }
 
     @Test
-    void failedFactIsRetriedWithoutReclassifyingOrSuppressingItsSiblings() {
+    void failedFactIsNotReplayedOrReclassifiedAndDoesNotSuppressItsSiblings() {
         try (var f = new LinearDeliveryFixture(true)) {
             f.expectedShutdownFailure = new IllegalStateException("owner callback failed");
             f.throwCompletionFor = 1;
@@ -459,8 +459,29 @@ class BatchDeliveryTest {
             f.drain();
             assertEquals(DeliveryResult.Status.DELIVERED, f.result(1).status());
             assertEquals(DeliveryResult.Status.DELIVERED, f.result(2).status());
-            assertEquals(Map.of(1L, 3, 2L, 1), f.completionCounts);
+            assertEquals(Map.of(1L, 1, 2L, 1), f.completionCounts);
             verify(f.grpc, times(1)).batchEnqueueAsync(anyString(), anyInt(), any());
+        }
+    }
+
+    @Test
+    void transportCompletionDoesNotStartAnotherStopOperation() {
+        try (var f = new LinearDeliveryFixture(true)) {
+            var dispatcher = spy(f.dispatcher);
+            ReflectionTestUtils.setField(f.worker, "dispatcher", dispatcher);
+            f.beforeCompletion =
+                    claim ->
+                            claim.owner()
+                                    .recordDeliveryResult(
+                                            new ContextResult.Abandonment(
+                                                    claim,
+                                                    CancelReason.CLIENT_CANCELLED,
+                                                    System.currentTimeMillis()));
+            f.process(List.of(f.item(1L, 10L)), OptionalLong.of(10L));
+            f.drain();
+            assertEquals(Map.of(1L, 1), f.completionCounts);
+            assertNotNull(f.claims.getFirst().owner().snapshot().delivery().abandonment());
+            verify(dispatcher, never()).stop(any());
         }
     }
 
@@ -540,7 +561,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
     final PrefillState queueOwnership =
             new PrefillState(
                     queueLock,
-                    PrefillActiveIndex.ordered(16, WorkerBatcher.PRIORITY_QUEUE_ORDER),
+                    PrefillActiveIndex.ordered(16, PrefillQueueRunner.PRIORITY_QUEUE_ORDER),
                     System::currentTimeMillis);
     final AtomicBoolean handoffClosed = new AtomicBoolean();
     final List<String> events = new CopyOnWriteArrayList<>();
@@ -556,7 +577,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
     final Set<Long> blockedDecode = ConcurrentHashMap.newKeySet();
     final SchedulerRuntime runtime;
     final DeliveryDispatcher dispatcher;
-    final WorkerBatcher worker;
+    final PrefillQueueRunner worker;
     final PrefillTimePredictor.Evaluator evaluator =
             spy(
                     new PrefillTimePredictor.Evaluator() {
@@ -615,7 +636,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
         doReturn(701L).when(execution).nextBatchId();
         ReflectionTestUtils.setField(owner, "runtime", runtime);
         worker =
-                new WorkerBatcher(
+                new PrefillQueueRunner(
                         "contract",
                         prefill,
                         QueueExecutionSettings.capture(config),

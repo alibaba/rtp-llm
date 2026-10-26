@@ -25,8 +25,7 @@ import static org.mockito.Mockito.when;
 class DeliveryStopTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(ints = {1, 3})
-    void cleanupApplicationRetriesPreserveProofWithoutInventingLocalSettlement(int failures)
-            throws Exception {
+    void cleanupFactsEnterTheSchedulerOncePerRemoteReply(int failures) throws Exception {
         var runtime = runtime();
         var claim = claim();
         when(claim.owner().snapshot().delivery().send())
@@ -50,8 +49,8 @@ class DeliveryStopTest {
                             int count = applications.incrementAndGet();
                             if (count == 1) {
                                 first.set(evidence);
-                            } else if (count <= 3) {
-                                assertSame(first.get(), evidence);
+                            } else {
+                                assertNotSame(first.get(), evidence);
                             }
                             if (count <= failures) {
                                 var failure =
@@ -83,7 +82,7 @@ class DeliveryStopTest {
                     DeliveryDispatcher.StopResult.REMOTE_CLEANED,
                     dispatcher.stop(claim, client, runtime).get(2, TimeUnit.SECONDS));
             assertEquals(failures + 1, applications.get());
-            org.mockito.Mockito.verify(client, org.mockito.Mockito.times(failures == 3 ? 2 : 1))
+            org.mockito.Mockito.verify(client, org.mockito.Mockito.times(failures + 1))
                     .cancelAsync(
                             any(),
                             org.mockito.ArgumentMatchers.anyInt(),
@@ -96,13 +95,9 @@ class DeliveryStopTest {
                     .onPreemption(any(), any());
         } finally {
             runtime.signals().completeDelivery(claim);
-            if (failures == 3) {
-                var reported = assertThrows(IllegalStateException.class, runtime::shutdown);
-                assertSame(firstFailure.get(), reported);
-                assertEquals(2, reported.getSuppressed().length);
-            } else {
-                assertDoesNotThrow(runtime::shutdown);
-            }
+            var reported = assertThrows(IllegalStateException.class, runtime::shutdown);
+            assertSame(firstFailure.get(), reported);
+            assertEquals(failures - 1, reported.getSuppressed().length);
         }
     }
 
@@ -181,15 +176,14 @@ class DeliveryStopTest {
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
-    void preemptionReplyRetainsOwnershipAcrossSubmissionAndApplicationFailure(boolean rejectWork)
+    void rejectedPreemptionFactIsReportedOnceEvenAfterWorkSubmissionRejection(boolean rejectWork)
             throws Exception {
         var runtime = org.mockito.Mockito.spy(runtime());
         var claim = claim();
         when(claim.owner().snapshot().delivery()).thenReturn(null);
         var scheduler = claim.owner().data().getScheduler();
-        when(scheduler.onPreemption(any(), any()))
-                .thenThrow(new IllegalStateException("transient fact application failure"))
-                .thenReturn(true);
+        var rejectedFact = new IllegalStateException("transient fact application failure");
+        when(scheduler.onPreemption(any(), any())).thenThrow(rejectedFact);
         if (rejectWork) {
             org.mockito.Mockito.doThrow(
                             new java.util.concurrent.RejectedExecutionException(
@@ -220,7 +214,7 @@ class DeliveryStopTest {
                         new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
         try {
             assertEquals(
-                    PreemptionRegistration.Reply.WAITING,
+                    PreemptionRegistration.Reply.UNKNOWN,
                     dispatcher
                             .preempt(
                                     registration,
@@ -231,8 +225,13 @@ class DeliveryStopTest {
                                     "priority preemption")
                             .get(2, TimeUnit.SECONDS));
             SchedulerTestSupport.awaitRequestWork(runtime);
-            org.mockito.Mockito.verify(scheduler, org.mockito.Mockito.times(2))
-                    .onPreemption(any(), any());
+            org.mockito.Mockito.verify(scheduler).onPreemption(any(), any());
+            org.mockito.Mockito.verify(client)
+                    .cancelAsync(
+                            any(),
+                            org.mockito.ArgumentMatchers.anyInt(),
+                            any(),
+                            org.mockito.ArgumentMatchers.anyLong());
             assertTrue(
                     ((java.util.Map<?, ?>)
                                     org.springframework.test.util.ReflectionTestUtils.getField(
@@ -240,7 +239,7 @@ class DeliveryStopTest {
                             .isEmpty());
             assertFalse(runtime.signals().preemption(registration).toCompletableFuture().isDone());
         } finally {
-            runtime.shutdown();
+            assertSame(rejectedFact, assertThrows(IllegalStateException.class, runtime::shutdown));
         }
     }
 

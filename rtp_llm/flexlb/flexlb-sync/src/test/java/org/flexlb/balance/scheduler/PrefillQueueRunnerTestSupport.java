@@ -10,31 +10,31 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
-public final class WorkerBatcherTestSupport {
+public final class PrefillQueueRunnerTestSupport {
 
-    private WorkerBatcherTestSupport() {}
+    private PrefillQueueRunnerTestSupport() {}
 
     static CapacityBoundary boundaryOnly(RequestRoute item, CapacityBoundary boundary) {
         return boundary;
     }
 
-    public static WorkerBatcher create(
+    public static PrefillQueueRunner create(
             String key,
             PrefillEndpoint endpoint,
             FlexlbConfig config,
             DeliveryDispatcher delivery,
             AbstractRequestScheduler scheduler) {
-        var runtime = new AtomicReference<WorkerBatcher>();
+        var runtime = new AtomicReference<PrefillQueueRunner>();
         var index =
                 PrefillActiveIndex.ordered(
                         16,
                         config.isPriorityOrdering()
-                                ? WorkerBatcher.PRIORITY_QUEUE_ORDER
-                                : WorkerBatcher.FIFO_QUEUE_ORDER);
+                                ? PrefillQueueRunner.PRIORITY_QUEUE_ORDER
+                                : PrefillQueueRunner.FIFO_QUEUE_ORDER);
         var state = new PrefillState(new ReentrantLock(), index, System::currentTimeMillis);
         var worker =
                 org.mockito.Mockito.mock(
-                        WorkerBatcher.class,
+                        PrefillQueueRunner.class,
                         org.mockito.Mockito.withSettings()
                                 .useConstructor(
                                         key,
@@ -53,18 +53,18 @@ public final class WorkerBatcherTestSupport {
                         })
                 .when(worker)
                 .offer(org.mockito.ArgumentMatchers.any());
-        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "batcher", worker);
+        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "queueRunner", worker);
         org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "ownership", state);
         DeliveryTestSupport.installQueueFixture(worker, delivery);
         runtime.set(worker);
         return runtime.get();
     }
 
-    public static PrefillState.QueueSnapshot capture(WorkerBatcher runtime) {
+    public static PrefillState.QueueSnapshot capture(PrefillQueueRunner runtime) {
         return state(runtime).captureQueue(Integer.MAX_VALUE);
     }
 
-    public static PrefillState state(WorkerBatcher runtime) {
+    public static PrefillState state(PrefillQueueRunner runtime) {
         return (PrefillState) ReflectionTestUtils.getField(runtime, "prefillState");
     }
 }

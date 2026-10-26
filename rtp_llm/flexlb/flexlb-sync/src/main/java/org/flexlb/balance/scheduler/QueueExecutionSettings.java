@@ -6,7 +6,7 @@ import org.flexlb.config.FlexlbConfig;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Only the immutable configuration shared by all WorkerBatchers. */
+/** Only the immutable configuration shared by all PrefillQueueRunners. */
 public record QueueExecutionSettings(
         boolean priorityOrdering,
         DispatcherConfig.Type dispatcherType,

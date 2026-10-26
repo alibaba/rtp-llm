@@ -22,6 +22,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -578,8 +579,11 @@ class RequestSchedulerContractTest {
             org.springframework.test.util.ReflectionTestUtils.setField(
                     f.requests.runtime, "timer", timer);
             try {
-                assertSame(failure, assertThrows(IllegalStateException.class, handle::finish));
+                assertDoesNotThrow(handle::finish);
                 assertSame(failure, SchedulerTestSupport.failure(f.requests));
+                assertNull(context.snapshot().placement());
+                assertDoesNotThrow(handle::finish);
+                verify(timer, times(3)).update(org.mockito.ArgumentMatchers.eq(context), any());
                 f.requests.runtime.awaitAdmissions();
                 assertEquals(
                         0L,

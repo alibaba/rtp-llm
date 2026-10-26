@@ -30,7 +30,7 @@ import static org.mockito.Mockito.mock;
 
 /** Route-time queue capture regression on the final Prefill runtime boundary. */
 @Tag("performance-regression")
-class WorkerBatcherPerformanceTest {
+class PrefillQueueRunnerPerformanceTest {
 
     private static final int[] QUEUE_DEPTHS = {0, 1, 32, 128, 512};
     private static final int MEASUREMENT_ROUNDS = 5;
@@ -39,9 +39,9 @@ class WorkerBatcherPerformanceTest {
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
     void queueWaitSnapshotCaptureDoesNotScaleWithRequestCount() throws Throwable {
         var capture =
-                MethodHandles.privateLookupIn(WorkerBatcher.class, MethodHandles.lookup())
+                MethodHandles.privateLookupIn(PrefillQueueRunner.class, MethodHandles.lookup())
                         .findVirtual(
-                                WorkerBatcher.class,
+                                PrefillQueueRunner.class,
                                 "recordQueueWait",
                                 MethodType.methodType(
                                         void.class, RequestRoute.class, String.class));
@@ -59,9 +59,10 @@ class WorkerBatcherPerformanceTest {
         // Both depths populate every priority bucket. Additional requests must not add capture
         // work.
         for (int depth : new int[] {128, 512, 4096}) {
-            WorkerBatcher runtime = runtimeWithDepth(depth);
+            PrefillQueueRunner runtime = runtimeWithDepth(depth);
             try {
-                RequestRoute head = WorkerBatcherTestSupport.capture(runtime).items().getFirst();
+                RequestRoute head =
+                        PrefillQueueRunnerTestSupport.capture(runtime).items().getFirst();
                 for (int i = 0; i < operations; i++) {
                     capture.invokeExact(runtime, head, "Prefill capacity exhausted");
                 }
@@ -114,19 +115,19 @@ class WorkerBatcherPerformanceTest {
         long threadId = Thread.currentThread().threadId();
         int operations = 100_000;
         for (int depth : QUEUE_DEPTHS) {
-            WorkerBatcher runtime = runtimeWithDepth(depth);
+            PrefillQueueRunner runtime = runtimeWithDepth(depth);
             try {
                 if (depth > 0) {
                     var capture =
                             MethodHandles.privateLookupIn(
-                                            WorkerBatcher.class, MethodHandles.lookup())
+                                            PrefillQueueRunner.class, MethodHandles.lookup())
                                     .findVirtual(
-                                            WorkerBatcher.class,
+                                            PrefillQueueRunner.class,
                                             "recordQueueWait",
                                             MethodType.methodType(
                                                     void.class, RequestRoute.class, String.class));
                     RequestRoute head =
-                            WorkerBatcherTestSupport.capture(runtime).items().getFirst();
+                            PrefillQueueRunnerTestSupport.capture(runtime).items().getFirst();
                     capture.invokeExact(runtime, head, "Prefill capacity exhausted");
                     assertEquals(depth, runtime.getLatestQueueWaitSnapshot().get("queueDepth"));
                 }
@@ -190,7 +191,7 @@ class WorkerBatcherPerformanceTest {
         long threadId = Thread.currentThread().threadId();
 
         for (int depth : QUEUE_DEPTHS) {
-            WorkerBatcher runtime = runtimeWithDepth(depth);
+            PrefillQueueRunner runtime = runtimeWithDepth(depth);
             PrefillEndpoint endpoint =
                     (PrefillEndpoint)
                             org.springframework.test.util.ReflectionTestUtils.getField(
@@ -261,7 +262,7 @@ class WorkerBatcherPerformanceTest {
         }
     }
 
-    private static WorkerBatcher runtimeWithDepth(int depth) throws InterruptedException {
+    private static PrefillQueueRunner runtimeWithDepth(int depth) throws InterruptedException {
         FlexlbConfig config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.usePriorityQueue(config);
         SchedulingTestConfig.useSingleDecision(config);
@@ -298,7 +299,8 @@ class WorkerBatcherPerformanceTest {
                         SchedulerTestSupport.repository(scheduler),
                         mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class));
         endpoint.enableQueueRuntime(QueueExecutionSettings.capture(config));
-        WorkerBatcher runtime = org.flexlb.balance.endpoint.EndpointTestSupport.batcher(endpoint);
+        PrefillQueueRunner runtime =
+                org.flexlb.balance.endpoint.EndpointTestSupport.queueRunner(endpoint);
         long now = System.currentTimeMillis();
         List<RequestRoute> items = new ArrayList<>(depth);
         for (int index = 0; index < depth; index++) {
@@ -324,11 +326,11 @@ class WorkerBatcherPerformanceTest {
             assertTrue(runtime.offer(item));
         }
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (WorkerBatcherTestSupport.state(runtime).progress().queueDepth() != depth
+        while (PrefillQueueRunnerTestSupport.state(runtime).progress().queueDepth() != depth
                 && System.nanoTime() < deadline) {
             TimeUnit.MILLISECONDS.sleep(1L);
         }
-        assertEquals(depth, WorkerBatcherTestSupport.state(runtime).progress().queueDepth());
+        assertEquals(depth, PrefillQueueRunnerTestSupport.state(runtime).progress().queueDepth());
         return runtime;
     }
 

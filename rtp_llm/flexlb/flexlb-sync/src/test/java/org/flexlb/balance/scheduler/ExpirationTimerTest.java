@@ -154,6 +154,29 @@ class ExpirationTimerTest {
     }
 
     @Test
+    void closedTimerHasNoInstallationObligationForRequestStillBeingSettled() {
+        var requests = mock(RequestRepository.class);
+        var context = registeredContext();
+        when(requests.isCurrent(context)).thenReturn(true);
+        var timer = new ExpirationTimer(requests);
+        var token =
+                new ExpirationTimer.Token(
+                        context, ExpirationTimer.Kind.REQUEST, 1L, Long.MAX_VALUE);
+        var plan = new ExpirationTimer.Plan(1L, token, null, null);
+        try {
+            timer.update(context, plan);
+            when(requests.isClosed()).thenReturn(true);
+            timer.close();
+            assertFalse(timer.needsUpdate(context, plan));
+            timer.update(context, plan);
+            assertFalse(timer.needsUpdate(context, plan));
+            assertTrue(((Map<?, ?>) ReflectionTestUtils.getField(timer, "slots")).isEmpty());
+        } finally {
+            timer.close();
+        }
+    }
+
+    @Test
     void archiveDuringInstallationReturnsRegistrationEvenWhenDetachFails() {
         var requests = mock(RequestRepository.class);
         var context = registeredContext();
