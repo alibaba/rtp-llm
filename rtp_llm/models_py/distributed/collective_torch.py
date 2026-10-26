@@ -438,12 +438,13 @@ def _register_process_groups_to_cpp():
 
         Args:
             tensors: Tensors to broadcast, each is broadcast in-place from root.
-            root: Source rank that holds the data.
+            root: Group-relative source rank that holds the data.
             mode: ParallelMode int (0=TP, 1=DP, 2=DP_AND_TP) selecting process group.
         """
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             return
+        # C++ roots are group-relative; torch.distributed.broadcast expects a global rank.
         global_root = torch.distributed.get_global_rank(pg, root)
         device_id = torch.cuda.current_device()
         for t in tensors:

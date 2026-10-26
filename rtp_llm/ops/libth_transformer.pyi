@@ -3,7 +3,7 @@ from __future__ import annotations
 import libth_transformer_config
 import torch
 import typing
-__all__: list[str] = ['EmbeddingCppOutput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput']
+__all__: list[str] = ['EmbeddingCppOutput', 'MultimodalInput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput', 'build_xgrammar_tokenizer_info_json', 'resume_kmonitor_after_scr']
 class EmbeddingCppOutput:
     output: TypedOutput
     def __init__(self) -> None:
@@ -24,9 +24,11 @@ class RtpEmbeddingOp:
 class RtpLLMOp:
     def __init__(self) -> None:
         ...
-    def init(self, model: typing.Any, engine_config: typing.Any, vit_config: typing.Any, propose_model: typing.Any, token_processor: typing.Any, mm_process_engine: typing.Any, trace_config: typing.Any = None) -> None:
+    def init(self, model: typing.Any, engine_config: typing.Any, vit_config: typing.Any, propose_model: typing.Any, token_processor: typing.Any, mm_process_engine: typing.Any, trace_config: typing.Any = None, defer_service_start: bool = ...) -> None:
         ...
-    def start_http_server(self, model_weights_loader: typing.Any, lora_infos: typing.Any, world_info: typing.Any, tokenizer: typing.Any, render: typing.Any) -> None:
+    def start_rpc_server(self) -> None:
+        ...
+    def start_http_server(self, model_weights_loader: typing.Any, world_info: typing.Any, tokenizer: typing.Any, render: typing.Any) -> None:
         ...
     def stop(self) -> None:
         ...
@@ -48,4 +50,6 @@ class TypedOutput:
         ...
 
 def get_multimodal_feature_hash(arg0: torch.Tensor) -> torch.Tensor:
+    ...
+def resume_kmonitor_after_scr() -> bool:
     ...

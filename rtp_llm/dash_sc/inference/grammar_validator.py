@@ -41,6 +41,7 @@ from rtp_llm.dash_sc.inference.core_dump_control import (
     _configure_xgrammar_sandbox_core_dump_for_current_process,
 )
 from rtp_llm.ops import GrammarConfig
+from rtp_llm.utils.scr_template_lifecycle import template_phase_active
 
 logger = logging.getLogger(__name__)
 
@@ -347,7 +348,11 @@ class GrammarValidator:
         self._closed = False
         self._mp = multiprocessing.get_context("spawn")
         self._idle = queue.Queue()
-        self._ensure_pool()  # warm N workers in the background; never blocks init
+        # Sandbox workers impose RLIMIT_AS; capturing them during a template
+        # lifecycle would make child processes part of the snapshot.  The first
+        # validation after release creates the pool.
+        if not template_phase_active():
+            self._ensure_pool()  # warm N workers in the background; never blocks init
 
         worker_limit_mb = max(0, self._worker_memory_limit_bytes // 1024 // 1024)
         msg = f"GrammarValidator mode=sandbox compile_backend=on queue_timeout_s={self._queue_timeout_s:g} compile_timeout_s={self._compile_timeout_s:g} compiler_threads={self._compile_threads} compiler_cache_bytes={self._cache_limit_bytes} result_cache_max_entries={self._result_cache_max_entries} pool={self._pool_target} worker_memory_limit_mb={worker_limit_mb}"

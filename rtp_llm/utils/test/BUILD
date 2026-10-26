@@ -278,3 +278,165 @@ py_test(
         "//rtp_llm:utils",
     ],
 )
+py_test(
+    name = "gang_info_test",
+    srcs = ["gang_info_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
+    name = "scr_advertise_ip_test",
+    srcs = ["scr_advertise_ip_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
+    name = "scr_endpoint_config_test",
+    srcs = ["scr_endpoint_config_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:sdk",
+        "//rtp_llm:structure",
+        "//rtp_llm:utils",
+        "//rtp_llm/access_logger:access_logger",
+        "//rtp_llm/metrics:metrics",
+        "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/distribute:distribute",
+        "//rtp_llm/server:server",
+    ],
+)
+
+py_test(
+    name = "scr_endpoint_provider_test",
+    srcs = ["scr_endpoint_provider_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:utils",
+        "//rtp_llm/distribute:distribute",
+    ],
+)
+
+py_test(
+    name = "scr_kmonitor_lifecycle_test",
+    srcs = ["scr_kmonitor_lifecycle_test.py"],
+    deps = ["//rtp_llm:utils", "//rtp_llm/aios/kmonitor:kmonitor_py"],
+)
+
+py_test(
+    name = "scr_local_comm_test",
+    srcs = ["scr_local_comm_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
+    name = "scr_native_logger_test",
+    srcs = ["scr_native_logger_test.py"],
+    data = ["//rtp_llm/cpp/utils:scr_logger_test_sources"],
+)
+
+py_test(
+    name = "scr_pd_advertisement_test",
+    srcs = ["scr_pd_advertisement_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:utils",
+        "//rtp_llm/distribute:distribute",
+    ],
+)
+
+py_test(
+    name = "scr_restore_context_test",
+    srcs = ["scr_restore_context_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:utils",
+        "//rtp_llm/distribute:distribute",
+    ],
+)
+
+py_test(
+    name = "scr_restore_env_file_test",
+    srcs = ["scr_restore_env_file_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
+    name = "scr_runtime_fixup_test",
+    srcs = ["scr_runtime_fixup_test.py"],
+    deps = ["//rtp_llm:utils", "//rtp_llm/aios/kmonitor:kmonitor_py"],
+)
+
+py_test(
+    name = "scr_service_startup_test",
+    srcs = ["scr_service_startup_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:sdk",
+        "//rtp_llm:structure",
+        "//rtp_llm:utils",
+        "//rtp_llm/access_logger:access_logger",
+        "//rtp_llm/metrics:metrics",
+        "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/distribute:distribute",
+        "//rtp_llm/server:server",
+    ],
+)
+
+py_test(
+    name = "scr_template_lifecycle_test",
+    srcs = ["scr_template_lifecycle_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
+    name = "scr_template_utils_test",
+    srcs = [
+        "scr_template_utils_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+)
+
+py_test(
+    name = "scr_transport_boundary_test",
+    srcs = ["scr_transport_boundary_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = ["//rtp_llm:config", "//rtp_llm:config_ops", "//rtp_llm/distribute:distribute"],
+)
+
+py_test(
+    name = "scr_vip_integration_test",
+    srcs = ["scr_vip_integration_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:utils",
+        "//rtp_llm/distribute:distribute",
+    ],
+)
+
+py_test(
+    name = "scr_vip_test",
+    srcs = ["scr_vip_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:utils",
+        "//rtp_llm/distribute:distribute",
+    ],
+)
+
+py_test(
+    name = "signal_guard_test",
+    srcs = ["signal_guard_test.py"],
+    deps = ["//rtp_llm:utils"],
+)

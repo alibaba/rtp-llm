@@ -113,3 +113,22 @@ cc_test(
     deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
     copts = copts(),
 )
+
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [":cuda13_torch_nvshmem"],
+    "//conditions:default": [],
+})
+
+cc_test(
+    name = "signal_utils_test",
+    srcs = ["SignalUtilsTest.cc"],
+    copts = test_copts,
+    deps = google_test_deps + [
+        "//rtp_llm/cpp/utils:signal_utils",
+    ] + cuda13_torch_link_deps,
+)

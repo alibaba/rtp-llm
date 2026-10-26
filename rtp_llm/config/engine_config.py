@@ -36,6 +36,8 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
     VitSeparation,
 )
+from rtp_llm.utils import scr_vip
+from rtp_llm.utils.scr_local_comm import cache_store_advertise_ip
 
 
 @dataclass
@@ -263,7 +265,10 @@ class EngineConfig:
 
 
 def update_worker_addrs(
-    runtime_config: RuntimeConfig, parallelism_config: ParallelismConfig, world_info
+    runtime_config: RuntimeConfig,
+    parallelism_config: ParallelismConfig,
+    world_info,
+    real_ip_by_vip: dict[str, str] | None = None,
 ) -> None:
     """Update worker addresses in runtime_config based on gang info."""
     if world_info is None:
@@ -274,6 +279,9 @@ def update_worker_addrs(
         return
     worker_addrs = []
     worker_grpc_addrs = []
+    advertise_ip = cache_store_advertise_ip(world_info, parallelism_config)
+    if scr_vip.enabled(parallelism_config) and real_ip_by_vip is None:
+        raise ValueError("SCR VIP CacheStore requires a current VIP-to-real-IP mapping")
     local_rank = parallelism_config.local_rank
     for member in world_info.members:
         if (
@@ -283,8 +291,13 @@ def update_worker_addrs(
             )
             == parallelism_config.dp_rank
         ):
+            cache_ip = (
+                real_ip_by_vip[member.ip]
+                if real_ip_by_vip is not None
+                else advertise_ip or member.ip
+            )
             worker_addrs.append(
-                f"{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
+                f"{cache_ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
             )
             worker_grpc_addrs.append(f"{member.ip}:{member.rpc_server_port}")
             logging.info(

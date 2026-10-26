@@ -32,7 +32,7 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.distributed_server import (
     get_dp_addrs_from_world_info,
-    get_world_info,
+    get_frontend_world_info,
 )
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
@@ -425,7 +425,7 @@ class FrontendApp(object):
 
         # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
         engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
-        world_info = get_world_info(
+        world_info = get_frontend_world_info(
             server_config=py_env_configs.server_config,
             distribute_config=py_env_configs.distribute_config,
             parallelism_config=py_env_configs.parallelism_config,
@@ -474,11 +474,34 @@ class FrontendApp(object):
             "Backend health_check did not become ready within %ds" % timeout_s
         )
 
-    def start(self):
+    def start(
+        self,
+        on_ready: Optional[Callable[[], None]] = None,
+        on_prebind: Optional[Callable[[], None]] = None,
+    ):
+        """Start the HTTP server and block on its main-thread service loop.
+
+        ``on_prebind`` runs after application initialization but before the
+        listening socket is created.  A checkpoint/template barrier belongs
+        here: the process must remain out of service until the control plane
+        releases the barrier.
+
+        ``on_ready`` is invoked by the ASGI startup hook, after the socket has
+        been bound and (for a colocated backend) the backend health check has
+        completed.  It must be installed before ``server.run``: this method
+        intentionally blocks and therefore callers cannot reliably run a
+        readiness callback after it returns.
+        """
+        self._on_ready = on_ready
+        self._on_prebind = on_prebind
         # spawn 后独立初始化；仅合法且启用的 JSON 配置会创建 Trace 运行时。
         init_telemetry("frontend", 0)
         self.frontend_server.start()
         app = self.create_app()
+
+        prebind = getattr(self, "_on_prebind", None)
+        if prebind is not None:
+            prebind()
 
         loop = "auto"
         if threading.current_thread() != threading.main_thread():
@@ -586,6 +609,9 @@ class FrontendApp(object):
                     self.frontend_server._global_controller.max_concurrency * 2
                 )
             )
+            on_ready = getattr(self, "_on_ready", None)
+            if on_ready is not None:
+                on_ready()
 
         def draining_response():
             reason = (

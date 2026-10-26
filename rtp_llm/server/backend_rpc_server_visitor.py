@@ -183,6 +183,10 @@ class BackendRPCServerVisitor:
         self.pd_route_retry_on_unavailable = self._pd_route_retry_on_unavailable()
         self.request_id_factory: Optional[Callable[[], int]] = None
 
+    def update_addresses(self, addresses: list[str]) -> None:
+        """Replace backend peers after a template restore fixup."""
+        self.model_rpc_client.update_addresses(addresses)
+
     @staticmethod
     def _pd_route_retry_on_unavailable() -> int:
         raw = os.environ.get(PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV, "")
@@ -1030,11 +1034,11 @@ def create_backend_rpc_server_visitor(
     from rtp_llm.config.engine_config import EngineConfig
     from rtp_llm.distribute.distributed_server import (
         get_dp_addrs_from_world_info,
-        get_world_info,
+        get_frontend_world_info,
     )
 
     engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
-    world_info = get_world_info(
+    world_info = get_frontend_world_info(
         server_config=py_env_configs.server_config,
         distribute_config=py_env_configs.distribute_config,
         parallelism_config=py_env_configs.parallelism_config,
@@ -1047,7 +1051,7 @@ def create_backend_rpc_server_visitor(
     if py_env_configs.vit_config:
         vit_separation = py_env_configs.vit_config.vit_separation
 
-    return BackendRPCServerVisitor(
+    visitor = BackendRPCServerVisitor(
         max_seq_len=model_config.max_seq_len,
         seq_size_per_block=model_config.attn_config.tokens_per_block,
         pd_sep_config=engine_config.pd_sep_config,
@@ -1063,3 +1067,13 @@ def create_backend_rpc_server_visitor(
         mm_model_config=getattr(model_config, "mm_model_config", None),
         model_config=model_config,
     )
+
+    from rtp_llm.utils.scr_template_utils import (
+        register_backend_visitor_template_hook,
+        register_server_config_template_hook,
+    )
+
+    # Bind restore validation to the same route view used to open the channels.
+    register_server_config_template_hook(py_env_configs)
+    register_backend_visitor_template_hook(visitor, py_env_configs, world_info)
+    return visitor
