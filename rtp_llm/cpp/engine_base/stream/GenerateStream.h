@@ -601,6 +601,10 @@ public:
     // Count worker claims on this stream's KV resource.
     // releaseResource waits for zero so worker-side update/specUpdate cannot
     // write into blocks already returned to the pool.
+    // Acquire KV ownership for an early MTP forward before its prior CPU
+    // bookkeeping completes. Release with decPendingAsyncBookkeepingAndMaybeRelease
+    // only after the GPU work finishes, or transfer the claim to its worker.
+    bool tryAcquireMtpForwardClaim();
     void incPendingAsyncBookkeeping();
     void decPendingAsyncBookkeepingAndMaybeRelease();
     bool hasPendingAsyncBookkeeping() const;

@@ -21,8 +21,25 @@ public:
     };
     using TokenCountsByPriority = std::map<int32_t, TokenCounts>;
 
-    StreamGroups(const std::list<GenerateStreamPtr>& streams) {
+    // Forward-only groups require validated, claimed single-sequence MTP decode
+    // streams. Do not inspect CPU token history while bookkeeping updates it.
+    StreamGroups(const std::list<GenerateStreamPtr>& streams, bool mtp_forward_only = false) {
         for (auto& stream : streams) {
+            if (mtp_forward_only) {
+                decode_streams_.push_back(stream);
+                ++total_decode_batch_size_;
+                ++model_execute_token_size_;
+                ++total_sampler_batch_size_in_;
+                ++total_sampler_batch_size_out_;
+                max_blocks_num_ = std::max(max_blocks_num_, stream->curBlocksNum());
+                max_seq_len_ = std::max(max_seq_len_,
+                    static_cast<size_t>(stream->getMtpAsyncDeviceState().next_real_seq_len));
+                total_score_batch_size_ += stream->scoreLen();
+                adapter_names.push_back(stream->adapterName());
+                // genTimeline() reads worker-owned CPU seqLength. Gather its
+                // eligibility in the normal groups rebuilt after bookkeeping.
+                continue;
+            }
             auto cur_batch_size  = stream->currentBatchSize();
             auto next_batch_size = stream->nextBatchSize();
             if (stream->isFakeStream()) {
