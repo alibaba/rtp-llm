@@ -124,9 +124,10 @@ def _build_scr_participant_manifest(
             _scr_local_world_size(py_env_configs) if manager_separate else 1
         )
     elif backend_enabled:
-        # VIT separation owns one standalone backend process; include that
-        # process directly instead of synthesizing rank workers for it.
-        participants.append(("backend_vit", "0"))
+        # VIT separation owns one standalone backend process.  It is not a
+        # manifest participant yet: the VIT launcher does not reach the SCR
+        # arrival barrier, and declaring a role that never arrives would stall
+        # the Epsilon quorum.  Add it here once VIT startup joins the barrier.
         backend_rank_count = 0
     if manager_separate:
         participants.append(("backend_manager", "0"))
@@ -214,7 +215,9 @@ def start_backend_server_impl(
 
     # only for debug
     if py_env_configs.profiling_debug_logging_config.debug_load_server:
-        start_backend_server(global_controller, py_env_configs, None, scr_manifest)
+        start_backend_server(
+            global_controller, py_env_configs, None, scr_manifest=scr_manifest
+        )
         os._exit(-1)
 
     # Create pipe for subprocess startup status communication

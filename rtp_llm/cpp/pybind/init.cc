@@ -7,7 +7,6 @@
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingQuery.h"
-#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
 #include "pybind11/stl.h"

@@ -505,6 +505,9 @@ def multi_rank_start(
             pre_exit_cleanup=cleanup,
         )
         manager.set_processes(processes, shutdown_group="backend")
+        # The outer manager is a manifest participant of its own: every declared
+        # role must arrive or the Epsilon quorum never completes.
+        _start_scr_manager_arrival(manager, scr_manifest)
         _send_pipe_status(
             pipe_writer,
             "success",

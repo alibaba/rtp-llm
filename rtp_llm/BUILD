@@ -101,7 +101,6 @@ requirement([
     "tiktoken",
     "protobuf",
     "grpcio-tools",
-    "requests",
     "setuptools",
     "Pillow",
     "pillow-heif",

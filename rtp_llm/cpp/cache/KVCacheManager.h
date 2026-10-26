@@ -115,11 +115,13 @@ public:
         const auto layout = coordinator_manager_->allLayerCacheBase();
         for (const auto& group_config : layout.topology().groups()) {
             for (const auto& buffer : layout.group(group_config.tag).layers()) {
-                if (buffer.kv_addr.defined()) {
-                    tensors.push_back(buffer.kv_addr);
-                }
-                if (buffer.kv_scale_addr.defined()) {
-                    tensors.push_back(buffer.kv_scale_addr);
+                // Pinned-host groups (CacheMemoryPlacement::HOST_PINNED) are not
+                // device state; registering them would make the checkpoint
+                // consumer reject the whole KV hint.
+                for (const auto* tensor : {&buffer.kv_addr, &buffer.kv_scale_addr}) {
+                    if (tensor->defined() && tensor->is_cuda()) {
+                        tensors.push_back(*tensor);
+                    }
                 }
             }
         }
