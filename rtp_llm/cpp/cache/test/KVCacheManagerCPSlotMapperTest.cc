@@ -60,7 +60,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DecodeTpReplicatesFullPagesWhilePrefillCp
     model.attn_config.kernel_tokens_per_block = 128;
     model.attn_config.sliding_window          = 128;
     KVCacheSpecDesc full;
-    full.tag               = "global_kv_2";
+    full.tag               = "csa_kv";
     full.cache_type        = KVCacheSpecType::OpaqueKV;
     full.entry_dtype       = DataType::TYPE_UINT8;
     full.entry_elems       = 288;

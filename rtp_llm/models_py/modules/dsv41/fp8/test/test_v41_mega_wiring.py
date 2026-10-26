@@ -450,7 +450,7 @@ class MegaAttentionWiringTest(unittest.TestCase):
         owner._pool_view_3d_fp8 = Mock(return_value=pool)
         owner._source_pool = Mock(return_value=extra)
         owner._decode_write_swa_fp8 = Mock()
-        owner._global_region = Mock(return_value="global_kv_1")
+        owner._global_region = Mock(return_value="hca_kv")
         owner._get_fp8_decode_op = Mock(return_value=object())
         selected = torch.arange(128).repeat(6, 1).int()
         slots = selected.long() + 128
