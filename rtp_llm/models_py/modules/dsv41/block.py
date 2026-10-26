@@ -305,6 +305,9 @@ class Block(nn.Module):
             self.ffn_hc,
             self.ffn_norm,
             original_tokens=original_tokens,
+            # Post-HC already owns this residual. Match the cross-layer policy
+            # so long prefill does not retain a second full HC activation.
+            reuse_residual=residual.numel() * residual.element_size() > 1 << 30,
             **({"moe_inputs": moe_inputs} if moe_inputs is not None else {}),
         )
 
