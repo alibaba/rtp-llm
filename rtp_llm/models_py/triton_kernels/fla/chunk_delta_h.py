@@ -340,6 +340,7 @@ def chunk_gated_delta_rule_fwd_h(
     save_new_value: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
     state_dtype: Optional[torch.dtype] = None,
+    cu_seqlens_cpu: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
@@ -396,7 +397,7 @@ def chunk_gated_delta_rule_fwd_h(
     BT = chunk_size
 
     chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, chunk_size)
+        prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu)
         if cu_seqlens is not None
         else None
     )
