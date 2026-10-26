@@ -476,6 +476,51 @@ TEST_F(FusedStridedCopyTest, MultipleStridedCopies) {
     }
 }
 
+// Rows crossing a copy tile must preserve each destination row's padding.
+// Include both aligned vector copies and an unaligned byte-copy fallback.
+TEST_F(FusedStridedCopyTest, WideRowsWithTailAndPadding) {
+    struct CopySpec {
+        size_t rows, row_bytes, src_stride, dst_stride, src_offset, dst_offset;
+    };
+    const std::vector<CopySpec> specs = {
+        {73, 16393, 16416, 16432, 0, 0},
+        {3, 16385, 16401, 16405, 1, 3},
+    };
+    std::vector<uint8_t*>             src_device(specs.size());
+    std::vector<uint8_t*>             dst_device(specs.size());
+    std::vector<std::vector<uint8_t>> expected(specs.size());
+    rtp_llm::FusedStridedCopyParams   params;
+
+    for (size_t c = 0; c < specs.size(); ++c) {
+        const auto&          s = specs[c];
+        std::vector<uint8_t> src(s.src_offset + s.rows * s.src_stride);
+        for (size_t i = 0; i < src.size(); ++i)
+            src[i] = static_cast<uint8_t>((i * 37 + c) & 0xFF);
+        expected[c].assign(s.dst_offset + s.rows * s.dst_stride, 0xA5);
+        for (size_t row = 0; row < s.rows; ++row)
+            std::memcpy(expected[c].data() + s.dst_offset + row * s.dst_stride,
+                        src.data() + s.src_offset + row * s.src_stride,
+                        s.row_bytes);
+        std::vector<uint8_t> dst(expected[c].size(), 0xA5);
+        src_device[c] = deviceAlloc(src);
+        dst_device[c] = deviceAlloc(dst);
+        params.add(src_device[c] + s.src_offset,
+                   dst_device[c] + s.dst_offset,
+                   s.rows,
+                   s.row_bytes,
+                   s.src_stride,
+                   s.dst_stride);
+    }
+
+    rtp_llm::invokeFusedStridedCopy(params, stream_);
+    CUDA_CHECK(cudaStreamSynchronize(stream_));
+    for (size_t c = 0; c < specs.size(); ++c) {
+        EXPECT_EQ(deviceToHost(dst_device[c], expected[c].size()), expected[c]) << "copy " << c;
+        cudaFree(src_device[c]);
+        cudaFree(dst_device[c]);
+    }
+}
+
 // Single-row strided copy (edge case: nrows == 1).
 TEST_F(FusedStridedCopyTest, SingleRowCopy) {
     constexpr size_t NROWS      = 1;
