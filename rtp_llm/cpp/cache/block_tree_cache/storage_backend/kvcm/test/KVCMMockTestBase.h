@@ -64,8 +64,9 @@ public:
         if (state_->fail) {
             return grpc::Status(state_->failure_code, "injected KVCM broadcast failure");
         }
+        auto* remote_response = response->mutable_remote_response();
+        remote_response->set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
         if (remote_request.op() == REMOTE_OPERATION_WRITE) {
-            auto* remote_response = response->mutable_remote_response();
             for (int index = 0; index < remote_request.uris_size(); ++index) {
                 remote_response->add_actual_uris("actual_rank_" + std::to_string(rank_) + "_" + std::to_string(index));
             }

@@ -3304,8 +3304,10 @@ TEST_F(BlockTreeEvictorTest, InvalidationDetachesBusyDescendantAndReclaimsAfterD
                             {makeResource(Tier::HOST, (*blocks)[2])}});
     ASSERT_EQ(inserted.inserted_nodes.size(), 3u);
     TreeNode* const busy_child                        = inserted.inserted_nodes[2];
-    busy_child->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
     const TransferDescriptor child_transfer(busy_child, 0, 2, Tier::HOST, Tier::DISK, {(*blocks)[2]});
+    evictor_->reserveSource({child_transfer});
+    evictor_->heaps_[0].pending_timings.emplace(
+        busy_child, EvictionTimingSnapshot(busy_child->group_set_resources[0].candidate_meta));
     const int64_t            key_version = tree_->keyVersion();
 
     // Only settled CRC sources are invalidated; the descendant belongs to another transfer.
@@ -3340,6 +3342,7 @@ TEST_F(BlockTreeEvictorTest, InvalidationDetachesBusyDescendantAndReclaimsAfterD
     const int64_t replacement_version = tree_->keyVersion();
 
     // Duplicate settlement entries reclaim the old node once without touching the new ancestors.
+    EXPECT_EQ(evictor_->heaps_[0].pending_timings.erase(busy_child), 1u);
     evictor_->discardDetachedTransfer({child_transfer});
     evictor_->settleEviction({child_transfer, child_transfer});
     EXPECT_TRUE(tree_->pending_node_pool_.empty());
