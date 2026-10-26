@@ -20,14 +20,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** Real endpoint accounting used by delivery callback ordering tests. */
 public final class DeliverySettlementTestSupport {
     private final ReentrantLock lock = new ReentrantLock();
-    public final PrefillState prefill =
-            new PrefillState(
-                    lock,
-                    PrefillActiveIndex.ordered(
-                            4, Comparator.comparingLong(RequestRoute::requestId)),
-                    System::currentTimeMillis);
+    public final PrefillState prefill;
     private final EndpointGenerationLifecycle generation =
             new EndpointGenerationLifecycle(() -> {});
+
+    public DeliverySettlementTestSupport() {
+        this(Comparator.comparingLong(RequestRoute::requestId));
+    }
+
+    public DeliverySettlementTestSupport(Comparator<RequestRoute> ordering) {
+        prefill =
+                new PrefillState(
+                        lock, PrefillActiveIndex.ordered(4, ordering), System::currentTimeMillis);
+    }
 
     public void enqueue(RequestRoute item) {
         lock.lock();
