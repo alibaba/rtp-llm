@@ -102,6 +102,17 @@ py_test(
     srcs = ["ppu/test/test_platform_boundary.py"],
     main = "ppu/test/test_platform_boundary.py",
     data = ["model_dispatch.py", "ppu/models/dsv4/resources.py"],
+    deps = [
+        "//rtp_llm/model_loader:loader",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:ops",
+        "//rtp_llm:lora",
+    ],
+    tags = ["ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )
 
 py_test(
