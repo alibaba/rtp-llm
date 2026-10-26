@@ -23,6 +23,17 @@ FLASHINFER_069_ANNOTATIONS = {
 }
 
 CUDA13_ANNOTATIONS = dict(FLASHINFER_069_ANNOTATIONS)
+CUDA13_ANNOTATIONS["deep-gemm"] = package_annotation(
+    whl_patches = {
+        "@rtp_llm//patches/deep_gemm:0002-normal-gemm-pdl-trigger.patch": json.encode({
+            "whls": [
+                "deep_gemm-2.8.2+341b656.cu132-cp310-cp310-linux_x86_64.whl",
+                "deep_gemm-2.8.2+341b656.cu132-cp310-cp310-linux_aarch64.whl",
+            ],
+            "patch_strip": 1,
+        }),
+    },
+)
 CUDA13_ANNOTATIONS["nvidia-cutlass-dsl-libs-core"] = package_annotation(
     whl_patches = {
         "@rtp_llm//patches/cutlass:0001-bazel-split-package-paths.patch": json.encode({

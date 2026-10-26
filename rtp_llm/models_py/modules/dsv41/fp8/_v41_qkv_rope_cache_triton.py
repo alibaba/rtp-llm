@@ -53,7 +53,12 @@ def _fused_qkv_rope_cache_kernel(
     APPLY_Q_ROPE: tl.constexpr,
     PADDED_HEADS: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    USE_PDL: tl.constexpr = False,
+    KV_READY: tl.constexpr = False,
 ):
+    tl.static_assert(not KV_READY or (not APPLY_Q_ROPE and HEADS == PADDED_HEADS))
+    if USE_PDL and not KV_READY:
+        tl.extra.cuda.gdc_wait()
     row = tl.program_id(0).to(tl.int64)
     tile = tl.program_id(1).to(tl.int64)
     pair = tl.arange(0, 32)
@@ -111,6 +116,9 @@ def _fused_qkv_rope_cache_kernel(
             normalized.to(tl.bfloat16),
             tl.gather(rope, tl.maximum(columns - 448, 0), 0),
         )
+        if USE_PDL and KV_READY:
+            # QA supplied raw KV before QB started; keep stores after QB's wait.
+            tl.extra.cuda.gdc_wait()
         tl.store(kv_out + row * 512 + columns, rounded)
         if not GATHERED_FREQS:
             tl.store(freqs_out + row * 64 + 2 * pair, cos)
@@ -212,12 +220,16 @@ def try_fused_qkv_rope_cache(
     freqs_cis: torch.Tensor | None = None,
     apply_q_rope: bool = True,
     pad_query_heads: int | None = None,
+    kv_ready: bool = False,
 ) -> FusedQKVRopeCache | None:
     """Apply Q RoPE in place and return BF16 KV plus the selected frequencies.
 
     ``apply_q_rope=False`` leaves Q unrotated for mega attention. Optional
     ``pad_query_heads`` pads its chunk-interleaved head layout in this same
     launch, while Wq itself continues to project only local heads.
+
+    ``kv_ready`` permits overlap with QB only when raw KV and frequencies were
+    completed before QB started. Q rotation/padding retains ordinary ordering.
 
     Only native V4.1 528-byte cache pages are accepted. Physical slots must be
     unique within the launch; any negative slot skips its store. Invalid
@@ -246,6 +258,10 @@ def try_fused_qkv_rope_cache(
         apply_q_rope or padded_heads not in (64, 128) or padded_heads < q.shape[-2]
     ):
         return None
+    import deep_gemm
+
+    use_pdl = torch.cuda.get_device_capability(q.device)[0] >= 9 and deep_gemm.get_pdl()
+    kv_ready = kv_ready and not apply_q_rope and padded_heads == q.shape[-2]
     q_out = (
         q
         if padded_heads == q.shape[-2]
@@ -287,6 +303,9 @@ def try_fused_qkv_rope_cache(
             APPLY_Q_ROPE=apply_q_rope,
             PADDED_HEADS=padded_heads,
             TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+            USE_PDL=use_pdl,
+            KV_READY=kv_ready,
+            launch_pdl=use_pdl,
             num_warps=4,
         )
     return FusedQKVRopeCache(q_out, kv_out, freqs_cis)
