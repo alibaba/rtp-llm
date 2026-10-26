@@ -545,6 +545,16 @@ class RequestSchedulerContractTest {
             assertEquals(
                     SchedulerTestSupport.Stage.FINALIZING, SchedulerTestSupport.stage(request));
             verify(endpoint, times(3)).release(null, route);
+            org.mockito.Mockito.doReturn(true).when(endpoint).release(null, route);
+            f.requests.requestCleanup(request);
+            RequestProtocolTestSupport.awaitCondition(
+                    () -> !f.requests.requests.isCurrent(request));
+            SchedulerTestSupport.awaitRequestWork(f.requests.runtime);
+            verify(endpoint, times(4)).release(null, route);
+            assertSame(failure, SchedulerTestSupport.failure(api));
+            assertSame(
+                    failure,
+                    assertThrows(IllegalStateException.class, f.requests.runtime::shutdown));
         }
     }
 
@@ -557,6 +567,7 @@ class RequestSchedulerContractTest {
             var handle = f.requests.claimAdmissionHandle(940L, future);
             assertNotNull(handle);
             var originalTimer = f.requests.runtime.deadlines();
+            originalTimer.remove(context);
             var timer = org.mockito.Mockito.spy(originalTimer);
             var failure = new IllegalStateException("expiry attachment failed");
             doThrow(failure)

@@ -953,7 +953,7 @@ class RequestTerminalSettlementTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {1, 2, 3})
+    @ValueSource(ints = {1, 2, 3, 5})
     void transientTerminalTimerFailureRetriesAfterActualResourceSettlement(int failures) {
         Fixture f = fixture(true, true);
         var context = f.requestContext();
@@ -961,11 +961,24 @@ class RequestTerminalSettlementTest {
         org.mockito.Mockito.clearInvocations(timer);
         var expected = new IllegalStateException("timer update failed");
         var attempts = new java.util.concurrent.atomic.AtomicInteger();
+        var installedRevision =
+                new java.util.concurrent.atomic.AtomicLong(
+                        context.snapshot().deadlines().revision());
+        when(timer.needsUpdate(any(), any()))
+                .thenAnswer(
+                        call -> {
+                            RequestContext owner = call.getArgument(0);
+                            ExpirationTimer.Plan plan = call.getArgument(1);
+                            return f.scheduler().requests.isCurrent(owner)
+                                    && plan.revision() > installedRevision.get();
+                        });
         doAnswer(
                         call -> {
                             if (attempts.incrementAndGet() <= failures) {
                                 throw expected;
                             }
+                            ExpirationTimer.Plan plan = call.getArgument(1);
+                            installedRevision.accumulateAndGet(plan.revision(), Math::max);
                             return null;
                         })
                 .when(timer)
@@ -994,15 +1007,24 @@ class RequestTerminalSettlementTest {
         var original = context.snapshot().outcome();
         assertEquals("original terminal failure", original.detail());
         assertFalse(RequestProtocolTestSupport.awaitResult(context.data().getFuture()).isSuccess());
-        if (failures == 3) {
-            assertEquals(3, attempts.get(), "the first close flow has a three-attempt bound");
+        if (failures == 5) {
+            assertEquals(
+                    5,
+                    attempts.get(),
+                    "close installs at most three times, then settlement recovers at most twice");
             assertEquals(Phase.ENDING, context.snapshot().phase());
             assertNotNull(context.snapshot().close().endOperation());
             assertTrue(context.snapshot().close().notificationsAttempted());
+            assertFalse(context.snapshot().close().timersDone());
+            assertTrue(timer.needsUpdate(context, context.snapshot().deadlines()));
             assertNotNull(
                     context.snapshot().deadlines().inactivity(),
                     "real pending notification keeps its existing watch");
             assertSame(context, f.scheduler().requests.findActive(RESERVATION.requestId()));
+            assertNull(f.scheduler().requests.findTerminal(RESERVATION.requestId()));
+            verify(f.item().prefillEp(), times(1)).release(null, f.item());
+            verify(f.item().decodeEp(), times(1))
+                    .release(RESERVATION, DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
             f.scheduler().requestCleanup(context);
             SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
         }

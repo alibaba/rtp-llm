@@ -83,18 +83,19 @@ public final class ExpirationTimer implements AutoCloseable {
         executor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
     }
 
+    boolean needsUpdate(RequestContext context, Plan plan) {
+        Slot observed = slots.get(context);
+        return requests.isCurrent(context)
+                && (observed == null
+                        || plan.revision() > observed.revision()
+                        || plan.revision() == observed.revision()
+                                && observed.hasFailedInstallation());
+    }
+
     /** Effect order may differ from fact order; only the greatest accepted revision installs handles. */
     void update(RequestContext context, Plan plan) {
         Objects.requireNonNull(plan);
-        if (context.snapshot().key() == null) {
-            return;
-        }
-        Slot observed = slots.get(context);
-        if (!requests.isCurrent(context)
-                || observed != null
-                        && (plan.revision() < observed.revision()
-                                || plan.revision() == observed.revision()
-                                        && !observed.hasFailedInstallation())) {
+        if (context.snapshot().key() == null || !needsUpdate(context, plan)) {
             return;
         }
         List<Handle> start = new ArrayList<>(3);

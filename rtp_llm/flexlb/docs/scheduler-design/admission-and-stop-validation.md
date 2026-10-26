@@ -127,7 +127,7 @@ the archived UT XML reports, individual before/after performance logs,
 `results.json`, and reproducible validation scripts. Failed intermediate runs
 and the obsolete-fixture failures remain separate historical artifacts.
 
-## Follow-up callback reduction
+## Callback reduction (e2e129d4db)
 
 The follow-up change makes a Dispatcher preemption ACK with an active delivery
 claim enter Scheduler once. Scheduler records both the attempt and delivery
@@ -207,3 +207,79 @@ measured 5,804.4 / 620.921ms / 620ms. Logs are `parent-isolated-burst.log` and
 passing cases or a controlled explanation of the difference. Eliminating the
 identified extra operations did not establish the cause of the remaining tail
 latency; this change cannot yet be certified as free of performance regression.
+
+## Effect ownership
+
+Review of `e2e129d4db` found that a single Scheduler entry still ran multiple
+effect owners: confirmation and its caller both updated deadlines, while closing
+and its caller both submitted settlement. A pre-close snapshot could also cause
+cancel re-entry after the request was already ENDING. The preceding UT pass did
+not establish the desired ownership contract.
+
+The new change makes continuation branches mutually exclusive and gives
+`closeRequest` responsibility for blocked/existing close recovery as well as new
+terminal selection. It removes caller cleanup tails from delivery failure,
+placement, retirement and deadline handling. No service class, executor, map,
+Context execution state or global lock is added.
+
+Five new action-count cases failed on the old implementation and passed after the
+change (`ownership-red.log`, `ownership-green.log`). Three additional cases test
+single-fact recovery of ACK deadline installation, cleanup submission, and a new
+terminal deadline while sender/release proof is still absent. Together with the
+combined-receipt ordering test, the final targeted set passes 9/9 in
+`ownership-final-targeted.log`.
+
+Review caught and fixed the removal of accidental recovery previously supplied
+by caller duplication. CloseTask owns bounded deadline retries. `requestCleanup`
+owns submission recovery, using an atomic WorkRegistration execution/ownership
+check; it never mistakes an inline task's failure for a failed handoff. An
+extended failure test caught that distinction before final verification.
+Historical failures remain observable; successful installation is recorded
+independently. The existing NOT_FOUND confirmation phase and synchronous
+RETIREMENT outcome selection remain necessary boundaries.
+
+Final source budget: Scheduler 30 methods / maximum 99 lines; ExpirationTimer
+10 / 64; SchedulerRuntime 30 / 61 (WorkRegistration 10 / 29).
+Production delta relative to `e2e129d4db` is three files, net +18 lines.
+`ownership-source.sha256` freezes 579 Java files: the same 575 module sources plus
+four existing Java tools. Its SHA-256 is
+`8867fd9e7dc9814b507e8b76f92d11fc5a390bb1c86fc9d379e861c316c92f15`.
+
+The final targeted contract set passes 15/15 (`ownership-final-contracts.log`).
+It includes modeled deadline installation state, retaining the original failure
+through admission completion and shutdown, and five consecutive installation
+failures that must not falsely archive a request or release resources twice.
+The first full run and the later failed handoff test are retained separately as
+`ownership-ut-initial.log` and `ownership-contracts-before-handoff-fix.log`.
+
+Final validation runs in `luoli_gpu` from an isolated copy of `e2e129d4db` plus
+only this patch at `ownership-candidate/rtp_llm/flexlb`. Concurrent PrefillState,
+WorkerBatcher and batch-test edits in the shared workspace are excluded. The
+full reactor and performance results use the `ownership-` prefix independently
+of earlier measurements; file isolation does not make the shared host a
+controlled performance environment.
+
+The complete UT reactor passes **3,289 tests, 0 failures, 0 errors, 1 skipped**
+with Maven `BUILD SUCCESS` in `ownership-ut.log`. Surefire XML reports are
+preserved in `ownership-ut-reports.tar`. An earlier isolated run was missing the
+repository-level telemetry JSON fixture; its failure is retained in
+`ownership-ut-fixture-missing.log`. The final run includes that fixture from the
+same baseline commit, with no Java source changes.
+
+The complete performance set retains the original 64 GiB heap, advanced Netty
+leak detection, workloads and thresholds: **22/25 pass, 3 failures, 0 errors**.
+Sync passes 5/5, API 15/16, BATCH matrix 0/2, NON_BATCH matrix 2/2. The API burst
+fails at server P99 545ms against 50ms. The 750P/750D measurements are:
+
+| Mode / target QPS  | Client QPS | Client P99 | Server P99 | Result                                            |
+| ------------------ | ---------: | ---------: | ---------: | ------------------------------------------------- |
+| BATCH / 3,000      |    2,996.7 |   66.973ms |       13ms | Fail: client P99                                  |
+| BATCH / 10,000     |    9,989.3 |  277.153ms |       60ms | Fail: client P99; server P99 also exceeds ceiling |
+| NON_BATCH / 3,000  |    2,998.1 |   14.104ms |        3ms | Pass                                              |
+| NON_BATCH / 10,000 |    9,991.8 |   26.367ms |        4ms | Pass                                              |
+
+**Performance remains unaccepted.** The change removes demonstrated redundant
+effects and passes ownership/recovery contracts; these runs do not establish a
+causal speedup or rule out performance regression. `ownership-results.json`
+records totals and metrics. The complete Java manifest still matches after UT,
+performance execution and commit-hook checks.
