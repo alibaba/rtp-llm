@@ -120,11 +120,11 @@ public final class WorkerBatcher {
                 new BatcherCycleResult(null, null, 0L, 0L, 0L, null);
 
         private static BatcherCycleResult capacityBlocked(
-                RequestRoute item, CapacityBoundary unavailable) {
+                RequestRoute item, CapacityBoundary unavailable, long queueVersion) {
             return new BatcherCycleResult(
                     Objects.requireNonNull(item),
                     Objects.requireNonNull(unavailable),
-                    0L,
+                    queueVersion,
                     0L,
                     0L,
                     unavailable.resource().getDescription());
@@ -527,6 +527,15 @@ public final class WorkerBatcher {
             String reason,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPrediction) {
+        return processSelection(candidates, reason, evaluator, plannedPrediction, null);
+    }
+
+    private CapacityBoundary processSelection(
+            List<RequestRoute> candidates,
+            String reason,
+            PrefillTimePredictor.Evaluator evaluator,
+            OptionalLong plannedPrediction,
+            RequestRoute bypassedHead) {
         queueGuard.lock();
         try {
             if (candidates.isEmpty()
@@ -538,72 +547,14 @@ public final class WorkerBatcher {
             queueGuard.unlock();
         }
         Preparation prep = new Preparation(candidates.getFirst(), candidates.size());
-        CapacityBoundary boundary = null;
-        RequestRoute blocked = null;
-        long payloadBytes = 16L;
         try (prep) {
             try {
-                for (RequestRoute item : candidates) {
-                    long itemBytes = prep.batch ? item.batchPayloadSizeUpperBound() : 0L;
-                    if (prep.batch
-                            && !prep.members.isEmpty()
-                            && itemBytes
-                                    > org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE
-                                            - payloadBytes) {
-                        break;
-                    }
-                    synchronized (item.ctx()) {
-                        var state = item.ctx().snapshot();
-                        boundary =
-                                state.preparedDelivery() && state.route() == item
-                                        ? prep.acquire(item, evaluator)
-                                        : CapacityBoundary.OWNERSHIP_LOST;
-                        if (boundary != null) {
-                            blocked = item;
-                            break;
-                        }
-                        payloadBytes += itemBytes;
-                    }
-                }
+                prep.acquire(candidates, evaluator);
                 if (prep.members.isEmpty()) {
-                    return boundary;
+                    return prep.boundary;
                 }
-                List<RequestRoute> items = prep.members.stream().map(Member::route).toList();
                 long prediction =
-                        !prep.batch
-                                ? 0L
-                                : plannedPrediction.isPresent() && items.size() == candidates.size()
-                                        ? plannedPrediction.getAsLong()
-                                        : PrefillPredictionBoundary.predictCommittedBatchMs(
-                                                evaluator,
-                                                PrefillBatchFeatures.from(
-                                                        items,
-                                                        RequestRoute::seqLen,
-                                                        RequestRoute::hitCache));
-                RequestRoute failed =
-                        boundary != null && boundary.status() == CapacityBoundary.Status.FAILED
-                                ? blocked
-                                : null;
-                long[] predictions =
-                        prep.batch
-                                ? new long[] {prediction}
-                                : prep.predictions.length == items.size()
-                                        ? prep.predictions
-                                        : Arrays.copyOf(prep.predictions, items.size());
-                prep.committed =
-                        commitSelection(
-                                now ->
-                                        prefillEndpoint.commitLocked(
-                                                new PrefillState.CommitPlan(
-                                                        prep.batch
-                                                                ? PrefillState.CommitKind.BATCH
-                                                                : PrefillState.CommitKind.QUEUED,
-                                                        items,
-                                                        List.of(),
-                                                        prep.reservation,
-                                                        predictions,
-                                                        failed,
-                                                        now)));
+                        prep.commit(evaluator, plannedPrediction, candidates.size(), bypassedHead);
                 if (prep.committed == null) {
                     return !prep.batch
                                     && !prefillState.requestCapacityAvailable(
@@ -615,7 +566,7 @@ public final class WorkerBatcher {
                 prep.reservation = null;
                 boolean removedFailedMember = prep.committed.removedFailedMember();
                 if (removedFailedMember) {
-                    removeAndNotify(blocked, boundary, true);
+                    removeAndNotify(prep.blocked, prep.boundary, true);
                 }
                 WorkSnapshot precedingWork = prep.committed.precedingWork().materialize();
                 if (prep.batch) {
@@ -626,7 +577,7 @@ public final class WorkerBatcher {
                                     precedingWork,
                                     prediction,
                                     evaluator,
-                                    boundary != null && boundary.unavailable()
+                                    prep.boundary != null && prep.boundary.unavailable()
                                             ? "delivery_capacity_prefix"
                                             : reason,
                                     prep.committed.remainingQueueDepth(),
@@ -818,7 +769,7 @@ public final class WorkerBatcher {
     }
 
     private BatcherCycleResult commitBoundary(
-            RequestRoute blockedItem, CapacityBoundary blockedResult) {
+            RequestRoute blockedItem, CapacityBoundary blockedResult, long queueVersion) {
         if (blockedItem == null || blockedResult == null) {
             return BatcherCycleResult.NO_ACTION;
         }
@@ -847,7 +798,13 @@ public final class WorkerBatcher {
             queueGuard.unlock();
         }
         if (capacityBlocked) {
-            return BatcherCycleResult.capacityBlocked(blockedItem, blockedResult);
+            long version =
+                    settings.priorityOrdering()
+                                    && blockedResult.resource()
+                                            == CapacityBoundary.Resource.DECODE_ENGINE
+                            ? queueVersion
+                            : 0L;
+            return BatcherCycleResult.capacityBlocked(blockedItem, blockedResult, version);
         }
         if (removed) {
             removeAndNotify(blockedItem, blockedResult, true);
@@ -976,10 +933,66 @@ public final class WorkerBatcher {
                             : OptionalLong.of(
                                     PrefillPredictionBoundary.committedDecisionGroupMs(
                                             selection.selectedPredictionMs().getAsDouble()));
-            return commitBoundary(
-                    head, processSelection(selection.items(), reason, evaluator, prediction));
+            var boundary = processSelection(selection.items(), reason, evaluator, prediction);
+            if (settings.priorityOrdering()
+                    && boundary != null
+                    && boundary.unavailable()
+                    && boundary.resource() == CapacityBoundary.Resource.DECODE_ENGINE) {
+                bypass(head, evaluator);
+            }
+            return commitBoundary(head, boundary, snapshot.queueVersion());
         } catch (InvalidPrefillPredictionException failure) {
-            return commitBoundary(head, CapacityBoundary.failed(failure));
+            return commitBoundary(head, CapacityBoundary.failed(failure), snapshot.queueVersion());
+        }
+    }
+
+    /** Checks ordering and the queue-owned allowance; it neither reserves nor consumes capacity. */
+    public boolean canBypass(RequestRoute head, RequestRoute candidate) {
+        queueGuard.lock();
+        try {
+            return settings.priorityOrdering() && prefillState.canBypassLocked(head, candidate);
+        } finally {
+            queueGuard.unlock();
+        }
+    }
+
+    /** Only the immediate blocked head may be skipped; a second blocked member stops this batch. */
+    private void bypass(RequestRoute head, PrefillTimePredictor.Evaluator evaluator) {
+        var snapshot = prefillState.captureQueue(Math.max(2, settings.maxRequests()));
+        if (snapshot.head() != head) {
+            return;
+        }
+        int end = 1;
+        while (end < snapshot.items().size() && canBypass(head, snapshot.items().get(end))) {
+            end++;
+        }
+        if (end == 1) {
+            return;
+        }
+        var predictor =
+                settings.executionBudgetMs() > 0L
+                        ? RequestTimeEstimation.newGroupPredictor(
+                                settings.dispatcherType(), evaluator)
+                        : null;
+        var candidates = snapshot.items().subList(1, end);
+        try {
+            var selection = grouping.select(candidates, schedulingConstraints(), predictor);
+            var constraints = schedulingConstraints();
+            if (!selection.items().isEmpty()
+                    && selection.fitsKv(constraints.batchKvCapacity())
+                    && (selection.items().size() == 1
+                            || selection.fitsCompute(constraints.batchTokenCapacity()))) {
+                var boundary =
+                        processSelection(
+                                selection.items(),
+                                "decode_head_bypass",
+                                evaluator,
+                                OptionalLong.empty(),
+                                head);
+                commitBoundary(selection.items().getFirst(), boundary, 0L);
+            }
+        } catch (InvalidPrefillPredictionException failure) {
+            commitBoundary(candidates.getFirst(), CapacityBoundary.failed(failure), 0L);
         }
     }
 
@@ -1169,11 +1182,94 @@ public final class WorkerBatcher {
         long batchId;
         boolean transferred;
         Throwable primaryFailure;
+        CapacityBoundary boundary;
+        RequestRoute blocked;
 
         Preparation(RequestRoute first, int size) {
             runtime = first.ctx().data().getScheduler().runtime;
             members = new ArrayList<>(size);
             predictions = batch ? null : new long[size];
+        }
+
+        void acquire(List<RequestRoute> candidates, PrefillTimePredictor.Evaluator evaluator) {
+            long payloadBytes = 16L;
+            for (RequestRoute item : candidates) {
+                long itemBytes = batch ? item.batchPayloadSizeUpperBound() : 0L;
+                if (batch
+                        && !members.isEmpty()
+                        && itemBytes
+                                > org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE
+                                        - payloadBytes) {
+                    break;
+                }
+                synchronized (item.ctx()) {
+                    var state = item.ctx().snapshot();
+                    boundary =
+                            state.preparedDelivery() && state.route() == item
+                                    ? acquire(item, evaluator)
+                                    : CapacityBoundary.OWNERSHIP_LOST;
+                    if (boundary != null) {
+                        blocked = item;
+                        break;
+                    }
+                    payloadBytes += itemBytes;
+                }
+            }
+        }
+
+        long commit(
+                PrefillTimePredictor.Evaluator evaluator,
+                OptionalLong plannedPrediction,
+                int candidateCount,
+                RequestRoute bypassedHead) {
+            List<RequestRoute> items = members.stream().map(Member::route).toList();
+            long prediction =
+                    !batch
+                            ? 0L
+                            : plannedPrediction.isPresent() && items.size() == candidateCount
+                                    ? plannedPrediction.getAsLong()
+                                    : PrefillPredictionBoundary.predictCommittedBatchMs(
+                                            evaluator,
+                                            PrefillBatchFeatures.from(
+                                                    items,
+                                                    RequestRoute::seqLen,
+                                                    RequestRoute::hitCache));
+            long[] committedPredictions =
+                    batch
+                            ? new long[] {prediction}
+                            : predictions.length == items.size()
+                                    ? predictions
+                                    : Arrays.copyOf(predictions, items.size());
+            RequestRoute failed =
+                    boundary != null && boundary.status() == CapacityBoundary.Status.FAILED
+                            ? blocked
+                            : null;
+            committed =
+                    commitSelection(
+                            now -> {
+                                if (bypassedHead != null
+                                        && bypassedHead
+                                                .decodeEp()
+                                                .shouldRetryDispatch(
+                                                        bypassedHead.decodeReservation(),
+                                                        runtime.deliveries()
+                                                                .decodeDeliveryCapacity)) {
+                                    return null;
+                                }
+                                return prefillEndpoint.commitLocked(
+                                        new PrefillState.CommitPlan(
+                                                batch
+                                                        ? PrefillState.CommitKind.BATCH
+                                                        : PrefillState.CommitKind.QUEUED,
+                                                items,
+                                                List.of(),
+                                                reservation,
+                                                committedPredictions,
+                                                failed,
+                                                now,
+                                                bypassedHead));
+                            });
+            return prediction;
         }
 
         CapacityBoundary acquire(RequestRoute item, PrefillTimePredictor.Evaluator evaluator) {
