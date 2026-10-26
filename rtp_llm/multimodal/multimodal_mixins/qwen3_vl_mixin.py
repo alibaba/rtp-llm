@@ -97,15 +97,13 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                 )
             with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, tags):
                 image = Image.open(image_data)
-            if (
-                mm_input.mm_preprocess_config.height != -1
-                and mm_input.mm_preprocess_config.width != -1
-            ):
-                resized_height, resized_width = smart_resize(
-                    mm_input.mm_preprocess_config.height,
-                    mm_input.mm_preprocess_config.width,
-                    factor=factor,
-                )
+            from rtp_llm.multimodal.qwen35_token_length import image_resize_plan
+
+            width, height = image.size
+            resized_height, resized_width, do_resize = image_resize_plan(
+                height, width, mm_input.mm_preprocess_config, factor
+            )
+            if not do_resize:
                 with vit_preprocess_timer(
                     GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, tags
                 ):
@@ -115,39 +113,6 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                     resized_width * resized_height,
                     tags,
                 )
-                do_resize = False
-            elif (
-                mm_input.mm_preprocess_config.max_pixels != -1
-                or mm_input.mm_preprocess_config.min_pixels != -1
-            ):
-                width, height = image.size
-                min_pixels = (
-                    0
-                    if mm_input.mm_preprocess_config.min_pixels == -1
-                    else mm_input.mm_preprocess_config.min_pixels
-                )
-                max_pixels = (
-                    0x7FFFFFFF
-                    if mm_input.mm_preprocess_config.max_pixels == -1
-                    else mm_input.mm_preprocess_config.max_pixels
-                )
-                resized_height, resized_width = smart_resize(
-                    height,
-                    width,
-                    factor=factor,
-                    min_pixels=min_pixels,
-                    max_pixels=max_pixels,
-                )
-                with vit_preprocess_timer(
-                    GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, tags
-                ):
-                    image = image.resize((resized_width, resized_height))
-                record_vit_preprocess_value(
-                    GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
-                    resized_width * resized_height,
-                    tags,
-                )
-                do_resize = False
             with vit_preprocess_timer(
                 GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, tags
             ):

@@ -211,8 +211,7 @@ bool FIFOScheduler::evaluateRunningBatch(const std::list<GenerateStreamPtr>& str
         admitted_count, admitted_tokens, admitted_max_seq_len, admitted_sequence_count, new_stream);
 }
 
-bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
-                                          const GenerateStreamPtr&       new_stream) {
+bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) {
     // FIFOScheduler's own scheduling loop uses the counter-based evaluateRunningBatch();
     // this list-based FIFOSchedulerBase entry point delegates to the list overload so
     // both paths agree.
@@ -226,8 +225,7 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
                                            const GenerateStreamPtr& candidate) const {
     // Preserve the historical singleton boundary; checkInputLength() has already
     // validated the candidate's standalone token cost.
-    if (admitted_stream_count == 0 && running_streams_.empty()
-        && candidate->contextLength() < int(max_seq_len_)) {
+    if (admitted_stream_count == 0 && running_streams_.empty() && candidate->contextLength() < int(max_seq_len_)) {
         return true;
     }
 
@@ -269,8 +267,8 @@ bool FIFOScheduler::fitsMixedKVCapacity(const GenerateStreamPtr&            cand
     if (candidate->maxBatchSize() != 1) {
         return false;
     }
-    const auto snapshots = cache_manager_->poolMetricsSnapshots();
-    const bool per_pool = !snapshots.empty();
+    const auto           snapshots = cache_manager_->poolMetricsSnapshots();
+    const bool           per_pool  = !snapshots.empty();
     std::vector<int64_t> available_blocks;
     std::vector<int64_t> reserve_blocks;
     if (per_pool) {
@@ -281,9 +279,9 @@ bool FIFOScheduler::fitsMixedKVCapacity(const GenerateStreamPtr&            cand
             if (snapshot.pool_index >= snapshots.size() || seen_pool[snapshot.pool_index]) {
                 return false;
             }
-            seen_pool[snapshot.pool_index] = true;
+            seen_pool[snapshot.pool_index]        = true;
             available_blocks[snapshot.pool_index] = static_cast<int64_t>(snapshot.available_blocks);
-            reserve_blocks[snapshot.pool_index] = static_cast<int64_t>(snapshot.reserve_blocks);
+            reserve_blocks[snapshot.pool_index]   = static_cast<int64_t>(snapshot.reserve_blocks);
         }
     } else {
         available_blocks.push_back(static_cast<int64_t>(cache_manager_->availableBlocksNum()));
@@ -295,8 +293,12 @@ bool FIFOScheduler::fitsMixedKVCapacity(const GenerateStreamPtr&            cand
         }
         const auto tokens = stream->completeTokenIdsPtr();
         return cache_manager_->estimateSingleSequencePeakNeedBlocksByPool(
-            stream->kvCachePtr(), stream->seqLength(), std::min(tokens->commonSeqLength(), stream->seqLength()),
-            remaining_tokens, tokens->getReserveStep(), stream->streamCacheResource().reuseCache());
+            stream->kvCachePtr(),
+            stream->seqLength(),
+            std::min(tokens->commonSeqLength(), stream->seqLength()),
+            remaining_tokens,
+            tokens->getReserveStep(),
+            stream->streamCacheResource().reuseCache());
     };
 
     // A fresh prefill must fit above every pool's own reserve watermark.
@@ -313,9 +315,9 @@ bool FIFOScheduler::fitsMixedKVCapacity(const GenerateStreamPtr&            cand
         }
     }
 
-    std::vector<int64_t> outstanding_blocks(available_blocks.size(), 0);
+    std::vector<int64_t>                      outstanding_blocks(available_blocks.size(), 0);
     std::unordered_set<const GenerateStream*> seen;
-    const auto account_stream = [&](const GenerateStreamPtr& stream) {
+    const auto                                account_stream = [&](const GenerateStreamPtr& stream) {
         if (!stream || stream->hasError() || stream->hasEvent(StreamEvents::GenerateDone)
             || !seen.insert(stream.get()).second) {
             return true;
@@ -444,13 +446,10 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
     if (!waiting_streams.empty()) {
-        auto oldest_enqueue_time_us = (*std::min_element(waiting_streams.begin(),
-                                                         waiting_streams.end(),
-                                                         [](const auto& lhs, const auto& rhs) {
-                                                             return lhs->schedulerEnqueueTimeUs()
-                                                                    < rhs->schedulerEnqueueTimeUs();
-                                                         }))
-                                          ->schedulerEnqueueTimeUs();
+        auto oldest_enqueue_time_us =
+            (*std::min_element(waiting_streams.begin(), waiting_streams.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs->schedulerEnqueueTimeUs() < rhs->schedulerEnqueueTimeUs();
+            }))->schedulerEnqueueTimeUs();
         last_waiting_oldest_age_us_ =
             std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
     }
@@ -700,6 +699,43 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     }
 }
 
+std::vector<GenerateStreamPtr> FIFOScheduler::selectMultimodalCandidates() const {
+    std::vector<GenerateStreamPtr> candidates;
+    if (!running_streams_.empty() || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
+        || !waiting_group_queue_.empty()) {
+        return candidates;
+    }
+    // Retain one bounded prepared cohort through KV shortage, without re-running ViT.
+    for (const auto& stream : waiting_streams_) {
+        if (!stream->hasError() && stream->generateInput()->multimodal_prepared_late) {
+            return candidates;
+        }
+    }
+    ScheduleRuntime budget;
+    for (const auto& stream : waiting_streams_) {
+        if (stream->hasError()) {
+            continue;
+        }
+        if ((max_batch_tokens_without_cache_ > 0
+             && budget.admitted_prefill_token_size_without_cache >= max_batch_tokens_without_cache_)
+            || (max_inited_kv_cache_streams_ > 0
+                && budget.admitted_running_stream_count >= max_inited_kv_cache_streams_)
+            || !evaluateRunningBatch(budget, stream)) {
+            continue;
+        }
+        ++budget.admitted_running_stream_count;
+        budget.admitted_prefill_token_size_with_cache += prefillTokenCostWithCache(stream);
+        budget.admitted_prefill_max_seq_len_with_cache =
+            std::max(budget.admitted_prefill_max_seq_len_with_cache, prefillSeqLenWithCache(stream));
+        budget.admitted_prefill_sequence_count += stream->currentBatchSize();
+        budget.admitted_prefill_token_size_without_cache += prefillTokenCostWithoutCache(stream);
+        if (stream->hasPendingMultimodal()) {
+            candidates.push_back(stream);
+        }
+    }
+    return candidates;
+}
+
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_) {
@@ -714,6 +750,14 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     last_waiting_oldest_age_us_       = 0;
 
     evaluateAndUpdateStreams(running_streams_);
+    const auto multimodal_candidates = selectMultimodalCandidates();
+    if (!multimodal_candidates.empty()) {
+        lock.unlock();
+        for (const auto& stream : multimodal_candidates) {
+            stream->prepareLateMultimodal();
+        }
+        lock.lock();
+    }
 
     if (running_streams_.empty()) {
         active_admission_lane_ = AdmissionLane::NONE;

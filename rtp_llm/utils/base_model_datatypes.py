@@ -1,12 +1,11 @@
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.ops import MultimodalInput
-
 
 
 class EmbeddingOutput:
@@ -60,6 +59,13 @@ class RequestInfo:
 
 
 @dataclass
+class MultimodalTokenExpansion:
+    token_ids: Sequence[int]
+    spans: List[Tuple[int, int]]
+    length_only: bool = False
+
+
+@dataclass
 class GenerateInput:
     request_id: int
     token_ids: torch.Tensor
@@ -73,6 +79,7 @@ class GenerateInput:
     enqueued_by_master: bool = False
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
+    mm_token_expansion: Optional[MultimodalTokenExpansion] = None
 
     class Config:
         arbitrary_types_allowed = True

@@ -44,6 +44,8 @@ public:
     grpc::Status
     GetCacheStatus(grpc::ServerContext* context, const ::CacheVersionPB* request, ::CacheStatusPB* response);
 
+    grpc::Status
+    GetMultimodalLengths(grpc::ServerContext* context, const GenerateInputPB* request, MultimodalLengthsPB* response);
     virtual grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                             const GenerateInputPB*                 request,
                                             grpc::ServerWriter<GenerateOutputsPB>* writer);

@@ -794,6 +794,19 @@ class MMProcessEngine:
             request_id=getattr(mm_inputs, "request_id", 0),
         )
 
+    def token_lengths(self, mm_inputs: List[MultimodalInput]) -> List[int]:
+        """Metadata only: no embedding submission, forward, or cache promotion."""
+        validate = getattr(self.mm_part, "validate_inputs", None)
+        if validate is not None:
+            validate(mm_inputs)
+        length_fn = getattr(self.mm_part, "token_length", None)
+        if length_fn is None:
+            raise NotImplementedError("adapter has no metadata-only length provider")
+        lengths = [length_fn(item, self.vit_config) for item in mm_inputs]
+        if any(type(n) is not int or not 0 < n < (1 << 31) for n in lengths):
+            raise ValueError("invalid metadata-only multimodal length")
+        return lengths
+
     def mm_embedding_cpp(
         self,
         urls: List[str],

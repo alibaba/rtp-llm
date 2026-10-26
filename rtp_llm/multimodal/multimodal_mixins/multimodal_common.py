@@ -159,6 +159,16 @@ class MultiModalEmbeddingInterface:
     def get_preprocess_params(self):
         return {}
 
+    def token_length(self, mm_input: MultimodalInput, vit_config: VitConfig) -> int:
+        """Rows in one complete output tensor, including internal video text tokens.
+
+        Metadata only: do not decode full media, submit embeddings, or run ViT.
+        Prompt delimiters outside the media span are excluded.
+        """
+        raise NotImplementedError(
+            "metadata-only length is not implemented for this adapter"
+        )
+
     def estimate_work(
         self, data: Any, mm_type: Optional[MMUrlType] = None
     ) -> Optional[MMWorkEstimate]:

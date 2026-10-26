@@ -71,7 +71,7 @@ private:
                                const GenerateStreamPtr&            new_stream) override;
     // Counter-based admission check used by admitWaitingStreams(). evaluateRunningMemory()
     // is the list-based FIFOSchedulerBase entry point and delegates here.
-    bool   evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
+    bool evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
     // Overload for group-queue admission: the admitted streams are tracked as a list
     // because ScheduleRuntime is not built in the group-queue path.
     bool   evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
@@ -100,14 +100,15 @@ private:
     void admitWaitingStreams(std::list<GenerateStreamPtr>&       waiting_streams,
                              const std::list<GenerateStreamPtr>& already_admitted_streams);
 
-    void cancelGroups(StreamGroupQueue& group_queue);
-    void evaluateWaitingGroupQueue();
-    void evaluateLoadingCacheGroupQueue();
-    bool loadingGroupReady() const;
-    void advanceLoadingGroup(StreamGroup& group);
-    void moveGroupToNewStreams(StreamGroup& group);
-    void moveGroupToAllocatingGroup(StreamGroup& group);
-    void dispatchPreparedGroup(StreamGroup& group);
+    std::vector<GenerateStreamPtr> selectMultimodalCandidates() const;
+    void                           cancelGroups(StreamGroupQueue& group_queue);
+    void                           evaluateWaitingGroupQueue();
+    void                           evaluateLoadingCacheGroupQueue();
+    bool                           loadingGroupReady() const;
+    void                           advanceLoadingGroup(StreamGroup& group);
+    void                           moveGroupToNewStreams(StreamGroup& group);
+    void                           moveGroupToAllocatingGroup(StreamGroup& group);
+    void                           dispatchPreparedGroup(StreamGroup& group);
 
     void    cancelExtraStreams() override;
     bool    hasExtraStreams() const override;

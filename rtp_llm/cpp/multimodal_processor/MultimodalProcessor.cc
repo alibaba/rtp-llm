@@ -136,6 +136,50 @@ ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_ou
     return ErrorInfo::OkStatus();
 }
 
+ErrorResult<ExpandedOutput>
+MultimodalProcessor::useExpandedTokenLayout(const GenerateInput&              input,
+                                            const std::vector<torch::Tensor>& features,
+                                            const std::vector<torch::Tensor>& feature_hashes) {
+    const auto& spans = input.multimodal_token_layout->spans;
+    const auto& ids   = input.input_ids;
+    if (spans.empty() || spans.size() != features.size()
+        || (!feature_hashes.empty() && feature_hashes.size() != features.size()) || !ids.defined() || ids.dim() != 1
+        || !ids.is_cpu() || ids.scalar_type() != torch::kInt32) {
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid expanded multimodal layout");
+    }
+    if (ids.numel() >= max_seq_len_) {
+        return ErrorInfo(ErrorCode::MM_LONG_PROMPT_ERROR, "expanded multimodal input exceeds max_seq_len");
+    }
+    auto    expanded_ids = ids.contiguous().clone();
+    auto    masks        = torch::ones({ids.numel()}, torch::kInt32);
+    auto    locs         = torch::empty({static_cast<int64_t>(spans.size())}, torch::kInt32);
+    int64_t previous_end = 0;
+    for (size_t i = 0; i < spans.size(); ++i) {
+        const auto [offset, length] = spans[i];
+        const int64_t end           = int64_t(offset) + length;
+        if (offset < previous_end || length <= 0 || end > ids.numel() || !features[i].defined() || features[i].dim() < 1
+            || features[i].size(0) != length) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "metadata length differs from complete embedding");
+        }
+        auto* target = expanded_ids.data_ptr<int32_t>() + offset;
+        if (feature_hashes.empty()) {
+            RETURN_IF_STATUS_ERROR(getFeatureHash(target, features[i]));
+        } else {
+            const auto& hashes = feature_hashes[i];
+            if (!hashes.defined() || !hashes.is_cpu() || hashes.dim() != 1 || hashes.scalar_type() != torch::kInt32
+                || hashes.numel() != length) {
+                return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid expanded multimodal hashes");
+            }
+            auto contiguous = hashes.contiguous();
+            memcpy(target, contiguous.data_ptr<int32_t>(), contiguous.nbytes());
+        }
+        std::fill(masks.data_ptr<int32_t>() + offset, masks.data_ptr<int32_t>() + end, 0);
+        locs.data_ptr<int32_t>()[i] = offset;
+        previous_end                = end;
+    }
+    return ExpandedOutput(std::move(expanded_ids), {}, std::move(masks), std::move(locs));
+}
+
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input) {
     if (input->generate_config && input->generate_config->calculate_loss) {
         return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
@@ -154,12 +198,15 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     input->multimodal_features = std::move(mm_embedding_res.mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
     input->mm_extra_input      = std::move(mm_embedding_res.mm_extra_input);
-    CHECK_AND_RETURN_REF(expanded_ids,
-                         expandTokenIds(input->multimodal_features.value(),
-                                        input->input_ids,
-                                        input->multimodal_inputs.value(),
-                                        {},
-                                        mm_embedding_res.feature_hashes));
+    CHECK_AND_RETURN_REF(
+        expanded_ids,
+        input->multimodal_token_layout ?
+            useExpandedTokenLayout(*input, input->multimodal_features.value(), mm_embedding_res.feature_hashes) :
+            expandTokenIds(input->multimodal_features.value(),
+                           input->input_ids,
+                           input->multimodal_inputs.value(),
+                           {},
+                           mm_embedding_res.feature_hashes));
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
     input->input_ids        = expanded_ids.expanded_ids;
     input->text_tokens_mask = expanded_ids.text_tokens_mask;

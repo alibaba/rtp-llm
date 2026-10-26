@@ -1,7 +1,26 @@
+load(":defs.bzl", "custom_smoke_test", "SMOKE_FRAMEWORK_DEPS")
 load(":qwen35_e1pd4_perf_smoke.bzl", "qwen35_e1pd4_perf_suite")
 load(":qwen35_epd_fusion_4gpu_smoke.bzl", "qwen35_epd_fusion_4gpu_suite")
 load(":qwen35_e2p4d2_repro.bzl", "qwen35_e2p4d2_repro_suite")
 package(default_visibility = ["//visibility:public"])
+
+custom_smoke_test(
+    name = "local_mm_late_prefill_smoke",
+    main = "local_mm_late_prefill_smoke_test.py",
+    # Qwen3.5 shares the full-attention and linear-state KV pool. Match the
+    # BF16 cache geometry used by qwen35_epd_fusion_4gpu_smoke.
+    smoke_args = "--use_local 1 --role_type PDFUSION --vit_separation 0 --world_size 2 --tp_size 1 --dp_size 2 --ep_size 2 --act_type BF16 --load_method auto --max_seq_len 131072 --enable_cuda_graph 0 --reuse_cache 1 --think_mode 0 --seq_size_per_block 2048 --kernel_seq_size_per_block 64 --kv_cache_mem_mb 16384 --reserver_runtime_mem_mb 24576",
+    gpu_type = ["SM103_CU13"],
+    tags = ["manual"],
+)
+
+py_binary(
+    name = "local_mm_late_prefill_dp4_stress",
+    srcs = ["local_mm_late_prefill_dp4_stress.py"],
+    main = "local_mm_late_prefill_dp4_stress.py",
+    deps = SMOKE_FRAMEWORK_DEPS,
+    legacy_create_init = 0,
+)
 
 # Framework source files for cross-package smoke tests.
 # Used as data dep (not srcs/deps) so internal smoke targets can merge their

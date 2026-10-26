@@ -386,6 +386,9 @@ int StreamCacheResource::estimatePeakNeedBlocks(
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
 absl::Status StreamCacheResource::initKVBlock() {
+    if (stream_->hasPendingMultimodal()) {
+        return absl::UnavailableError("multimodal identities are not ready for KV lookup");
+    }
     RTP_LLM_PROFILE_FUNCTION();
     // Decode side: first malloc should NOT use device cache, regardless of runtime config.
     // Follow-up allocations (incrKVBlock) will respect reuseCache() && enableDeviceCache().

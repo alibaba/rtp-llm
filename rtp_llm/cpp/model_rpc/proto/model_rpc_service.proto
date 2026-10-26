@@ -247,6 +247,22 @@ message RequestInfoPB {
     string source_role = 5;
 }
 
+message MultimodalTokenSpanPB {
+    int32 offset = 1;
+    int32 length = 2;
+}
+
+message MultimodalTokenLayoutPB {
+    reserved 1;
+    repeated MultimodalTokenSpanPB spans = 2;
+    bool length_only = 3;
+}
+
+message MultimodalLengthsPB {
+    // One integer for each complete output tensor, including video special tokens.
+    repeated int32 lengths = 1;
+}
+
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -261,6 +277,8 @@ message GenerateInputPB {
     // priority). Used as a metrics tag on engine-side TPS
     // reporting; never affects engine scheduling.
     int32 priority = 10;
+    // token_ids are already expanded when this field is present.
+    MultimodalTokenLayoutPB multimodal_token_layout = 11;
 }
 
 message AuxInfoPB {
@@ -892,6 +910,7 @@ message CancelResponsePB {
 }
 
 service RpcService {
+    rpc GetMultimodalLengths(GenerateInputPB) returns (MultimodalLengthsPB);
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);

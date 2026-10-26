@@ -15,6 +15,40 @@ namespace rtp_llm {
 
 class MultimodalProcessorTest: public DeviceTestBase {};
 
+TEST_F(MultimodalProcessorTest, testLengthOnlyAssemblyMatchesEager) {
+    auto processor           = FakeMultimodalProcessor::createFakeMultimodalProcessor({{90, 91}}, false, 100);
+    auto eager               = std::make_shared<GenerateInput>();
+    eager->input_ids         = torch::tensor({1, 90, 5, 91, 2}, torch::kInt32);
+    eager->multimodal_inputs = std::vector<MultimodalInput>{MultimodalInput("3")};
+    ASSERT_TRUE(processor.updateMultimodalFeatures(eager).ok());
+    auto late                     = std::make_shared<GenerateInput>();
+    late->input_ids               = torch::tensor({1, 90, 0, 0, 0, 91, 2}, torch::kInt32);
+    late->multimodal_inputs       = eager->multimodal_inputs;
+    late->multimodal_token_layout = MultimodalTokenLayout{{{2, 3}}, true};
+    ASSERT_TRUE(processor.updateMultimodalFeatures(late).ok());
+    EXPECT_TRUE(torch::equal(eager->input_ids, late->input_ids));
+    EXPECT_TRUE(torch::equal(*eager->text_tokens_mask, *late->text_tokens_mask));
+    EXPECT_TRUE(torch::equal(*eager->mm_locs, *late->mm_locs));
+    EXPECT_TRUE(torch::equal(eager->multimodal_features->at(0), late->multimodal_features->at(0)));
+    late->multimodal_token_layout->spans[0].second = 2;
+    EXPECT_FALSE(processor.updateMultimodalFeatures(late).ok());
+}
+
+TEST_F(MultimodalProcessorTest, testExpandedHashValuesAreNotParsedAsTags) {
+    auto          processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{90, 91}}, false, 100);
+    GenerateInput input;
+    input.input_ids               = torch::tensor({1, 90, 0, 0, 91, 2}, torch::kInt32);
+    input.multimodal_token_layout = MultimodalTokenLayout{{{2, 2}}, true};
+    auto features                 = std::vector<torch::Tensor>{torch::ones({2, 4})};
+    auto hashes                   = std::vector<torch::Tensor>{torch::tensor({90, 91}, torch::kInt32)};
+    auto result                   = processor.useExpandedTokenLayout(input, features, hashes);
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(torch::equal(result.value().expanded_ids, torch::tensor({1, 90, 90, 91, 91, 2}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(result.value().locs, torch::tensor({2}, torch::kInt32)));
+    input.multimodal_token_layout->spans[0].first = -1;
+    EXPECT_FALSE(processor.useExpandedTokenLayout(input, features, hashes).ok());
+}
+
 TEST_F(MultimodalProcessorTest, testSimple) {
     FakeMultimodalProcessor        processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 10);
     std::shared_ptr<GenerateInput> input     = std::make_shared<GenerateInput>();

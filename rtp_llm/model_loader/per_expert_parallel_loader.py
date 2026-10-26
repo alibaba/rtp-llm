@@ -6,7 +6,10 @@ import torch
 from fastsafetensors import ParallelLoader
 from fastsafetensors.parallel_loader import TimingContext
 
+# CUDA 13 pins this wheel. Its batch, tensor factory and process-group
+# contracts are covered by test_per_expert_parallel_loader on real GPUs.
 _REQUIRED_FST_VERSION = "0.1.19"
+_CUDA13_FST_VERSION = "0.1.20+ali"
 
 
 class PerExpertParallelLoader(ParallelLoader):
@@ -25,10 +28,13 @@ class PerExpertParallelLoader(ParallelLoader):
 
     def __init__(self, stacked_key_config: Dict[str, str], *args, **kwargs):
         fst_ver = getattr(fastsafetensors, "__version__", "unknown")
-        if not fst_ver.startswith(_REQUIRED_FST_VERSION):
+        if not (
+            fst_ver.startswith(_REQUIRED_FST_VERSION) or fst_ver == _CUDA13_FST_VERSION
+        ):
             raise RuntimeError(
                 f"PerExpertParallelLoader is tested with fastsafetensors "
-                f"{_REQUIRED_FST_VERSION}*, current version: {fst_ver}. "
+                f"{_REQUIRED_FST_VERSION}* or {_CUDA13_FST_VERSION}, "
+                f"current version: {fst_ver}. "
                 f"Internal API changes may cause breakage."
             )
         super().__init__(*args, **kwargs)

@@ -8,6 +8,10 @@ namespace rtp_llm {
 class LocalMultimodalProcessor: public MultimodalProcessor {
 public:
     using MultimodalProcessor::MultimodalProcessor;
+    std::vector<int32_t> tokenLengths(const std::vector<MultimodalInput>& inputs) {
+        py::gil_scoped_acquire gil;
+        return mm_process_engine_.attr("token_lengths")(inputs).cast<std::vector<int32_t>>();
+    }
 
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,

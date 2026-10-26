@@ -1,3 +1,12 @@
+py_test(
+    name = "test_per_expert_parallel_loader",
+    srcs = ["test_per_expert_parallel_loader.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual", "SM103_CU13"],
+    size = "large",
+    timeout = "long",
+)
+
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]

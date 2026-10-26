@@ -74,6 +74,7 @@ class BackendRPCServerVisitor:
         parallelism_config=None,
         prefill_cp_config=None,
         source_role: str = "frontend",
+        mm_model_config=None,
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -92,6 +93,17 @@ class BackendRPCServerVisitor:
             source_role: Caller role used for request-info correlation fields.
         """
         self.max_seq_len = max_seq_len
+        self.mm_model_config = mm_model_config
+        self.local_mm_late_prefill = (
+            os.environ.get("RTP_LLM_LOCAL_MM_LATE_PREFILL", "0") == "1"
+            and vit_separation == VitSeparation.VIT_SEPARATION_LOCAL
+            and mm_model_config is not None
+            and not pd_sep_config.decode_entrance
+        )
+        if self.local_mm_late_prefill:
+            logging.info(
+                "local multimodal length-only admission and late prefill enabled"
+            )
         self.seq_size_per_block = seq_size_per_block
         self.pd_sep_config = pd_sep_config
         self.sp_config = sp_config
@@ -624,6 +636,10 @@ class BackendRPCServerVisitor:
         async def route_and_enqueue(attempt_input: GenerateInput):
             if self.host_service.service_available:
                 await self.route_ips(attempt_input)
+            if self.local_mm_late_prefill:
+                await self.model_rpc_client.prepare_local_multimodal(
+                    attempt_input, self.mm_model_config, self.max_seq_len
+                )
             return self.model_rpc_client.enqueue(attempt_input)
 
         async def stream_with_aux_info():
@@ -774,4 +790,5 @@ def create_backend_rpc_server_visitor(
         parallelism_config=engine_config.parallelism_config,
         prefill_cp_config=py_env_configs.prefill_cp_config,
         source_role=source_role,
+        mm_model_config=getattr(model_config, "mm_model_config", None),
     )

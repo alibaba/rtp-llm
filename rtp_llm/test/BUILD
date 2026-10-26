@@ -1,4 +1,11 @@
 py_test(
+    name = "qwen35_thinking_renderer_test",
+    srcs = ["qwen35_thinking_renderer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual", "SM103_CU13"],
+)
+
+py_test(
     name = "fused_rope_kvcache_legacy_mrope_test",
     srcs = ["fused_rope_kvcache_legacy_mrope_test.py"],
     deps = ["//rtp_llm:testlib"],

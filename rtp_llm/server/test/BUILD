@@ -1,6 +1,12 @@
 load("@arch_config//:arch_select.bzl", get_triton_deps = "triton_deps", "internal_deps")
 
 py_test(
+    name = "mm_length_routing_test",
+    srcs = ["mm_length_routing_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/cpp/model_rpc:model_rpc_client", "//rtp_llm/server:server"],
+)
+
+py_test(
     name = "backend_rpc_server_visitor_test",
     srcs = ["backend_rpc_server_visitor_test.py"],
     deps = [

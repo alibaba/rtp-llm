@@ -29,6 +29,12 @@ public:
         return local_server_->init(maga_init_params, std::move(propose_params), mm_process_engine);
     }
 
+    grpc::Status GetMultimodalLengths(grpc::ServerContext*   context,
+                                      const GenerateInputPB* request,
+                                      MultimodalLengthsPB*   response) override {
+        return local_server_->GetMultimodalLengths(context, request, response);
+    }
+
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {

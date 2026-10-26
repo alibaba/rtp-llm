@@ -91,6 +91,11 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
     def _device(self):
         return self.visual.device
 
+    def token_length(self, mm_input, vit_config) -> int:
+        from rtp_llm.multimodal.qwen35_token_length import token_length
+
+        return token_length(mm_input, vit_config, **self.get_preprocess_params())
+
     def get_preprocess_params(self):
         return {
             "processor": self.mm_processor,

@@ -42,6 +42,29 @@ bool enqueueIndividually(FIFOScheduler& scheduler, const vector<GenerateStreamPt
 class FIFOSchedulerTest: public DeviceTestBase {
 public:
     FIFOSchedulerTest() {}
+
+protected:
+    struct SchedulerResources {
+        std::shared_ptr<KVCacheManager> cache_manager;
+        ResourceContext                 resource_context;
+        ModelConfig                     model_config;
+        RuntimeConfig                   runtime_config;
+    };
+    SchedulerResources
+    makeReadinessResources(int block_num, int tokens_per_block, RoleType role_type, int batch_limit, int token_budget) {
+        SchedulerResources resources;
+        auto config = makeMhaCacheConfig(1, block_num, 1, 4, tokens_per_block, rtp_llm::DataType::TYPE_FP16);
+        resources.cache_manager                                              = std::make_shared<KVCacheManager>(config);
+        resources.resource_context.cache_manager                             = resources.cache_manager;
+        resources.resource_context.role_type                                 = role_type;
+        resources.resource_context.reuse_cache                               = true;
+        resources.model_config.max_seq_len                                   = 8192;
+        resources.model_config.attn_config.tokens_per_block                  = tokens_per_block;
+        resources.runtime_config.max_generate_batch_size                     = batch_limit;
+        resources.runtime_config.fifo_scheduler_config.max_batch_tokens_size = token_budget;
+        resources.runtime_config.fifo_scheduler_config.decode_prefill_ratio  = "0";
+        return resources;
+    }
 };
 
 static std::shared_ptr<GenerateConfig> makeTestGenerateConfig(int max_new_tokens = 1) {
@@ -54,6 +77,166 @@ static PDSepConfig makePDFusionPDSepConfig() {
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::PDFUSION;
     return pd_sep_config;
+}
+
+TEST_F(FIFOSchedulerTest, lateMultimodalIsBoundedAndInstallsIdentityBeforeKV) {
+    auto resources = makeReadinessResources(32, 1, RoleType::PDFUSION, 1, 128);
+    ASSERT_TRUE(resources.cache_manager->init());
+    auto                           pd = makePDFusionPDSepConfig();
+    FIFOScheduler                  scheduler(resources.runtime_config,
+                            resources.model_config,
+                            pd,
+                            ParallelismConfig(),
+                            ModelSpecificConfig(),
+                            resources.cache_manager);
+    std::vector<GenerateStreamPtr> requests;
+    int                            calls = 0;
+    for (int id = 1; id <= 2; ++id) {
+        auto input                     = std::make_shared<GenerateInput>();
+        input->request_id              = id;
+        input->input_ids               = torch::tensor({1, 0, 0, 2}, torch::kInt32);
+        input->generate_config         = makeTestGenerateConfig();
+        input->multimodal_token_layout = MultimodalTokenLayout{{{1, 2}}, true};
+        input->prepare_multimodal      = [&, id](std::shared_ptr<GenerateInput>& prepared) {
+            ++calls;
+            EXPECT_EQ(resources.cache_manager->freeBlocksNum(), 31);
+            // Re-entering a scheduler observer proves its lock is not held during ViT.
+            EXPECT_EQ(scheduler.waitingStreamsSize(), 2);
+            prepared->input_ids           = torch::tensor({1, id * 11, id * 12, 2}, torch::kInt32);
+            prepared->multimodal_features = std::vector<torch::Tensor>{torch::ones({2, 4})};
+            return ErrorInfo::OkStatus();
+        };
+        requests.push_back(std::make_shared<NormalGenerateStream>(
+            input, resources.model_config, resources.runtime_config, resources.resource_context, nullptr));
+        EXPECT_TRUE(scheduler.enqueue(requests.back()).ok());
+    }
+    EXPECT_EQ(calls, 0);
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 1);
+    EXPECT_EQ(calls, 1);
+    EXPECT_FALSE(requests[0]->hasPendingMultimodal());
+    EXPECT_TRUE(requests[1]->hasPendingMultimodal());
+    EXPECT_EQ(requests[0]->completeTokenIdsVec(0), (std::vector<int>{1, 11, 12, 2}));
+    requests[0]->prepareLateMultimodal();
+    EXPECT_EQ(calls, 1);
+}
+
+TEST_F(FIFOSchedulerTest, lateMultimodalKVRetryDoesNotRecomputeOrWarmQueue) {
+    auto resources = makeReadinessResources(32, 1, RoleType::PDFUSION, 1, 128);
+    ASSERT_TRUE(resources.cache_manager->init());
+    auto held_input             = std::make_shared<GenerateInput>();
+    held_input->input_ids       = torch::arange(30, torch::kInt32);
+    held_input->generate_config = makeTestGenerateConfig();
+    auto holder                 = std::make_shared<NormalGenerateStream>(
+        held_input, resources.model_config, resources.runtime_config, resources.resource_context, nullptr);
+    ASSERT_TRUE(holder->initKVBlock().ok());
+    ASSERT_EQ(resources.cache_manager->freeBlocksNum(), 1);
+    auto          pd = makePDFusionPDSepConfig();
+    FIFOScheduler scheduler(resources.runtime_config,
+                            resources.model_config,
+                            pd,
+                            ParallelismConfig(),
+                            ModelSpecificConfig(),
+                            resources.cache_manager);
+    int           calls            = 0;
+    auto          input            = std::make_shared<GenerateInput>();
+    input->input_ids               = torch::tensor({1, 0, 0, 2}, torch::kInt32);
+    input->generate_config         = makeTestGenerateConfig();
+    input->multimodal_token_layout = MultimodalTokenLayout{{{1, 2}}, true};
+    input->prepare_multimodal      = [&](std::shared_ptr<GenerateInput>& prepared) {
+        ++calls;
+        prepared->input_ids           = torch::tensor({1, 11, 12, 2}, torch::kInt32);
+        prepared->multimodal_features = std::vector<torch::Tensor>{torch::ones({2, 4})};
+        return ErrorInfo::OkStatus();
+    };
+    auto stream = std::make_shared<NormalGenerateStream>(
+        input, resources.model_config, resources.runtime_config, resources.resource_context, nullptr);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    ASSERT_TRUE(scheduler.schedule().ok());
+    ASSERT_TRUE(scheduler.schedule().ok());
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(stream->curBlocksNum(), 0);
+    EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(stream->hasError());
+    holder->releaseResource();
+    auto ready = scheduler.schedule();
+    ASSERT_TRUE(ready.ok());
+    ASSERT_EQ(ready->size(), 1);
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
+}
+
+TEST_F(FIFOSchedulerTest, lateMultimodalTimeoutDoesNotStartViT) {
+    auto resources = makeReadinessResources(32, 1, RoleType::PDFUSION, 1, 128);
+    ASSERT_TRUE(resources.cache_manager->init());
+    auto input                         = std::make_shared<GenerateInput>();
+    input->input_ids                   = torch::tensor({1, 0, 0, 2}, torch::kInt32);
+    input->generate_config             = makeTestGenerateConfig();
+    input->generate_config->timeout_ms = 1;
+    input->begin_time_us               = autil::TimeUtility::currentTimeInMicroSeconds() - 1000000;
+    input->multimodal_token_layout     = MultimodalTokenLayout{{{1, 2}}, true};
+    int calls                          = 0;
+    input->prepare_multimodal          = [&](std::shared_ptr<GenerateInput>&) {
+        ++calls;
+        return ErrorInfo::OkStatus();
+    };
+    auto stream = std::make_shared<NormalGenerateStream>(
+        input, resources.model_config, resources.runtime_config, resources.resource_context, nullptr);
+    stream->prepareLateMultimodal();
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(calls, 0);
+    EXPECT_EQ(stream->curBlocksNum(), 0);
+    EXPECT_EQ(resources.cache_manager->freeBlocksNum(), 31);
+}
+
+TEST_F(FIFOSchedulerTest, lateMultimodalCancellationDoesNotInstallPreparedTensors) {
+    auto resources = makeReadinessResources(32, 1, RoleType::PDFUSION, 1, 128);
+    ASSERT_TRUE(resources.cache_manager->init());
+    auto input                     = std::make_shared<GenerateInput>();
+    input->input_ids               = torch::tensor({1, 0, 0, 2}, torch::kInt32);
+    input->generate_config         = makeTestGenerateConfig();
+    input->multimodal_token_layout = MultimodalTokenLayout{{{1, 2}}, true};
+    auto stream                    = std::make_shared<NormalGenerateStream>(
+        input, resources.model_config, resources.runtime_config, resources.resource_context, nullptr);
+    int calls                 = 0;
+    input->prepare_multimodal = [&](std::shared_ptr<GenerateInput>& prepared) {
+        ++calls;
+        stream->reportError(ErrorCode::CANCELLED, "cancelled during ViT preparation");
+        prepared->input_ids           = torch::tensor({1, 11, 12, 2}, torch::kInt32);
+        prepared->multimodal_features = std::vector<torch::Tensor>{torch::ones({2, 4})};
+        return ErrorInfo::OkStatus();
+    };
+    stream->prepareLateMultimodal();
+    EXPECT_EQ(calls, 1);
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_TRUE(stream->hasPendingMultimodal());
+    EXPECT_FALSE(input->multimodal_features.has_value());
+    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 0, 0, 2}));
+    EXPECT_EQ(stream->curBlocksNum(), 0);
+    EXPECT_EQ(resources.cache_manager->freeBlocksNum(), 31);
+}
+
+TEST_F(FIFOSchedulerTest, lateMultimodalLengthMismatchCannotAllocateKV) {
+    auto resources = makeReadinessResources(32, 1, RoleType::PDFUSION, 1, 128);
+    ASSERT_TRUE(resources.cache_manager->init());
+    auto input                     = std::make_shared<GenerateInput>();
+    input->input_ids               = torch::tensor({1, 0, 0, 2}, torch::kInt32);
+    input->generate_config         = makeTestGenerateConfig();
+    input->multimodal_token_layout = MultimodalTokenLayout{{{1, 2}}, true};
+    input->prepare_multimodal      = [](std::shared_ptr<GenerateInput>& prepared) {
+        prepared->input_ids           = torch::tensor({1, 11, 12, 13, 2}, torch::kInt32);
+        prepared->multimodal_features = std::vector<torch::Tensor>{torch::ones({3, 4})};
+        return ErrorInfo::OkStatus();
+    };
+    auto stream = std::make_shared<NormalGenerateStream>(
+        input, resources.model_config, resources.runtime_config, resources.resource_context, nullptr);
+    EXPECT_FALSE(stream->initKVBlock().ok());
+    EXPECT_EQ(resources.cache_manager->freeBlocksNum(), 31);
+    stream->prepareLateMultimodal();
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->curBlocksNum(), 0);
+    EXPECT_EQ(resources.cache_manager->freeBlocksNum(), 31);
 }
 
 TEST_F(FIFOSchedulerTest, testSimple) {

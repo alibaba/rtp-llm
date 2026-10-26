@@ -1,6 +1,7 @@
 import json
 from typing import Any
 
+from rtp_llm.config.generate_config import ThinkingMode
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.basic_renderer import PromptWithMMInput
@@ -24,6 +25,20 @@ class Qwen35Renderer(Qwen3CoderRenderer, Qwen2VLRenderer):
     def _render_messages(
         self, request: ChatCompletionRequest, add_vision_id: bool
     ) -> PromptWithMMInput:
+        # Keep the checkpoint's prompt mode aligned with response parsing.
+        # Qwen2VL only forwards explicit template kwargs; otherwise Qwen3.5's
+        # template enables thinking even when the server default disables it.
+        mode = self.resolve_thinking_mode(request)
+        if mode in (ThinkingMode.DISABLED, ThinkingMode.ENABLED):
+            request = request.model_copy(deep=True)
+            kwargs = dict(request.get_chat_template_kwargs() or {})
+            kwargs["enable_thinking"] = mode == ThinkingMode.ENABLED
+            if request.extra_configs is not None and (
+                request.extra_configs.chat_template_kwargs is not None
+            ):
+                request.extra_configs.chat_template_kwargs = kwargs
+            else:
+                request.chat_template_kwargs = kwargs
         return Qwen2VLRenderer._render_messages(self, request, add_vision_id)
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:

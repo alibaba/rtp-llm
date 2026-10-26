@@ -327,6 +327,8 @@ public:
         return reserve_step_;
     }
     StreamState moveToNext();
+    void        prepareLateMultimodal();
+    bool        hasPendingMultimodal() const;
 
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is finished
@@ -916,6 +918,7 @@ protected:
     size_t            hidden_size_;
 
     std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
+    int64_t                             processor_eos_token_id_ = -1;
     at::Generator                       generator_;
 
     // just for bool test

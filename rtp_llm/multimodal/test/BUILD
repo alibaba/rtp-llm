@@ -1,3 +1,17 @@
+py_test(
+    name = "qwen35_late_vit_acceptance_test",
+    srcs = ["qwen35_late_vit_acceptance_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "qwen35_token_length_test",
+    srcs = ["qwen35_token_length_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
 filegroup(
     name = "testdata",
     srcs = glob([

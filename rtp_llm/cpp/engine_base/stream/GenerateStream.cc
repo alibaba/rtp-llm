@@ -133,7 +133,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         }
     }
 
-    auto processors_result = LogitsProcessorFactory::createLogitsProcessors(
+    processor_eos_token_id_ = processor_eos_token_id;
+    auto processors_result  = LogitsProcessorFactory::createLogitsProcessors(
         generate_input_, init_batch_size, maxBatchSize(), processor_eos_token_id);
     if (processors_result.ok()) {
         auto processors = std::move(processors_result.value());
@@ -291,6 +292,63 @@ int GenerateStream::estimatePeakNeedBlocks(int remaining_tokens) const {
 std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {
     return generate_input_;
 }
+bool GenerateStream::hasPendingMultimodal() const {
+    return generate_input_->multimodal_token_layout && generate_input_->multimodal_token_layout->length_only;
+}
+
+void GenerateStream::prepareLateMultimodal() {
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        checkTimeoutWithoutLock();
+        if (!hasPendingMultimodal() || hasErrorWithoutLock()) {
+            return;
+        }
+    }
+    // No stream/scheduler lock is held during CPU preprocessing, ViT or safety inspection.
+    // Prepare into a private copy; cancellation must not observe half-installed tensors.
+    auto prepared = std::make_shared<GenerateInput>(*generate_input_);
+    try {
+        if (!prepared->prepare_multimodal) {
+            reportError(ErrorCode::INVALID_PARAMS, "missing multimodal preparation callback");
+            return;
+        }
+        auto result = prepared->prepare_multimodal(prepared);
+        if (!result.ok()) {
+            reportError(result.code(), result.ToString());
+            return;
+        }
+        if (prepared->inputLength() != inputLength() || !prepared->multimodal_features) {
+            reportError(ErrorCode::MM_WRONG_FORMAT_ERROR, "late multimodal preparation changed admitted length");
+            return;
+        }
+        // Penalty/grammar state must see the same input identities as the eager path,
+        // never the zero placeholders used only for admission.
+        auto processors = LogitsProcessorFactory::createLogitsProcessors(
+            prepared, complete_token_ids_->batchSize(), maxBatchSize(), processor_eos_token_id_);
+        if (!processors.ok()) {
+            reportError(processors.status().code(), processors.status().ToString());
+            return;
+        }
+        std::lock_guard<std::mutex> lock(*mutex_);
+        checkTimeoutWithoutLock();
+        if (hasErrorWithoutLock()) {
+            return;
+        }
+        // Install actual feature identities BEFORE any KV lookup/allocation, across all beam rows.
+        auto ids = complete_token_ids_->completeTokenIds();
+        for (int row = 0; row < complete_token_ids_->batchSize(); ++row) {
+            ids[row].narrow(0, 0, prepared->inputLength()).copy_(prepared->input_ids);
+        }
+        prepared->multimodal_token_layout->length_only = false;
+        prepared->prepare_multimodal                   = {};
+        prepared->multimodal_prepared_late             = true;
+        *generate_input_                               = *prepared;
+        logits_processor_list_                         = std::move(processors.value());
+    } catch (const std::exception& error) {
+        reportError(ErrorCode::MM_PROCESS_ERROR, error.what());
+    }
+}
+
 std::shared_ptr<GenerateConfig>& GenerateStream::generateConfig() const {
     return generate_input_->generate_config;
 }

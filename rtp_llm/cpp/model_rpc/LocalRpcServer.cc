@@ -239,8 +239,71 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
     return grpc::Status::OK;
 }
 
+grpc::Status LocalRpcServer::GetMultimodalLengths(grpc::ServerContext*   context,
+                                                  const GenerateInputPB* request,
+                                                  MultimodalLengthsPB*   response) {
+    auto        local   = std::dynamic_pointer_cast<LocalMultimodalProcessor>(mm_processor_);
+    const auto& runtime = maga_init_params_.runtime_config;
+    if (!local || maga_init_params_.pd_sep_config.role_type != RoleType::PDFUSION || runtime.use_batch_decode_scheduler
+        || !runtime.fifo_scheduler_config.pdfusion_scheduler_mode.empty()) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                            "length-only multimodal input requires LOCAL PDFUSION with FIFO scheduling");
+    }
+    try {
+        if (context && context->IsCancelled()) {
+            return grpc::Status(grpc::StatusCode::CANCELLED, "metadata request cancelled");
+        }
+        auto input = QueryConverter::transQuery(request);
+        if (!input->multimodal_inputs || input->multimodal_token_layout || input->isGroup()) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "expected unexpanded multimodal inputs");
+        }
+        const auto lengths = local->tokenLengths(*input->multimodal_inputs);
+        if (lengths.size() != input->multimodal_inputs->size()) {
+            throw std::invalid_argument("multimodal length cardinality mismatch");
+        }
+        for (auto length : lengths) {
+            if (length <= 0) {
+                throw std::invalid_argument("multimodal length must be positive");
+            }
+            response->add_lengths(length);
+        }
+        return grpc::Status::OK;
+    } catch (const std::exception& error) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, error.what());
+    }
+}
+
 ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
     output = QueryConverter::transQuery(&input_pb);
+    if (output->multimodal_token_layout) {
+        const auto& runtime = maga_init_params_.runtime_config;
+        if (!output->multimodal_token_layout->length_only
+            || !std::dynamic_pointer_cast<LocalMultimodalProcessor>(mm_processor_)
+            || maga_init_params_.pd_sep_config.role_type != RoleType::PDFUSION || runtime.use_batch_decode_scheduler
+            || !runtime.fifo_scheduler_config.pdfusion_scheduler_mode.empty() || !output->multimodal_inputs
+            || output->isGroup()) {
+            return ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported length-only multimodal request");
+        }
+        if (output->input_ids.numel() >= maga_init_params_.model_config_.max_seq_len) {
+            return ErrorInfo(ErrorCode::MM_LONG_PROMPT_ERROR, "expanded multimodal input exceeds max_seq_len");
+        }
+        if (output->multimodal_token_layout->spans.size() != output->multimodal_inputs->size()
+            || output->multimodal_token_layout->spans.empty()) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid length-only multimodal spans");
+        }
+        int64_t end = 0;
+        for (const auto& span : output->multimodal_token_layout->spans) {
+            if (span.first < end || span.second <= 0 || int64_t(span.first) + span.second > output->inputLength()) {
+                return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid length-only multimodal span");
+            }
+            end = int64_t(span.first) + span.second;
+        }
+        auto processor             = mm_processor_;
+        output->prepare_multimodal = [processor](std::shared_ptr<GenerateInput>& prepared) {
+            return processor->updateMultimodalFeatures(prepared);
+        };
+        return ErrorInfo::OkStatus();
+    }
     if (mm_processor_ != nullptr && output->multimodal_inputs) {
         RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
         auto mm_res = mm_processor_->updateMultimodalFeatures(output);

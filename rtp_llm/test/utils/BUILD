@@ -1,4 +1,12 @@
 package(default_visibility = ["//visibility:public"])
+
+py_test(
+    name = "cuda13_dependency_import_test",
+    srcs = ["cuda13_dependency_import_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual", "SM103_CU13"],
+)
+
 load("@arch_config//:arch_select.bzl", "requirement")
 
 requirement([

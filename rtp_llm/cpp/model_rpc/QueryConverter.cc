@@ -29,7 +29,7 @@ RoleType checkedRoleType(int value, const char* field_name) {
 }
 
 RoleType checkedRoleString(const std::string& value) {
-    std::string role = value;
+    std::string       role   = value;
     const std::string prefix = "RoleType.";
     if (role.rfind(prefix, 0) == 0) {
         role = role.substr(prefix.size());
@@ -54,7 +54,7 @@ RoleType checkedRoleString(const std::string& value) {
 
 RoleType transRoleAddrType(const RoleAddrPB& role_addr) {
     std::optional<RoleType> resolved;
-    auto merge = [&resolved](RoleType candidate, const char* source) {
+    auto                    merge = [&resolved](RoleType candidate, const char* source) {
         RTP_LLM_CHECK_WITH_INFO(!resolved.has_value() || *resolved == candidate,
                                 "conflicting RoleAddrPB role from %s: resolved=%d candidate=%d",
                                 source,
@@ -278,6 +278,14 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
     generate_input->group_size = input->group_size() > 0 ? input->group_size() : 1;
+    if (input->has_multimodal_token_layout()) {
+        MultimodalTokenLayout layout;
+        layout.length_only = input->multimodal_token_layout().length_only();
+        for (const auto& span : input->multimodal_token_layout().spans()) {
+            layout.spans.emplace_back(span.offset(), span.length());
+        }
+        generate_input->multimodal_token_layout = std::move(layout);
+    }
     if (input->has_group_id()) {
         generate_input->group_id = input->group_id().value();
     }

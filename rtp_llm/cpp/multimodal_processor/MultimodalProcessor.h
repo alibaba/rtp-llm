@@ -65,6 +65,10 @@ private:
 
     ErrorInfo checkExpandLength(const ExpandedOutput& expand_output);
 
+    ErrorResult<ExpandedOutput> useExpandedTokenLayout(const GenerateInput&              input,
+                                                       const std::vector<torch::Tensor>& features,
+                                                       const std::vector<torch::Tensor>& feature_hashes);
+
 public:
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input);
 
