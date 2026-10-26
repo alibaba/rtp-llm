@@ -665,7 +665,6 @@ TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
     for (const auto& snapshot : before) {
         EXPECT_EQ(snapshot.frozen_ref_blocks, 0u);
     }
-    std::vector<std::pair<IBlockPool*, BlockIdxType>> frozen_blocks;
     for (IBlockPool* pool : {static_cast<IBlockPool*>(device.get()),
                              static_cast<IBlockPool*>(host.get()),
                              static_cast<IBlockPool*>(disk.get())}) {
@@ -675,8 +674,6 @@ TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
         pool->freezeBlock(*block);
         pool->freezeBlock(*block);
         pool->decTreeRef(*block, BlockTreeRefType::STORE);
-        EXPECT_EQ(pool->treeRefCount(*block), 2u);
-        frozen_blocks.emplace_back(pool, *block);
     }
     const auto after = reporter.collectPoolMetricsSnapshots(groups);
     ASSERT_EQ(after.size(), 3u);
@@ -685,19 +682,6 @@ TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
         EXPECT_EQ(snapshot.store_ref_blocks, 0u);
         EXPECT_EQ(snapshot.load_ref_blocks, 0u);
         EXPECT_EQ(snapshot.eviction_target_ref_blocks, 0u);
-    }
-    for (const auto& [pool, block] : frozen_blocks) {
-        pool->decTreeRef(block, BlockTreeRefType::FROZEN);
-        EXPECT_EQ(pool->treeRefCount(block), 1u);
-    }
-    for (const auto& snapshot : reporter.collectPoolMetricsSnapshots(groups)) {
-        EXPECT_EQ(snapshot.frozen_ref_blocks, 1u);
-    }
-    for (const auto& [pool, block] : frozen_blocks) {
-        pool->decTreeRef(block, BlockTreeRefType::FROZEN);
-    }
-    for (const auto& snapshot : reporter.collectPoolMetricsSnapshots(groups)) {
-        EXPECT_EQ(snapshot.frozen_ref_blocks, 0u);
     }
 }
 
@@ -1579,7 +1563,7 @@ TEST_F(BlockTreeCacheTest, ThreadSafety) {
     EXPECT_EQ(stats.tree_node_count, 4u);
 }
 
-TEST_F(BlockTreeCacheTest, ConcurrentDoubleMatch_EvictsBeforeLastRelease) {
+TEST_F(BlockTreeCacheTest, ConcurrentDoubleMatch_PreventsDropUntilLastRelease) {
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
     cache_->insert({100}, resources, Tier::DEVICE);
@@ -1640,12 +1624,12 @@ TEST_F(BlockTreeCacheTest, ConcurrentDoubleMatch_EvictsBeforeLastRelease) {
 
     const DeviceBlockPoolPtr& pool = cache_->groupSets()[0]->devicePools()[0];
     EXPECT_EQ(pool->refCount(42), 3u);
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 0);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
-    EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
-    EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);
+    EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
     EXPECT_TRUE(pool->isAllocated(42));
-    EXPECT_EQ(pool->refCount(42), 2u);
+    EXPECT_EQ(pool->refCount(42), 3u);
     {
         std::lock_guard<std::mutex> lock(mutex);
         release_match[0] = true;
@@ -1655,9 +1639,10 @@ TEST_F(BlockTreeCacheTest, ConcurrentDoubleMatch_EvictsBeforeLastRelease) {
         std::unique_lock<std::mutex> lock(mutex);
         cv.wait(lock, [&] { return released_count == 1; });
     }
-    EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 0);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);
     EXPECT_TRUE(pool->isAllocated(42));
-    EXPECT_EQ(pool->refCount(42), 1u);
+    EXPECT_EQ(pool->refCount(42), 2u);
 
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -1668,9 +1653,90 @@ TEST_F(BlockTreeCacheTest, ConcurrentDoubleMatch_EvictsBeforeLastRelease) {
         thread.join();
     }
     EXPECT_EQ(released_count, 2u);
+    EXPECT_EQ(pool->refCount(42), 1u);
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
     EXPECT_FALSE(pool->isAllocated(42));
+}
+
+TEST_F(BlockTreeCacheTest, WatermarkDirectDropSkipsHeldLruCandidateUntilLastRequestReleasesIt) {
+    const auto& pool = cache_->groupSets()[0]->devicePools()[0];
+    pool->incRef(42);
+    pool->incRef(42);
+    std::vector<std::vector<GroupSetResource>> held(1, std::vector<GroupSetResource>(1));
+    held[0][0].device_blocks = {42};
+    cache_->insert({100}, held, Tier::DEVICE);
+    std::vector<std::vector<GroupSetResource>> idle(1, std::vector<GroupSetResource>(1));
+    idle[0][0].device_blocks = {43};
+    cache_->insert({200}, idle, Tier::DEVICE);
+
+    // No lower tier is enabled, so maintenance must drop rather than migrate.
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache_, Tier::DEVICE, 0.99);
+    const size_t initial_free = pool->freeBlocksNum();
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+    EXPECT_EQ(pool->freeBlocksNum(), initial_free + 1);
+    EXPECT_FALSE(pool->isAllocated(43));
+    EXPECT_FALSE(cache_->tree()->findNode({100}).empty());
+    EXPECT_TRUE(cache_->tree()->findNode({200}).empty());
+    EXPECT_EQ(pool->refCount(42), 3u);
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);
+
+    const auto version = cache_->getKeySnapshot().version;
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+    EXPECT_EQ(cache_->getKeySnapshot().version, version);
+    pool->decRef(42);
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+    EXPECT_EQ(pool->freeBlocksNum(), initial_free + 1);
+    EXPECT_EQ(pool->refCount(42), 2u);
+    EXPECT_FALSE(cache_->tree()->findNode({100}).empty());
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);
+
+    pool->decRef(42);
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+    EXPECT_FALSE(pool->isAllocated(42));
+    EXPECT_EQ(pool->freeBlocksNum(), initial_free + 2);
+    EXPECT_TRUE(cache_->tree()->findNode({100}).empty());
+    EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
+}
+
+TEST_F(BlockTreeCacheTest, WatermarkDirectDropPreservesDeviceBlockWithTreeOperationReference) {
+    const auto& pool = cache_->groupSets()[0]->devicePools()[0];
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    cache_->insert({100}, resources, Tier::DEVICE);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache_, Tier::DEVICE, 0.99);
+
+    const size_t initial_free = pool->freeBlocksNum();
+    const auto   version      = cache_->getKeySnapshot().version;
+    for (const BlockTreeRefType type :
+         {BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE}) {
+        pool->incTreeRef(42, type);
+        BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+        EXPECT_EQ(pool->freeBlocksNum(), initial_free);
+        EXPECT_EQ(cache_->getKeySnapshot().version, version);
+        EXPECT_FALSE(cache_->tree()->findNode({100}).empty());
+        EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);
+        pool->decTreeRef(42, type);
+    }
+
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+    EXPECT_FALSE(pool->isAllocated(42));
+    EXPECT_EQ(pool->freeBlocksNum(), initial_free + 1);
+    EXPECT_TRUE(cache_->tree()->findNode({100}).empty());
+
+    resources[0][0].device_blocks = {43};
+    pool->incRef(43);
+    cache_->insert({200}, resources, Tier::DEVICE);
+    pool->freezeBlock(43);
+    pool->decRef(43);
+    const auto frozen_free    = pool->freeBlocksNum();
+    const auto frozen_version = cache_->getKeySnapshot().version;
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+    EXPECT_EQ(pool->freeBlocksNum(), frozen_free);
+    EXPECT_EQ(cache_->getKeySnapshot().version, frozen_version);
+    EXPECT_TRUE(pool->isFrozen(43));
+    EXPECT_FALSE(cache_->tree()->findNode({200}).empty());
 }
 
 TEST_F(BlockTreeCacheTest, ForceDropSkipsHeldLruCandidateUntilLastRequestReleasesIt) {
@@ -1714,7 +1780,7 @@ TEST_F(BlockTreeCacheTest, ForceDropSkipsDeviceBlockWithTreeOperationReference) 
     resources[0][0].device_blocks = {42};
     cache_->insert({100}, resources, Tier::DEVICE);
     for (const BlockTreeRefType type :
-         {BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE, BlockTreeRefType::FROZEN}) {
+         {BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE}) {
         pool->incTreeRef(42, type);
         const size_t initial_free = pool->freeBlocksNum();
         EXPECT_EQ(cache_->evictForGroup("group0", 1), 0);
@@ -1725,6 +1791,15 @@ TEST_F(BlockTreeCacheTest, ForceDropSkipsDeviceBlockWithTreeOperationReference) 
     }
     EXPECT_EQ(cache_->evictForGroup("group0", 1), 1);
     EXPECT_FALSE(pool->isAllocated(42));
+
+    resources[0][0].device_blocks = {43};
+    cache_->insert({200}, resources, Tier::DEVICE);
+    pool->freezeBlock(43);
+    const size_t frozen_free = pool->freeBlocksNum();
+    EXPECT_EQ(cache_->evictForGroup("group0", 1), 0);
+    EXPECT_EQ(pool->freeBlocksNum(), frozen_free);
+    EXPECT_TRUE(pool->isFrozen(43));
+    EXPECT_FALSE(cache_->tree()->findNode({200}).empty());
 }
 
 TEST_F(BlockTreeCacheTest, ForceDropRequiresEveryDevicePoolMemberToBeReclaimable) {
@@ -2371,14 +2446,17 @@ TEST_F(BlockTreeCacheTest, InsertMatchReclaimRelease_RefcountLifecycle) {
     EXPECT_EQ(result.matched_device_resources[0].node_blocks[0].second, (std::vector<BlockIdxType>{block}));
     EXPECT_EQ(pool->refCount(block), 2u);
 
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 0);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_TRUE(pool->isAllocated(block));
-    EXPECT_EQ(pool->refCount(block), 1u);
-    EXPECT_EQ(cache->getStats().tree_node_count, 0u);
+    EXPECT_EQ(pool->refCount(block), 2u);
+    EXPECT_EQ(cache->getStats().tree_node_count, 1u);
 
     block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
     result.matched_device_resources.clear();
+    EXPECT_TRUE(pool->isAllocated(block));
+    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
     EXPECT_FALSE(pool->isAllocated(block));
     EXPECT_EQ(pool->freeBlocksNum(), kUsableBlocks);
     EXPECT_EQ(cache->getStats().tree_node_count, 0u);
@@ -3135,11 +3213,12 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
     EXPECT_EQ(cache_device_pool->treeRefCount(cache_block), 1u);
     EXPECT_EQ(host_pool->treeRefCount(host_block), 2u);
 
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
+    // Matching owns the DEVICE source until the request releases it, even if the load is rejected.
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 0);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_TRUE(cache_device_pool->isAllocated(cache_block));
-    EXPECT_EQ(cache_device_pool->refCount(cache_block), 1u);
-    EXPECT_EQ(cache_device_pool->treeRefCount(cache_block), 0u);
+    EXPECT_EQ(cache_device_pool->refCount(cache_block), 2u);
+    EXPECT_EQ(cache_device_pool->treeRefCount(cache_block), 1u);
 
     const BlockIdxType request_target = poolMalloc(*target_device_pool);
     ASSERT_NE(request_target, NULL_BLOCK_IDX);
@@ -3154,8 +3233,8 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
     EXPECT_TRUE(load_context->done());
     EXPECT_FALSE(load_context->success());
     EXPECT_EQ(per_rank_transfer_engine->submittedBatchCount(), 0u);
-    EXPECT_EQ(cache_device_pool->refCount(cache_block), 1u);
-    EXPECT_EQ(cache_device_pool->treeRefCount(cache_block), 0u);
+    EXPECT_EQ(cache_device_pool->refCount(cache_block), 2u);
+    EXPECT_EQ(cache_device_pool->treeRefCount(cache_block), 1u);
     EXPECT_EQ(host_pool->treeRefCount(host_block), 1u);
     EXPECT_EQ(target_device_pool->refCount(request_target), 1u);
 
@@ -3167,9 +3246,11 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
 
     EXPECT_TRUE(rejection_guard.restore());
     load_context.reset();
-    EXPECT_EQ(cache_device_pool->refCount(cache_block), 1u);
+    EXPECT_EQ(cache_device_pool->refCount(cache_block), 2u);
     block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
     result.matched_device_resources.clear();
+    EXPECT_EQ(cache_device_pool->refCount(cache_block), 1u);
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
     EXPECT_FALSE(cache_device_pool->isAllocated(cache_block));
     EXPECT_EQ(host_pool->treeRefCount(host_block), 1u);
     target_device_pool->decRef(request_target);
