@@ -1073,6 +1073,7 @@ class KVCacheSpecDesc:
     cache_type: KVCacheSpecType
     dtype: DataType
     is_state_cache: bool
+    head_sharded_transfer: bool
     entry_elems: int
     entry_dtype: DataType
     entry_count_mode: OpaqueBlockEntryCountMode
@@ -1101,6 +1102,7 @@ class ModelConfig:
     embedding_size: int
     eplb_config: EPLBConfig
     kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
+    local_kv_cache_sharded: typing.Optional[bool]
     cache_min_replay_tokens: int
     cache_key_hash_seed: int
     expert_num: int

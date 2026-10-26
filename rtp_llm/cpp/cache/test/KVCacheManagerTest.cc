@@ -41,7 +41,7 @@ using block_tree_cache_test::BlockTreeCacheTestPeer;
 namespace {
 constexpr int                  kDsv4PoolNum = 7;
 const std::vector<std::string> kDsv4Tags    = {
-    "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state", "hca_kv", "hca_state"};
+    "csa_kv", "csa_state", "hca_kv", "hca_state", "indexer_kv", "indexer_state", "swa_kv"};
 
 }  // namespace
 
@@ -61,6 +61,84 @@ protected:
 private:
     bool old_core_dump_on_exception_{false};
 };
+
+static CacheConfig makeLinearReplayLifetimeConfig(int block_num) {
+    auto config                      = makeSimpleLinearCacheConfig(1, block_num, 4, DataType::TYPE_BF16, 1, 2);
+    config.linear_replay = LinearReplayPlan::create({0}, 1, 2, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1);
+    return config;
+}
+
+TEST_F(KVCacheManagerTest, LinearReplayOwnLifetimeHoldsDoNotRequireCopyOnWrite) {
+    auto           config = makeLinearReplayLifetimeConfig(2);
+    KVCacheManager manager(config);
+    ASSERT_TRUE(manager.init());
+    auto pool  = manager.coordinator_manager_->groupBlockPools().front();
+    auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    pool->incRef(*block);
+    ASSERT_EQ(pool->freeBlocksNum(), 0u);
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    resource->initGroups(config.topologyPtr());
+    resource->setBatchBlocks(0, "linear", {*block});
+    auto hold = manager.holdLinearReplayBlocks(resource);
+    ASSERT_EQ(pool->refCount(*block), 2u);
+
+    // With no spare blocks, treating the hold as another request fails COW.
+    EXPECT_FALSE(manager.makeLinearReplayTailsPrivate(resource));
+    // Copies of one shared_ptr are one pool reference, not separate owners.
+    EXPECT_TRUE(manager.makeLinearReplayTailsPrivate(resource, -1, {hold, hold}));
+    EXPECT_EQ(resource->blocks(0, "linear"), (BlockIndicesType{*block}));
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+    for (int round = 0; round < 8; ++round) {
+        auto next_hold = manager.holdLinearReplayBlocks(resource);
+        EXPECT_TRUE(manager.makeLinearReplayTailsPrivate(resource, -1, {hold, next_hold}));
+        hold = std::move(next_hold);
+        EXPECT_EQ(pool->refCount(*block), 2u);
+    }
+
+    // Another request's reference still requires COW and cannot be ignored.
+    pool->incRef(*block);
+    EXPECT_FALSE(manager.makeLinearReplayTailsPrivate(resource, -1, {hold}));
+    pool->decRef(*block);
+    EXPECT_TRUE(manager.makeLinearReplayTailsPrivate(resource, -1, {hold}));
+    hold.reset();
+    pool->decRef(*block);
+}
+
+TEST_F(KVCacheManagerTest, LinearReplayRetainsOnlyItsAnchorAcrossPageCrossing) {
+    auto           config = makeLinearReplayLifetimeConfig(3);
+    KVCacheManager manager(config);
+    ASSERT_TRUE(manager.init());
+    auto pool   = manager.coordinator_manager_->groupBlockPools().front();
+    auto blocks = pool->malloc(2);
+    ASSERT_TRUE(blocks.has_value());
+    pool->incRef(*blocks);
+    ASSERT_EQ(pool->freeBlocksNum(), 0u);
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    resource->initGroups(config.topologyPtr());
+    resource->setBatchBlocks(0, "linear", *blocks);
+    auto anchor = manager.holdLinearReplayBlocks(resource, 4);
+    EXPECT_EQ(pool->refCount((*blocks)[0]), 1u);
+    EXPECT_EQ(pool->refCount((*blocks)[1]), 2u);
+
+    // Advance from token 4 to token 8 at full capacity. The older tail is no
+    // longer a replay source and can become the new destination; the anchor
+    // remains retained while the next verify rebuilds from it.
+    BlockIndicesType replacements;
+    int              required_free_blocks = 0;
+    ASSERT_TRUE(pool->tryReplaceRequestReferences({{(*blocks)[0], 1, 0}}, 1, replacements, required_free_blocks));
+    ASSERT_EQ(replacements.size(), 1u);
+    EXPECT_EQ(replacements[0], (*blocks)[0]);
+    resource->setBatchBlocks(0, "linear", {0, (*blocks)[1], replacements[0]});
+    auto next_anchor = manager.holdLinearReplayBlocks(resource, 8);
+    EXPECT_TRUE(manager.makeLinearReplayTailsPrivate(resource, 8, {anchor, next_anchor}));
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+    anchor.reset();
+    next_anchor.reset();
+    pool->decRef(*blocks);
+}
 
 static void assertBlockBytesEq(const std::shared_ptr<rtp_llm::KVCacheManager>& cache_manager,
                                int                                             layer_id,
@@ -544,7 +622,7 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     const auto candidate =
         CacheConfigCreator::computeLocalBlockNum(candidate_config, target, {}, options, {}, std::nullopt, sp);
     EXPECT_EQ(candidate_config.group("default").block_num, 0u);
-    ASSERT_EQ(candidate_config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(candidate_config.mtp_sub_configs.size(), 1u);
     for (const auto& sub : candidate_config.mtp_sub_configs) {
         EXPECT_EQ(sub->group("default").block_num, 0u);
     }
@@ -555,14 +633,14 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     ASSERT_TRUE(manager.init());
     const auto& config = manager.cacheConfig();
     EXPECT_EQ(config.group("default").block_num, candidate);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     ASSERT_EQ(manager.coordinator_manager_->groupBlockPools().size(), 1u);
     const auto& pool        = manager.coordinator_manager_->groupBlockPools()[0];
     const auto  pool_config = std::dynamic_pointer_cast<const DeviceBlockPoolConfig>(pool->config_);
     ASSERT_NE(pool_config, nullptr);
-    ASSERT_EQ(pool_config->memory_layouts.size(), 3u);
-    // FP16 K+V: 4 tokens/block * 2 bytes/element * (2 target + 2*4 draft elements/token).
-    constexpr size_t bytes_per_block = 4 * 2 * 2 * (2 + 2 * 4);
+    ASSERT_EQ(pool_config->memory_layouts.size(), 2u);
+    // FP16 K+V: one target segment (32 bytes) plus one draft segment (64 bytes).
+    constexpr size_t bytes_per_block = 4 * 2 * 2 * (2 + 4);
     constexpr size_t budget_bytes    = 1024 * 1024;
     EXPECT_EQ(config.group("default").block_num, budget_bytes / bytes_per_block);
     EXPECT_EQ(pool->getTotalSizeBytes(), static_cast<size_t>(config.group("default").block_num) * bytes_per_block);
@@ -708,7 +786,7 @@ TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysi
     ASSERT_TRUE(cache_manager->init());
     auto allocator = std::dynamic_pointer_cast<CoordinatorCacheManager>(cache_manager->coordinator_manager_);
     ASSERT_NE(allocator, nullptr);
-    EXPECT_EQ(publishedGroupTags(cache_config.topology()), std::vector<std::string>({"linear", "full"}));
+    EXPECT_EQ(publishedGroupTags(cache_config.topology()), std::vector<std::string>({"full", "linear"}));
     EXPECT_NE(cache_config.blockSizeBytesForGroup("full"), cache_config.blockSizeBytesForGroup("linear"));
 
     const auto& pools = allocator->groupBlockPools();

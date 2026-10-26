@@ -17,10 +17,12 @@ public:
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                             const CacheConfig&                 cache_config,
                             const SpeculativeExecutionConfig&  sp_config,
-                            bool                               warm_up):
+                            bool                               warm_up,
+                            bool                               preserve_prefill_positions = false):
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
+        preserve_prefill_positions_(preserve_prefill_positions),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
         dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
@@ -41,23 +43,43 @@ public:
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output) const;
 
+    static GptModelOutputs gatherAcceptedTargetDiagnostics(const GptModelOutputs& target_output,
+                                                           const torch::Tensor&   accept_lengths,
+                                                           int64_t                verify_width);
+
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
+    absl::Status gatherLinearReplayInputs(const StreamGroups& stream_groups,
+                                          const CacheConfig& cache_config,
+                                          GptModelInputs& model_input,
+                                          TensorHolder& host_holder,
+                                          std::vector<GenerateStream::LinearReplayRound>& rounds) const;
 
     // Produce the next round's immutable page table by applying the exact
     // linear-cache permutation used by GenerateStream::specUpdate.  FULL/SWA
-    // groups are copied unchanged.  Keeping this operation tensor-native lets
-    // proposal/verify overlap host bookkeeping without a per-round D2H join.
+    // groups are copied unchanged. Each LINEAR group uses its own token span.
+    // Keeping this operation tensor-native lets proposal/verify overlap host
+    // bookkeeping without a per-round D2H join. Non-LINEAR spans may be zero.
     static torch::Tensor advanceLinearCacheBlockTable(const torch::Tensor&               current_table,
                                                       const torch::Tensor&               previous_seq_lengths,
                                                       const torch::Tensor&               accept_lengths,
                                                       const std::vector<CacheGroupType>& group_types,
-                                                      int64_t                            seq_size_per_block);
+                                                      const std::vector<int64_t>&        group_spans);
 
-    absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
-                                                         const GptModelOutputs&                      model_output,
-                                                         const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
-                                                         const torch::Tensor& draft_token_ids) const;
+    // Prepare history and proposals on the caller's stream. Omitting draft
+    // tokens keeps the host-only stage used by non-CUDA background preparation.
+    SamplerInputs prepareSpecSamplerInput(const StreamGroups&                  stream_groups,
+                                          const torch::Tensor&                 draft_token_ids    = {},
+                                          const std::shared_ptr<torch::Event>& draft_tokens_ready = {}) const;
+    void          prepareSpecSamplerInputDevice(const StreamGroups&                  stream_groups,
+                                                SamplerInputs&                       sampler_inputs,
+                                                const torch::Tensor&                 draft_token_ids,
+                                                const std::shared_ptr<torch::Event>& draft_tokens_ready = {}) const;
+    // Wait for target logits on the caller's stream before finalizing. This
+    // stage also joins the processor mask's ready event on that stream.
+    SamplerInputs finalizeSpecSamplerInput(SamplerInputs                               sampler_inputs,
+                                           const GptModelOutputs&                      model_output,
+                                           const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,
@@ -75,6 +97,7 @@ public:
                                                   TensorHolder&       host_holder) const;
 
     void expandTargetVerifyPositionIds(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
+    void expandTargetVerifyPositionIdsFromDecode(GptModelInputs& model_input) const;
 
     void updateDecodeDraftModelInput(GptModelInputs&        model_input,
                                      const GptModelOutputs& model_output,
@@ -190,6 +213,7 @@ protected:
 
     int     propose_step_;
     size_t  vocab_size_                = 0;
+    bool    preserve_prefill_positions_ = false;
     bool    is_dspark_                 = false;
     int32_t dspark_mask_token_id_      = -1;
     bool    dspark_sample_from_anchor_ = true;

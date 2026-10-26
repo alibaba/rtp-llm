@@ -9,6 +9,12 @@ py_library(
     deps = ["//rtp_llm:torch"],
 )
 
+filegroup(
+    name = "fia2a_plan_sources",
+    srcs = ["modules/factory/attention/cuda_mla_impl/fia2a_plan.py"],
+    visibility = ["//rtp_llm/models_py/modules/factory/attention/cuda_mla_impl/test:__pkg__"],
+)
+
 # CPU-only subset of the DSv4 decode package: pure-torch modules plus the
 # package __init__ chain, without the CUDA/testlib closure. The lazily
 # imported paged/pool helpers (pool_slot_mapping, _pool_triton) are part of
@@ -51,6 +57,18 @@ requirement(flashmla)
 requirement(["flash-mla-legacy"])
 requirement(rtp_kernel)
 requirement(flashattn)
+
+
+filegroup(
+    name = "bounded_projection_jit_test_sources",
+    srcs = [
+        "modules/kimi_k3/bounded_projection_jit_warmup.py",
+        "modules/kimi_k3/kernel_jit_warmup.py",
+        "modules/dsv41/dsv4_kernel_jit_warmup.py",
+        "modules/factory/attention/mla_prefill_plan.py",
+    ],
+    visibility = ["//rtp_llm/models_py/modules/kimi_k3/test:__pkg__"],
+)
 
 
 filegroup(
@@ -122,8 +140,8 @@ py_library(
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
         # cuda13 locks ship flashinfer-python and deep-ep.
-        "@//:using_cuda13_x86": flashinfer + deep,
-        "@//:using_cuda13_arm": flashinfer + deep,
+        "@//:using_cuda13_x86": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl", "//rtp_llm:apache-tvm-ffi"],
+        "@//:using_cuda13_arm": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl", "//rtp_llm:apache-tvm-ffi"],
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
         "@//:using_rocm": [
@@ -165,7 +183,10 @@ py_library(
 
 
 # Export sitecustomize.py for test targets to fix nvidia-cutlass-dsl import
-exports_files(["modules/factory/sitecustomize.py"])
+exports_files([
+    "modules/factory/fused_moe/utils/mega_moe/buffer.py",
+    "modules/factory/sitecustomize.py",
+])
 
 py_library(
     name = "modules_cuda",

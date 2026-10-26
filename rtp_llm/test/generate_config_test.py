@@ -361,8 +361,6 @@ class OpenaiGenerateConfigTest(TestCase):
         )
         self.tokenizer = QWenTokenizer(
             os.path.join(self.test_data_path, "qwen_7b/tokenizer/qwen.tiktoken"),
-            *args,
-            **kwargs,
         )
 
     def _extract_openai_generation_config(
@@ -1292,7 +1290,7 @@ class GrammarMultiSequenceConfigTest(TestCase):
                     ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 )
                 self.assertIn(
-                    "thinking mode does not support beam search or "
+                    "grammar-constrained decoding does not support beam search or "
                     "num_return_sequences > 1",
                     ctx.exception.message,
                 )

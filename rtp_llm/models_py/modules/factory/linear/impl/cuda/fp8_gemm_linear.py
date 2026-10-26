@@ -111,6 +111,22 @@ class CudaFp8GEMMLinear(LinearBase):
             self._deepgemm_linear, "cached_scales_max_len", 0
         )
 
+    def supports_skip_head_mid(
+        self, input: torch.Tensor, head_splits: tuple[int, int, int]
+    ) -> bool:
+        return self._deepgemm_linear.supports_skip_head_mid(input, head_splits)
+
+    def forward_skip_head_mid(
+        self,
+        input: torch.Tensor,
+        head_splits: tuple[int, int, int],
+        *,
+        output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return self._deepgemm_linear.forward_skip_head_mid(
+            input, head_splits, output=output
+        )
+
     def _should_use_flashinfer(self, input: torch.Tensor) -> bool:
         if self._flashinfer_linear is None:
             return False
@@ -140,3 +156,23 @@ class CudaFp8GEMMLinear(LinearBase):
         if not self._should_use_flashinfer(input):
             return self._deepgemm_linear(input)
         return self._flashinfer_linear(input)
+
+    def forward_quantized(
+        self,
+        values: torch.Tensor,
+        scales: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Consume grouped E4M3 values and their explicit scales without requantizing."""
+        return self._deepgemm_linear.forward_quantized(values, scales, out=out)
+
+    def quantize_collective_input(
+        self, input: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize collective inputs without advertising fused-norm support.
+
+        Attention backends probe ``quantize_input`` to opt into a different
+        RMSNorm/quantization kernel. Collective reuse must not change that
+        capability or the wrapper's existing attention execution path.
+        """
+        return self._deepgemm_linear.quantize_input(input)

@@ -104,16 +104,16 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "推荐一部喜剧类型的电影，比如《疯狂原始人》。这部电影由克里斯托弗·诺兰执导，讲述了一个关于原始人的故事，其中充满了幽默和滑稽的元素。影片通过幽默的方式展现了人类对未知和挑战的勇气和决心，同时也展现了原始人的独特文化和性格。这部电影在喜剧和科幻的结合上非常成功，受到了观众的喜爱。",
+                            "content": "推荐一部喜剧类型的电影，比如《疯狂原始人》。这部电影由克里斯托弗·诺兰执导，讲述了一个关于原始人的故事，其中充满了幽默和滑稽的元素。影片通过幽默的方式展现了人类在面对困难和挑战时的勇气和智慧。\n\n如果您喜欢动作、冒险或者科幻类型的电影，那么《速度与激情》系列可能是一个不错的选择。这部电影由汤姆·汉克斯主演，讲述了一群赛车手在不同国家之间的冒险故事。影片",
                             "partial": false
                         },
-                        "finish_reason": "stop"
+                        "finish_reason": "length"
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 149,
-                    "total_tokens": 227,
-                    "completion_tokens": 78,
+                    "total_tokens": 249,
+                    "completion_tokens": 100,
                     "completion_tokens_details": null,
                     "prompt_tokens_details": {
                         "audio_tokens": null,
@@ -123,11 +123,11 @@
                 "debug_info": null,
                 "aux_info": {
                     "cost_time": 438.33,
-                    "iter_count": 78,
+                    "iter_count": 100,
                     "prefix_len": 0,
                     "input_len": 149,
-                    "output_len": 78,
-                    "step_output_len": 78,
+                    "output_len": 100,
+                    "step_output_len": 100,
                     "first_token_cost_time": 59.539,
                     "wait_time": 0.102,
                     "pd_sep": false,

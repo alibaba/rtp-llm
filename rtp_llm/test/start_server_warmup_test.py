@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from rtp_llm import start_server
-from rtp_llm.ops import SpeculativeType
+from rtp_llm.ops import RoleType, SpeculativeType
 
 
 class StartupRealWarmupTest(unittest.TestCase):
@@ -44,8 +44,54 @@ class StartupRealWarmupTest(unittest.TestCase):
                 max_len=1048576,
                 reserve_step=8,
             ),
-            1048568,
+            1048567,
         )
+        self.assertEqual(
+            start_server._get_startup_real_warmup_request_token_len(
+                token_len=1048576,
+                max_len=1048576,
+                reserve_step=4,
+            ),
+            1048571,
+        )
+
+    def test_k3_prefill_entry_only_and_both_switches_required(self):
+        config = SimpleNamespace(
+            runtime_config=SimpleNamespace(warm_up=True, model_warm_up=True),
+            role_config=SimpleNamespace(role_type=RoleType.PREFILL),
+            parallelism_config=SimpleNamespace(world_rank=0, world_size=8, tp_size=4),
+            model_args=SimpleNamespace(model_type="kimi_k3"),
+        )
+        self.assertTrue(start_server._should_run_startup_real_warmup(config))
+        config.parallelism_config.world_rank = 1
+        self.assertFalse(start_server._should_run_startup_real_warmup(config))
+        config.parallelism_config.world_rank = 0
+        config.role_config.role_type = RoleType.DECODE
+        self.assertFalse(start_server._should_run_startup_real_warmup(config))
+        config.role_config.role_type = RoleType.PREFILL
+        config.runtime_config.model_warm_up = False
+        self.assertFalse(start_server._should_run_startup_real_warmup(config))
+
+    def test_real_warmup_only_enables_dsv4_and_k3_targets(self):
+        config = SimpleNamespace(
+            runtime_config=SimpleNamespace(warm_up=True, model_warm_up=True),
+            role_config=SimpleNamespace(role_type=RoleType.PREFILL),
+            parallelism_config=SimpleNamespace(world_rank=0, world_size=1, tp_size=1),
+            model_args=SimpleNamespace(model_type="deepseek_v4"),
+        )
+        for model_type, expected in (
+            ("deepseek_v4", True),
+            ("kimi_k3", True),
+            ("deepseek_v4_mtp", False),
+            ("kimi_k3_mtp", False),
+            ("custom_model", False),
+            ("", False),
+        ):
+            with self.subTest(model_type=model_type):
+                config.model_args.model_type = model_type
+                self.assertEqual(
+                    start_server._should_run_startup_real_warmup(config), expected
+                )
 
 
 if __name__ == "__main__":

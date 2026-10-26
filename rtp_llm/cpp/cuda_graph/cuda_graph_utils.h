@@ -33,6 +33,7 @@ public:
     CaptureMemoryHold(at::Tensor hidden_states, torch_ext::PyModelInputs& inputs, bool is_embedding):
         decoder_layer_hidden_states_(hidden_states) {
         py_model_inputs_.attention_inputs.input_lengths        = inputs.attention_inputs.input_lengths;
+        py_model_inputs_.attention_inputs.linear_replay        = inputs.attention_inputs.linear_replay;
         py_model_inputs_.attention_inputs.input_lengths_device = inputs.attention_inputs.input_lengths_device;
         py_model_inputs_.attention_inputs.sequence_lengths     = inputs.attention_inputs.sequence_lengths;
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device =
@@ -47,6 +48,14 @@ public:
         py_model_inputs_.input_ids                                 = inputs.input_ids;
         py_model_inputs_.engram_token_windows                      = inputs.engram_token_windows;
         py_model_inputs_.combo_position_ids                        = inputs.combo_position_ids;
+
+        py_model_inputs_.attention_inputs.valid_token_mask = inputs.attention_inputs.valid_token_mask;
+        py_model_inputs_.attention_inputs.logical_token_count = inputs.attention_inputs.logical_token_count;
+        py_model_inputs_.attention_inputs.logical_request_count = inputs.attention_inputs.logical_request_count;
+        py_model_inputs_.attention_inputs.physical_token_count = inputs.attention_inputs.physical_token_count;
+        py_model_inputs_.attention_inputs.physical_request_count = inputs.attention_inputs.physical_request_count;
+
+        py_model_inputs_.attention_inputs.is_mtp_draft_update = inputs.attention_inputs.is_mtp_draft_update;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;

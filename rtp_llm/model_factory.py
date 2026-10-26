@@ -151,7 +151,7 @@ class ModelFactory:
             or sp_type == SpeculativeType.DSPARK
         ):
             model_type = propose_model_config.model_type
-            if model_type == "deepseek-v3-mtp" or model_type == "mixtbstars-mtp":
+            if model_type in ("deepseek-v3-mtp", "mixtbstars-mtp", "kimi_k3_mtp"):
                 logging.warning(
                     f"create sp model type is {model_type}, so change the sp type to mtp"
                 )
@@ -385,6 +385,9 @@ class ModelFactory:
             if generate_env_config is not None
             else GenerateEnvConfig()
         )
+        model_config.generate_env_config.grammar_format = (
+            model_cls.create_grammar_format()
+        )
         model_config.render_config = (
             render_config if render_config is not None else RenderConfig()
         )
@@ -458,18 +461,19 @@ class ModelFactory:
         if not sp_config.checkpoint_path:
             return None
 
-        # Current learned-draft SP engine supports MTP, EAGLE and DSpARK.
+        # Learned draft models share the same propose-model construction path.
         if sp_config.type not in [
             SpeculativeType.MTP,
             SpeculativeType.EAGLE,
+            SpeculativeType.EAGLE3,
             SpeculativeType.DSPARK,
         ]:
             logging.error(
-                "Speculative engine only supports MTP, EAGLE and DSpARK, but got %s",
+                "Speculative engine only supports MTP, EAGLE, EAGLE3 and DSpARK, but got %s",
                 sp_config.type.name,
             )
             raise ValueError(
-                "Speculative engine only supports MTP, EAGLE and DSpARK, but got %s"
+                "Speculative engine only supports MTP, EAGLE, EAGLE3 and DSpARK, but got %s"
                 % sp_config.type.name
             )
 
@@ -508,6 +512,12 @@ class ModelFactory:
             propose_model_config, engine_config.kv_cache_config
         )
         propose_model_cls._post_build_model_config(propose_model_config)
+        # Draft models share the target scheduler bounds. Proposal width sizes
+        # their workspaces independently of the number of draft modules.
+        propose_model_config.gen_num_per_cycle = sp_config.gen_num_per_cycle
+        propose_model_config.moe_prefill_max_tokens_per_rank = (
+            model_config.moe_prefill_max_tokens_per_rank
+        )
 
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(

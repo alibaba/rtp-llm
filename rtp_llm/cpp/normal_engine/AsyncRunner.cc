@@ -1,11 +1,25 @@
 #include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <ATen/record_function.h>
 #include <thread>
 #include <utility>
 
 namespace rtp_llm {
+namespace {
+
+void logAsyncFailure(const char* context, const std::exception_ptr& exception) noexcept {
+    try {
+        std::rethrow_exception(exception);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("[AsyncRunner] %s failed: %s", context, e.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("[AsyncRunner] %s failed with unknown exception", context);
+    }
+}
+
+}  // namespace
 
 AsyncRunner::AsyncRunner(torch::Stream stream): stream_(stream), event_(stream.device_type()) {
     thread_ = std::thread([this] {
@@ -15,6 +29,14 @@ AsyncRunner::AsyncRunner(torch::Stream stream): stream_(stream), event_(stream.d
 }
 
 AsyncRunner::~AsyncRunner() {
+    // Finish both CPU work and submitted GPU work before shutting down.
+    try {
+        std::unique_lock<std::mutex> lk(mutex_);
+        cv_done_.wait(lk, [this] { return task_done_; });
+        stream_.synchronize();
+    } catch (...) {
+        logAsyncFailure("shutdown", std::current_exception());
+    }
     {
         std::lock_guard<std::mutex> lk(mutex_);
         shutdown_ = true;
@@ -26,13 +48,17 @@ AsyncRunner::~AsyncRunner() {
 }
 
 void AsyncRunner::launch(std::function<void()> fn) {
+    launch("unnamed task", std::move(fn));
+}
+
+void AsyncRunner::launch(std::string task_name, std::function<void()> fn) {
     RTP_LLM_PROFILE_SCOPE("async_runner.launch");
     at::ThreadLocalState tls_state;
     {
         std::unique_lock<std::mutex> lk(mutex_);
         cv_done_.wait(lk, [this] { return task_done_; });
         rethrowPendingExceptionIfAny(lk);
-        pending_task_ = Task{std::move(fn), std::move(tls_state)};
+        pending_task_ = Task{std::move(fn), std::move(tls_state), std::move(task_name)};
         task_done_    = false;
     }
     cv_task_.notify_one();
@@ -43,7 +69,6 @@ void AsyncRunner::sync(const torch::Stream& wait_stream) {
     std::unique_lock<std::mutex> lk(mutex_);
     cv_done_.wait(lk, [this] { return task_done_; });
     rethrowPendingExceptionIfAny(lk);
-    lk.unlock();
     event_.block(wait_stream);
 }
 
@@ -87,6 +112,11 @@ void AsyncRunner::workerLoop() {
 
         {
             std::lock_guard<std::mutex> lk(mutex_);
+            // Log even when exit cleanup drains the task without a sync().
+            // Keep the original exception for launch()/sync() to rethrow.
+            if (exception) {
+                logAsyncFailure(task.name.c_str(), exception);
+            }
             pending_exception_ = exception;
             task_done_         = true;
         }

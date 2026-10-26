@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/CacheStoreWriter.h"
+#include "rtp_llm/models_py/bindings/LinearReplay.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -29,8 +30,10 @@ namespace torch_ext {
 struct LayerKVCache {
     torch::Tensor kv_cache_base;
     torch::Tensor kv_scale_base;
+    std::optional<LinearReplayLayerCache> linear_replay;
     int           seq_size_per_block = 0;
     int           layer_id           = -1;
+    int           group_id           = -1;
     std::string   tag                = "default";
 
     LayerKVCache() = default;
@@ -67,7 +70,17 @@ public:
         if (group_layout.empty() || !group_layout.hasLayer(layer)) {
             throw std::runtime_error("Layer " + std::to_string(layer_id) + " has no KV cache tensor for tag " + tag);
         }
-        return makeLayerCache(layer_id, group, group_layout.at(layer));
+        auto result = makeLayerCache(layer_id, group, group_layout.at(layer));
+        result.group_id = static_cast<int>(grouped_layout_.topology().groupIdForTag(tag));
+        const auto replay_group = linear_replay_by_tag_.find(tag);
+        if (replay_group != linear_replay_by_tag_.end() && layer < replay_group->second.size()) {
+            result.linear_replay = replay_group->second[layer];
+        }
+        return result;
+    }
+
+    void setLinearReplayByTag(std::map<std::string, std::vector<std::optional<LinearReplayLayerCache>>> replay) {
+        linear_replay_by_tag_ = std::move(replay);
     }
 
     std::vector<LayerKVCache> getLayerCacheGroups(int layer_id) const {
@@ -107,6 +120,7 @@ public:
     size_t getEntriesPerBlock(const std::string& tag) const;
 
 private:
+    std::map<std::string, std::vector<std::optional<LinearReplayLayerCache>>> linear_replay_by_tag_;
     void validateLayer(int layer_id) const {
         if (layer_id < 0 || static_cast<size_t>(layer_id) >= layerCount()) {
             throw std::runtime_error("Invalid layer index: " + std::to_string(layer_id));
@@ -277,6 +291,7 @@ struct PyContextParallelParams {
 struct PyAttentionInputs {
     bool          is_prefill{false};
     bool          is_target_verify{false};
+    std::optional<rtp_llm::LinearReplayInputs> linear_replay;
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor input_lengths;
@@ -314,6 +329,12 @@ struct PyAttentionInputs {
     torch::Tensor decode_cu_seqlens_device;
 
     // CUDA Graph mode flags
+    bool is_mtp_draft_update = false;
+    int64_t logical_request_count = 0;
+    int64_t physical_request_count = 0;
+    int64_t logical_token_count = 0;
+    int64_t physical_token_count = 0;
+    torch::Tensor valid_token_mask;
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
 
     std::optional<PyContextParallelParams> context_parallel_info;

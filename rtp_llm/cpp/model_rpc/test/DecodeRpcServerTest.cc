@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstring>
 #include <thread>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -32,7 +33,8 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(std::string              req
             /*partition_count=*/1,
             /*partition_id=*/0,
             /*server_context=*/nullptr,
-            prefill_cp_size};
+            prefill_cp_size,
+            static_cast<int32_t>(peer_addrs.size())};
 }
 
 class TestDecodeRpcService final: public RpcService::Service {
@@ -177,6 +179,8 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     EXPECT_EQ(broadcast->FindFieldByName("partition_count")->number(), 10);
     EXPECT_EQ(broadcast->FindFieldByName("partition_id")->number(), 11);
     EXPECT_EQ(broadcast->FindFieldByName("prefill_cp_size")->number(), 13);
+    EXPECT_EQ(broadcast->FindFieldByName("prefill_tp_size")->number(), 15);
+    EXPECT_EQ(GenerateRequestPB::descriptor()->FindFieldByName("prefill_tp_size")->number(), 23);
     EXPECT_EQ(broadcast->FindFieldByName("tagged_group_block_ids")->number(), 14);
 
     const auto* response = BroadcastLoadResponsePB::descriptor();
@@ -198,9 +202,9 @@ TEST(DecodeRpcServerTest, HeterogeneousPhysicalBlockMarksExactCoveredBaseKeys) {
     EXPECT_EQ(DecodeRpcServer::keyBlocksPerLogicalBlock(policy, 8, 4), 2u);
 
     std::vector<size_t> transferred(5, 0);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/1, /*block_offset_index=*/0, /*key_span=*/2);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/3, /*block_offset_index=*/1, /*key_span=*/2);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/4, /*block_offset_index=*/2, /*key_span=*/2);
+    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/1, /*key_span=*/2);
+    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/3, /*key_span=*/2);
+    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/4, /*key_span=*/2);
 
     EXPECT_EQ(transferred, (std::vector<size_t>{1, 1, 1, 1, 1}));
 }
@@ -211,9 +215,9 @@ TEST(DecodeRpcServerTest, CompactPhysicalBlockCoversEveryBaseKey) {
     EXPECT_EQ(DecodeRpcServer::keyBlocksPerLogicalBlock(policy, kCompactSeqSizePerBlock, kBaseSeqSizePerBlock), 1u);
 
     std::vector<size_t> transferred(11, 0);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/9, /*block_offset_index=*/4, /*key_span=*/2);
+    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/9, /*key_span=*/2);
     DecodeRpcServer::markCacheKeyRange(
-        transferred, /*endpoint_key_index=*/10, /*block_offset_index=*/5, /*key_span=*/2);
+        transferred, /*endpoint_key_index=*/10, /*key_span=*/2);
 
     EXPECT_EQ(transferred, (std::vector<size_t>{0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1}));
 }
@@ -238,6 +242,144 @@ TEST(DecodeRpcServerTest, CompletedHandoffPrefixRequiresEveryTransferObligation)
 TEST(DecodeRpcServerTest, MultiRankHandoffUsesMinimumPrefix) {
     EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({6, 4, 5}), 4u);
     EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({}), 0u);
+}
+
+TEST(DecodeRpcServerTest, LinearHeadPartitionsSplitSourceForLargerDecodeTp) {
+    const std::vector<std::string> peers{"127.0.0.1:1000:2000", "127.0.0.1:1001:2001"};
+    const auto partitions = DecodeRpcServer::prefillPeerPartitions(peers, /*attention_tp=*/4, /*attention_rank=*/1);
+
+    ASSERT_EQ(partitions.size(), 1u);
+    const auto& partition = partitions.at(peers[0]);
+    EXPECT_EQ(partition.local_partition_count, 1);
+    EXPECT_EQ(partition.local_partition_id, 0);
+    EXPECT_EQ(partition.remote_partition_count, 2);
+    EXPECT_EQ(partition.remote_partition_id, 1);
+}
+
+TEST(DecodeRpcServerTest, LinearHeadPartitionsMergeSourcesForSmallerDecodeTp) {
+    const std::vector<std::string> peers{
+        "127.0.0.1:1000:2000", "127.0.0.1:1001:2001", "127.0.0.1:1002:2002", "127.0.0.1:1003:2003"};
+    const auto partitions = DecodeRpcServer::prefillPeerPartitions(peers, /*attention_tp=*/2, /*attention_rank=*/1);
+
+    ASSERT_EQ(partitions.size(), 2u);
+    EXPECT_EQ(partitions.at(peers[2]).local_partition_count, 2);
+    EXPECT_EQ(partitions.at(peers[2]).local_partition_id, 0);
+    EXPECT_EQ(partitions.at(peers[3]).local_partition_count, 2);
+    EXPECT_EQ(partitions.at(peers[3]).local_partition_id, 1);
+    EXPECT_EQ(partitions.at(peers[3]).remote_partition_count, 1);
+    EXPECT_EQ(partitions.at(peers[3]).remote_partition_id, 0);
+}
+
+TEST(DecodeRpcServerTest, LinearHeadPartitionsKeepSymmetricTpUnsplit) {
+    const std::vector<std::string> peers{"127.0.0.1:1000:2000", "127.0.0.1:1001:2001"};
+    const auto partitions = DecodeRpcServer::prefillPeerPartitions(peers, /*attention_tp=*/2, /*attention_rank=*/1);
+
+    ASSERT_EQ(partitions.size(), 1u);
+    const auto& partition = partitions.at(peers[1]);
+    EXPECT_EQ(partition.local_partition_count, 1);
+    EXPECT_EQ(partition.remote_partition_count, 1);
+    EXPECT_EQ(partition.local_partition_id, 0);
+    EXPECT_EQ(partition.remote_partition_id, 0);
+}
+
+TEST(DecodeRpcServerTest, NonLinearGroupsKeepLegacyReplicaSelection) {
+    const std::vector<std::string> peers{
+        "127.0.0.1:1000:2000", "127.0.0.1:1001:2001", "127.0.0.1:1002:2002", "127.0.0.1:1003:2003"};
+    const auto mla = DecodeRpcServer::prefillPeerPartitions(peers, 2, 1, /*use_mla=*/true);
+    ASSERT_EQ(mla.size(), 1u);
+    EXPECT_EQ(mla.at(peers[2]).local_partition_count, 1);
+    EXPECT_EQ(mla.at(peers[2]).remote_partition_count, 1);
+
+    const auto replicated = DecodeRpcServer::prefillPeerPartitions(
+        peers, 8, 5, /*use_mla=*/false, /*replicated_kv=*/true);
+    ASSERT_EQ(replicated.size(), 1u);
+    EXPECT_EQ(replicated.at(peers[1]).remote_partition_count, 8);
+    EXPECT_EQ(replicated.at(peers[1]).remote_partition_id, 5);
+}
+
+TEST(DecodeRpcServerTest, ReplicatedLinearHeadsUseAttentionTpRatherThanPeerCount) {
+    const std::vector<std::string> peers{
+        "127.0.0.1:1000:2000", "127.0.0.1:1001:2001", "127.0.0.1:1002:2002", "127.0.0.1:1003:2003"};
+    // Four physical peers each hold all heads (Prefill attention TP=1).
+    // Decode TP=2 takes half of one replica, rather than merging two peers.
+    const auto partitions = DecodeRpcServer::prefillPeerPartitions(
+        peers, /*attention_tp=*/2, /*attention_rank=*/1, /*use_mla=*/false, /*replicated_kv=*/true);
+    ASSERT_EQ(partitions.size(), 1u);
+    const auto& partition = partitions.at(peers[1]);
+    EXPECT_EQ(partition.local_partition_count, 1);
+    EXPECT_EQ(partition.remote_partition_count, 2);
+    EXPECT_EQ(partition.remote_partition_id, 1);
+}
+
+TEST(DecodeRpcServerTest, LinearTransferMergesEachStateSegmentIndependently) {
+    std::vector<uint8_t> destination(20, 0);
+    BlockInfo block;
+    block.addr = destination.data();
+    block.size_bytes = destination.size();
+    const std::vector<std::vector<uint8_t>> sources{
+        {1, 2, 3, 4, 11, 12, 21, 22, 31, 32},
+        {5, 6, 7, 8, 13, 14, 23, 24, 33, 34}};
+
+    for (int peer = 0; peer < 2; ++peer) {
+        const AsymmetricTPContext partition{"peer", 0, /*local_count=*/2, peer, /*remote_count=*/1, 0};
+        const auto segments = DecodeRpcServer::linearLoadSegments({8, 4, 4, 4}, block, partition);
+        ASSERT_EQ(segments.size(), 4u);
+        size_t source_offset = 0;
+        for (const auto& segment : segments) {
+            std::memcpy(segment.addr, sources[peer].data() + source_offset, segment.size_bytes);
+            source_offset += segment.size_bytes;
+        }
+    }
+
+    EXPECT_EQ(destination, (std::vector<uint8_t>{1, 2, 3, 4, 5, 6, 7, 8,
+                                                11, 12, 13, 14, 21, 22, 23, 24, 31, 32, 33, 34}));
+}
+
+TEST(DecodeRpcServerTest, LinearTransferSplitsEachSourceSegmentIndependently) {
+    const std::vector<uint8_t> source{1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 21, 22, 23, 24, 31, 32, 33, 34};
+    std::vector<uint8_t> destination(10, 0);
+    BlockInfo block;
+    block.addr = destination.data();
+    block.size_bytes = destination.size();
+    const AsymmetricTPContext partition{"peer", 0, /*local_count=*/1, 0, /*remote_count=*/2, /*remote_id=*/1};
+    const auto segments = DecodeRpcServer::linearLoadSegments({4, 2, 2, 2}, block, partition);
+    ASSERT_EQ(segments.size(), 4u);
+
+    size_t source_offset = 0;
+    for (const auto& segment : segments) {
+        std::memcpy(segment.addr,
+                    source.data() + source_offset + segment.size_bytes * partition.remote_partition_id,
+                    segment.size_bytes);
+        source_offset += segment.size_bytes * partition.remote_partition_count;
+    }
+    EXPECT_EQ(destination, (std::vector<uint8_t>{5, 6, 7, 8, 13, 14, 23, 24, 33, 34}));
+}
+
+TEST(DecodeRpcServerTest, CompletedHandoffSkipsKeysWithoutRankLocalLoads) {
+    // Both ranks have completed their own three loads in a six-block request.
+    // The result is a global prefix length, rather than a local transfer count.
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
+                  /*already_reused_blocks=*/0, /*required=*/{1, 0, 1, 0, 1, 0}, /*transferred=*/{1, 0, 1, 0, 1, 0}),
+              6u);
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
+                  /*already_reused_blocks=*/0, /*required=*/{0, 1, 0, 1, 0, 1}, /*transferred=*/{0, 1, 0, 1, 0, 1}),
+              6u);
+}
+
+TEST(DecodeRpcServerTest, IncompleteRankLocalLoadStopsTheGlobalPrefix) {
+    const auto rank0_prefix = DecodeRpcServer::completedHandoffPrefixBlocks(
+        /*already_reused_blocks=*/0, /*required=*/{1, 0, 1, 0, 1, 0}, /*transferred=*/{1, 0, 1, 0, 1, 0});
+    const auto rank1_prefix = DecodeRpcServer::completedHandoffPrefixBlocks(
+        /*already_reused_blocks=*/0, /*required=*/{0, 1, 0, 1, 0, 1}, /*transferred=*/{0, 1, 0, 0, 0, 0});
+
+    EXPECT_EQ(rank1_prefix, 3u);
+    EXPECT_EQ(DecodeRpcServer::minLoadedCacheBlockCount({rank0_prefix, rank1_prefix}), 3u);
+}
+
+TEST(DecodeRpcServerTest, CompletedHandoffDoesNotSkipAnIncompleteDenseLoad) {
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
+                  /*already_reused_blocks=*/0, /*required=*/{1, 1, 1, 1, 1, 1}, /*transferred=*/{1, 1, 1, 0, 1, 0}),
+              3u);
 }
 
 TEST(DecodeRpcServerTest, EmptyRemoteLoadTopologyFailsBeforePartitionArithmetic) {
@@ -275,6 +417,7 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
 
     EXPECT_EQ(request.prefill_cp_size(), 2);
+    EXPECT_EQ(request.prefill_tp_size(), 2);
     EXPECT_EQ(request.partition_count(), 1);
     EXPECT_EQ(request.partition_id(), 0);
     EXPECT_EQ(request.reuse_block_size(), 3);
@@ -304,6 +447,7 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/1, peer_addrs);
 
     EXPECT_EQ(request.prefill_cp_size(), 2);
+    EXPECT_EQ(request.prefill_tp_size(), 2);
     EXPECT_EQ(request.partition_count(), 1);
     EXPECT_EQ(request.partition_id(), 0);
     EXPECT_EQ(request.reuse_block_size(), 3);
@@ -312,27 +456,41 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     EXPECT_EQ(request.peer_addrs(1), "prefill-1");
 }
 
+TEST(DecodeRpcServerTest, SourceAttentionTpIsIndependentOfPhysicalKvShards) {
+    DecodeRpcServer server;
+    server.resource_.workers = {"decode-0", "decode-1"};
+    const std::vector<std::string> peers{"prefill-0", "prefill-1", "prefill-2", "prefill-3"};
+    auto context = makeLoadContext("request", peers, {101}, GroupBlockIds{}, /*prefill_cp_size=*/4);
+    context.prefill_tp_size = 1;
+
+    const auto request = server.constructRemoteLoadRequestForMla(context, /*index=*/0, peers);
+    EXPECT_EQ(request.prefill_cp_size(), 4);
+    EXPECT_EQ(request.prefill_tp_size(), 1);
+    EXPECT_EQ(request.peer_addrs_size(), 4);
+}
+
 TEST(DecodeRpcServerTest, TaggedBlockRowsPreserveReceivedOrderAcrossTopologies) {
     auto topology =
         CacheTopology::create({makeRpcGroup("linear"), makeRpcGroup("full")}, {{0, {"linear"}}, {1, {"full"}}});
     BroadcastLoadRequestPB request;
-    auto*                  full = request.add_tagged_group_block_ids();
-    full->set_tag("full");
-    full->add_block_ids(10);
     auto* linear = request.add_tagged_group_block_ids();
     linear->set_tag("linear");
     linear->add_block_ids(20);
+    auto* full = request.add_tagged_group_block_ids();
+    full->set_tag("full");
+    full->add_block_ids(10);
 
     const auto blocks = DecodeRpcServer::decodeGroupBlockIds(request, *topology);
-    EXPECT_EQ(blocks.orderedTags(), (std::vector<std::string>{"full", "linear"}));
+    EXPECT_EQ(blocks.orderedTags(), (std::vector<std::string>{"linear", "full"}));
+    EXPECT_NE(blocks.orderedTags(), topology->groupTags());
     EXPECT_EQ(blocks.blocks("full"), (BlockIndicesType{10}));
     EXPECT_EQ(blocks.blocks("linear"), (BlockIndicesType{20}));
 
     auto reordered =
         CacheTopology::create({makeRpcGroup("full"), makeRpcGroup("linear")}, {{0, {"linear"}}, {1, {"full"}}});
-    EXPECT_NE(topology->groupTags(), reordered->groupTags());
+    EXPECT_EQ(topology->groupTags(), reordered->groupTags());
     const auto reordered_blocks = DecodeRpcServer::decodeGroupBlockIds(request, *reordered);
-    EXPECT_EQ(reordered_blocks.orderedTags(), (std::vector<std::string>{"full", "linear"}));
+    EXPECT_EQ(reordered_blocks.orderedTags(), (std::vector<std::string>{"linear", "full"}));
     EXPECT_EQ(reordered_blocks.blocks("full"), blocks.blocks("full"));
     EXPECT_EQ(DecodeRpcServer::makeTaggedRequestKey(42, 1, topology->group("full").tag),
               DecodeRpcServer::makeTaggedRequestKey(42, 1, reordered->group("full").tag));
@@ -368,9 +526,13 @@ TEST(DecodeRpcServerTest, ResourceRowsKeepTheirOwnOrderAndSharedLifetime) {
         CacheTopology::create({makeRpcGroup("linear"), makeRpcGroup("full")}, {{0, {"full", "linear"}}}));
     resource->mutableBlockIds("linear").assign({20});
     resource->mutableBlockIds("full").assign({10});
-    auto context = makeLoadContext("request", {"peer"}, {}, resource->groupBlockIds(), 1);
+    // Received row order is independent of canonical topology IDs. Keep the
+    // resource's shared holders while giving the context a noncanonical index.
+    GroupBlockIds received{{{"linear", 0}, {"full", 1}},
+                           {resource->groupBlockIds("linear"), resource->groupBlockIds("full")}};
+    auto context = makeLoadContext("request", {"peer"}, {}, received, 1);
     EXPECT_NE(&context.groupBlockIds().tag_to_index_, &resource->groupBlockIds().tag_to_index_);
-    EXPECT_EQ(context.groupBlockIds().rows_[1], resource->groupBlockIds().rows_[1]);
+    EXPECT_EQ(context.groupBlockIds().rows_[1], resource->groupBlockIds("full"));
     resource->mutableBlockIds("full").assign({11, NULL_BLOCK_IDX});
     resource.reset();
     auto sender_topology =
@@ -815,6 +977,52 @@ TEST(DecodeRpcServerTest, SuccessfulRequestHasNoPhaseErrorType) {
               nullptr);
 }
 
+TEST(DecodeRpcServerTest, CompactDecodeTp4LoadsGlobalPagesIntoLocalSlots) {
+    const auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const std::vector<KeyOffsetPairs> expected = {
+        {{0, 0}, {4, 1}, {8, 2}, {12, 3}},
+        {{1, 0}, {5, 1}, {9, 2}},
+        {{2, 0}, {6, 1}, {10, 2}},
+        {{3, 0}, {7, 1}, {11, 2}},
+    };
+    for (int rank = 0; rank < 4; ++rank) {
+        const auto plan = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                              /*local_block_num=*/4,
+                                                              /*cache_key_count=*/13,
+                                                              /*reuse_block_size=*/0,
+                                                              /*use_hybrid=*/true,
+                                                              /*group_seq_size_per_block=*/4096,
+                                                              /*base_seq_size_per_block=*/4096,
+                                                              /*decode_cp_rank=*/rank,
+                                                              /*decode_cp_size=*/4);
+        EXPECT_EQ(keyOffsetPairs(plan), expected[rank]);
+    }
+}
+
+TEST(DecodeRpcServerTest, CompactTp8ToTp4PreservesGlobalKeysAcrossPrefillPeers) {
+    const auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto peer1 = buildCacheStorePlan(policy, 13, 0, true, /*cp_rank=*/1, /*cp_size=*/8);
+    const auto peer5 = buildCacheStorePlan(policy, 13, 0, true, /*cp_rank=*/5, /*cp_size=*/8);
+    // Decode rank 1 interleaves P ranks 1 and 5; copying either P table
+    // wholesale would place global page 9 in the wrong Decode slot.
+    EXPECT_EQ(keyOffsetPairs(peer1), (KeyOffsetPairs{{1, 0}, {9, 1}}));
+    EXPECT_EQ(keyOffsetPairs(peer5), (KeyOffsetPairs{{5, 0}}));
+    const auto decode = DecodeRpcServer::buildGroupLoadPlan(policy, 4, 13, 0, true, 4096, 4096, 1, 4);
+    EXPECT_EQ(keyOffsetPairs(decode), (KeyOffsetPairs{{1, 0}, {5, 1}, {9, 2}}));
+
+    const auto reused = DecodeRpcServer::buildGroupLoadPlan(policy, 4, 13, 5, false, 4096, 4096, 1, 4);
+    EXPECT_EQ(keyOffsetPairs(reused), (KeyOffsetPairs{{5, 1}, {9, 2}}));
+}
+
+TEST(DecodeRpcServerTest, CompactDecodeRejectsMissingOwnedPageCapacity) {
+    EXPECT_ANY_THROW(DecodeRpcServer::buildGroupLoadPlan(defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                                         /*local_block_num=*/3,
+                                                         /*cache_key_count=*/13,
+                                                         /*reuse_block_size=*/0,
+                                                         /*use_hybrid=*/true,
+                                                         4096, 4096, 0, 4));
+}
+
 TEST(DecodeRpcServerTest, HeterogeneousFullGroupUsesGlobalEndpointKeys) {
     const auto policy        = defaultCacheGroupPolicy(CacheGroupType::FULL);
     const auto producer_plan = buildCacheStorePlan(policy,
@@ -857,6 +1065,42 @@ TEST(DecodeRpcServerTest, HeterogeneousPartialBlockUsesLastAvailableKey) {
 
     EXPECT_EQ(keyOffsetPairs(producer_plan), (KeyOffsetPairs{{1, 0}, {3, 1}, {4, 2}}));
     EXPECT_EQ(keyOffsetPairs(decode_plan), keyOffsetPairs(producer_plan));
+}
+
+TEST(DecodeRpcServerTest, FullBlockSourcePeerMatchesProducerAcrossSpansAndShards) {
+    const auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    for (const size_t key_span : {1u, 2u, 3u}) {
+        for (const size_t key_count : {17u, 18u}) {
+            const size_t logical_blocks = (key_count + key_span - 1) / key_span;
+            for (const int prefill_cp : {2, 3, 4}) {
+                SCOPED_TRACE(::testing::Message() << "span=" << key_span << " keys=" << key_count
+                                                 << " prefill_cp=" << prefill_cp);
+                std::vector<int> published_by(key_count, -1);
+                for (int peer = 0; peer < prefill_cp; ++peer) {
+                    const auto published = buildCacheStorePlan(
+                        policy, logical_blocks, 0, true, peer, prefill_cp, key_span, key_count);
+                    for (const auto& pair : published) {
+                        ASSERT_EQ(published_by[pair.key_index], -1);
+                        published_by[pair.key_index] = peer;
+                    }
+                }
+                for (const int decode_cp : {1, 2, 4}) {
+                    const size_t local_blocks = (logical_blocks + decode_cp - 1) / decode_cp;
+                    for (int rank = 0; rank < decode_cp; ++rank) {
+                        const auto loaded = DecodeRpcServer::buildGroupLoadPlan(
+                            policy, local_blocks, key_count, 0, true,
+                            /*group_seq_size_per_block=*/4 * key_span,
+                            /*base_seq_size_per_block=*/4, rank, decode_cp);
+                        for (const auto& pair : loaded) {
+                            ASSERT_GE(published_by[pair.key_index], 0);
+                            EXPECT_EQ(DecodeRpcServer::fullBlockSourcePeer(pair.key_index, key_span, prefill_cp),
+                                      static_cast<size_t>(published_by[pair.key_index]));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 TEST(DecodeRpcServerTest, CompactStateGroupLoadsGlobalTailKeysIntoCanonicalSlots) {
@@ -991,17 +1235,58 @@ TEST(DecodeRpcServerTest, FullGroupKeepsWholeLogicalBlocksAfterReuse) {
     EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{2, 2}, {3, 3}}));
 }
 
-TEST(DecodeRpcServerTest, EmptyTableOrMissingCacheKeysYieldNoLoad) {
-    const auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+TEST(DecodeRpcServerTest, IncompleteDestinationTableCannotEraseRequiredLoads) {
+    const auto full_policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    EXPECT_ANY_THROW(DecodeRpcServer::buildGroupLoadPlan(full_policy,
+                                                        /*local_block_num=*/2,
+                                                        /*cache_key_count=*/3,
+                                                        /*reuse_block_size=*/0,
+                                                        /*use_hybrid=*/true,
+                                                        kBaseSeqSizePerBlock,
+                                                        kBaseSeqSizePerBlock));
+    EXPECT_ANY_THROW(DecodeRpcServer::buildGroupLoadPlan(full_policy,
+                                                        /*local_block_num=*/2,
+                                                        /*cache_key_count=*/6,
+                                                        /*reuse_block_size=*/0,
+                                                        /*use_hybrid=*/true,
+                                                        kBaseSeqSizePerBlock,
+                                                        kBaseSeqSizePerBlock,
+                                                        /*decode_cp_rank=*/0,
+                                                        /*decode_cp_size=*/2));
 
-    EXPECT_TRUE(DecodeRpcServer::buildGroupLoadPlan(policy,
+    const auto compact_policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+    EXPECT_ANY_THROW(DecodeRpcServer::buildGroupLoadPlan(compact_policy,
+                                                        /*local_block_num=*/5,
+                                                        /*cache_key_count=*/11,
+                                                        /*reuse_block_size=*/0,
+                                                        /*use_hybrid=*/true,
+                                                        kCompactSeqSizePerBlock,
+                                                        kBaseSeqSizePerBlock));
+    EXPECT_ANY_THROW(DecodeRpcServer::buildGroupLoadPlan(compact_policy,
+                                                        /*local_block_num=*/0,
+                                                        /*cache_key_count=*/11,
+                                                        /*reuse_block_size=*/0,
+                                                        /*use_hybrid=*/true,
+                                                        kCompactSeqSizePerBlock,
+                                                        kBaseSeqSizePerBlock));
+}
+
+TEST(DecodeRpcServerTest, RankWithoutOwnedPagesHasNoRequiredLoads) {
+    EXPECT_TRUE(DecodeRpcServer::buildGroupLoadPlan(defaultCacheGroupPolicy(CacheGroupType::FULL),
                                                     /*local_block_num=*/0,
-                                                    /*cache_key_count=*/11,
+                                                    /*cache_key_count=*/1,
                                                     /*reuse_block_size=*/0,
                                                     /*use_hybrid=*/true,
-                                                    kCompactSeqSizePerBlock,
-                                                    kBaseSeqSizePerBlock)
+                                                    kBaseSeqSizePerBlock,
+                                                    kBaseSeqSizePerBlock,
+                                                    /*decode_cp_rank=*/1,
+                                                    /*decode_cp_size=*/2)
                     .empty());
+}
+
+TEST(DecodeRpcServerTest, MissingCacheKeysYieldNoLoad) {
+    const auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+
     EXPECT_TRUE(DecodeRpcServer::buildGroupLoadPlan(policy,
                                                     /*local_block_num=*/6,
                                                     /*cache_key_count=*/0,

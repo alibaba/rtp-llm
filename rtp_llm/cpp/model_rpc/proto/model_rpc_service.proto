@@ -8,6 +8,7 @@ message TensorPB {
         INT32 = 1;
         FP16 = 2;
         BF16 = 3;
+        UINT8 = 4;
     }
     DataType data_type = 1;
     repeated int64 shape = 2;
@@ -15,6 +16,7 @@ message TensorPB {
     bytes int32_data = 4;
     bytes fp16_data = 5;
     bytes bf16_data = 6;
+    bytes uint8_data = 7;
 }
 
 message IntVector {
@@ -452,6 +454,12 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
+    // Physical Prefill KV shard count. Query CP may remain disabled.
+    // Zero from older senders means one unsharded source.
+    int32 prefill_cp_size = 13;
+    reserved 14 to 22;
+    // Attention head sharding can differ from the physical KV shard count.
+    int32 prefill_tp_size = 23;
 }
 
 // In the TP case, the decode master broadcasts to decode workers.
@@ -475,6 +483,7 @@ message BroadcastLoadRequestPB {
     reserved "group_block_ids";
     int32 prefill_cp_size = 13;
     repeated TaggedBlockIdsPB tagged_group_block_ids = 14;
+    int32 prefill_tp_size = 15;
 
 }
 

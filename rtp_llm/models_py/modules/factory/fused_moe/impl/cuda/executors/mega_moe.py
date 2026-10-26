@@ -53,6 +53,9 @@ _PRE_KERNEL_BARRIER_VERBOSE_ENV = "MEGA_MOE_PRE_KERNEL_BARRIER_VERBOSE"
 _PRE_KERNEL_BARRIER_LOGGED_KEYS: set[tuple[int, int]] = set()
 
 
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.activation import situ_kwargs
+
+
 def _mega_output_capacity(buf, requested_capacity: int) -> int:
     """Output rows must cover DeepGEMM's internally aligned token capacity."""
     capacity = max(int(requested_capacity), 1)
@@ -158,6 +161,8 @@ def _get_validated_world_ep_group(cfg, dist):
 
 
 class MegaMoeExecutor(Fp8Fp4ExecutorBase):
+    supports_situ = True
+
     execute_empty_inputs = True
 
     @property
@@ -167,7 +172,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         )
         return (
             self._input_packer.name == "fused"
-            and pack_impl == "optimized"
+            and pack_impl in ("optimized", "fast_finite")
             and 1 <= self.cfg.n_activated_experts <= 32
         )
 
@@ -207,6 +212,26 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
+        self._activation = getattr(cfg, "expert_activation", "swiglu")
+        if self._activation not in ("situ", "swiglu"):
+            raise ValueError(f"Unsupported MegaMoE activation {self._activation!r}")
+        if self._activation == "situ" and not callable(
+            getattr(deep_gemm, "fp8_fp4_mega_moe_k3", None)
+        ):
+            raise RuntimeError("K3 SiTU requires the dedicated DeepGEMM K3 API")
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.activation import (
+            mega_moe_functions,
+        )
+        self._mega_kernel, transform_weights, _ = mega_moe_functions(
+            deep_gemm, self._activation
+        )
+        self._activation_kwargs = {}
+        if self._activation == "situ":
+            self._activation_kwargs = situ_kwargs(
+                self._mega_kernel,
+                cfg.activation_beta,
+                cfg.activation_linear_beta,
+            )
         E = cfg.n_local_experts
         D = cfg.dim
         inter = cfg.moe_inter_dim
@@ -220,21 +245,26 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             cfg.moe_w1_layout,
         )
         device = w13.device
-        s13_int = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
+        s13_int = prepare_fp4_weight_scale_for_deepgemm(
+            s13_raw, 2 * inter, D, E, backend=deep_gemm
+        )
         del s13_raw
         torch.cuda.empty_cache()
 
         w2 = layer_weights.pop(W.moe_w2)
         s2_raw = layer_weights.pop(W.moe_s2)
-        s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
+        s2_int = prepare_fp4_weight_scale_for_deepgemm(
+            s2_raw, D, inter, E, backend=deep_gemm
+        )
         del s2_raw
         torch.cuda.empty_cache()
 
         # Mega MoE transform: L1 gate/up interleave (gran=8 along N) +
         # both SFs UTCCP-transposed. Drop inputs immediately after.
-        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
+        (l1_w, l1_sf), (l2_w, l2_sf) = transform_weights(
             (w13, s13_int),
             (w2, s2_int),
+            **({"activation": "situ"} if self._activation == "situ" else {}),
         )
         del w13, s13_int, w2, s2_int
         torch.cuda.empty_cache()
@@ -266,7 +296,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             hidden=D,
             intermediate_hidden=inter,
             use_fp8_dispatch=True,
-            activation="swiglu",
+            activation=self._activation,
         )
         # Single-layer staging output. All MoE layers execute sequentially, so one
         # process-local buffer is enough and avoids O(layers) persistent memory.
@@ -327,6 +357,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             cfg.moe_inter_dim,
             max_tokens_per_rank,
             cfg.swiglu_limit,
+            self._activation,
+            tuple(self._activation_kwargs.items()),
             cfg.route_scale,
             num_sms,
             tuple(token_counts),
@@ -450,24 +482,23 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             )
 
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
-        import deep_gemm
-
         self._maybe_pre_kernel_barrier(tokens)
         sync_cuda_graph_warmup_ranks(
             f"moe.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
             device,
         )
-        deep_gemm.fp8_fp4_mega_moe(
+        self._mega_kernel(
             y,
             (self._mega_l1_w, self._mega_l1_sf),
             (self._mega_l2_w, self._mega_l2_sf),
             self._mega_buf,
             recipe=(1, 1, FP4_BLOCK),
-            activation="swiglu",
+            activation=self._activation,
             activation_clamp=(
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
+            **self._activation_kwargs,
         )
 
     def forward(

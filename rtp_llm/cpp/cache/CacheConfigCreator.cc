@@ -53,6 +53,7 @@ void addBudgetBytes(size_t& total, size_t bytes, size_t count = 1) {
 
 KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
+    addBudgetBytes(budget.explicit_pool_reserve_bytes, config.linear_replay.reserve_bytes);
     for (size_t gid = 0; gid < config.topology().groups().size(); ++gid) {
         const auto& group          = config.topology().groups()[gid];
         size_t      group_bytes    = 0;
@@ -224,7 +225,6 @@ void populateGroups(CacheConfig&                 config,
         CacheGroupPolicy policy;
     };
     std::map<std::string, BuildState> groups_by_tag;
-    std::vector<std::string>          ordered_tags;
     std::vector<LayerBase>            layers(static_cast<size_t>(config.layer_num));
     for (uint32_t layer_id = 0; layer_id < config.layer_num; ++layer_id) {
         layers[layer_id].layer_id = static_cast<int>(layer_id);
@@ -258,7 +258,6 @@ void populateGroups(CacheConfig&                 config,
                 it->second.spec        = spec;
                 it->second.fingerprint = spec->fingerprint();
                 it->second.policy      = policy;
-                ordered_tags.push_back(spec->tag);
             } else {
                 RTP_LLM_CHECK_WITH_INFO(it->second.fingerprint == spec->fingerprint(),
                                         "cache tag=%s has multiple physical prototypes",
@@ -272,10 +271,9 @@ void populateGroups(CacheConfig&                 config,
     }
 
     std::vector<GroupBase> groups;
-    groups.reserve(ordered_tags.size());
-    for (const auto& tag : ordered_tags) {
-        const auto& state = groups_by_tag.at(tag);
-        GroupBase   group;
+    groups.reserve(groups_by_tag.size());
+    for (const auto& [tag, state] : groups_by_tag) {
+        GroupBase group;
         group.tag    = tag;
         group.spec   = state.spec;
         group.policy = state.policy;
@@ -301,6 +299,16 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     config.layer_num               = static_cast<uint32_t>(model_config.num_layers);
     config.cache_min_replay_tokens = std::max(1, model_config.cache_min_replay_tokens);
     config.cache_key_hash_seed     = model_config.cache_key_hash_seed;
+
+    const auto& cp = parallelism_config.prefill_cp_config;
+    // Existing models retain Query-CP Prefill sharding and replicated Decode.
+    // Models that declare a local layout select it independently of Query CP.
+    const bool legacy_local_sharding =
+        cp.kv_cache_sharded && cp.is_enabled() && parallelism_config.role_type != RoleType::DECODE;
+    config.local_kv_cache_sharded =
+        parallelism_config.tp_size > 1 && model_config.local_kv_cache_sharded.value_or(legacy_local_sharding);
+    RTP_LLM_CHECK_WITH_INFO(!config.local_kv_cache_sharded || cp.kv_cache_sharded,
+                            "local PageRR allocation requires kv_cache_sharded transport metadata");
 
     config.seq_size_per_block = seq_size;
     config.use_mla            = model_config.attn_config.use_mla;
@@ -392,8 +400,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const KVCacheConfig&                             kv_cache_config,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config,
                                              const ModelConfig*                               draft_model_config,
-                                             bool                                             is_mtp,
-                                             bool                                             is_eagle) {
+                                             bool                                             /*is_mtp*/,
+                                             bool                                             /*is_eagle*/) {
     RTP_LLM_CHECK_WITH_INFO(draft_model_config == nullptr || sp_config.has_value(),
                             "draft cache configuration requires speculative execution configuration");
     RTP_LLM_CHECK_WITH_INFO(
@@ -404,7 +412,9 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     auto      config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     if (draft_model_config != nullptr) {
         auto draft = createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-        int  num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
+        // The executor currently reuses module 0 for every proposal step.
+        // gen_num_per_cycle controls proposal depth, not active module count.
+        const int num_mtp_modules = 1;
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
         for (int module = 0; module < num_mtp_modules; ++module) {
@@ -413,6 +423,96 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     }
 
     return config;
+}
+
+void CacheConfigCreator::configureDecodeLinearPool(CacheConfig&             config,
+                                                   const ParallelismConfig& parallelism_config,
+                                                   const RuntimeConfig&     runtime_config) {
+    if (!runtime_config.enable_linear_replay || parallelism_config.role_type != RoleType::DECODE) {
+        return;
+    }
+    auto groups = config.topology().groups();
+    bool changed = false;
+    for (auto& group : groups) {
+        if (group.policy.group_type != CacheGroupType::LINEAR
+            || group.policy.memory_placement != CacheMemoryPlacement::DEVICE || group.policy.explicit_block_num > 0) {
+            continue;
+        }
+        constexpr uint64_t kTailBlocksPerStream = 2;
+        constexpr uint64_t kReserveStreams = 4;
+        RTP_LLM_CHECK_WITH_INFO(runtime_config.max_generate_batch_size > 0,
+                                "Decode LINEAR pool requires positive concurrency, got %ld",
+                                static_cast<long>(runtime_config.max_generate_batch_size));
+        const uint64_t concurrency = static_cast<uint64_t>(runtime_config.max_generate_batch_size);
+        RTP_LLM_CHECK_WITH_INFO(concurrency <= std::numeric_limits<uint32_t>::max() / kTailBlocksPerStream
+                                                  - kReserveStreams,
+                                "Decode LINEAR pool block count overflows uint32: concurrency=%lu",
+                                static_cast<unsigned long>(concurrency));
+        group.policy.explicit_block_num = static_cast<uint32_t>(kTailBlocksPerStream * (concurrency + kReserveStreams));
+        group.policy.charge_to_paged_budget = true;
+        RTP_LLM_LOG_INFO("Decode LINEAR pool tag=%s concurrency=%lu blocks=%u",
+                         group.tag.c_str(),
+                         static_cast<unsigned long>(concurrency),
+                         group.policy.explicit_block_num);
+        changed = true;
+    }
+    if (changed) {
+        const auto layers = config.topology().layers();
+        config.setTopology(std::move(groups), layers);
+    }
+}
+
+void CacheConfigCreator::configureLinearReplay(CacheConfig&                                      config,
+                                               const ModelConfig&                                model_config,
+                                               const ParallelismConfig&                          parallelism_config,
+                                               const RuntimeConfig&                              runtime_config,
+                                               const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                               bool                                              is_mtp) {
+    if (!runtime_config.enable_linear_replay || !is_mtp || parallelism_config.role_type == RoleType::PREFILL
+        || !sp_config || sp_config->gen_num_per_cycle <= 0
+        || (sp_config->type != SP_TYPE_MTP && sp_config->type != SP_TYPE_EAGLE
+            && sp_config->type != SP_TYPE_EAGLE3)) {
+        return;
+    }
+    std::vector<int> group_ids;
+    size_t           layer_count = 0;
+    for (size_t group_id = 0; group_id < config.groups().size(); ++group_id) {
+        const auto& group = config.groups()[group_id];
+        if (group.policy.group_type != CacheGroupType::LINEAR
+            || group.policy.memory_placement != CacheMemoryPlacement::DEVICE) {
+            continue;
+        }
+        const auto layers = config.layerIdsForGroup(group.tag);
+        const auto target_layers = std::count_if(layers.begin(), layers.end(), [&](int layer) {
+            return layer >= 0 && static_cast<uint32_t>(layer) < config.layer_num;
+        });
+        if (target_layers > 0) {
+            group_ids.push_back(static_cast<int>(group_id));
+            layer_count += static_cast<size_t>(target_layers);
+        }
+    }
+    if (group_ids.empty()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(runtime_config.max_generate_batch_size > 0
+                                && runtime_config.max_generate_batch_size <= std::numeric_limits<int>::max(),
+                            "LINEAR replay requires a positive slot count fitting int");
+    RTP_LLM_CHECK_WITH_INFO(sp_config->gen_num_per_cycle < std::numeric_limits<int>::max(),
+                            "LINEAR replay verify width overflows int");
+    const auto& linear = model_config.linear_attention_config;
+    const auto  tp     = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
+    RTP_LLM_CHECK_WITH_INFO(linear.linear_num_key_heads > 0 && linear.linear_num_value_heads > 0
+                                && linear.linear_num_key_heads % tp == 0 && linear.linear_num_value_heads % tp == 0,
+                            "LINEAR replay requires head counts divisible by attention TP");
+    RTP_LLM_CHECK_WITH_INFO(linear.linear_conv_kernel_dim > 1, "LINEAR replay requires convolution history");
+    config.linear_replay = LinearReplayPlan::create(std::move(group_ids),
+                                                    runtime_config.max_generate_batch_size,
+                                                    sp_config->gen_num_per_cycle + 1,
+                                                    {linear.linear_num_key_heads / tp, linear.linear_key_head_dim},
+                                                    {linear.linear_num_value_heads / tp, linear.linear_value_head_dim},
+                                                    linear.replay_vector_gate,
+                                                    linear.conv_state_dtype,
+                                                    layer_count);
 }
 
 uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&                               config,

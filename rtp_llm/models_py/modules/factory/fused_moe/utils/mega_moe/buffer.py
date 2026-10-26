@@ -7,8 +7,8 @@ no longer needed once the next layer's MoE starts. So we share **one buffer**
 across all MoE layers via a module-level cache, avoiding one large persistent
 allocation per layer.
 
-The cache key set MUST stay invariant across the refactor — see Phase 1 risk
-#9 in ``.claude/plans/optimized-riding-mist.md``.
+K3's separate SiTU API has a distinct workspace layout and must not reuse
+buffers allocated by the generic API.
 """
 
 import logging
@@ -31,12 +31,33 @@ def estimate_mega_moe_symm_buffer_bytes(
     intermediate_hidden: int,
     use_fp8_dispatch: bool = True,
     activation: str = "swiglu",
+    *,
+    backend=None,
 ) -> int | None:
     try:
-        import deep_gemm
+        if backend is None:
+            import deep_gemm as backend
 
+        # K3 uses a separate workspace and token-alignment contract.
+        if activation == "situ":
+            alignment = int(backend._C.get_token_alignment_for_mega_moe_k3())
+            capacity = (
+                (num_max_tokens_per_rank + alignment - 1) // alignment * alignment
+            )
+            return int(
+                backend._C.get_symm_buffer_size_for_mega_moe_k3(
+                    group_size,
+                    num_experts,
+                    capacity,
+                    num_topk,
+                    hidden,
+                    intermediate_hidden,
+                    "fp8xfp4",
+                    activation,
+                )[0]
+            )
         return int(
-            deep_gemm._C.get_symm_buffer_size_for_mega_moe(
+            backend._C.get_symm_buffer_size_for_mega_moe(
                 group_size,
                 num_experts,
                 num_max_tokens_per_rank,
@@ -60,8 +81,12 @@ def _get_or_create_mega_buf(
     intermediate_hidden,
     use_fp8_dispatch,
     activation,
+    *,
+    backend=None,
 ):
-    import deep_gemm
+    backend_key = backend
+    if backend is None:
+        import deep_gemm as backend
 
     key = (
         id(group),
@@ -73,6 +98,10 @@ def _get_or_create_mega_buf(
         bool(use_fp8_dispatch),
         activation,
     )
+    if backend_key is not None:
+        key = key + (backend_key,)
+    if activation == "situ":
+        key = key + ("mega_moe_k3",)
     buf = _MEGA_BUF_CACHE.get(key)
     if buf is None:
         try:
@@ -89,20 +118,28 @@ def _get_or_create_mega_buf(
                 intermediate_hidden=intermediate_hidden,
                 use_fp8_dispatch=use_fp8_dispatch,
                 activation=activation,
+                backend=backend,
             )
             if group_size > 0
             else None
         )
-        buf = deep_gemm.get_symm_buffer_for_mega_moe(
+        allocation_kwargs = dict(
             group=group,
             num_experts=num_experts,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             num_topk=num_topk,
             hidden=hidden,
             intermediate_hidden=intermediate_hidden,
-            use_fp8_dispatch=use_fp8_dispatch,
             activation=activation,
         )
+        if activation == "situ":
+            buf = backend.get_symm_buffer_for_mega_moe_k3(
+                **allocation_kwargs, mma_type="fp8xfp4"
+            )
+        else:
+            buf = backend.get_symm_buffer_for_mega_moe(
+                **allocation_kwargs, use_fp8_dispatch=use_fp8_dispatch
+            )
         actual_bytes = None
         try:
             actual_bytes = int(buf.buffer.numel() * buf.buffer.element_size())
@@ -168,12 +205,13 @@ def _get_or_create_mega_output(
     return cached
 
 
-def _mega_moe_unavailable_reason() -> str | None:
+def _mega_moe_unavailable_reason(backend=None) -> str | None:
     """Return ``None`` when Mega MoE can run, otherwise a human-readable reason."""
     try:
-        import deep_gemm
+        if backend is None:
+            import deep_gemm as backend
 
-        if not hasattr(deep_gemm, "fp8_fp4_mega_moe"):
+        if not hasattr(backend, "fp8_fp4_mega_moe"):
             return "deep_gemm.fp8_fp4_mega_moe is missing"
     except Exception as e:
         return f"failed to import deep_gemm: {e}"
@@ -194,11 +232,11 @@ def _mega_moe_unavailable_reason() -> str | None:
     return None
 
 
-def _mega_moe_available() -> bool:
+def _mega_moe_available(backend=None) -> bool:
     """Whether DeepGEMM's ``fp8_fp4_mega_moe`` (symm-mem fused dispatch +
     L1 GEMM + SwiGLU + L2 GEMM + combine, SM100-only) is usable here.
 
     Requires: deep_gemm >= 2.5 (commit 891d57b introduced it), torch >= 2.9
     for ``torch.distributed._symmetric_memory``, CUDA device SM100+, and
     an initialised world-size process group of size > 1."""
-    return _mega_moe_unavailable_reason() is None
+    return _mega_moe_unavailable_reason(backend) is None

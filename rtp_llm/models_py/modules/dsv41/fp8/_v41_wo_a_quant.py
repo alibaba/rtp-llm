@@ -33,6 +33,27 @@ _VENDOR_HASHES = {
     "epilogue/sm100_store_cd_swap_ab.cuh": "0cc27e0ca66e3be47b1d90974ff7f66efca38c08b783ce16fc5e8f1d8db7010f",
     "common/math.cuh": "576e9db1a1889087f77b3f74d74d011bf452f16c0e5c030bdd661e961c074ddc",
 }
+_VENDOR_V2_HASHES = {
+    "impls/sm100_fp8_fp4_gemm_1d1d.cuh": "71d32a9fd72034d04f3900165f5bb88dde6e2d4565c624a4953c4c72b2c18ef1",
+    "epilogue/sm100_store_cd.cuh": "0b23dcc32c4d08b1efb641844806dd92ebffd4697c8157bdfc5ca64238fe489b",
+    "epilogue/sm100_store_cd_swap_ab.cuh": "7d71c6630ba4d9376266cbdfdbe8fb38544cb1ac7ef2437d32ce52bdb2c76f6a",
+    "common/math.cuh": "a28f4dfe0340b62dbdb3e9c1286d5e7332d81bd5936ef7cbec13e8e447a2e51a",
+    "epilogue/operators.cuh": "42c9580b1cabd18c68e1b2ffaa8029f30cb97b550d7047e39db0b2cffebc258b",
+    "common/types.cuh": "0382bf27efb6deea5dc21a4f8ae21296494e513166c2682c63e498c70cefa6b2",
+    "impls/sm100_fp8_gemm_local_policy.cuh": "470da6d88dae81b48bcafc0fc0c79dd197c35721a8ddb077fa557165ffc93f46",
+}
+
+
+def _vendor_abi(include):
+    for abi, hashes in ((1, _VENDOR_HASHES), (2, _VENDOR_V2_HASHES)):
+        if all(
+            (include / "deep_gemm" / name).is_file()
+            and hashlib.sha256((include / "deep_gemm" / name).read_bytes()).hexdigest()
+            == expected
+            for name, expected in hashes.items()
+        ):
+            return abi
+    return None
 
 
 def _device_supported(device):
@@ -91,13 +112,8 @@ def _dependencies():
     import deep_gemm
 
     include = Path(deep_gemm.__file__).resolve().parent / "include"
-    for name, expected in _VENDOR_HASHES.items():
-        path = include / "deep_gemm" / name
-        if (
-            not path.is_file()
-            or hashlib.sha256(path.read_bytes()).hexdigest() != expected
-        ):
-            return None
+    if _vendor_abi(include) is None:
+        return None
     cuda = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     nvcc = str(Path(cuda) / "bin/nvcc") if cuda else shutil.which("nvcc")
     cxx = os.environ.get("CXX") or shutil.which("c++")
@@ -112,6 +128,7 @@ def _dependencies():
 
 def _build_library(sms, dependencies):
     include, cuda, nvcc, cxx = dependencies
+    abi_flag = f"-DV41_DEEPGEMM_V2={int(_vendor_abi(include) == 2)}"
     source = Path(__file__).resolve().parent
     digest = hashlib.sha256(str(sms).encode())
     # driver.so is host code: shared caches must not mix ARM and x86 builds
@@ -155,6 +172,7 @@ def _build_library(sms, dependencies):
                         "--ptxas-options=--verbose",
                         "--diag-suppress=39,161,174,177,186,940",
                         f"-DV41_NUM_SMS={sms}",
+                        abi_flag,
                         "-I" + str(include),
                     ],
                     [
@@ -166,6 +184,7 @@ def _build_library(sms, dependencies):
                         "-fPIC",
                         "-O2",
                         "-std=c++17",
+                        abi_flag,
                         "-I" + str(cuda / "include"),
                         "-L" + str(cuda / "lib64/stubs"),
                         "-lcuda",

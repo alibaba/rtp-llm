@@ -81,26 +81,26 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "I'm sorry, but I can't provide guidance on new college entrance exams or college planning services. My current capabilities are limited to the functions provided in the tools section. If you have any questions or need assistance with that, please let me know!"
+                            "content": "I'm sorry, but I can't provide guidance on college admissions or career planning. However, I can help you with any questions related to the products and services I have access to. Would you like me to assist with anything related to my available tools?"
                         },
                         "finish_reason": "stop"
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 497,
-                    "total_tokens": 548,
-                    "completion_tokens": 51,
+                    "total_tokens": 549,
+                    "completion_tokens": 52,
                     "completion_tokens_details": null,
                     "prompt_tokens_details": null
                 },
                 "debug_info": null,
                 "aux_info": {
                     "cost_time": 1274.939,
-                    "iter_count": 51,
+                    "iter_count": 52,
                     "prefix_len": 0,
                     "input_len": 497,
-                    "output_len": 51,
-                    "step_output_len": 51,
+                    "output_len": 52,
+                    "step_output_len": 52,
                     "first_token_cost_time": 286.03,
                     "wait_time": 0.199,
                     "pd_sep": false,
@@ -203,15 +203,15 @@
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": "I'm sorry, but I can't provide guidance on new college entrance exams or college planning services. My current capabilities are limited to the functions provided in the tools section. If you have any questions or need assistance with that, please let me know!"
+                            "content": "I'm sorry, but I can't provide guidance on college admissions or career planning. However, I can help you with any questions related to the products and services I have access to. Would you like me to assist with anything related to my available tools?"
                         },
                         "finish_reason": "stop"
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 497,
-                    "total_tokens": 548,
-                    "completion_tokens": 51,
+                    "total_tokens": 549,
+                    "completion_tokens": 52,
                     "completion_tokens_details": null,
                     "prompt_tokens_details": null
                 },

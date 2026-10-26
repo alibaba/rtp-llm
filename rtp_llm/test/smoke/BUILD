@@ -1,4 +1,16 @@
 load(":defs.bzl", "custom_smoke_test", "smoke_test")
+
+custom_smoke_test(
+    name = "chunked_multimodal",
+    main = "chunked_multimodal_test.py",
+    smoke_args = "--world_size 1",
+    gpu_type = ["H20_CU13"],
+    data = [
+        "//rtp_llm:sdk",
+        "data/model/qwen_vl/q_r_3.json",
+        "data/model/qwen_vl/1.jpeg",
+    ],
+)
 package(default_visibility = ["//visibility:public"])
 
 # Framework source files for cross-package smoke tests.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <future>
 #include <list>
 #include <map>
 #include <memory>
@@ -94,6 +95,12 @@ public:
                                                              bool linear_attention,
                                                              bool cache_snapshot_ready = false);
     static int selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
+    static bool              hasLinearCacheSnapshotCapacity(const std::list<GenerateStreamPtr>& streams,
+                                                            const CacheConfig&                  cache_config,
+                                                            const std::vector<CacheGroupType>&  group_types,
+                                                            int64_t                             physical_width,
+                                                            int64_t                             kernel_width,
+                                                            int64_t                             max_accept_length);
 
 protected:
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
@@ -136,8 +143,11 @@ protected:
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
     void            waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
-    void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
-    void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
+    using PreparedTargetToken = std::future<std::pair<torch::Tensor, std::shared_ptr<torch::Event>>>;
+    PreparedTargetToken launchTargetVerifyPrepareAsync(const GptModelInputs&        model_input,
+                                                       size_t                       batch_size,
+                                                       std::list<GenerateStreamPtr> streams = {});
+    void                launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     absl::Status    runDecodeAlignmentOnly(GptModelInputs& model_input);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
@@ -170,6 +180,8 @@ protected:
                                       const torch::Tensor&                         kv_cache_kernel_block_id,
                                       GptModelOutputs                              draft_prefill_model_output,
                                       SamplerOutput                                draft_prefill_sampler_output,
+                                      const std::optional<LinearReplayInputs>&      linear_replay,
+                                      const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
                                       std::shared_ptr<torch::Event>                rejection_event,
                                       std::shared_ptr<torch::Event>                draft_event);
 
@@ -177,7 +189,8 @@ protected:
                           const StreamGroups&         stream_groups,
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t,
-                          int64_t&                    model_forward_us);
+                          int64_t&                    model_forward_us,
+                          PreparedTargetToken         prepared_target_token = {});
 
     bool useDeviceInput() const;
     bool checkDeviceInput() const;
@@ -203,6 +216,11 @@ protected:
     bool useAsyncDeviceState() const;
 
     bool useAsyncPrepare() const;
+    void recordLinearReplayLastUse(const std::vector<GenerateStream::LinearReplayRound>& rounds);
+    void publishLinearReplayWindows(const StreamGroups& stream_groups,
+                                    const LinearReplayInputs& replay,
+                                    const std::vector<GenerateStream::LinearReplayRound>& rounds,
+                                    const torch::Tensor& accept_lengths);
 
     // Opt-in gate to skip the broad sync at decodeStep start.
     // Device state, epoch-guarded clears, and single-slotted workers preserve
@@ -212,14 +230,16 @@ protected:
     // Attach next-step device state, then fork a worker that waits on caller-
     // recorded rejection/draft events and runs D2H/specUpdate/KV release off
     // the main thread.
-    absl::Status dispatchDecodeAsync(const StreamGroups&                          stream_groups,
-                                     const speculative::SpeculativeSamplerOutput& spec_decode_output,
-                                     const torch::Tensor&                         verify_position_ids,
-                                     const torch::Tensor&                         kv_cache_block_id,
-                                     const torch::Tensor&                         kv_cache_kernel_block_id,
-                                     MergedOutput                                 draft_prefill_output,
-                                     std::shared_ptr<torch::Event>                rejection_event,
-                                     std::shared_ptr<torch::Event>                draft_event);
+    absl::Status dispatchDecodeAsync(const StreamGroups&                                   stream_groups,
+                                     const speculative::SpeculativeSamplerOutput&          spec_decode_output,
+                                     const torch::Tensor&                                  verify_position_ids,
+                                     const torch::Tensor&                                  kv_cache_block_id,
+                                     const torch::Tensor&                                  kv_cache_kernel_block_id,
+                                     MergedOutput                                          draft_prefill_output,
+                                     const std::optional<LinearReplayInputs>&              linear_replay,
+                                     const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
+                                     std::shared_ptr<torch::Event>                         rejection_event,
+                                     std::shared_ptr<torch::Event>                         draft_event);
 
     // Synchronous dispatch also publishes the same per-stream device state as
     // the async path, using the host seqLength after specUpdate as truth.
@@ -233,7 +253,7 @@ protected:
                                                   int64_t              batch_size,
                                                   int64_t              verify_width);
 
-    void releaseAllModelBuffers();
+    void releaseAllModelBuffers(bool defer_reclaim = false);
 
 private:
     static torch::Tensor snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
@@ -314,6 +334,7 @@ private:
     // Declare the worker after its target so destruction joins the worker first.
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
     AsyncRunner                             spec_logits_verify_async_runner_;
+    AsyncRunner                             spec_sampler_prepare_runner_;
 
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
