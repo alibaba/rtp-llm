@@ -92,7 +92,7 @@ class PrefillStateLockContractTest {
     private static PrefillState state() {
         return new PrefillState(
                 new ReentrantLock(),
-                PrefillActiveIndex.ordered(16, Comparator.comparingLong(RequestRoute::requestId)),
+                PrefillActiveIndex.ordered(16, Comparator.comparing(RequestRoute::requestId)),
                 () -> 0L);
     }
 }

@@ -8,7 +8,7 @@ import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -32,7 +32,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
-/** Real submit/stop/shutdown paths; only endpoint selection and thread timing are isolated. */
+/**
+ * Real submit/stop/shutdown paths; only endpoint selection and thread timing are isolated.
+ */
 class SubmissionShutdownDeadlockTest {
     @ParameterizedTest(name = "queued={0}")
     @ValueSource(booleans = {false, true})
@@ -225,12 +227,12 @@ class SubmissionShutdownDeadlockTest {
                                     new PlacementAvailability(),
                                     SchedulingTestConfig.capacity(config),
                                     org.mockito.Mockito.mock(
-                                            org.flexlb.service.RecentCacheKeyTraceReporter.class));
+                                            org.flexlb.service.TheoryCacheHitReporter.class));
             runtime.registerScheduler(scheduler);
         }
 
         RequestContext context(long id) {
-            return RequestProtocolTestSupport.context(config, id);
+            return RequestProtocolTestSupport.context(config, String.valueOf(id));
         }
 
         @Override

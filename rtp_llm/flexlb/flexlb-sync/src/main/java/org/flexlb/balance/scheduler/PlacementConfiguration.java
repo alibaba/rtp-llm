@@ -4,13 +4,15 @@ import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
 
-/** Assembles the scheduler, Prefill delivery, and Decode admission from startup config. */
+/**
+ * Assembles the scheduler, Prefill delivery, and Decode admission from startup config.
+ */
 @Configuration(proxyBeanMethods = false)
 public class PlacementConfiguration {
 
@@ -39,7 +41,7 @@ public class PlacementConfiguration {
             SchedulerRuntime runtime,
             ConfigService configService,
             AdmissionCapacity capacity,
-            RecentCacheKeyTraceReporter traceReporter) {
+            TheoryCacheHitReporter traceReporter) {
         FlexlbConfig config = configService.loadBalanceConfig();
         AbstractRequestScheduler scheduler =
                 create(
@@ -63,7 +65,7 @@ public class PlacementConfiguration {
             DecodeAdmission decodeCapacity,
             PlacementAvailability availability,
             AdmissionCapacity capacity,
-            RecentCacheKeyTraceReporter traceReporter) {
+            TheoryCacheHitReporter traceReporter) {
         if (config.isQueue()) {
             QueuedRequestScheduler queue =
                     new QueuedRequestScheduler(

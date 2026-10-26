@@ -11,6 +11,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Failures;
 
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
@@ -31,29 +32,36 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
     private byte constructionState = BUILDING;
     private final RequestContext ctx;
     private Response routeResponse;
+    private final List<String> decodePreemptRequestIds;
     private WorkerEndpoint.GenerationPin[] pins;
-    // Role slots in the three-pin scope; -1 means that role has not been selected.
+    // Role slots in the four-pin scope; -1 means that role has not been selected.
     private byte prefillIndex = -1;
     private byte decodeIndex = -1;
     private ServerStatus prefill;
     private ServerStatus decode;
     private ServerStatus vit;
+    private ServerStatus encoder;
+    private byte encoderIndex = -1;
     private long prefillWorkMs;
     private long prefillVersion;
     private long decodeVersion;
     private final DecodeResources.ReservationHandle decodeReservation;
 
-    /** Construction is thread confined; prepare publishes the completed route. */
+    /**
+     * Construction is thread confined; prepare publishes the completed route.
+     */
     public RequestRoute(RequestContext context) {
-        this(context, null, null);
+        this(context, null, null, List.of());
     }
 
     private RequestRoute(
             RequestContext context,
             RequestRoute selected,
-            DecodeResources.ReservationHandle reservation) {
+            DecodeResources.ReservationHandle reservation,
+            List<String> preemptRequestIds) {
         ctx = Objects.requireNonNull(context, "context");
         decodeReservation = reservation;
+        decodePreemptRequestIds = List.copyOf(preemptRequestIds);
         if (selected != null) {
             constructionState = PREPARED;
             routeResponse = selected.routeResponse;
@@ -68,7 +76,9 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
         }
     }
 
-    /** Consumes the pin even on validation failure; only selection may add facts. */
+    /**
+     * Consumes the pin even on validation failure; only selection may add facts.
+     */
     public ServerStatus add(
             WorkerEndpoint.GenerationPin pin, ServerStatus status, long workMs, long version) {
         try {
@@ -78,7 +88,7 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
                     ServerStatus.copyOf(Objects.requireNonNull(status, "worker metadata"));
             checkArgument(frozen.isSuccess(), "route requires successful Worker metadata");
             checkState(
-                    frozen.getRequestId() == requestId(),
+                    Objects.equals(frozen.getRequestId(), requestId()),
                     "selected Worker belongs to another request");
             WorkerEndpoint endpoint = pin.endpoint();
             checkArgument(
@@ -97,17 +107,21 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
                         decodeIndex < 0 && endpoint instanceof DecodeEndpoint,
                         "request requires at most one exact Decode assignment");
             } else {
-                checkArgument(role == RoleType.VIT, "unsupported Worker role");
-                checkState(vit == null, "request requires at most one VIT assignment");
+                checkArgument(
+                        role == RoleType.VIT || role == RoleType.ENCODER,
+                        "unsupported Worker role");
+                checkState(
+                        role == RoleType.VIT ? vit == null : encoder == null,
+                        "request requires at most one assignment per stateless role");
             }
             if (pins == null) {
-                pins = new WorkerEndpoint.GenerationPin[3];
+                pins = new WorkerEndpoint.GenerationPin[4];
             }
             int index = 0;
             while (index < pins.length && pins[index] != null) {
                 index++;
             }
-            checkState(index < pins.length, "route supports at most three Worker roles");
+            checkState(index < pins.length, "route supports at most four Worker roles");
             pins[index] = pin;
             if (role.supportsPrefill()) {
                 prefillIndex = (byte) index;
@@ -118,6 +132,9 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
                 decodeIndex = (byte) index;
                 decode = frozen;
                 decodeVersion = version;
+            } else if (role == RoleType.ENCODER) {
+                encoder = frozen;
+                encoderIndex = (byte) index;
             } else {
                 vit = frozen;
             }
@@ -133,7 +150,9 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
         }
     }
 
-    /** Finish construction once; the selector retains cleanup responsibility on failure. */
+    /**
+     * Finish construction once; the selector retains cleanup responsibility on failure.
+     */
     RequestRoute prepare() {
         checkState(constructionState == BUILDING, "route selection is not building");
         constructionState =
@@ -142,13 +161,16 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
         for (var pin : pins) {
             checkState(pin == null || pin.isOpen(), "selected endpoint generation is closed");
         }
-        var statuses = new ArrayList<ServerStatus>(3);
+        var statuses = new ArrayList<ServerStatus>(4);
         for (int i = 0; i < pins.length; i++) {
             var pin = pins[i];
             if (pin == null) {
                 continue;
             }
-            statuses.add(i == prefillIndex ? prefill : i == decodeIndex ? decode : vit);
+            statuses.add(
+                    i == prefillIndex
+                            ? prefill
+                            : i == decodeIndex ? decode : i == encoderIndex ? encoder : vit);
             if (i != prefillIndex && i != decodeIndex) {
                 pins[i] = null;
                 pin.close();
@@ -159,25 +181,37 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
         response.setSuccess(true);
         routeResponse = response;
         vit = null;
+        encoder = null;
         constructionState = PREPARED;
         return this;
     }
 
-    /** Attach exact capacity without copying assignments or mutating an earlier route identity. */
+    /**
+     * Attach exact capacity without copying assignments or mutating an earlier route identity.
+     */
     static RequestRoute create(
             RequestContext context,
             RequestRoute selected,
             DecodeResources.ReservationHandle reservation) {
+        return create(context, selected, reservation, List.of());
+    }
+
+    static RequestRoute create(
+            RequestContext context,
+            RequestRoute selected,
+            DecodeResources.ReservationHandle reservation,
+            List<String> preemptRequestIds) {
         checkState(selected.constructionState == PREPARED, "capacity requires a prepared route");
         var inputs = Objects.requireNonNull(context.data().getRequest(), "request inputs");
         Objects.requireNonNull(context.data().getSchedulingMetadata(), "scheduling metadata");
         checkArgument(
-                context.data().getRequestId() == selected.requestId(),
+                java.util.Objects.equals(context.data().getRequestId(), selected.requestId()),
                 "assignment belongs to another request");
         checkArgument(
-                reservation == null || reservation.requestId() == inputs.getRequestId(),
+                reservation == null
+                        || java.util.Objects.equals(reservation.requestId(), inputs.getRequestId()),
                 "Decode reservation belongs to another request");
-        return new RequestRoute(context, selected, reservation);
+        return new RequestRoute(context, selected, reservation, preemptRequestIds);
     }
 
     WorkerEndpoint blockedEndpointIfCurrent(PlacementKey blocker) {
@@ -216,7 +250,9 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
         return ctx;
     }
 
-    /** O(1) bound; grouping must not parse or copy serialized GenerateInput payloads. */
+    /**
+     * O(1) bound; grouping must not parse or copy serialized GenerateInput payloads.
+     */
     public long batchPayloadSizeUpperBound() {
         return ctx.data().getGenerateInputSize()
                 + 64L
@@ -237,7 +273,15 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
     }
 
     public Response successResponse(boolean enqueuedByMaster) {
-        return Response.buildSuccessResponse(routeResponse, enqueuedByMaster);
+        var response = Response.buildSuccessResponse(routeResponse, enqueuedByMaster);
+        if (!decodePreemptRequestIds.isEmpty()) {
+            for (ServerStatus status : response.getServerStatus()) {
+                if (status.getRole() == RoleType.DECODE) {
+                    status.setPreemptRequestIds(decodePreemptRequestIds);
+                }
+            }
+        }
+        return response;
     }
 
     public ServerStatus prefill() {
@@ -277,28 +321,36 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
         return expiry <= 0L || nowMs >= expiry;
     }
 
-    /** Normalized priority for the Worker queue index. */
+    /**
+     * Normalized priority for the Worker queue index.
+     */
     public int priority() {
         return ctx.data().getPriority();
     }
 
-    /** Stable FIFO sequence and same-priority tie-break; retained on re-offer. */
+    /**
+     * Stable FIFO sequence and same-priority tie-break; retained on re-offer.
+     */
     public long enqueueSeq() {
         return ctx.data().getWorkerEnqueueSequence();
     }
 
     // -- derived accessors --
 
-    public long requestId() {
+    public String requestId() {
         return ctx.data().getRequestId();
     }
 
-    /** Total sequence length of this request. */
+    /**
+     * Total sequence length of this request.
+     */
     public long seqLen() {
         return ctx.data().getRequest().getHardKvTokens();
     }
 
-    /** Frozen cache-hit tokens on the assigned Prefill generation. */
+    /**
+     * Frozen cache-hit tokens on the assigned Prefill generation.
+     */
     public long hitCache() {
         return prefill.getDebugInfo() == null ? 0L : prefill.getDebugInfo().getHitCacheLen();
     }

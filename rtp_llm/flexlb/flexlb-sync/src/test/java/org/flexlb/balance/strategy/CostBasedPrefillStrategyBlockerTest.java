@@ -9,9 +9,7 @@ import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -32,7 +30,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -72,7 +69,7 @@ class CostBasedPrefillStrategyBlockerTest {
                                 0L,
                                 true,
                                 GroupingPolicy.FIXED_WINDOW,
-                                Comparator.comparingLong(GroupPlanner.Item::requestId),
+                                Comparator.comparing(GroupPlanner.Item::requestId),
                                 new GroupPlanner.Constraints(1, Long.MAX_VALUE, 0L, 0L, 0L),
                                 List.of(),
                                 null),
@@ -82,14 +79,13 @@ class CostBasedPrefillStrategyBlockerTest {
             var projectedWorkers = new AtomicInteger();
             var directory = mock(EndpointRegistry.class);
             var cache = mock(CacheAwareService.class);
-            when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
+            when(cache.findMatchingEngines(any()))
+                    .thenReturn(
+                            org.flexlb.cache.domain.CacheMatchResult.empty(
+                                    org.flexlb.cache.domain.CacheMatchSource.LOCAL_SYNC));
             var strategy =
                     new CostBasedPrefillStrategy(
-                            directory,
-                            cache,
-                            mock(EngineHealthReporter.class),
-                            mock(CacheMetricsReporter.class),
-                            SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()));
+                            directory, cache, mock(EngineHealthReporter.class));
             var entries = new ArrayList<EndpointRegistry.PrefillRoutingEntry>();
             for (int index = 0; index < shape.length(); index++) {
                 char kind = shape.charAt(index);
@@ -129,7 +125,7 @@ class CostBasedPrefillStrategyBlockerTest {
             var result =
                     StrategyTestSupport.select(
                             strategy,
-                            Request.builder().requestId(99L).seqLen(100L).build(),
+                            Request.builder().requestId("99").seqLen(100L).build(),
                             SchedulingMetadata.explicit(50, Long.MAX_VALUE),
                             role,
                             group);
@@ -143,7 +139,13 @@ class CostBasedPrefillStrategyBlockerTest {
             if (expected.isEmpty()) {
                 verifyNoInteractions(cache);
             } else {
-                verify(cache).findMatchingEngines(any(), eq(role), eq(expected));
+                verify(cache)
+                        .findMatchingEngines(
+                                org.mockito.ArgumentMatchers.argThat(
+                                        query ->
+                                                query.roleType() == role
+                                                        && java.util.Objects.equals(
+                                                                query.group(), group)));
             }
             for (int index = 0; index < shape.length(); index++) {
                 if (shape.charAt(index) == 'O') {

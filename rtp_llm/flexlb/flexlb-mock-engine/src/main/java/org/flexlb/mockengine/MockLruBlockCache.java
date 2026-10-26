@@ -47,7 +47,9 @@ import static com.google.common.base.Preconditions.checkState;
  */
 final class MockLruBlockCache {
 
-    /** Default reserve watermark ratio (production reserve_block_num_ ≈ 5% of init available). */
+    /**
+     * Default reserve watermark ratio (production reserve_block_num_ ≈ 5% of init available).
+     */
     static final double DEFAULT_RESERVE_RATIO = 0.05;
 
     private final int totalBlocks;
@@ -61,7 +63,9 @@ final class MockLruBlockCache {
      */
     private final LinkedHashMap<Long, Integer> blocks;
 
-    /** Blocks held by in-flight requests that carry no cache key (growth/empty-bh). */
+    /**
+     * Blocks held by in-flight requests that carry no cache key (growth/empty-bh).
+     */
     private int heldBlocks;
 
     private long evictions;
@@ -297,7 +301,9 @@ final class MockLruBlockCache {
         return changed;
     }
 
-    /** Cancelled request: release references and return held blocks to free (no LRU handover). */
+    /**
+     * Cancelled request: release references and return held blocks to free (no LRU handover).
+     */
     synchronized void release(BlockLease lease) {
         dereference(lease.hitKeys);
         heldBlocks -= lease.nakedBlocks;
@@ -340,7 +346,9 @@ final class MockLruBlockCache {
 
     // ─────────────────────────── observation ───────────────────────────
 
-    /** Total number of LRU evictions (capacity + forced). */
+    /**
+     * Total number of LRU evictions (capacity + forced).
+     */
     synchronized long evictions() {
         return evictions;
     }
@@ -349,7 +357,9 @@ final class MockLruBlockCache {
         return Set.copyOf(blocks.keySet());
     }
 
-    /** Pool size in blocks (== ceil(totalKvTokens / spb)). */
+    /**
+     * Pool size in blocks (== ceil(totalKvTokens / spb)).
+     */
     synchronized int totalBlocks() {
         return totalBlocks;
     }
@@ -362,12 +372,16 @@ final class MockLruBlockCache {
         return totalBlocks - heldBlocks - referencedKeyBlocks();
     }
 
-    /** Blocks held by in-flight requests (keyless allocations + growth). */
+    /**
+     * Blocks held by in-flight requests (keyless allocations + growth).
+     */
     synchronized int heldBlocks() {
         return heldBlocks;
     }
 
-    /** Cache-key blocks referenced by in-flight requests. */
+    /**
+     * Cache-key blocks referenced by in-flight requests.
+     */
     synchronized int referencedKeyBlocks() {
         int referenced = 0;
         for (Integer ref : blocks.values()) {
@@ -378,12 +392,16 @@ final class MockLruBlockCache {
         return referenced;
     }
 
-    /** Fully unallocated blocks. */
+    /**
+     * Fully unallocated blocks.
+     */
     synchronized int freeBlocks() {
         return totalBlocks - heldBlocks - blocks.size();
     }
 
-    /** Reserve watermark in blocks: ceil(reserveRatio x totalBlocks). */
+    /**
+     * Reserve watermark in blocks: ceil(reserveRatio x totalBlocks).
+     */
     synchronized int reserveBlocks() {
         return (int) Math.ceil(totalBlocks * reserveRatio);
     }
@@ -421,7 +439,9 @@ final class MockLruBlockCache {
         }
     }
 
-    /** Family of a gate failure: {@code required + reserve} vs the PHYSICAL pool. */
+    /**
+     * Family of a gate failure: {@code required + reserve} vs the PHYSICAL pool.
+     */
     private AllocationFailure failureFamily(int requiredBlocks) {
         return requiredBlocks + reserveBlocks() > totalBlocks
                 ? AllocationFailure.PERMANENT
@@ -468,7 +488,9 @@ final class MockLruBlockCache {
             this.nakedBlocks = nakedBlocks;
         }
 
-        /** Total blocks this lease pins (hit references + keyless holds). */
+        /**
+         * Total blocks this lease pins (hit references + keyless holds).
+         */
         int totalBlocks() {
             return hitKeys.size() + nakedBlocks;
         }

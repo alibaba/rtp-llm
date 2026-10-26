@@ -17,7 +17,9 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.LongMath.saturatedAdd;
 
-/** Thread-confined frozen-snapshot TTFT projector and invocation-scoped result view. */
+/**
+ * Thread-confined frozen-snapshot TTFT projector and invocation-scoped result view.
+ */
 public final class RouteTimelineProjector implements RequestTimeEstimation.CandidateView {
 
     private static final ThreadLocal<RouteTimelineProjector> PROJECTORS =
@@ -25,7 +27,7 @@ public final class RouteTimelineProjector implements RequestTimeEstimation.Candi
 
     private static final String INVALID_PREDICTION_DETAIL = "PREDICTOR_RETURNED_INVALID_VALUE";
     private final PredictionBoundary predictions = new PredictionBoundary();
-    private long requestId;
+    private String requestId;
     private int priority;
     private long enqueuedAtMs;
     private long expiresAtMs;
@@ -41,15 +43,19 @@ public final class RouteTimelineProjector implements RequestTimeEstimation.Candi
 
     private RouteTimelineProjector() {}
 
-    /** Reusable projector owned by the current planner thread. */
+    /**
+     * Reusable projector owned by the current planner thread.
+     */
     public static RouteTimelineProjector current() {
         return PROJECTORS.get();
     }
 
-    /** Borrowed result: read or copy it before this thread's next projectView call. */
+    /**
+     * Borrowed result: read or copy it before this thread's next projectView call.
+     */
     public RequestTimeEstimation.CandidateView projectView(
             RequestTimeEstimation.Inputs inputs,
-            long requestId,
+            String requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,
@@ -74,10 +80,12 @@ public final class RouteTimelineProjector implements RequestTimeEstimation.Candi
                 false);
     }
 
-    /** Rank known serial work without converting a transient KV wait into a cache miss. */
+    /**
+     * Rank known serial work without converting a transient KV wait into a cache miss.
+     */
     public RequestTimeEstimation.CandidateView projectRankingView(
             RequestTimeEstimation.Inputs inputs,
-            long requestId,
+            String requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,
@@ -104,7 +112,7 @@ public final class RouteTimelineProjector implements RequestTimeEstimation.Candi
 
     private RequestTimeEstimation.CandidateView projectView(
             RequestTimeEstimation.Inputs inputs,
-            long requestId,
+            String requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,
@@ -410,9 +418,9 @@ public final class RouteTimelineProjector implements RequestTimeEstimation.Candi
         }
     }
 
-    private static boolean containsActiveRequest(QueueSnapshot queue, long requestId) {
+    private static boolean containsActiveRequest(QueueSnapshot queue, String requestId) {
         for (GroupPlanner.Item item : queue.activeItems()) {
-            if (item.requestId() == requestId) {
+            if (java.util.Objects.equals(item.requestId(), requestId)) {
                 return true;
             }
         }
@@ -459,7 +467,8 @@ public final class RouteTimelineProjector implements RequestTimeEstimation.Candi
                 Comparator<GroupPlanner.Item> order,
                 long nowMs) {
             for (GroupPlanner.Item item : active) {
-                if (item.requestId() == probe.requestId() && !expiredAt(item, nowMs)) {
+                if (java.util.Objects.equals(item.requestId(), probe.requestId())
+                        && !expiredAt(item, nowMs)) {
                     return null;
                 }
             }
@@ -498,7 +507,9 @@ public final class RouteTimelineProjector implements RequestTimeEstimation.Candi
                     : active.get(position < probeIndex ? position : position - 1);
         }
 
-        /** The planner consumes one cursor at a time; no iterator escapes this projection. */
+        /**
+         * The planner consumes one cursor at a time; no iterator escapes this projection.
+         */
         @Override
         public Iterator<GroupPlanner.Item> iterator() {
             probePosition = Integer.MAX_VALUE;
@@ -751,7 +762,9 @@ public final class RouteTimelineProjector implements RequestTimeEstimation.Candi
         }
     }
 
-    /** Predictor failures preserve the distinction between execution and invalid values. */
+    /**
+     * Predictor failures preserve the distinction between execution and invalid values.
+     */
     private static final class PredictionFailure extends RuntimeException {
         private PredictionFailure(RuntimeException cause) {
             super(cause);

@@ -52,7 +52,7 @@ class LeakCanaryLongRunE2ETest {
                                     .enqueueErrorMessage("reject before admission")
                                     .build());
             h.startAutoPump(10);
-            Response rejected = h.scheduler.submit(h.context(99_999L, 50)).get(5, TimeUnit.SECONDS);
+            Response rejected = h.scheduler.submit(h.context("99999", 50)).get(5, TimeUnit.SECONDS);
             assertEquals(8510, rejected.getCode());
             AutoTpmE2EHarness.await(
                     () -> h.decodeEndpoint(0).resourceSnapshot().reservedCount() == 0,
@@ -80,7 +80,7 @@ class LeakCanaryLongRunE2ETest {
             // Priority ordering and exact terminal cleanup remain active without preemption.
             // 小批次与快速派发维持持续流量。
             h.config.getRequestLifecycle().getRequest().setTimeoutMs(INACTIVITY_TIMEOUT_MS);
-            h.prefillSelector = ctx -> (int) (ctx.data().getRequestId() % 2);
+            h.prefillSelector = ctx -> (int) (Long.parseLong(ctx.data().getRequestId()) % 2);
             h.startAutoPump(10);
 
             JavaMockEngineCluster.FastRpcService faultTarget = h.prefillEngines.get(0);
@@ -117,7 +117,7 @@ class LeakCanaryLongRunE2ETest {
                 }
 
                 int priority = PRIORITIES[(int) (rid % PRIORITIES.length)];
-                futures.add(h.scheduler.submit(h.context(rid++, priority)));
+                futures.add(h.scheduler.submit(h.context(String.valueOf(rid++), priority)));
                 if (elapsed >= nextSettlementCheck) {
                     assertCompletedRequestsSettled(h, completedAt, System.currentTimeMillis());
                     nextSettlementCheck = elapsed + 250;
@@ -220,7 +220,8 @@ class LeakCanaryLongRunE2ETest {
                             if (now - observedAt >= COMPLETION_SETTLEMENT_MS) {
                                 assertTrue(
                                         SchedulerTestSupport.decodeReservation(
-                                                        h.decodeEndpoint(0), requestId)
+                                                        h.decodeEndpoint(0),
+                                                        String.valueOf(requestId))
                                                 == null,
                                         "completed request "
                                                 + requestId

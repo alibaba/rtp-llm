@@ -177,7 +177,9 @@ public class LearningPredictor implements PrefillTimePredictor {
         return inputs;
     }
 
-    /** Append in request order so every prefix retains the full evaluation's rounding. */
+    /**
+     * Append in request order so every prefix retains the full evaluation's rounding.
+     */
     private static void appendInput(double[] inputs, long seqLen, long hitCache) {
         double reuse = hitCache / TOKENS_PER_FEATURE_UNIT;
         double compute = (seqLen - hitCache) / TOKENS_PER_FEATURE_UNIT;

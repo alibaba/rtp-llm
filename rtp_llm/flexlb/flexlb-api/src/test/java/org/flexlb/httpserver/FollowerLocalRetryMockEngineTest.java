@@ -26,7 +26,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Real scheduler, dispatcher and Netty engine RPCs; only engine compute and discovery are simulated. */
+/**
+ * Real scheduler, dispatcher and Netty engine RPCs; only engine compute and discovery are simulated.
+ */
 class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
     @ParameterizedTest
     @ValueSource(strings = {"NOT_MASTER", "SHUTDOWN", "DEAD_BEFORE_CONNECT", "UNRESOLVABLE_HOST"})
@@ -58,10 +60,10 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
                                         + (deadPort - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET));
                 follower.useBoundedConnectFailure(deadPort);
             }
-            long requestId = 91_001L;
+            String requestId = "91001";
             var originalInput =
                     org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
-                            .setRequestId(requestId)
+                            .setRequestId(Long.parseLong(requestId))
                             .setGenerateConfig(
                                     org.flexlb.engine.grpc.EngineRpcService.GenerateConfigPB
                                             .newBuilder()
@@ -70,7 +72,7 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
                             .toByteString();
             var request =
                     FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                            .setRequestId(requestId)
+                            .setRequestId(Long.parseLong(requestId))
                             .setSeqLen(128)
                             .setMaxNewTokens(8)
                             .setNumBeams(1)
@@ -90,7 +92,10 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
                 assertTrue(response.getSuccess(), response.getErrorMessage());
                 assertTrue(response.getEnqueuedByMaster());
                 assertTrue(response.getLifecycle().getBatchId() > 0);
-                assertEquals(requestId, response.getLifecycle().getRequestId());
+                assertEquals(Long.parseLong(requestId), response.getLifecycle().getRequestId());
+                assertEquals(
+                        Long.toString(Long.parseLong(requestId)),
+                        response.getLifecycle().getRequestIdStr());
                 assertEquals(
                         1,
                         mockPrefillWorker.getEnqueueCount(),

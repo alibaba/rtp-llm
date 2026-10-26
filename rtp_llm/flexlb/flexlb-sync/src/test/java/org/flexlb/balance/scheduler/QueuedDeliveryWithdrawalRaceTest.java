@@ -20,9 +20,9 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -46,17 +46,17 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyInt;
-import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Delivery and queued withdrawal arbitrate through the real exact Decode resource ledger. */
+/**
+ * Delivery and queued withdrawal arbitrate through the real exact Decode resource ledger.
+ */
 class QueuedDeliveryWithdrawalRaceTest {
 
     @Test
@@ -128,7 +128,9 @@ class QueuedDeliveryWithdrawalRaceTest {
                         "the losing preparation must leave the route queued");
                 assertEquals(0, fixture.prefill.ownership.stats().batchCount());
                 assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
-                verify(fixture.client, never()).batchEnqueueAsync(anyString(), anyInt(), any());
+                verify(fixture.client, never())
+                        .batchEnqueueAsync(
+                                org.mockito.ArgumentMatchers.anyString(), anyInt(), any());
             } finally {
                 withdrawal.complete(ContextResult.PublicationResult.RESTORED);
             }
@@ -182,7 +184,8 @@ class QueuedDeliveryWithdrawalRaceTest {
             SchedulingTestConfig.useSingleDecision(config);
             var service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
-            when(client.batchEnqueueAsync(anyString(), anyInt(), any()))
+            when(client.batchEnqueueAsync(
+                            org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                     .thenAnswer(
                             call -> {
                                 EngineRpcService.EnqueueBatchRequestPB request =
@@ -222,7 +225,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                             runtime,
                             availability,
                             new DecodeResources.AdmissionCapacity(64L, 90),
-                            mock(RecentCacheKeyTraceReporter.class));
+                            mock(TheoryCacheHitReporter.class));
             runtime.registerScheduler(owner);
             var pStatus =
                     WorkerStatus.createDiscovered(
@@ -283,7 +286,7 @@ class QueuedDeliveryWithdrawalRaceTest {
             context.data()
                     .setRequest(
                             Request.builder()
-                                    .requestId(909001L)
+                                    .requestId("909001")
                                     .rawPriority(50)
                                     .seqLen(16L)
                                     .build());
@@ -291,7 +294,7 @@ class QueuedDeliveryWithdrawalRaceTest {
             context.data()
                     .setGenerateInputPb(
                             EngineRpcService.GenerateInputPB.newBuilder()
-                                    .setRequestId(context.data().getRequestId())
+                                    .setRequestId(Long.parseLong(context.data().getRequestId()))
                                     .addTokenIds(1)
                                     .build()
                                     .toByteString());
@@ -356,7 +359,8 @@ class QueuedDeliveryWithdrawalRaceTest {
             assertTrue(future.get(5, TimeUnit.SECONDS).isSuccess());
             assertEquals(0, prefill.ownership.progress().queueDepth());
             assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
-            verify(client, times(1)).batchEnqueueAsync(anyString(), anyInt(), any());
+            verify(client, times(1))
+                    .batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any());
         }
 
         @Override

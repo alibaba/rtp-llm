@@ -12,7 +12,9 @@ import java.util.stream.LongStream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Twin r6/r7 inputs applied to the real pure planner, with a frozen clock. */
+/**
+ * Twin r6/r7 inputs applied to the real pure planner, with a frozen clock.
+ */
 class GroupPlannerTwinWorkloadTest {
 
     @Test
@@ -28,7 +30,7 @@ class GroupPlannerTwinWorkloadTest {
         assertEquals(8, first.items().size());
         assertEquals(8, second.items().size());
 
-        List<Long> sparseDispatched = new ArrayList<>();
+        List<String> sparseDispatched = new ArrayList<>();
         for (long id = 1; id <= 16; id++) {
             long arrival = (id - 1) * 2_000L;
             List<Item> pending = List.of(item(id, arrival, 128L));
@@ -71,13 +73,13 @@ class GroupPlannerTwinWorkloadTest {
         Constraints limits = new Constraints(8, 2_000L, 22_000_000L, 0L, 400L);
         Selection<Item> result = GroupPlanner.selectWithPrediction(arrivals, limits, null);
 
-        assertEquals(List.of(1L, 2L), result.items().stream().map(Item::requestId).toList());
+        assertEquals(List.of("1", "2"), result.items().stream().map(Item::requestId).toList());
         assertEquals(1_800L, result.paddedTokens());
         assertTrue(result.fitsCompute(2_000L));
         assertEquals("fixed_window_timeout", GroupPlanner.dispatchReason(result, limits, 400L));
     }
 
     private static Item item(long id, long arrivalMs, long tokens) {
-        return new Item(id, 0, id, arrivalMs, Long.MAX_VALUE, tokens, 0L);
+        return new Item(Long.toString(id), 0, id, arrivalMs, Long.MAX_VALUE, tokens, 0L);
     }
 }

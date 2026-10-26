@@ -2,7 +2,9 @@ package org.flexlb.balance.scheduler;
 
 import java.util.Objects;
 
-/** Exact identity only. Transport and release facts are immutable Context snapshots. */
+/**
+ * Exact identity only. Transport and release facts are immutable Context snapshots.
+ */
 public record DeliveryClaim(
         RequestContext owner,
         long sequence,

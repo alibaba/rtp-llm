@@ -25,9 +25,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
-import static com.google.common.base.Preconditions.checkArgument;
-
-/** 与 Python config.py 共享 JSON 配置契约。 */
+/**
+ * 与 Python config.py 共享 JSON 配置契约。
+ */
 @JsonAutoDetect(
         fieldVisibility = JsonAutoDetect.Visibility.ANY,
         setterVisibility = JsonAutoDetect.Visibility.NONE)
@@ -47,7 +47,9 @@ final class TraceConfig {
                     "schedule_delay_ms",
                     "http_timeout_ms");
 
-    /** 需要下界（> 0）与 int 范围检查的字段。 */
+    /**
+     * 需要下界（> 0）与 int 范围检查的字段。
+     */
     private static final List<String> INT_FIELDS =
             List.of(
                     "max_queue_size",
@@ -55,7 +57,9 @@ final class TraceConfig {
                     "schedule_delay_ms",
                     "http_timeout_ms");
 
-    /** 禁止被 headers 覆盖的 HTTP 头。 */
+    /**
+     * 禁止被 headers 覆盖的 HTTP 头。
+     */
     private static final Set<String> RESERVED =
             Set.of(
                     "host",
@@ -170,7 +174,9 @@ final class TraceConfig {
         return config;
     }
 
-    /** 安全解析：不附加原始异常，避免 Jackson 消息带出 JSON 内容与凭证。 */
+    /**
+     * 安全解析：不附加原始异常，避免 Jackson 消息带出 JSON 内容与凭证。
+     */
     private static JsonNode decode(String raw) {
         JsonNode node;
         try {
@@ -199,7 +205,9 @@ final class TraceConfig {
         }
     }
 
-    /** Normalize accepted scalar spellings before binding so Jackson defaults cannot change the contract. */
+    /**
+     * Normalize accepted scalar spellings before binding so Jackson defaults cannot change the contract.
+     */
     private static void normalizeScalars(ObjectNode root, boolean enabled) {
         root.put("enabled", enabled);
         for (String name : INT_FIELDS) {
@@ -254,7 +262,9 @@ final class TraceConfig {
         }
     }
 
-    /** headers 必须是对象，且每个值必须是字符串（Map&lt;String, String&gt; 会被 Jackson 放宽）。 */
+    /**
+     * headers 必须是对象，且每个值必须是字符串（Map&lt;String, String&gt; 会被 Jackson 放宽）。
+     */
     private static void validateHeadersShape(JsonNode root) {
         JsonNode node = root.get("headers");
         if (node == null) {
@@ -288,7 +298,9 @@ final class TraceConfig {
         }
     }
 
-    /** 缺省关闭；显式 null 按配置错误处理。 */
+    /**
+     * 缺省关闭；显式 null 按配置错误处理。
+     */
     private static Boolean lenientEnabled(JsonNode root) {
         JsonNode node = root.get("enabled");
         if (node == null) {
@@ -318,7 +330,9 @@ final class TraceConfig {
         throw new ConfigException("enabled", "expected_boolean");
     }
 
-    /** 直接反序列化；Jackson 的异常按字段与目标类型映射回契约错误码。 */
+    /**
+     * 直接反序列化；Jackson 的异常按字段与目标类型映射回契约错误码。
+     */
     private static TraceConfig map(JsonNode root) {
         try {
             TraceConfig config = MAPPER.treeToValue(root, TraceConfig.class);
@@ -425,15 +439,16 @@ final class TraceConfig {
         try {
             URI uri = new URI(endpoint);
             String scheme = uri.getScheme();
-            checkArgument(
-                    ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))
-                            && uri.getHost() != null
-                            && uri.getRawUserInfo() == null
-                            && uri.getRawFragment() == null
-                            && uri.getPort() != 0
-                            && uri.getPort() <= 65535
-                            && !uri.getRawAuthority().endsWith(":")
-                            && endpoint.chars().noneMatch(c -> c <= 32 || c >= 127));
+            if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))
+                    || uri.getHost() == null
+                    || uri.getRawUserInfo() != null
+                    || uri.getRawFragment() != null
+                    || uri.getPort() == 0
+                    || uri.getPort() > 65535
+                    || uri.getRawAuthority().endsWith(":")
+                    || endpoint.chars().anyMatch(c -> c <= 32 || c >= 127)) {
+                throw new IllegalArgumentException();
+            }
         } catch (Exception ignored) {
             throw new ConfigException("endpoint", "invalid_endpoint");
         }

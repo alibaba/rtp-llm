@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -142,7 +142,7 @@ class DeliveryStopTest {
                         claim.owner(),
                         1L,
                         new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
-                                1L, 41L, 1L),
+                                1L, "41", 1L),
                         new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
         try {
             var preemption =
@@ -210,7 +210,7 @@ class DeliveryStopTest {
                         claim.owner(),
                         1L,
                         new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
-                                1L, 41L, 1L),
+                                1L, "41", 1L),
                         new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
         try {
             assertEquals(
@@ -270,7 +270,7 @@ class DeliveryStopTest {
                             claim.owner(),
                             1L,
                             new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
-                                    1L, 41L, 1L),
+                                    1L, "41", 1L),
                             new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
             var dispatcher =
                     new DeliveryDispatcher(
@@ -454,7 +454,7 @@ class DeliveryStopTest {
                             claim.owner(),
                             1L,
                             new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
-                                    1L, 41L, 1L),
+                                    1L, "41", 1L),
                             new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
             var answer =
                     cleanup.preempt(
@@ -479,6 +479,7 @@ class DeliveryStopTest {
 
     private static DeliveryClaim claim() {
         var context = mock(RequestContext.class, RETURNS_DEEP_STUBS);
+        when(context.data().getRequestId()).thenReturn("41");
         var claim =
                 new DeliveryClaim(
                         context, 1, mock(RequestRoute.class), DeliveryClaimKind.BATCH_ENQUEUE, 17);

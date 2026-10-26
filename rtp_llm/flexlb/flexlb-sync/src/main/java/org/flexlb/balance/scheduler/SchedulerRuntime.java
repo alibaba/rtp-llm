@@ -6,7 +6,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Failures;
@@ -33,7 +33,9 @@ import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkState;
 
-/** Owns scheduler executors, delivery capacity, metrics, maintenance, and ordered shutdown. */
+/**
+ * Owns scheduler executors, delivery capacity, metrics, maintenance, and ordered shutdown.
+ */
 @Component
 public final class SchedulerRuntime implements RequestTaskScheduler {
 
@@ -141,7 +143,9 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         return requests;
     }
 
-    /** Offloads effects; Context and endpoint owners arbitrate concurrent work, not executor order. */
+    /**
+     * Offloads effects; Context and endpoint owners arbitrate concurrent work, not executor order.
+     */
     @Override
     public void executeRequestWork(RequestContext context, Runnable work) {
         Objects.requireNonNull(work, "work");
@@ -150,7 +154,9 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         }
     }
 
-    /** Isolates stop events while retaining the same ownership and shutdown accounting. */
+    /**
+     * Isolates stop events while retaining the same ownership and shutdown accounting.
+     */
     void executeStopWork(RequestContext context, Runnable work) {
         Objects.requireNonNull(work, "work");
         try (var registration = registerRequestWork(context)) {
@@ -159,7 +165,9 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         }
     }
 
-    /** Register before publishing state that obliges a later effect or local cleanup. */
+    /**
+     * Register before publishing state that obliges a later effect or local cleanup.
+     */
     WorkRegistration registerRequestWork(RequestContext context) {
         WorkRegistration registration = tryRegisterRequestWork(context);
         checkState(registration != null, "request work is closed");
@@ -177,7 +185,9 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         return new WorkRegistration(context);
     }
 
-    /** Counts both the submitting source and its optional task, including the handoff between them. */
+    /**
+     * Counts both the submitting source and its optional task, including the handoff between them.
+     */
     final class WorkRegistration implements AutoCloseable {
         private final RequestContext context;
         private ExecutorService executor = requestWorkers;
@@ -386,14 +396,21 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         return !requests.isStopping() && !requests.isClosed();
     }
 
-    /** 后台清理、准入或续接失败在此汇总；停服时统一报告，不执行 Future 监听或关闭流程。 */
+    /**
+     * 后台清理、准入或续接失败在此汇总；停服时统一报告，不执行 Future 监听或关闭流程。
+     */
     void recordFailure(Throwable cause) {
         synchronized (schedulerLock) {
             failure = Failures.append(failure, cause);
         }
+        org.flexlb.metric.SafeFlexMonitor.run(
+                "request lifecycle failure",
+                () -> requestReporter.reportLifecycleFailure("terminal_cleanup"));
     }
 
-    /** Startup wiring: register the placement owner once for ordered shutdown. */
+    /**
+     * Startup wiring: register the placement owner once for ordered shutdown.
+     */
     void registerScheduler(AbstractRequestScheduler scheduler) {
         synchronized (schedulerLock) {
             checkState(isAccepting(), "scheduler is closed");
@@ -449,6 +466,8 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
                                 .getInternalRuntime()
                                 .getBatchDispatchCompletionThreads());
         this.timer = new ExpirationTimer(requests);
+        deliveryReporter.registerDispatchExecutorMetrics();
+        deliveries.reportExecutorMetrics(deliveryReporter);
     }
 
     private static final long TERMINAL_RETENTION_MS = 10_000L;
@@ -480,8 +499,13 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
             return;
         }
         try {
+            deliveries.reportExecutorMetrics(deliveryReporter);
+            var tracked = requests.trackedRequestStats();
             deliveryReporter.reportSchedulerInflight(
-                    requests.liveRequestCount(), requests.oldestLiveRequestAgeMs());
+                    tracked.generationRequests(), tracked.oldestAgeMs());
+            deliveryReporter.reportTrackedRequestCount(
+                    RoleType.PREFILL, tracked.generationRequests());
+            deliveryReporter.reportTrackedRequestCount(RoleType.ENCODER, tracked.encoderRequests());
         } catch (RuntimeException failure) {
             warnIsolated("Failed to report scheduler inflight metrics", failure);
         }
@@ -615,7 +639,9 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         Failures.rethrow(failure, "request executors failed to close");
     }
 
-    /** Spring 停服入口：停止接收、等待请求资源结算，再关闭共享执行设施。 */
+    /**
+     * Spring 停服入口：停止接收、等待请求资源结算，再关闭共享执行设施。
+     */
     @PreDestroy
     void shutdown() {
         checkState(
@@ -632,7 +658,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         }
         Throwable firstFailure = null;
         if (scheduler != null) {
-            firstFailure = Failures.run(firstFailure, scheduler::closePlacement);
+            firstFailure = Failures.run(firstFailure, scheduler::closeAllPlacement);
             firstFailure = Failures.run(firstFailure, this::awaitAdmissions);
         }
         for (var context : requests.snapshotActive()) {

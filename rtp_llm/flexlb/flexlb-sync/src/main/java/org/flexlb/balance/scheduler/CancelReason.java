@@ -1,8 +1,11 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 
-/** First cause asking the scheduling master to cancel a request. */
+/**
+ * First cause asking the scheduling master to cancel a request.
+ */
 public enum CancelReason {
     CLIENT_CANCELLED("request cancelled by client"),
     DEADLINE_EXCEEDED("request deadline exceeded"),
@@ -19,7 +22,10 @@ public enum CancelReason {
         return message;
     }
 
-    public EngineRpcService.CancelRequestPB toRequest(long requestId) {
+    /**
+     * Build Engine cancellation without normalizing or rounding the business request ID.
+     */
+    public EngineRpcService.CancelRequestPB toRequest(String requestId) {
         var reason =
                 switch (this) {
                     case CLIENT_CANCELLED ->
@@ -35,7 +41,7 @@ public enum CancelReason {
                                     .REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED;
                 };
         return EngineRpcService.CancelRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestId(RequestId.toEngineRequestId(requestId))
                 .setReason(reason)
                 .build();
     }

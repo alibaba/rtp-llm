@@ -9,7 +9,9 @@ import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
 
 import java.io.IOException;
 
-/** Validated delivery input with encoded tokens, rather than a decoded token array. */
+/**
+ * Delivery input with validated token bytes that stay encoded until Engine decoding.
+ */
 final class GenerateInputPayload {
     private final GenerateInputPB wireMessage;
 
@@ -68,7 +70,9 @@ final class GenerateInputPayload {
         }
     }
 
-    /** Wire representation only: token accessors are intentionally empty until Engine decoding. */
+    /**
+     * Wire representation only: token accessors are intentionally empty until Engine decoding.
+     */
     GenerateInputPB.Builder toWireBuilder() {
         return wireMessage.toBuilder();
     }

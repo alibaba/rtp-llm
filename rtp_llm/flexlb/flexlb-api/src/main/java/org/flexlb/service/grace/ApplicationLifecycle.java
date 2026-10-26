@@ -17,7 +17,9 @@ import org.springframework.stereotype.Component;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
-/** Owns the fixed application online, health and graceful-shutdown workflow. */
+/**
+ * Owns the fixed application online, health and graceful-shutdown workflow.
+ */
 @Slf4j
 @Component
 public class ApplicationLifecycle implements ApplicationContextAware {
@@ -37,7 +39,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         owningContext = context;
     }
 
-    private volatile boolean warmUpFinished;
+    private final org.flexlb.listener.ApplicationWarmupState warmupState;
     private volatile boolean shutdownReceived;
     private volatile boolean shutdownCompletedSuccessfully;
 
@@ -46,8 +48,9 @@ public class ApplicationLifecycle implements ApplicationContextAware {
             MasterStatusService consistency,
             FlexlbGrpcServer grpcServer,
             GracefulLifecycleReporter reporter,
-            Environment environment) {
-        this(consistency, grpcServer, reporter, environment, DEFAULT_WARM_UP_WAIT_MS);
+            Environment environment,
+            org.flexlb.listener.ApplicationWarmupState warmupState) {
+        this(consistency, grpcServer, reporter, environment, warmupState, DEFAULT_WARM_UP_WAIT_MS);
     }
 
     ApplicationLifecycle(
@@ -55,11 +58,13 @@ public class ApplicationLifecycle implements ApplicationContextAware {
             FlexlbGrpcServer grpcServer,
             GracefulLifecycleReporter reporter,
             Environment environment,
+            org.flexlb.listener.ApplicationWarmupState warmupState,
             long warmUpWaitMs) {
         this.consistency = consistency;
         this.grpcServer = grpcServer;
         this.reporter = reporter;
         this.environment = environment;
+        this.warmupState = warmupState;
         this.warmUpWaitMs = warmUpWaitMs;
     }
 
@@ -70,7 +75,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         }
         shutdownReceived = false;
         shutdownCompletedSuccessfully = false;
-        warmUpFinished = false;
+        warmupState.setWarmupFinished(false);
 
         long consistencyStartedAt = System.currentTimeMillis();
         try {
@@ -93,7 +98,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
             Thread.currentThread().interrupt();
             log.error("application warm up interrupted", e);
         } finally {
-            warmUpFinished = true;
+            warmupState.setWarmupFinished(true);
         }
     }
 
@@ -137,6 +142,6 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     }
 
     public boolean isHealthy() {
-        return warmUpFinished && !shutdownReceived;
+        return warmupState.isWarmupFinished() && !shutdownReceived;
     }
 }

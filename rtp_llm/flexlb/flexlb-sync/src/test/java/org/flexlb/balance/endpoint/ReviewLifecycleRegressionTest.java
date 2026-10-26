@@ -3,7 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -61,7 +61,7 @@ class ReviewLifecycleRegressionTest {
         EndpointRegistry registry = registry();
         WorkerStatus status =
                 EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8081);
-        String address = status.getIpPort();
+        String address = status.getLogicalIpPort();
         registry.currentOrDiscover(RoleType.PREFILL, address, () -> status);
         EndpointTestSupport.publishEndpoint(registry, RoleType.PREFILL, address, status);
         CacheAwareService cache = mock(CacheAwareService.class);
@@ -113,7 +113,8 @@ class ReviewLifecycleRegressionTest {
         EndpointRegistry registry = registry();
         WorkerStatus status = EndpointTestSupport.workerStatus(role, "127.0.0.1", 8080, 8081);
         WorkerEndpoint endpoint =
-                EndpointTestSupport.publishEndpoint(registry, role, status.getIpPort(), status);
+                EndpointTestSupport.publishEndpoint(
+                        registry, role, status.getLogicalIpPort(), status);
         ReentrantLock lock =
                 role == RoleType.PREFILL
                         ? ((PrefillEndpoint) endpoint).ownership.lock

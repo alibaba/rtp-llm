@@ -6,8 +6,8 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.SchedulerConfig;
-import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -59,7 +59,7 @@ class SchedulerRuntimeTest {
                         f.runtime, "requestRecovery", rejectedRecovery);
             }
             f.runtime.executeRequestWork(
-                    RequestProtocolTestSupport.context(f.config, 9110L),
+                    RequestProtocolTestSupport.context(f.config, "9110"),
                     () -> {
                         executions.incrementAndGet();
                         completed.complete(Thread.currentThread());
@@ -85,7 +85,7 @@ class SchedulerRuntimeTest {
         try (var f = new Fixture(false)) {
             var scheduler =
                     (AbstractRequestScheduler) SchedulerTestSupport.initializedScheduler(f.runtime);
-            var context = RequestProtocolTestSupport.context(f.config, 9103L);
+            var context = RequestProtocolTestSupport.context(f.config, "9103");
             var result = RequestProtocolTestSupport.register(scheduler, context);
             var entered = new java.util.concurrent.CountDownLatch(1);
             var release = new java.util.concurrent.CountDownLatch(1);
@@ -144,7 +144,7 @@ class SchedulerRuntimeTest {
                     .data()
                     .setRequest(
                             org.flexlb.dao.loadbalance.Request.builder()
-                                    .requestId(991L)
+                                    .requestId("991")
                                     .seqLen(1L)
                                     .build());
             wrongMode
@@ -210,7 +210,7 @@ class SchedulerRuntimeTest {
                                 mock(EngineGrpcClient.class)));
         var scheduler = mock(AbstractRequestScheduler.class);
         var expected = new IllegalStateException("placement close failed");
-        doThrow(expected).when(scheduler).closePlacement();
+        doThrow(expected).when(scheduler).closeAllPlacement();
         var deliveries = spy(runtime.deliveries());
         org.springframework.test.util.ReflectionTestUtils.setField(
                 runtime, "deliveries", deliveries);
@@ -219,7 +219,7 @@ class SchedulerRuntimeTest {
         assertSame(expected, assertThrows(IllegalStateException.class, runtime::shutdown));
 
         var order = inOrder(scheduler, runtime, deliveries, endpoints);
-        order.verify(scheduler).closePlacement();
+        order.verify(scheduler).closeAllPlacement();
         order.verify(runtime).awaitAdmissions();
         order.verify(deliveries).awaitDeliveries();
         order.verify(endpoints).close();
@@ -231,7 +231,7 @@ class SchedulerRuntimeTest {
         try (var f = new Fixture()) {
             var scheduler =
                     (AbstractRequestScheduler) SchedulerTestSupport.initializedScheduler(f.runtime);
-            var accepted = RequestProtocolTestSupport.context(f.config, 9101L);
+            var accepted = RequestProtocolTestSupport.context(f.config, "9101");
             var result = RequestProtocolTestSupport.register(scheduler, accepted);
             assertFalse(result.isDone());
 
@@ -240,7 +240,7 @@ class SchedulerRuntimeTest {
             assertFalse(f.runtime.isAccepting());
             assertFalse(f.runtime.requests().isClosed());
             assertSame(accepted, f.runtime.requests().findActive(accepted.data().getRequestId()));
-            var rejected = RequestProtocolTestSupport.context(f.config, 9102L);
+            var rejected = RequestProtocolTestSupport.context(f.config, "9102");
             var rejectedResult = RequestProtocolTestSupport.register(scheduler, rejected);
             assertFalse(rejectedResult.join().isSuccess());
             assertNull(rejected.data().getScheduler());
@@ -279,13 +279,13 @@ class SchedulerRuntimeTest {
                             f.runtime,
                             f.config,
                             SchedulingTestConfig.capacity(f.config),
-                            mock(RecentCacheKeyTraceReporter.class));
+                            mock(TheoryCacheHitReporter.class));
             var installedResult =
                     RequestProtocolTestSupport.register(
-                            installed, RequestProtocolTestSupport.context(f.config, 9103L));
+                            installed, RequestProtocolTestSupport.context(f.config, "9103"));
             var otherResult =
                     RequestProtocolTestSupport.register(
-                            other, RequestProtocolTestSupport.context(f.config, 9104L));
+                            other, RequestProtocolTestSupport.context(f.config, "9104"));
 
             f.runtime.shutdown();
 
@@ -307,12 +307,12 @@ class SchedulerRuntimeTest {
                                     f.runtime,
                                     f.config,
                                     SchedulingTestConfig.capacity(f.config),
-                                    mock(RecentCacheKeyTraceReporter.class)));
-            var otherContext = RequestProtocolTestSupport.context(f.config, 9105L);
+                                    mock(TheoryCacheHitReporter.class)));
+            var otherContext = RequestProtocolTestSupport.context(f.config, "9105");
             var otherResult = RequestProtocolTestSupport.register(other, otherContext);
             var installedResult =
                     RequestProtocolTestSupport.register(
-                            installed, RequestProtocolTestSupport.context(f.config, 9106L));
+                            installed, RequestProtocolTestSupport.context(f.config, "9106"));
             var expected = new IllegalStateException("cancellation failed");
             doThrow(expected).when(other).cancel(otherContext, 0L, CancelReason.SHUTDOWN);
 
@@ -349,8 +349,8 @@ class SchedulerRuntimeTest {
                                     runtime,
                                     config,
                                     SchedulingTestConfig.capacity(config),
-                                    mock(RecentCacheKeyTraceReporter.class)));
-            var context = RequestProtocolTestSupport.context(config, 9107L);
+                                    mock(TheoryCacheHitReporter.class)));
+            var context = RequestProtocolTestSupport.context(config, "9107");
             var result = RequestProtocolTestSupport.register(owner, context);
             var expected =
                     new IllegalStateException("cancellation failed before scheduler registration");
@@ -431,7 +431,7 @@ class SchedulerRuntimeTest {
         try (var f = new Fixture(false)) {
             var owner =
                     (AbstractRequestScheduler) SchedulerTestSupport.initializedScheduler(f.runtime);
-            var context = RequestProtocolTestSupport.context(f.config, 9201L);
+            var context = RequestProtocolTestSupport.context(f.config, "9201");
             var future = RequestProtocolTestSupport.register(owner, context);
             var observed = new java.util.concurrent.CompletableFuture<Throwable>();
             var caller = Thread.currentThread();
@@ -547,7 +547,7 @@ class SchedulerRuntimeTest {
                             new PlacementAvailability(),
                             SchedulingTestConfig.capacity(config),
                             org.mockito.Mockito.mock(
-                                    org.flexlb.service.RecentCacheKeyTraceReporter.class)));
+                                    org.flexlb.service.TheoryCacheHitReporter.class)));
         }
 
         public void close() {

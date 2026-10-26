@@ -5,7 +5,9 @@ import java.util.List;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Thread-local scalar bindings; immutable items supply aggregate bindings directly. */
+/**
+ * Thread-local scalar bindings; immutable items supply aggregate bindings directly.
+ */
 final class PrefillTimeVariableBindings {
 
     private static final ThreadLocal<BindingContext> BINDING_CTX =

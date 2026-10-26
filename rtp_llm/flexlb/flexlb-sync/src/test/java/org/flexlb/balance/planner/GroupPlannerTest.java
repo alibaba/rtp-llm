@@ -27,13 +27,15 @@ class GroupPlannerTest {
 
     private static final long BIG = 1_000_000L;
 
-    /** Each candidate group is predicted at exactly 100ms per member. */
+    /**
+     * Each candidate group is predicted at exactly 100ms per member.
+     */
     private static final GroupPlanner.PrefixPrediction<Item> HUNDRED_PER_MEMBER =
             (added, items) -> 100.0 * items.size();
 
     private static Item item(long id, long seqLen, long enqueuedAtMs) {
         return new Item(
-                id, /* priority */
+                Long.toString(id), /* priority */
                 0, /* enqueueSeq */
                 id,
                 enqueuedAtMs, /* expiresAtMs */
@@ -235,25 +237,26 @@ class GroupPlannerTest {
         @Test
         void acceptsHitCacheAtBothBounds() {
             assertEquals(0L, item(1L, 100L, 0L).hitCache());
-            assertEquals(100L, new Item(1L, 0, 1L, 0L, BIG, 100L, 100L).hitCache());
+            assertEquals(100L, new Item("1", 0, 1L, 0L, BIG, 100L, 100L).hitCache());
         }
 
         @Test
         void rejectsNegativeSeqLen() {
             assertThrows(
-                    IllegalArgumentException.class, () -> new Item(1L, 0, 1L, 0L, BIG, -1L, 0L));
+                    IllegalArgumentException.class, () -> new Item("1", 0, 1L, 0L, BIG, -1L, 0L));
         }
 
         @Test
         void rejectsHitCacheAboveSeqLen() {
             assertThrows(
-                    IllegalArgumentException.class, () -> new Item(1L, 0, 1L, 0L, BIG, 100L, 101L));
+                    IllegalArgumentException.class,
+                    () -> new Item("1", 0, 1L, 0L, BIG, 100L, 101L));
         }
 
         @Test
         void rejectsNegativeHitCache() {
             assertThrows(
-                    IllegalArgumentException.class, () -> new Item(1L, 0, 1L, 0L, BIG, 100L, -1L));
+                    IllegalArgumentException.class, () -> new Item("1", 0, 1L, 0L, BIG, 100L, -1L));
         }
     }
 
@@ -382,7 +385,8 @@ class GroupPlannerTest {
                             items, new Constraints(3, BIG, BIG, 0L, 300L), null);
 
             assertEquals(
-                    List.of(1L, 2L, 3L), selection.items().stream().map(Item::requestId).toList());
+                    List.of("1", "2", "3"),
+                    selection.items().stream().map(Item::requestId).toList());
             assertEquals(3, selection.items().size());
             assertEquals(30L, selection.paddedTokens());
             assertEquals(30L, selection.kvTokens());
@@ -399,7 +403,7 @@ class GroupPlannerTest {
             Selection<Item> selection =
                     GroupPlanner.selectWithPrediction(
                             items, new Constraints(1, BIG, BIG, 0L, 300L), null);
-            assertEquals(List.of(1L), selection.items().stream().map(Item::requestId).toList());
+            assertEquals(List.of("1"), selection.items().stream().map(Item::requestId).toList());
         }
 
         @Test
@@ -455,7 +459,7 @@ class GroupPlannerTest {
             Selection<Item> selection =
                     GroupPlanner.selectWithPrediction(
                             items, new Constraints(10, BIG, BIG, 150L, 300L), HUNDRED_PER_MEMBER);
-            assertEquals(List.of(1L), selection.items().stream().map(Item::requestId).toList());
+            assertEquals(List.of("1"), selection.items().stream().map(Item::requestId).toList());
             assertTrue(selection.predictionBoundaryTriggered());
             assertEquals(OptionalDouble.of(100.0), selection.selectedPredictionMs());
         }
@@ -478,7 +482,8 @@ class GroupPlannerTest {
                                         default -> 50.0;
                                     });
 
-            assertEquals(List.of(1L, 2L), selection.items().stream().map(Item::requestId).toList());
+            assertEquals(
+                    List.of("1", "2"), selection.items().stream().map(Item::requestId).toList());
             assertTrue(selection.predictionBoundaryTriggered());
             assertEquals(OptionalDouble.of(120.0), selection.selectedPredictionMs());
         }
@@ -624,7 +629,7 @@ class GroupPlannerTest {
                             List.of(item(1L, 1000L, 1000L)),
                             new Constraints(10, /* batchTokenCapacity */ 100L, BIG, 0L, 300L),
                             null);
-            assertEquals(List.of(1L), selection.items().stream().map(Item::requestId).toList());
+            assertEquals(List.of("1"), selection.items().stream().map(Item::requestId).toList());
             assertEquals(1000L, selection.paddedTokens());
         }
 
@@ -636,7 +641,7 @@ class GroupPlannerTest {
                             List.of(item(1L, 1000L, 1000L)),
                             new Constraints(10, BIG, /* batchKvCapacity */ 100L, 0L, 300L),
                             null);
-            assertEquals(List.of(1L), selection.items().stream().map(Item::requestId).toList());
+            assertEquals(List.of("1"), selection.items().stream().map(Item::requestId).toList());
             assertEquals(1000L, selection.kvTokens());
         }
 
@@ -649,7 +654,7 @@ class GroupPlannerTest {
                             List.of(item(1L, 50L, 1000L), item(2L, 5000L, 2000L)),
                             new Constraints(10, /* cap */ 1000L, BIG, 0L, 300L),
                             null);
-            assertEquals(List.of(1L), selection.items().stream().map(Item::requestId).toList());
+            assertEquals(List.of("1"), selection.items().stream().map(Item::requestId).toList());
         }
 
         @Test
@@ -664,7 +669,7 @@ class GroupPlannerTest {
             String reason = GroupPlanner.dispatchReason(plan, constraints, 1300L);
             assertTrue(reason != null);
             assertEquals(GroupPlanner.FIXED_WINDOW_TIMEOUT, reason);
-            assertEquals(List.of(1L), plan.items().stream().map(Item::requestId).toList());
+            assertEquals(List.of("1"), plan.items().stream().map(Item::requestId).toList());
         }
 
         @Test

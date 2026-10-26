@@ -40,7 +40,9 @@ public record CapacityBoundary(
                 null);
     }
 
-    /** Park delivery without restricting publication into the worker queue. */
+    /**
+     * Park delivery without restricting publication into the worker queue.
+     */
     public static CapacityBoundary deliveryUnavailable(Resource resource) {
         return new CapacityBoundary(
                 Status.UNAVAILABLE, Objects.requireNonNull(resource, "resource"), null, null);
@@ -61,7 +63,9 @@ public record CapacityBoundary(
         FAILED
     }
 
-    /** Shared capacity failure descriptions for direct admission and queued delivery. */
+    /**
+     * Shared capacity failure descriptions for direct admission and queued delivery.
+     */
     @lombok.Getter
     @lombok.RequiredArgsConstructor
     public enum Resource {
@@ -73,7 +77,9 @@ public record CapacityBoundary(
         private final String description;
     }
 
-    /** Either an accepted capability/value or one fully materialized boundary. */
+    /**
+     * Either an accepted capability/value or one fully materialized boundary.
+     */
     public record Attempt<T>(T value, CapacityBoundary boundary) {
 
         public Attempt {

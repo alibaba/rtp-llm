@@ -50,7 +50,9 @@ public class Response {
     @JsonProperty("admission_reject_reason")
     private AdmissionRejectReason admissionRejectReason = AdmissionRejectReason.UNSPECIFIED;
 
-    /** Deep-copy all response data, preserving null collections and entries. */
+    /**
+     * Deep-copy all response data, preserving null collections and entries.
+     */
     public static Response copyOf(Response source) {
         if (source == null) {
             return null;
@@ -80,7 +82,9 @@ public class Response {
         return copy;
     }
 
-    /** Build a successful delivery response without mutating the original route response. */
+    /**
+     * Build a successful delivery response without mutating the original route response.
+     */
     public static Response buildSuccessResponse(Response routeResponse, boolean enqueuedByMaster) {
         Response success = copyOf(java.util.Objects.requireNonNull(routeResponse, "routeResponse"));
         success.success = true;

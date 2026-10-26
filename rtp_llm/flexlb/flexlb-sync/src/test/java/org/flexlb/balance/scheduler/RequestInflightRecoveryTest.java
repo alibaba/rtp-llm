@@ -19,9 +19,9 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -45,7 +45,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -70,7 +69,8 @@ class RequestInflightRecoveryTest {
                             : DeliveryResult.delivered());
             if (!rejectedBeforeTerminal) {
                 assertTrue(f.route.future().get(2, TimeUnit.SECONDS).isSuccess());
-                f.owner.cancel(Fixture.REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED);
+                f.owner.cancel(
+                        String.valueOf(Fixture.REQUEST_ID), 0L, CancelReason.CLIENT_CANCELLED);
             } else {
                 assertFalse(f.route.future().get(2, TimeUnit.SECONDS).isSuccess());
             }
@@ -212,7 +212,7 @@ class RequestInflightRecoveryTest {
             DecodeResources.ReservationHandle occupyingD1;
             try (var pin = f.decode.tryPinGeneration()) {
                 occupyingD1 =
-                        f.decode.tryReserveQueuedRequest(pin, 201L, 16L, 32L, 50, null).handle();
+                        f.decode.tryReserveQueuedRequest(pin, "201", 16L, 32L, 50, null).handle();
             }
             assertNotNull(occupyingD1);
             var occupied = f.decode.acquireDispatchPermit(occupyingD1, f.capacity);
@@ -226,11 +226,11 @@ class RequestInflightRecoveryTest {
                 DecodeResources.ReservationHandle reservedD2;
                 try (var pin = d2.tryPinGeneration()) {
                     reservedD2 =
-                            d2.tryReserveQueuedRequest(pin, 302L, 16L, 32L, 50, f.capacity)
+                            d2.tryReserveQueuedRequest(pin, "302", 16L, 32L, 50, f.capacity)
                                     .handle();
                 }
                 assertNotNull(reservedD2);
-                var behindHead = f.enqueue(302L, d2, reservedD2);
+                var behindHead = f.enqueue("302", d2, reservedD2);
                 var state =
                         (org.flexlb.balance.endpoint.PrefillState)
                                 ReflectionTestUtils.getField(f.prefill, "ownership");
@@ -268,7 +268,7 @@ class RequestInflightRecoveryTest {
                 bPermit.handle().release();
                 try (var pin = d2.tryPinGeneration()) {
                     assertNull(
-                            d2.tryReserveQueuedRequest(pin, 303L, 16L, 32L, 50, f.capacity)
+                            d2.tryReserveQueuedRequest(pin, "303", 16L, 32L, 50, f.capacity)
                                     .handle(),
                             "New C cannot reserve D2 while queued B holds its sole placement slot");
                 }
@@ -301,6 +301,8 @@ class RequestInflightRecoveryTest {
         Fixture() {
             config = SchedulingTestConfig.batchConfig();
             SchedulingTestConfig.useBatchDispatcher(config);
+            config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
+            config.getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(90L);
             var service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
             var reporter = mock(DeliveryMetricsReporter.class);
@@ -309,7 +311,7 @@ class RequestInflightRecoveryTest {
                             service,
                             reporter,
                             mock(RequestSchedulerReporter.class),
-                            mock(RecentCacheKeyTraceReporter.class));
+                            mock(TheoryCacheHitReporter.class));
             endpoints =
                     new EndpointRegistry(
                             service,
@@ -327,11 +329,12 @@ class RequestInflightRecoveryTest {
             decode = (DecodeEndpoint) publish(RoleType.DECODE, "127.0.0.2");
             try (var pin = decode.tryPinGeneration()) {
                 reservation =
-                        decode.tryReserveQueuedRequest(pin, REQUEST_ID, 16L, 32L, 50, capacity)
+                        decode.tryReserveQueuedRequest(
+                                        pin, String.valueOf(REQUEST_ID), 16L, 32L, 50, capacity)
                                 .handle();
             }
             assertNotNull(reservation);
-            context = RequestProtocolTestSupport.context(config, REQUEST_ID);
+            context = RequestProtocolTestSupport.context(config, String.valueOf(REQUEST_ID));
             var future = RequestProtocolTestSupport.register(owner, context);
             context.data().setFuture(future);
             route =
@@ -350,11 +353,11 @@ class RequestInflightRecoveryTest {
                 ReflectionTestUtils.invokeMethod(
                         prefillState,
                         "enableQueueLocked",
-                        Comparator.comparingLong(RequestRoute::requestId));
+                        Comparator.comparing(RequestRoute::requestId));
             } finally {
                 prefillState.queueGuard().unlock();
             }
-            try (var admission = owner.claimAdmissionHandle(REQUEST_ID, future);
+            try (var admission = owner.claimAdmissionHandle(String.valueOf(REQUEST_ID), future);
                     var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertEquals(
@@ -393,7 +396,7 @@ class RequestInflightRecoveryTest {
         }
 
         RequestRoute enqueue(
-                long requestId, DecodeEndpoint endpoint, DecodeResources.ReservationHandle held) {
+                String requestId, DecodeEndpoint endpoint, DecodeResources.ReservationHandle held) {
             var requestContext = RequestProtocolTestSupport.context(config, requestId);
             var future = RequestProtocolTestSupport.register(owner, requestContext);
             requestContext.data().setFuture(future);
@@ -529,7 +532,7 @@ class RequestInflightRecoveryTest {
         void assertNextDecodeReservationRejected() {
             try (var pin = decode.tryPinGeneration()) {
                 assertNull(
-                        decode.tryReserveQueuedRequest(pin, 102L, 16L, 32L, 50, capacity).handle(),
+                        decode.tryReserveQueuedRequest(pin, "102", 16L, 32L, 50, capacity).handle(),
                         "The retained shadow fills the one-request Decode placement limit");
             }
         }
@@ -537,7 +540,7 @@ class RequestInflightRecoveryTest {
         void assertNextDecodeReservationAccepted() {
             try (var pin = decode.tryPinGeneration()) {
                 var next =
-                        decode.tryReserveQueuedRequest(pin, 102L, 16L, 32L, 50, capacity).handle();
+                        decode.tryReserveQueuedRequest(pin, "102", 16L, 32L, 50, capacity).handle();
                 assertNotNull(next, "Released capacity must admit the next request");
                 decode.release(next, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
             }

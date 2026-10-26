@@ -3,8 +3,8 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.config.ConfigService;
-import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -13,16 +13,19 @@ import java.util.Map;
 import java.util.WeakHashMap;
 
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
-import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
 
-/** Builds real request owners and shared facilities; contains no request state machine. */
+/**
+ * Builds real request owners and shared facilities; contains no request state machine.
+ */
 public final class SchedulerTestSupport {
-    /** Empty Decode ownership uses typed domain results, including in tests without a real ledger. */
+    /**
+     * Empty Decode ownership uses typed domain results, including in tests without a real ledger.
+     */
     public static org.flexlb.balance.endpoint.DecodeEndpoint mockDecodeEndpoint() {
         return RequestProtocolTestSupport.decodeEndpoint();
     }
@@ -53,8 +56,8 @@ public final class SchedulerTestSupport {
 
     private static RequestRepository mockRepository(AbstractRequestScheduler owner) {
         var repository = mock(RequestRepository.class);
-        when(repository.ownerOf(anyLong())).thenReturn(owner);
-        when(repository.findActive(anyLong()))
+        when(repository.ownerOf(org.mockito.ArgumentMatchers.anyString())).thenReturn(owner);
+        when(repository.findActive(org.mockito.ArgumentMatchers.anyString()))
                 .thenAnswer(
                         call -> {
                             var context = mock(RequestContext.class);
@@ -177,7 +180,9 @@ public final class SchedulerTestSupport {
         ReflectionTestUtils.invokeMethod(runtime, "closeRequestExecutors");
     }
 
-    /** Response/timer fixtures explicitly supply resource proof; production has no manual close path. */
+    /**
+     * Response/timer fixtures explicitly supply resource proof; production has no manual close path.
+     */
     static FixtureSettlement settleTerminalFixture(
             RequestContext context, ContextResult.EndToken terminal) {
         var delivery = context.snapshot().delivery();
@@ -298,12 +303,14 @@ public final class SchedulerTestSupport {
                 : new RequestRepository.TerminalRecord(state, owner);
     }
 
-    /** State/protocol fixtures have no running placement loop. */
+    /**
+     * State/protocol fixtures have no running placement loop.
+     */
     public static AbstractRequestScheduler create(
             ConfigService config,
             DeliveryMetricsReporter batches,
             RequestSchedulerReporter requests,
-            RecentCacheKeyTraceReporter trace) {
+            TheoryCacheHitReporter trace) {
         return create(
                 config,
                 batches,
@@ -315,12 +322,14 @@ public final class SchedulerTestSupport {
                 false);
     }
 
-    /** Construct all placement dependencies together and let the runtime own their shutdown. */
+    /**
+     * Construct all placement dependencies together and let the runtime own their shutdown.
+     */
     public static AbstractRequestScheduler create(
             ConfigService config,
             DeliveryMetricsReporter batches,
             RequestSchedulerReporter requests,
-            RecentCacheKeyTraceReporter trace,
+            TheoryCacheHitReporter trace,
             RequestWorkerSelector router,
             DecodeAdmission eviction,
             PlacementAvailability availability) {
@@ -331,7 +340,7 @@ public final class SchedulerTestSupport {
             ConfigService config,
             DeliveryMetricsReporter batches,
             RequestSchedulerReporter requests,
-            RecentCacheKeyTraceReporter trace,
+            TheoryCacheHitReporter trace,
             RequestWorkerSelector router,
             DecodeAdmission eviction,
             PlacementAvailability availability,
@@ -354,7 +363,7 @@ public final class SchedulerTestSupport {
             SchedulerRuntime runtime,
             ConfigService config,
             DeliveryMetricsReporter batches,
-            RecentCacheKeyTraceReporter trace,
+            TheoryCacheHitReporter trace,
             RequestWorkerSelector router,
             DecodeAdmission eviction,
             PlacementAvailability availability) {
@@ -365,7 +374,7 @@ public final class SchedulerTestSupport {
             SchedulerRuntime runtime,
             ConfigService config,
             DeliveryMetricsReporter batches,
-            RecentCacheKeyTraceReporter trace,
+            TheoryCacheHitReporter trace,
             RequestWorkerSelector router,
             DecodeAdmission eviction,
             PlacementAvailability availability,

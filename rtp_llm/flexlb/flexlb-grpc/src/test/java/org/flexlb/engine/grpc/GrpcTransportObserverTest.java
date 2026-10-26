@@ -256,6 +256,63 @@ class GrpcTransportObserverTest {
         assertEquals(GrpcTransportObserver.Event.WRITE_BROKEN_PIPE, state.observation().event());
     }
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void epollKeepsActualFailuresWithoutInferringEofFromLocalClose(boolean injectFailure)
+            throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(io.netty.channel.epoll.Epoll.isAvailable());
+        var epollGroup = new io.netty.channel.epoll.EpollEventLoopGroup(1);
+        try (var listener = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+            var epollChannel =
+                    new Bootstrap()
+                            .group(epollGroup)
+                            .channelFactory(observer::newEpollChannel)
+                            .handler(
+                                    new ChannelInboundHandlerAdapter() {
+                                        @Override
+                                        public void exceptionCaught(
+                                                ChannelHandlerContext context, Throwable failure) {
+                                            propagatedFailure.set(failure);
+                                            context.close();
+                                        }
+                                    })
+                            .connect(listener.getLocalSocketAddress())
+                            .syncUninterruptibly()
+                            .channel();
+            try (var accepted = listener.accept()) {
+                epollChannel.eventLoop().submit(() -> {}).get(5, TimeUnit.SECONDS);
+                var attributes =
+                        Attributes.newBuilder()
+                                .set(Grpc.TRANSPORT_ATTR_LOCAL_ADDR, epollChannel.localAddress())
+                                .set(Grpc.TRANSPORT_ATTR_REMOTE_ADDR, epollChannel.remoteAddress())
+                                .build();
+                var state = observer.find(attributes);
+                assertNotNull(state);
+                if (injectFailure) {
+                    var failure = new OutOfMemoryError("direct read allocation");
+                    epollChannel
+                            .eventLoop()
+                            .submit(() -> epollChannel.pipeline().fireExceptionCaught(failure))
+                            .get(5, TimeUnit.SECONDS);
+                    assertSame(failure, propagatedFailure.get());
+                    assertEquals(
+                            GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED,
+                            state.observation().causeKind());
+                } else {
+                    epollChannel.close().syncUninterruptibly();
+                    assertNull(state.observation());
+                }
+                assertTrue(epollChannel.closeFuture().await(5, TimeUnit.SECONDS));
+                epollChannel.eventLoop().submit(() -> {}).get(5, TimeUnit.SECONDS);
+                assertNull(observer.find(attributes));
+            } finally {
+                epollChannel.close().syncUninterruptibly();
+            }
+        } finally {
+            epollGroup.shutdownGracefully(0, 5, TimeUnit.SECONDS).syncUninterruptibly();
+        }
+    }
+
     private Attributes connect() throws IOException {
         server = new ServerSocket(0, 1, InetAddress.getLoopbackAddress());
         server.setSoTimeout(5000);

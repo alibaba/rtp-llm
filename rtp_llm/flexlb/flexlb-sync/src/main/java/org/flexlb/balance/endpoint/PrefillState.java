@@ -59,7 +59,9 @@ public final class PrefillState {
         }
     }
 
-    /** Request status matched to its exact Prefill route, published after ledger reconciliation. */
+    /**
+     * Request status matched to its exact Prefill route, published after ledger reconciliation.
+     */
     public record PrefillRequestStatus(RequestRoute route, Kind kind, long errorCode) {
         public PrefillRequestStatus {
             Objects.requireNonNull(route, "route");
@@ -122,12 +124,14 @@ public final class PrefillState {
 
     public record Stats(
             int locallyOwnedRequests,
+            int inflightRequests,
             int individuallyOwnedRequests,
             int batchCount,
             long maxObservedAgeMs) {
         public Stats {
             checkArgument(
                     locallyOwnedRequests >= 0
+                            && inflightRequests >= 0
                             && individuallyOwnedRequests >= 0
                             && batchCount >= 0
                             && maxObservedAgeMs >= 0L,
@@ -135,7 +139,9 @@ public final class PrefillState {
         }
     }
 
-    /** An accepted plan owns its generation until the sender workflow exits. */
+    /**
+     * An accepted plan owns its generation until the sender workflow exits.
+     */
     public record CommittedHandoff(
             EndpointGenerationLifecycle.HandoffPermit generationHandoff,
             WorkCapture precedingWork,
@@ -148,7 +154,9 @@ public final class PrefillState {
         }
     }
 
-    /** One exact ownership transaction; predictions are computed before entering the ledger lock. */
+    /**
+     * One exact ownership transaction; predictions are computed before entering the ledger lock.
+     */
     public enum CommitKind {
         DIRECT,
         QUEUED,
@@ -265,7 +273,9 @@ public final class PrefillState {
         }
     }
 
-    /** Exact preparation capability, consumed by commit or rollback. */
+    /**
+     * Exact preparation capability, consumed by commit or rollback.
+     */
     public abstract static class Reservation {
         final PrefillState owner;
         /* Guarded by owner.lock; null means committed, rolled back or retired. */
@@ -305,7 +315,9 @@ public final class PrefillState {
         private EndpointGenerationLifecycle.HandoffPermit generationHandoff;
     }
 
-    /** One committed Prefill batch: exact members, execution progress and accumulated results. */
+    /**
+     * One committed Prefill batch: exact members, execution progress and accumulated results.
+     */
     static final class PrefillBatch {
         final long batchId;
         Set<RequestEntry> members = Set.of();
@@ -325,7 +337,9 @@ public final class PrefillState {
         }
     }
 
-    /** Resource ownership within this Prefill generation, independent of request protocol. */
+    /**
+     * Resource ownership within this Prefill generation, independent of request protocol.
+     */
     enum OwnershipStage {
         QUEUED,
         DIRECT_RESERVED,
@@ -333,7 +347,9 @@ public final class PrefillState {
         STOP_PENDING
     }
 
-    /** Canonical resource facts for one exact route. Guarded by {@link #lock}. */
+    /**
+     * Canonical resource facts for one exact route. Guarded by {@link #lock}.
+     */
     static final class RequestEntry {
         OwnershipStage ownership;
         final RequestRoute route;
@@ -369,7 +385,9 @@ public final class PrefillState {
         }
     }
 
-    /** Queue and committed work captured at one ownership linearization point. */
+    /**
+     * Queue and committed work captured at one ownership linearization point.
+     */
     public record Snapshot(
             Progress version,
             long capturedAtMs,
@@ -381,7 +399,9 @@ public final class PrefillState {
         }
     }
 
-    /** Immutable leaves copied under the ownership lock; projection runs outside it. */
+    /**
+     * Immutable leaves copied under the ownership lock; projection runs outside it.
+     */
     public static final class WorkCapture {
         private final long capturedAtMs;
         private List<WorkSnapshot.RequestWork> requests;
@@ -400,7 +420,9 @@ public final class PrefillState {
             this.unknownRequestCount = unknownRequestCount;
         }
 
-        /** Shared lazy projection; callers never hold the endpoint ownership lock. */
+        /**
+         * Shared lazy projection; callers never hold the endpoint ownership lock.
+         */
         public WorkSnapshot materialize() {
             WorkSnapshot snapshot = materialized;
             if (snapshot != null) {
@@ -425,7 +447,9 @@ public final class PrefillState {
             long errorCode,
             PriorityPreemptionProgress preemptionProgress) {}
 
-    /** Package-local only for observation reduction; queue consumers use the guard. */
+    /**
+     * Package-local only for observation reduction; queue consumers use the guard.
+     */
     final ReentrantLock lock;
 
     private final QueueGuard queueGuard;
@@ -488,20 +512,28 @@ public final class PrefillState {
         return queueGuard;
     }
 
-    /** Non-owning index containing only ACTIVE RequestRoute identities. */
+    /**
+     * Non-owning index containing only ACTIVE RequestRoute identities.
+     */
     private PrefillActiveIndex activeIndex;
 
-    /** Canonical request ownership, changed only under the endpoint lock. */
-    final Map<Long, RequestEntry> requests = new HashMap<>();
+    /**
+     * Canonical request ownership, changed only under the endpoint lock.
+     */
+    final Map<String, RequestEntry> requests = new HashMap<>();
 
     final LongSupplier clock;
 
-    /** Monotonic ownership/work revision used by projection snapshots. */
+    /**
+     * Monotonic ownership/work revision used by projection snapshots.
+     */
     private volatile long mutationVersion;
 
     private volatile long schedulingInputVersion;
 
-    /** Published at ownership mutation boundaries; admission still checks under the lock. */
+    /**
+     * Published at ownership mutation boundaries; admission still checks under the lock.
+     */
     private volatile long outstandingRequestCount;
 
     private int committedBatchCount;
@@ -510,13 +542,17 @@ public final class PrefillState {
     private long requestCountsVersion = -1;
     private long[] requestCountsByPriority;
 
-    /** Derived immutable work; ACTIVE queue mutations leave committed work unchanged. */
+    /**
+     * Derived immutable work; ACTIVE queue mutations leave committed work unchanged.
+     */
     private WorkCapture committedWorkCapture;
 
     long unknownEngineRequestCount;
     private final Map<Long, PrefillBatch> batches = new HashMap<>();
 
-    /** Publish the capacity summary before readers observe a new ownership revision. */
+    /**
+     * Publish the capacity summary before readers observe a new ownership revision.
+     */
     private void recordMutationLocked() {
         queueGuard.requireHeld();
         outstandingRequestCount = saturatedAdd(requests.size(), unknownEngineRequestCount);
@@ -550,7 +586,9 @@ public final class PrefillState {
         return progress;
     }
 
-    /** Enable waiting work without replacing the ledger of existing DIRECT reservations. */
+    /**
+     * Enable waiting work without replacing the ledger of existing DIRECT reservations.
+     */
     void enableQueueLocked(Comparator<RequestRoute> ordering) {
         queueGuard.requireHeld();
         if (activeIndex == PrefillActiveIndex.disabled()) {
@@ -560,14 +598,18 @@ public final class PrefillState {
         }
     }
 
-    /** One bounded, ordered queue view; all metadata belongs to the same ownership revision. */
+    /**
+     * One bounded, ordered queue view; all metadata belongs to the same ownership revision.
+     */
     public record QueueSnapshot(
             long queueVersion,
             long schedulingInputVersion,
             List<RequestRoute> items,
             RequestRoute head) {}
 
-    /** Diagnostic counters captured from one queue ownership revision. */
+    /**
+     * Diagnostic counters captured from one queue ownership revision.
+     */
     public record QueueCounters(
             long version, int[] byPriority, long outstandingRequests, int batchSlots) {}
 
@@ -620,7 +662,9 @@ public final class PrefillState {
                         outstandingRequestCount);
     }
 
-    /** Remove a known exact owner and its non-owning indexes; batch leases keep their own preparation. */
+    /**
+     * Remove a known exact owner and its non-owning indexes; batch leases keep their own preparation.
+     */
     private boolean removeEntry(RequestEntry entry) {
         if (requests.get(entry.route.requestId()) != entry) {
             return false;
@@ -653,7 +697,9 @@ public final class PrefillState {
         ACK_STOP
     }
 
-    /** One exact queue transition. Worker runtime decisions may hold the same reentrant lock around it. */
+    /**
+     * One exact queue transition. Worker runtime decisions may hold the same reentrant lock around it.
+     */
     public RequestRoute updateQueue(QueueChange change, RequestRoute exact, long nowMs) {
         lock.lock();
         try {
@@ -721,7 +767,9 @@ public final class PrefillState {
         return true;
     }
 
-    /** The worker additionally requires PRIORITY ordering and a Decode-capacity wait. */
+    /**
+     * The worker additionally requires PRIORITY ordering and a Decode-capacity wait.
+     */
     public boolean canBypassLocked(RequestRoute head, RequestRoute candidate) {
         queueGuard.requireHeld();
         var entry = requests.get(head.requestId());
@@ -738,7 +786,9 @@ public final class PrefillState {
                 && head.decodeEp() != candidate.decodeEp();
     }
 
-    /** The queue part of a worker wait; the worker owns stop and control wakeups. */
+    /**
+     * The queue part of a worker wait; the worker owns stop and control wakeups.
+     */
     public boolean queueWaitCurrentLocked(
             RequestRoute head,
             long queueVersion,
@@ -766,7 +816,9 @@ public final class PrefillState {
     private long admissionSummaryLimit;
     private AdmissionSummary admissionSummaryCache;
 
-    /** Reuse stable inputs without allocating cache envelopes on mixed-priority misses. */
+    /**
+     * Reuse stable inputs without allocating cache envelopes on mixed-priority misses.
+     */
     public AdmissionSummary admissionSummary(int priority, long requestLimit) {
         lock.lock();
         try {
@@ -853,7 +905,9 @@ public final class PrefillState {
         }
     }
 
-    /** Queued routes consume no delivery slots; reserved and committed work do. */
+    /**
+     * Queued routes consume no delivery slots; reserved and committed work do.
+     */
     public boolean requestCapacityAvailable(long maximum, int requested) {
         checkArgument(maximum >= 0L && requested > 0, "invalid request capacity");
         lock.lock();
@@ -876,7 +930,9 @@ public final class PrefillState {
         }
     }
 
-    /** Validate the complete plan before changing a seat, preparation, or generation capability. */
+    /**
+     * Validate the complete plan before changing a seat, preparation, or generation capability.
+     */
     public CommittedHandoff commitLocked(
             CommitPlan plan, EndpointGenerationLifecycle.HandoffPermit handoff) {
         queueGuard.requireHeld();
@@ -1029,7 +1085,9 @@ public final class PrefillState {
         }
     }
 
-    /** Preparation rollback and exact resource cleanup share a result contract, never execution callbacks. */
+    /**
+     * Preparation rollback and exact resource cleanup share a result contract, never execution callbacks.
+     */
     public Release release(Reservation preparation, RequestRoute route) {
         checkArgument(
                 (preparation == null) != (route == null),
@@ -1122,11 +1180,13 @@ public final class PrefillState {
         }
     }
 
-    /** Facts prepared under the lock, then read during prediction and exact-version commit. */
+    /**
+     * Facts prepared under the lock, then read during prediction and exact-version commit.
+     */
     public static final class StatusReduction {
         final PrefillState owner;
         long version;
-        final Map<Long, TerminalObservation> terminals;
+        final Map<String, TerminalObservation> terminals;
         final Map<RequestEntry, Phase> individualPhases = new IdentityHashMap<>();
         final Map<PrefillBatch, Phase> batchPhases = new IdentityHashMap<>();
         final Map<PrefillBatch, BatchOutcome> batchOutcomes;
@@ -1136,7 +1196,7 @@ public final class PrefillState {
         Map<Long, List<RequestRoute>> predictionInputs;
         StatusReconciliation result;
 
-        StatusReduction(PrefillState owner, Map<Long, TerminalObservation> terminals) {
+        StatusReduction(PrefillState owner, Map<String, TerminalObservation> terminals) {
             this.owner = owner;
             this.terminals = terminals;
             this.batchOutcomes = terminals.isEmpty() ? Map.of() : new IdentityHashMap<>();
@@ -1147,13 +1207,17 @@ public final class PrefillState {
         }
     }
 
-    /** Owned by one batch or by an uncommitted status reduction, never both while preparing. */
+    /**
+     * Owned by one batch or by an uncommitted status reduction, never both while preparing.
+     */
     static final class BatchOutcome {
         long maxExecutionTimeMs;
         boolean successfulCompletion;
         boolean learningEligible = true;
 
-        /** Historical execution evidence survives a later queued observation. */
+        /**
+         * Historical execution evidence survives a later queued observation.
+         */
         boolean executionStarted;
     }
 
@@ -1166,8 +1230,12 @@ public final class PrefillState {
         return Math.max(0L, remainingWorkMs - elapsedMs);
     }
 
-    /** Capture exact activity into the same transaction that will commit it. */
-    /** Null means the out-of-lock prediction was invalidated; no fact has changed. */
+    /**
+     * Capture exact activity into the same transaction that will commit it.
+     */
+    /**
+     * Null means the out-of-lock prediction was invalidated; no fact has changed.
+     */
     public StatusReconciliation commitStatusLocked(
             StatusReduction reduction, Map<Long, Long> predictions) {
         queueGuard.requireHeld();
@@ -1249,7 +1317,7 @@ public final class PrefillState {
                             .map(entry -> entry.route)
                             .sorted(
                                     Comparator.comparingLong(RequestRoute::enqueueSeq)
-                                            .thenComparingLong(RequestRoute::requestId))
+                                            .thenComparing(RequestRoute::requestId))
                             .toList();
             List<BatchCompletion> completions =
                     batches.values().stream()
@@ -1324,7 +1392,9 @@ public final class PrefillState {
         return retirement;
     }
 
-    /** Capture exact committed identities before the workflow checks request ownership outside this lock. */
+    /**
+     * Capture exact committed identities before the workflow checks request ownership outside this lock.
+     */
     public List<RequestRoute> cleanupCandidates() {
         lock.lock();
         try {
@@ -1337,7 +1407,9 @@ public final class PrefillState {
         }
     }
 
-    /** One orphan pass: a retained member protects its whole batch. Counts batches and individuals. */
+    /**
+     * One orphan pass: a retained member protects its whole batch. Counts batches and individuals.
+     */
     public int evictExpiredInflight(long ttlMs, Set<RequestRoute> orphanCandidates) {
         int evicted = 0;
         lock.lock();
@@ -1395,6 +1467,7 @@ public final class PrefillState {
         lock.lock();
         try {
             int locallyOwned = 0;
+            int inflight = 0;
             int individual = 0;
             long maxAgeMs = 0L;
             long nowMs = clock.getAsLong();
@@ -1403,6 +1476,11 @@ public final class PrefillState {
                     continue;
                 }
                 locallyOwned++;
+                Phase reportedPhase =
+                        entry.batch == null ? entry.individualPhase : entry.batch.servicePhase;
+                if (reportedPhase == Phase.COMMITTED) {
+                    inflight++;
+                }
                 if (entry.batch == null) {
                     individual++;
                     maxAgeMs = Math.max(maxAgeMs, Math.max(0L, nowMs - entry.phaseBaseMs));
@@ -1414,7 +1492,7 @@ public final class PrefillState {
                 }
                 maxAgeMs = Math.max(maxAgeMs, Math.max(0L, nowMs - batch.lastObservedAtMs));
             }
-            return new Stats(locallyOwned, individual, committedBatchCount, maxAgeMs);
+            return new Stats(locallyOwned, inflight, individual, committedBatchCount, maxAgeMs);
         } finally {
             lock.unlock();
         }
@@ -1486,7 +1564,7 @@ public final class PrefillState {
             if (batch.preparation != null) {
                 continue;
             }
-            List<Long> members = new ArrayList<>(batch.members.size());
+            List<String> members = new ArrayList<>(batch.members.size());
             for (RequestEntry member : batch.members) {
                 if (!excluded.contains(member)) {
                     members.add(member.route.requestId());

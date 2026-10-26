@@ -5,13 +5,17 @@ import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.springframework.test.util.ReflectionTestUtils;
 
-/** Builds and inspects exact Decode reservations for mock-engine tests. */
+/**
+ * Builds and inspects exact Decode reservations for mock-engine tests.
+ */
 public final class SchedulerTestSupport {
-    /** Build a real local reservation without publishing it to the master queue. */
+    /**
+     * Build a real local reservation without publishing it to the master queue.
+     */
     public static DecodeResources.ReservationHandle reserveUnqueuedDecode(
             DecodeEndpoint endpoint,
             WorkerEndpoint.GenerationPin pin,
-            long requestId,
+            String requestId,
             long hardKv,
             long expectedKv,
             int priority) {
@@ -43,17 +47,19 @@ public final class SchedulerTestSupport {
         }
     }
 
-    /** Read shadow ownership for assertions, without granting a production lookup capability. */
+    /**
+     * Read shadow ownership for assertions, without granting a production lookup capability.
+     */
     public static DecodeResources.ReservationHandle decodeReservation(
-            DecodeEndpoint endpoint, long requestId) {
+            DecodeEndpoint endpoint, String requestId) {
         return endpoint.isRetired()
                 ? null
                 : decodeReservation(endpoint.resourceSnapshot(), requestId);
     }
 
     private static DecodeResources.ReservationHandle decodeReservation(
-            DecodeResources.ResourceSnapshot snapshot, long requestId) {
-        var request = snapshot.requests().get(requestId);
+            DecodeResources.ResourceSnapshot snapshot, String requestId) {
+        var request = snapshot.requests().get(String.valueOf(requestId));
         if (request == null || request.reservationToken() <= 0L) {
             return null;
         }

@@ -2,7 +2,7 @@ package org.flexlb.service;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestData;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -19,7 +19,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 
-/** Selects cache-affine ViT endpoints and owns temporary cold-key placements. */
+/**
+ * Selects cache-affine ViT endpoints and owns temporary cold-key placements.
+ */
 @Component
 public class VitCacheSelector {
     private static final long MIN_PENDING_TTL_MS = 120_000;
@@ -59,8 +61,8 @@ public class VitCacheSelector {
         this.workers = workers;
     }
 
-    public synchronized ServerStatus select(RequestContext ctx, String group) {
-        var keys = ctx.data().getRequest().getCacheAffinityKeys();
+    public synchronized ServerStatus select(RequestData ctx, String group) {
+        var keys = ctx.getRequest().getCacheAffinityKeys();
         if (keys == null
                 || keys.isEmpty()
                 || keys.size() > 256
@@ -71,7 +73,8 @@ public class VitCacheSelector {
         Map<String, Candidate> candidates = directory.candidates(group, keys);
         long now = System.currentTimeMillis();
         if (now - pendingPrunedAt >= 5000) {
-            pending.values().removeIf(p -> !p.matches(candidates.get(p.worker().getIpPort()), now));
+            pending.values()
+                    .removeIf(p -> !p.matches(candidates.get(p.worker().getLogicalIpPort()), now));
             pendingPrunedAt = now;
         }
         List<Candidate> best = new ArrayList<>();
@@ -106,7 +109,7 @@ public class VitCacheSelector {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
         Candidate selected = best.get(ThreadLocalRandom.current().nextInt(best.size()));
-        long timeout = ctx.data().getRequest().getGenerateTimeout();
+        long timeout = ctx.getRequest().getGenerateTimeout();
         long ttl =
                 timeout <= 0
                         ? MIN_PENDING_TTL_MS
@@ -119,7 +122,7 @@ public class VitCacheSelector {
         while (pending.size() > MAX_PENDING) {
             pending.remove(pending.keySet().iterator().next());
         }
-        return status(selected.worker(), ctx.data().getRequestId());
+        return status(selected.worker(), ctx.getRequestId());
     }
 
     /**
@@ -127,14 +130,12 @@ public class VitCacheSelector {
      * current endpoint generation. Address equality alone cannot identify a worker
      * after replacement; generation zero is not a wildcard.
      */
-    public synchronized ServerStatus validate(RequestContext ctx, String group) {
-        ServerStatus selected = ctx.data().getRequest().getSelectedVit();
+    public synchronized ServerStatus validate(RequestData ctx, String group) {
+        ServerStatus selected = ctx.getRequest().getSelectedVit();
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
-        try (var pin =
-                workers.capture(
-                        RoleType.VIT, selected.getServerIp() + ":" + selected.getHttpPort())) {
+        try (var pin = workers.capture(RoleType.VIT, selected.getLogicalIpPort())) {
             WorkerStatus worker = pin == null ? null : pin.endpoint().getStatus();
             if (selected.getRole() != RoleType.VIT
                     || worker == null
@@ -144,22 +145,23 @@ public class VitCacheSelector {
                     || selected.getWorkerGeneration() != pin.generationId()) {
                 return errorStatus(StrategyErrorType.NO_VIT_WORKER);
             }
-            return status(worker, ctx.data().getRequestId());
+            return status(worker, ctx.getRequestId());
         }
     }
 
-    /** Holds the selected endpoint generation through the admission handoff. */
+    /**
+     * Holds the selected endpoint generation through the admission handoff.
+     */
     public synchronized ServerStatus selectPinned(
-            RequestContext ctx, String group, RequestRoute route) {
+            RequestData ctx, String group, RequestRoute route) {
         ServerStatus result =
-                ctx.data().getRequest().getSelectedVit() == null
+                ctx.getRequest().getSelectedVit() == null
                         ? select(ctx, group)
                         : validate(ctx, group);
         if (!result.isSuccess()) {
             return null;
         }
-        WorkerEndpoint.GenerationPin pin =
-                workers.capture(RoleType.VIT, result.getServerIp() + ":" + result.getHttpPort());
+        WorkerEndpoint.GenerationPin pin = workers.capture(RoleType.VIT, result.getLogicalIpPort());
         if (pin == null) {
             return null;
         }
@@ -177,10 +179,11 @@ public class VitCacheSelector {
         return status;
     }
 
-    private static ServerStatus status(WorkerStatus worker, long requestId) {
+    private static ServerStatus status(WorkerStatus worker, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setRole(RoleType.VIT);
         status.setWorkerGeneration(worker.getGenerationId());
+        status.setSelectedEngineIndex(worker.getEngineIndex(), worker.getMultiEngineNum());
         status.setServerIp(worker.getIp());
         status.setHttpPort(worker.getPort());
         status.setGrpcPort(worker.getGrpcPort());

@@ -19,7 +19,8 @@ public class NettyServerConfig {
     }
 
     @Bean
-    public NettyServerCustomizer nettyServerMetricsCustomizer(LoopResources loopResources) {
+    public NettyServerCustomizer nettyServerMetricsCustomizer(
+            ConfigService configService, LoopResources loopResources) {
         return httpServer ->
                 httpServer
                         .runOn(loopResources)

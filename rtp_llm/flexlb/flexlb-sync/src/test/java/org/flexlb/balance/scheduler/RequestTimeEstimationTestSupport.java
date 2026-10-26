@@ -22,13 +22,13 @@ public final class RequestTimeEstimationTestSupport {
 
     static final Comparator<GroupPlanner.Item> FIFO =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
-                    .thenComparingLong(GroupPlanner.Item::requestId);
+                    .thenComparing(GroupPlanner.Item::requestId);
 
     static final Comparator<GroupPlanner.Item> PRIORITY =
             Comparator.comparingInt(GroupPlanner.Item::priority)
                     .reversed()
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq)
-                    .thenComparingLong(GroupPlanner.Item::requestId);
+                    .thenComparing(GroupPlanner.Item::requestId);
 
     static final RequestTimeEstimation.DeliveryProjection ROUTE =
             RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
@@ -100,15 +100,21 @@ public final class RequestTimeEstimationTestSupport {
             long serviceTokens,
             long expiresAtMs) {
         return new GroupPlanner.Item(
-                requestId, priority, enqueueSequence, NOW_MS - 1L, expiresAtMs, serviceTokens, 0L);
+                Long.toString(requestId),
+                priority,
+                enqueueSequence,
+                NOW_MS - 1L,
+                expiresAtMs,
+                serviceTokens,
+                0L);
     }
 
-    static Probe probe(long requestId, int priority, long sequenceLength, long hitCache) {
+    static Probe probe(String requestId, int priority, long sequenceLength, long hitCache) {
         return probe(requestId, priority, NOW_MS, Long.MAX_VALUE, sequenceLength, hitCache);
     }
 
     static Probe probe(
-            long requestId,
+            String requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,
@@ -142,9 +148,11 @@ public final class RequestTimeEstimationTestSupport {
                 deliveryProjection);
     }
 
-    /** Virtual request evaluated against one frozen endpoint snapshot. */
+    /**
+     * Virtual request evaluated against one frozen endpoint snapshot.
+     */
     public record Probe(
-            long requestId,
+            String requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,

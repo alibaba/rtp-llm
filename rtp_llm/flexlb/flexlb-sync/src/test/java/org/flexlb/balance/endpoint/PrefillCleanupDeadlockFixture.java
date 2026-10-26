@@ -6,7 +6,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -14,15 +14,16 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Package-local admission APIs exercised through real committed requests. */
+/**
+ * Package-local admission APIs exercised through real committed requests.
+ */
 public final class PrefillCleanupDeadlockFixture {
     private final AtomicLong clock = new AtomicLong(100);
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillState state =
             new PrefillState(
                     lock,
-                    PrefillActiveIndex.ordered(
-                            4, Comparator.comparingLong(RequestRoute::requestId)),
+                    PrefillActiveIndex.ordered(4, Comparator.comparing(RequestRoute::requestId)),
                     clock::get);
     private final EndpointGenerationLifecycle generation =
             new EndpointGenerationLifecycle(() -> {});
@@ -66,12 +67,12 @@ public final class PrefillCleanupDeadlockFixture {
         clock.set(200);
     }
 
-    public void sweepBatches(LongPredicate retain) {
+    public void sweepBatches(Predicate<String> retain) {
         assertEquals(0, EndpointTestSupport.evictPrefill(state, 10L, retain));
         assertEquals(1, state.stats().batchCount());
     }
 
-    public void sweepIndividuals(LongPredicate retain) {
+    public void sweepIndividuals(Predicate<String> retain) {
         assertEquals(0, EndpointTestSupport.evictPrefill(state, 10L, retain));
         assertEquals(1, state.stats().individuallyOwnedRequests());
     }
@@ -100,7 +101,7 @@ public final class PrefillCleanupDeadlockFixture {
 
     private static RequestRoute item(long id) {
         RequestRoute item = mock(RequestRoute.class);
-        when(item.requestId()).thenReturn(id);
+        when(item.requestId()).thenReturn(Long.toString(id));
         when(item.seqLen()).thenReturn(100L);
         return item;
     }

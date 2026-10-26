@@ -2,7 +2,9 @@ package org.flexlb.balance.planner;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Pure grouping of ordered inputs. No clock reads, queue mutation or resource acquisition. */
+/**
+ * Pure grouping of ordered inputs. No clock reads, queue mutation or resource acquisition.
+ */
 public enum GroupingPolicy {
     SINGLE,
     FIXED_WINDOW;
@@ -25,7 +27,9 @@ public enum GroupingPolicy {
                 items, constraints, this == SINGLE ? null : predictor);
     }
 
-    /** Null means that no group can dispatch at this clock. */
+    /**
+     * Null means that no group can dispatch at this clock.
+     */
     public String dispatchReason(
             GroupPlanner.Selection<?> selection, GroupPlanner.Constraints constraints, long nowMs) {
         if (selection.items().isEmpty()) {

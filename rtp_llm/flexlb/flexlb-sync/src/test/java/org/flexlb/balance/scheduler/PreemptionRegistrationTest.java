@@ -76,7 +76,7 @@ class PreemptionRegistrationTest {
     void registeredInputCannotBeReplacedWhilePreemptionOwnsIdentity() {
         var registration = registration();
         var context = registration.owner();
-        context.data().setRequest(Request.builder().requestId(7L).seqLen(16L).build());
+        context.data().setRequest(Request.builder().requestId("7").seqLen(16L).build());
         context.data()
                 .setSchedulingMetadata(org.flexlb.dao.SchedulingMetadata.explicit(50, 100_000L));
         context.data()
@@ -89,9 +89,9 @@ class PreemptionRegistrationTest {
                         context.data()
                                 .setRequest(
                                         context.data().getRequest().toBuilder()
-                                                .requestId(99L)
+                                                .requestId("99")
                                                 .build()));
-        assertEquals(7L, context.snapshot().key().requestId());
+        assertEquals("7", context.snapshot().key().requestId());
     }
 
     @Test

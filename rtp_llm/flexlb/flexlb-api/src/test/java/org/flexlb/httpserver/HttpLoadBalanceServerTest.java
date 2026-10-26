@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.scheduler.RequestRepository;
+import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.MasterStatusService;
@@ -17,15 +18,55 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 
 import java.util.Map;
 
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class HttpLoadBalanceServerTest {
 
+    @Test
+    void inflightStatusExposesExactBlockedRequestCount() {
+        org.flexlb.balance.scheduler.AbstractRequestScheduler scheduler =
+                mock(org.flexlb.balance.scheduler.AbstractRequestScheduler.class);
+        var requests = mock(RequestRepository.class);
+        when(requests.liveRequestCount()).thenReturn(9);
+        when(scheduler.placementCounts())
+                .thenReturn(
+                        new org.flexlb.balance.scheduler.AbstractRequestScheduler.PlacementCounts(
+                                0, 2));
+        HttpLoadBalanceServer server =
+                new HttpLoadBalanceServer(
+                        mock(MasterStatusService.class),
+                        mock(ConfigService.class, RETURNS_DEEP_STUBS),
+                        scheduler,
+                        mock(EndpointRegistry.class),
+                        requests,
+                        mock(WorkerStatusSynchronizer.class),
+                        new ServerScheduleLatencyRecorder());
+        WebTestClient client =
+                WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
+
+        client.get()
+                .uri("/rtp_llm/inflight_status")
+                .accept(MediaType.APPLICATION_JSON)
+                .exchange()
+                .expectStatus()
+                .isOk()
+                .expectBody()
+                .jsonPath("$.scheduler_inflight")
+                .isEqualTo(9)
+                .jsonPath("$.scheduler_tracked")
+                .isEqualTo(9)
+                .jsonPath("$.scheduler_blocked")
+                .isEqualTo(2);
+
+        verify(scheduler).placementCounts();
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-    void masterInfoUsesCanonicalSchedulerQueueDepthAndDispatcherCapability(boolean batch) {
+    void masterInfoUsesPendingDeliveryCountAndDispatcherCapability(boolean batch) {
         MasterStatusService consistency = mock(MasterStatusService.class);
         ConfigService configService = mock(ConfigService.class);
         RequestRepository requests = mock(RequestRepository.class);
@@ -37,6 +78,7 @@ class HttpLoadBalanceServerTest {
         }
         when(configService.loadBalanceConfig()).thenReturn(config);
         when(consistency.getMasterHostIpPort()).thenReturn("127.0.0.1:7001");
+        var scheduler = mock(org.flexlb.balance.scheduler.AbstractRequestScheduler.class);
         when(requests.pendingDeliveryRequestCount()).thenReturn(7);
         when(synchronizer.isReady()).thenReturn(true);
 
@@ -44,8 +86,9 @@ class HttpLoadBalanceServerTest {
                 new HttpLoadBalanceServer(
                         consistency,
                         configService,
-                        requests,
+                        scheduler,
                         endpointRegistry,
+                        requests,
                         synchronizer,
                         new ServerScheduleLatencyRecorder());
         WebTestClient client =
@@ -83,7 +126,7 @@ class HttpLoadBalanceServerTest {
                 endpoint, "ownership", mock(PrefillState.class));
         when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         when(endpoint.getStatus()).thenReturn(status);
-        when(endpoint.ownership.stats()).thenReturn(new PrefillState.Stats(7, 3, 2, 42L));
+        when(endpoint.ownership.stats()).thenReturn(new PrefillState.Stats(7, 7, 3, 2, 42L));
         when(status.cacheIndexSnapshot())
                 .thenReturn(
                         new WorkerStatus.CacheIndexSnapshot(
@@ -99,8 +142,9 @@ class HttpLoadBalanceServerTest {
                 new HttpLoadBalanceServer(
                         mock(MasterStatusService.class),
                         configService,
-                        requests,
+                        mock(RequestScheduler.class),
                         endpointRegistry,
+                        requests,
                         mock(WorkerStatusSynchronizer.class),
                         new ServerScheduleLatencyRecorder());
         WebTestClient client =
@@ -143,8 +187,9 @@ class HttpLoadBalanceServerTest {
                 new HttpLoadBalanceServer(
                         consistency,
                         mock(ConfigService.class),
-                        mock(RequestRepository.class),
+                        mock(RequestScheduler.class),
                         mock(EndpointRegistry.class),
+                        mock(RequestRepository.class),
                         mock(WorkerStatusSynchronizer.class),
                         new ServerScheduleLatencyRecorder());
         WebTestClient client =

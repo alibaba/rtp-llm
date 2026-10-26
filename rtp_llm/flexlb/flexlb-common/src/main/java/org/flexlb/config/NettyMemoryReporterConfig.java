@@ -3,7 +3,9 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 
-/** Allocator scans are opt-in because Netty acquires arena locks while reading these metrics. */
+/**
+ * Allocator scans are opt-in because Netty acquires arena locks while reading these metrics.
+ */
 @Getter
 @Setter
 public final class NettyMemoryReporterConfig {

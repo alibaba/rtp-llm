@@ -1,14 +1,15 @@
 package org.flexlb.engine.grpc;
 
-import io.grpc.ManagedChannel;
 import io.grpc.Server;
 import io.grpc.Status;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.stub.StreamObserver;
-import io.netty.channel.EventLoopGroup;
+import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -19,7 +20,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -34,7 +34,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -146,15 +145,22 @@ class EngineGrpcClientMonitoringTest {
         FlexMonitor monitor = failingMonitor(monitorError);
         doThrow(monitorFailure(monitorError))
                 .when(monitor)
-                .register(anyString(), any(FlexMetricType.class));
+                .register(org.mockito.ArgumentMatchers.anyString(), any(FlexMetricType.class));
         doThrow(monitorFailure(monitorError))
                 .when(monitor)
-                .register(anyString(), any(FlexMetricType.class), any(FlexPriorityType.class));
+                .register(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        any(FlexMetricType.class),
+                        any(FlexPriorityType.class));
         GrpcReporter reporter = new GrpcReporter(monitor);
         assertDoesNotThrow(reporter::init);
-        verify(monitor, times(2)).register(anyString(), any(FlexMetricType.class));
-        verify(monitor, times(4))
-                .register(anyString(), any(FlexMetricType.class), any(FlexPriorityType.class));
+        verify(monitor)
+                .register(org.mockito.ArgumentMatchers.anyString(), any(FlexMetricType.class));
+        verify(monitor, times(6))
+                .register(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        any(FlexMetricType.class),
+                        any(FlexPriorityType.class));
         assertDoesNotThrow(() -> reporter.reportChannelPoolSize(3));
     }
 
@@ -171,7 +177,9 @@ class EngineGrpcClientMonitoringTest {
 
     private static FlexMonitor failingMonitor(boolean monitorError) {
         FlexMonitor monitor = mock(FlexMonitor.class);
-        doThrow(monitorFailure(monitorError)).when(monitor).report(anyString(), any(), anyDouble());
+        doThrow(monitorFailure(monitorError))
+                .when(monitor)
+                .report(org.mockito.ArgumentMatchers.anyString(), any(), anyDouble());
         return monitor;
     }
 
@@ -216,28 +224,31 @@ class EngineGrpcClientMonitoringTest {
                             .addService(service)
                             .build()
                             .start();
+            var channels = mock(GrpcChannelFactory.class);
+            org.mockito.Mockito.when(
+                            channels.create(
+                                    org.mockito.ArgumentMatchers.any(),
+                                    org.mockito.ArgumentMatchers.any()))
+                    .thenAnswer(
+                            ignored ->
+                                    InProcessChannelBuilder.forName(serverName)
+                                            .propagateCauseWithStatus(true)
+                                            .intercept(GrpcCallTrace.INTERCEPTOR)
+                                            .directExecutor()
+                                            .build());
             client =
                     new EngineGrpcClient(
-                            mock(CustomNameResolver.class),
-                            mock(ThreadPoolExecutor.class),
-                            mock(EventLoopGroup.class),
+                            mock(EngineAddressResolver.class),
+                            channels,
                             new GrpcReporter(monitor),
-                            20,
-                            5000L) {
-                        @Override
-                        protected ManagedChannel createChannel(String channelKey) {
-                            return InProcessChannelBuilder.forName(serverName)
-                                    .propagateCauseWithStatus(true)
-                                    .directExecutor()
-                                    .build();
-                        }
-                    };
+                            mock(CacheMatchConfiguration.class),
+                            5000L);
         }
 
         @Override
         public void close() throws Exception {
             try {
-                client.shutdownChannelPool();
+                client.shutdown();
             } finally {
                 server.shutdownNow();
                 server.awaitTermination(2, TimeUnit.SECONDS);

@@ -21,7 +21,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Exercise one demand and budget through selection, planning and authoritative commit. */
+/**
+ * Exercise one demand and budget through selection, planning and authoritative commit.
+ */
 class DecodeCapacityPreemptionTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -32,7 +34,7 @@ class DecodeCapacityPreemptionTest {
         long expectedKvTokens = 250L;
         DecodeResources.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.tryReserveQueuedRequest(pin, 1L, 100L, 200L, 30, null).handle();
+            victim = endpoint.tryReserveQueuedRequest(pin, "1", 100L, 200L, 30, null).handle();
             assertEquals(
                     DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     endpoint.acquireDispatchPermit(
@@ -42,7 +44,7 @@ class DecodeCapacityPreemptionTest {
                             .status());
             var reservation =
                     endpoint.tryReserveQueuedRequest(
-                                    pin, 9L, hardKvTokens, expectedKvTokens, 70, null)
+                                    pin, "9", hardKvTokens, expectedKvTokens, 70, null)
                             .handle();
             assertNotNull(reservation);
             assertEquals(
@@ -68,7 +70,7 @@ class DecodeCapacityPreemptionTest {
                         VictimStage.DECODE_ENGINE_OWNED);
         assertEquals(DecodeEvictionProposal.CASE_KV, proposal.evictionCase());
         assertEquals(
-                List.of(1L),
+                List.of("1"),
                 proposal.victims().stream()
                         .map(DecodeResources.DecodeRequestView::requestId)
                         .toList());
@@ -80,10 +82,10 @@ class DecodeCapacityPreemptionTest {
                         ? DecodeResources.PreemptionBeginResult.INFEASIBLE
                         : DecodeResources.PreemptionBeginResult.SUCCESS,
                 endpoint.beginPreemption(
-                        1L, List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
-        assertNotNull(EndpointTestSupport.decodeReservation(endpoint, 1L));
+                        1L, List.of(victim), "9", hardKvTokens, expectedKvTokens, 70, policy));
+        assertNotNull(EndpointTestSupport.decodeReservation(endpoint, "1"));
         if (usageChanged) {
-            assertNull(EndpointTestSupport.decodeReservation(endpoint, 9L));
+            assertNull(EndpointTestSupport.decodeReservation(endpoint, "9"));
         }
     }
 
@@ -95,10 +97,10 @@ class DecodeCapacityPreemptionTest {
         long expectedKvTokens = 100L;
         DecodeResources.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.tryReserveQueuedRequest(pin, 1L, 100L, 200L, 30, null).handle();
+            victim = endpoint.tryReserveQueuedRequest(pin, "1", 100L, 200L, 30, null).handle();
             assertNull(
                     endpoint.tryReserveQueuedRequest(
-                                    pin, 9L, hardKvTokens, expectedKvTokens, 70, policy)
+                                    pin, "9", hardKvTokens, expectedKvTokens, 70, policy)
                             .handle());
         }
         // The same queued reservation remains soft for ordinary Engine dispatch.
@@ -114,9 +116,9 @@ class DecodeCapacityPreemptionTest {
         assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
         assertNotNull(
                 endpoint.replaceQueuedRequests(
-                        List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
-        assertNull(EndpointTestSupport.decodeReservation(endpoint, 1L));
-        assertNotNull(EndpointTestSupport.decodeReservation(endpoint, 9L));
+                        List.of(victim), "9", hardKvTokens, expectedKvTokens, 70, policy));
+        assertNull(EndpointTestSupport.decodeReservation(endpoint, "1"));
+        assertNotNull(EndpointTestSupport.decodeReservation(endpoint, "9"));
     }
 
     @Test
@@ -127,18 +129,18 @@ class DecodeCapacityPreemptionTest {
         long expectedKvTokens = 200L;
         DecodeResources.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.tryReserveQueuedRequest(pin, 1L, 0L, 900L, 30, null).handle();
+            victim = endpoint.tryReserveQueuedRequest(pin, "1", 0L, 900L, 30, null).handle();
         }
         DecodeEvictionProposal proposal =
                 plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);
         assertEquals(
-                List.of(1L),
+                List.of("1"),
                 proposal.victims().stream()
                         .map(DecodeResources.DecodeRequestView::requestId)
                         .toList());
         assertNotNull(
                 endpoint.replaceQueuedRequests(
-                        List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
+                        List.of(victim), "9", hardKvTokens, expectedKvTokens, 70, policy));
         assertEquals(200L, EndpointTestSupport.expectedReservedKv(endpoint.resourceSnapshot()));
     }
 
@@ -153,7 +155,7 @@ class DecodeCapacityPreemptionTest {
         var failures = new HashMap<String, String>();
         var request =
                 org.flexlb.dao.loadbalance.Request.builder()
-                        .requestId(99L)
+                        .requestId("99")
                         .seqLen(hardKvTokens)
                         .maxNewTokens((int) (expectedKvTokens - hardKvTokens))
                         .build();

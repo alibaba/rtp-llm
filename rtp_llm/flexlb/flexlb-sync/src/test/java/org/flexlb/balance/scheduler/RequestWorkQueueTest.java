@@ -21,7 +21,8 @@ class RequestWorkQueueTest {
     @Timeout(10)
     void duplicateRunnerCannotExecuteTheNextSettlementConcurrently() throws Exception {
         var queue = new RequestWorkQueue();
-        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 7101L);
+        var context =
+                RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), "7101");
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var next = new CountDownLatch(1);
@@ -58,7 +59,8 @@ class RequestWorkQueueTest {
     @Test
     void failedStartRejectsCountedWorkAndAllowsTheNextNotification() {
         var queue = new RequestWorkQueue();
-        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 7102L);
+        var context =
+                RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), "7102");
         var failure = new IllegalStateException("all executors rejected");
         var rejected = new AtomicInteger();
         var ran = new AtomicInteger();
@@ -87,7 +89,8 @@ class RequestWorkQueueTest {
     @Test
     void pendingNotificationsCoalesceAndAnIdleLaneDoesNotRetainRequestIdentity() {
         var queue = new RequestWorkQueue();
-        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 7103L);
+        var context =
+                RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), "7103");
         var driver = new AtomicReference<Runnable>();
         var ran = new AtomicInteger();
         assertTrue(queue.execute(context, ran::incrementAndGet, cause -> fail(cause), driver::set));

@@ -2,6 +2,7 @@ package org.flexlb.mock;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,12 +42,16 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     private final List<FinishedTask> finishedTasks = new ArrayList<>();
     private volatile Consumer<EngineRpcService.EnqueueBatchRequestPB> acceptedBatchListener;
 
-    /** Optional execution bridge for tests that exercise repeated delivery and status polling. */
+    /**
+     * Optional execution bridge for tests that exercise repeated delivery and status polling.
+     */
     public void onAcceptedBatch(Consumer<EngineRpcService.EnqueueBatchRequestPB> listener) {
         acceptedBatchListener = listener;
     }
 
-    /** Publish authoritative, versioned completion facts through GetWorkerStatus. */
+    /**
+     * Publish authoritative, versioned completion facts through GetWorkerStatus.
+     */
     public void completeBatch(EngineRpcService.EnqueueBatchRequestPB batch) {
         synchronized (finishedTasks) {
             for (var slot : batch.getDpSlotsList()) {
@@ -70,11 +75,15 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
     // ==================== Call records (thread-safe, for assertions) ====================
 
-    /** All EnqueueBatch requests received, in arrival order. */
+    /**
+     * All EnqueueBatch requests received, in arrival order.
+     */
     final CopyOnWriteArrayList<EngineRpcService.EnqueueBatchRequestPB> enqueuedRequests =
             new CopyOnWriteArrayList<>();
 
-    /** Counter for GetWorkerStatus calls. */
+    /**
+     * Counter for GetWorkerStatus calls.
+     */
     final AtomicLong workerStatusCallCount = new AtomicLong(0);
 
     // ==================== Behavior (volatile, hot-swappable) ====================
@@ -102,7 +111,9 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         return workerStatusCallCount.get();
     }
 
-    /** Clear all call records (useful between test cases sharing a worker). */
+    /**
+     * Clear all call records (useful between test cases sharing a worker).
+     */
     public void resetRecords() {
         enqueuedRequests.clear();
         workerStatusCallCount.set(0);
@@ -140,10 +151,11 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
                 for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                     for (EngineRpcService.EnqueueBatchExternalInputPB ext :
                             slot.getRequestsList()) {
-                        long reqId = ext.getInput().getRequestId();
+                        String reqId = RequestId.parse(ext.getInput());
                         responseBuilder.addErrors(
-                                EngineRpcService.EnqueueBatchErrorPB.newBuilder()
-                                        .setRequestId(reqId)
+                                RequestIdFixtures.write(
+                                                EngineRpcService.EnqueueBatchErrorPB.newBuilder(),
+                                                reqId)
                                         .setErrorInfo(
                                                 EngineRpcService.ErrorDetailsPB.newBuilder()
                                                         .setErrorCode(beh.getEnqueueErrorCode())

@@ -1064,7 +1064,7 @@ public final class JavaLoadClient {
         }
         RoleType domainRole = RoleTypeProtoConverter.fromProto(roleType);
         return EngineRpcService.RoleAddrPB.newBuilder()
-                .setRole(RoleTypeProtoConverter.toLegacyProto(domainRole))
+                .setRole(RoleTypeProtoConverter.toRoleAddrProto(domainRole))
                 .setRoleStr(domainRole.getCode())
                 .setIp(addr.substring(0, colon))
                 .setHttpPort(0)
@@ -1081,7 +1081,9 @@ public final class JavaLoadClient {
         return addrs.get(idx);
     }
 
-    /** Loads fallback gRPC addresses from the mock cluster's endpoint records. */
+    /**
+     * Loads fallback gRPC addresses from the mock cluster's endpoint records.
+     */
     void loadFallbackEndpoints(String path) throws IOException {
         JsonNode data = MAPPER.readTree(Path.of(path).toFile());
         if (fallbackPrefillAddrs.isEmpty()) {
@@ -1191,7 +1193,7 @@ public final class JavaLoadClient {
                     .addRoleAddrs(
                             EngineRpcService.RoleAddrPB.newBuilder()
                                     .setRole(
-                                            RoleTypeProtoConverter.toLegacyProto(
+                                            RoleTypeProtoConverter.toRoleAddrProto(
                                                     RoleTypeProtoConverter.fromProto(roleType)))
                                     .setRoleStr(
                                             RoleTypeProtoConverter.fromProto(roleType).getCode())
@@ -1704,7 +1706,9 @@ public final class JavaLoadClient {
         }
     }
 
-    /** Builds the Prometheus text-format payload (parity with Python _push_metrics). */
+    /**
+     * Builds the Prometheus text-format payload (parity with Python _push_metrics).
+     */
     String buildPushMetricsBody() {
         List<String> lines = new ArrayList<>();
         int inflight = inflightCount.get();
@@ -1866,7 +1870,9 @@ public final class JavaLoadClient {
         return rampUpSeconds + (index - rampCount) / perShardQps;
     }
 
-    /** Nearest-rank percentile (parity with Python LoadClient._percentile). */
+    /**
+     * Nearest-rank percentile (parity with Python LoadClient._percentile).
+     */
     static double percentileNearestRank(List<Double> values, double p) {
         if (values.isEmpty()) {
             return 0.0;
@@ -1970,13 +1976,19 @@ public final class JavaLoadClient {
          *  restore the old "leave the field unset on the wire" behavior. */
         final int priority;
 
-        /** Single-priority override: > 0 pins every request to that level. */
+        /**
+         * Single-priority override: > 0 pins every request to that level.
+         */
         final int forcePriority;
 
-        /** Arrival process: "replay" (trace ts pacing) or "uniform" (fixed interval). */
+        /**
+         * Arrival process: "replay" (trace ts pacing) or "uniform" (fixed interval).
+         */
         final String sendMode;
 
-        /** Total target QPS across all shards; required > 0 in uniform mode. */
+        /**
+         * Total target QPS across all shards; required > 0 in uniform mode.
+         */
         final double sendModeQps;
 
         /** Uniform-mode traffic ramp-up: per-shard QPS climbs linearly from 0
@@ -2086,7 +2098,9 @@ public final class JavaLoadClient {
             return "uniform".equals(sendMode);
         }
 
-        /** True when GRPC_TARGETS carries >= 2 addresses (HA sticky+failover mode). */
+        /**
+         * True when GRPC_TARGETS carries >= 2 addresses (HA sticky+failover mode).
+         */
         boolean isMultiTarget() {
             return grpcTargets.size() >= 2;
         }
@@ -2334,7 +2348,9 @@ public final class JavaLoadClient {
         final List<Long> blockKeys;
         final List<Integer> tokenIds;
 
-        /** Auto-TPM QoS priority in [1, 100]; 0 means unset. */
+        /**
+         * Auto-TPM QoS priority in [1, 100]; 0 means unset.
+         */
         final int priority;
 
         TraceRecord(
@@ -2369,7 +2385,9 @@ public final class JavaLoadClient {
         String status = "unknown";
         double scheduleMs;
 
-        /** Absolute epoch-ms when the schedule RPC returned (send_start + schedule_ms); 0 on the direct fallback path (no master schedule hop). */
+        /**
+         * Absolute epoch-ms when the schedule RPC returned (send_start + schedule_ms); 0 on the direct fallback path (no master schedule hop).
+         */
         double schedDoneEpochMs;
 
         double ttftMs;
@@ -2400,7 +2418,9 @@ public final class JavaLoadClient {
         double sendStartEpochMs;
         double pacingLagMs;
 
-        /** Auto-TPM QoS priority carried by the schedule request; 0 means unset. */
+        /**
+         * Auto-TPM QoS priority carried by the schedule request; 0 means unset.
+         */
         int priority;
 
         /** True for rows synthesized by the collector (deadline timeout /

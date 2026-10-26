@@ -36,13 +36,15 @@ for variant in ("before", "after"):
         directory
         / "flexlb-sync/src/main/java/org/flexlb/balance/planner/GroupPlanner.java"
     ).read_text()
+    if not re.search(r"record Item\(\s*String\b", planner_source):
+        body = body.replace("String.valueOf(i)", "i").replace('"99999"', "99999")
     if variant == "before" and " select(" in planner_source:
         a = body.index("        // INCREMENTAL_BEGIN")
         b = body.index("        // INCREMENTAL_END") + len("        // INCREMENTAL_END")
         body = (
             body[:a]
             + """        var selected = GroupPlanner.select(items, GroupPlanner.itemAccess(), constraints(size),
-                prefix -> model.predictBatchMs(PrefillBatchFeatures.from(prefix,
+                prefix -> model.predictBatchMs(org.flexlb.balance.prediction.PrefillBatchFeatures.from(prefix,
                         GroupPlanner.Item::seqLen, GroupPlanner.Item::hitCache)));"""
             + body[b:]
         )

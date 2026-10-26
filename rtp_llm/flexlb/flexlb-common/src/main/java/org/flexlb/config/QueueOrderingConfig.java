@@ -3,7 +3,9 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 
-/** Queue ordering mode and optional priority/preemption settings. */
+/**
+ * Queue ordering mode and optional priority/preemption settings.
+ */
 @Getter
 @Setter
 public final class QueueOrderingConfig {

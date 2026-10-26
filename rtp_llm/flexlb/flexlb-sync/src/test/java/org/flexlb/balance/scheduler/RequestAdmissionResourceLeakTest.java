@@ -8,7 +8,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -34,7 +34,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Real endpoint reservations remain exact across competing local terminal paths. */
+/**
+ * Real endpoint reservations remain exact across competing local terminal paths.
+ */
 class RequestAdmissionResourceLeakTest {
     private FlexlbConfig config;
     private AbstractRequestScheduler lifecycle;
@@ -49,7 +51,7 @@ class RequestAdmissionResourceLeakTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
     }
 
     @AfterEach
@@ -66,8 +68,8 @@ class RequestAdmissionResourceLeakTest {
 
     @Test
     void declinedPublicationLeavesNoCanonicalItem() {
-        Registered registered = registerItem(1L);
-        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(1L, registered.future());
+        Registered registered = registerItem("1");
+        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle("1", registered.future());
                 var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
@@ -76,8 +78,8 @@ class RequestAdmissionResourceLeakTest {
                             registered.item(),
                             RequestProtocolTestSupport.publication(() -> false)));
             rollbackUnpublished(admission, registered);
-            assertNull(activeRoute(1L));
-            assertTrue(lifecycle.isAdmissionOpen(1L, registered.future()));
+            assertNull(activeRoute("1"));
+            assertTrue(lifecycle.isAdmissionOpen("1", registered.future()));
             verify(registered.item().decodeEp(), never())
                     .release(any(), eq(DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
         }
@@ -85,8 +87,8 @@ class RequestAdmissionResourceLeakTest {
 
     @Test
     void throwingPublicationLeavesTheExactRegistrationRetryable() {
-        Registered registered = registerItem(2L);
-        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(2L, registered.future());
+        Registered registered = registerItem("2");
+        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle("2", registered.future());
                 var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertThrows(
@@ -100,23 +102,23 @@ class RequestAdmissionResourceLeakTest {
                                                         "publication failed");
                                             })));
             rollbackUnpublished(admission, registered);
-            assertNull(activeRoute(2L));
-            assertTrue(lifecycle.isAdmissionOpen(2L, registered.future()));
+            assertNull(activeRoute("2"));
+            assertTrue(lifecycle.isAdmissionOpen("2", registered.future()));
         }
     }
 
     @Test
     void duplicatePublicationDoesNotReleaseCanonicalDecodeReservation() {
-        Registered registered = registerItem(3L);
+        Registered registered = registerItem("3");
         RequestProtocolTestSupport.beginRoutePublication(lifecycle, registered);
         assertEquals(
                 PlacementResult.Status.CLOSED,
                 lifecycle.commitRoute(
                         registered.item(), RequestProtocolTestSupport.publication(() -> true)));
-        assertSame(registered.item(), activeRoute(3L));
+        assertSame(registered.item(), activeRoute("3"));
         verify(registered.item().decodeEp(), never())
                 .release(any(), eq(DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
-        lifecycle.cancel(3L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancel("3", 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 registered.future().join().getCode());
@@ -129,8 +131,8 @@ class RequestAdmissionResourceLeakTest {
 
     @Test
     void cancellationWaitsForPublicationMutationBeforeReleasingReservation() {
-        Registered registered = registerItem(4L);
-        AdmissionHandle admission = lifecycle.claimAdmissionHandle(4L, registered.future());
+        Registered registered = registerItem("4");
+        AdmissionHandle admission = lifecycle.claimAdmissionHandle("4", registered.future());
         assertNotNull(admission);
         try {
             assertEquals(
@@ -139,7 +141,7 @@ class RequestAdmissionResourceLeakTest {
                             registered.item(), RequestProtocolTestSupport.publication(() -> true)));
             assertEquals(
                     RequestState.Phase.CANCEL_REQUESTED,
-                    lifecycle.cancel(4L, 0L, CancelReason.CLIENT_CANCELLED).state());
+                    lifecycle.cancel("4", 0L, CancelReason.CLIENT_CANCELLED).state());
             verify(registered.item().decodeEp(), never())
                     .release(any(), eq(DecodeResources.ReleaseReason.COUNTERPART_FINISHED));
         } finally {
@@ -157,7 +159,7 @@ class RequestAdmissionResourceLeakTest {
     void competingLocalTerminalPathsReleaseTheExactReservationOnce() throws Exception {
         try (var executor = Executors.newFixedThreadPool(2)) {
             for (long id = 10; id < 42; id++) {
-                Registered registered = registerItem(id);
+                Registered registered = registerItem(String.valueOf(id));
                 RequestProtocolTestSupport.beginRoutePublication(lifecycle, registered);
                 CountDownLatch start = new CountDownLatch(1);
                 long requestId = id;
@@ -165,7 +167,10 @@ class RequestAdmissionResourceLeakTest {
                         executor.submit(
                                 () -> {
                                     RequestProtocolTestSupport.await(start);
-                                    lifecycle.cancel(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+                                    lifecycle.cancel(
+                                            String.valueOf(requestId),
+                                            0L,
+                                            CancelReason.CLIENT_CANCELLED);
                                 });
                 var completed =
                         executor.submit(
@@ -190,7 +195,7 @@ class RequestAdmissionResourceLeakTest {
 
     @Test
     void shutdownReleasesQueuedReservationsOnce() {
-        Registered registered = registerItem(51L);
+        Registered registered = registerItem("51");
         RequestProtocolTestSupport.beginRoutePublication(lifecycle, registered);
         assertTrue(RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(lifecycle));
         lifecycle.closeOutstandingAndTerminalize();
@@ -212,8 +217,8 @@ class RequestAdmissionResourceLeakTest {
 
     @Test
     void queuedPrefillPreemptionReturnsPreemptedAndReleasesDecodeOnce() throws Exception {
-        Registered victim = registerItem(61L);
-        Registered incoming = registerItem(62L);
+        Registered victim = registerItem("61");
+        Registered incoming = registerItem("62");
         RequestProtocolTestSupport.beginRoutePublication(lifecycle, victim);
         lifecycle.onQueueEvent(
                 victim.item(), AbstractRequestScheduler.QueueKind.PREEMPTED, incoming.item(), null);
@@ -222,12 +227,12 @@ class RequestAdmissionResourceLeakTest {
         assertEquals("preempted by higher-priority request 62", response.getErrorMessage());
         lifecycle.onQueueEvent(
                 victim.item(), AbstractRequestScheduler.QueueKind.PREEMPTED, incoming.item(), null);
-        lifecycle.cancel(61L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancel("61", 0L, CancelReason.CLIENT_CANCELLED);
         verify(victim.item().decodeEp(), times(1))
                 .release(
                         victim.item().decodeReservation(),
                         DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
-        assertTrue(lifecycle.isAdmissionOpen(62L, incoming.future()));
+        assertTrue(lifecycle.isAdmissionOpen("62", incoming.future()));
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -235,9 +240,9 @@ class RequestAdmissionResourceLeakTest {
     void cancellationAtEveryPublicationOutcomeSettlesTheOriginalRequest(
             String publicationOutcome, CancelReason reason, boolean inactivityExpired)
             throws Exception {
-        Registered registered = registerItem(71L);
+        Registered registered = registerItem("71");
         var context = registered.item().ctx();
-        AdmissionHandle admission = lifecycle.claimAdmissionHandle(71L, registered.future());
+        AdmissionHandle admission = lifecycle.claimAdmissionHandle("71", registered.future());
         assertNotNull(admission);
         try {
             var publication =
@@ -249,7 +254,7 @@ class RequestAdmissionResourceLeakTest {
                                     RequestProtocolTestSupport.expireInactiveRequest(
                                             lifecycle, context, Long.MAX_VALUE);
                                 } else {
-                                    lifecycle.cancel(71L, 0L, reason);
+                                    lifecycle.cancel("71", 0L, reason);
                                 }
                                 org.junit.jupiter.api.Assertions.assertFalse(
                                         registered.future().isDone(),
@@ -290,7 +295,7 @@ class RequestAdmissionResourceLeakTest {
         SchedulerTestSupport.awaitRequestWork(lifecycle.runtime);
         assertEquals(0, lifecycle.requests.liveRequestCount());
         org.junit.jupiter.api.Assertions.assertFalse(
-                lifecycle.isAdmissionOpen(71L, registered.future()));
+                lifecycle.isAdmissionOpen("71", registered.future()));
         // A scheduling deadline is canceled by the published Prefill queue owner;
         // an actual inactivity expiry retains separate EXPIRED cleanup proof.
         verify(registered.item().decodeEp(), times(publicationOutcome.equals("SUCCESS") ? 1 : 0))
@@ -299,7 +304,7 @@ class RequestAdmissionResourceLeakTest {
                         inactivityExpired
                                 ? DecodeResources.ReleaseReason.EXPIRED
                                 : DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
-        lifecycle.cancel(71L, 0L, CancelReason.SHUTDOWN);
+        lifecycle.cancel("71", 0L, CancelReason.SHUTDOWN);
         assertSame(response, registered.future().join());
     }
 
@@ -346,14 +351,14 @@ class RequestAdmissionResourceLeakTest {
                         ContextResult.PublicationResult.ROLLBACK_COMPLETED);
     }
 
-    private RequestRoute activeRoute(long requestId) {
+    private RequestRoute activeRoute(String requestId) {
         RequestContext requestContext = lifecycle.requests.findActive(requestId);
         synchronized (requestContext) {
             return requestContext.snapshot().route();
         }
     }
 
-    private Registered registerItem(long requestId) {
+    private Registered registerItem(String requestId) {
         RequestContext context = RequestProtocolTestSupport.context(config, requestId);
         var future = RequestProtocolTestSupport.register(lifecycle, context);
         DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();

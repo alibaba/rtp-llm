@@ -11,7 +11,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -45,7 +45,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Executable documentation for the RequestContext delivery lock boundary. */
+/**
+ * Executable documentation for the RequestContext delivery lock boundary.
+ */
 class RequestDeliveryLockContractTest {
 
     private FlexlbConfig config;
@@ -62,7 +64,7 @@ class RequestDeliveryLockContractTest {
                         configService,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
     }
 
     @AfterEach
@@ -89,7 +91,7 @@ class RequestDeliveryLockContractTest {
                         () -> {
                             await(initializing);
                             cancellationStarted.countDown();
-                            return lifecycle.cancel(809L, 0L, CancelReason.CLIENT_CANCELLED);
+                            return lifecycle.cancel("809", 0L, CancelReason.CLIENT_CANCELLED);
                         });
         org.mockito.Mockito.when(
                         endpoint.reserveBatch(
@@ -670,7 +672,7 @@ class RequestDeliveryLockContractTest {
                                 })));
         assertEquals(
                 701L,
-                SchedulerTestSupport.repository(lifecycle).getRequestState(805L, 701L).batchId());
+                SchedulerTestSupport.repository(lifecycle).getRequestState("805", 701L).batchId());
         assertFalse(registered.future().isDone());
 
         RequestProtocolTestSupport.transport(lifecycle, first, DeliveryResult.delivered());
@@ -686,7 +688,7 @@ class RequestDeliveryLockContractTest {
                 RequestProtocolTestSupport.claimBatch(
                         lifecycle, registered.item(), 703L, () -> true);
         assertNotNull(claim);
-        RequestContext original = lifecycle.requests.findActive(207L);
+        RequestContext original = lifecycle.requests.findActive("207");
 
         RequestProtocolTestSupport.applyPrefillStatus(
                 lifecycle,
@@ -744,10 +746,10 @@ class RequestDeliveryLockContractTest {
         }
         DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
         DecodeResources.ReservationHandle reservation =
-                new DecodeResources.ReservationHandle(1L, 208L, 1L);
+                new DecodeResources.ReservationHandle(1L, "208", 1L);
         when(decode.ownership(reservation))
                 .thenReturn(org.flexlb.balance.endpoint.DecodeResources.Ownership.CONFIRMED);
-        RequestContext context = context(208L);
+        RequestContext context = context("208");
         CompletableFuture<Response> future =
                 RequestProtocolTestSupport.register(lifecycle, context);
         assertSame(future, context.data().getFuture());
@@ -783,7 +785,7 @@ class RequestDeliveryLockContractTest {
         } else {
             RequestProtocolTestSupport.routeDelivered(lifecycle, claim, precedingWork, 30_000L);
         }
-        RequestContext requestContext = lifecycle.requests.findActive(208L);
+        RequestContext requestContext = lifecycle.requests.findActive("208");
         synchronized (requestContext) {
             assertTrue(requestContext.snapshot().engine().decodeAccepted());
             assertTrue(
@@ -858,14 +860,14 @@ class RequestDeliveryLockContractTest {
         assertTrue(RequestProtocolTestSupport.awaitResult(registered.future()).isSuccess());
         assertEquals(
                 RequestState.Phase.ACKNOWLEDGED,
-                SchedulerTestSupport.repository(lifecycle).getRequestState(205L, 0L).state());
+                SchedulerTestSupport.repository(lifecycle).getRequestState("205", 0L).state());
         // The observation window includes the 10-second handoff grace and is
         // independent of worker-status RPC timing and request inactivity.
         assertTimeoutPreemptively(
                 Duration.ofSeconds(15),
                 () -> {
                     while (!SchedulerTestSupport.repository(lifecycle)
-                            .getRequestState(205L, 0L)
+                            .getRequestState("205", 0L)
                             .detail()
                             .contains("SUSPECTED_LOST")) {
                         Thread.sleep(5L);
@@ -874,6 +876,10 @@ class RequestDeliveryLockContractTest {
     }
 
     private void assertQueuedWithoutClaim(long requestId) {
+        assertQueuedWithoutClaim(Long.toString(requestId));
+    }
+
+    private void assertQueuedWithoutClaim(String requestId) {
         RequestState snapshot =
                 SchedulerTestSupport.repository(lifecycle).getRequestState(requestId, 0L);
         assertEquals(RequestState.Phase.QUEUED, snapshot.state());
@@ -890,7 +896,7 @@ class RequestDeliveryLockContractTest {
 
     private Registered registerItem(
             long requestId, PrefillEndpoint prefillEndpoint, DecodeEndpoint decodeEndpoint) {
-        RequestContext context = context(requestId);
+        RequestContext context = context(String.valueOf(requestId));
         CompletableFuture<Response> future =
                 RequestProtocolTestSupport.register(lifecycle, context);
         assertSame(future, context.data().getFuture());
@@ -907,7 +913,7 @@ class RequestDeliveryLockContractTest {
         return new Registered(item, future);
     }
 
-    private RequestContext context(long requestId) {
+    private RequestContext context(String requestId) {
         return RequestProtocolTestSupport.context(config, requestId);
     }
 }

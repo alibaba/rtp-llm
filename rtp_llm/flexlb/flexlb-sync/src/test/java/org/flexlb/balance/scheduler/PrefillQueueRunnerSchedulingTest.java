@@ -12,11 +12,13 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -92,7 +94,7 @@ class PrefillQueueRunnerSchedulingTest {
                         service,
                         mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock();
         PrefillQueueRunner runtime = runningRuntime(config, endpoint, delivery);
@@ -104,7 +106,12 @@ class PrefillQueueRunnerSchedulingTest {
                 .when(endpoint)
                 .signal(PrefillEndpoint.Signal.INPUT);
         RequestContext context = item(config, endpoint, 901L, 50, System.currentTimeMillis()).ctx();
-        context.data().setGenerateInputPb(com.google.protobuf.ByteString.copyFromUtf8("input"));
+        context.data()
+                .setGenerateInputPb(
+                        org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
+                                .setRequestId(Long.parseLong(context.data().getRequestId()))
+                                .build()
+                                .toByteString());
         var future = RequestProtocolTestSupport.register(scheduler, context);
         context.data().setFuture(future);
         var request =
@@ -120,7 +127,7 @@ class PrefillQueueRunnerSchedulingTest {
         CountDownLatch published = new CountDownLatch(1);
         CountDownLatch allowCommit = new CountDownLatch(1);
         try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
-                var routing = scheduler.claimAdmissionHandle(901L, future);
+                var routing = scheduler.claimAdmissionHandle("901", future);
                 var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(routing)) {
             assertNotNull(routing);
             var committed =
@@ -187,7 +194,7 @@ class PrefillQueueRunnerSchedulingTest {
                         mock(AbstractRequestScheduler.class));
         RequestRoute route = spy(item(config, endpoint, 902L, 50, System.currentTimeMillis()));
         RequestContext context = route.ctx();
-        context.register(902L, System.currentTimeMillis(), Long.MAX_VALUE, 60_000L);
+        context.register("902", System.currentTimeMillis(), Long.MAX_VALUE, 60_000L);
         var operation =
                 ((ContextResult.Granted<ContextResult.PlacementToken>) context.beginPlacement(null))
                         .value();
@@ -665,7 +672,7 @@ class PrefillQueueRunnerSchedulingTest {
                 RequestTimeEstimationTestSupport.project(
                         inputs,
                         new RequestTimeEstimationTestSupport.Probe(
-                                22L, 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
+                                "22", 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
                         endpoint.predictor.evaluator(),
                         projection,
                         now);
@@ -739,8 +746,7 @@ class PrefillQueueRunnerSchedulingTest {
             finish.countDown();
             var shared = first.get(2, TimeUnit.SECONDS);
             for (var follower : followers) {
-                org.junit.jupiter.api.Assertions.assertSame(
-                        shared, follower.get(2, TimeUnit.SECONDS));
+                assertSame(shared, follower.get(2, TimeUnit.SECONDS));
             }
         } finally {
             finish.countDown();
@@ -823,7 +829,7 @@ class PrefillQueueRunnerSchedulingTest {
                         SchedulingTestConfig.configService(config),
                         mock(DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         var execution = spy(scheduler.runtime.deliveries());
         org.springframework.test.util.ReflectionTestUtils.setField(
                 scheduler.runtime, "deliveries", execution);
@@ -859,7 +865,11 @@ class PrefillQueueRunnerSchedulingTest {
         for (RequestRoute route : List.of(first, revoked)) {
             route.ctx()
                     .data()
-                    .setGenerateInputPb(com.google.protobuf.ByteString.copyFromUtf8("input"));
+                    .setGenerateInputPb(
+                            org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
+                                    .setRequestId(Long.parseLong(route.ctx().data().getRequestId()))
+                                    .build()
+                                    .toByteString());
             assertSame(RequestProtocolTestSupport.register(scheduler, route.ctx()), route.future());
             assertTrue(scheduler.requests.isCurrent(route.ctx()));
         }
@@ -889,7 +899,9 @@ class PrefillQueueRunnerSchedulingTest {
                 admission.finish();
             }
             allowFirstStatusRead.countDown();
-            await(delivery.groupPredictionEntered);
+            assertTrue(
+                    delivery.groupPredictionEntered.await(2, TimeUnit.SECONDS),
+                    runtime.getLatestQueueWaitSnapshot().toString());
 
             assertTrue(runtime.control(revoked, PrefillQueueRunner.Control.REMOVE));
             delivery.allowGroupPrediction.countDown();
@@ -977,7 +989,11 @@ class PrefillQueueRunnerSchedulingTest {
             int priority,
             long enqueuedAtMs) {
         Request request =
-                Request.builder().requestId(requestId).rawPriority(priority).seqLen(10L).build();
+                Request.builder()
+                        .requestId(String.valueOf(requestId))
+                        .rawPriority(priority)
+                        .seqLen(10L)
+                        .build();
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
@@ -995,6 +1011,8 @@ class PrefillQueueRunnerSchedulingTest {
         when(predictor.evaluator()).thenReturn(evaluator);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
+        when(endpoint.collectionWindowMs(org.mockito.ArgumentMatchers.anyLong()))
+                .thenAnswer(call -> call.getArgument(0));
         org.springframework.test.util.ReflectionTestUtils.setField(
                 endpoint, "predictor", predictor);
         return endpoint;
@@ -1002,13 +1020,26 @@ class PrefillQueueRunnerSchedulingTest {
 
     private static WorkerStatus stableStatus() {
         WorkerStatus status = mock(WorkerStatus.class);
+        when(status.topologySnapshot())
+                .thenReturn(
+                        new WorkerStatus.TopologySnapshot(
+                                null, "10.0.0.1", 8080, 8081, null, null, 0, 1));
+        when(status.getRole()).thenReturn(RoleType.PREFILL);
+        when(status.getLogicalIpPort()).thenReturn("10.0.0.1:8080@0");
         when(status.committedEngineObservation()).thenReturn(capacity());
+        when(status.getMetricIpPort()).thenReturn("10.0.0.1");
         return status;
     }
 
     private static WorkerStatus gatedFirstStatusRead(
             CountDownLatch entered, CountDownLatch proceed) {
         WorkerStatus status = mock(WorkerStatus.class);
+        when(status.topologySnapshot())
+                .thenReturn(
+                        new WorkerStatus.TopologySnapshot(
+                                null, "10.0.0.1", 8080, 8081, null, null, 0, 1));
+        when(status.getRole()).thenReturn(RoleType.PREFILL);
+        when(status.getLogicalIpPort()).thenReturn("10.0.0.1:8080@0");
         AtomicBoolean first = new AtomicBoolean(true);
         when(status.committedEngineObservation())
                 .thenAnswer(
@@ -1050,7 +1081,9 @@ class PrefillQueueRunnerSchedulingTest {
         }
     }
 
-    /** Queue scheduling fixture: stubs Worker boundaries, never Dispatcher business APIs. */
+    /**
+     * Queue scheduling fixture: stubs Worker boundaries, never Dispatcher business APIs.
+     */
     private abstract static class BoundaryDelivery {
         abstract CapacityBoundary selectBoundary(
                 List<RequestRoute> candidates,
@@ -1240,6 +1273,119 @@ class PrefillQueueRunnerSchedulingTest {
         void release() {
             available.set(true);
             listeners.forEach(Runnable::run);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void existingRuntimeUsesUpdatedWindowOnNextDecision(boolean increaseWindow) throws Exception {
+        FlexlbConfig initial = fixedConfig();
+        initial.decisionPolicy().setMaxPredictedExecutionMs(null);
+        initial.decisionPolicy().setMaxCollectionWaitMs(increaseWindow ? 0L : 60_000L);
+        AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
+        PrefillEndpoint endpoint =
+                org.flexlb.balance.endpoint.EndpointTestSupport.unstartedPrefill(
+                        initial,
+                        stableStatus(),
+                        SchedulerTestSupport.dispatcher(),
+                        mock(AbstractRequestScheduler.class));
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                endpoint,
+                "configSupplier",
+                (java.util.function.Supplier<FlexlbConfig>) current::get);
+        EventDrivenBlock delivery = new EventDrivenBlock();
+        PrefillQueueRunner runtime = runningRuntime(initial, endpoint, delivery);
+
+        FlexlbConfig updated = fixedConfig();
+        updated.decisionPolicy().setMaxPredictedExecutionMs(null);
+        updated.decisionPolicy().setMaxCollectionWaitMs(increaseWindow ? 60_000L : 0L);
+        current.set(updated);
+        assertEquals(
+                increaseWindow ? 60_000L : 0L,
+                endpoint.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
+        assertTrue(runtime.offer(item(initial, endpoint, 77L, 50, System.currentTimeMillis())));
+        if (increaseWindow) {
+            current.set(initial);
+            assertEquals(
+                    0L,
+                    endpoint.captureRouteProjectionInputs()
+                            .queue()
+                            .constraints()
+                            .collectionWindowMs());
+            runtime.signal(false);
+        }
+        await(delivery.firstAttempt);
+    }
+
+    @Test
+    void windowUpdateInvalidatesProjectionWithoutQueueMutation() {
+        FlexlbConfig initial = fixedConfig();
+        initial.decisionPolicy().setMaxCollectionWaitMs(100L);
+        AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
+        PrefillEndpoint endpoint =
+                org.flexlb.balance.endpoint.EndpointTestSupport.unstartedPrefill(
+                        initial,
+                        stableStatus(),
+                        SchedulerTestSupport.dispatcher(),
+                        mock(AbstractRequestScheduler.class));
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                endpoint,
+                "configSupplier",
+                (java.util.function.Supplier<FlexlbConfig>) current::get);
+        PrefillQueueRunner runtime =
+                runningRuntime(initial, endpoint, SchedulerTestSupport.dispatcher());
+
+        var before = endpoint.captureRouteProjectionInputs();
+        assertEquals(100L, before.queue().constraints().collectionWindowMs());
+        assertSame(before, endpoint.captureRouteProjectionInputs());
+        FlexlbConfig updated = fixedConfig();
+        updated.decisionPolicy().setMaxCollectionWaitMs(500L);
+        current.set(updated);
+        var after = endpoint.captureRouteProjectionInputs();
+        assertEquals(500L, after.queue().constraints().collectionWindowMs());
+        assertSame(after, endpoint.captureRouteProjectionInputs());
+        assertEquals(before.queue().activeItems(), after.queue().activeItems());
+        assertEquals(100L, before.queue().constraints().collectionWindowMs());
+
+        current.set(initial);
+        assertEquals(
+                100L,
+                endpoint.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {30_000L, 120_000L})
+    void collectionWaitDeadlineUsesTheUpdatedWindow(long updatedWindowMs) {
+        var config = fixedConfig();
+        config.decisionPolicy().setMaxPredictedExecutionMs(null);
+        var endpoint = stableEndpoint(stableStatus());
+        when(endpoint.collectionWindowMs(org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(updatedWindowMs);
+        var worker =
+                PrefillQueueRunnerTestSupport.create(
+                        "updated-window",
+                        endpoint,
+                        config,
+                        SchedulerTestSupport.dispatcher(),
+                        mock(AbstractRequestScheduler.class));
+        var state = PrefillQueueRunnerTestSupport.state(worker);
+        long enqueuedAtMs = System.currentTimeMillis();
+        var request = item(config, endpoint, 78L, 50, enqueuedAtMs);
+        assertSame(
+                request,
+                state.updateQueue(PrefillState.QueueChange.ENQUEUE, request, enqueuedAtMs));
+        try {
+            var decision =
+                    org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                            worker, "processQueue");
+            assertEquals(
+                    enqueuedAtMs + updatedWindowMs,
+                    org.springframework.test.util.ReflectionTestUtils.getField(
+                            decision, "wakeAtMs"));
+        } finally {
+            state.updateQueue(PrefillState.QueueChange.REMOVE, request, System.currentTimeMillis());
+            assertNull(worker.stopAndAwait());
         }
     }
 }

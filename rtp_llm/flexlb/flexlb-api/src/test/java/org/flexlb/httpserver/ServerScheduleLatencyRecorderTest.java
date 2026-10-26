@@ -14,6 +14,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ServerScheduleLatencyRecorderTest {
 
     @Test
+    void ignoresCompletionWithoutContext() {
+        ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
+
+        recorder.recordCompletion(null, System.nanoTime());
+
+        assertEquals(0L, recorder.snapshot().get("completion_count"));
+        assertEquals(0L, ((Map<?, ?>) recorder.snapshot().get("server_total_ms")).get("count"));
+    }
+
+    @Test
     void recordsServerTotalStagesAndRates() {
         ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
         long end = System.nanoTime();
@@ -28,7 +38,7 @@ class ServerScheduleLatencyRecorderTest {
 
         recorder.recordArrival(end - TimeUnit.SECONDS.toNanos(1));
         recorder.recordArrival(end);
-        recorder.recordCompletion(context, end);
+        recorder.recordCompletion(context.data(), end);
 
         Map<String, Object> snapshot = recorder.snapshot();
         assertEquals(2L, snapshot.get("arrival_count"));
@@ -49,8 +59,8 @@ class ServerScheduleLatencyRecorderTest {
         org.springframework.test.util.ReflectionTestUtils.setField(
                 terminalFirst.data(), "ackAtNanos", 0L);
 
-        recorder.recordCompletion(terminalFirst, end);
-        recorder.recordCompletion(contextWithBatchWait(end, 5L, null), end);
+        recorder.recordCompletion(terminalFirst.data(), end);
+        recorder.recordCompletion(contextWithBatchWait(end, 5L, null).data(), end);
 
         Map<String, Object> snapshot = recorder.snapshot();
         assertEquals(2L, snapshot.get("completion_count"));
@@ -76,7 +86,7 @@ class ServerScheduleLatencyRecorderTest {
         route.data().setBatchDispatchedNanos(0L);
         org.springframework.test.util.ReflectionTestUtils.setField(route.data(), "ackAtNanos", 0L);
 
-        recorder.recordCompletion(route, end);
+        recorder.recordCompletion(route.data(), end);
 
         Map<String, Object> snapshot = recorder.snapshot();
         assertEquals(1L, snapshot.get("completion_count"));
@@ -94,13 +104,13 @@ class ServerScheduleLatencyRecorderTest {
         long end = System.nanoTime();
 
         // Scheduling-metadata priorities (PRIORITY path)
-        recorder.recordCompletion(contextWithBatchWait(end, 5, metadata(40)), end);
-        recorder.recordCompletion(contextWithBatchWait(end, 10, metadata(50)), end);
+        recorder.recordCompletion(contextWithBatchWait(end, 5, metadata(40)).data(), end);
+        recorder.recordCompletion(contextWithBatchWait(end, 10, metadata(50)).data(), end);
         // Fallback path: priority carried on the request only (metadata == null)
         RequestContext legacy = contextWithBatchWait(end, 20, null);
         Request request = Request.builder().rawPriority(70).build();
         legacy.data().setRequest(request);
-        recorder.recordCompletion(legacy, end);
+        recorder.recordCompletion(legacy.data(), end);
 
         Map<String, Object> snapshot = recorder.snapshot();
         // Global aggregate contains all three samples (backward-compatible format)
@@ -117,20 +127,21 @@ class ServerScheduleLatencyRecorderTest {
     }
 
     @Test
-    void fallsBackToPriorityZeroWhenRequestCarriesNoPriority() {
+    void distinguishesAbsentRequestsFromDefaultSchedulingPriority() {
         ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
         long end = System.nanoTime();
 
         // Neither scheduling metadata nor request present
-        recorder.recordCompletion(contextWithBatchWait(end, 5, null), end);
+        recorder.recordCompletion(contextWithBatchWait(end, 5, null).data(), end);
         // Request present but priority unset (proto3 default 0)
         RequestContext unset = contextWithBatchWait(end, 7, null);
         unset.data().setRequest(Request.builder().build());
-        recorder.recordCompletion(unset, end);
+        recorder.recordCompletion(unset.data(), end);
 
         Map<?, ?> byPriority = (Map<?, ?>) recorder.snapshot().get("batch_wait_ms_by_priority");
-        assertEquals(1, byPriority.size());
-        assertPriorityBucket(byPriority, 0, 2L, 5L);
+        assertEquals(2, byPriority.size());
+        assertPriorityBucket(byPriority, 0, 1L, 5L);
+        assertPriorityBucket(byPriority, 50, 1L, 7L);
     }
 
     @Test
@@ -140,8 +151,8 @@ class ServerScheduleLatencyRecorderTest {
 
         long end = System.nanoTime();
         // Record higher priority first to verify ascending output order
-        recorder.recordCompletion(contextWithBatchWait(end, 10, metadata(50)), end);
-        recorder.recordCompletion(contextWithBatchWait(end, 5, metadata(40)), end);
+        recorder.recordCompletion(contextWithBatchWait(end, 10, metadata(50)).data(), end);
+        recorder.recordCompletion(contextWithBatchWait(end, 5, metadata(40)).data(), end);
 
         assertEquals(
                 " batch_wait_p95_prio40_ms=5 batch_wait_p95_prio50_ms=10",
@@ -153,7 +164,7 @@ class ServerScheduleLatencyRecorderTest {
         ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
         long end = System.nanoTime();
         recorder.recordArrival(end);
-        recorder.recordCompletion(contextWithBatchWait(end, 5, metadata(40)), end);
+        recorder.recordCompletion(contextWithBatchWait(end, 5, metadata(40)).data(), end);
         recorder.reset();
 
         Map<String, Object> snapshot = recorder.snapshot();

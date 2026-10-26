@@ -8,10 +8,18 @@ import io.grpc.Status;
 
 import java.util.concurrent.ThreadPoolExecutor;
 
-/** Reject new calls at the RPC boundary, never by discarding gRPC lifecycle tasks. */
+/**
+ * Reject new calls at the RPC boundary, never by discarding gRPC lifecycle tasks.
+ */
 final class GrpcOverloadInterceptor implements ServerInterceptor {
     private final ThreadPoolExecutor executor;
     private final ThreadPoolExecutor controlExecutor;
+    private final java.util.concurrent.atomic.AtomicLong rejectedCalls =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    long rejected() {
+        return rejectedCalls.get();
+    }
 
     GrpcOverloadInterceptor(ThreadPoolExecutor executor) {
         this(executor, executor);
@@ -30,6 +38,7 @@ final class GrpcOverloadInterceptor implements ServerInterceptor {
                         ? controlExecutor
                         : this.executor;
         if (executor.isShutdown() || executor.getQueue().remainingCapacity() == 0) {
+            rejectedCalls.incrementAndGet();
             call.close(
                     Status.RESOURCE_EXHAUSTED.withDescription("FlexLB gRPC executor saturated"),
                     new Metadata());

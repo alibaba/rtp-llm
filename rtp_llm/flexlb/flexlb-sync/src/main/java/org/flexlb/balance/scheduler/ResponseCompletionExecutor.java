@@ -44,7 +44,9 @@ final class ResponseCompletionExecutor implements AutoCloseable {
 
         private CompletionRegistration() {}
 
-        /** Every accepted response runs asynchronously, including executor rejection recovery. */
+        /**
+         * Every accepted response runs asynchronously, including executor rejection recovery.
+         */
         void submit(BooleanSupplier operation) {
             if (!phase.compareAndSet(Phase.RESERVED, Phase.SUBMITTED)) {
                 throw new IllegalStateException("response registration already resolved");
@@ -77,7 +79,9 @@ final class ResponseCompletionExecutor implements AutoCloseable {
             }
         }
 
-        /** External mutations stay synchronous; queued/recovered tasks share one execution claim. */
+        /**
+         * External mutations stay synchronous; queued/recovered tasks share one execution claim.
+         */
         boolean completeNow(BooleanSupplier operation) {
             Phase observed;
             do {
@@ -139,10 +143,14 @@ final class ResponseCompletionExecutor implements AutoCloseable {
                             .name("response-completion-recovery-", 1)
                             .factory());
 
-    /** Null while accepting registrations; otherwise the shared final close result. */
+    /**
+     * Null while accepting registrations; otherwise the shared final close result.
+     */
     private CompletableFuture<Throwable> closeResult;
 
-    /** Also serves as the monitor protecting registrations and closeResult. */
+    /**
+     * Also serves as the monitor protecting registrations and closeResult.
+     */
     private final Set<CompletionRegistration> registrations =
             Collections.newSetFromMap(new IdentityHashMap<>());
 
@@ -178,7 +186,9 @@ final class ResponseCompletionExecutor implements AutoCloseable {
         return Boolean.TRUE.equals(completing.get());
     }
 
-    /** Stops registration, drains accepted completions and closes workers. */
+    /**
+     * Stops registration, drains accepted completions and closes workers.
+     */
     @Override
     public void close() {
         if (isCompletingOnCurrentThread()) {

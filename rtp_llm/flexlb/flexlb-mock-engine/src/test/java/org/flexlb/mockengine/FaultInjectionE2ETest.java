@@ -40,7 +40,9 @@ class FaultInjectionE2ETest {
 
     private static final int BASE_PORT = 62900;
 
-    /** 通用布防：单请求批次 + 快派发，每个请求恰好一次 enqueueBatch。 */
+    /**
+     * 通用布防：单请求批次 + 快派发，每个请求恰好一次 enqueueBatch。
+     */
     private static void arm(AutoTpmE2EHarness h) {
         h.startAutoPump(10);
     }
@@ -48,7 +50,8 @@ class FaultInjectionE2ETest {
     private static Response submitTo(AutoTpmE2EHarness h, int prefillIndex, long requestId)
             throws Exception {
         h.prefillSelector = ctx -> prefillIndex;
-        CompletableFuture<Response> future = h.scheduler.submit(h.context(requestId, 50));
+        CompletableFuture<Response> future =
+                h.scheduler.submit(h.context(String.valueOf(requestId), 50));
         return future.get(10, TimeUnit.SECONDS);
     }
 
@@ -324,7 +327,7 @@ class FaultInjectionE2ETest {
             // 首个 EnqueueBatch 触发 crash 并返回空 ACK。请求可能已经越过发送边界，
             // Master 在请求 TTL 内等待匹配状态；持续无确认时必须本地回收。
             h.prefillSelector = ctx -> 0;
-            CompletableFuture<Response> crashed = h.scheduler.submit(h.context(9902, 50));
+            CompletableFuture<Response> crashed = h.scheduler.submit(h.context("9902", 50));
             CountDownLatch crashedTerminal = new CountDownLatch(1);
             crashed.whenComplete((ignored, error) -> crashedTerminal.countDown());
 
@@ -350,7 +353,7 @@ class FaultInjectionE2ETest {
                     "missing ACK stays pending before the request inactivity deadline");
             assertFalse(crashed.isDone(), "the unconfirmed request stays incomplete before TTL");
             if (clientCancellation) {
-                h.scheduler.cancel(9902L, 0L, CancelReason.CLIENT_CANCELLED);
+                h.scheduler.cancel("9902", 0L, CancelReason.CLIENT_CANCELLED);
             }
             assertEquals(
                     0L,
@@ -402,7 +405,9 @@ class FaultInjectionE2ETest {
 
     private record StreamResult(Throwable error, boolean completed) {}
 
-    /** 直连 generate_stream，等 500ms 观察流事件（fault 场景内即时返回或保持沉默）。 */
+    /**
+     * 直连 generate_stream，等 500ms 观察流事件（fault 场景内即时返回或保持沉默）。
+     */
     private static StreamResult callGenerateStream(
             JavaMockEngineCluster.FastRpcService svc, long requestId) throws InterruptedException {
         EngineRpcService.GenerateInputPB.Builder input =
@@ -438,7 +443,9 @@ class FaultInjectionE2ETest {
         return new StreamResult(error.get(), finished && error.get() == null);
     }
 
-    /** 直连 fetch_response，等 500ms 观察流事件。 */
+    /**
+     * 直连 fetch_response，等 500ms 观察流事件。
+     */
     private static StreamResult callFetchResponse(
             JavaMockEngineCluster.FastRpcService svc, long requestId) throws InterruptedException {
         AtomicReference<Throwable> error = new AtomicReference<>();

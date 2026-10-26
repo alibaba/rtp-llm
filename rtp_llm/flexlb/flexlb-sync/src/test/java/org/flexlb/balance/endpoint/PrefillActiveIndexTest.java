@@ -191,7 +191,7 @@ class PrefillActiveIndexTest {
         verify(first, times(1)).seqLen();
     }
 
-    private static List<Long> ids(PrefillActiveIndex.Capture capture) {
+    private static List<String> ids(PrefillActiveIndex.Capture capture) {
         return capture.projectedItems().stream()
                 .map(org.flexlb.balance.planner.GroupPlanner.Item::requestId)
                 .toList();
@@ -199,7 +199,7 @@ class PrefillActiveIndexTest {
 
     private static RequestRoute item(long id, int priority) {
         var request = mock(RequestRoute.class);
-        when(request.requestId()).thenReturn(id);
+        when(request.requestId()).thenReturn(Long.toString(id));
         when(request.enqueueSeq()).thenReturn(id);
         when(request.priority()).thenReturn(priority);
         when(request.seqLen()).thenReturn(10L);

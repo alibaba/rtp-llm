@@ -6,7 +6,9 @@ import java.util.function.ToLongFunction;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Immutable, payload-free features retained for prediction and learning. */
+/**
+ * Immutable, payload-free features retained for prediction and learning.
+ */
 public record PrefillBatchFeatures(List<Item> items) {
 
     public PrefillBatchFeatures {

@@ -4,7 +4,9 @@ import java.util.Objects;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Immutable request outcome selected before cleanup. */
+/**
+ * Immutable request outcome selected before cleanup.
+ */
 record TerminalOutcome(RequestState.Phase phase, String detail) {
     TerminalOutcome {
         Objects.requireNonNull(phase, "phase");

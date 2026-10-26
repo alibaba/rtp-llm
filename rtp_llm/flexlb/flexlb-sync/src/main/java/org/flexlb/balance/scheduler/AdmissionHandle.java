@@ -9,7 +9,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
-/** One caller's placement scope. Context retains only its immutable token. */
+/**
+ * One caller's placement scope. Context retains only its immutable token.
+ */
 public final class AdmissionHandle implements AutoCloseable {
     final ContextResult.PlacementToken token;
     private final AbstractRequestScheduler scheduler;

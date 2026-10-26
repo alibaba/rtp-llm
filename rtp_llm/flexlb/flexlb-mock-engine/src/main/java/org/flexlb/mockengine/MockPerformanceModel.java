@@ -3,10 +3,10 @@ package org.flexlb.mockengine;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.prediction.PrefillTimeFormula;
-import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig.EstimatorType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -380,7 +380,7 @@ final class MockPerformanceModel {
             if (item.isArray()
                     && item.size() >= 2
                     && "FLEXLB_CONFIG".equals(item.get(0).asText())) {
-                FlexlbConfig config = ConfigService.parse(item.get(1).asText());
+                FlexlbConfig config = FlexlbConfigMerger.mergeWithDefaults(item.get(1).asText());
                 var estimator =
                         config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator();
                 if (estimator != null && estimator.getType() == EstimatorType.FORMULA) {
@@ -475,7 +475,9 @@ final class MockPerformanceModel {
         this.overrideFixedPrefillMs = ms;
     }
 
-    /** Python /set_perf {@code decode_scale}: replace the decode latency scale. */
+    /**
+     * Python /set_perf {@code decode_scale}: replace the decode latency scale.
+     */
     void setOverrideDecodeScale(Double scale) {
         this.overrideDecodeScale = scale;
     }
@@ -489,7 +491,9 @@ final class MockPerformanceModel {
         this.overrideMaxWaitingPrefillBatches = cap;
     }
 
-    /** Python launcher {@code --block-size}: override the block size from the perf config. */
+    /**
+     * Python launcher {@code --block-size}: override the block size from the perf config.
+     */
     void setBlockSize(int blockSize) {
         this.blockSize = blockSize;
     }
@@ -551,7 +555,9 @@ final class MockPerformanceModel {
         return (int) Math.ceil(outputLen / tokensPerStep);
     }
 
-    /** Tokens produced per running stream per decode step (MTP acceptance fold). */
+    /**
+     * Tokens produced per running stream per decode step (MTP acceptance fold).
+     */
     double tokensPerStep() {
         return tokensPerStep;
     }
@@ -567,7 +573,9 @@ final class MockPerformanceModel {
         return decodeReserveStep;
     }
 
-    /** Effective decode scale (runtime /set_perf override > JSON config). */
+    /**
+     * Effective decode scale (runtime /set_perf override > JSON config).
+     */
     private double effectiveDecodeScale() {
         return overrideDecodeScale != null ? overrideDecodeScale : decodeScale;
     }

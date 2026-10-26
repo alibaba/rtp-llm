@@ -20,9 +20,21 @@ import static com.google.common.base.Preconditions.checkArgument;
  */
 public class WorkerEndpoint {
 
-    /** Passive status facts. The sync workflow publishes them after releasing the generation lock. */
+    /**
+     * Passive status facts. The sync workflow publishes them after releasing the generation lock.
+     */
     public sealed interface StatusChange {
         record None() implements StatusChange {}
+
+        record Encoder(
+                java.util.List<WorkerStatus.TaskObservation> active,
+                java.util.List<WorkerStatus.TaskObservation> finished)
+                implements StatusChange {
+            public Encoder {
+                active = java.util.List.copyOf(active);
+                finished = java.util.List.copyOf(finished);
+            }
+        }
 
         record Prefill(PrefillState.StatusReconciliation reconciliation) implements StatusChange {}
 
@@ -56,7 +68,7 @@ public class WorkerEndpoint {
     // ==================== identity (delegated to status) ====================
 
     public String ipPort() {
-        return status.getIpPort();
+        return status.getLogicalIpPort();
     }
 
     public String getIp() {
@@ -121,7 +133,9 @@ public class WorkerEndpoint {
         return NO_STATUS_CHANGE;
     }
 
-    /** Publish only facts belonging to this role; subclasses own their notification adapters. */
+    /**
+     * Publish only facts belonging to this role; subclasses own their notification adapters.
+     */
     public void publishStatus(StatusChange change) {
         checkArgument(
                 change instanceof StatusChange.None,
@@ -148,7 +162,9 @@ public class WorkerEndpoint {
         return permit == null ? null : new GenerationPin(this, permit);
     }
 
-    /** Validate an exact, still-open pin before consuming its admission right. */
+    /**
+     * Validate an exact, still-open pin before consuming its admission right.
+     */
     public final void requirePinnedGeneration(GenerationPin pin) {
         checkArgument(
                 pin != null && pin.endpoint == this && pin.permit.isOpen(),
@@ -193,7 +209,9 @@ public class WorkerEndpoint {
         retireInternal(false);
     }
 
-    /** Initiate unpublished-candidate cleanup without blocking its status lock. */
+    /**
+     * Initiate unpublished-candidate cleanup without blocking its status lock.
+     */
     final void closeAsynchronously() {
         retireInternal(true);
     }
@@ -226,7 +244,9 @@ public class WorkerEndpoint {
         generationLifecycle.awaitRetirement(timeoutMs);
     }
 
-    /** Bind exact finalization to actual cleanup, including after a wait timeout. */
+    /**
+     * Bind exact finalization to actual cleanup, including after a wait timeout.
+     */
     final void onRetired(Runnable completion) {
         generationLifecycle.onRetired(completion);
     }
@@ -313,7 +333,9 @@ public class WorkerEndpoint {
      * endpoint cannot publish a coherent complete work view.
      * <p>Decode: total active task count (confirmed running + inflight).
      */
-    /** Skip a monitoring sample when a stateful endpoint is busy. */
+    /**
+     * Skip a monitoring sample when a stateful endpoint is busy.
+     */
     public OptionalLong tryGetLoadMetric() {
         return getLoadMetric();
     }

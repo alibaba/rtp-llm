@@ -14,7 +14,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -34,7 +34,6 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyInt;
-import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -42,7 +41,9 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Waiting ownership is independent of delivery slots; failed publication rolls back only its owner. */
+/**
+ * Waiting ownership is independent of delivery slots; failed publication rolls back only its owner.
+ */
 @Timeout(15)
 class QueuedPublicationNotificationFailureTest {
     @Test
@@ -95,7 +96,7 @@ class QueuedPublicationNotificationFailureTest {
             var low = fixture.context(9311L, 20);
             var oldRoute = fixture.publish(low);
             var incoming = fixture.context(9312L, 80);
-            var handle = fixture.queue.claimAdmissionHandle(9312L, incoming.data().getFuture());
+            var handle = fixture.queue.claimAdmissionHandle("9312", incoming.data().getFuture());
             assertNotNull(handle);
             var failure = new IllegalStateException("physical offer failed before enqueue");
             fixture.physicalFailure = failure;
@@ -154,7 +155,7 @@ class QueuedPublicationNotificationFailureTest {
                                     service,
                                     mock(DeliveryMetricsReporter.class),
                                     reporter,
-                                    mock(RecentCacheKeyTraceReporter.class));
+                                    mock(TheoryCacheHitReporter.class));
             prefill =
                     spy(
                             EndpointTestSupport.realPrefill(
@@ -189,7 +190,11 @@ class QueuedPublicationNotificationFailureTest {
                                 return null;
                             })
                     .when(reporter)
-                    .reportVictim(anyInt(), anyInt(), anyString(), anyString());
+                    .reportVictim(
+                            anyInt(),
+                            anyInt(),
+                            org.mockito.ArgumentMatchers.anyString(),
+                            org.mockito.ArgumentMatchers.anyString());
             doAnswer(
                             call -> {
                                 var exact =
@@ -221,7 +226,7 @@ class QueuedPublicationNotificationFailureTest {
         }
 
         RequestContext context(long id, int priority) {
-            var context = RequestProtocolTestSupport.context(config, id);
+            var context = RequestProtocolTestSupport.context(config, String.valueOf(id));
             context.data()
                     .setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
             RequestProtocolTestSupport.register(queue, context);

@@ -7,6 +7,7 @@ import org.flexlb.balance.scheduler.RequestContext;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -23,10 +24,11 @@ class DecodeAdmissionHandoffTest {
         var plan = mock(QueuedRequestScheduler.Plan.class);
         var context = mock(RequestContext.class);
         var endpoint = mock(DecodeEndpoint.class);
-        var reservation = new DecodeResources.ReservationHandle(1L, 42L, 1L);
+        var reservation = new DecodeResources.ReservationHandle(1L, "42", 1L);
         var source = new CompletableFuture<DecodeAdmission.PreemptionResult>();
+        var victims = List.of("victim-1", "victim-2");
         when(plan.context()).thenReturn(context);
-        when(plan.accept(endpoint, reservation)).thenReturn(accepted);
+        when(plan.accept(endpoint, reservation, victims)).thenReturn(accepted);
         when(admission.tryReclaim(context, endpoint)).thenReturn(source);
         when(endpoint.release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK))
                 .thenReturn(
@@ -39,9 +41,10 @@ class DecodeAdmissionHandoffTest {
                         ? observer.cancel(false)
                         : observer.completeExceptionally(
                                 new IllegalStateException("observer gone")));
-        source.complete(new DecodeAdmission.PreemptionResult(reservation, false, "committed"));
+        source.complete(
+                new DecodeAdmission.PreemptionResult(reservation, false, "committed", victims));
 
-        verify(plan).accept(endpoint, reservation);
+        verify(plan).accept(endpoint, reservation, victims);
         verify(endpoint, times(accepted ? 0 : 1))
                 .release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
     }

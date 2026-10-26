@@ -15,8 +15,8 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Failures;
@@ -36,7 +36,9 @@ import java.util.concurrent.TimeUnit;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
-/** Complete payload preparation precedes sending; Scheduler owns all request transitions. */
+/**
+ * Complete payload preparation precedes sending; Scheduler owns all request transitions.
+ */
 @Component
 public class DeliveryDispatcher {
     static final long CLEANUP_TIMEOUT_MS = 5_000L;
@@ -129,7 +131,9 @@ public class DeliveryDispatcher {
         }
     }
 
-    /** Entering deliverBatch transfers all temporary resources, including on rejection. */
+    /**
+     * Entering deliverBatch transfers all temporary resources, including on rejection.
+     */
     record Batch(
             long batchId,
             List<Member> members,
@@ -478,7 +482,9 @@ public class DeliveryDispatcher {
         }
     }
 
-    /** Accept the entire stop operation; callers do not drive retries or sender completion. */
+    /**
+     * Accept the entire stop operation; callers do not drive retries or sender completion.
+     */
     CompletableFuture<StopResult> stop(DeliveryClaim claim) {
         var runtime = claim.owner().data().getScheduler().runtime;
         return stop(claim, runtime.engineClient, runtime);
@@ -686,7 +692,9 @@ public class DeliveryDispatcher {
         return created;
     }
 
-    /** Drain accepted events and late RPC replies while Scheduler still accepts evidence. */
+    /**
+     * Drain accepted events and late RPC replies while Scheduler still accepts evidence.
+     */
     void awaitStops(SchedulerRuntime runtime) {
         Throwable problem = null;
         long deadline =
@@ -757,7 +765,9 @@ public class DeliveryDispatcher {
                             : runtime.signals().delivery(claim).toCompletableFuture();
         }
 
-        /** Only this ordered event stream changes execution state; no effects run under the record monitor. */
+        /**
+         * Only this ordered event stream changes execution state; no effects run under the record monitor.
+         */
         private synchronized CompletableFuture<Void> post(Runnable event) {
             if (closed) {
                 return CompletableFuture.completedFuture(null);

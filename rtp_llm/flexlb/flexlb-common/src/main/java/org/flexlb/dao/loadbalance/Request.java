@@ -35,16 +35,27 @@ public final class Request {
     @JsonProperty("vit_route_only")
     private final boolean vitRouteOnly;
 
+    @JsonProperty("block_size")
+    private final long blockSize;
+
     @JsonProperty("seq_len")
     private final long seqLen;
+
+    /**
+     * Client-estimated Encoder cache hit in MM tokens; null means not provided.
+     */
+    @JsonProperty("encoder_cache_hit_len")
+    private final Long encoderCacheHitLen;
 
     @JsonProperty("cache_key_block_size")
     private final long cacheKeyBlockSize;
 
     @JsonProperty("request_id")
-    private final long requestId;
+    private final String requestId;
 
-    /** Upstream generation timeout retained for transport compatibility. */
+    /**
+     * Upstream generation timeout retained for transport compatibility.
+     */
     @JsonProperty("generate_timeout")
     @Builder.Default
     private final long generateTimeout = DEFAULT_GENERATE_TIMEOUT_MS;
@@ -59,7 +70,7 @@ public final class Request {
 
     @JsonProperty("max_new_tokens")
     @Builder.Default
-    private final int maxNewTokens = 1;
+    private final int maxNewTokens = 0;
 
     @JsonProperty("num_beams")
     @Builder.Default
@@ -73,7 +84,9 @@ public final class Request {
     @Builder.Default
     private final String model = "";
 
-    /** Caller-supplied wire value; SchedulingMetadata owns the normalized priority. */
+    /**
+     * Caller-supplied wire value; SchedulingMetadata owns the normalized priority.
+     */
     @JsonProperty("priority")
     @Builder.Default
     private final int rawPriority = 0;
@@ -83,9 +96,11 @@ public final class Request {
             List<String> cacheAffinityKeys,
             ServerStatus selectedVit,
             boolean vitRouteOnly,
+            long blockSize,
             long seqLen,
+            Long encoderCacheHitLen,
             long cacheKeyBlockSize,
-            long requestId,
+            String requestId,
             long generateTimeout,
             long requestTimeMs,
             String apiKey,
@@ -99,6 +114,8 @@ public final class Request {
                 cacheAffinityKeys == null ? List.of() : List.copyOf(cacheAffinityKeys);
         this.selectedVit = ServerStatus.copyOf(selectedVit);
         this.vitRouteOnly = vitRouteOnly;
+        this.blockSize = blockSize;
+        this.encoderCacheHitLen = encoderCacheHitLen;
         this.seqLen = seqLen;
         this.cacheKeyBlockSize = cacheKeyBlockSize;
         this.requestId = requestId;

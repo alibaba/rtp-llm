@@ -7,7 +7,7 @@ import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -27,7 +27,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Public submission and cancellation contracts against both scheduler modes. */
+/**
+ * Public submission and cancellation contracts against both scheduler modes.
+ */
 class RequestSchedulerModeTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -112,10 +114,14 @@ class RequestSchedulerModeTest {
     void fixedModeRejectsMismatchedInputAndAnotherSchedulerCanShareLifecycle() throws Exception {
         try (Fixture direct = new Fixture(false)) {
             var queueConfig = SchedulingTestConfig.batchConfig();
-            var laterQueue = RequestProtocolTestSupport.context(queueConfig, 8762L);
+            var laterQueue = RequestProtocolTestSupport.context(queueConfig, "8762");
             laterQueue
                     .data()
-                    .setGenerateInputPb(com.google.protobuf.ByteString.copyFromUtf8("input"));
+                    .setGenerateInputPb(
+                            org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
+                                    .setRequestId(Long.parseLong(laterQueue.data().getRequestId()))
+                                    .build()
+                                    .toByteString());
             assertEquals(
                     StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
                     direct.scheduler.submit(laterQueue).join().getCode());
@@ -128,7 +134,7 @@ class RequestSchedulerModeTest {
             FlexlbConfig directConfig = new FlexlbConfig();
             directConfig.setScheduler(ConfigTestSupport.direct());
             SchedulingTestConfig.useNonBatchDispatcher(directConfig);
-            var laterDirect = RequestProtocolTestSupport.context(directConfig, 8763L);
+            var laterDirect = RequestProtocolTestSupport.context(directConfig, "8763");
             when(queued.router.select(laterDirect, null))
                     .thenReturn(
                             PlacementResult.rejected(
@@ -141,7 +147,7 @@ class RequestSchedulerModeTest {
                                     directConfig,
                                     SchedulingTestConfig.capacity(directConfig),
                                     org.mockito.Mockito.mock(
-                                            org.flexlb.service.RecentCacheKeyTraceReporter.class))
+                                            org.flexlb.service.TheoryCacheHitReporter.class))
                             .submit(laterDirect);
             assertSame(future, laterDirect.data().getFuture());
             assertEquals(
@@ -271,7 +277,7 @@ class RequestSchedulerModeTest {
                             service,
                             reporter,
                             mock(RequestSchedulerReporter.class),
-                            mock(RecentCacheKeyTraceReporter.class),
+                            mock(TheoryCacheHitReporter.class),
                             router,
                             mock(DecodeAdmission.class),
                             new PlacementAvailability());
@@ -280,7 +286,7 @@ class RequestSchedulerModeTest {
                     scheduler instanceof QueuedRequestScheduler queuedScheduler
                             ? queuedScheduler
                             : null;
-            context = RequestProtocolTestSupport.context(config, 8761L);
+            context = RequestProtocolTestSupport.context(config, "8761");
         }
 
         @Override

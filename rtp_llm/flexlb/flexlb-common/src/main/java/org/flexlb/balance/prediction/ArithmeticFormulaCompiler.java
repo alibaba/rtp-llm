@@ -22,10 +22,7 @@ import static org.flexlb.balance.prediction.ArithmeticFormulaAst.FunctionNode;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.Node;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.UnaryNode;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.VariableNode;
-import static org.flexlb.balance.prediction.ArithmeticFormulaAst.binary;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.evaluate;
-import static org.flexlb.balance.prediction.ArithmeticFormulaAst.function;
-import static org.flexlb.balance.prediction.ArithmeticFormulaAst.unary;
 import static org.objectweb.asm.Opcodes.ACC_FINAL;
 import static org.objectweb.asm.Opcodes.ACC_PUBLIC;
 import static org.objectweb.asm.Opcodes.ACC_SUPER;
@@ -55,7 +52,9 @@ import static org.objectweb.asm.Opcodes.IRETURN;
 import static org.objectweb.asm.Opcodes.RETURN;
 import static org.objectweb.asm.Opcodes.V17;
 
-/** JVM backend: fused aggregates and scoped common subexpressions, without reassociation. */
+/**
+ * JVM backend: fused aggregates and scoped common subexpressions, without reassociation.
+ */
 final class ArithmeticFormulaCompiler {
     private static final String CLASS_NAME =
             "org/flexlb/balance/prediction/ArithmeticFormula$Generated";
@@ -116,7 +115,9 @@ final class ArithmeticFormulaCompiler {
         double evaluate(double[] batch, double[] sums);
     }
 
-    /** Same AST and ordered additions as full evaluation; only the lifetime of sums changes. */
+    /**
+     * Same AST and ordered additions as full evaluation; only the lifetime of sums changes.
+     */
     static Incremental compileIncremental(Node root) {
         Map<AggregateFuncNode, Integer> aggregates = new LinkedHashMap<>();
         collectAggregates(root, aggregates, new HashSet<>());
@@ -224,7 +225,9 @@ final class ArithmeticFormulaCompiler {
         }
     }
 
-    /** One traversal, independent ordered accumulators, shared per-item expressions. */
+    /**
+     * One traversal, independent ordered accumulators, shared per-item expressions.
+     */
     private void fuseAggregates(Map<AggregateFuncNode, Integer> aggregates, Scope outer) {
         aggregates.replaceAll(
                 (aggregate, ignored) -> {

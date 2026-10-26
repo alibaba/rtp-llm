@@ -4,7 +4,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -17,7 +17,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -42,6 +42,8 @@ class RequestOrchestratorsTest {
     @Test
     void shutdownContinuesAfterFailureAndKeepsTheFirstCause() {
         var requests = mock(RequestRepository.class);
+        when(requests.trackedRequestStats())
+                .thenReturn(new RequestRepository.TrackedRequestStats(0, 0, 0));
         when(requests.closeRegistration()).thenReturn(true);
         var endpoints = mock(EndpointRegistry.class);
         var dispatcher = SchedulerTestSupport.dispatcher();
@@ -59,7 +61,7 @@ class RequestOrchestratorsTest {
         runtime.registerScheduler(owner);
         var first = new IllegalStateException("placement close failed");
         var second = new IllegalStateException("dispatcher failed");
-        doThrow(first).when(owner).closePlacement();
+        doThrow(first).when(owner).closeAllPlacement();
         var executions = org.mockito.Mockito.spy(runtime.deliveries());
         org.springframework.test.util.ReflectionTestUtils.setField(
                 runtime, "deliveries", executions);
@@ -74,6 +76,8 @@ class RequestOrchestratorsTest {
     @Test
     void shutdownClosesRegistrationBeforeStoppingAndDrainingProducers() {
         var requests = mock(RequestRepository.class);
+        when(requests.trackedRequestStats())
+                .thenReturn(new RequestRepository.TrackedRequestStats(0, 0, 0));
         when(requests.closeRegistration()).thenReturn(true, false);
         var endpoints = mock(EndpointRegistry.class);
         var dispatcher = SchedulerTestSupport.dispatcher();
@@ -95,18 +99,20 @@ class RequestOrchestratorsTest {
         runtime.shutdown();
         InOrder order = inOrder(requests, owner, runtime, executions, endpoints);
         order.verify(requests).closeRegistration();
-        order.verify(owner).closePlacement();
+        order.verify(owner).closeAllPlacement();
         order.verify(runtime).awaitAdmissions();
         order.verify(executions).awaitDeliveries();
         order.verify(endpoints).close();
         runtime.shutdown();
-        verify(owner).closePlacement();
+        verify(owner).closeAllPlacement();
         verify(executions).awaitDeliveries();
     }
 
     @Test
     void failedRegistrationGateCannotStartShutdown() {
         var requests = mock(RequestRepository.class);
+        when(requests.trackedRequestStats())
+                .thenReturn(new RequestRepository.TrackedRequestStats(0, 0, 0));
         var endpoints = mock(EndpointRegistry.class);
         var failure = new IllegalStateException("gate failed");
         when(requests.closeRegistration()).thenThrow(failure);
@@ -123,6 +129,8 @@ class RequestOrchestratorsTest {
     @Test
     void shutdownCannotReportSuccessWithUnsettledRequests() {
         var requests = mock(RequestRepository.class);
+        when(requests.trackedRequestStats())
+                .thenReturn(new RequestRepository.TrackedRequestStats(0, 0, 0));
         when(requests.closeRegistration()).thenReturn(true);
         when(requests.liveRequestCount()).thenReturn(1);
         var runtime = runtime(requests, mock(EndpointRegistry.class));
@@ -165,17 +173,19 @@ class RequestOrchestratorsTest {
     @Test
     void expirationOrchestratorPassesOnlyTheExactRegistrySweeper() {
         RequestRepository requests = mock(RequestRepository.class);
+        when(requests.trackedRequestStats())
+                .thenReturn(new RequestRepository.TrackedRequestStats(0, 0, 0));
         EndpointRegistry registry = mock(EndpointRegistry.class);
         AtomicBoolean exactOwnershipPredicateObserved = new AtomicBoolean();
         doAnswer(
                         invocation -> {
-                            java.util.function.LongPredicate owns = invocation.getArgument(1);
-                            exactOwnershipPredicateObserved.set(owns.test(91L));
+                            java.util.function.Predicate<String> owns = invocation.getArgument(1);
+                            exactOwnershipPredicateObserved.set(owns.test("91"));
                             return null;
                         })
                 .when(registry)
                 .evictExpiredOrphans(anyLong(), any());
-        when(requests.retainsIdentity(91L)).thenReturn(true);
+        when(requests.retainsIdentity("91")).thenReturn(true);
         runtime(requests, registry).maintainExpiration();
         verify(registry).evictExpiredOrphans(anyLong(), any());
         org.junit.jupiter.api.Assertions.assertTrue(exactOwnershipPredicateObserved.get());
@@ -184,6 +194,8 @@ class RequestOrchestratorsTest {
     @Test
     void metricsDoNothingAfterLifecycleShutdownBegins() {
         RequestRepository requests = mock(RequestRepository.class);
+        when(requests.trackedRequestStats())
+                .thenReturn(new RequestRepository.TrackedRequestStats(0, 0, 0));
         EndpointRegistry registry = mock(EndpointRegistry.class);
         DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
         RequestSchedulerReporter admissionReporter = mock(RequestSchedulerReporter.class);
@@ -205,6 +217,8 @@ class RequestOrchestratorsTest {
     @Test
     void metricsIsolateEveryEndpointLeafAndContinueTraversal() {
         RequestRepository requests = mock(RequestRepository.class);
+        when(requests.trackedRequestStats())
+                .thenReturn(new RequestRepository.TrackedRequestStats(0, 0, 0));
         EndpointRegistry registry = mock(EndpointRegistry.class);
         DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
         RequestSchedulerReporter admissionReporter = mock(RequestSchedulerReporter.class);
@@ -224,6 +238,8 @@ class RequestOrchestratorsTest {
         prefill.put("p1", failingPrefill);
         prefill.put("p2", healthyPrefill);
         when(requests.liveRequestCount()).thenReturn(7);
+        when(requests.trackedRequestStats())
+                .thenReturn(new RequestRepository.TrackedRequestStats(7, 0, 19L));
         when(requests.oldestLiveRequestAgeMs()).thenReturn(19L);
         when(registry.endpointSnapshot(org.flexlb.dao.route.RoleType.PREFILL))
                 .thenReturn(Map.copyOf(prefill));
@@ -265,6 +281,8 @@ class RequestOrchestratorsTest {
     @Test
     void failedPrefillSnapshotDoesNotSuppressDecodeMetrics() {
         RequestRepository requests = mock(RequestRepository.class);
+        when(requests.trackedRequestStats())
+                .thenReturn(new RequestRepository.TrackedRequestStats(0, 0, 0));
         EndpointRegistry registry = mock(EndpointRegistry.class);
         DeliveryMetricsReporter batches = mock(DeliveryMetricsReporter.class);
         RequestSchedulerReporter admission = mock(RequestSchedulerReporter.class);
@@ -301,6 +319,8 @@ class RequestOrchestratorsTest {
     @Test
     void maintenanceStillSweepsOrphansAfterTerminalRecordFailure() {
         var requests = mock(RequestRepository.class);
+        when(requests.trackedRequestStats())
+                .thenReturn(new RequestRepository.TrackedRequestStats(0, 0, 0));
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(SchedulingTestConfig.newConfig());
         var first = new IllegalStateException("records");
@@ -320,6 +340,8 @@ class RequestOrchestratorsTest {
     @Test
     void unexpectedCheckedFailureFromCallbackIsReported() {
         var requests = mock(RequestRepository.class);
+        when(requests.trackedRequestStats())
+                .thenReturn(new RequestRepository.TrackedRequestStats(0, 0, 0));
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(SchedulingTestConfig.newConfig());
         var failure = new Exception("callback failure");
@@ -342,17 +364,19 @@ class RequestOrchestratorsTest {
     @Test
     void maintenanceUsesOnePolicyAndTimeSnapshotBeforeSweepingOrphans() {
         var requests = mock(RequestRepository.class);
+        when(requests.trackedRequestStats())
+                .thenReturn(new RequestRepository.TrackedRequestStats(0, 0, 0));
         var endpoints = mock(org.flexlb.balance.endpoint.EndpointRegistry.class);
         var service = mock(ConfigService.class);
         var config = SchedulingTestConfig.newConfig();
         when(service.loadBalanceConfig()).thenReturn(config);
-        when(requests.retainsIdentity(91L)).thenReturn(true);
+        when(requests.retainsIdentity("91")).thenReturn(true);
         org.mockito.Mockito.doAnswer(
                         call -> {
                             assertEquals(10_000L, call.getArgument(0, Long.class));
-                            LongPredicate retained = call.getArgument(1);
-                            org.junit.jupiter.api.Assertions.assertTrue(retained.test(91L));
-                            org.junit.jupiter.api.Assertions.assertFalse(retained.test(92L));
+                            Predicate<String> retained = call.getArgument(1);
+                            org.junit.jupiter.api.Assertions.assertTrue(retained.test("91"));
+                            org.junit.jupiter.api.Assertions.assertFalse(retained.test("92"));
                             return null;
                         })
                 .when(endpoints)
@@ -375,6 +399,8 @@ class RequestOrchestratorsTest {
     @Test
     void maintenancePreservesSaturationAndStopsAtShutdown() {
         var requests = mock(RequestRepository.class);
+        when(requests.trackedRequestStats())
+                .thenReturn(new RequestRepository.TrackedRequestStats(0, 0, 0));
         var endpoints = mock(org.flexlb.balance.endpoint.EndpointRegistry.class);
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(SchedulingTestConfig.newConfig());

@@ -2,7 +2,9 @@ package org.flexlb.httpserver;
 
 import org.flexlb.config.FlexlbConfig;
 
-/** Startup policy for logical receiving wire-byte reservations, not physical Direct accounting. */
+/**
+ * Startup policy for logical receiving wire-byte reservations, not physical Direct accounting.
+ */
 final class GrpcReceivingBudget {
     // Matches the server's 4 MiB receive window plus allocator/frame headroom. Wire callbacks
     // follow buffer retention and flow-credit return; this is a heuristic, never a Direct hard

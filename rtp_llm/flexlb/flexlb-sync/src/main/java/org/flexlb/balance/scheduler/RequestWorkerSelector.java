@@ -4,6 +4,8 @@ import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.EncoderSelection;
+import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.VitWorkerSelector;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -20,6 +22,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 @Component
 public class RequestWorkerSelector {
@@ -28,6 +31,10 @@ public class RequestWorkerSelector {
     private final DecodeSelector decodeSelector;
     private final VitWorkerSelector vitSelector;
     private final List<RoleType> requiredRoles;
+
+    @Autowired(required = false)
+    private EncoderStrategy encoderSelector;
+
     @Autowired private VitCacheSelector vitCacheSelector;
 
     @Autowired
@@ -44,8 +51,54 @@ public class RequestWorkerSelector {
                         Objects.requireNonNull(modelMetaConfig, "modelMetaConfig").requiredRoles());
     }
 
+    boolean hasEncoderRole() {
+        return requiredRoles.contains(RoleType.ENCODER);
+    }
+
+    boolean isEncoderOnly(RequestContext context) {
+        if (context == null) {
+            return false;
+        }
+        Set<RoleType> requested = context.data().getRequestedRoles();
+        return requiredRoles.stream()
+                .filter(role -> requested == null || requested.contains(role))
+                .collect(java.util.stream.Collectors.toSet())
+                .equals(Set.of(RoleType.ENCODER));
+    }
+
+    Response validateRoles(RequestContext context) {
+        if (context == null || context.data().getRequest() == null) {
+            return Response.error(StrategyErrorType.INVALID_REQUEST);
+        }
+        Set<RoleType> requested = context.data().getRequestedRoles();
+        return requested != null && !requiredRoles.containsAll(requested)
+                ? Response.error(StrategyErrorType.INVALID_REQUEST)
+                : null;
+    }
+
+    PlacementResult<EncoderSelection, PlacementKey> selectEncoder(RequestContext context) {
+        Response invalid = validateRoles(context);
+        if (invalid != null || !isEncoderOnly(context)) {
+            return PlacementResult.rejected(
+                    invalid == null ? Response.error(StrategyErrorType.INVALID_REQUEST) : invalid);
+        }
+        String group = resolvePolicyGroup(context);
+        EncoderSelection selected =
+                encoderSelector == null ? null : encoderSelector.select(context.data(), group);
+        return selected == null
+                ? PlacementResult.blocked(
+                        new PlacementKey(RoleType.ENCODER, group, null),
+                        Response.error(StrategyErrorType.NO_ENCODER_WORKER),
+                        null)
+                : PlacementResult.success(selected);
+    }
+
     public PlacementResult<RequestRoute, PlacementKey> select(
             RequestContext context, String policyGroup) {
+        Response invalid = validateRoles(context);
+        if (invalid != null) {
+            return PlacementResult.rejected(invalid);
+        }
         Request request = context == null ? null : context.data().getRequest();
         SchedulingMetadata metadata =
                 context == null ? null : context.data().getSchedulingMetadata();
@@ -69,7 +122,8 @@ public class RequestWorkerSelector {
                 ServerStatus vit =
                         vitCacheSelector == null || !requiredRoles.contains(RoleType.VIT)
                                 ? null
-                                : vitCacheSelector.selectPinned(context, policyGroup, routing);
+                                : vitCacheSelector.selectPinned(
+                                        context.data(), policyGroup, routing);
                 if (vit == null) {
                     return PlacementResult.rejected(
                             Response.error(StrategyErrorType.VIT_ROUTE_STALE));
@@ -77,6 +131,10 @@ public class RequestWorkerSelector {
                 group = vit.getGroup();
             }
             for (RoleType role : requiredRoles) {
+                var requested = context.data().getRequestedRoles();
+                if (requested != null && !requested.contains(role)) {
+                    continue;
+                }
                 if (role == RoleType.VIT && request.getSelectedVit() != null) {
                     continue;
                 }
@@ -128,7 +186,7 @@ public class RequestWorkerSelector {
         if (!requiredRoles.contains(RoleType.VIT) || vitCacheSelector == null) {
             return Response.error(StrategyErrorType.NO_VIT_WORKER);
         }
-        ServerStatus vit = vitCacheSelector.select(context, resolvePolicyGroup(context));
+        ServerStatus vit = vitCacheSelector.select(context.data(), resolvePolicyGroup(context));
         Response response = new Response();
         response.setSuccess(vit.isSuccess());
         response.setCode(vit.getCode());
@@ -145,7 +203,9 @@ public class RequestWorkerSelector {
         }
         return vitCacheSelector != null
                 && requiredRoles.contains(RoleType.VIT)
-                && vitCacheSelector.validate(context, resolvePolicyGroup(context)).isSuccess();
+                && vitCacheSelector
+                        .validate(context.data(), resolvePolicyGroup(context))
+                        .isSuccess();
     }
 
     String resolvePolicyGroup(RequestContext context) {
@@ -154,11 +214,7 @@ public class RequestWorkerSelector {
         }
         var selector = context.data().getConfig().getRouter().getGroupSelector();
         Request request = context.data().getRequest();
-        return selector == null
-                ? null
-                : selector.resolveTargetGroup(
-                                request.getRequestId(), request.getApiKey(), request.getSeqLen())
-                        .orElse(null);
+        return selector == null ? null : selector.resolveTargetGroup(request).orElse(null);
     }
 
     private PlacementResult<ServerStatus, PlacementKey> selectRole(
@@ -171,7 +227,7 @@ public class RequestWorkerSelector {
             case PREFILL, PDFUSION ->
                     prefillSelector.select(request, metadata, role, group, routing);
             case DECODE ->
-                    withGroup(decodeSelector.select(request, metadata, group, routing), group);
+                    withGroup(decodeSelector.select(routing.ctx().data(), group, routing), group);
             case VIT ->
                     withGroup(
                             selectedOrBlocked(
@@ -179,10 +235,21 @@ public class RequestWorkerSelector {
                                             request.getRequestId(), role, group, routing),
                                     role),
                             group);
+            case ENCODER ->
+                    withGroup(selectedEncoderForRoute(routing.ctx(), group, routing), group);
             case FRONTEND ->
                     throw new IllegalArgumentException(
                             "Endpoint selection is not supported for FRONTEND");
         };
+    }
+
+    private PlacementResult<ServerStatus, RoleType> selectedEncoderForRoute(
+            RequestContext context, String group, RequestRoute routing) {
+        try (EncoderSelection selected =
+                encoderSelector == null ? null : encoderSelector.select(context.data(), group)) {
+            return selectedOrBlocked(
+                    selected == null ? null : selected.transferTo(routing), RoleType.ENCODER);
+        }
     }
 
     private static PlacementResult<ServerStatus, PlacementKey> withGroup(

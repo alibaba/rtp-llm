@@ -28,7 +28,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
-/** Route-time queue capture regression on the final Prefill runtime boundary. */
+/**
+ * Route-time queue capture regression on the final Prefill runtime boundary.
+ */
 @Tag("performance-regression")
 class PrefillQueueRunnerPerformanceTest {
 
@@ -342,7 +344,11 @@ class PrefillQueueRunnerPerformanceTest {
             long enqueuedAtMs,
             long seqLen) {
         Request request =
-                Request.builder().requestId(requestId).seqLen(seqLen).rawPriority(priority).build();
+                Request.builder()
+                        .requestId(String.valueOf(requestId))
+                        .seqLen(seqLen)
+                        .rawPriority(priority)
+                        .build();
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));

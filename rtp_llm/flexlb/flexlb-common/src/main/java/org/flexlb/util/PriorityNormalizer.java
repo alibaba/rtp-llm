@@ -16,7 +16,9 @@ package org.flexlb.util;
  */
 public final class PriorityNormalizer {
 
-    /** gRPC metadata header carrying the caller QoS level (fallback channel). */
+    /**
+     * gRPC metadata header carrying the caller QoS level (fallback channel).
+     */
     public static final String QOS_HEADER_NAME = "x-dashscope-inner-qos-level";
 
     public static final int MIN_PRIORITY = 1;
@@ -78,7 +80,9 @@ public final class PriorityNormalizer {
         return isValid(defaultPriority) ? defaultPriority : DEFAULT_PRIORITY;
     }
 
-    /** Parse caller QoS without assigning a default scheduling priority. */
+    /**
+     * Parse caller QoS without assigning a default scheduling priority.
+     */
     public static int parseHeader(String headerValue) {
         if (headerValue != null) {
             try {

@@ -199,7 +199,9 @@ class TwinOverloadAdmissionTest {
             try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
                 assertNotNull(pin);
                 assertNotNull(
-                        endpoint.tryReserveQueuedRequest(pin, id, 128L, 256L, 50, null).handle());
+                        endpoint.tryReserveQueuedRequest(
+                                        pin, String.valueOf(id), 128L, 256L, 50, null)
+                                .handle());
             }
         }
         for (long id = 1; id <= 8; id++) {
@@ -209,7 +211,8 @@ class TwinOverloadAdmissionTest {
                             DecodeEndpoint.EngineDispatchPermit>
                     acquisition =
                             endpoint.acquireDispatchPermit(
-                                    EndpointTestSupport.decodeReservation(endpoint, id),
+                                    EndpointTestSupport.decodeReservation(
+                                            endpoint, String.valueOf(id)),
                                     new DecodeResources.AdmissionCapacity(8L, 90L));
             assertEquals(
                     DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
@@ -221,7 +224,7 @@ class TwinOverloadAdmissionTest {
         assertEquals(
                 DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
                 endpoint.acquireDispatchPermit(
-                                EndpointTestSupport.decodeReservation(endpoint, 9L),
+                                EndpointTestSupport.decodeReservation(endpoint, "9"),
                                 new DecodeResources.AdmissionCapacity(8L, 90L))
                         .status());
 
@@ -235,7 +238,7 @@ class TwinOverloadAdmissionTest {
                         DecodeEndpoint.EngineDispatchPermit>
                 resumed =
                         endpoint.acquireDispatchPermit(
-                                EndpointTestSupport.decodeReservation(endpoint, 9L),
+                                EndpointTestSupport.decodeReservation(endpoint, "9"),
                                 new DecodeResources.AdmissionCapacity(8L, 90L));
         assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, resumed.status());
         assertTrue(resumed.handle().release());
@@ -293,7 +296,7 @@ class TwinOverloadAdmissionTest {
     }
 
     private static RequestRoute item(PrefillEndpoint endpoint, FlexlbConfig config, long id) {
-        Request request = Request.builder().requestId(id).seqLen(128L).build();
+        Request request = Request.builder().requestId(String.valueOf(id)).seqLen(128L).build();
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);
         ServerStatus selected = new ServerStatus();
@@ -310,7 +313,7 @@ class TwinOverloadAdmissionTest {
         Map<String, TaskInfo> result = new LinkedHashMap<>();
         for (long id = firstId; id < firstId + count; id++) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(id);
+            task.setRequestId(Long.toString(id));
             task.setBatchId(batchId);
             task.setPhase(phase);
             task.setInputLength(128L);

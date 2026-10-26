@@ -30,12 +30,10 @@ import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyBoolean;
 import static org.mockito.Mockito.anyList;
-import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -43,7 +41,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
-/** Planning input changes are independent from locally owned request/work changes. */
+/**
+ * Planning input changes are independent from locally owned request/work changes.
+ */
 class PrefillPlanningInputChangeTest {
 
     @ParameterizedTest
@@ -51,7 +51,7 @@ class PrefillPlanningInputChangeTest {
         "200,100,0,100, 200,100,100,100, 200,100",
         "200,100,100,100, 400,100,100,100, 400,100",
         "0,100,0,0, 0,300,0,0, 300,9223372036854775807",
-        "0,0,0,0, 0,0,-1,100, 9223372036854775807,0"
+        "0,0,0,0, 0,0,-1,100, 1048576,0"
     })
     void newerCapacityOnlyStatusRefreshesCachedConstraints(
             long oldBatchTokens,
@@ -140,10 +140,11 @@ class PrefillPlanningInputChangeTest {
                             return null;
                         })
                 .when(worker)
-                .processSelection(anyList(), anyString(), any(), any(), any());
+                .processSelection(
+                        anyList(), org.mockito.ArgumentMatchers.anyString(), any(), any(), any());
         RequestContext context = new RequestContext(config);
         context.data()
-                .setRequest(Request.builder().requestId(51L).rawPriority(0).seqLen(10L).build());
+                .setRequest(Request.builder().requestId("51").rawPriority(0).seqLen(10L).build());
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(0, Long.MAX_VALUE));
         RequestRoute route =
                 SchedulingTestConfig.createRoute(

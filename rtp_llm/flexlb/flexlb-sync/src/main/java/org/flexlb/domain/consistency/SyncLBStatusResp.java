@@ -3,7 +3,9 @@ package org.flexlb.domain.consistency;
 import lombok.Getter;
 import lombok.Setter;
 
-/** Leadership snapshot response. */
+/**
+ * Leadership snapshot response.
+ */
 @Getter
 @Setter
 public class SyncLBStatusResp {

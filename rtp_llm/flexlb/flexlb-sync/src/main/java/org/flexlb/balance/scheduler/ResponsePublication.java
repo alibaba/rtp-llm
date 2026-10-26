@@ -8,7 +8,9 @@ import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkState;
 
-/** One accepted response task. State selection belongs to Context; execution belongs to this registration. */
+/**
+ * One accepted response task. State selection belongs to Context; execution belongs to this registration.
+ */
 final class ResponsePublication implements AutoCloseable {
     private final ResponseCompletionExecutor.CompletionRegistration registration;
     final RequestContext owner;

@@ -1,7 +1,7 @@
 package org.flexlb.service.monitor;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.sync.schedule.WorkerRetirementCleaner;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -63,6 +63,16 @@ class ScheduledTaskConfigurationTest {
                         "taskMetricScheduler",
                         ScheduledThreadPoolExecutor.class,
                         () -> new ScheduledThreadPoolExecutor(1));
+            }
+            for (String source :
+                    java.util.List.of(
+                            "environmentConfigSource",
+                            "nacosConfigSource",
+                            "uniConfigConfigSource")) {
+                context.registerBean(
+                        source,
+                        org.flexlb.service.config.ConfigSource.class,
+                        () -> mock(org.flexlb.service.config.ConfigSource.class));
             }
             context.refresh();
             scheduler = context.getBean("taskScheduler", ScheduledThreadPoolExecutor.class);

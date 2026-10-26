@@ -44,7 +44,9 @@ public final class PlacementAvailability {
         }
     }
 
-    /** Publish one worker's edge without retaining history from a retired generation. */
+    /**
+     * Publish one worker's edge without retaining history from a retired generation.
+     */
     public void changed(WorkerStatus worker, String address) {
         changed(
                 PlacementKey.exact(worker.getRole(), worker.topologySnapshot().group(), address),
@@ -63,7 +65,7 @@ public final class PlacementAvailability {
                 sequence.incrementAndGet());
     }
 
-    void changed(PlacementKey key) {
+    public void changed(PlacementKey key) {
         changed(key, null);
     }
 

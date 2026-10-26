@@ -10,12 +10,14 @@ import java.util.function.Predicate;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.math.LongMath.saturatedAdd;
 
-/** Immutable Decode resource identities, capacity arithmetic, snapshots and observed facts. */
+/**
+ * Immutable Decode resource identities, capacity arithmetic, snapshots and observed facts.
+ */
 public final class DecodeResources {
     private DecodeResources() {}
 
     public record ReservationHandle(
-            long endpointGenerationId, long requestId, long reservationToken) {
+            long endpointGenerationId, String requestId, long reservationToken) {
 
         public ReservationHandle {
             checkArgument(
@@ -40,7 +42,9 @@ public final class DecodeResources {
         }
     }
 
-    /** Resource acquisition always carries a domain status and, only on success, its exact capability. */
+    /**
+     * Resource acquisition always carries a domain status and, only on success, its exact capability.
+     */
     public record Acquisition<S, H>(S status, H handle) {
         private static final Acquisition<?, ?>[] RESERVE_FAILURES =
                 failures(ReserveStatus.values());
@@ -89,7 +93,9 @@ public final class DecodeResources {
         }
     }
 
-    /** Resource mutations share one passive result. Every status/edge combination is preallocated. */
+    /**
+     * Resource mutations share one passive result. Every status/edge combination is preallocated.
+     */
     public record ResourceChange<S>(S status, boolean capacityReleased) {
         private static final ResourceChange<?>[] RELEASES =
                 changes(ReservationReleaseResult.values());
@@ -128,7 +134,9 @@ public final class DecodeResources {
         }
     }
 
-    /** A cheap, exact resource query; it never grants a reservation or dispatch right. */
+    /**
+     * A cheap, exact resource query; it never grants a reservation or dispatch right.
+     */
     public enum Ownership {
         NONE,
         HELD,
@@ -165,19 +173,33 @@ public final class DecodeResources {
     }
 
     public enum EngineDispatchPermitAcquireStatus {
-        /** An exact-reservation permit now owns one Decode hard-gate slot. */
+        /**
+         * An exact-reservation permit now owns one Decode hard-gate slot.
+         */
         ACQUIRED,
-        /** Engine already owns this reservation; the permit carries identity without charging capacity. */
+        /**
+         * Engine already owns this reservation; the permit carries identity without charging capacity.
+         */
         ALREADY_ACCEPTED,
-        /** Concurrency or Decode KV has no unreserved hard capacity. */
+        /**
+         * Concurrency or Decode KV has no unreserved hard capacity.
+         */
         CAPACITY_FULL,
-        /** The request no longer owns a live shadow reservation. */
+        /**
+         * The request no longer owns a live shadow reservation.
+         */
         NOT_OWNED,
-        /** The reservation is already engine-facing rather than Prefill-queued. */
+        /**
+         * The reservation is already engine-facing rather than Prefill-queued.
+         */
         NOT_QUEUED,
-        /** Another pre-delivery attempt already owns this request's permit. */
+        /**
+         * Another pre-delivery attempt already owns this request's permit.
+         */
         ALREADY_ACQUIRED,
-        /** This exact Decode endpoint generation no longer accepts delivery. */
+        /**
+         * This exact Decode endpoint generation no longer accepts delivery.
+         */
         ENDPOINT_RETIRED
     }
 
@@ -203,7 +225,18 @@ public final class DecodeResources {
         ATTEMPT_ALREADY_EXISTS
     }
 
-    /** The caller has resolved request protocol; this operation changes only exact resource ownership. */
+    public record ReturnedPreemption(PreemptionBeginResult status, ReservationHandle reservation) {
+        public ReturnedPreemption {
+            java.util.Objects.requireNonNull(status, "status");
+            checkArgument(
+                    (status == PreemptionBeginResult.SUCCESS) == (reservation != null),
+                    "successful returned preemption requires its exact incoming reservation");
+        }
+    }
+
+    /**
+     * The caller has resolved request protocol; this operation changes only exact resource ownership.
+     */
     public record PreemptionUpdate(Kind kind, ReservationHandle reservation) {
         public enum Kind {
             CANCEL_HANDED_OFF,
@@ -243,7 +276,9 @@ public final class DecodeResources {
         }
     }
 
-    /** Request status matched to its exact Decode reservation, published after ledger reconciliation. */
+    /**
+     * Request status matched to its exact Decode reservation, published after ledger reconciliation.
+     */
     public record DecodeRequestStatus(
             Kind kind, ReservationHandle reservation, long errorCode, boolean allocationObserved) {
         public DecodeRequestStatus {
@@ -272,10 +307,12 @@ public final class DecodeResources {
         }
     }
 
-    /** One immutable request table and capacity view captured under the admission lock. */
+    /**
+     * One immutable request table and capacity view captured under the admission lock.
+     */
     public record ResourceSnapshot(
             DecodeRoutingView routing,
-            Map<Long, DecodeRequestView> requests,
+            Map<String, DecodeRequestView> requests,
             int queuedCount,
             int activeDispatchPermits) {
         public ResourceSnapshot {
@@ -350,7 +387,7 @@ public final class DecodeResources {
     }
 
     public record DecodeRequestView(
-            long requestId,
+            String requestId,
             int priority,
             long kvTokens,
             long expectedKvTokens,
@@ -363,7 +400,9 @@ public final class DecodeResources {
         }
     }
 
-    /** Failure-only priority summary, shared until the admission revision changes. */
+    /**
+     * Failure-only priority summary, shared until the admission revision changes.
+     */
     public static final class AdmissionSummary {
         private final DecodeRoutingView routing;
         private final CapacityRelease[] placementOccupancy;
@@ -401,7 +440,9 @@ public final class DecodeResources {
                     "Decode admission limits are outside their domain");
         }
 
-        /** Use the same occupancy scope for the observation and every exact victim release. */
+        /**
+         * Use the same occupancy scope for the observation and every exact victim release.
+         */
         public CapacityDeficit evaluate(
                 CapacityUsage usage,
                 long hardKvTokens,
@@ -442,7 +483,9 @@ public final class DecodeResources {
                     : new CapacityDeficit(requests, hard, expected);
         }
 
-        /** Integer arithmetic never rounds the configured KV budget up. */
+        /**
+         * Integer arithmetic never rounds the configured KV budget up.
+         */
         public long kvBudget(long totalKv) {
             checkArgument(totalKv >= 0L, "negative KV capacity");
             return totalKv / 100L * maxKvUsagePercent + totalKv % 100L * maxKvUsagePercent / 100L;

@@ -10,7 +10,9 @@ import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 
-/** Assembles API fixtures through the same scheduler and configuration as production. */
+/**
+ * Assembles API fixtures through the same scheduler and configuration as production.
+ */
 final class FlexlbServiceTestSupport {
     static FlexlbServiceImpl create(
             RequestScheduler scheduler,
@@ -22,9 +24,30 @@ final class FlexlbServiceTestSupport {
             DeliveryMetricsReporter batches,
             ServerScheduleLatencyRecorder latency,
             RequestSchedulerReporter reporter) {
-        if (org.mockito.Mockito.mockingDetails(leadership).isMock()) {
-            org.mockito.Mockito.doCallRealMethod().when(leadership).shouldForwardToMaster();
-        }
+        return create(
+                scheduler,
+                requests,
+                leadership,
+                health,
+                forwarder,
+                config,
+                batches,
+                latency,
+                reporter,
+                null);
+    }
+
+    static FlexlbServiceImpl create(
+            RequestScheduler scheduler,
+            RequestRepository requests,
+            MasterStatusView leadership,
+            EngineHealthReporter health,
+            FlexlbGrpcForwarder forwarder,
+            ConfigService config,
+            DeliveryMetricsReporter batches,
+            ServerScheduleLatencyRecorder latency,
+            RequestSchedulerReporter reporter,
+            org.flexlb.cache.match.CacheAwareService cache) {
         if (org.mockito.Mockito.mockingDetails(scheduler).isMock()
                 && !(scheduler instanceof AbstractRequestScheduler)) {
             org.mockito.Mockito.lenient()
@@ -42,13 +65,14 @@ final class FlexlbServiceTestSupport {
         }
         return new FlexlbServiceImpl(
                 scheduler,
-                config.loadBalanceConfig(),
                 requests,
                 leadership,
                 health,
                 forwarder,
+                config,
                 batches,
                 latency,
-                reporter);
+                reporter,
+                cache);
     }
 }

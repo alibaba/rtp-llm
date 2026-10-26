@@ -42,7 +42,9 @@ final class PlacementCapacityWaitQueue {
         return domain != null && domain.retry != entry;
     }
 
-    /** The only park boundary: do not sleep through an edge published during planning. */
+    /**
+     * The only park boundary: do not sleep through an edge published during planning.
+     */
     boolean park(GlobalQueueEntry entry, PlacementKey blocker, long observedSequence) {
         Objects.requireNonNull(blocker, "blocker");
         if (availability.lastChangedSequence(blocker.capacityDomain()) > observedSequence) {
@@ -58,7 +60,9 @@ final class PlacementCapacityWaitQueue {
         return true;
     }
 
-    /** Constant number of domain lookups, independent of backlog size. */
+    /**
+     * Constant number of domain lookups, independent of backlog size.
+     */
     void capacityChanged(PlacementKey key) {
         if (key.endpoint() != null) {
             release(key.capacityDomain());
@@ -73,6 +77,10 @@ final class PlacementCapacityWaitQueue {
         return !ready.isEmpty();
     }
 
+    int size() {
+        return membership.size();
+    }
+
     void resumeReady(int limit, Consumer<GlobalQueueEntry> resume) {
         for (int count = 0; count < limit && !ready.isEmpty(); count++) {
             Domain domain = ready.pollFirst();
@@ -84,7 +92,9 @@ final class PlacementCapacityWaitQueue {
         }
     }
 
-    /** A departing request did not consume the remaining retry opportunity. */
+    /**
+     * A departing request did not consume the remaining retry opportunity.
+     */
     void remove(GlobalQueueEntry entry) {
         remove(entry, true);
     }

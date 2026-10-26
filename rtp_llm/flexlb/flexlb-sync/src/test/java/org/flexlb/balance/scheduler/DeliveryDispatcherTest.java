@@ -12,19 +12,24 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.DeliveryExecution.DeliveryPermit;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.enums.FlexMetricType;
+import org.flexlb.enums.FlexPriorityType;
+import org.flexlb.metric.FlexMonitor;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -49,11 +54,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -110,6 +116,92 @@ class DeliveryDispatcherTest {
     }
 
     @Test
+    void unusedDispatcherRegistersAndReportsZeroExecutorValues() {
+        runtime.shutdown();
+        FlexMonitor monitor = mock(FlexMonitor.class);
+        dispatcher = createDispatcher(1, 1, null);
+        var metrics = new org.flexlb.service.monitor.DeliveryMetricsReporter(monitor);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                runtime, "deliveryReporter", metrics);
+        metrics.registerDispatchExecutorMetrics();
+        runtime.deliveries().reportExecutorMetrics(metrics);
+
+        for (String metric :
+                List.of(
+                        MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS,
+                        MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE,
+                        MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE)) {
+            verify(monitor).register(metric, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+            verify(monitor).report(metric, 0.0);
+        }
+    }
+
+    @Test
+    void executorMetricsTrackBusyQueuedAndIdleState() throws Exception {
+        runtime.shutdown();
+        FlexMonitor monitor = mock(FlexMonitor.class);
+        dispatcher = createDispatcher(1, 1, null);
+        var metrics = new org.flexlb.service.monitor.DeliveryMetricsReporter(monitor);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                runtime, "deliveryReporter", metrics);
+        metrics.registerDispatchExecutorMetrics();
+        runtime.deliveries().reportExecutorMetrics(metrics);
+        ThreadPoolExecutor executor =
+                (ThreadPoolExecutor)
+                        ReflectionTestUtils.getField(runtime.deliveries(), "dispatchExecutor");
+        PrefillEndpoint endpoint = createPrefillEndpoint();
+        CountDownLatch firstDispatchStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirstDispatch = new CountDownLatch(1);
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
+                .thenAnswer(
+                        invocation -> {
+                            EngineRpcService.EnqueueBatchRequestPB request =
+                                    invocation.getArgument(2);
+                            if (request.getBatchId() == 1L) {
+                                firstDispatchStarted.countDown();
+                                assertTrue(releaseFirstDispatch.await(5, TimeUnit.SECONDS));
+                            }
+                            return CompletableFuture.completedFuture(
+                                    ackResponse(
+                                            request.getBatchId(), List.of(request.getBatchId())));
+                        });
+
+        try {
+            submit(
+                    List.of(createRequestRoute("1", 500, 200, endpoint)),
+                    1L,
+                    100,
+                    "executor_metrics",
+                    callback);
+            assertTrue(firstDispatchStarted.await(5, TimeUnit.SECONDS));
+            submit(
+                    List.of(createRequestRoute("2", 500, 200, endpoint)),
+                    2L,
+                    100,
+                    "executor_metrics",
+                    callback);
+
+            clearInvocations(monitor);
+            runtime.deliveries().reportExecutorMetrics(metrics);
+            verify(monitor).report(MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS, 1.0);
+            verify(monitor).report(MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE, 1.0);
+            verify(monitor).report(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE, 1.0);
+        } finally {
+            releaseFirstDispatch.countDown();
+        }
+
+        RequestProtocolTestSupport.awaitCondition(
+                () -> executor.getCompletedTaskCount() == 2L && callback.successCount.get() == 2);
+        clearInvocations(monitor);
+        runtime.deliveries().reportExecutorMetrics(metrics);
+        runtime.deliveries().reportExecutorMetrics(metrics);
+        verify(monitor, times(2)).report(MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS, 0.0);
+        verify(monitor, times(2)).report(MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE, 0.0);
+        verify(monitor, times(2)).report(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE, 1.0);
+    }
+
+    @Test
     void dispatchPreservesDistinctPerRequestTraceContextsInOneBatch() throws Exception {
         assertDispatchedTraceContexts(true, false);
     }
@@ -129,8 +221,8 @@ class DeliveryDispatcherTest {
         org.flexlb.telemetry.FlexlbTrace.configure(
                 enabled ? io.opentelemetry.api.OpenTelemetry.noop() : null, "");
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute first = createRequestRoute(501L, 500, 200, prefillEp);
-        RequestRoute second = createRequestRoute(502L, 500, 200, prefillEp);
+        RequestRoute first = createRequestRoute("501", 500, 200, prefillEp);
+        RequestRoute second = createRequestRoute("502", 500, 200, prefillEp);
         first.ctx()
                 .data()
                 .setGenerateInputPb(
@@ -178,7 +270,9 @@ class DeliveryDispatcherTest {
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenAnswer(
                         inv -> {
                             sent.add(inv.getArgument(2));
@@ -393,11 +487,13 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchSendsItemsToGrpcAndReceivesAck() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RequestRoute item = createRequestRoute("1", 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response = ackResponse(1L, List.of(1L));
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         submit(List.of(item), 1L, 100, "test_reason", callback);
@@ -407,7 +503,9 @@ class DeliveryDispatcherTest {
         assertEquals(0, callback.failureCount.get());
         ArgumentCaptor<EngineRpcService.EnqueueBatchRequestPB> request =
                 ArgumentCaptor.forClass(EngineRpcService.EnqueueBatchRequestPB.class);
-        verify(grpcClient).batchEnqueueAsync(anyString(), anyInt(), request.capture());
+        verify(grpcClient)
+                .batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), request.capture());
         // Default raised from 3s to 60s by d1dcb3de38 (V4.1 multimodal
         // delivery stabilization); the explicit-config case below covers the
         // configured value.
@@ -417,9 +515,11 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchPassesConfiguredFetchAttachTimeoutToEngine() throws Exception {
         config.getDispatcher().setFetchAttachTimeoutMs(1500);
-        RequestRoute item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
+        RequestRoute item = createRequestRoute("1", 500, 200, createPrefillEndpoint());
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(ackResponse(1L, List.of(1L))));
 
         submit(List.of(item), 1L, 100, "test_reason", callback);
@@ -427,15 +527,17 @@ class DeliveryDispatcherTest {
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS), "onSuccess should be called");
         ArgumentCaptor<EngineRpcService.EnqueueBatchRequestPB> request =
                 ArgumentCaptor.forClass(EngineRpcService.EnqueueBatchRequestPB.class);
-        verify(grpcClient).batchEnqueueAsync(anyString(), anyInt(), request.capture());
+        verify(grpcClient)
+                .batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), request.capture());
         assertEquals(1500, request.getValue().getFetchAttachTimeoutMs());
     }
 
     @Test
     void batchAttributesAndValidatedResponseTimePrecedeEveryItemCallback() throws Exception {
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RequestRoute first = createRequestRoute(601L, 20, 0, endpoint);
-        RequestRoute second = createRequestRoute(602L, 20, 0, endpoint);
+        RequestRoute first = createRequestRoute("601", 20, 0, endpoint);
+        RequestRoute second = createRequestRoute("602", 20, 0, endpoint);
         var firstSpan = mock(io.opentelemetry.api.trace.Span.class);
         var secondSpan = mock(io.opentelemetry.api.trace.Span.class);
         when(firstSpan.storeInContext(any(io.opentelemetry.context.Context.class)))
@@ -447,7 +549,9 @@ class DeliveryDispatcherTest {
                 .data()
                 .setTraceContext(io.opentelemetry.context.Context.root().with(secondSpan));
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(
                         CompletableFuture.completedFuture(ackResponse(93L, List.of(601L, 602L))));
         CompletableFuture<Void> verified = new CompletableFuture<>();
@@ -484,12 +588,14 @@ class DeliveryDispatcherTest {
 
     @Test
     void malformedAckDoesNotPublishValidatedResponseTime() throws Exception {
-        RequestRoute item = createRequestRoute(603L, 20, 0, createPrefillEndpoint());
+        RequestRoute item = createRequestRoute("603", 20, 0, createPrefillEndpoint());
         var span = mock(io.opentelemetry.api.trace.Span.class);
         when(span.storeInContext(any(io.opentelemetry.context.Context.class))).thenCallRealMethod();
         item.ctx().data().setTraceContext(io.opentelemetry.context.Context.root().with(span));
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(ackResponse(94L, List.of(999L))));
         submit(List.of(item), 94L, 100, "malformed", callback);
         assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS));
@@ -504,12 +610,14 @@ class DeliveryDispatcherTest {
     @ValueSource(booleans = {false, true})
     void asynchronousTimeoutKeepsEveryMemberUncertain(boolean grpcDeadline) throws Exception {
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RequestRoute first = createRequestRoute(611L, 20, 0, endpoint);
-        RequestRoute second = createRequestRoute(612L, 20, 0, endpoint);
+        RequestRoute first = createRequestRoute("611", 20, 0, endpoint);
+        RequestRoute second = createRequestRoute("612", 20, 0, endpoint);
         var rpc = new CompletableFuture<EngineRpcService.EnqueueBatchResponsePB>();
         CountDownLatch invoked = new CountDownLatch(1);
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenAnswer(
                         call -> {
                             invoked.countDown();
@@ -540,16 +648,20 @@ class DeliveryDispatcherTest {
         }
         verify(grpcClient)
                 .batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class));
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class));
     }
 
     @Test
     void dispatchHandlesGrpcError() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RequestRoute item = createRequestRoute("1", 500, 200, prefillEp);
 
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(
                         CompletableFuture.failedFuture(
                                 new RuntimeException("gRPC connection refused")));
@@ -567,10 +679,12 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchHandlesNullGrpcResponse() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RequestRoute item = createRequestRoute("1", 500, 200, prefillEp);
 
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(null));
 
         submit(List.of(item), 1L, 100, "test_reason", callback);
@@ -582,8 +696,10 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchHandlesNullGrpcFutureAsUncertain() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any())).thenReturn(null);
+        RequestRoute item = createRequestRoute("1", 500, 200, prefillEp);
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
+                .thenReturn(null);
 
         submit(List.of(item), 1L, 100, "test", callback);
 
@@ -595,8 +711,9 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchRejectsAckWithDifferentBatchId() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(8L, 500, 200, prefillEp);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+        RequestRoute item = createRequestRoute("8", 500, 200, prefillEp);
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenReturn(
                         CompletableFuture.completedFuture(
                                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
@@ -658,12 +775,12 @@ class DeliveryDispatcherTest {
     @Test
     void unexpectedPreSendFailureIsDefiniteAndIsolatesCallbacks() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute first = createRequestRoute(1L, 500, 200, prefillEp);
-        RequestRoute second = createRequestRoute(2L, 500, 200, prefillEp);
+        RequestRoute first = createRequestRoute("1", 500, 200, prefillEp);
+        RequestRoute second = createRequestRoute("2", 500, 200, prefillEp);
         when(prefillEp.getIp())
                 .thenThrow(new IllegalStateException("endpoint unavailable before send"));
         CountDownLatch attempted = new CountDownLatch(2);
-        var failures = new java.util.concurrent.ConcurrentHashMap<Long, Integer>();
+        var failures = new java.util.concurrent.ConcurrentHashMap<String, Integer>();
         AtomicInteger uncertain = new AtomicInteger();
         BiConsumer<RequestRoute, DeliveryResult> throwingCallback =
                 (exactItem, completion) -> {
@@ -671,7 +788,7 @@ class DeliveryDispatcherTest {
                     if (completion.status() == DeliveryResult.Status.NOT_SENT) {
                         failures.merge(item.requestId(), 1, Integer::sum);
                         attempted.countDown();
-                        if (item.requestId() == 1L) {
+                        if (item.requestId().equals("1")) {
                             throw new IllegalStateException("first callback failed");
                         }
                     } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
@@ -683,21 +800,23 @@ class DeliveryDispatcherTest {
 
         assertTrue(attempted.await(5, TimeUnit.SECONDS));
         runtime.deliveries().awaitDeliveries();
-        assertEquals(java.util.Map.of(1L, 1, 2L, 1), failures);
+        assertEquals(java.util.Map.of("1", 1, "2", 1), failures);
         assertEquals(0, uncertain.get());
-        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
+        verify(grpcClient, never())
+                .batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any());
     }
 
     @Test
     void synchronousRpcInvocationFailureIsUncertainAndIsolatesCallbacks() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute first = createRequestRoute(1L, 500, 200, prefillEp);
-        RequestRoute second = createRequestRoute(2L, 500, 200, prefillEp);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+        RequestRoute first = createRequestRoute("1", 500, 200, prefillEp);
+        RequestRoute second = createRequestRoute("2", 500, 200, prefillEp);
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenThrow(new IllegalStateException("client threw after invocation began"));
         CountDownLatch attempted = new CountDownLatch(2);
         AtomicInteger failures = new AtomicInteger();
-        var uncertain = new java.util.concurrent.ConcurrentHashMap<Long, Integer>();
+        var uncertain = new java.util.concurrent.ConcurrentHashMap<String, Integer>();
         BiConsumer<RequestRoute, DeliveryResult> throwingCallback =
                 (exactItem, completion) -> {
                     RequestRoute item = assertInstanceOf(RequestRoute.class, exactItem);
@@ -706,7 +825,7 @@ class DeliveryDispatcherTest {
                     } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
                         uncertain.merge(item.requestId(), 1, Integer::sum);
                         attempted.countDown();
-                        if (item.requestId() == 1L) {
+                        if (item.requestId().equals("1")) {
                             throw new IllegalStateException("first callback failed");
                         }
                     }
@@ -717,7 +836,7 @@ class DeliveryDispatcherTest {
         assertTrue(attempted.await(5, TimeUnit.SECONDS));
         runtime.deliveries().awaitDeliveries();
         assertEquals(0, failures.get());
-        assertEquals(java.util.Map.of(1L, 1, 2L, 1), uncertain);
+        assertEquals(java.util.Map.of("1", 1, "2", 1), uncertain);
     }
 
     @Test
@@ -725,11 +844,12 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RequestRoute item = createRequestRoute("1", 500, 200, prefillEp);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture =
                 new CompletableFuture<>();
         CountDownLatch invoked = new CountDownLatch(1);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(
                         invocation -> {
                             invoked.countDown();
@@ -768,7 +888,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchHandlesResponseWithErrors() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RequestRoute item = createRequestRoute("1", 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
@@ -784,7 +904,9 @@ class DeliveryDispatcherTest {
                                         .build())
                         .build();
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         submit(
@@ -816,8 +938,8 @@ class DeliveryDispatcherTest {
     void malformedMemberAcknowledgementKeepsEveryMemberUncertain(String violation)
             throws Exception {
         PrefillEndpoint prefill = createPrefillEndpoint();
-        var first = createRequestRoute(1L, 500, 200, prefill);
-        var second = createRequestRoute(2L, 500, 200, prefill);
+        var first = createRequestRoute("1", 500, 200, prefill);
+        var second = createRequestRoute("2", 500, 200, prefill);
         var response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(95L)
@@ -844,7 +966,8 @@ class DeliveryDispatcherTest {
                             .addErrors(error.toBuilder().setRequestId(99L));
             default -> throw new AssertionError(violation);
         }
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response.build()));
         var results = new CopyOnWriteArrayList<DeliveryResult>();
         var identities = new CopyOnWriteArrayList<RequestRoute>();
@@ -884,14 +1007,16 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchHandlesMissingAck() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RequestRoute item = createRequestRoute("1", 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(1L)
                         .build(); // no success, no error
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         submit(List.of(item), 1L, 100, "test", callback);
@@ -904,8 +1029,8 @@ class DeliveryDispatcherTest {
     void responseCallbackFailureIsIsolatedAndNeverReclassifiesOtherItemsAsUncertain()
             throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute succeeded = createRequestRoute(11L, 500, 200, prefillEp);
-        RequestRoute rejected = createRequestRoute(12L, 500, 200, prefillEp);
+        RequestRoute succeeded = createRequestRoute("11", 500, 200, prefillEp);
+        RequestRoute rejected = createRequestRoute("12", 500, 200, prefillEp);
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(91L)
@@ -923,7 +1048,8 @@ class DeliveryDispatcherTest {
                                                         .build())
                                         .build())
                         .build();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         CountDownLatch callbacksAttempted = new CountDownLatch(2);
@@ -958,14 +1084,16 @@ class DeliveryDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         CountDownLatch rpcInvoked = new CountDownLatch(1);
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenAnswer(
                         invocation -> {
                             rpcInvoked.countDown();
                             return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
                         });
 
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RequestRoute item = createRequestRoute("1", 500, 200, prefillEp);
         DeliveryPermit permit = reservePermit();
 
         runtime.deliveries().stopDeliveryAdmission();
@@ -991,14 +1119,15 @@ class DeliveryDispatcherTest {
         CountDownLatch invoked = new CountDownLatch(1);
         CountDownLatch observerEntered = new CountDownLatch(1);
         CountDownLatch releaseObserver = new CountDownLatch(1);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(
                         call -> {
                             invoked.countDown();
                             return rpc;
                         });
         submit(
-                List.of(createRequestRoute(1L, 500, 200, prefillEp)),
+                List.of(createRequestRoute("1", 500, 200, prefillEp)),
                 1L,
                 100,
                 "drain_rpc",
@@ -1040,9 +1169,10 @@ class DeliveryDispatcherTest {
                                 runtime.deliveries(), "completionExecutor");
         executor.shutdown();
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RequestRoute first = createRequestRoute(1L, 500, 200, endpoint);
-        RequestRoute second = createRequestRoute(2L, 500, 200, endpoint);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+        RequestRoute first = createRequestRoute("1", 500, 200, endpoint);
+        RequestRoute second = createRequestRoute("2", 500, 200, endpoint);
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenReturn(CompletableFuture.completedFuture(ackResponse(91L, List.of(1L, 2L))));
         var results = new CopyOnWriteArrayList<DeliveryResult>();
         var identities = new CopyOnWriteArrayList<RequestRoute>();
@@ -1066,7 +1196,8 @@ class DeliveryDispatcherTest {
             assertEquals(DeliveryResult.Status.UNCERTAIN, result.status());
             assertInstanceOf(java.util.concurrent.RejectedExecutionException.class, result.cause());
         }
-        verify(grpcClient).batchEnqueueAsync(anyString(), anyInt(), any());
+        verify(grpcClient)
+                .batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any());
     }
 
     @Test
@@ -1126,8 +1257,8 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 1, null);
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RequestRoute firstItem = createRequestRoute(1L, 500, 200, endpoint);
-        RequestRoute secondItem = createRequestRoute(2L, 500, 200, endpoint);
+        RequestRoute firstItem = createRequestRoute("1", 500, 200, endpoint);
+        RequestRoute secondItem = createRequestRoute("2", 500, 200, endpoint);
         DeliveryPermit running = reservePermit();
         DeliveryPermit queued = reservePermit();
         CapacityBoundary.Attempt<?> rejected = runtime.deliveries().tryReserveDelivery();
@@ -1151,7 +1282,7 @@ class DeliveryDispatcherTest {
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void replacementAfterPreparationIsUsedAtSendTime(boolean malformed) throws Exception {
-        RequestRoute item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
+        RequestRoute item = createRequestRoute("1", 500, 200, createPrefillEndpoint());
         item.ctx().data().prepareGenerateInput();
         item.ctx()
                 .data()
@@ -1167,12 +1298,13 @@ class DeliveryDispatcherTest {
                 "replacement",
                 (request, completion) -> result.complete(completion));
         assertEquals(DeliveryResult.Status.NOT_SENT, result.get(5, TimeUnit.SECONDS).status());
-        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
+        verify(grpcClient, never())
+                .batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any());
     }
 
     @Test
     void invalidFinalBatchFailsBeforeRpcOnTheDeliveryThread() throws Exception {
-        RequestRoute item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
+        RequestRoute item = createRequestRoute("1", 500, 200, createPrefillEndpoint());
         CompletableFuture<Void> checked = new CompletableFuture<>();
         reservePermit()
                 .submit(
@@ -1203,7 +1335,8 @@ class DeliveryDispatcherTest {
                         },
                         failure -> checked.completeExceptionally(failure));
         checked.get(5, TimeUnit.SECONDS);
-        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
+        verify(grpcClient, never())
+                .batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any());
     }
 
     @Test
@@ -1211,12 +1344,13 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, endpoint);
+        RequestRoute item = createRequestRoute("1", 500, 200, endpoint);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture =
                 new CompletableFuture<>();
         CountDownLatch rpcInvoked = new CountDownLatch(1);
         CountDownLatch allowHandoff = new CountDownLatch(1);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(
                         invocation -> {
                             rpcInvoked.countDown();
@@ -1281,14 +1415,16 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchUsesAdmissionPriorityEvenIfOriginalRequestChanges() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp, 60);
+        RequestRoute item = createRequestRoute("1", 500, 200, prefillEp, 60);
         item.ctx()
                 .data()
                 .setRequest(item.ctx().data().getRequest().toBuilder().rawPriority(7).build());
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenAnswer(
                         inv -> {
                             sent.add(inv.getArgument(2));
@@ -1302,14 +1438,16 @@ class DeliveryDispatcherTest {
     }
 
     @Test
-    void dispatchLeavesPriorityUnsetForNoPriorityRequests() throws Exception {
+    void dispatchWritesTheDefaultSchedulingPriorityForUnspecifiedRequests() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
-        // default Request priority is the no-priority sentinel (0)
+        RequestRoute item = createRequestRoute("1", 500, 200, prefillEp);
+        // Missing client priority uses the effective default captured in SchedulingMetadata.
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenAnswer(
                         inv -> {
                             sent.add(inv.getArgument(2));
@@ -1319,16 +1457,17 @@ class DeliveryDispatcherTest {
         submit(List.of(item), 1L, 100, "test", callback);
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
-        assertEquals(0, sentInput(sent.getFirst()).getPriority());
+        assertEquals(50, sentInput(sent.getFirst()).getPriority());
     }
 
     @Test
     void dispatchDualWritesCompatibleRoleAddress() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RequestRoute item = createRequestRoute("1", 500, 200, prefillEp);
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(
                         inv -> {
                             sent.add(inv.getArgument(2));
@@ -1352,7 +1491,8 @@ class DeliveryDispatcherTest {
         PrefillEndpoint endpoint = createPrefillEndpoint();
         var items = new java.util.ArrayList<RequestRoute>();
         for (int index = 0; index < 6; index++) {
-            RequestRoute original = createRequestRoute(index + 1L, 500L, 200L, endpoint);
+            RequestRoute original =
+                    createRequestRoute(String.valueOf(index + 1L), 500L, 200L, endpoint);
             ServerStatus prefill = original.prefill();
             prefill.setDpRank(multipleRanks && index % 2 != 0 ? 1L : 2L);
             if (index == 4) {
@@ -1380,7 +1520,8 @@ class DeliveryDispatcherTest {
                             original.enqueuedAtMs()));
         }
         CompletableFuture<EngineRpcService.EnqueueBatchRequestPB> sent = new CompletableFuture<>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(
                         call -> {
                             sent.complete(call.getArgument(2));
@@ -1404,7 +1545,7 @@ class DeliveryDispatcherTest {
                             .map(RequestRoute::requestId)
                             .toList(),
                     slot.getRequestsList().stream()
-                            .map(input -> input.getInput().getRequestId())
+                            .map(input -> Long.toString(input.getInput().getRequestId()))
                             .toList());
             for (var external : slot.getRequestsList()) {
                 inputs.put(external.getInput().getRequestId(), external.getInput());
@@ -1412,7 +1553,10 @@ class DeliveryDispatcherTest {
         }
         assertEquals(items.size(), inputs.size());
         for (RequestRoute item : items) {
-            var roles = inputs.get(item.requestId()).getGenerateConfig().getRoleAddrsList();
+            var roles =
+                    inputs.get(Long.parseLong(item.requestId()))
+                            .getGenerateConfig()
+                            .getRoleAddrsList();
             assertEquals(item.decode() == null ? 1 : 2, roles.size());
             assertEquals(RoleType.PREFILL, RoleTypeProtoConverter.fromRoleAddr(roles.getFirst()));
             assertEquals(item.prefill().getServerIp(), roles.getFirst().getIp());
@@ -1607,12 +1751,13 @@ class DeliveryDispatcherTest {
     @ValueSource(booleans = {false, true})
     void rpcCompletionUsesItsOwnPoolForImmediateAndNetworkReplies(boolean immediate)
             throws Exception {
-        var item = createRequestRoute(721L, 20L, 0L, createPrefillEndpoint());
+        var item = createRequestRoute("721", 20L, 0L, createPrefillEndpoint());
         var rpc = new CompletableFuture<EngineRpcService.EnqueueBatchResponsePB>();
         var invoked = new CountDownLatch(1);
         var completed = new CompletableFuture<Thread>();
         var sendingThread = new java.util.concurrent.atomic.AtomicReference<Thread>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(
                         call -> {
                             sendingThread.set(Thread.currentThread());
@@ -1648,14 +1793,14 @@ class DeliveryDispatcherTest {
         org.junit.jupiter.api.Assertions.assertNotSame(sendingThread.get(), completion);
         runtime.deliveries().awaitDeliveries();
         verify(grpcClient, org.mockito.Mockito.times(1))
-                .batchEnqueueAsync(anyString(), anyInt(), any());
+                .batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any());
     }
 
     @Test
     void sendBoundaryRemovesCancelledMembersFromTheActualPayload() throws Exception {
         var endpoint = createPrefillEndpoint();
-        var cancelled = createRequestRoute(701L, 20L, 0L, endpoint);
-        var admitted = createRequestRoute(702L, 20L, 0L, endpoint);
+        var cancelled = createRequestRoute("701", 20L, 0L, endpoint);
+        var admitted = createRequestRoute("702", 20L, 0L, endpoint);
         when(cancelled
                         .ctx()
                         .data()
@@ -1676,14 +1821,15 @@ class DeliveryDispatcherTest {
                 .data()
                 .setTraceContext(io.opentelemetry.context.Context.root().with(cancelledSpan));
         var sent = new CompletableFuture<EngineRpcService.EnqueueBatchRequestPB>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(
                         call -> {
                             sent.complete(call.getArgument(2));
                             return CompletableFuture.completedFuture(
                                     ackResponse(71L, List.of(702L)));
                         });
-        var results = new java.util.concurrent.ConcurrentHashMap<Long, DeliveryResult.Status>();
+        var results = new java.util.concurrent.ConcurrentHashMap<String, DeliveryResult.Status>();
         var completed = new CountDownLatch(2);
         submit(
                 List.of(cancelled, admitted),
@@ -1702,8 +1848,8 @@ class DeliveryDispatcherTest {
                         .map(request -> request.getInput().getRequestId())
                         .toList());
         assertTrue(completed.await(2, TimeUnit.SECONDS));
-        assertEquals(DeliveryResult.Status.NOT_SENT, results.get(701L));
-        assertEquals(DeliveryResult.Status.DELIVERED, results.get(702L));
+        assertEquals(DeliveryResult.Status.NOT_SENT, results.get("701"));
+        assertEquals(DeliveryResult.Status.DELIVERED, results.get("702"));
         verify(admittedSpan).setAttribute(org.flexlb.telemetry.FlexlbTrace.BATCH_SIZE, 1L);
         verify(cancelledSpan, org.mockito.Mockito.never())
                 .setAttribute(
@@ -1718,10 +1864,10 @@ class DeliveryDispatcherTest {
         var endpoint = createPrefillEndpoint();
         var items =
                 List.of(
-                        createRequestRoute(711L, 20L, 0L, endpoint),
-                        createRequestRoute(712L, 20L, 0L, endpoint),
-                        createRequestRoute(713L, 20L, 0L, endpoint));
-        var acceptedIds = new java.util.ArrayList<Long>();
+                        createRequestRoute("711", 20L, 0L, endpoint),
+                        createRequestRoute("712", 20L, 0L, endpoint),
+                        createRequestRoute("713", 20L, 0L, endpoint));
+        var acceptedIds = new java.util.ArrayList<String>();
         for (int index = 0; index < items.size(); index++) {
             boolean accepted = (refusedMask & (1 << index)) == 0;
             when(items.get(index)
@@ -1735,13 +1881,14 @@ class DeliveryDispatcherTest {
             }
         }
         var sent = new CompletableFuture<EngineRpcService.EnqueueBatchRequestPB>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(
                         call -> {
                             sent.complete(call.getArgument(2));
                             return CompletableFuture.completedFuture(ackResponse(73L, acceptedIds));
                         });
-        var results = new java.util.concurrent.ConcurrentHashMap<Long, DeliveryResult.Status>();
+        var results = new java.util.concurrent.ConcurrentHashMap<String, DeliveryResult.Status>();
         var completed = new CountDownLatch(items.size());
         submit(
                 items,
@@ -1766,20 +1913,21 @@ class DeliveryDispatcherTest {
                     .tryStartSend(items.get(index).ctx().snapshot().delivery().identity());
         }
         if (acceptedIds.isEmpty()) {
-            verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
+            verify(grpcClient, never())
+                    .batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any());
         } else {
             assertEquals(
                     acceptedIds,
                     sent.get(2, TimeUnit.SECONDS).getDpSlotsList().stream()
                             .flatMap(slot -> slot.getRequestsList().stream())
-                            .map(request -> request.getInput().getRequestId())
+                            .map(request -> Long.toString(request.getInput().getRequestId()))
                             .toList());
         }
     }
 
     @Test
     void sendBoundarySkipsRpcWhenEveryMemberWasCancelled() throws Exception {
-        var item = createRequestRoute(703L, 20L, 0L, createPrefillEndpoint());
+        var item = createRequestRoute("703", 20L, 0L, createPrefillEndpoint());
         when(item.ctx()
                         .data()
                         .getScheduler()
@@ -1794,16 +1942,16 @@ class DeliveryDispatcherTest {
                 (ignored, result) -> completed.complete(result));
         assertEquals(DeliveryResult.Status.NOT_SENT, completed.get(2, TimeUnit.SECONDS).status());
         org.mockito.Mockito.verify(grpcClient, org.mockito.Mockito.never())
-                .batchEnqueueAsync(anyString(), anyInt(), any());
+                .batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any());
     }
 
     private RequestRoute createRequestRoute(
-            long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
+            String requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
         return createRequestRoute(requestId, seqLen, hitCacheLen, prefillEp, 0);
     }
 
     private RequestRoute createRequestRoute(
-            long requestId,
+            String requestId,
             long seqLen,
             long hitCacheLen,
             PrefillEndpoint prefillEp,
@@ -1816,8 +1964,9 @@ class DeliveryDispatcherTest {
 
         // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)
         EngineRpcService.GenerateInputPB input =
-                EngineRpcService.GenerateInputPB.newBuilder()
-                        .setRequestId(requestId)
+                RequestIdFixtures.write(
+                                EngineRpcService.GenerateInputPB.newBuilder(),
+                                Long.toString(Long.parseLong(requestId)))
                         .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
                         .build();
         ctx.data().setGenerateInputPb(input.toByteString());
@@ -1849,7 +1998,7 @@ class DeliveryDispatcherTest {
                                         ctx.beginDelivery(
                                                 route,
                                                 DeliveryClaimKind.BATCH_ENQUEUE,
-                                                requestId,
+                                                Long.parseLong(requestId),
                                                 now))
                                 .value();
         ctx.commitDelivery(delivery, true, now);
@@ -1858,12 +2007,14 @@ class DeliveryDispatcherTest {
     }
 
     private EngineRpcService.EnqueueBatchResponsePB ackResponse(
-            long batchId, List<Long> successIds) {
+            long batchId, List<? extends Object> successIds) {
         EngineRpcService.EnqueueBatchResponsePB.Builder builder =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(batchId);
-        for (long id : successIds) {
+        for (Object encodedId : successIds) {
             builder.addSuccesses(
-                    EngineRpcService.EnqueueBatchSuccessPB.newBuilder().setRequestId(id).build());
+                    EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
+                            .setRequestId(Long.parseLong(encodedId.toString()))
+                            .build());
         }
         return builder.build();
     }
@@ -1917,9 +2068,11 @@ class DeliveryDispatcherTest {
                                 fn.apply(ackResponse(1L, List.of(1L)), null));
                     }
                 };
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any())).thenReturn(immediate);
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
+                .thenReturn(immediate);
         submit(
-                List.of(createRequestRoute(1L, 500, 200, createPrefillEndpoint())),
+                List.of(createRequestRoute("1", 500, 200, createPrefillEndpoint())),
                 1L,
                 100,
                 "immediate_completion",
@@ -1962,9 +2115,11 @@ class DeliveryDispatcherTest {
                                 "registration failed");
                     }
                 };
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any())).thenReturn(broken);
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
+                .thenReturn(broken);
         submit(
-                List.of(createRequestRoute(1L, 500, 200, createPrefillEndpoint())),
+                List.of(createRequestRoute("1", 500, 200, createPrefillEndpoint())),
                 1L,
                 100,
                 "registration_failure",
@@ -2000,13 +2155,15 @@ class DeliveryDispatcherTest {
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> pending =
                 new CompletableFuture<>();
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenAnswer(invocation -> pending);
 
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         // Exhaust the single admission permit with one in-flight batch.
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RequestRoute item = createRequestRoute("1", 500, 200, prefillEp);
         DeliveryPermit permit = reservePermit();
         assertDoesNotThrow(() -> submit(permit, List.of(item), 1L, 100, "inflight_hold", callback));
 
@@ -2035,7 +2192,7 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RequestRoute item = createRequestRoute("1", 500, 200, prefillEp);
         // Force a deterministic pre-send build failure: null generateInput
         // bytes path is hard to force; use an oversize payload instead by
         // mocking the config to throw in requireBatchDispatcher — simplest
@@ -2122,7 +2279,8 @@ class DeliveryDispatcherTest {
                 dispatcherIsTerminatedWithin(5),
                 "shutdown must complete after a sender-less delivery");
         taskDone.countDown();
-        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
+        verify(grpcClient, never())
+                .batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any());
     }
 
     /**
@@ -2136,10 +2294,11 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(7L, 500, 200, prefillEp);
+        RequestRoute item = createRequestRoute("7", 500, 200, prefillEp);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> pending =
                 new CompletableFuture<>();
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+        when(grpcClient.batchEnqueueAsync(
+                        org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(invocation -> pending);
         CountDownLatch uncertain = new CountDownLatch(1);
         BiConsumer<RequestRoute, DeliveryResult> uncertainCallback =
@@ -2196,7 +2355,7 @@ class DeliveryDispatcherTest {
         // must be rejected pre-serialization.
         dispatcher = createDispatcher(1, 0, null, 64L);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RequestRoute item = createRequestRoute("1", 500, 200, prefillEp);
         CountDownLatch failed = new CountDownLatch(1);
         BiConsumer<RequestRoute, DeliveryResult> failureCallback =
                 (exactItem, completion) -> {
@@ -2208,7 +2367,8 @@ class DeliveryDispatcherTest {
         assertTrue(
                 failed.await(5, TimeUnit.SECONDS),
                 "oversize-batch dispatch must fail NOT_SENT without serialization");
-        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
+        verify(grpcClient, never())
+                .batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any());
 
         // Permit and byte charge must both be back: next admission succeeds
         // (a fresh small item still cannot pass the tiny budget, so instead

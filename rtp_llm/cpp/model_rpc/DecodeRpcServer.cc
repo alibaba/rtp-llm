@@ -64,6 +64,22 @@ namespace rtp_llm {
 
 namespace {
 
+bool readFailureWasCancelled(const DecodeGenerateContext& context) {
+    if (context.server_context == nullptr) {
+        return false;
+    }
+    // Read completion and cancellation notification use separate completion-queue operations.
+    // Bound the observation wait so an ordinary client half-close still reports a read failure.
+    const auto observation_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
+    while (!context.isRequestCancelled()) {
+        if (std::chrono::steady_clock::now() >= observation_deadline) {
+            return context.isRequestCancelled();
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    return true;
+}
+
 // gRPC delivers propose probs/hidden as pageable CPU tensors. Pinning them
 // before the H2D copy lets cudaMemcpyAsync run on the DMA engine instead of
 // falling back to a staged synchronous copy on the handler thread. Pinning is
@@ -322,7 +338,7 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     decode_context.time_info.updateRequestBegineTime();
     auto& allocate_request = decode_context.allocate_request;
     if (!decode_context.rpc_context.grpc_stream->Read(&allocate_request)) {
-        const bool cancelled        = decode_context.isRequestCancelled();
+        const bool cancelled        = readFailureWasCancelled(decode_context);
         decode_context.error_status = generateRequestReadFailureStatus(cancelled);
         const auto peer = decode_context.server_context != nullptr ? decode_context.server_context->peer() : "unknown";
         RTP_LLM_LOG_WARNING(
@@ -554,7 +570,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     auto&             generate_stream = decode_context.getStream();
     GenerateRequestPB generate_request;
     if (!grpc_stream->Read(&generate_request)) {
-        const bool cancelled        = decode_context.isRequestCancelled();
+        const bool cancelled        = readFailureWasCancelled(decode_context);
         decode_context.error_status = generateRequestReadFailureStatus(cancelled);
         RTP_LLM_LOG_WARNING("request [%s] read generate request failed, cancelled [%d], grpc status code [%d]",
                             decode_context.request_key.c_str(),

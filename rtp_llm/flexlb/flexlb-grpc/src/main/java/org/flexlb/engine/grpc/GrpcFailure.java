@@ -22,7 +22,9 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.concurrent.RejectedExecutionException;
 
-/** Classifies actual causes for diagnostics and retry. RPC failure alone does not establish worker health. */
+/**
+ * Classifies actual causes for diagnostics and retry. RPC failure alone does not establish worker health.
+ */
 public final class GrpcFailure {
     // Stronger local evidence wins over transport wrappers.
     // This order is independent of both the cause-chain order and Kind's declaration order.
@@ -80,7 +82,9 @@ public final class GrpcFailure {
                     || kind == Kind.LOCAL_BIND_FAILED;
         }
 
-        /** Caller also enforces operation idempotency and the single retry limit. */
+        /**
+         * Caller also enforces operation idempotency and the single retry limit.
+         */
         public boolean retryableTransportFailure() {
             // Cancellation/deadline remains terminal even when cancellation exposes a closed
             // transport.

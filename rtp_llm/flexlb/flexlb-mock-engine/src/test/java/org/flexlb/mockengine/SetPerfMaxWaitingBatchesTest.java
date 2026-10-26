@@ -87,7 +87,8 @@ class SetPerfMaxWaitingBatchesTest {
         for (int i = 1; i <= 5; i++) {
             assertEquals(
                     1,
-                    enqueue(prefill, batch(1000 + i, slot(0, input(i, 10)))).getSuccessesCount(),
+                    enqueue(prefill, batch(1000 + i, slot(0, input(String.valueOf(i), 10))))
+                            .getSuccessesCount(),
                     "batch " + i + " should be accepted (unbounded)");
         }
         assertEquals(4, prefill.getWaitingCount(), "1 running + 4 queued expected");
@@ -95,7 +96,7 @@ class SetPerfMaxWaitingBatchesTest {
         // set → cap arrives exactly at the current queue depth → next batch rejected.
         httpPost("/set_perf", "{\"engine\":\"prefill-0\",\"max_waiting_batches\":4}");
         EngineRpcService.EnqueueBatchResponsePB rejected =
-                enqueue(prefill, batch(1006, slot(0, input(6, 10))));
+                enqueue(prefill, batch(1006, slot(0, input("6", 10))));
         assertEquals(0, rejected.getSuccessesCount(), "6th batch should not be accepted");
         assertEquals(1, rejected.getErrorsCount(), "6th batch should be rejected");
         String message = rejected.getErrors(0).getErrorInfo().getErrorMessage();
@@ -110,14 +111,14 @@ class SetPerfMaxWaitingBatchesTest {
         httpPost("/set_perf", "{\"engine\":\"prefill-0\",\"max_waiting_batches\":6}");
         assertEquals(
                 1,
-                enqueue(prefill, batch(1007, slot(0, input(7, 10)))).getSuccessesCount(),
+                enqueue(prefill, batch(1007, slot(0, input("7", 10)))).getSuccessesCount(),
                 "raised cap should accept again");
 
         // Clear (0 = unbounded) → acceptance restored.
         httpPost("/set_perf", "{\"engine\":\"prefill-0\",\"max_waiting_batches\":0}");
         assertEquals(
                 1,
-                enqueue(prefill, batch(1008, slot(0, input(8, 10)))).getSuccessesCount(),
+                enqueue(prefill, batch(1008, slot(0, input("8", 10)))).getSuccessesCount(),
                 "clearing to 0 should accept again");
 
         // The 7 admitted batches drain to completion despite the rejection.
@@ -136,30 +137,30 @@ class SetPerfMaxWaitingBatchesTest {
 
         assertEquals(
                 1,
-                enqueue(prefill, batch(2001, slot(0, input(1, 10)))).getSuccessesCount(),
+                enqueue(prefill, batch(2001, slot(0, input("1", 10)))).getSuccessesCount(),
                 "1st batch runs");
         assertEquals(
                 1,
-                enqueue(prefill, batch(2002, slot(0, input(2, 10)))).getSuccessesCount(),
+                enqueue(prefill, batch(2002, slot(0, input("2", 10)))).getSuccessesCount(),
                 "2nd batch queues under configured cap 1");
         assertEquals(
                 1,
-                enqueue(prefill, batch(2003, slot(0, input(3, 10)))).getErrorsCount(),
+                enqueue(prefill, batch(2003, slot(0, input("3", 10)))).getErrorsCount(),
                 "3rd batch should hit the configured cap of 1");
 
         // Runtime override raises the cap above the JSON value.
         httpPost("/set_perf", "{\"engine\":\"prefill-0\",\"max_waiting_batches\":3}");
         assertEquals(
                 1,
-                enqueue(prefill, batch(2004, slot(0, input(4, 10)))).getSuccessesCount(),
+                enqueue(prefill, batch(2004, slot(0, input("4", 10)))).getSuccessesCount(),
                 "overridden cap 3 should accept batch 4");
         assertEquals(
                 1,
-                enqueue(prefill, batch(2005, slot(0, input(5, 10)))).getSuccessesCount(),
+                enqueue(prefill, batch(2005, slot(0, input("5", 10)))).getSuccessesCount(),
                 "overridden cap 3 should accept batch 5");
         assertEquals(
                 1,
-                enqueue(prefill, batch(2006, slot(0, input(6, 10)))).getErrorsCount(),
+                enqueue(prefill, batch(2006, slot(0, input("6", 10)))).getErrorsCount(),
                 "6th batch should hit the overridden cap of 3");
 
         awaitInflightZero(prefill, 5_000);
@@ -181,7 +182,7 @@ class SetPerfMaxWaitingBatchesTest {
 
         for (int i = 1; i <= 8; i++) {
             EngineRpcService.EnqueueBatchResponsePB response =
-                    enqueue(prefill, batch(3000 + i, slot(0, input(i, 10))));
+                    enqueue(prefill, batch(3000 + i, slot(0, input(String.valueOf(i), 10))));
             assertEquals(
                     1,
                     response.getSuccessesCount(),
@@ -215,11 +216,11 @@ class SetPerfMaxWaitingBatchesTest {
 
         // The failed request must not have relaxed or changed the live cap:
         // with cap still 1, batch 1 runs, batch 2 queues, batch 3 is rejected.
-        assertEquals(1, enqueue(prefill, batch(4001, slot(0, input(1, 10)))).getSuccessesCount());
-        assertEquals(1, enqueue(prefill, batch(4002, slot(0, input(2, 10)))).getSuccessesCount());
+        assertEquals(1, enqueue(prefill, batch(4001, slot(0, input("1", 10)))).getSuccessesCount());
+        assertEquals(1, enqueue(prefill, batch(4002, slot(0, input("2", 10)))).getSuccessesCount());
         assertEquals(
                 1,
-                enqueue(prefill, batch(4003, slot(0, input(3, 10)))).getErrorsCount(),
+                enqueue(prefill, batch(4003, slot(0, input("3", 10)))).getErrorsCount(),
                 "cap must still be 1 after the rejected negative request");
 
         awaitInflightZero(prefill, 5_000);
@@ -253,7 +254,9 @@ class SetPerfMaxWaitingBatchesTest {
         return service;
     }
 
-    /** @param maxWaitingBatches constructor-time JSON cap; null = absent (default 0). */
+    /**
+     * @param maxWaitingBatches constructor-time JSON cap; null = absent (default 0).
+     */
     private MockPerformanceModel model(String prefillFormula, Integer maxWaitingBatches)
             throws Exception {
         Map<String, ?> prefillOverrides =

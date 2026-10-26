@@ -18,9 +18,9 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -39,7 +39,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Prefill status must carry stage completion through the real endpoint and context reducers. */
+/**
+ * Prefill status must carry stage completion through the real endpoint and context reducers.
+ */
 class PrefillCompletionProjectionTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -54,10 +56,7 @@ class PrefillCompletionProjectionTest {
         var requestReporter = mock(RequestSchedulerReporter.class);
         var requests =
                 SchedulerTestSupport.create(
-                        service,
-                        reporter,
-                        requestReporter,
-                        mock(RecentCacheKeyTraceReporter.class));
+                        service, reporter, requestReporter, mock(TheoryCacheHitReporter.class));
         var projector = requests;
         var endpoints =
                 new EndpointRegistry(
@@ -104,7 +103,7 @@ class PrefillCompletionProjectionTest {
             var capacity = new DecodeResources.AdmissionCapacity(10L, 90L);
             try (var pin = decode.tryPinGeneration()) {
                 reservation =
-                        decode.tryReserveQueuedRequest(pin, 101L, 16L, 32L, 50, capacity).handle();
+                        decode.tryReserveQueuedRequest(pin, "101", 16L, 32L, 50, capacity).handle();
                 assertNotNull(reservation);
                 var acquisition = decode.acquireDispatchPermit(reservation, capacity);
                 assertEquals(
@@ -114,7 +113,7 @@ class PrefillCompletionProjectionTest {
                         DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                         acquisition.handle().dispatch().status());
             }
-            var context = RequestProtocolTestSupport.context(config, 101L);
+            var context = RequestProtocolTestSupport.context(config, "101");
             var future = RequestProtocolTestSupport.register(requests, context);
             context.data().setFuture(future);
             RequestRoute item =
@@ -129,7 +128,7 @@ class PrefillCompletionProjectionTest {
                             System.currentTimeMillis());
             AtomicReference<PrefillState.RouteReservation> routeReservation =
                     new AtomicReference<>();
-            try (var mutation = requests.claimAdmissionHandle(101L, future);
+            try (var mutation = requests.claimAdmissionHandle("101", future);
                     var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(mutation);
                     var pin = prefill.tryPinGeneration()) {
                 assertNotNull(mutation);
@@ -189,12 +188,12 @@ class PrefillCompletionProjectionTest {
                     prefill.ownership.admissionSummary(0, prefill.requestLimit).occupiedRequests());
 
             TaskInfo task = new TaskInfo();
-            task.setRequestId(101L);
+            task.setRequestId("101");
             task.setInputLength(16L);
             task.setPhase(TaskPhase.RUNNING);
             applyStatus(prefill, status(2L, Map.of("101", task), Map.of()));
             SchedulerTestSupport.awaitRequestWork(requests.runtime);
-            RequestContext requestContext = requests.requests.findActive(101L);
+            RequestContext requestContext = requests.requests.findActive("101");
             synchronized (requestContext) {
                 assertTrue(
                         requestContext.snapshot().deadlines().visibility() == null,
@@ -232,7 +231,7 @@ class PrefillCompletionProjectionTest {
                     "a suspected lost request must not isolate a worker with available capacity");
             try (var pin = decode.tryPinGeneration()) {
                 var waiting =
-                        decode.tryReserveQueuedRequest(pin, 102L, 16L, 32L, 50, capacity).handle();
+                        decode.tryReserveQueuedRequest(pin, "102", 16L, 32L, 50, capacity).handle();
                 assertNotNull(waiting);
                 var acquisition = decode.acquireDispatchPermit(waiting, capacity);
                 assertEquals(
@@ -256,7 +255,7 @@ class PrefillCompletionProjectionTest {
             assertEquals(0L, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
             assertEquals(0, decode.routingView().engineCapacityUsed());
             org.junit.jupiter.api.Assertions.assertNull(
-                    requests.requests.findActive(101L),
+                    requests.requests.findActive("101"),
                     "the exact Decode terminal must finish the retained lifecycle before shutdown");
             assertTrue(
                     future.join().isSuccess(),

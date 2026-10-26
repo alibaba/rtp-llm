@@ -7,7 +7,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentMap;
 
-/** Exact-token execution barriers; weak identity keys prevent retained request history. */
+/**
+ * Exact-token execution barriers; weak identity keys prevent retained request history.
+ */
 public final class RequestSignals {
     private final ConcurrentMap<DeliveryClaim, CompletableFuture<Void>> deliveries =
             new MapMaker().weakKeys().makeMap();

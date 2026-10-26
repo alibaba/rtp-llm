@@ -412,7 +412,9 @@ class ContinuousBatchingDecodeTest {
 
     // ──────────── Model / service helpers ────────────
 
-    /** Curve [[1,100],[2,200]] with sleep_scale 1.0 and no jitter. */
+    /**
+     * Curve [[1,100],[2,200]] with sleep_scale 1.0 and no jitter.
+     */
     private MockPerformanceModel twoPointCurveModel() throws Exception {
         return model(List.of(List.of(1, 100.0), List.of(2, 200.0)));
     }

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.KvCacheGroupMode;
 
 import java.util.Map;
 
@@ -63,6 +64,15 @@ public class WorkerStatusResponse {
     @JsonProperty("dpRank")
     private long dpRank;
 
+    @JsonProperty("block_hash_lookahead_tokens")
+    private int blockHashLookaheadTokens;
+
+    @JsonProperty("cache_match_rollback_blocks")
+    private int cacheMatchRollbackBlocks;
+
+    @JsonProperty("kv_cache_group_mode")
+    private KvCacheGroupMode kvCacheGroupMode = KvCacheGroupMode.UNSPECIFIED;
+
     @JsonProperty("alive")
     private boolean alive;
 
@@ -72,7 +82,9 @@ public class WorkerStatusResponse {
     @JsonProperty("total_kv_cache")
     private long totalKvCacheTokens;
 
-    /** Model-level maximum sequence length reported by the Engine. */
+    /**
+     * Model-level maximum sequence length reported by the Engine.
+     */
     @JsonProperty("max_seq_len")
     private long maxSeqLen;
 
@@ -84,9 +96,34 @@ public class WorkerStatusResponse {
     @JsonProperty("max_batch_tokens_size")
     private long maxBatchTokensSize;
 
+    @JsonProperty("last_step_metrics")
+    private WorkerStatus.StepMetrics lastStepMetrics;
+
     @JsonProperty("version")
     private long version;
 
     @JsonProperty("message")
     private String message;
+
+    public void setRunningTaskInfo(Map<?, TaskInfo> tasks) {
+        runningTaskInfo = copyTaskIds(tasks);
+    }
+
+    public void setFinishedTaskInfo(Map<?, TaskInfo> tasks) {
+        finishedTaskInfo = copyTaskIds(tasks);
+    }
+
+    private static Map<String, TaskInfo> copyTaskIds(Map<?, TaskInfo> tasks) {
+        if (tasks == null) {
+            return null;
+        }
+        Map<String, TaskInfo> result = new java.util.HashMap<>();
+        tasks.forEach(
+                (id, task) -> {
+                    if (id != null) {
+                        result.put(id.toString(), task);
+                    }
+                });
+        return result;
+    }
 }

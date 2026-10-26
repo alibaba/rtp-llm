@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.config.ConfigService;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -36,7 +36,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** A frontend cancel owns its publication; a queued close retains its independently claimed notification. */
+/**
+ * A frontend cancel owns its publication; a queued close retains its independently claimed notification.
+ */
 @Timeout(15)
 class RequestNotificationOwnershipRaceTest {
     @Test
@@ -52,9 +54,9 @@ class RequestNotificationOwnershipRaceTest {
                                 service,
                                 mock(DeliveryMetricsReporter.class),
                                 mock(RequestSchedulerReporter.class),
-                                mock(RecentCacheKeyTraceReporter.class));
+                                mock(TheoryCacheHitReporter.class));
         var runtime = owner.runtime;
-        var context = RequestProtocolTestSupport.context(config, 9401L);
+        var context = RequestProtocolTestSupport.context(config, "9401");
         var future = RequestProtocolTestSupport.register(owner, context);
         var originalTimer = runtime.deadlines();
         var timer = spy(originalTimer);
@@ -111,7 +113,7 @@ class RequestNotificationOwnershipRaceTest {
             assertFalse(context.snapshot().close().notificationsDone());
             assertFalse(context.snapshot().close().timersDone());
             assertEquals(1, runtime.requests().liveRequestCount());
-            assertSame(context, runtime.requests().findActive(9401L));
+            assertSame(context, runtime.requests().findActive("9401"));
             assertTrue(
                     publications(runtime).isEmpty(),
                     "the frontend publisher releases its own registration only");

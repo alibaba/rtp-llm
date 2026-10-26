@@ -10,7 +10,9 @@ import org.flexlb.balance.prediction.DecodeCostFormula;
 @Setter
 public final class RoutingConfig {
 
-    /** Multiplicative scale for all percentage-valued routing settings. */
+    /**
+     * Multiplicative scale for all percentage-valued routing settings.
+     */
     public static final double PERCENTAGE_SCALE = 100.0;
 
     private volatile TrafficPolicyConfig groupSelector;
@@ -46,11 +48,26 @@ public final class RoutingConfig {
     @Getter
     @Setter
     public static final class CacheAffinityConfig {
-        /** Maximum TTFT penalty accepted for choosing a cache leader. */
+        /**
+         * Maximum TTFT penalty accepted for choosing a cache leader.
+         */
         private long maxExtraTtftMs;
 
-        /** Minimum reusable-prefix percentage required before affinity applies. */
+        /**
+         * Minimum reusable-prefix percentage required before affinity applies.
+         */
         private double minPrefixHitPercent = 5;
+
+        /**
+         * Credit applied to remote-source cache matches when estimating effective hit tokens.
+         */
+        private double remoteDiscount = 0.2;
+
+        /**
+         * Optional guard for local lifecycle work plus this request's uncached tokens.
+         * Zero disables the guard.
+         */
+        private long maxOutstandingUncachedTokens;
     }
 
     @Getter
@@ -92,10 +109,14 @@ public final class RoutingConfig {
     @Getter
     @Setter
     public static final class DecodeAvailabilityConfig {
-        /** Maximum Decode KV usage percentage, in [1, 100]. */
+        /**
+         * Maximum Decode KV usage percentage, in [1, 100].
+         */
         private long maxKvUsagePercent = 90;
 
-        /** Master-side cap for all Engine-facing Decode ownership. */
+        /**
+         * Master-side cap for all Engine-facing Decode ownership.
+         */
         private Long maxEngineRequests;
     }
 }

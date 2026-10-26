@@ -17,6 +17,7 @@ import static org.flexlb.constant.MetricConstant.GRPC_CALL_FAILURE;
 import static org.flexlb.constant.MetricConstant.GRPC_CHANNEL_POOL_SIZE;
 import static org.flexlb.constant.MetricConstant.GRPC_CONNECTION_DURATION;
 import static org.flexlb.constant.MetricConstant.GRPC_DELIVERY_DELAY;
+import static org.flexlb.constant.MetricConstant.GRPC_RESPONSE_SIZE;
 
 /**
  * Reporter for gRPC channel pool metrics.
@@ -50,10 +51,12 @@ public class GrpcReporter {
                                 GRPC_DELIVERY_DELAY,
                                 FlexMetricType.GAUGE,
                                 FlexPriorityType.PRECISE));
-        monitor.register(GRPC_CHANNEL_POOL_SIZE, FlexMetricType.GAUGE);
-        monitor.register(GRPC_CALL_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(GRPC_CALL_COUNT, FlexMetricType.QPS);
-        monitor.register(GRPC_CONNECTION_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(GRPC_CHANNEL_POOL_SIZE, FlexMetricType.GAUGE);
+        this.monitor.register(GRPC_CALL_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(GRPC_RESPONSE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(GRPC_CALL_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        this.monitor.register(
+                GRPC_CONNECTION_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
 
     /**
@@ -83,6 +86,19 @@ public class GrpcReporter {
         monitor.report(GRPC_CALL_COUNT, tags, 1);
     }
 
+    public void reportResponseSize(String serviceType, long responseSize, boolean isRetry) {
+        monitor.report(
+                GRPC_RESPONSE_SIZE,
+                FlexMetricTags.of("service", serviceType, "retry", String.valueOf(isRetry)),
+                responseSize);
+    }
+
+    public void reportCallMetrics(
+            String serviceType, long duration, int responseSize, boolean isRetry) {
+        reportCallMetrics(serviceType, duration, isRetry);
+        reportResponseSize(serviceType, responseSize, isRetry);
+    }
+
     /**
      * Report gRPC connection duration
      *
@@ -96,7 +112,9 @@ public class GrpcReporter {
         monitor.report(GRPC_CONNECTION_DURATION, tags, connectionDuration);
     }
 
-    /** Reports one logical RPC only after its final failure, including any retry. */
+    /**
+     * Reports one logical RPC only after its final failure, including any retry.
+     */
     public void reportCallFailure(
             String serviceType,
             boolean retry,
@@ -125,7 +143,9 @@ public class GrpcReporter {
         monitor.report(GRPC_CALL_FAILURE, tags, 1.0);
     }
 
-    /** Local transport-to-Future delivery time, including successful calls. Unknown samples are omitted. */
+    /**
+     * Local transport-to-Future delivery time, including successful calls. Unknown samples are omitted.
+     */
     public void reportDeliveryDelay(
             String serviceType, boolean retry, GrpcCallTrace.Snapshot transport) {
         if (transport.callbackDelayMs() >= 0) {

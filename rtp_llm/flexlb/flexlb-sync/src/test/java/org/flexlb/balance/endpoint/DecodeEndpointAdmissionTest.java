@@ -53,7 +53,7 @@ class DecodeEndpointAdmissionTest {
 
     private WorkerStatus status;
     private DecodeEndpoint endpoint;
-    private final Map<Long, DecodeResources.ReservationHandle> reservations = new HashMap<>();
+    private final Map<String, DecodeResources.ReservationHandle> reservations = new HashMap<>();
 
     @BeforeEach
     void setUp() {
@@ -70,12 +70,12 @@ class DecodeEndpointAdmissionTest {
     @Test
     void staleCapacityWaitDoesNotFollowAReusedRequestId() {
         var capacity = new DecodeResources.AdmissionCapacity(1L, 100L);
-        reserveQueued(1L, 10L, 10L, 50);
-        var occupied = acquirePermit(1L, 1);
-        var stale = reserveQueued(2L, 10L, 10L, 50);
+        reserveQueued("1", 10L, 10L, 50);
+        var occupied = acquirePermit("1", 1);
+        var stale = reserveQueued("2", 10L, 10L, 50);
         assertFalse(endpoint.shouldRetryDispatch(stale, capacity));
         endpoint.release(stale, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
-        var current = reserveQueued(2L, 10L, 10L, 50);
+        var current = reserveQueued("2", 10L, 10L, 50);
         assertNotEquals(stale, current);
         assertTrue(
                 endpoint.shouldRetryDispatch(stale, capacity),
@@ -96,14 +96,14 @@ class DecodeEndpointAdmissionTest {
     @Test
     void realKvAvailable_subtractsHardNotExpectedReservations() {
         updateStatus(null, null, 10_000);
-        reserve(1L, 500, 600, 70);
+        reserve("1", 500, 600, 70);
 
         // Hard (500), not expected (600), is subtracted from the report.
         assertEquals(9_500, endpoint.routingView().realKvAvailable());
         assertEquals(500, endpoint.routingView().inflightHardKv());
         assertEquals(600, EndpointTestSupport.expectedReservedKv(endpoint.resourceSnapshot()));
 
-        DecodeResources.DecodeRequestView entry = reserved().get(1L);
+        DecodeResources.DecodeRequestView entry = reserved().get("1");
         assertEquals(70, entry.priority());
         assertEquals(DecodeTaskPhase.LOCAL_RESERVED, entry.phase());
     }
@@ -114,11 +114,11 @@ class DecodeEndpointAdmissionTest {
     void reserveAndRelease_bumpVersion_andReverseShadowAccounting() {
         long v0 = endpoint.routingView().admissionVersion();
 
-        reserve(1L, 500, 600, 30);
+        reserve("1", 500, 600, 30);
         assertEquals(v0 + 1, endpoint.routingView().admissionVersion());
         assertEquals(1, endpoint.routingView().totalLoad());
 
-        release(1L);
+        release("1");
         assertEquals(v0 + 2, endpoint.routingView().admissionVersion());
         assertEquals(0, endpoint.routingView().totalLoad());
         assertEquals(0, endpoint.routingView().inflightHardKv());
@@ -139,37 +139,37 @@ class DecodeEndpointAdmissionTest {
         try (WorkerEndpoint.GenerationPin pin = exactEndpoint.tryPinGeneration()) {
             assertNotNull(pin);
             speculative =
-                    exactEndpoint.tryReserveQueuedRequest(pin, 11L, 100L, 110L, 10, null).handle();
+                    exactEndpoint.tryReserveQueuedRequest(pin, "11", 100L, 110L, 10, null).handle();
         }
         exactEndpoint.release(speculative, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
-        verify(availability).changed(exactEndpoint.getStatus(), "10.0.0.1:8080");
+        verify(availability).changed(exactEndpoint.getStatus(), "10.0.0.1:8080@0");
 
         DecodeResources.ReservationHandle published;
         try (WorkerEndpoint.GenerationPin pin = exactEndpoint.tryPinGeneration()) {
             assertNotNull(pin);
             published =
-                    exactEndpoint.tryReserveQueuedRequest(pin, 12L, 100L, 110L, 10, null).handle();
+                    exactEndpoint.tryReserveQueuedRequest(pin, "12", 100L, 110L, 10, null).handle();
         }
         exactEndpoint.release(published, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
-        verify(availability, times(2)).changed(exactEndpoint.getStatus(), "10.0.0.1:8080");
+        verify(availability, times(2)).changed(exactEndpoint.getStatus(), "10.0.0.1:8080@0");
     }
 
     @Test
     void conditionalOrphanReleasePreservesReplacementReservation() {
-        long requestId = 2L;
+        String requestId = "2";
         DecodeResources.ReservationHandle stale = reserve(requestId, 100, 110, 30);
-        DecodeResources.DecodeRequestView staleSnapshot = reserved().get(requestId);
+        DecodeResources.DecodeRequestView staleSnapshot = reserved().get(String.valueOf(requestId));
         release(requestId);
 
         DecodeResources.ReservationHandle current = reserve(requestId, 200, 220, 70);
-        DecodeResources.DecodeRequestView replacement = reserved().get(requestId);
+        DecodeResources.DecodeRequestView replacement = reserved().get(String.valueOf(requestId));
         assertNotEquals(staleSnapshot.reservationToken(), replacement.reservationToken());
 
         assertEquals(
                 DecodeResources.ReservationReleaseResult.STALE,
                 endpoint.release(stale, DecodeResources.ReleaseReason.COUNTERPART_FINISHED)
                         .status());
-        assertReservationIdentity(replacement, reserved().get(requestId));
+        assertReservationIdentity(replacement, reserved().get(String.valueOf(requestId)));
         assertEquals(200, endpoint.routingView().inflightHardKv());
         assertEquals(220, EndpointTestSupport.expectedReservedKv(endpoint.resourceSnapshot()));
 
@@ -177,7 +177,7 @@ class DecodeEndpointAdmissionTest {
                 DecodeResources.ReservationReleaseResult.RELEASED,
                 endpoint.release(current, DecodeResources.ReleaseReason.COUNTERPART_FINISHED)
                         .status());
-        assertFalse(reserved().containsKey(requestId));
+        assertFalse(reserved().containsKey(String.valueOf(requestId)));
         assertEquals(0, endpoint.routingView().inflightHardKv());
         assertEquals(0, EndpointTestSupport.expectedReservedKv(endpoint.resourceSnapshot()));
     }
@@ -187,8 +187,8 @@ class DecodeEndpointAdmissionTest {
     @Test
     void tryReleaseVictimsAndReserveIncoming_success_appliesAtomically() {
         updateStatus(Map.of(), Map.of(), 708L);
-        reserve(1L, 100, 110, 30);
-        reserve(2L, 200, 220, 40);
+        reserve("1", 100, 110, 30);
+        reserve("2", 200, 220, 40);
         markQueued(1L);
         markQueued(2L);
         long version = endpoint.routingView().admissionVersion();
@@ -196,16 +196,16 @@ class DecodeEndpointAdmissionTest {
         var incoming =
                 endpoint.replaceQueuedRequests(
                         handles(1L, 2L),
-                        9L,
+                        "9",
                         700,
                         708,
                         70,
                         new DecodeResources.AdmissionCapacity(2, 100));
         assertNotNull(incoming);
-        assertEquals(EndpointTestSupport.decodeReservation(endpoint, 9L), incoming);
-        assertFalse(reserved().containsKey(1L));
-        assertFalse(reserved().containsKey(2L));
-        assertEquals(70, reserved().get(9L).priority());
+        assertEquals(EndpointTestSupport.decodeReservation(endpoint, "9"), incoming);
+        assertFalse(reserved().containsKey("1"));
+        assertFalse(reserved().containsKey("2"));
+        assertEquals(70, reserved().get("9").priority());
         assertEquals(1, endpoint.routingView().totalLoad());
         assertEquals(700, endpoint.routingView().inflightHardKv());
         assertTrue(endpoint.routingView().admissionVersion() > version);
@@ -216,7 +216,7 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void tryReleaseVictimsAndReserveIncoming_identityMismatch_appliesNothing() {
-        DecodeResources.ReservationHandle exact = reserve(1L, 100, 110, 30);
+        DecodeResources.ReservationHandle exact = reserve("1", 100, 110, 30);
         markQueued(1L);
         DecodeResources.ReservationHandle stale =
                 new DecodeResources.ReservationHandle(
@@ -228,36 +228,36 @@ class DecodeEndpointAdmissionTest {
         assertNull(
                 endpoint.replaceQueuedRequests(
                         List.of(stale),
-                        9L,
+                        "9",
                         700,
                         708,
                         70,
                         new DecodeResources.AdmissionCapacity(1, 100)));
-        assertTrue(reserved().containsKey(1L));
-        assertFalse(reserved().containsKey(9L));
+        assertTrue(reserved().containsKey("1"));
+        assertFalse(reserved().containsKey("9"));
         assertEquals(100, endpoint.routingView().inflightHardKv());
         assertEquals(version, endpoint.routingView().admissionVersion());
     }
 
     @Test
     void tryReleaseVictimsAndReserveIncoming_victimGone_appliesNothing() {
-        DecodeResources.ReservationHandle exact = reserve(1L, 100, 110, 30);
+        DecodeResources.ReservationHandle exact = reserve("1", 100, 110, 30);
         markQueued(1L);
         long version = endpoint.routingView().admissionVersion();
         DecodeResources.ReservationHandle absent =
                 new DecodeResources.ReservationHandle(
-                        exact.endpointGenerationId(), 42L, exact.reservationToken() + 1L);
+                        exact.endpointGenerationId(), "42", exact.reservationToken() + 1L);
 
         assertNull(
                 endpoint.replaceQueuedRequests(
                         List.of(exact, absent),
-                        9L,
+                        "9",
                         700,
                         708,
                         70,
                         new DecodeResources.AdmissionCapacity(1, 100)));
-        assertTrue(reserved().containsKey(1L));
-        assertFalse(reserved().containsKey(9L));
+        assertTrue(reserved().containsKey("1"));
+        assertFalse(reserved().containsKey("9"));
         assertEquals(100, endpoint.routingView().inflightHardKv());
         assertEquals(version, endpoint.routingView().admissionVersion());
     }
@@ -266,16 +266,16 @@ class DecodeEndpointAdmissionTest {
     void engineDispatchPermitAndLocalEvictionHaveOneAdmissionLockWinner() {
         // Eviction wins: it removes the reservation, so the batch item must be
         // skipped before acquiring an engine-dispatch permit / gRPC publication.
-        reserve(1L, 100, 110, 30);
+        reserve("1", 100, 110, 30);
         markQueued(1L);
-        assertTrue(releaseLocalShadow(1L));
+        assertTrue(releaseLocalShadow("1"));
         org.flexlb.balance.endpoint.DecodeResources.Acquisition<
                         org.flexlb.balance.endpoint.DecodeResources
                                 .EngineDispatchPermitAcquireStatus,
                         DecodeEndpoint.EngineDispatchPermit>
                 released =
                         endpoint.acquireDispatchPermit(
-                                reservations.get(1L),
+                                reservations.get("1"),
                                 new DecodeResources.AdmissionCapacity(5, 100L));
         assertEquals(
                 DecodeResources.EngineDispatchPermitAcquireStatus.NOT_OWNED, released.status());
@@ -283,22 +283,22 @@ class DecodeEndpointAdmissionTest {
 
         // Dispatch wins: commit atomically clears queued ownership while retaining
         // the reservation, so a later local-eviction attempt cannot touch it.
-        reserve(2L, 100, 110, 30);
+        reserve("2", 100, 110, 30);
         markQueued(2L);
-        DecodeEndpoint.EngineDispatchPermit permit = acquirePermit(2L, 5);
+        DecodeEndpoint.EngineDispatchPermit permit = acquirePermit("2", 5);
         assertEquals(TRANSFERRED, permit.dispatch().status());
-        assertFalse(releaseLocalShadow(2L));
-        assertTrue(reserved().containsKey(2L));
+        assertFalse(releaseLocalShadow("2"));
+        assertTrue(reserved().containsKey("2"));
 
         // Engine-facing reservations are not eligible for a pre-delivery permit.
-        reserve(3L, 100, 110, 30);
+        reserve("3", 100, 110, 30);
         org.flexlb.balance.endpoint.DecodeResources.Acquisition<
                         org.flexlb.balance.endpoint.DecodeResources
                                 .EngineDispatchPermitAcquireStatus,
                         DecodeEndpoint.EngineDispatchPermit>
                 engineFacing =
                         endpoint.acquireDispatchPermit(
-                                reservations.get(3L),
+                                reservations.get("3"),
                                 new DecodeResources.AdmissionCapacity(5, 100L));
         assertEquals(
                 DecodeResources.EngineDispatchPermitAcquireStatus.NOT_QUEUED,
@@ -310,23 +310,23 @@ class DecodeEndpointAdmissionTest {
     void engineDispatchPermit_stopsAtConfiguredEngineFacingLimit() {
         // Four non-queued reservations already face the Engine.
         for (long requestId = 100; requestId < 104; requestId++) {
-            reserve(requestId, 100, 110, 30);
+            reserve(String.valueOf(requestId), 100, 110, 30);
         }
         // A single Prefill batch may contain many reservations which are all
         // deliberately invisible to getEngineLoad while still queued.
         for (long requestId = 1; requestId <= 20; requestId++) {
-            reserve(requestId, 100, 110, 50);
+            reserve(String.valueOf(requestId), 100, 110, 50);
             markQueued(requestId);
         }
 
-        DecodeEndpoint.EngineDispatchPermit first = acquirePermit(1L, 5);
+        DecodeEndpoint.EngineDispatchPermit first = acquirePermit("1", 5);
         assertEquals(TRANSFERRED, first.dispatch().status());
         List<DecodeResources.EngineDispatchPermitAcquireStatus> results =
                 LongStream.rangeClosed(2, 20)
                         .mapToObj(
                                 requestId ->
                                         endpoint.acquireDispatchPermit(
-                                                        reservations.get(requestId),
+                                                        reservations.get(String.valueOf(requestId)),
                                                         new DecodeResources.AdmissionCapacity(
                                                                 5, 100L))
                                                 .status())
@@ -348,24 +348,24 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void engineDispatchPermit_preservesUnlimitedAndRejectsNonQueuedReservations() {
-        reserve(1L, 100, 110, 30);
-        reserve(2L, 100, 110, 30);
+        reserve("1", 100, 110, 30);
+        reserve("2", 100, 110, 30);
         markQueued(1L);
         markQueued(2L);
 
-        assertEquals(TRANSFERRED, acquirePermit(1L, 0).dispatch().status());
-        assertEquals(TRANSFERRED, acquirePermit(2L, 0).dispatch().status());
+        assertEquals(TRANSFERRED, acquirePermit("1", 0).dispatch().status());
+        assertEquals(TRANSFERRED, acquirePermit("2", 0).dispatch().status());
 
         // A non-queued reservation is already engine-facing and has no
         // pre-delivery ownership transition to reserve.
-        reserve(3L, 100, 110, 30);
+        reserve("3", 100, 110, 30);
         org.flexlb.balance.endpoint.DecodeResources.Acquisition<
                         org.flexlb.balance.endpoint.DecodeResources
                                 .EngineDispatchPermitAcquireStatus,
                         DecodeEndpoint.EngineDispatchPermit>
                 acquisition =
                         endpoint.acquireDispatchPermit(
-                                reservations.get(3L),
+                                reservations.get("3"),
                                 new DecodeResources.AdmissionCapacity(1, 100L));
         assertEquals(
                 DecodeResources.EngineDispatchPermitAcquireStatus.NOT_QUEUED, acquisition.status());
@@ -376,7 +376,7 @@ class DecodeEndpointAdmissionTest {
     void queuedKvIsSoftUntilDispatchPermit_thenKvLimitIsAuthoritative() {
         updateStatus(null, null, 1_000);
 
-        reserveQueued(1L, 400, 900, 50);
+        reserveQueued("1", 400, 900, 50);
 
         assertEquals(
                 900,
@@ -395,33 +395,33 @@ class DecodeEndpointAdmissionTest {
                         DecodeEndpoint.EngineDispatchPermit>
                 first =
                         endpoint.acquireDispatchPermit(
-                                reservations.get(1L),
+                                reservations.get("1"),
                                 new DecodeResources.AdmissionCapacity(256, 90));
         assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, first.status());
         assertNotNull(first.handle());
         assertTrue(
-                EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 1L),
+                EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), "1"),
                 "capacity is occupied before queued ownership is transferred");
         assertEquals(
                 0,
                 endpoint.routingView().engineLoad(),
                 "a pre-delivery permit is not engine-facing load");
 
-        reserveQueued(2L, 100, 100, 50);
+        reserveQueued("2", 100, 100, 50);
         org.flexlb.balance.endpoint.DecodeResources.Acquisition<
                         org.flexlb.balance.endpoint.DecodeResources
                                 .EngineDispatchPermitAcquireStatus,
                         DecodeEndpoint.EngineDispatchPermit>
                 second =
                         endpoint.acquireDispatchPermit(
-                                reservations.get(2L),
+                                reservations.get("2"),
                                 new DecodeResources.AdmissionCapacity(256, 90));
         assertEquals(
                 DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
                 second.status(),
                 "a permit already occupying the 90% KV fence must prevent oversubscription");
         assertNull(second.handle());
-        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 2L));
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), "2"));
         assertEquals(
                 900,
                 endpoint.routingView().dispatchUsage().expectedKvUsed(),
@@ -434,22 +434,22 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void engineDispatchPermit_reportsNotOwnedAfterReleaseOrPreemptionClaim() {
-        reserve(1L, 100, 110, 30);
+        reserve("1", 100, 110, 30);
         markQueued(1L);
-        release(1L);
+        release("1");
         org.flexlb.balance.endpoint.DecodeResources.Acquisition<
                         org.flexlb.balance.endpoint.DecodeResources
                                 .EngineDispatchPermitAcquireStatus,
                         DecodeEndpoint.EngineDispatchPermit>
                 released =
                         endpoint.acquireDispatchPermit(
-                                reservations.get(1L),
+                                reservations.get("1"),
                                 new DecodeResources.AdmissionCapacity(5, 100L));
         assertEquals(
                 DecodeResources.EngineDispatchPermitAcquireStatus.NOT_OWNED, released.status());
         assertNull(released.handle());
 
-        reserve(2L, 100, 110, 30);
+        reserve("2", 100, 110, 30);
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(2L), 9L, 100, 110, 70));
@@ -459,7 +459,7 @@ class DecodeEndpointAdmissionTest {
                         DecodeEndpoint.EngineDispatchPermit>
                 preempted =
                         endpoint.acquireDispatchPermit(
-                                reservations.get(2L),
+                                reservations.get("2"),
                                 new DecodeResources.AdmissionCapacity(5, 100L));
         assertEquals(
                 DecodeResources.EngineDispatchPermitAcquireStatus.NOT_OWNED, preempted.status());
@@ -468,8 +468,8 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void engineDispatchPermit_capacityFullLeavesReservationQueued() {
-        reserve(100L, 100, 110, 30);
-        reserve(1L, 100, 110, 50);
+        reserve("100", 100, 110, 30);
+        reserve("1", 100, 110, 50);
         markQueued(1L);
         long versionBeforeAcquire = endpoint.routingView().admissionVersion();
 
@@ -479,7 +479,7 @@ class DecodeEndpointAdmissionTest {
                         DecodeEndpoint.EngineDispatchPermit>
                 acquisition =
                         endpoint.acquireDispatchPermit(
-                                reservations.get(1L),
+                                reservations.get("1"),
                                 new DecodeResources.AdmissionCapacity(1, 100L));
 
         assertEquals(
@@ -487,25 +487,25 @@ class DecodeEndpointAdmissionTest {
                 acquisition.status());
         assertNull(acquisition.handle());
         assertEquals(versionBeforeAcquire, endpoint.routingView().admissionVersion());
-        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 1L));
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), "1"));
         assertEquals(1, endpoint.routingView().engineLoad());
     }
 
     @Test
     void engineDispatchPermit_occupiesHardGateWithoutChangingEngineLoad() {
-        reserve(1L, 100, 110, 50);
-        reserve(2L, 100, 110, 50);
+        reserve("1", 100, 110, 50);
+        reserve("2", 100, 110, 50);
         markQueued(1L);
         markQueued(2L);
 
-        DecodeEndpoint.EngineDispatchPermit first = acquirePermit(1L, 1);
+        DecodeEndpoint.EngineDispatchPermit first = acquirePermit("1", 1);
         org.flexlb.balance.endpoint.DecodeResources.Acquisition<
                         org.flexlb.balance.endpoint.DecodeResources
                                 .EngineDispatchPermitAcquireStatus,
                         DecodeEndpoint.EngineDispatchPermit>
                 duplicate =
                         endpoint.acquireDispatchPermit(
-                                reservations.get(1L),
+                                reservations.get("1"),
                                 new DecodeResources.AdmissionCapacity(1, 100L));
         org.flexlb.balance.endpoint.DecodeResources.Acquisition<
                         org.flexlb.balance.endpoint.DecodeResources
@@ -513,7 +513,7 @@ class DecodeEndpointAdmissionTest {
                         DecodeEndpoint.EngineDispatchPermit>
                 second =
                         endpoint.acquireDispatchPermit(
-                                reservations.get(2L),
+                                reservations.get("2"),
                                 new DecodeResources.AdmissionCapacity(1, 100L));
 
         assertEquals(
@@ -526,33 +526,33 @@ class DecodeEndpointAdmissionTest {
                 endpoint.routingView().engineLoad(),
                 "a pre-delivery permit is not engine-facing load");
         assertEquals(2, endpoint.resourceSnapshot().queuedCount());
-        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 1L));
-        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 2L));
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), "1"));
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), "2"));
         assertTrue(first.release());
     }
 
     @Test
     void engineDispatchPermit_releaseRestoresHardGateCapacityAndIsIdempotent() {
-        reserve(1L, 100, 110, 50);
-        reserve(2L, 100, 110, 50);
+        reserve("1", 100, 110, 50);
+        reserve("2", 100, 110, 50);
         markQueued(1L);
         markQueued(2L);
-        DecodeEndpoint.EngineDispatchPermit first = acquirePermit(1L, 1);
+        DecodeEndpoint.EngineDispatchPermit first = acquirePermit("1", 1);
 
         assertTrue(first.release());
         assertFalse(first.release());
         assertEquals(OWNERSHIP_LOST, first.dispatch().status());
 
-        DecodeEndpoint.EngineDispatchPermit second = acquirePermit(2L, 1);
+        DecodeEndpoint.EngineDispatchPermit second = acquirePermit("2", 1);
         assertEquals(2, endpoint.resourceSnapshot().queuedCount());
-        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 1L));
-        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 2L));
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), "1"));
+        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), "2"));
         assertTrue(second.release());
     }
 
     @Test
     void closedEndpointRejectsPermitAcquisitionAsRetired() {
-        reserveQueued(1L, 100L, 110L, 50);
+        reserveQueued("1", 100L, 110L, 50);
         endpoint.close();
 
         org.flexlb.balance.endpoint.DecodeResources.Acquisition<
@@ -561,7 +561,7 @@ class DecodeEndpointAdmissionTest {
                         DecodeEndpoint.EngineDispatchPermit>
                 acquisition =
                         endpoint.acquireDispatchPermit(
-                                reservations.get(1L),
+                                reservations.get("1"),
                                 new DecodeResources.AdmissionCapacity(1, 100L));
 
         assertEquals(
@@ -572,15 +572,15 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void closeBeforeReservationRejectsEveryNewOwnershipEntryPoint() {
-        DecodeResources.ReservationHandle stale = reserve(10L, 10, 10, 1);
-        release(10L);
+        DecodeResources.ReservationHandle stale = reserve("10", 10, 10, 1);
+        release("10");
         endpoint.close();
 
         assertNull(endpoint.tryPinGeneration());
         assertNull(
                 endpoint.replaceQueuedRequests(
                         List.of(stale),
-                        3L,
+                        "3",
                         100,
                         110,
                         50,
@@ -590,7 +590,7 @@ class DecodeEndpointAdmissionTest {
                 endpoint.beginPreemption(
                         101L,
                         List.of(stale),
-                        5L,
+                        "5",
                         100,
                         110,
                         50,
@@ -603,12 +603,12 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void reserveQueuedBeforeCloseRetiresUnpublishedOwnership() {
-        DecodeResources.ReservationHandle reservation = reserveQueued(1L, 100, 110, 50);
-        assertEquals(reservation, EndpointTestSupport.decodeReservation(endpoint, 1L));
+        DecodeResources.ReservationHandle reservation = reserveQueued("1", 100, 110, 50);
+        assertEquals(reservation, EndpointTestSupport.decodeReservation(endpoint, "1"));
 
         endpoint.close();
 
-        assertNull(EndpointTestSupport.decodeReservation(endpoint, 1L));
+        assertNull(EndpointTestSupport.decodeReservation(endpoint, "1"));
         assertTrue(endpoint.resourceSnapshot().queuedCount() == 0);
         assertEquals(0L, endpoint.routingView().inflightHardKv());
         assertEquals(0L, EndpointTestSupport.expectedReservedKv(endpoint.resourceSnapshot()));
@@ -617,12 +617,12 @@ class DecodeEndpointAdmissionTest {
     @Test
     void closeBetweenPermitAcquisitionAndTransferRetiresExactPermitAndReleasesHardGate()
             throws InterruptedException {
-        reserve(1L, 100, 110, 50);
-        reserve(2L, 100, 110, 50);
+        reserve("1", 100, 110, 50);
+        reserve("2", 100, 110, 50);
         markQueued(1L);
         markQueued(2L);
-        DecodeEndpoint.EngineDispatchPermit permit = acquirePermit(1L, 1);
-        var waiting = EndpointTestSupport.decodeReservation(endpoint, 2L);
+        DecodeEndpoint.EngineDispatchPermit permit = acquirePermit("1", 1);
+        var waiting = EndpointTestSupport.decodeReservation(endpoint, "2");
         assertFalse(
                 endpoint.shouldRetryDispatch(
                         waiting, new DecodeResources.AdmissionCapacity(1L, 100L)));
@@ -665,9 +665,9 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void releaseAcknowledgesTheExactPermitInvalidatedByRetirement() {
-        reserve(1L, 100, 110, 50);
+        reserve("1", 100, 110, 50);
         markQueued(1L);
-        DecodeEndpoint.EngineDispatchPermit retired = acquirePermit(1L, 1);
+        DecodeEndpoint.EngineDispatchPermit retired = acquirePermit("1", 1);
 
         endpoint.close();
 
@@ -682,33 +682,35 @@ class DecodeEndpointAdmissionTest {
     @Test
     void closePreservesTransferredPermitOutcomeWhileRetiringEndpointOwnership() {
         long requestId = 1L;
-        reserve(requestId, 100, 110, 50);
+        reserve(String.valueOf(requestId), 100, 110, 50);
         markQueued(requestId);
-        DecodeEndpoint.EngineDispatchPermit permit = acquirePermit(requestId, 1);
+        DecodeEndpoint.EngineDispatchPermit permit = acquirePermit(String.valueOf(requestId), 1);
         assertEquals(TRANSFERRED, permit.dispatch().status());
         assertEquals(1, endpoint.routingView().engineLoad());
 
         endpoint.close();
 
         assertEquals(TRANSFERRED, permit.dispatch().status());
-        assertNull(EndpointTestSupport.decodeReservation(endpoint, requestId));
-        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
+        assertNull(EndpointTestSupport.decodeReservation(endpoint, String.valueOf(requestId)));
+        assertFalse(
+                EndpointTestSupport.isQueued(
+                        endpoint.resourceSnapshot(), String.valueOf(requestId)));
         assertEquals(
                 0,
                 endpoint.routingView().engineLoad(),
                 "retirement clears canonical generation ownership without reversing the permit result");
-        assertFalse(releaseLocalShadow(requestId));
+        assertFalse(releaseLocalShadow(String.valueOf(requestId)));
     }
 
     @Test
     void engineDispatchPermit_commitDoesNotRecheckCapacity() {
-        reserve(1L, 100, 110, 50);
+        reserve("1", 100, 110, 50);
         markQueued(1L);
-        DecodeEndpoint.EngineDispatchPermit permit = acquirePermit(1L, 1);
+        DecodeEndpoint.EngineDispatchPermit permit = acquirePermit("1", 1);
 
         // Independent engine-facing work fills the original limit after this
         // permit has already reserved its slot.
-        reserve(100L, 100, 110, 30);
+        reserve("100", 100, 110, 30);
         assertEquals(1, endpoint.routingView().engineLoad());
 
         assertEquals(TRANSFERRED, permit.dispatch().status());
@@ -717,69 +719,75 @@ class DecodeEndpointAdmissionTest {
                 permit.dispatch().status(),
                 "ownership transfer must be idempotent after handoff");
         assertFalse(permit.release());
-        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 1L));
+        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), "1"));
         assertEquals(2, endpoint.routingView().engineLoad());
     }
 
     @Test
     void committedPermitCannotReturnEngineOwnershipToQueuedState() {
-        reserve(1L, 100, 110, 50);
-        reserve(2L, 100, 110, 50);
+        reserve("1", 100, 110, 50);
+        reserve("2", 100, 110, 50);
         markQueued(1L);
         markQueued(2L);
-        DecodeResources.DecodeRequestView firstReservation = reserved().get(1L);
-        DecodeEndpoint.EngineDispatchPermit first = acquirePermit(1L, 1);
+        DecodeResources.DecodeRequestView firstReservation = reserved().get("1");
+        DecodeEndpoint.EngineDispatchPermit first = acquirePermit("1", 1);
 
         assertEquals(TRANSFERRED, first.dispatch().status());
-        assertReservationIdentity(firstReservation, reserved().get(1L));
-        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 1L));
+        assertReservationIdentity(firstReservation, reserved().get("1"));
+        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), "1"));
         assertEquals(1, endpoint.routingView().engineLoad());
         assertEquals(
                 DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
                 endpoint.acquireDispatchPermit(
-                                reservations.get(2L),
+                                reservations.get("2"),
                                 new DecodeResources.AdmissionCapacity(1, 100L))
                         .status());
 
         assertFalse(
                 first.release(), "committed Decode ownership is irreversible through the permit");
-        assertReservationIdentity(firstReservation, reserved().get(1L));
-        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), 1L));
+        assertReservationIdentity(firstReservation, reserved().get("1"));
+        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), "1"));
         assertEquals(1, endpoint.routingView().engineLoad());
 
         settleFromWorkerStatus(1L);
-        DecodeEndpoint.EngineDispatchPermit second = acquirePermit(2L, 1);
+        DecodeEndpoint.EngineDispatchPermit second = acquirePermit("2", 1);
         assertTrue(second.release());
     }
 
     @Test
     void committedPermitCannotAffectLaterDispatchRoundOnSameReservation() {
         long requestId = 1L;
-        reserve(requestId, 100, 110, 50);
+        reserve(String.valueOf(requestId), 100, 110, 50);
         markQueued(requestId);
-        DecodeResources.DecodeRequestView reservation = reserved().get(requestId);
-        DecodeEndpoint.EngineDispatchPermit first = acquirePermit(requestId, 1);
+        DecodeResources.DecodeRequestView reservation = reserved().get(String.valueOf(requestId));
+        DecodeEndpoint.EngineDispatchPermit first = acquirePermit(String.valueOf(requestId), 1);
         assertEquals(TRANSFERRED, first.dispatch().status());
         try (var pin = endpoint.tryPinGeneration()) {
             assertFalse(
-                    endpoint.markQueued(pin, reservations.get(requestId)).status().applied(),
+                    endpoint.markQueued(pin, reservations.get(String.valueOf(requestId)))
+                            .status()
+                            .applied(),
                     "handoff cannot be undone by republishing queue membership");
         }
         assertFalse(first.release());
-        assertReservationIdentity(reservation, reserved().get(requestId));
-        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
+        assertReservationIdentity(reservation, reserved().get(String.valueOf(requestId)));
+        assertFalse(
+                EndpointTestSupport.isQueued(
+                        endpoint.resourceSnapshot(), String.valueOf(requestId)));
         assertEquals(1, endpoint.routingView().engineLoad());
     }
 
     @Test
     void markQueuedPhaseBumpsAdmissionVersionOnlyWhenOwnershipActuallyChanges() {
         long requestId = 1L;
-        reserve(requestId, 100, 110, 50);
+        reserve(String.valueOf(requestId), 100, 110, 50);
         long versionBeforeFirstMark = endpoint.routingView().admissionVersion();
 
         markQueued(requestId);
         assertEquals(versionBeforeFirstMark + 1, endpoint.routingView().admissionVersion());
-        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
+        assertTrue(
+                EndpointTestSupport.isQueued(
+                        endpoint.resourceSnapshot(), String.valueOf(requestId)));
 
         markQueued(requestId);
         assertEquals(
@@ -787,40 +795,45 @@ class DecodeEndpointAdmissionTest {
                 endpoint.routingView().admissionVersion(),
                 "repeating an existing queued mark must be a no-op");
 
-        DecodeEndpoint.EngineDispatchPermit permit = acquirePermit(requestId, 1);
+        DecodeEndpoint.EngineDispatchPermit permit = acquirePermit(String.valueOf(requestId), 1);
         assertEquals(TRANSFERRED, permit.dispatch().status());
         long versionBeforeSecondRound = endpoint.routingView().admissionVersion();
 
         try (var pin = endpoint.tryPinGeneration()) {
-            assertFalse(endpoint.markQueued(pin, reservations.get(requestId)).status().applied());
+            assertFalse(
+                    endpoint.markQueued(pin, reservations.get(String.valueOf(requestId)))
+                            .status()
+                            .applied());
         }
         assertEquals(versionBeforeSecondRound, endpoint.routingView().admissionVersion());
     }
 
     @Test
-    void staleCommittedPermitCannotAffectReplacementGeneration() {
+    void staleCommittedPermitCannotAffectReplacementGeneration() throws Exception {
         long requestId = 1L;
-        reserve(requestId, 100, 110, 50);
+        reserve(String.valueOf(requestId), 100, 110, 50);
         markQueued(requestId);
-        DecodeResources.DecodeRequestView original = reserved().get(requestId);
-        DecodeEndpoint.EngineDispatchPermit stale = acquirePermit(requestId, 1);
+        DecodeResources.DecodeRequestView original = reserved().get(String.valueOf(requestId));
+        DecodeEndpoint.EngineDispatchPermit stale = acquirePermit(String.valueOf(requestId), 1);
         assertEquals(TRANSFERRED, stale.dispatch().status());
 
         settleFromWorkerStatus(requestId);
-        reserve(requestId, 200, 220, 70);
+        reserve(String.valueOf(requestId), 200, 220, 70);
         markQueued(requestId);
-        DecodeResources.DecodeRequestView replacement = reserved().get(requestId);
+        DecodeResources.DecodeRequestView replacement = reserved().get(String.valueOf(requestId));
         assertNotEquals(original.reservationToken(), replacement.reservationToken());
-        DecodeEndpoint.EngineDispatchPermit current = acquirePermit(requestId, 1);
+        DecodeEndpoint.EngineDispatchPermit current = acquirePermit(String.valueOf(requestId), 1);
 
         assertFalse(stale.release(), "a committed old generation must not change its replacement");
         assertFalse(stale.release(), "a stale release must stay idempotent");
-        assertReservationIdentity(replacement, reserved().get(requestId));
-        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
+        assertReservationIdentity(replacement, reserved().get(String.valueOf(requestId)));
+        assertTrue(
+                EndpointTestSupport.isQueued(
+                        endpoint.resourceSnapshot(), String.valueOf(requestId)));
         assertEquals(
                 DecodeResources.EngineDispatchPermitAcquireStatus.ALREADY_ACQUIRED,
                 endpoint.acquireDispatchPermit(
-                                reservations.get(requestId),
+                                reservations.get(String.valueOf(requestId)),
                                 new DecodeResources.AdmissionCapacity(1, 100L))
                         .status());
 
@@ -828,72 +841,78 @@ class DecodeEndpointAdmissionTest {
                 TRANSFERRED,
                 current.dispatch().status(),
                 "the stale token must not release or invalidate the new permit");
-        assertReservationIdentity(replacement, reserved().get(requestId));
-        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
+        assertReservationIdentity(replacement, reserved().get(String.valueOf(requestId)));
+        assertFalse(
+                EndpointTestSupport.isQueued(
+                        endpoint.resourceSnapshot(), String.valueOf(requestId)));
     }
 
     @Test
     void staleEngineDispatchPermitCannotAffectReplacementGeneration() {
         long requestId = 1L;
-        reserve(requestId, 100, 110, 50);
+        reserve(String.valueOf(requestId), 100, 110, 50);
         markQueued(requestId);
-        DecodeResources.DecodeRequestView original = reserved().get(requestId);
-        DecodeEndpoint.EngineDispatchPermit stale = acquirePermit(requestId, 1);
+        DecodeResources.DecodeRequestView original = reserved().get(String.valueOf(requestId));
+        DecodeEndpoint.EngineDispatchPermit stale = acquirePermit(String.valueOf(requestId), 1);
 
-        release(requestId);
-        reserve(requestId, 200, 220, 70);
+        release(String.valueOf(requestId));
+        reserve(String.valueOf(requestId), 200, 220, 70);
         markQueued(requestId);
-        DecodeResources.DecodeRequestView replacement = reserved().get(requestId);
+        DecodeResources.DecodeRequestView replacement = reserved().get(String.valueOf(requestId));
         assertNotEquals(original.reservationToken(), replacement.reservationToken());
 
-        DecodeEndpoint.EngineDispatchPermit current = acquirePermit(requestId, 1);
+        DecodeEndpoint.EngineDispatchPermit current = acquirePermit(String.valueOf(requestId), 1);
         assertFalse(stale.release(), "the old token must not remove the new permit");
         assertEquals(OWNERSHIP_LOST, stale.dispatch().status());
-        assertReservationIdentity(replacement, reserved().get(requestId));
-        assertTrue(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
+        assertReservationIdentity(replacement, reserved().get(String.valueOf(requestId)));
+        assertTrue(
+                EndpointTestSupport.isQueued(
+                        endpoint.resourceSnapshot(), String.valueOf(requestId)));
         assertEquals(
                 TRANSFERRED,
                 current.dispatch().status(),
                 "the replacement generation keeps its permit");
-        assertReservationIdentity(replacement, reserved().get(requestId));
-        assertFalse(EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), requestId));
+        assertReservationIdentity(replacement, reserved().get(String.valueOf(requestId)));
+        assertFalse(
+                EndpointTestSupport.isQueued(
+                        endpoint.resourceSnapshot(), String.valueOf(requestId)));
     }
 
     @Test
     void staleEngineDispatchPermitCannotUseAConfirmedReplacement() {
         long requestId = 2L;
-        reserve(requestId, 100, 110, 50);
+        reserve(String.valueOf(requestId), 100, 110, 50);
         markQueued(requestId);
-        DecodeEndpoint.EngineDispatchPermit stale = acquirePermit(requestId, 1);
+        DecodeEndpoint.EngineDispatchPermit stale = acquirePermit(String.valueOf(requestId), 1);
 
-        release(requestId);
-        reserve(requestId, 200, 220, 70);
+        release(String.valueOf(requestId));
+        reserve(String.valueOf(requestId), 200, 220, 70);
         markQueued(requestId);
-        DecodeEndpoint.EngineDispatchPermit current = acquirePermit(requestId, 1);
+        DecodeEndpoint.EngineDispatchPermit current = acquirePermit(String.valueOf(requestId), 1);
         TaskInfo running = new TaskInfo();
-        running.setRequestId(requestId);
+        running.setRequestId(Long.toString(requestId));
         running.setPhase(TaskPhase.RUNNING);
         updateStatus(Map.of(Long.toString(requestId), running), null, 10_000L);
 
         assertEquals(OWNERSHIP_LOST, stale.dispatch().status());
-        assertTrue(endpoint.ownership(reservations.get(requestId)).confirmed());
+        assertTrue(endpoint.ownership(reservations.get(String.valueOf(requestId))).confirmed());
         assertEquals(TRANSFERRED, current.dispatch().status());
     }
 
     @Test
     void engineAcceptanceCompletesPermitHandoffWithoutLeakingCapacity() {
-        reserve(1L, 100, 110, 50);
+        reserve("1", 100, 110, 50);
         markQueued(1L);
-        DecodeEndpoint.EngineDispatchPermit stale = acquirePermit(1L, 2);
+        DecodeEndpoint.EngineDispatchPermit stale = acquirePermit("1", 2);
 
         TaskInfo running = new TaskInfo();
-        running.setRequestId(1L);
+        running.setRequestId("1");
         running.setPhase(TaskPhase.RUNNING);
         updateStatus(Map.of("1", running), null, 10_000);
 
-        reserve(2L, 100, 110, 50);
+        reserve("2", 100, 110, 50);
         markQueued(2L);
-        DecodeEndpoint.EngineDispatchPermit current = acquirePermit(2L, 2);
+        DecodeEndpoint.EngineDispatchPermit current = acquirePermit("2", 2);
         assertEquals(TRANSFERRED, stale.dispatch().status());
         assertEquals(TRANSFERRED, stale.dispatch().status());
         assertFalse(stale.release());
@@ -903,15 +922,15 @@ class DecodeEndpointAdmissionTest {
     @ParameterizedTest
     @ValueSource(longs = {-1L, Long.MIN_VALUE})
     void ttlEvictionInvalidatesPermitWithoutLeakingHardGateCapacity(long ttlMs) {
-        reserve(1L, 100, 110, 50);
+        reserve("1", 100, 110, 50);
         markQueued(1L);
-        DecodeEndpoint.EngineDispatchPermit stale = acquirePermit(1L, 1);
+        DecodeEndpoint.EngineDispatchPermit stale = acquirePermit("1", 1);
 
         assertEquals(1, endpoint.evictExpiredRequests(ttlMs, requestId -> false));
-        reserve(2L, 100, 110, 50);
+        reserve("2", 100, 110, 50);
         markQueued(2L);
 
-        DecodeEndpoint.EngineDispatchPermit current = acquirePermit(2L, 1);
+        DecodeEndpoint.EngineDispatchPermit current = acquirePermit("2", 1);
         assertFalse(stale.release());
         assertTrue(current.release());
     }
@@ -920,10 +939,10 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void calibrate_movesConfirmedOutOfReservedView() {
-        reserve(1L, 500, 508, 30);
+        reserve("1", 500, 508, 30);
 
         TaskInfo running = new TaskInfo();
-        running.setRequestId(1L);
+        running.setRequestId("1");
         running.setPhase(TaskPhase.KV_ALLOCATED);
         updateStatus(Map.of("1", running), null, 10_000);
 
@@ -936,15 +955,30 @@ class DecodeEndpointAdmissionTest {
     }
 
     @Test
+    void ordinaryWorkerTerminalAllowsLaterActiveObservation() {
+        reserve("11", 500, 508, 30);
+        settleFromWorkerStatus(11L);
+
+        TaskInfo zombie = new TaskInfo();
+        zombie.setRequestId("11");
+        zombie.setPhase(TaskPhase.RUNNING);
+        updateStatus(Map.of("11", zombie), Map.of(), 10_000L);
+
+        assertNull(EndpointTestSupport.decodeReservation(endpoint, "11"));
+        assertEquals(1, endpoint.routingView().totalLoad());
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
+    }
+
+    @Test
     void versionedReceivedTaskEmitsActivityWithoutAdvancingAcceptance() {
         AbstractRequestScheduler events = mock(AbstractRequestScheduler.class);
         endpoint =
                 EndpointTestSupport.decode(
                         status,
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(events));
-        DecodeResources.ReservationHandle reservation = reserve(1L, 500, 508, 30);
+        DecodeResources.ReservationHandle reservation = reserve("1", 500, 508, 30);
         TaskInfo received = new TaskInfo();
-        received.setRequestId(1L);
+        received.setRequestId("1");
         received.setPhase(TaskPhase.RECEIVED);
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(Map.of("1", received));
@@ -964,7 +998,7 @@ class DecodeEndpointAdmissionTest {
                 org.flexlb.balance.scheduler.ContextResult.EngineKind.ACTIVE, activeStatus.kind());
         assertEquals(endpoint, activeStatus.route().decodeEp());
         assertEquals(reservation, activeStatus.reservation());
-        assertEquals(reservation, EndpointTestSupport.decodeReservation(endpoint, 1L));
+        assertEquals(reservation, EndpointTestSupport.decodeReservation(endpoint, "1"));
     }
 
     @Test
@@ -998,7 +1032,7 @@ class DecodeEndpointAdmissionTest {
                                         blockingEndpoint.tryPinGeneration()) {
                                     assertNotNull(pin);
                                     EndpointTestSupport.reserveUnqueuedDecode(
-                                            blockingEndpoint, pin, 71L, 500L, 600L, 80);
+                                            blockingEndpoint, pin, "71", 500L, 600L, 80);
                                 }
                             });
             assertThrows(
@@ -1014,7 +1048,7 @@ class DecodeEndpointAdmissionTest {
             statusUpdate.get(5, TimeUnit.SECONDS);
             reserve.get(5, TimeUnit.SECONDS);
 
-            assertNotNull(EndpointTestSupport.decodeReservation(blockingEndpoint, 71L));
+            assertNotNull(EndpointTestSupport.decodeReservation(blockingEndpoint, "71"));
             assertEquals(500L, blockingEndpoint.routingView().inflightHardKv());
             assertEquals(
                     600L,
@@ -1051,7 +1085,11 @@ class DecodeEndpointAdmissionTest {
                                             endpoint.tryPinGeneration()) {
                                         reservation =
                                                 endpoint.tryReserveQueuedRequest(
-                                                                pin, requestId, 100L, 3000L, 50,
+                                                                pin,
+                                                                String.valueOf(requestId),
+                                                                100L,
+                                                                3000L,
+                                                                50,
                                                                 null)
                                                         .handle();
                                     }
@@ -1099,10 +1137,10 @@ class DecodeEndpointAdmissionTest {
     @Test
     void permitAcquisitionRecognizesExactAcceptanceBeforeDelivery() {
         updateStatus(Map.of(), Map.of(), 10_000L);
-        var handle = reserveQueued(72L, 100L, 1000L, 50);
+        var handle = reserveQueued("72", 100L, 1000L, 50);
         assertFalse(endpoint.ownership(handle).confirmed());
         TaskInfo accepted = new TaskInfo();
-        accepted.setRequestId(72L);
+        accepted.setRequestId("72");
         accepted.setPhase(TaskPhase.KV_ALLOCATED);
         accepted.setInputLength(100L);
         updateStatus(Map.of("72", accepted), Map.of(), 9900L);
@@ -1144,9 +1182,9 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void alreadyAcceptedPermitsCannotOutliveTerminalOrRequestReplacement() {
-        var handle = reserveQueued(72L, 100L, 1000L, 50);
+        var handle = reserveQueued("72", 100L, 1000L, 50);
         TaskInfo accepted = new TaskInfo();
-        accepted.setRequestId(72L);
+        accepted.setRequestId("72");
         accepted.setPhase(TaskPhase.KV_ALLOCATED);
         accepted.setInputLength(100L);
         updateStatus(Map.of("72", accepted), Map.of(), 9900L);
@@ -1165,14 +1203,14 @@ class DecodeEndpointAdmissionTest {
                 "identity-only permits must not duplicate Engine capacity");
 
         TaskInfo finished = new TaskInfo();
-        finished.setRequestId(72L);
+        finished.setRequestId("72");
         updateStatus(Map.of(), Map.of("72", finished), 10_000L);
         assertEquals(OWNERSHIP_LOST, terminalCheck.handle().dispatch().status());
         assertFalse(terminalCheck.handle().release());
         assertEquals(0, endpoint.routingView().engineCapacityUsed());
 
         endpoint.evictExpiredRequests(-1L, ignored -> false);
-        var replacement = reserveQueued(72L, 200L, 2000L, 70);
+        var replacement = reserveQueued("72", 200L, 2000L, 70);
         assertNotEquals(handle.reservationToken(), replacement.reservationToken());
         updateStatus(Map.of("72", accepted), Map.of(), 9800L);
         assertTrue(endpoint.ownership(replacement).confirmed());
@@ -1183,9 +1221,9 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void permitAcquisitionCannotChargeAReplacementRequest() {
-        var stale = reserveQueued(71L, 100L, 1000L, 50);
-        release(71L);
-        var current = reserveQueued(71L, 200L, 2000L, 50);
+        var stale = reserveQueued("71", 100L, 1000L, 50);
+        release("71");
+        var current = reserveQueued("71", 200L, 2000L, 50);
         var capacity = new DecodeResources.AdmissionCapacity(2L, 90L);
         assertEquals(
                 DecodeResources.EngineDispatchPermitAcquireStatus.NOT_OWNED,
@@ -1199,7 +1237,7 @@ class DecodeEndpointAdmissionTest {
     @Test
     void permitHandoffPreventsLocalRollbackUntilAuthoritativeTerminal() {
         updateStatus(Map.of(), Map.of(), 10_000L);
-        var handle = reserveQueued(71L, 100L, 1000L, 50);
+        var handle = reserveQueued("71", 100L, 1000L, 50);
         var acquired =
                 endpoint.acquireDispatchPermit(
                         handle, new DecodeResources.AdmissionCapacity(2L, 90L));
@@ -1214,7 +1252,7 @@ class DecodeEndpointAdmissionTest {
                                 .status());
         assertEquals(1000L, EndpointTestSupport.expectedReservedKv(endpoint.resourceSnapshot()));
         TaskInfo finished = new TaskInfo();
-        finished.setRequestId(71L);
+        finished.setRequestId("71");
         updateStatus(Map.of(), Map.of("71", finished), 10_000L);
         assertEquals(0L, EndpointTestSupport.expectedReservedKv(endpoint.resourceSnapshot()));
     }
@@ -1252,7 +1290,7 @@ class DecodeEndpointAdmissionTest {
     }
 
     private DecodeResources.ReservationHandle reserve(
-            long requestId, long hardKv, long expectedKv, int priority) {
+            String requestId, long hardKv, long expectedKv, int priority) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             if (pin == null) {
                 throw new IllegalStateException("Decode endpoint generation is retired");
@@ -1266,7 +1304,7 @@ class DecodeEndpointAdmissionTest {
     }
 
     private DecodeResources.ReservationHandle reserveQueued(
-            long requestId, long hardKv, long expectedKv, int priority) {
+            String requestId, long hardKv, long expectedKv, int priority) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             if (pin == null) {
                 throw new IllegalStateException("Decode endpoint generation is retired");
@@ -1283,19 +1321,22 @@ class DecodeEndpointAdmissionTest {
     private void markQueued(long requestId) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            assertTrue(endpoint.markQueued(pin, reservations.get(requestId)).status().applied());
+            assertTrue(
+                    endpoint.markQueued(pin, reservations.get(String.valueOf(requestId)))
+                            .status()
+                            .applied());
         }
     }
 
-    private void release(long requestId) {
-        DecodeResources.ReservationHandle reservation = reservations.get(requestId);
+    private void release(String requestId) {
+        DecodeResources.ReservationHandle reservation = reservations.get(String.valueOf(requestId));
         if (reservation != null) {
             endpoint.release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
         }
     }
 
-    private boolean releaseLocalShadow(long requestId) {
-        DecodeResources.ReservationHandle reservation = reservations.get(requestId);
+    private boolean releaseLocalShadow(String requestId) {
+        DecodeResources.ReservationHandle reservation = reservations.get(String.valueOf(requestId));
         return reservation != null
                 && (endpoint.release(
                                         reservation,
@@ -1304,7 +1345,7 @@ class DecodeEndpointAdmissionTest {
                         == ReservationReleaseResult.RELEASED);
     }
 
-    private Map<Long, DecodeResources.DecodeRequestView> reserved() {
+    private Map<String, DecodeResources.DecodeRequestView> reserved() {
         return endpoint.resourceSnapshot().requests().entrySet().stream()
                 .filter(entry -> !entry.getValue().phase().isEngineConfirmed())
                 .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
@@ -1325,22 +1366,22 @@ class DecodeEndpointAdmissionTest {
     }
 
     private List<DecodeResources.ReservationHandle> handles(long... ids) {
-        return LongStream.of(ids).mapToObj(reservations::get).toList();
+        return LongStream.of(ids).mapToObj(id -> reservations.get(String.valueOf(id))).toList();
     }
 
     private DecodeResources.PreemptionBeginResult beginPreemption(
             long attemptToken,
             List<Long> victimIds,
             long incomingRequestId,
-            long hardKv,
-            long expectedKv,
+            long requiredKv,
+            long kvBudget,
             int priority) {
         return endpoint.beginPreemption(
                 attemptToken,
-                victimIds.stream().map(reservations::get).toList(),
-                incomingRequestId,
-                hardKv,
-                expectedKv,
+                victimIds.stream().map(id -> reservations.get(String.valueOf(id))).toList(),
+                String.valueOf(incomingRequestId),
+                requiredKv,
+                kvBudget,
                 priority,
                 new DecodeResources.AdmissionCapacity(
                         Math.max(1, endpoint.routingView().totalLoad()), 100));
@@ -1348,7 +1389,7 @@ class DecodeEndpointAdmissionTest {
 
     private void settleFromWorkerStatus(long requestId) {
         TaskInfo finished = new TaskInfo();
-        finished.setRequestId(requestId);
+        finished.setRequestId(Long.toString(requestId));
         finished.setErrorCode(0);
         updateStatus(
                 Map.of(),
@@ -1357,14 +1398,14 @@ class DecodeEndpointAdmissionTest {
     }
 
     private DecodeEndpoint.EngineDispatchPermit acquirePermit(
-            long requestId, long concurrencyLimit) {
+            String requestId, long concurrencyLimit) {
         org.flexlb.balance.endpoint.DecodeResources.Acquisition<
                         org.flexlb.balance.endpoint.DecodeResources
                                 .EngineDispatchPermitAcquireStatus,
                         DecodeEndpoint.EngineDispatchPermit>
                 acquisition =
                         endpoint.acquireDispatchPermit(
-                                reservations.get(requestId),
+                                reservations.get(String.valueOf(requestId)),
                                 new DecodeResources.AdmissionCapacity(concurrencyLimit, 100L));
         assertEquals(
                 DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());

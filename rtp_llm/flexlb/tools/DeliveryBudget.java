@@ -12,7 +12,9 @@ import java.util.ArrayDeque;
 import java.util.LinkedHashMap;
 import java.util.List;
 
-/** Source budgets, including private methods, overloads and explicitly written constructors. */
+/**
+ * Source budgets, including private methods, overloads and explicitly written constructors.
+ */
 public final class DeliveryBudget {
     private static final class Counts {
         int methods;

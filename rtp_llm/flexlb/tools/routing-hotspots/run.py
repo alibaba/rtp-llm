@@ -50,6 +50,18 @@ for variant, directory in [("before", baseline), ("after", root)]:
             "GroupPlanner.evaluateReadiness(selection, limits, 1000).reason()",
         )
     benchmark_source = source.read_text()
+    if not re.search(r"record Item\(\s*String\b", planner_source.read_text()):
+        benchmark_source = benchmark_source.replace(
+            ".requestId(String.valueOf(id))", ".requestId(id)"
+        ).replace("String.valueOf(Long.MAX_VALUE)", "Long.MAX_VALUE")
+        verification_source = (
+            verification_source.replace(
+                "String.valueOf(trial % 13 == 0 ? i % 19 : i)",
+                "trial % 13 == 0 ? i % 19 : i",
+            )
+            .replace('"9999", WorkSnapshot.Phase', "9999, WorkSnapshot.Phase")
+            .replace('trial % 50 == 0 ? "1" : "999999"', "trial % 50 == 0 ? 1 : 999999")
+        )
     if not (
         directory
         / "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PrefillQueueRunner.java"
@@ -74,7 +86,7 @@ for variant, directory in [("before", baseline), ("after", root)]:
         benchmark_source = benchmark_source.replace(
             "DeliveryDispatcher", "DeliveryStrategy"
         ).replace(
-            "strategy = new DeliveryStrategy(null, service, null, reporter, null);",
+            "strategy = new DeliveryStrategy(null, service, reporter);",
             "strategy = new BatchDeliveryStrategy(() -> null, () -> 1L, reporter, "
             "new org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity(0L, 90L), 2);",
         )

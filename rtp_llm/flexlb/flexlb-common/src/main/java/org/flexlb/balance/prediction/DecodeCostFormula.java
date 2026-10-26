@@ -4,7 +4,9 @@ import java.util.Map;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Immutable Decode cost expression evaluated against one routing snapshot. */
+/**
+ * Immutable Decode cost expression evaluated against one routing snapshot.
+ */
 public final class DecodeCostFormula {
 
     private static final Map<String, Integer> VARIABLES =

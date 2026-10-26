@@ -4,7 +4,9 @@ import org.flexlb.util.PriorityNormalizer;
 
 import java.util.Comparator;
 
-/** One request identity retained by the model-wide ordered queue. */
+/**
+ * One request identity retained by the model-wide ordered queue.
+ */
 final class GlobalQueueEntry {
     static final Comparator<GlobalQueueEntry> SEQUENCE_ORDER =
             Comparator.comparingLong(entry -> entry.sequence);

@@ -17,7 +17,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 
-/** Configures the OpenTelemetry SDK before Spring starts serving requests. */
+/**
+ * Configures the OpenTelemetry SDK before Spring starts serving requests.
+ */
 final class OpenTelemetryBootstrap {
 
     private static boolean initialized;
@@ -38,7 +40,9 @@ final class OpenTelemetryBootstrap {
 
     private OpenTelemetryBootstrap() {}
 
-    /** Spring 启动前读取一次 JSON；只有完整构造成功才发布 enabled。 */
+    /**
+     * Spring 启动前读取一次 JSON；只有完整构造成功才发布 enabled。
+     */
     static synchronized boolean configureFromEnvironment() {
         if (initialized) {
             return FlexlbTrace.isEnabled();
@@ -119,6 +123,11 @@ final class OpenTelemetryBootstrap {
             provider.shutdown().join(2, TimeUnit.SECONDS);
             provider = null;
         }
+    }
+
+    static synchronized void resetForTest() {
+        shutdown();
+        initialized = false;
     }
 
     static Resource resource() {

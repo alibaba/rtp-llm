@@ -4,9 +4,12 @@ import java.util.Objects;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Immutable public view of one canonical request generation. */
+/**
+ * Immutable public view of one canonical request generation.
+ */
 public record RequestState(
-        long requestId,
+        String requestId,
+        long originalNumericRequestId,
         Phase state,
         DeliveryClaimKind deliveryClaimKind,
         long batchId,
@@ -26,7 +29,9 @@ public record RequestState(
                 "only batch enqueue delivery may carry a batchId");
     }
 
-    /** Public reporting projection; internal control facts never escape as executable commands. */
+    /**
+     * Public reporting projection; internal control facts never escape as executable commands.
+     */
     public static RequestState from(ContextResult.Snapshot snapshot) {
         if (snapshot.terminalRecord() != null) {
             return snapshot.terminalRecord();
@@ -59,7 +64,11 @@ public record RequestState(
                                                 ? Phase.ACKNOWLEDGED
                                                 : delivery != null
                                                         ? Phase.DISPATCHING
-                                                        : Phase.QUEUED;
+                                                        : snapshot.encoder() != null
+                                                                ? snapshot.encoder().acknowledged()
+                                                                        ? Phase.ACKNOWLEDGED
+                                                                        : Phase.DISPATCHING
+                                                                : Phase.QUEUED;
         String detail =
                 snapshot.outcome() != null
                         ? snapshot.outcome().detail()
@@ -80,15 +89,22 @@ public record RequestState(
                                                 : "queued";
         return new RequestState(
                 snapshot.key().requestId(),
+                snapshot.key().originalNumericRequestId(),
                 phase,
-                delivery == null ? DeliveryClaimKind.NONE : delivery.identity().kind(),
+                delivery == null
+                        ? snapshot.encoder() == null
+                                ? DeliveryClaimKind.NONE
+                                : DeliveryClaimKind.ROUTE_DECISION
+                        : delivery.identity().kind(),
                 delivery == null ? 0L : delivery.identity().batchId(),
                 snapshot.createdAtMs(),
                 snapshot.updatedAtMs(),
                 detail == null ? "" : detail);
     }
 
-    /** An expected batch ID of zero accepts any batch, including route delivery. */
+    /**
+     * An expected batch ID of zero accepts any batch, including route delivery.
+     */
     public boolean matchesBatch(long expectedBatchId) {
         return expectedBatchId == 0L || batchId == expectedBatchId;
     }

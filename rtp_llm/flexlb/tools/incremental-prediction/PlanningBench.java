@@ -16,7 +16,9 @@ import java.util.Locale;
 import java.util.Random;
 import java.util.function.DoubleSupplier;
 
-/** Forked benchmark of whole prefix selection and five-candidate frozen queue projection. */
+/**
+ * Forked benchmark of whole prefix selection and five-candidate frozen queue projection.
+ */
 public class PlanningBench {
     static volatile double sink;
     static final ThreadMXBean CPU = (ThreadMXBean) ManagementFactory.getThreadMXBean();
@@ -36,7 +38,9 @@ public class PlanningBench {
         var items = new ArrayList<GroupPlanner.Item>();
         for (int i = 0; i < count; i++) {
             long compute = 100 + random.nextInt(4096), hit = random.nextInt(4096);
-            items.add(new GroupPlanner.Item(i, 0, i, 1000, 61_000, compute + hit, hit));
+            items.add(
+                    new GroupPlanner.Item(
+                            String.valueOf(i), 0, i, 1000, 61_000, compute + hit, hit));
         }
         return items;
     }
@@ -108,7 +112,7 @@ public class PlanningBench {
             for (int i = 0; i < 64; i++)
                 probes.add(
                         new RequestTimeEstimationTestSupport.Probe(
-                                99999, 0, 1000, 61_000, 1024 + i * 32, i * 8, i * 8));
+                                "99999", 0, 1000, 61_000, 1024 + i * 32, i * 8, i * 8));
             int[] index = {0};
             bench(
                     "fleet5_depth_" + depth,

@@ -35,7 +35,9 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
         return new Builder();
     }
 
-    /** Add two profiles without losing precision. */
+    /**
+     * Add two profiles without losing precision.
+     */
     public PriorityHarmProfile plus(PriorityHarmProfile other) {
         BigInteger[] sum = new BigInteger[PriorityNormalizer.MAX_PRIORITY + 1];
         for (int priority = PriorityNormalizer.MIN_PRIORITY;
@@ -50,7 +52,9 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
         return new PriorityHarmProfile(sum);
     }
 
-    /** Diagnostic scalar derived from exact weighted harm; plan ordering stays lexicographic. */
+    /**
+     * Diagnostic scalar derived from exact weighted harm; plan ordering stays lexicographic.
+     */
     public long totalCost() {
         BigInteger cost = BigInteger.ZERO;
         BigInteger maximum = BigInteger.valueOf(Long.MAX_VALUE);
@@ -105,7 +109,9 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
         return value == null ? BigInteger.ZERO : value;
     }
 
-    /** Mutable accumulator used only while one immutable plan is built. */
+    /**
+     * Mutable accumulator used only while one immutable plan is built.
+     */
     public static final class Builder {
 
         private final BigInteger[] harmByPriority =

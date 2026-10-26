@@ -25,7 +25,9 @@ import static org.flexlb.balance.endpoint.PrefillState.StatusReconciliation;
 import static org.flexlb.balance.endpoint.PrefillState.StatusReduction;
 import static org.flexlb.balance.endpoint.PrefillState.TerminalObservation;
 
-/** Builds independent resource facts under the owner lock; it never commits or runs effects. */
+/**
+ * Builds independent resource facts under the owner lock; it never commits or runs effects.
+ */
 public final class PrefillObservation {
     private PrefillObservation() {}
 
@@ -103,7 +105,7 @@ public final class PrefillObservation {
                     && reduction.batchPhases.get(batch) != Phase.ENGINE_RUNNING) {
                 survivors.sort(
                         Comparator.comparingLong(RequestRoute::enqueueSeq)
-                                .thenComparingLong(RequestRoute::requestId));
+                                .thenComparing(RequestRoute::requestId));
                 inputs.put(batch.batchId, List.copyOf(survivors));
             }
         }
@@ -125,9 +127,9 @@ public final class PrefillObservation {
         return reduction;
     }
 
-    private static Map<Long, TerminalObservation> terminals(
+    private static Map<String, TerminalObservation> terminals(
             PrefillState state, Map<String, WorkerStatus.TaskObservation> tasks) {
-        Map<Long, TerminalObservation> facts = new HashMap<>();
+        Map<String, TerminalObservation> facts = new HashMap<>();
         for (var task : tasks.values()) {
             var entry = state.requests.get(task.requestId());
             if (entry == null
@@ -162,7 +164,7 @@ public final class PrefillObservation {
             WorkerStatus.EngineObservation engine,
             StatusReduction reduction,
             List<PrefillRequestStatus> statuses) {
-        Set<Long> unknown = new HashSet<>(), known = new HashSet<>();
+        Set<String> unknown = new HashSet<>(), known = new HashSet<>();
         for (var task : engine.runningTaskList().values()) {
             if (reduction.terminals.containsKey(task.requestId())) {
                 continue;

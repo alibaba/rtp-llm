@@ -7,7 +7,9 @@ import java.util.Arrays;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Reusable columns for modeled Prefill candidates from one fleet snapshot. */
+/**
+ * Reusable columns for modeled Prefill candidates from one fleet snapshot.
+ */
 final class PrefillCandidateSet {
 
     private static final int INITIAL_CAPACITY = 16;

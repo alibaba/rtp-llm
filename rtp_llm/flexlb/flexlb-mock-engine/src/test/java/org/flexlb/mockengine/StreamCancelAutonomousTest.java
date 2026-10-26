@@ -66,7 +66,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class StreamCancelAutonomousTest {
 
-    /** Fresh range above the 62000-63900 blocks used by the existing suites. */
+    /**
+     * Fresh range above the 62000-63900 blocks used by the existing suites.
+     */
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(64000);
 
     @TempDir Path tempDir;
@@ -120,7 +122,8 @@ class StreamCancelAutonomousTest {
         long rid = 7001L;
 
         try (ClientStream stream =
-                ClientStream.generateStream(prefillPort(), MockEngineTestSupport.input(rid, 16))) {
+                ClientStream.generateStream(
+                        prefillPort(), MockEngineTestSupport.input(String.valueOf(rid), 16))) {
             awaitCondition(
                     () -> prefill.getRunningCount() >= 1,
                     2_000,
@@ -298,7 +301,8 @@ class StreamCancelAutonomousTest {
         long rid = 7004L;
 
         try (ClientStream stream =
-                ClientStream.generateStream(decodePort(), MockEngineTestSupport.input(rid, 16))) {
+                ClientStream.generateStream(
+                        decodePort(), MockEngineTestSupport.input(String.valueOf(rid), 16))) {
             awaitCondition(
                     () -> decode.getRunningCount() >= 1,
                     2_000,
@@ -339,7 +343,8 @@ class StreamCancelAutonomousTest {
         // ── Order A: stream breaks FIRST, explicit Cancel arrives second ──
         long ridA = 7005L;
         try (ClientStream stream =
-                ClientStream.generateStream(decodePort(), MockEngineTestSupport.input(ridA, 16))) {
+                ClientStream.generateStream(
+                        decodePort(), MockEngineTestSupport.input(String.valueOf(ridA), 16))) {
             awaitCondition(
                     () -> decode.getRunningCount() >= 1,
                     2_000,
@@ -373,7 +378,8 @@ class StreamCancelAutonomousTest {
         // ── Order B: explicit Cancel FIRST, stream breaks second ──
         long ridB = 7006L;
         try (ClientStream stream =
-                ClientStream.generateStream(decodePort(), MockEngineTestSupport.input(ridB, 16))) {
+                ClientStream.generateStream(
+                        decodePort(), MockEngineTestSupport.input(String.valueOf(ridB), 16))) {
             awaitCondition(
                     () -> decode.getRunningCount() >= 1,
                     2_000,
@@ -467,7 +473,9 @@ class StreamCancelAutonomousTest {
 
     private int basePort;
 
-    /** Actual decode port — with 0 prefill engines the decode takes basePort+0. */
+    /**
+     * Actual decode port — with 0 prefill engines the decode takes basePort+0.
+     */
     private int decodePortValue;
 
     private int prefillPort() {
@@ -568,14 +576,18 @@ class StreamCancelAutonomousTest {
         return (List<Long>) service.getSnapshot().get("cancelled_rids");
     }
 
-    /** Per-RPC counter from the public snapshot surface (rpc_counts map). */
+    /**
+     * Per-RPC counter from the public snapshot surface (rpc_counts map).
+     */
     private static int rpcCount(JavaMockEngineCluster.FastRpcService service, String rpc) {
         @SuppressWarnings("unchecked")
         Map<String, Object> counts = (Map<String, Object>) service.getSnapshot().get("rpc_counts");
         return ((Number) counts.get(rpc)).intValue();
     }
 
-    /** Typed CANCELLED terminals for {@code rid} visible in the next WorkerStatus poll. */
+    /**
+     * Typed CANCELLED terminals for {@code rid} visible in the next WorkerStatus poll.
+     */
     private static long countCancelTerminals(
             JavaMockEngineCluster.FastRpcService service, long rid) {
         return MockEngineTestSupport.workerStatus(service, 0).getFinishedTaskListList().stream()
@@ -669,7 +681,9 @@ class StreamCancelAutonomousTest {
             return stream;
         }
 
-        /** Simulate the client dying: cancel exactly this call mid-flight. */
+        /**
+         * Simulate the client dying: cancel exactly this call mid-flight.
+         */
         void breakStream() {
             call.cancel("client stream gone", null);
         }

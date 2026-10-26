@@ -51,12 +51,16 @@ class MetricsValidationTest {
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
     private static final int BASE_PORT = 62800;
 
-    /** Pattern: {@code metric_name{engine_name="...",role="...",grpc_port="12345",engine_ip="..."} value} */
+    /**
+     * Pattern: {@code metric_name{engine_name="...",role="...",grpc_port="12345",engine_ip="..."} value}
+     */
     private static final Pattern PER_ENGINE_METRIC_PATTERN =
             Pattern.compile(
                     "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
 
-    /** Pattern: {@code metric_name{role="prefill"} value} */
+    /**
+     * Pattern: {@code metric_name{role="prefill"} value}
+     */
     private static final Pattern ROLE_METRIC_PATTERN =
             Pattern.compile("(\\w+)\\{role=\"(\\w+)\"\\}\\s+(\\d+)");
 
@@ -89,7 +93,7 @@ class MetricsValidationTest {
                         new EngineRpcService.GenerateInputPB[count];
                 for (int j = 0; j < count; j++) {
                     int decodePort = decodeServices.get((i * count + j) % nDecode).getGrpcPort();
-                    inputs[j] = inputWithDecode(startRequestId + j, 10, decodePort);
+                    inputs[j] = inputWithDecode(String.valueOf(startRequestId + j), 10, decodePort);
                 }
                 EngineRpcService.EnqueueBatchResponsePB response =
                         enqueue(prefillServices.get(i), batch(1000 + i, slot(0, inputs)));

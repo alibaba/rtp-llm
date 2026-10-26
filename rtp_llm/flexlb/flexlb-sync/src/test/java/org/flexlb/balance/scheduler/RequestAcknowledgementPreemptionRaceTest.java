@@ -9,7 +9,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -32,7 +32,7 @@ class RequestAcknowledgementPreemptionRaceTest {
     void laterPreemptionCannotDiscardAlreadyConfirmedAcknowledgementTask() throws Exception {
         var config = SchedulingTestConfig.newConfig();
         config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
-        var context = RequestProtocolTestSupport.context(config, 9741L);
+        var context = RequestProtocolTestSupport.context(config, "9741");
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         var owner =
@@ -40,13 +40,13 @@ class RequestAcknowledgementPreemptionRaceTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         SchedulerTestSupport.responseCompletions(owner.runtime).close();
         var publisher = new ResponseCompletionExecutor(1);
         ReflectionTestUtils.setField(owner.runtime, "responseCompletions", publisher);
         ReflectionTestUtils.setField(owner.runtime, "timer", mock(ExpirationTimer.class));
         RequestProtocolTestSupport.register(owner, context);
-        var reservation = new DecodeResources.ReservationHandle(1L, 9741L, 3L);
+        var reservation = new DecodeResources.ReservationHandle(1L, "9741", 3L);
         var decode = RequestProtocolTestSupport.decodeEndpoint();
         var prefill = mock(PrefillEndpoint.class);
         var server = new ServerStatus();

@@ -1,10 +1,13 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.Objects;
@@ -27,6 +30,7 @@ import static org.flexlb.balance.scheduler.ContextResult.ClosePermit;
 import static org.flexlb.balance.scheduler.ContextResult.CloseProgress;
 import static org.flexlb.balance.scheduler.ContextResult.DeliveryEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.DeliveryFacts;
+import static org.flexlb.balance.scheduler.ContextResult.EncoderFacts;
 import static org.flexlb.balance.scheduler.ContextResult.End;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
@@ -89,9 +93,11 @@ public final class RequestContext {
                     true,
                     false,
                     true,
-                    true);
+                    true,
+                    null);
     private Phase phase = Phase.OPEN;
     private RequestRoute route;
+    private EncoderFacts encoder;
     private PlacementFacts placement;
     private DeliveryFacts delivery;
     private EngineFacts engine = EMPTY.engine();
@@ -113,7 +119,11 @@ public final class RequestContext {
     private long inactivityMs;
 
     public RequestContext(FlexlbConfig config) {
-        data = new RequestData(Objects.requireNonNull(config));
+        this(new RequestData(Objects.requireNonNull(config)));
+    }
+
+    public RequestContext(RequestData data) {
+        this.data = Objects.requireNonNull(data, "data");
         state = new Snapshot(EMPTY, 0L, 0L, 0L);
     }
 
@@ -122,7 +132,7 @@ public final class RequestContext {
     }
 
     public synchronized Update register(
-            long requestId, long nowMs, long expiresAtMs, long inactivityTimeoutMs) {
+            String requestId, long nowMs, long expiresAtMs, long inactivityTimeoutMs) {
         var before = state;
         if (key != null) {
             return update(before, before);
@@ -130,7 +140,12 @@ public final class RequestContext {
         if (inactivityTimeoutMs <= 0L) {
             throw new IllegalArgumentException("positive inactivity timeout required");
         }
-        key = new Identity(requestId, INCARNATIONS.incrementAndGet());
+        key =
+                new Identity(
+                        requestId,
+                        INCARNATIONS.incrementAndGet(),
+                        data.getOriginalNumericRequestId(),
+                        data.getRequestPhase());
         createdAtMs = lastWorkerAtMs = nowMs;
         absoluteDeadline = expiresAtMs;
         inactivityMs = inactivityTimeoutMs;
@@ -140,6 +155,66 @@ public final class RequestContext {
 
     public synchronized Snapshot snapshot() {
         return state;
+    }
+
+    /**
+     * Keep the selected Encoder generation until completion, cancellation or inactivity.
+     */
+    synchronized boolean claimEncoderRoute(EncoderEndpoint endpoint, long nowMs) {
+        if (key == null
+                || key.requestPhase() != RequestPhase.ENCODER
+                || phase != Phase.OPEN
+                || cancellation != null
+                || pendingEnd != null
+                || encoder != null) {
+            return false;
+        }
+        long input = Math.max(0L, data.getRequest().getSeqLen());
+        Long estimatedHit = data.getRequest().getEncoderCacheHitLen();
+        long uncached =
+                input - Math.min(input, Math.max(0L, estimatedHit == null ? 0L : estimatedHit));
+        if (!endpoint.trackSelectedRequest(key.requestId(), uncached)) {
+            return false;
+        }
+        encoder = new EncoderFacts(endpoint, false);
+        close = new CloseFacts(null, null, false, true, false, false, false, false);
+        refresh(nowMs);
+        return true;
+    }
+
+    /**
+     * Accept status only from the Encoder generation selected for this request.
+     */
+    synchronized Update recordEncoderStatus(
+            EncoderEndpoint source,
+            WorkerStatus.TaskObservation task,
+            boolean finished,
+            long nowMs) {
+        var before = state;
+        if (encoder == null
+                || encoder.endpoint() != source
+                || phase == Phase.CLOSED
+                || !Objects.equals(key.requestId(), task.requestId())) {
+            return new Update(UpdateKind.STALE, before, before);
+        }
+        lastWorkerAtMs = nowMs;
+        if (finished) {
+            retainEnd(
+                    new EndEvidence(
+                            null,
+                            EndKind.WORKER,
+                            RoleType.ENCODER,
+                            task.errorCode() == 0L,
+                            task.errorCode(),
+                            null,
+                            task.errorCode() == 0L
+                                    ? "encoder completed"
+                                    : "encoder worker error code " + task.errorCode(),
+                            false,
+                            true),
+                    nowMs);
+        }
+        return update(before, refresh(nowMs));
     }
 
     public synchronized Claim<PlacementToken> beginPlacement(RequestRoute withdrawing) {
@@ -176,7 +251,8 @@ public final class RequestContext {
         if (placement == null || placement.operation() != exact || exact.owner() != this) {
             return new Stale<>(before);
         }
-        if (acquired.requestId() != key.requestId() || acquired.ctx() != this) {
+        if (!java.util.Objects.equals(acquired.requestId(), key.requestId())
+                || acquired.ctx() != this) {
             return new Stale<>(before);
         }
         if (result != PublicationResult.PREPARED) {
@@ -942,6 +1018,17 @@ public final class RequestContext {
         if (phase == Phase.CLOSED && candidate.kind() != ResponseKind.TERMINAL) {
             return new Rejected<>(before, before, Rejection.CLOSED);
         }
+        if (candidate.kind() == ResponseKind.ENCODER_ACK) {
+            if (phase != Phase.OPEN
+                    || pendingEnd != null
+                    || cancellation != null
+                    || encoder == null
+                    || encoder.acknowledged()) {
+                return new Rejected<>(before, before, Rejection.INVALID_STATE);
+            }
+            encoder = new EncoderFacts(encoder.endpoint(), true);
+            requestDeadlineConsumed = true;
+        }
         boolean acknowledgement =
                 candidate.kind() == ResponseKind.ACK
                         || candidate.kind() == ResponseKind.CONFIRMATION;
@@ -1000,7 +1087,9 @@ public final class RequestContext {
         return new Granted<>(before, refresh(candidate.nowMs()), choice);
     }
 
-    /** Publisher capacity is reserved by Scheduler before this outcome/notification claim. */
+    /**
+     * Publisher capacity is reserved by Scheduler before this outcome/notification claim.
+     */
     public synchronized Claim<EndToken> beginClose(EndEvidence evidence, long nowMs) {
         var before = state;
         if (key == null) {
@@ -1161,13 +1250,19 @@ public final class RequestContext {
             terminalRecord =
                     new RequestState(
                             key.requestId(),
+                            key.originalNumericRequestId(),
                             outcome.outcome().phase(),
-                            delivery == null ? DeliveryClaimKind.NONE : delivery.identity().kind(),
+                            delivery == null
+                                    ? encoder == null
+                                            ? DeliveryClaimKind.NONE
+                                            : DeliveryClaimKind.ROUTE_DECISION
+                                    : delivery.identity().kind(),
                             delivery == null ? 0L : delivery.identity().batchId(),
                             createdAtMs,
                             nowMs,
                             outcome.detail());
             phase = Phase.CLOSED;
+            encoder = null;
             route = null;
             preemption = null;
             pendingEnd = null;
@@ -1423,7 +1518,8 @@ public final class RequestContext {
                         && state.selectedResponse() == selected
                         && state.close() == close
                         && state.deadlines() == deadlines
-                        && state.terminalRecord() == terminalRecord;
+                        && state.terminalRecord() == terminalRecord
+                        && state.encoder() == encoder;
         if (sameFacts && state.lastWorkerAtMs() == lastWorkerAtMs) {
             return state;
         }
@@ -1473,7 +1569,8 @@ public final class RequestContext {
                                                 || cancellation.reason()
                                                         != CancelReason.DEADLINE_EXCEEDED)
                                         && !engine.decodeAccepted()
-                                        && (delivery == null || !delivery.transferred()));
+                                        && (delivery == null || !delivery.transferred()),
+                                encoder);
         state =
                 new Snapshot(
                         facts,

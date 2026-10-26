@@ -20,7 +20,7 @@ class GroupingPolicyTest {
     private static final long UNLIMITED = Long.MAX_VALUE;
 
     private static Item item(long id, long enqueuedAt, long tokens) {
-        return new Item(id, 50, id, enqueuedAt, UNLIMITED, tokens, 0L);
+        return new Item(String.valueOf(id), 50, id, enqueuedAt, UNLIMITED, tokens, 0L);
     }
 
     @ParameterizedTest

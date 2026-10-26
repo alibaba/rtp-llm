@@ -1,7 +1,7 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -44,7 +44,7 @@ class PollRunnerLifecycleTest {
                 RunnerTestSupport.discovered(
                         RoleType.DECODE, null, "127.0.0.1", 8080, 19000, "site");
         var registry = RunnerTestSupport.endpointRegistry(mock(ConfigService.class));
-        registry.currentOrDiscover(RoleType.DECODE, status.getIpPort(), () -> status);
+        registry.currentOrDiscover(RoleType.DECODE, status.getLogicalIpPort(), () -> status);
         WorkerStatusRpcClient grpc = mock(WorkerStatusRpcClient.class);
         CacheAwareService cache = mock(CacheAwareService.class);
         DynamicCacheIntervalService interval = mock(DynamicCacheIntervalService.class);
@@ -115,9 +115,14 @@ class PollRunnerLifecycleTest {
         if (failureAt.equals("CALLBACK")) {
             if (cachePoll) {
                 verify(reporter)
-                        .reportCacheStatusCheckerFail(eq("model"), any(), eq(RoleType.DECODE));
+                        .reportCacheStatusCheckerFail(
+                                eq(status), any(org.flexlb.enums.BalanceStatusEnum.class));
             } else {
-                verify(reporter).reportStatusCheckerFail(eq("model"), any(), eq(RoleType.DECODE));
+                verify(reporter)
+                        .reportStatusCheckerFail(
+                                any(),
+                                org.mockito.ArgumentMatchers.anyString(),
+                                eq(RoleType.DECODE));
             }
         }
         if (!cachePoll && (failureAt.equals("REPLY") || failureAt.equals("CALLBACK"))) {

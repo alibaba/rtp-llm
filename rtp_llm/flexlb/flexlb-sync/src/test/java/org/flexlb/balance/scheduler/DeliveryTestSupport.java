@@ -13,7 +13,9 @@ import org.mockito.Mockito;
 import java.util.List;
 import java.util.OptionalLong;
 
-/** Transport/config fixtures. Queue decisions are stubbed on PrefillQueueRunner, never on Dispatcher. */
+/**
+ * Transport/config fixtures. Queue decisions are stubbed on PrefillQueueRunner, never on Dispatcher.
+ */
 public final class DeliveryTestSupport {
     public static org.flexlb.config.ConfigService service(org.flexlb.config.FlexlbConfig config) {
         var service = Mockito.mock(org.flexlb.config.ConfigService.class);
@@ -216,12 +218,12 @@ public final class DeliveryTestSupport {
 
     private DeliveryTestSupport() {}
 
-    static RequestRoute item(long requestId) {
-        return item(requestId, 50, requestId, 100L, 10L);
+    static RequestRoute item(String requestId) {
+        return item(requestId, 50, Long.parseLong(requestId), 100L, 10L);
     }
 
     static RequestRoute item(
-            long requestId, int priority, long enqueuedAtMs, long seqLen, long hitCache) {
+            String requestId, int priority, long enqueuedAtMs, long seqLen, long hitCache) {
         RequestRoute item = Mockito.mock(RequestRoute.class);
         Mockito.when(item.requestId()).thenReturn(requestId);
         Mockito.when(item.priority()).thenReturn(priority);

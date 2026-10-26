@@ -175,10 +175,11 @@ class StopExecutorSafetyTest {
                         null,
                         DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
                         new org.flexlb.service.monitor.DeliveryMetricsReporter(null));
-        var client = mock(org.flexlb.engine.grpc.EngineGrpcClient.class);
+        var client = mock(org.flexlb.engine.grpc.client.EngineGrpcClient.class);
         var rpcReplies =
                 new java.util.concurrent.CopyOnWriteArrayList<
-                        CompletableFuture<org.flexlb.engine.grpc.EngineGrpcClient.CancelReply>>();
+                        CompletableFuture<
+                                org.flexlb.engine.grpc.client.EngineGrpcClient.CancelReply>>();
         var entered = new CountDownLatch(30);
         var answers = new java.util.ArrayList<CompletableFuture<?>>();
         when(client.cancelAsync(any(), anyInt(), any(), anyLong()))
@@ -186,7 +187,8 @@ class StopExecutorSafetyTest {
                         call -> {
                             var reply =
                                     new CompletableFuture<
-                                            org.flexlb.engine.grpc.EngineGrpcClient.CancelReply>();
+                                            org.flexlb.engine.grpc.client.EngineGrpcClient
+                                                    .CancelReply>();
                             rpcReplies.add(reply);
                             entered.countDown();
                             return reply;
@@ -201,7 +203,7 @@ class StopExecutorSafetyTest {
                                 context,
                                 i,
                                 new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
-                                        1, i + 1, i + 1),
+                                        1, Integer.toString(i + 1), i + 1),
                                 new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
                 answers.add(
                         cleanup.preempt(claim, client, runtime, 500L, null, "priority preemption"));
@@ -214,7 +216,7 @@ class StopExecutorSafetyTest {
             rpcReplies.forEach(
                     reply ->
                             reply.complete(
-                                    org.flexlb.engine.grpc.EngineGrpcClient.CancelReply
+                                    org.flexlb.engine.grpc.client.EngineGrpcClient.CancelReply
                                             .REQUEST_CLEANED));
             CompletableFuture.allOf(answers.toArray(CompletableFuture[]::new))
                     .get(3, TimeUnit.SECONDS);
@@ -223,7 +225,9 @@ class StopExecutorSafetyTest {
     }
 
     private RequestContext context() {
-        return mock(RequestContext.class, RETURNS_DEEP_STUBS);
+        var context = mock(RequestContext.class, RETURNS_DEEP_STUBS);
+        when(context.data().getRequestId()).thenReturn("1");
+        return context;
     }
 
     private SchedulerRuntime runtime() {
@@ -236,6 +240,6 @@ class StopExecutorSafetyTest {
                 new DeliveryDispatcher(
                         null, config, new org.flexlb.service.monitor.DeliveryMetricsReporter(null)),
                 config,
-                mock(org.flexlb.engine.grpc.EngineGrpcClient.class));
+                mock(org.flexlb.engine.grpc.client.EngineGrpcClient.class));
     }
 }

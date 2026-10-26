@@ -1,14 +1,19 @@
 package org.flexlb.consistency;
 
-/** Read-only leadership view used to decide local scheduling versus forwarding. */
+/**
+ * Read-only leadership view used to decide local scheduling versus forwarding.
+ */
 public interface MasterStatusView {
+
+    default void start() {}
+
+    default void offline() {}
+
+    default void destroy() {}
 
     boolean isNeedConsistency();
 
     boolean isMaster();
 
-    /** Standalone nodes and the elected master schedule locally. */
-    default boolean shouldForwardToMaster() {
-        return isNeedConsistency() && !isMaster();
-    }
+    default void refreshMasterHost(boolean forceSync) {}
 }

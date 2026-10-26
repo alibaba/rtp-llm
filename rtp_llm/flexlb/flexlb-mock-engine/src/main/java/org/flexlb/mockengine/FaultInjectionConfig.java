@@ -340,7 +340,9 @@ public final class FaultInjectionConfig {
      */
     public record StatusFakeTask(long requestId, long batchId, String phase, long errorCode) {
 
-        /** True for the finished-form synthetic completion. */
+        /**
+         * True for the finished-form synthetic completion.
+         */
         public boolean isFinishedForm() {
             return "finished".equalsIgnoreCase(phase);
         }

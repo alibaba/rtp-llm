@@ -83,7 +83,7 @@ class RequestRouteTest {
             metadata.setSuccess(false);
         }
         if (invalid.equals("request")) {
-            metadata.setRequestId(99L);
+            metadata.setRequestId("99");
         }
         if (invalid.equals("address")) {
             metadata.setHttpPort(9999);
@@ -377,6 +377,53 @@ class RequestRouteTest {
         }
     }
 
+    @Test
+    void combinedEncoderVitPrefillDecodeRouteKeepsEveryRoleAndReleasesStatelessPins() {
+        var prefill = prefill();
+        var decode =
+                org.flexlb.balance.endpoint.EndpointTestSupport.decode(
+                        WorkerStatus.createDiscovered(
+                                RoleType.DECODE, "original", "decode", 8080, 8090, null),
+                        new RequestRepository());
+        var encoder =
+                new org.flexlb.balance.endpoint.EncoderEndpoint(
+                        WorkerStatus.createDiscovered(
+                                RoleType.ENCODER, "original", "encoder", 8080, 8090, null),
+                        new RequestRepository(),
+                        new PlacementAvailability());
+        var vit =
+                new WorkerEndpoint(
+                        WorkerStatus.createDiscovered(
+                                RoleType.VIT, "original", "vit", 8080, 8090, null));
+        var encoderPin = encoder.tryPinGeneration();
+        var vitPin = vit.tryPinGeneration();
+        try (var route = new RequestRoute(context())) {
+            route.add(encoderPin, metadata(encoder), -1L, 0L);
+            route.add(vitPin, metadata(vit), -1L, 0L);
+            route.add(prefill.tryPinGeneration(), metadata(prefill), 1L, 0L);
+            route.add(decode.tryPinGeneration(), metadata(decode), -1L, 0L);
+            route.prepare();
+            assertEquals(
+                    List.of(RoleType.ENCODER, RoleType.VIT, RoleType.PREFILL, RoleType.DECODE),
+                    route.successResponse(false).getServerStatus().stream()
+                            .map(ServerStatus::getRole)
+                            .toList());
+            assertFalse(encoderPin.isOpen());
+            assertFalse(vitPin.isOpen());
+            assertTrue(route.prefillPin().isOpen());
+            assertTrue(route.decodePin().isOpen());
+        } finally {
+            prefill.close();
+            decode.close();
+            encoder.close();
+            vit.close();
+            prefill.awaitRetirement();
+            decode.awaitRetirement();
+            encoder.awaitRetirement();
+            vit.awaitRetirement();
+        }
+    }
+
     private static void closeAfterBarrier(RequestRoute route, CyclicBarrier barrier) {
         try {
             barrier.await(2, TimeUnit.SECONDS);
@@ -387,7 +434,7 @@ class RequestRouteTest {
     }
 
     private static RequestContext context() {
-        return RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 42L);
+        return RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), "42");
     }
 
     private static PrefillEndpoint prefill() {
@@ -406,7 +453,7 @@ class RequestRouteTest {
         var result =
                 ServerStatus.forWorker(
                         worker.getStatus().getRole(),
-                        42L,
+                        "42",
                         worker.getStatus().topologySnapshot(),
                         worker.getStatus().committedEngineObservation());
         return result;

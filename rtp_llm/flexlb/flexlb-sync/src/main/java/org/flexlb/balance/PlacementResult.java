@@ -7,7 +7,9 @@ import java.util.Objects;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** One placement attempt and its internal diagnostic snapshot, separate from the wire response. */
+/**
+ * One placement attempt and its internal diagnostic snapshot, separate from the wire response.
+ */
 public record PlacementResult<V, B>(
         Status status, V value, Response failure, B blocker, Map<String, Object> diagnostics) {
 
@@ -52,7 +54,9 @@ public record PlacementResult<V, B>(
                 Status.BLOCKED, null, null, Objects.requireNonNull(blocker, "blocker"), null);
     }
 
-    /** A retryable block retains the failure observed by the same decision. */
+    /**
+     * A retryable block retains the failure observed by the same decision.
+     */
     public static <V, B> PlacementResult<V, B> blocked(
             B blocker, Response failure, Map<String, Object> diagnostics) {
         return new PlacementResult<>(

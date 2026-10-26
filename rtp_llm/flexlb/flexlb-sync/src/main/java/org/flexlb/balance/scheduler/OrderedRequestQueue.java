@@ -48,7 +48,9 @@ final class OrderedRequestQueue {
         insert(entry, false);
     }
 
-    /** FIFO uses bucket zero; PRIORITY uses the request's priority as its bucket. */
+    /**
+     * FIFO uses bucket zero; PRIORITY uses the request's priority as its bucket.
+     */
     private int bucketIndex(GlobalQueueEntry entry) {
         return priorityOrdering ? entry.priority() : 0;
     }
@@ -76,7 +78,9 @@ final class OrderedRequestQueue {
         return size;
     }
 
-    /** Rare route withdrawal: restore the original position without issuing a new sequence. */
+    /**
+     * Rare route withdrawal: restore the original position without issuing a new sequence.
+     */
     void restore(GlobalQueueEntry entry) {
         checkState(
                 entry.removed && entry.sequence > 0L,
@@ -124,7 +128,9 @@ final class OrderedRequestQueue {
         return !pendingPriorities.isEmpty() || !readyRetries.isEmpty();
     }
 
-    /** Make an awakened request directly available to the next bounded scan. */
+    /**
+     * Make an awakened request directly available to the next bounded scan.
+     */
     void markRequestReadyForRetry(GlobalQueueEntry entry) {
         if (entry.removed) {
             return;

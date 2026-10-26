@@ -14,7 +14,9 @@ import java.util.List;
 import java.util.Random;
 import java.util.TreeMap;
 
-/** Run identically against both revisions; compare complete selections and candidates. */
+/**
+ * Run identically against both revisions; compare complete selections and candidates.
+ */
 public class ProjectionDifferential {
     static void add(MessageDigest digest, Object value) {
         digest.update(String.valueOf(value).getBytes(StandardCharsets.UTF_8));
@@ -49,7 +51,7 @@ public class ProjectionDifferential {
                         };
                 items.add(
                         new GroupPlanner.Item(
-                                trial % 13 == 0 ? i % 19 : i,
+                                String.valueOf(trial % 13 == 0 ? i % 19 : i),
                                 random.nextInt(8),
                                 i,
                                 980 + i % 15,
@@ -90,7 +92,7 @@ public class ProjectionDifferential {
                             trial % 4 == 0
                                     ? List.of(
                                             new WorkSnapshot.RequestWork(
-                                                    9999, WorkSnapshot.Phase.ENGINE_RUNNING, 500))
+                                                    "9999", WorkSnapshot.Phase.ENGINE_RUNNING, 500))
                                     : List.of(),
                             List.of(),
                             0);
@@ -108,7 +110,7 @@ public class ProjectionDifferential {
                             0L);
             var probe =
                     new RequestTimeEstimationTestSupport.Probe(
-                            trial % 50 == 0 ? 1 : 999999,
+                            trial % 50 == 0 ? "1" : "999999",
                             random.nextInt(10),
                             1000,
                             trial % 7 == 0 ? 1015 : Long.MAX_VALUE,

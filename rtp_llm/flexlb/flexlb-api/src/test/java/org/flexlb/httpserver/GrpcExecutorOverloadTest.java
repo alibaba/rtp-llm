@@ -39,7 +39,9 @@ class GrpcExecutorOverloadTest {
                     .setResponseMarshaller(new BytesMarshaller())
                     .build();
 
-    /** Deliver a real Netty message AFTER the RPC has started and the executor fills. */
+    /**
+     * Deliver a real Netty message AFTER the RPC has started and the executor fills.
+     */
     @Test
     void acceptedMessageAndCloseStillRunWhenExecutorIsFull() throws Exception {
         try (Fixture f = new Fixture()) {

@@ -14,6 +14,50 @@ import static org.mockito.Mockito.when;
 
 class PlacementAvailabilityTest {
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(
+            value = RoleType.class,
+            names = {"PREFILL", "DECODE", "ENCODER"})
+    void retiredWorkerHistoryIsDiscardedWithoutLosingTheRetryEdge(RoleType role) {
+        var availability = new PlacementAvailability();
+        var worker = mock(org.flexlb.dao.master.WorkerStatus.class);
+        when(worker.getRole()).thenReturn(role);
+        when(worker.topologySnapshot())
+                .thenReturn(
+                        new org.flexlb.dao.master.WorkerStatus.TopologySnapshot(
+                                "group", "127.0.0.1", 8080, 8090, null, null, 0, 1));
+        when(worker.isActiveGeneration()).thenReturn(true);
+        String address = "127.0.0.1:8080@0";
+        var key = PlacementKey.exact(role, "group", address);
+        List<PlacementKey> events = new ArrayList<>();
+        availability.addListener(events::add);
+        availability.changed(worker, address);
+        long beforeRetirement = availability.sequence();
+
+        when(worker.isActiveGeneration()).thenReturn(false);
+        availability.clearRetired(worker, address);
+        assertEquals(List.of(key), events);
+        assertTrue(availability.lastChangedSequence(key) > beforeRetirement);
+        var history =
+                (java.util.Map<?, ?>)
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                availability, "lastChanged");
+        org.junit.jupiter.api.Assertions.assertFalse(history.containsKey(key.capacityDomain()));
+        org.junit.jupiter.api.Assertions.assertFalse(
+                history.containsKey(new PlacementKey(role, "group", null)));
+
+        availability.changed(worker, address);
+        org.junit.jupiter.api.Assertions.assertFalse(history.containsKey(key.capacityDomain()));
+        var replacement = mock(org.flexlb.dao.master.WorkerStatus.class);
+        when(replacement.getRole()).thenReturn(role);
+        var topology = worker.topologySnapshot();
+        when(replacement.topologySnapshot()).thenReturn(topology);
+        when(replacement.isActiveGeneration()).thenReturn(true);
+        availability.changed(replacement, address);
+        assertTrue(history.containsKey(key.capacityDomain()));
+        assertEquals(availability.sequence(), availability.lastChangedSequence(key));
+    }
+
     @Test
     void exactReleaseAdvancesExactGroupAndRoleEdges() {
         PlacementAvailability availability = new PlacementAvailability();

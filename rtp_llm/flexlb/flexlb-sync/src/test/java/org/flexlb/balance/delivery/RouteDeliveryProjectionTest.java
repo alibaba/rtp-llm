@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class RouteDeliveryProjectionTest {
 
     private static GroupPlanner.Item item(long id, long seqLen) {
-        return new GroupPlanner.Item(id, 0, id, 1000L, 1_000_000L, seqLen, 0L);
+        return new GroupPlanner.Item(Long.toString(id), 0, id, 1000L, 1_000_000L, seqLen, 0L);
     }
 
     @ParameterizedTest
@@ -195,19 +195,19 @@ class RouteDeliveryProjectionTest {
 
     private static final class CountingPredictions implements RequestTimeEstimation.Predictions {
 
-        private final Map<Long, Integer> itemCalls = new HashMap<>();
-        private Set<Long> failingIds = Set.of();
+        private final Map<String, Integer> itemCalls = new HashMap<>();
+        private Set<String> failingIds = Set.of();
         private int batchDurationCalls;
         private int batchPlanningCalls;
 
         void failOn(long... ids) {
-            var set = new java.util.HashSet<Long>();
-            for (long id : ids) set.add(id);
+            var set = new java.util.HashSet<String>();
+            for (long id : ids) set.add(Long.toString(id));
             this.failingIds = set;
         }
 
         int itemCalls(long id) {
-            return itemCalls.getOrDefault(id, 0);
+            return itemCalls.getOrDefault(Long.toString(id), 0);
         }
 
         int batchDurationCalls() {
@@ -226,7 +226,7 @@ class RouteDeliveryProjectionTest {
         @Override
         public long itemDurationMs(long seqLen, long hitCache) {
             return itemDurationMs(
-                    new GroupPlanner.Item(0L, 0, 0L, 0L, Long.MAX_VALUE, seqLen, hitCache));
+                    new GroupPlanner.Item("0", 0, 0L, 0L, Long.MAX_VALUE, seqLen, hitCache));
         }
 
         @Override
@@ -234,7 +234,7 @@ class RouteDeliveryProjectionTest {
             return batchDurationMs(
                     List.of(
                             new GroupPlanner.Item(
-                                    0L, 0, 0L, 0L, Long.MAX_VALUE, seqLen, hitCache)));
+                                    "0", 0, 0L, 0L, Long.MAX_VALUE, seqLen, hitCache)));
         }
 
         @Override

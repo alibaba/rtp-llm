@@ -15,7 +15,9 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
-/** Owns scheduled handles. Context owns only immutable desired deadline tokens. */
+/**
+ * Owns scheduled handles. Context owns only immutable desired deadline tokens.
+ */
 public final class ExpirationTimer implements AutoCloseable {
     public enum Kind {
         REQUEST,
@@ -95,7 +97,9 @@ public final class ExpirationTimer implements AutoCloseable {
                                 && observed.hasFailedInstallation());
     }
 
-    /** Effect order may differ from fact order; only the greatest accepted revision installs handles. */
+    /**
+     * Effect order may differ from fact order; only the greatest accepted revision installs handles.
+     */
     void update(RequestContext context, Plan plan) {
         Objects.requireNonNull(plan);
         if (context.snapshot().key() == null || !needsUpdate(context, plan)) {
@@ -180,7 +184,9 @@ public final class ExpirationTimer implements AutoCloseable {
         }
     }
 
-    /** Archive drops infrastructure ownership after the terminal record's atomic directory commit. */
+    /**
+     * Archive drops infrastructure ownership after the terminal record's atomic directory commit.
+     */
     void remove(RequestContext context) {
         Slot removed = slots.get(context);
         Throwable failure = null;

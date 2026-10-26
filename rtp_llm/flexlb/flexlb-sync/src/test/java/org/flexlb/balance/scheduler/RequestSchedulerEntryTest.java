@@ -8,7 +8,7 @@ import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.telemetry.FlexlbTrace;
@@ -54,8 +54,8 @@ class RequestSchedulerEntryTest {
             SchedulingTestConfig.useNonBatchDispatcher(config);
         }
         var router = mock(RequestWorkerSelector.class);
-        var owner = owner(config, mock(RecentCacheKeyTraceReporter.class), router);
-        var context = RequestProtocolTestSupport.context(config, 700L);
+        var owner = owner(config, mock(TheoryCacheHitReporter.class), router);
+        var context = RequestProtocolTestSupport.context(config, "700");
         Span span = mock(Span.class);
         when(span.storeInContext(any(Context.class))).thenCallRealMethod();
         context.data().setTraceContext(Context.root().with(span));
@@ -80,9 +80,9 @@ class RequestSchedulerEntryTest {
     void completionObservationPreservesResponseEvenWhenReporterFails(boolean reporterFails)
             throws Exception {
         var config = SchedulingTestConfig.batchConfig();
-        var reporter = mock(RecentCacheKeyTraceReporter.class);
+        var reporter = mock(TheoryCacheHitReporter.class);
         var owner = owner(config, reporter);
-        var context = RequestProtocolTestSupport.context(config, 702L);
+        var context = RequestProtocolTestSupport.context(config, "702");
         var original =
                 context.data().getRequest().toBuilder()
                         .blockCacheKeys(java.util.List.of(11L, 12L))
@@ -103,7 +103,7 @@ class RequestSchedulerEntryTest {
                             return null;
                         })
                 .when(reporter)
-                .report(context);
+                .report(context.data());
         var pending = owner.register(context, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
         try {
             var response = new Response();
@@ -119,7 +119,7 @@ class RequestSchedulerEntryTest {
                             null,
                             System.currentTimeMillis());
             DeliveryClaim claim;
-            try (var admission = owner.claimAdmissionHandle(702L, pending)) {
+            try (var admission = owner.claimAdmissionHandle("702", pending)) {
                 assertEquals(
                         PlacementResult.Status.SUCCESS,
                         owner.commitRoute(
@@ -134,7 +134,7 @@ class RequestSchedulerEntryTest {
             var published = pending.get(3, TimeUnit.SECONDS);
             assertTrue(published.isSuccess());
             assertSame(published, context.data().getResponse());
-            verify(reporter, timeout(3000)).report(context);
+            verify(reporter, timeout(3000)).report(context.data());
             assertTrue(observed.await(3, TimeUnit.SECONDS));
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
             while (!context.data().getRequest().getBlockCacheKeys().isEmpty()
@@ -151,7 +151,7 @@ class RequestSchedulerEntryTest {
 
     @org.junit.jupiter.api.Test
     void observationsReadOnlyPublishedResultsWithoutWaitingForCompletionSideEffects() {
-        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 703L);
+        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), "703");
         assertNull(context.data().getResponse());
         var pending = new CompletableFuture<Response>();
         context.data().setFuture(pending);
@@ -173,21 +173,21 @@ class RequestSchedulerEntryTest {
     @org.junit.jupiter.api.Test
     void missingBatchInputRejectsBeforeRegistration() {
         var config = SchedulingTestConfig.batchConfig();
-        var owner = owner(config, mock(RecentCacheKeyTraceReporter.class));
-        var context = RequestProtocolTestSupport.context(config, 701L);
+        var owner = owner(config, mock(TheoryCacheHitReporter.class));
+        var context = RequestProtocolTestSupport.context(config, "701");
         context.data().setGenerateInputPb(null);
         try {
             assertEquals(
                     StrategyErrorType.GENERATE_INPUT_REQUIRED.getErrorCode(),
                     owner.submit(context).join().getCode());
-            assertFalse(owner.requests.retainsIdentity(701L));
+            assertFalse(owner.requests.retainsIdentity("701"));
         } finally {
             owner.runtime.shutdown();
         }
     }
 
     private static AbstractRequestScheduler owner(
-            FlexlbConfig config, RecentCacheKeyTraceReporter trace, RequestWorkerSelector router) {
+            FlexlbConfig config, TheoryCacheHitReporter trace, RequestWorkerSelector router) {
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         return SchedulerTestSupport.create(
@@ -201,7 +201,7 @@ class RequestSchedulerEntryTest {
     }
 
     private static AbstractRequestScheduler owner(
-            FlexlbConfig config, RecentCacheKeyTraceReporter trace) {
+            FlexlbConfig config, TheoryCacheHitReporter trace) {
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         return SchedulerTestSupport.create(

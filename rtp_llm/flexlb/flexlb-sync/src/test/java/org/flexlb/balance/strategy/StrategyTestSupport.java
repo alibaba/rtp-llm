@@ -22,7 +22,9 @@ import org.mockito.Mockito;
 import java.util.List;
 import java.util.Map;
 
-/** Package-local fixtures built only from the frozen endpoint-facing ports. */
+/**
+ * Package-local fixtures built only from the frozen endpoint-facing ports.
+ */
 final class StrategyTestSupport {
 
     private StrategyTestSupport() {}
@@ -78,11 +80,42 @@ final class StrategyTestSupport {
         return select(request, route -> selector.select(request, metadata, role, group, route));
     }
 
+    static org.flexlb.balance.PlacementResult<
+                    RequestRoute, org.flexlb.balance.scheduler.PlacementKey>
+            select(
+                    CostBasedPrefillStrategy selector,
+                    org.flexlb.balance.scheduler.RequestData data,
+                    RoleType role,
+                    String group) {
+        var route = new RequestRoute(new org.flexlb.balance.scheduler.RequestContext(data));
+        try {
+            var result =
+                    selector.select(
+                            data.getRequest(), data.getSchedulingMetadata(), role, group, route);
+            if (result.status() == org.flexlb.balance.PlacementResult.Status.SUCCESS) {
+                return org.flexlb.balance.PlacementResult.success(route);
+            }
+            route.close();
+            return new org.flexlb.balance.PlacementResult<>(
+                    result.status(),
+                    null,
+                    result.failure(),
+                    result.blocker(),
+                    result.diagnostics());
+        } catch (RuntimeException | Error failure) {
+            org.flexlb.util.Failures.append(failure, org.flexlb.util.Failures.close(route));
+            throw failure;
+        }
+    }
+
     static RequestRoute select(VitWorkerSelector selector, long id, RoleType role, String group) {
         RequestRoute route =
-                scope(org.flexlb.dao.loadbalance.Request.builder().requestId(id).build());
+                scope(
+                        org.flexlb.dao.loadbalance.Request.builder()
+                                .requestId(Long.toString(id))
+                                .build());
         try {
-            if (selector.select(id, role, group, route) != null) {
+            if (selector.select(Long.toString(id), role, group, route) != null) {
                 return route;
             }
             route.close();
@@ -177,7 +210,10 @@ final class StrategyTestSupport {
                         source.getIp(),
                         source.getPort(),
                         source.getGrpcPort(),
-                        source.getSite());
+                        source.getSite(),
+                        source.getDeploymentName(),
+                        source.getEngineIndex(),
+                        source.getMultiEngineNum());
         WorkerStatus.StatusObservation observation =
                 status.bindStatusObservation(
                         source.committedEngineObservation(), true, 1L, 0L, Map.of());
@@ -258,7 +294,9 @@ final class StrategyTestSupport {
         publish(status, response);
     }
 
-    /** Keep selection-owned queues parked without replacing admission internals. */
+    /**
+     * Keep selection-owned queues parked without replacing admission internals.
+     */
     private static DeliveryDispatcher parkedDelivery() {
         return org.flexlb.balance.scheduler.DeliveryTestSupport.parked(PARKED_BOUNDARY);
     }

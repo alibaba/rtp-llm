@@ -46,7 +46,7 @@ class PrefillStateSnapshotTest {
     private final AtomicLong clock = new AtomicLong(100);
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillActiveIndex waiting =
-            PrefillActiveIndex.ordered(4, Comparator.comparingLong(RequestRoute::requestId));
+            PrefillActiveIndex.ordered(4, Comparator.comparing(RequestRoute::requestId));
     private final PrefillState state = new PrefillState(lock, waiting, clock::get);
     private final EndpointGenerationLifecycle generation =
             new EndpointGenerationLifecycle(() -> {});
@@ -622,7 +622,7 @@ class PrefillStateSnapshotTest {
         assertSame(before.active(), after.active());
         assertNoWork(before.work().materialize(), 1L, 2L);
         assertWork(after.work().materialize(), 20L, 2L);
-        assertFalse(after.work().materialize().containsRequest(1L));
+        assertFalse(after.work().materialize().containsRequest("1"));
         enqueue(item(3));
         var added = capture();
         assertNotSame(after.active(), added.active());
@@ -700,7 +700,7 @@ class PrefillStateSnapshotTest {
         var config = new FlexlbConfig();
         config.getDispatcher().setType(DispatcherConfig.Type.NON_BATCH);
         var context = new RequestContext(config);
-        var request = Request.builder().requestId(id).seqLen(100L).build();
+        var request = Request.builder().requestId(String.valueOf(id)).seqLen(100L).build();
         context.data().setRequest(request);
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));
         return SchedulingTestConfig.createRoute(context, null, null, null, null, null, null, 100L);
@@ -757,7 +757,7 @@ class PrefillStateSnapshotTest {
         assertEquals(PrefillState.RequestRelease.COMMITTED, state.release(null, first).kind());
         assertEquals(PrefillState.RequestRelease.NONE, state.release(null, first).kind());
         assertWork(state.committedSnapshot(), 100L, 2L);
-        assertFalse(state.committedSnapshot().containsRequest(1L));
+        assertFalse(state.committedSnapshot().containsRequest("1"));
         assertEquals(1L, state.admissionSummary(0, 0L).occupiedRequests());
         assertEquals(1, state.captureQueueCounters().batchSlots());
         assertEquals(PrefillState.RequestRelease.COMMITTED, state.release(null, second).kind());
@@ -773,7 +773,7 @@ class PrefillStateSnapshotTest {
         try (var preparation = EndpointTestSupport.preparation(immediateReservation)) {
             assertEquals(List.of(queued), waitingItems());
             assertWork(state.committedSnapshot(), 40L, 2L);
-            assertFalse(state.committedSnapshot().containsRequest(1L));
+            assertFalse(state.committedSnapshot().containsRequest("1"));
             try (var handoff =
                     EndpointTestSupport.commitQueuedRoutes(
                             state,
@@ -878,7 +878,7 @@ class PrefillStateSnapshotTest {
                         List.of(committedReservation),
                         generation.tryAcquireHandoff())) {
             assertWork(state.committedSnapshot(), 50L, 2L, 3L);
-            assertFalse(state.committedSnapshot().containsRequest(1L));
+            assertFalse(state.committedSnapshot().containsRequest("1"));
         }
         var retired = state.retireGenerationOwnership();
         assertNull(retired.invariantFailure());
@@ -1242,11 +1242,11 @@ class PrefillStateSnapshotTest {
                 assertTrue(EndpointTestSupport.releaseRequest(state, incoming));
                 clock.set(190L);
                 WorkSnapshot frozen = handoff.precedingWork().materialize();
-                assertTrue(frozen.containsRequest(81L));
+                assertTrue(frozen.containsRequest("81"));
                 assertEquals(250L, frozen.knownRemainingWorkMsAt(150L));
                 assertEquals(210L, frozen.knownRemainingWorkMsAt(190L));
                 assertFalse(
-                        frozen.containsRequest(82L), "the incoming batch is not preceding work");
+                        frozen.containsRequest("82"), "the incoming batch is not preceding work");
                 assertNoWork(state.committedSnapshot(), 81L, 82L);
                 assertEquals(0, state.stats().batchCount());
             }
@@ -1272,9 +1272,9 @@ class PrefillStateSnapshotTest {
 
         clock.set(150);
         assertTrue(EndpointTestSupport.releaseRequest(state, a));
-        assertTrue(state.committedSnapshot().containsRequest(2L));
-        assertTrue(state.committedSnapshot().containsRequest(3L));
-        assertFalse(state.committedSnapshot().containsRequest(1L));
+        assertTrue(state.committedSnapshot().containsRequest("2"));
+        assertTrue(state.committedSnapshot().containsRequest("3"));
+        assertFalse(state.committedSnapshot().containsRequest("1"));
         assertEquals(250L, remainingWork());
         clock.set(190);
         assertTrue(EndpointTestSupport.releaseRequest(state, b));
@@ -1521,7 +1521,7 @@ class PrefillStateSnapshotTest {
 
         assertEquals(4, outcome.requestStatuses().size());
         assertEquals(
-                List.of(1L, 2L),
+                List.of("1", "2"),
                 outcome.requestStatuses().stream()
                         .filter(
                                 requestStatus ->
@@ -1544,10 +1544,10 @@ class PrefillStateSnapshotTest {
                 remainingWork(),
                 "the batch without terminal events still advances to RUNNING");
         WorkSnapshot remaining = state.committedSnapshot();
-        assertTrue(remaining.containsRequest(3L));
-        assertTrue(remaining.containsRequest(4L));
-        assertFalse(remaining.containsRequest(1L));
-        assertFalse(remaining.containsRequest(2L));
+        assertTrue(remaining.containsRequest("3"));
+        assertTrue(remaining.containsRequest("4"));
+        assertFalse(remaining.containsRequest("1"));
+        assertFalse(remaining.containsRequest("2"));
     }
 
     @Test
@@ -1651,7 +1651,7 @@ class PrefillStateSnapshotTest {
         assertEquals(1, state.stats().locallyOwnedRequests());
         assertEquals(List.of(11L), batchIds());
         assertWork(state.committedSnapshot(), 100L, 1L);
-        assertFalse(state.committedSnapshot().containsRequest(2L));
+        assertFalse(state.committedSnapshot().containsRequest("2"));
         assertFalse(
                 EndpointTestSupport.releaseRequest(state, first),
                 "old item cannot settle the replacement");
@@ -1983,14 +1983,14 @@ class PrefillStateSnapshotTest {
         assertFalse(snapshot.hasUnknownWork());
         assertEquals(expectedMs, snapshot.totalRemainingWorkMs().orElseThrow());
         for (long id : includedIds) {
-            assertTrue(snapshot.containsRequest(id), "missing request " + id);
+            assertTrue(snapshot.containsRequest(String.valueOf(id)), "missing request " + id);
         }
     }
 
     private static void assertNoWork(WorkSnapshot snapshot, long... excludedIds) {
         assertWork(snapshot, 0L);
         for (long id : excludedIds) {
-            assertFalse(snapshot.containsRequest(id), "retained request " + id);
+            assertFalse(snapshot.containsRequest(String.valueOf(id)), "retained request " + id);
         }
     }
 
@@ -2031,7 +2031,7 @@ class PrefillStateSnapshotTest {
     private static TaskInfo task(
             long requestId, TaskPhase phase, long errorCode, long executionMs) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         task.setBatchId(10L);
         task.setPhase(phase);
         task.setErrorCode(errorCode);
@@ -2041,7 +2041,7 @@ class PrefillStateSnapshotTest {
 
     private static RequestRoute item(long id) {
         var item = mock(RequestRoute.class);
-        when(item.requestId()).thenReturn(id);
+        when(item.requestId()).thenReturn(Long.toString(id));
         when(item.seqLen()).thenReturn(100L);
         return item;
     }
@@ -2069,5 +2069,30 @@ class PrefillStateSnapshotTest {
 
     private List<RequestRoute> waitingItems() {
         return state.captureQueue(Integer.MAX_VALUE).items();
+    }
+
+    @Test
+    void inflightExcludesQueuedAndConfirmedWorkerRequests() {
+        enqueue(item(9));
+        assertEquals(0, state.stats().inflightRequests());
+        try (var preparation =
+                EndpointTestSupport.preparation(
+                        state.reserveUnqueuedRoute(item(8), 10, Long.MAX_VALUE).reservation())) {
+            assertEquals(0, state.stats().inflightRequests());
+        }
+        var request = item(1);
+        var reservation = state.reserveUnqueuedRoute(request, 10, Long.MAX_VALUE).reservation();
+        try (var preparation = EndpointTestSupport.preparation(reservation);
+                var handoff =
+                        EndpointTestSupport.commitRoutes(
+                                state,
+                                List.of(request),
+                                List.of(reservation),
+                                generation.tryAcquireHandoff())) {
+            assertEquals(1, state.stats().inflightRequests());
+        }
+        reconcile(Map.of(), Map.of("1", task(1, TaskPhase.RUNNING, 0, 0)), unused -> 0L);
+        assertEquals(0, state.stats().inflightRequests());
+        assertEquals(1, state.stats().locallyOwnedRequests());
     }
 }

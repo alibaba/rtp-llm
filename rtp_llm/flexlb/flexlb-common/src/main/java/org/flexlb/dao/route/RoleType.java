@@ -14,6 +14,7 @@ public enum RoleType {
     PREFILL("PREFILL", "Prefill"),
     DECODE("DECODE", "Decode"),
     VIT("VIT", "Vision Transformer"),
+    ENCODER("ENCODER", "MultiModal Encoder"),
     FRONTEND("FRONTEND", "Frontend");
 
     @JsonValue private final String code;
@@ -32,12 +33,16 @@ public enum RoleType {
         this.description = description;
     }
 
-    /** Whether this role executes Prefill work, including fused Prefill/Decode. */
+    /**
+     * Whether this role executes Prefill work, including fused Prefill/Decode.
+     */
     public boolean supportsPrefill() {
         return this == PREFILL || this == PDFUSION;
     }
 
-    /** Whether cache polling supplies detailed block keys for the routing index. */
+    /**
+     * Whether cache polling supplies detailed block keys for the routing index.
+     */
     public boolean requiresCacheKeys() {
         return supportsPrefill();
     }
@@ -91,6 +96,7 @@ public enum RoleType {
             case DECODE -> StrategyErrorType.NO_DECODE_WORKER;
             case PDFUSION -> StrategyErrorType.NO_PDFUSION_WORKER;
             case VIT -> StrategyErrorType.NO_VIT_WORKER;
+            case ENCODER -> StrategyErrorType.NO_ENCODER_WORKER;
             case FRONTEND -> StrategyErrorType.NO_FRONTEND_WORKER;
         };
     }

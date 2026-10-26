@@ -35,7 +35,9 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import static org.mockito.Mockito.mock;
 
-/** Same source on both revisions; includes real PrefillQueueRunner snapshot capture. */
+/**
+ * Same source on both revisions; includes real PrefillQueueRunner snapshot capture.
+ */
 public class SnapshotBench {
     static final ThreadMXBean CPU = (ThreadMXBean) ManagementFactory.getThreadMXBean();
     static volatile long sink;
@@ -43,14 +45,16 @@ public class SnapshotBench {
     static DeliveryDispatcher strategy;
     static final RequestTimeEstimationTestSupport.Probe PROBE =
             new RequestTimeEstimationTestSupport.Probe(
-                    Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
+                    String.valueOf(Long.MAX_VALUE), 0, 1, Long.MAX_VALUE, 2048, 0, 0);
 
     record Endpoint(
             PrefillEndpoint endpoint, PrefillState state, ReentrantLock lock, RequestRoute member) {
         void changeMembership() {
             lock.lock();
             try {
-                if (!state.removeQueuedLocked(member) || !state.enqueueActiveLocked(member, 0)) {
+                if (state.updateQueue(PrefillState.QueueChange.REMOVE, member, 0) != member
+                        || state.updateQueue(PrefillState.QueueChange.ENQUEUE, member, 0)
+                                != member) {
                     throw new AssertionError("membership update failed");
                 }
             } finally {
@@ -62,11 +66,16 @@ public class SnapshotBench {
     record Sample(long ns, long cpu, long bytes, long checksum) {}
 
     static RequestRoute request(FlexlbConfig config, long id, int priority, long tokens) {
-        var request = Request.builder().requestId(id).seqLen(tokens).rawPriority(priority).build();
+        var request =
+                Request.builder()
+                        .requestId(String.valueOf(id))
+                        .seqLen(tokens)
+                        .rawPriority(priority)
+                        .build();
         var context = new RequestContext(config);
-        context.setRequest(request);
-        context.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
-        context.setFuture(new CompletableFuture<>());
+        context.data().setRequest(request);
+        context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
+        context.data().setFuture(new CompletableFuture<>());
         return org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(
                 context, null, null, null, null, null, null, 1L);
     }
@@ -100,9 +109,7 @@ public class SnapshotBench {
                         strategy,
                         mock(DeliveryMetricsReporter.class),
                         new PlacementAvailability());
-        Field stateField = PrefillEndpoint.class.getDeclaredField("prefillState");
-        stateField.setAccessible(true);
-        var state = (PrefillState) stateField.get(endpoint);
+        var state = endpoint.ownership;
         Field lockField = PrefillState.class.getDeclaredField("lock");
         lockField.setAccessible(true);
         var lock = (ReentrantLock) lockField.get(state);
@@ -131,7 +138,8 @@ public class SnapshotBench {
         try {
             for (int i = 0; i < depth; i++) {
                 last = request(config, i, 1 + i % 4, 100 + random.nextInt(4096));
-                if (!state.enqueueActiveLocked(last, 0)) throw new AssertionError();
+                if (state.updateQueue(PrefillState.QueueChange.ENQUEUE, last, 0) != last)
+                    throw new AssertionError();
             }
         } finally {
             lock.unlock();
@@ -190,7 +198,8 @@ public class SnapshotBench {
                 long cpu = 0, bytes = 0, checksum = 0, operations = 0;
                 do {
                     for (var endpoint : endpoints) {
-                        if (mode.equals("status")) endpoint.endpoint.signalRouteReady();
+                        if (mode.equals("status"))
+                            endpoint.endpoint.signal(PrefillEndpoint.Signal.INPUT);
                         if (mode.equals("membership")) endpoint.changeMembership();
                     }
                     var gate = new CountDownLatch(1);
@@ -272,7 +281,7 @@ public class SnapshotBench {
         var reporter = new DeliveryMetricsReporter(null);
         var service = mock(org.flexlb.config.ConfigService.class);
         org.mockito.Mockito.when(service.loadBalanceConfig()).thenReturn(config());
-        strategy = new DeliveryDispatcher(null, service, null, reporter, null);
+        strategy = new DeliveryDispatcher(null, service, reporter);
     }
 
     public static void main(String[] args) throws Exception {

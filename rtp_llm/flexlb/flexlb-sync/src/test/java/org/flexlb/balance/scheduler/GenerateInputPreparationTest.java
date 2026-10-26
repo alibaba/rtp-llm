@@ -5,7 +5,7 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -63,6 +63,28 @@ class GenerateInputPreparationTest {
     }
 
     @Test
+    void identityValidationDoesNotMaterializeTheGenerationPayload() {
+        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), "71");
+        context.data()
+                .setGenerateInputPb(
+                        GenerateInputPB.newBuilder()
+                                .setRequestId(71)
+                                .addAllTokenIds(java.util.Collections.nCopies(100_000, 42))
+                                .build()
+                                .toByteString());
+        assertEquals("71", context.data().generateInputRequestId());
+        var preparation =
+                (java.util.concurrent.FutureTask<?>)
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                context.data(), "generateInput");
+        assertFalse(
+                preparation.isDone(),
+                "identity validation must leave payload materialization to the worker");
+        context.data().prepareGenerateInput();
+        assertTrue(preparation.isDone());
+    }
+
+    @Test
     void nonBatchDoesNotRetainOrParseInput() throws Exception {
         var config = SchedulingTestConfig.newConfig();
         config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
@@ -77,7 +99,7 @@ class GenerateInputPreparationTest {
     @ValueSource(booleans = {false, true})
     void archiveDropsCachedInputWithoutInvalidatingAnExistingReader(boolean prepared)
             throws Exception {
-        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 71L);
+        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), "71");
         var wire = GenerateInputPB.newBuilder().setRequestId(71L).addTokenIds(42).build();
         context.data().setGenerateInputPb(wire.toByteString());
         var reader = prepared ? context.data().getGenerateInput() : null;
@@ -92,7 +114,7 @@ class GenerateInputPreparationTest {
                 IllegalStateException.class,
                 () -> context.data().setGenerateInputPb(ByteString.EMPTY));
         repository.archive(context, RequestState.from(context.snapshot()));
-        assertNull(repository.findActive(71L));
+        assertNull(repository.findActive("71"));
         assertFalse(context.data().hasGenerateInput());
         assertNull(context.data().getGenerateInput());
         if (reader != null) {
@@ -106,7 +128,7 @@ class GenerateInputPreparationTest {
     void cancellationOrDeadlineDuringPreparationCannotReachSelection(boolean deadline)
             throws Exception {
         var config = SchedulingTestConfig.batchConfig();
-        var source = RequestProtocolTestSupport.context(config, 17001L);
+        var source = RequestProtocolTestSupport.context(config, "17001");
         var context = spy(source);
         var data = spy(source.data());
         org.springframework.test.util.ReflectionTestUtils.setField(context, "data", data);
@@ -137,7 +159,7 @@ class GenerateInputPreparationTest {
                         service,
                         reporter,
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class),
+                        mock(TheoryCacheHitReporter.class),
                         router,
                         mock(DecodeAdmission.class),
                         new PlacementAvailability());
@@ -149,7 +171,7 @@ class GenerateInputPreparationTest {
             if (deadline) {
                 clockAdvanced.set(true);
             } else {
-                registry.cancel(17001L, 0L, CancelReason.CLIENT_CANCELLED);
+                registry.cancel("17001", 0L, CancelReason.CLIENT_CANCELLED);
                 assertEquals(
                         8504,
                         future.get(2, TimeUnit.SECONDS).getCode(),

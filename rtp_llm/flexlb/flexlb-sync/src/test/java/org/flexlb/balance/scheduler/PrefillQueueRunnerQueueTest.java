@@ -12,7 +12,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -40,7 +40,9 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Canonical endpoint-queue contract exposed by {@link PrefillQueueRunner}. */
+/**
+ * Canonical endpoint-queue contract exposed by {@link PrefillQueueRunner}.
+ */
 class PrefillQueueRunnerQueueTest {
 
     private final List<PrefillQueueRunner> runtimes = new ArrayList<>();
@@ -73,7 +75,7 @@ class PrefillQueueRunnerQueueTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         RuntimeException observerFailure =
                 new IllegalStateException("queue-removal observer failed");
         RuntimeException preparationFailure =
@@ -95,7 +97,7 @@ class PrefillQueueRunnerQueueTest {
             doAnswer(
                             call -> {
                                 List<RequestRoute> selected = call.getArgument(0);
-                                if (selected.getFirst().requestId() == 930L) {
+                                if (selected.getFirst().requestId().equals("930")) {
                                     return CapacityBoundary.failed(preparationFailure);
                                 }
                                 laterSelected.countDown();
@@ -125,13 +127,13 @@ class PrefillQueueRunnerQueueTest {
                                     ContextResult.PreparationFailure.class));
             worker.start();
             for (long id : new long[] {930L, 931L}) {
-                var context = RequestProtocolTestSupport.context(config, id);
+                var context = RequestProtocolTestSupport.context(config, String.valueOf(id));
                 var future = RequestProtocolTestSupport.register(owner, context);
                 org.flexlb.balance.endpoint.DecodeResources.ReservationHandle reservation;
                 try (var pin = decode.tryPinGeneration()) {
                     reservation =
                             org.flexlb.balance.endpoint.EndpointTestSupport.reserveUnqueuedDecode(
-                                    decode, pin, id, 1L, 2L, 50);
+                                    decode, pin, String.valueOf(id), 1L, 2L, 50);
                 }
                 var route =
                         SchedulingTestConfig.createRoute(
@@ -143,7 +145,8 @@ class PrefillQueueRunnerQueueTest {
                                 decode,
                                 reservation,
                                 System.currentTimeMillis());
-                try (AdmissionHandle admission = owner.claimAdmissionHandle(id, future);
+                try (AdmissionHandle admission =
+                                owner.claimAdmissionHandle(String.valueOf(id), future);
                         var completed = RequestProtocolTestSupport.finishOnExit(admission)) {
                     assertNotNull(admission);
                     assertEquals(
@@ -170,7 +173,7 @@ class PrefillQueueRunnerQueueTest {
                     assertTrue(
                             laterSelected.await(5L, TimeUnit.SECONDS),
                             "an observer failure must not stop the worker from planning the later request");
-                    owner.cancel(id, 0L, CancelReason.CLIENT_CANCELLED);
+                    owner.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
                     assertFalse(future.get(5L, TimeUnit.SECONDS).isSuccess());
                     RequestProtocolTestSupport.awaitCondition(
                             () -> !owner.requests.isCurrent(context));
@@ -215,7 +218,7 @@ class PrefillQueueRunnerQueueTest {
         assertTrue(runtime.offer(item(4, 50, now + 5_000, now - 100, 128)));
 
         var snapshot = PrefillQueueRunnerTestSupport.capture(runtime);
-        assertEquals(List.of(2L, 1L, 3L, 4L), requestIds(snapshot.items()));
+        assertEquals(List.of("2", "1", "3", "4"), requestIds(snapshot.items()));
         assertEquals(4, snapshot.items().size());
     }
 
@@ -230,7 +233,7 @@ class PrefillQueueRunnerQueueTest {
         assertTrue(runtime.offer(item(3, 50, now + 9_000, now, 128)));
 
         assertEquals(
-                List.of(1L, 2L, 4L, 3L),
+                List.of("1", "2", "4", "3"),
                 requestIds(PrefillQueueRunnerTestSupport.capture(runtime).items()));
     }
 
@@ -245,7 +248,7 @@ class PrefillQueueRunnerQueueTest {
         assertTrue(runtime.offer(item(3, 70, now + 100, now + 200, 128)));
 
         assertEquals(
-                List.of(1L, 2L, 3L),
+                List.of("1", "2", "3"),
                 requestIds(PrefillQueueRunnerTestSupport.capture(runtime).items()));
     }
 
@@ -356,14 +359,14 @@ class PrefillQueueRunnerQueueTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         try {
             PrefillQueueRunner runtime =
                     PrefillQueueRunnerTestSupport.create(
                             "test-worker", prefillEndpoint, config, deliveryStrategy, registry);
             runtimes.add(runtime);
             runtime.start();
-            RequestContext context = RequestProtocolTestSupport.context(config, 907L);
+            RequestContext context = RequestProtocolTestSupport.context(config, "907");
             CompletableFuture<Response> future =
                     RequestProtocolTestSupport.register(registry, context);
             context.data().setFuture(future);
@@ -412,7 +415,7 @@ class PrefillQueueRunnerQueueTest {
                                 }
                                 return released;
                             });
-            try (AdmissionHandle admission = registry.claimAdmissionHandle(907L, future);
+            try (AdmissionHandle admission = registry.claimAdmissionHandle("907", future);
                     var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertEquals(
                         PlacementResult.Status.SUCCESS,
@@ -452,18 +455,18 @@ class PrefillQueueRunnerQueueTest {
                 RequestProtocolTestSupport.awaitCondition(
                         () ->
                                 SchedulerTestSupport.repository(registry)
-                                                .getRequestState(907L, 0L)
+                                                .getRequestState("907", 0L)
                                                 .state()
                                         == RequestState.Phase.CANCELLED);
             } else {
-                RequestState cancelled = registry.cancel(907L, 0L, CancelReason.CLIENT_CANCELLED);
+                RequestState cancelled = registry.cancel("907", 0L, CancelReason.CLIENT_CANCELLED);
                 assertEquals(RequestState.Phase.CANCEL_REQUESTED, cancelled.state());
                 assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
             }
             RequestProtocolTestSupport.awaitCondition(
                     () ->
                             SchedulerTestSupport.repository(registry)
-                                                    .getRequestState(907L, 0L)
+                                                    .getRequestState("907", 0L)
                                                     .state()
                                             == RequestState.Phase.CANCELLED
                                     && PrefillQueueRunnerTestSupport.state(runtime)
@@ -482,7 +485,7 @@ class PrefillQueueRunnerQueueTest {
                             PrefillQueueRunnerTestSupport.state(runtime), queued));
             assertEquals(
                     RequestState.Phase.CANCELLED,
-                    SchedulerTestSupport.repository(registry).getRequestState(907L, 0L).state());
+                    SchedulerTestSupport.repository(registry).getRequestState("907", 0L).state());
             assertNotNull(cleanupThread.get());
             assertFalse(cleanupThread.get() == Thread.currentThread());
             org.mockito.Mockito.verify(prefillEndpoint).release(null, queued);
@@ -609,7 +612,11 @@ class PrefillQueueRunnerQueueTest {
     private RequestRoute item(
             long requestId, int priority, long expiresAtMs, long enqueuedAtMs, long seqLen) {
         Request request =
-                Request.builder().requestId(requestId).seqLen(seqLen).rawPriority(priority).build();
+                Request.builder()
+                        .requestId(String.valueOf(requestId))
+                        .seqLen(seqLen)
+                        .rawPriority(priority)
+                        .build();
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, expiresAtMs));
@@ -618,7 +625,7 @@ class PrefillQueueRunnerQueueTest {
                 context, null, null, null, prefillEndpoint, null, null, enqueuedAtMs);
     }
 
-    private static List<Long> requestIds(List<RequestRoute> items) {
+    private static List<String> requestIds(List<RequestRoute> items) {
         return items.stream().map(RequestRoute::requestId).toList();
     }
 
@@ -636,7 +643,9 @@ class PrefillQueueRunnerQueueTest {
         return endpoint;
     }
 
-    /** Holds every exact head ACTIVE so snapshots can exercise live ordering. */
+    /**
+     * Holds every exact head ACTIVE so snapshots can exercise live ordering.
+     */
     private static final class BlockingDispatcher extends DeliveryTestSupport.StubDispatcher {
 
         private final AtomicInteger attempts = new AtomicInteger();

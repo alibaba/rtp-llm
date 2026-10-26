@@ -3,7 +3,9 @@ package org.flexlb.domain.consistency;
 import lombok.Getter;
 import lombok.Setter;
 
-/** ZooKeeper consistency configuration. */
+/**
+ * ZooKeeper consistency configuration.
+ */
 @Getter
 @Setter
 public class LBConsistencyConfig {

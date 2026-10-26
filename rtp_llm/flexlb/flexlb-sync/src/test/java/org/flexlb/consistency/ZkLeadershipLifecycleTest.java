@@ -27,13 +27,22 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class ZkLeadershipLifecycleTest {
+    private static org.flexlb.config.ConfigService configuration() {
+        var config = new org.flexlb.config.FlexlbConfig();
+        var service = mock(org.flexlb.config.ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        return service;
+    }
+
     @Test
     void olderLeaderLookupCannotOverwriteANewerLookup() throws Exception {
         var service =
                 new ZookeeperMasterElectService(
                         mock(GeneralHttpNettyService.class),
                         mock(EngineHealthReporter.class),
-                        mock(Environment.class));
+                        mock(Environment.class),
+                        configuration(),
+                        mock(org.flexlb.config.DeploymentIdentity.class));
         var selector = mock(LeaderSelector.class);
         var oldLeader = mock(Participant.class);
         var newLeader = mock(Participant.class);
@@ -62,7 +71,7 @@ class ZkLeadershipLifecycleTest {
             release.countDown();
             lookup.get(2, TimeUnit.SECONDS);
             newerLookup.get(2, TimeUnit.SECONDS);
-            assertEquals("127.0.0.10", service.getMasterHostIp());
+            assertEquals("127.0.0.10", service.getMasterHostIp(false));
         } finally {
             release.countDown();
             executor.shutdownNow();
@@ -76,7 +85,9 @@ class ZkLeadershipLifecycleTest {
                 new ZookeeperMasterElectService(
                         mock(GeneralHttpNettyService.class),
                         mock(EngineHealthReporter.class),
-                        mock(Environment.class));
+                        mock(Environment.class),
+                        configuration(),
+                        mock(org.flexlb.config.DeploymentIdentity.class));
         var selector = mock(LeaderSelector.class);
         var oldLeader = mock(Participant.class);
         when(oldLeader.getId()).thenReturn("127.0.0.9");
@@ -107,7 +118,7 @@ class ZkLeadershipLifecycleTest {
             release.countDown();
             lookup.get(2, TimeUnit.SECONDS);
             assertNull(
-                    service.getMasterHostIp(),
+                    service.getMasterHostIp(false),
                     "the pre-disconnect lookup cannot restore the old leader");
         } finally {
             release.countDown();
@@ -122,7 +133,11 @@ class ZkLeadershipLifecycleTest {
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         ZookeeperMasterElectService service =
                 new ZookeeperMasterElectService(
-                        mock(GeneralHttpNettyService.class), reporter, mock(Environment.class));
+                        mock(GeneralHttpNettyService.class),
+                        reporter,
+                        mock(Environment.class),
+                        configuration(),
+                        mock(org.flexlb.config.DeploymentIdentity.class));
         assertThrows(
                 CancelLeadershipException.class,
                 () -> service.stateChanged(null, ConnectionState.SUSPENDED));
@@ -144,7 +159,11 @@ class ZkLeadershipLifecycleTest {
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         ZookeeperMasterElectService service =
                 new ZookeeperMasterElectService(
-                        mock(GeneralHttpNettyService.class), reporter, mock(Environment.class));
+                        mock(GeneralHttpNettyService.class),
+                        reporter,
+                        mock(Environment.class),
+                        configuration(),
+                        mock(org.flexlb.config.DeploymentIdentity.class));
         org.springframework.test.util.ReflectionTestUtils.setField(
                 service,
                 "localNode",

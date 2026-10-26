@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -26,7 +26,7 @@ class SchedulerRequestWorkTest {
         AtomicReference<String> observedContext = new AtomicReference<>();
         try {
             executor.executeRequestWork(
-                    requestContext(993000L),
+                    requestContext("993000"),
                     () -> {
                         worker.set(Thread.currentThread());
                         observedContext.set(inherited.get());
@@ -46,8 +46,8 @@ class SchedulerRequestWorkTest {
     @Test
     void sameRequestAndOtherRequestsProgressConcurrentlyWhileCloseWaitsForEveryOwner()
             throws Exception {
-        RequestContext blockedContext = requestContext(993001L);
-        RequestContext independentContext = requestContext(993002L);
+        RequestContext blockedContext = requestContext("993001");
+        RequestContext independentContext = requestContext("993002");
         CountDownLatch started = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         CountDownLatch sameRequestFinished = new CountDownLatch(1);
@@ -98,7 +98,7 @@ class SchedulerRequestWorkTest {
         AtomicReference<String> threadName = new AtomicReference<>();
         try {
             executor.executeRequestWork(
-                    requestContext(993003L),
+                    requestContext("993003"),
                     () -> {
                         threadName.set(Thread.currentThread().getName());
                         ran.countDown();
@@ -115,7 +115,7 @@ class SchedulerRequestWorkTest {
         SchedulerRuntime executor = runtime();
         CountDownLatch later = new CountDownLatch(1);
         try {
-            RequestContext requestContext = requestContext(993004L);
+            RequestContext requestContext = requestContext("993004");
             executor.executeRequestWork(
                     requestContext,
                     () -> {
@@ -145,7 +145,7 @@ class SchedulerRequestWorkTest {
         if (recovery) {
             ((ExecutorService) ReflectionTestUtils.getField(executor, "requestWorkers")).shutdown();
         }
-        RequestContext context = requestContext(993005L);
+        RequestContext context = requestContext("993005");
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         CountDownLatch nestedEntered = new CountDownLatch(1);
@@ -229,7 +229,7 @@ class SchedulerRequestWorkTest {
         if (recovery) {
             ((ExecutorService) ReflectionTestUtils.getField(executor, "requestWorkers")).shutdown();
         }
-        RequestContext context = requestContext(993006L);
+        RequestContext context = requestContext("993006");
         var observed = new java.util.concurrent.CopyOnWriteArrayList<Integer>();
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
@@ -270,7 +270,7 @@ class SchedulerRequestWorkTest {
     @Test
     void closeWaitsForRegistrationBeforeSubmissionAndForSourceAfterTaskFinishes() throws Exception {
         var runtime = runtime();
-        var context = requestContext(993007L);
+        var context = requestContext("993007");
         var registration = runtime.registerRequestWork(context);
         var ran = new CountDownLatch(1);
         var closer = new Thread(() -> SchedulerTestSupport.closeRequestWork(runtime));
@@ -302,7 +302,7 @@ class SchedulerRequestWorkTest {
         var worker = new AtomicReference<Thread>();
         try {
             runtime.executeRequestWork(
-                    requestContext(993008L), () -> worker.set(Thread.currentThread()));
+                    requestContext("993008"), () -> worker.set(Thread.currentThread()));
             SchedulerTestSupport.awaitRequestWork(runtime);
             org.junit.jupiter.api.Assertions.assertNotNull(worker.get());
             org.junit.jupiter.api.Assertions.assertNotSame(Thread.currentThread(), worker.get());
@@ -317,8 +317,8 @@ class SchedulerRequestWorkTest {
     void acceptedOwnerMayHandOffExactRequestCleanupDuringCloseButForeignSourcesCannot()
             throws Exception {
         var runtime = runtime();
-        var context = requestContext(993009L);
-        var foreign = requestContext(993010L);
+        var context = requestContext("993009");
+        var foreign = requestContext("993010");
         var entered = new CountDownLatch(1);
         var handoff = new CountDownLatch(1);
         var childEntered = new CountDownLatch(1);
@@ -400,7 +400,7 @@ class SchedulerRequestWorkTest {
         SchedulerTestSupport.closeRequestExecutors(runtime);
     }
 
-    private static RequestContext requestContext(long requestId) {
+    private static RequestContext requestContext(String requestId) {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         RequestContext context = RequestProtocolTestSupport.context(config, requestId);
         var owner = org.mockito.Mockito.mock(AbstractRequestScheduler.class);

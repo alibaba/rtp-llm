@@ -2,8 +2,8 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -17,7 +17,6 @@ import java.util.concurrent.CompletableFuture;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -26,6 +25,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class GrpcCacheStatusCheckRunnerTest {
+    private final String ipPort = "127.0.0.1:8080@0";
 
     private final WorkerStatusRpcClient workerStatusRpcClient =
             Mockito.mock(WorkerStatusRpcClient.class);
@@ -52,7 +52,11 @@ class GrpcCacheStatusCheckRunnerTest {
                         .setBlockSize(128)
                         .build();
         when(workerStatusRpcClient.getCacheStatusAsync(
-                        anyString(), anyInt(), anyLong(), anyLong(), eq(RoleType.DECODE)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        anyLong(),
+                        anyLong(),
+                        eq(RoleType.DECODE)))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         new GrpcCacheStatusCheckRunner(
@@ -78,7 +82,6 @@ class GrpcCacheStatusCheckRunnerTest {
     void testGrpcCacheStatusCheckRunner() {
         // Arrange
         String modelName = "test-model";
-        String ipPort = "127.0.0.1:8080";
         String site = "test-site";
 
         WorkerStatus workerStatus = workerStatus();
@@ -92,9 +95,13 @@ class GrpcCacheStatusCheckRunnerTest {
                         .setBlockSize(128)
                         .build();
         when(workerStatusRpcClient.getCacheStatusAsync(
-                        anyString(), anyInt(), anyLong(), anyLong(), eq(RoleType.PREFILL)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        anyLong(),
+                        anyLong(),
+                        eq(RoleType.PREFILL)))
                 .thenReturn(CompletableFuture.completedFuture(cacheStatusPB));
-        when(localKvCacheAwareManager.updateEngineBlockCache(workerStatus))
+        when(localKvCacheAwareManager.updateFromWorkerStatus(workerStatus))
                 .thenReturn(WorkerCacheUpdateResult.builder().success(true).build());
 
         // Act
@@ -129,7 +136,6 @@ class GrpcCacheStatusCheckRunnerTest {
 
     @Test
     void failedCacheIndexUpdateRetriesTheSameWorkerVersion() {
-        String ipPort = "127.0.0.1:8080";
         WorkerStatus workerStatus = workerStatus();
         EndpointRegistry directory = directory(workerStatus);
         EngineRpcService.CacheStatusPB firstResponse =
@@ -137,12 +143,16 @@ class GrpcCacheStatusCheckRunnerTest {
         EngineRpcService.CacheStatusPB secondResponse =
                 EngineRpcService.CacheStatusPB.newBuilder().setVersion(2).setBlockSize(128).build();
         when(workerStatusRpcClient.getCacheStatusAsync(
-                        anyString(), anyInt(), anyLong(), anyLong(), eq(RoleType.PREFILL)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        anyLong(),
+                        anyLong(),
+                        eq(RoleType.PREFILL)))
                 .thenReturn(
                         CompletableFuture.completedFuture(firstResponse),
                         CompletableFuture.completedFuture(secondResponse),
                         CompletableFuture.completedFuture(secondResponse));
-        when(localKvCacheAwareManager.updateEngineBlockCache(workerStatus))
+        when(localKvCacheAwareManager.updateFromWorkerStatus(workerStatus))
                 .thenReturn(
                         WorkerCacheUpdateResult.builder().success(true).build(),
                         WorkerCacheUpdateResult.builder()
@@ -170,7 +180,6 @@ class GrpcCacheStatusCheckRunnerTest {
 
     @Test
     void staleGenerationCallbackCannotPublishAddressCache() {
-        String ipPort = "127.0.0.1:8080";
         WorkerStatus oldStatus = workerStatus();
         var config = Mockito.mock(org.flexlb.config.ConfigService.class);
         EndpointRegistry directory = RunnerTestSupport.endpointRegistry(config);
@@ -178,7 +187,11 @@ class GrpcCacheStatusCheckRunnerTest {
         directory.currentOrDiscover(RoleType.PREFILL, ipPort, () -> replacement);
         CompletableFuture<EngineRpcService.CacheStatusPB> response = new CompletableFuture<>();
         when(workerStatusRpcClient.getCacheStatusAsync(
-                        anyString(), anyInt(), anyLong(), anyLong(), eq(RoleType.PREFILL)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        anyLong(),
+                        anyLong(),
+                        eq(RoleType.PREFILL)))
                 .thenReturn(response);
 
         GrpcCacheStatusCheckRunner runner =
@@ -204,7 +217,7 @@ class GrpcCacheStatusCheckRunnerTest {
                         .setBlockSize(128)
                         .build());
 
-        verify(localKvCacheAwareManager, never()).updateEngineBlockCache(oldStatus);
+        verify(localKvCacheAwareManager, never()).updateFromWorkerStatus(oldStatus);
     }
 
     private void runCachePoll(
@@ -232,7 +245,7 @@ class GrpcCacheStatusCheckRunnerTest {
     private static EndpointRegistry directory(WorkerStatus status) {
         var config = Mockito.mock(org.flexlb.config.ConfigService.class);
         EndpointRegistry directory = RunnerTestSupport.endpointRegistry(config);
-        directory.currentOrDiscover(status.getRole(), status.getIpPort(), () -> status);
+        directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
         return directory;
     }
 }

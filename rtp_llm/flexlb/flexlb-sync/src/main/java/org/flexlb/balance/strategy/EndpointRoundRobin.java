@@ -7,7 +7,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.IntFunction;
 import java.util.function.IntPredicate;
 
-/** Continues an address ring within each routing group, even as eligibility changes. */
+/**
+ * Continues an address ring within each routing group, even as eligibility changes.
+ */
 final class EndpointRoundRobin {
     private record Scope(RoleType role, String group) {}
 

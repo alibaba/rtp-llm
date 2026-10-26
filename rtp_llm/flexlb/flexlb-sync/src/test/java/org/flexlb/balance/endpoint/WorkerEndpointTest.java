@@ -60,17 +60,17 @@ class WorkerEndpointTest {
 
     @Test
     void commitBatch_increasesCommittedWork() {
-        registerBatch(1L, 500, item(100L, 1000));
+        registerBatch(1L, 500, item("100", 1000));
         assertCommittedWorkNear(500);
 
-        registerBatch(2L, 300, item(101L, 500));
+        registerBatch(2L, 300, item("101", 500));
         assertCommittedWorkNear(800);
     }
 
     @Test
     void releaseBatch_decreasesCommittedWork() {
-        RequestRoute first = item(100L, 1000);
-        RequestRoute second = item(101L, 500);
+        RequestRoute first = item("100", 1000);
+        RequestRoute second = item("101", 500);
         registerBatch(1L, 500, first);
         registerBatch(2L, 300, second);
 
@@ -80,16 +80,16 @@ class WorkerEndpointTest {
 
     @Test
     void releaseBatch_unknownBatchId_noEffect() {
-        RequestRoute committed = item(100L, 1000);
+        RequestRoute committed = item("100", 1000);
         registerBatch(1L, 500, committed);
-        RequestRoute unknown = item(999L, 1000);
+        RequestRoute unknown = item("999", 1000);
         assertTrue(!endpoint.release(null, unknown));
         assertCommittedWorkNear(500);
     }
 
     @Test
     void releaseBatch_neverGoesNegative() {
-        RequestRoute item = item(100L, 1000);
+        RequestRoute item = item("100", 1000);
         registerBatch(1L, 100, item);
         assertTrue(endpoint.release(null, item));
         assertTrue(!endpoint.release(null, item));
@@ -105,9 +105,9 @@ class WorkerEndpointTest {
 
     @Test
     void calibrate_noInflight_resetsToZero() {
-        registerBatch(1L, 500, item(100L, 1000));
+        registerBatch(1L, 500, item("100", 1000));
 
-        TaskInfo finished = task(100L, 1000, 0, 1L);
+        TaskInfo finished = task("100", 1000, 0, 1L);
         finished.setErrorCode(0);
         calibrate(Map.of("100", finished), null);
 
@@ -117,11 +117,11 @@ class WorkerEndpointTest {
 
     @Test
     void calibrate_finishedBatch_removedFromInflight() {
-        registerBatch(5L, 9999, item(100L, 1000), item(101L, 2000));
+        registerBatch(5L, 9999, item("100", 1000), item("101", 2000));
 
-        TaskInfo t1 = task(100L, 1000, 0, 5L);
+        TaskInfo t1 = task("100", 1000, 0, 5L);
         t1.setErrorCode(0);
-        TaskInfo t2 = task(101L, 2000, 0, 5L);
+        TaskInfo t2 = task("101", 2000, 0, 5L);
         t2.setErrorCode(0);
         calibrate(Map.of("100", t1, "101", t2), null);
 
@@ -131,12 +131,12 @@ class WorkerEndpointTest {
 
     @Test
     void calibrate_partialBatchFailure_repacks() {
-        registerBatch(5L, 9999, item(100L, 1000), item(101L, 2000));
+        registerBatch(5L, 9999, item("100", 1000), item("101", 2000));
 
-        TaskInfo failed = task(100L, 1000, 0, 5L);
+        TaskInfo failed = task("100", 1000, 0, 5L);
         failed.setErrorCode(1);
         failed.setErrorMessage("timeout");
-        TaskInfo success = task(101L, 2000, 0, 5L);
+        TaskInfo success = task("101", 2000, 0, 5L);
         success.setErrorCode(0);
         calibrate(Map.of("100", failed, "101", success), null);
 
@@ -146,10 +146,10 @@ class WorkerEndpointTest {
 
     @Test
     void calibrate_inflightUnconfirmedBatchesSurvive() {
-        registerBatch(5L, 1000, item(100L, 500));
-        registerBatch(7L, 2000, item(200L, 1000));
+        registerBatch(5L, 1000, item("100", 500));
+        registerBatch(7L, 2000, item("200", 1000));
 
-        TaskInfo finished = task(100L, 500, 0, 5L);
+        TaskInfo finished = task("100", 500, 0, 5L);
         finished.setErrorCode(0);
         calibrate(Map.of("100", finished), null);
 
@@ -162,9 +162,9 @@ class WorkerEndpointTest {
 
     @Test
     void repackBatch_removesFailedRequests() {
-        RequestRoute first = item(100L, 1000);
-        RequestRoute failed = item(101L, 2000);
-        RequestRoute third = item(102L, 3000);
+        RequestRoute first = item("100", 1000);
+        RequestRoute failed = item("101", 2000);
+        RequestRoute third = item("102", 3000);
         registerBatch(5L, 9999, first, failed, third);
         assertTrue(endpoint.release(null, failed));
 
@@ -175,7 +175,7 @@ class WorkerEndpointTest {
 
     @Test
     void repackBatch_allFailed_removesBatch() {
-        RequestRoute item = item(100L, 1000);
+        RequestRoute item = item("100", 1000);
         registerBatch(5L, 500, item);
         assertTrue(endpoint.release(null, item));
 
@@ -185,7 +185,7 @@ class WorkerEndpointTest {
 
     @Test
     void ipPort_format() {
-        assertEquals("10.0.0.1:8080", endpoint.ipPort());
+        assertEquals("10.0.0.1:8080@0", endpoint.ipPort());
     }
 
     @Test
@@ -316,7 +316,7 @@ class WorkerEndpointTest {
     @Test
     void onWorkerStatusUpdate_calibrates_prefill() {
         WorkerStatusResponse resp = new WorkerStatusResponse();
-        resp.setFinishedTaskInfo(Map.of("100", task(100L, 1000, 0, 1L)));
+        resp.setFinishedTaskInfo(Map.of("100", task("100", 1000, 0, 1L)));
 
         // PrefillEndpoint calibrates even when runningTaskInfo is null
         EndpointTestSupport.applyStatus(endpoint, resp).run();
@@ -357,19 +357,19 @@ class WorkerEndpointTest {
         }
     }
 
-    private RequestRoute item(long requestId, long seqLen) {
+    private RequestRoute item(String requestId, long seqLen) {
         return SchedulingTestConfig.createRoute(
                 ctx(requestId, seqLen), null, null, null, endpoint, null, null, 0L);
     }
 
-    private RequestContext ctx(long requestId, long seqLen) {
+    private RequestContext ctx(String requestId, long seqLen) {
         Request req = Request.builder().requestId(requestId).seqLen(seqLen).build();
         RequestContext ctx = new RequestContext(SchedulingTestConfig.newConfig());
         ctx.data().setRequest(req);
         return ctx;
     }
 
-    private TaskInfo task(long requestId, long inputLength, long prefixLength, long batchId) {
+    private TaskInfo task(String requestId, long inputLength, long prefixLength, long batchId) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setInputLength(inputLength);

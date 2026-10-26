@@ -59,11 +59,44 @@ class VitWorkerSelectorTest {
                 StrategyTestSupport.select(strategy, 3L, RoleType.VIT, "group-a")) {
             assertNotNull(selected);
             assertEquals(RoleType.VIT, StrategyTestSupport.vit(selected).getRole());
-            assertEquals(3L, StrategyTestSupport.vit(selected).getRequestId());
+            assertEquals("3", StrategyTestSupport.vit(selected).getRequestId());
             assertEquals("127.0.0.3", StrategyTestSupport.vit(selected).getServerIp());
             assertEquals(8080, StrategyTestSupport.vit(selected).getHttpPort());
             assertEquals(8081, StrategyTestSupport.vit(selected).getGrpcPort());
             assertEquals("group-a", StrategyTestSupport.vit(selected).getGroup());
+        }
+    }
+
+    @Test
+    void selectedMultiEngineVitPreservesLogicalIdentity() {
+        WorkerStatus first =
+                WorkerStatus.createDiscovered(
+                        RoleType.VIT, "group-a", "127.0.0.3", 8080, 8081, "test-site", null, 0, 2);
+        WorkerStatus second =
+                WorkerStatus.createDiscovered(
+                        RoleType.VIT, "group-a", "127.0.0.3", 8080, 8081, "test-site", null, 1, 2);
+        StrategyTestSupport.publish(
+                first, StrategyTestSupport.response(RoleType.VIT, true, 0L, 0L, 1L));
+        StrategyTestSupport.publish(
+                second, StrategyTestSupport.response(RoleType.VIT, true, 0L, 0L, 1L));
+        StrategyTestSupport.publishEndpoint(
+                endpoints, RoleType.VIT, first.getLogicalIpPort(), first);
+        StrategyTestSupport.publishEndpoint(
+                endpoints, RoleType.VIT, second.getLogicalIpPort(), second);
+        EndpointRegistry directory = endpoints;
+        for (String address : endpoints.endpointAddressSnapshot(RoleType.VIT)) {
+            WorkerStatus endpointStatus = endpoints.get(RoleType.VIT, address).getStatus();
+            directory.currentOrDiscover(RoleType.VIT, address, () -> endpointStatus);
+        }
+        strategy = new VitWorkerSelector(directory);
+
+        try (RequestRoute selected =
+                StrategyTestSupport.select(strategy, 31L, RoleType.VIT, "group-a")) {
+            assertNotNull(selected);
+            assertNotNull(StrategyTestSupport.vit(selected).getEngineIndex());
+            assertEquals(
+                    "127.0.0.3:8080@" + StrategyTestSupport.vit(selected).getEngineIndex(),
+                    StrategyTestSupport.vit(selected).getLogicalIpPort());
         }
     }
 

@@ -1,7 +1,7 @@
 package org.flexlb.sync.schedule;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Failures;
@@ -15,7 +15,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
-/** Retries retirement of confirmed discovery removals and worker-reported failures. */
+/**
+ * Retries retirement of confirmed discovery removals and worker-reported failures.
+ */
 @Component
 public class WorkerRetirementCleaner {
 
@@ -63,7 +65,7 @@ public class WorkerRetirementCleaner {
                             () ->
                                     logger.warn(
                                             "Retiring unavailable worker: {}, role: {}, generation={}, trace={}",
-                                            status.getIpPort(),
+                                            status.getLogicalIpPort(),
                                             status.getRole(),
                                             status.getGenerationId(),
                                             status.trace().snapshot().compact()));

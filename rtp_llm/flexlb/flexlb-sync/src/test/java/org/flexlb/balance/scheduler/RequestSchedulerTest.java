@@ -17,7 +17,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -47,7 +47,6 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.doAnswer;
@@ -72,7 +71,7 @@ class RequestSchedulerTest {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
-        RecentCacheKeyTraceReporter trace = mock(RecentCacheKeyTraceReporter.class);
+        TheoryCacheHitReporter trace = mock(TheoryCacheHitReporter.class);
         AbstractRequestScheduler owner =
                 SchedulerTestSupport.create(
                         service,
@@ -84,7 +83,7 @@ class RequestSchedulerTest {
                         new PlacementAvailability());
         RequestScheduler scheduler = owner;
         try {
-            RequestContext vision = context(config, 918L);
+            RequestContext vision = context(config, "918");
             vision.data()
                     .setRequest(vision.data().getRequest().toBuilder().vitRouteOnly(true).build());
             vision.data().setGenerateInputPb(null);
@@ -98,14 +97,14 @@ class RequestSchedulerTest {
             verify(router, never()).select(any(), any());
             org.mockito.Mockito.verifyNoInteractions(trace);
 
-            RequestContext missingPayload = context(config, 918L);
+            RequestContext missingPayload = context(config, "918");
             missingPayload.data().setGenerateInputPb(null);
             assertEquals(
                     StrategyErrorType.GENERATE_INPUT_REQUIRED.getErrorCode(),
                     scheduler.submit(missingPayload).join().getCode());
             assertEquals(0, owner.requests.liveRequestCount());
 
-            RequestContext pd = context(config, 918L);
+            RequestContext pd = context(config, "918");
             when(router.select(pd, null))
                     .thenReturn(
                             PlacementResult.rejected(
@@ -135,13 +134,13 @@ class RequestSchedulerTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class),
+                        mock(TheoryCacheHitReporter.class),
                         router,
                         org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
                         new PlacementAvailability());
         RequestScheduler scheduler = owner;
         try {
-            RequestContext request = context(config, 919L);
+            RequestContext request = context(config, "919");
             request.data()
                     .setRequest(
                             request.data().getRequest().toBuilder()
@@ -169,8 +168,8 @@ class RequestSchedulerTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
-        RequestContext context = context(config, 990009L);
+                        mock(TheoryCacheHitReporter.class));
+        RequestContext context = context(config, "990009");
         when(router.resolvePolicyGroup(context))
                 .thenAnswer(
                         invocation -> {
@@ -193,7 +192,7 @@ class RequestSchedulerTest {
             assertEquals(
                     RequestState.Phase.CANCELLED,
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
-                            .getRequestState(990009L, 0L)
+                            .getRequestState("990009", 0L)
                             .state());
             assertEquals(
                     0,
@@ -224,8 +223,8 @@ class RequestSchedulerTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
-        RequestContext context = context(config, 990008L);
+                        mock(TheoryCacheHitReporter.class));
+        RequestContext context = context(config, "990008");
         CountDownLatch decisionControlEntered = new CountDownLatch(1);
         CountDownLatch releaseDecisionControl = new CountDownLatch(1);
         Thread ingressThread = Thread.currentThread();
@@ -280,7 +279,7 @@ class RequestSchedulerTest {
             assertEquals(
                     RequestState.Phase.CANCELLED,
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
-                            .getRequestState(990008L, 0L)
+                            .getRequestState("990008", 0L)
                             .state());
             assertEquals(
                     0,
@@ -314,20 +313,20 @@ class RequestSchedulerTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         CountDownLatch controlStarted = new CountDownLatch(1);
         CountDownLatch releaseControl = new CountDownLatch(1);
         AtomicReference<Thread> targetOwner = new AtomicReference<>();
         doAnswer(
                         invocation -> {
-                            long id =
+                            String id =
                                     ((RequestContext) invocation.getArgument(0))
                                             .data()
                                             .getRequestId();
-                            if (id == 990006L) {
+                            if (id.equals("990006")) {
                                 controlStarted.countDown();
                                 assertTrue(releaseControl.await(5, TimeUnit.SECONDS));
-                            } else if (id == 990007L) {
+                            } else if (id.equals("990007")) {
                                 targetOwner.set(Thread.currentThread());
                             }
                             return invocation.callRealMethod();
@@ -344,18 +343,18 @@ class RequestSchedulerTest {
                                 org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
                                 new PlacementAvailability());
         try {
-            RequestContext gate = context(config, 990006L);
+            RequestContext gate = context(config, "990006");
             CompletableFuture<Response> gateFuture =
                     RequestProtocolTestSupport.register(lifecycle, gate);
-            lifecycle.cancel(990006L, 0L, CancelReason.CLIENT_CANCELLED);
+            lifecycle.cancel("990006", 0L, CancelReason.CLIENT_CANCELLED);
             assertTrue(coordinator.trySubmitRegistered(gate));
             assertTrue(controlStarted.await(5, TimeUnit.SECONDS));
-            RequestContext target = context(config, 990007L);
+            RequestContext target = context(config, "990007");
             CompletableFuture<Response> future =
                     RequestProtocolTestSupport.register(lifecycle, target);
             assertTrue(coordinator.trySubmitRegistered(target));
             if (priorBusinessCancel) {
-                lifecycle.cancel(990007L, 0L, CancelReason.CLIENT_CANCELLED);
+                lifecycle.cancel("990007", 0L, CancelReason.CLIENT_CANCELLED);
                 Response success = new Response();
                 success.setSuccess(true);
                 assertFalse(future.complete(success));
@@ -367,7 +366,7 @@ class RequestSchedulerTest {
             assertEquals(
                     RequestState.Phase.CANCEL_REQUESTED,
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
-                            .getRequestState(990007L, 0L)
+                            .getRequestState("990007", 0L)
                             .state());
             assertEquals(
                     1,
@@ -377,7 +376,7 @@ class RequestSchedulerTest {
             RequestProtocolTestSupport.awaitCondition(
                     () ->
                             org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
-                                            .getRequestState(990007L, 0L)
+                                            .getRequestState("990007", 0L)
                                             .state()
                                     == RequestState.Phase.CANCELLED);
             assertThrows(java.util.concurrent.CancellationException.class, future::join);
@@ -408,8 +407,8 @@ class RequestSchedulerTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
-        RequestContext context = context(config, 990005L);
+                        mock(TheoryCacheHitReporter.class));
+        RequestContext context = context(config, "990005");
         CountDownLatch planning = new CountDownLatch(1);
         CountDownLatch releasePlan = new CountDownLatch(1);
         CountDownLatch closeSettled = new CountDownLatch(1);
@@ -510,13 +509,15 @@ class RequestSchedulerTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         CountDownLatch controlStarted = new CountDownLatch(1);
         CountDownLatch releaseControl = new CountDownLatch(1);
         doAnswer(
                         invocation -> {
-                            if (((RequestContext) invocation.getArgument(0)).data().getRequestId()
-                                    == 990003L) {
+                            if (((RequestContext) invocation.getArgument(0))
+                                    .data()
+                                    .getRequestId()
+                                    .equals("990003")) {
                                 controlStarted.countDown();
                                 assertTrue(releaseControl.await(5, TimeUnit.SECONDS));
                             }
@@ -526,8 +527,10 @@ class RequestSchedulerTest {
                 .resolveControl(any(), org.mockito.ArgumentMatchers.eq(false));
         doAnswer(
                         invocation -> {
-                            if (((RequestContext) invocation.getArgument(0)).data().getRequestId()
-                                    == 990004L) {
+                            if (((RequestContext) invocation.getArgument(0))
+                                    .data()
+                                    .getRequestId()
+                                    .equals("990004")) {
                                 if (futureCancellation) {
                                     CompletableFuture<Response> future =
                                             ((RequestContext) invocation.getArgument(0))
@@ -539,7 +542,7 @@ class RequestSchedulerTest {
                                             RequestState.Phase.CANCEL_REQUESTED,
                                             lifecycle
                                                     .cancel(
-                                                            990004L,
+                                                            "990004",
                                                             0L,
                                                             CancelReason.CLIENT_CANCELLED)
                                                     .state());
@@ -560,13 +563,13 @@ class RequestSchedulerTest {
                                 new PlacementAvailability());
         Thread closer = null;
         try {
-            RequestContext gate = context(config, 990003L);
+            RequestContext gate = context(config, "990003");
             CompletableFuture<Response> gateFuture =
                     RequestProtocolTestSupport.register(lifecycle, gate);
-            lifecycle.cancel(990003L, 0L, CancelReason.CLIENT_CANCELLED);
+            lifecycle.cancel("990003", 0L, CancelReason.CLIENT_CANCELLED);
             assertTrue(coordinator.trySubmitRegistered(gate));
             assertTrue(controlStarted.await(5, TimeUnit.SECONDS));
-            RequestContext target = context(config, 990004L);
+            RequestContext target = context(config, "990004");
             CompletableFuture<Response> future =
                     RequestProtocolTestSupport.register(lifecycle, target);
             assertTrue(coordinator.trySubmitRegistered(target));
@@ -586,7 +589,7 @@ class RequestSchedulerTest {
                         () ->
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                                         lifecycle)
-                                                .getRequestState(990004L, 0L)
+                                                .getRequestState("990004", 0L)
                                                 .state()
                                         == RequestState.Phase.CANCELLED);
                 assertThrows(java.util.concurrent.CancellationException.class, future::join);
@@ -629,7 +632,7 @@ class RequestSchedulerTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         QueuedRequestScheduler coordinator =
                 (QueuedRequestScheduler)
                         RequestProtocolTestSupport.injectPlacementDependencies(
@@ -639,7 +642,7 @@ class RequestSchedulerTest {
                                 mock(DeliveryMetricsReporter.class),
                                 org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
                                 new PlacementAvailability());
-        RequestContext context = context(config, 990002L);
+        RequestContext context = context(config, "990002");
         CompletableFuture<Response> future =
                 RequestProtocolTestSupport.register(lifecycle, context);
         CountDownLatch controlEntered = new CountDownLatch(1);
@@ -663,7 +666,7 @@ class RequestSchedulerTest {
             } else {
                 assertEquals(
                         RequestState.Phase.CANCEL_REQUESTED,
-                        lifecycle.cancel(990002L, 0L, CancelReason.CLIENT_CANCELLED).state());
+                        lifecycle.cancel("990002", 0L, CancelReason.CLIENT_CANCELLED).state());
                 assertFalse(future.isDone());
             }
             assertTrue(controlEntered.await(5, TimeUnit.SECONDS));
@@ -671,7 +674,7 @@ class RequestSchedulerTest {
             assertEquals(
                     RequestState.Phase.CANCEL_REQUESTED,
                     SchedulerTestSupport.repository(lifecycle)
-                            .getRequestState(990002L, 0L)
+                            .getRequestState("990002", 0L)
                             .state());
             assertTrue(coordinator.trySubmitRegistered(context));
             releaseControl.countDown();
@@ -680,7 +683,7 @@ class RequestSchedulerTest {
                         () ->
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                                         lifecycle)
-                                                .getRequestState(990002L, 0L)
+                                                .getRequestState("990002", 0L)
                                                 .state()
                                         == RequestState.Phase.CANCELLED);
                 assertThrows(java.util.concurrent.CancellationException.class, future::join);
@@ -720,8 +723,8 @@ class RequestSchedulerTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
-        RequestContext context = context(config, 990001L);
+                        mock(TheoryCacheHitReporter.class));
+        RequestContext context = context(config, "990001");
         CountDownLatch planning = new CountDownLatch(1);
         CountDownLatch releasePlan = new CountDownLatch(1);
         CountDownLatch planClosed = new CountDownLatch(1);
@@ -756,16 +759,16 @@ class RequestSchedulerTest {
             assertTrue(planning.await(5, TimeUnit.SECONDS));
             if (deadline) {
                 RequestContext requestContext =
-                        SchedulerTestSupport.repository(lifecycle).findActive(990001L);
+                        SchedulerTestSupport.repository(lifecycle).findActive("990001");
                 var exact = requestContext.snapshot().deadlines().request();
                 lifecycle.onDeadline(exact, exact.atMs());
             } else {
-                lifecycle.cancel(990001L, 0L, CancelReason.CLIENT_CANCELLED);
+                lifecycle.cancel("990001", 0L, CancelReason.CLIENT_CANCELLED);
             }
             assertEquals(
                     RequestState.Phase.CANCEL_REQUESTED,
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
-                            .getRequestState(990001L, 0L)
+                            .getRequestState("990001", 0L)
                             .state());
             assertFalse(future.isDone(), "the admission claim still owns its route");
             RequestProtocolTestSupport.awaitCondition(
@@ -828,8 +831,8 @@ class RequestSchedulerTest {
         RequestWorkerSelector router = mockRouter();
 
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
-        RequestContext unavailable = RequestProtocolTestSupport.context(config, 910001L);
-        RequestContext healthy = RequestProtocolTestSupport.context(config, 910002L);
+        RequestContext unavailable = RequestProtocolTestSupport.context(config, "910001");
+        RequestContext healthy = RequestProtocolTestSupport.context(config, "910002");
         CompletableFuture<Response> first = new CompletableFuture<>();
         CompletableFuture<Response> second = new CompletableFuture<>();
         when(lifecycle.register(
@@ -852,9 +855,9 @@ class RequestSchedulerTest {
                             registered.data().setFuture(second);
                             return second;
                         });
-        when(lifecycle.claimAdmissionHandle(910001L, first))
+        when(lifecycle.claimAdmissionHandle("910001", first))
                 .thenReturn(mock(AdmissionHandle.class));
-        when(lifecycle.claimAdmissionHandle(910002L, second))
+        when(lifecycle.claimAdmissionHandle("910002", second))
                 .thenReturn(mock(AdmissionHandle.class));
         when(router.resolvePolicyGroup(unavailable)).thenReturn("unavailable-group");
         when(router.resolvePolicyGroup(healthy)).thenReturn(healthyGroup);
@@ -913,7 +916,7 @@ class RequestSchedulerTest {
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
         DecodeAdmission eviction = org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock();
         PlacementAvailability availability = new PlacementAvailability();
-        RequestContext context = context(config, 897L, 90);
+        RequestContext context = context(config, "897", 90);
         CompletableFuture<Response> future = new CompletableFuture<>();
         when(lifecycle.register(
                         org.mockito.ArgumentMatchers.eq(context),
@@ -926,7 +929,7 @@ class RequestSchedulerTest {
                             return future;
                         });
         AdmissionHandle handle = RequestProtocolTestSupport.admissionHandle(context);
-        when(lifecycle.claimAdmissionHandle(897L, future)).thenReturn(handle);
+        when(lifecycle.claimAdmissionHandle("897", future)).thenReturn(handle);
         DecodeEndpoint selectedEndpoint = RequestProtocolTestSupport.decodeEndpoint();
         when(selectedEndpoint.ipPort()).thenReturn("selected-decode:8080");
         RequestRoute selectedRoute = mock(RequestRoute.class);
@@ -950,7 +953,7 @@ class RequestSchedulerTest {
 
         when(selectedRoute.decodeEp()).thenReturn(selectedEndpoint);
         when(selectedRoute.requestId()).thenReturn(context.data().getRequestId());
-        var reservation = new DecodeResources.ReservationHandle(1L, 897L, 7L);
+        var reservation = new DecodeResources.ReservationHandle(1L, "897", 7L);
         when(selectedEndpoint.markQueued(any(), org.mockito.ArgumentMatchers.eq(reservation)))
                 .thenReturn(
                         DecodeResources.ResourceChange.of(
@@ -1027,7 +1030,7 @@ class RequestSchedulerTest {
                         StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                         rejection.getValue().getCode());
             }
-            verify(lifecycle, times(1)).claimAdmissionHandle(897L, future);
+            verify(lifecycle, times(1)).claimAdmissionHandle("897", future);
             boolean hasReservation =
                     !outcome.equals("rejected")
                             && !outcome.equals("error")
@@ -1079,7 +1082,7 @@ class RequestSchedulerTest {
                 .thenReturn(new EndpointRegistry.Counts(0, 1));
         AtomicInteger availableSlots = new AtomicInteger();
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
-        RequestContext context = context(config, 899L);
+        RequestContext context = context(config, "899");
         CompletableFuture<Response> future = new CompletableFuture<>();
         when(lifecycle.register(
                         org.mockito.ArgumentMatchers.eq(context),
@@ -1091,7 +1094,7 @@ class RequestSchedulerTest {
                             registered.data().setFuture(future);
                             return future;
                         });
-        when(lifecycle.claimAdmissionHandle(899L, future)).thenReturn(mock(AdmissionHandle.class));
+        when(lifecycle.claimAdmissionHandle("899", future)).thenReturn(mock(AdmissionHandle.class));
         RequestRoute route = mock(RequestRoute.class);
         PrefillEndpoint endpoint = mockPrefillEndpoint("127.0.0.1", 8000);
         when(route.blockedEndpointIfCurrent(any(PlacementKey.class))).thenReturn(endpoint);
@@ -1140,7 +1143,7 @@ class RequestSchedulerTest {
         RequestWorkerSelector router = mockRouter();
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
-        RequestContext context = context(config, 900L);
+        RequestContext context = context(config, "900");
         CompletableFuture<Response> future = new CompletableFuture<>();
         when(lifecycle.register(
                         org.mockito.ArgumentMatchers.eq(context),
@@ -1152,7 +1155,7 @@ class RequestSchedulerTest {
                             registered.data().setFuture(future);
                             return future;
                         });
-        when(lifecycle.claimAdmissionHandle(900L, future)).thenReturn(mock(AdmissionHandle.class));
+        when(lifecycle.claimAdmissionHandle("900", future)).thenReturn(mock(AdmissionHandle.class));
         when(router.select(context, null))
                 .thenReturn(
                         PlacementResult.rejected(
@@ -1183,7 +1186,7 @@ class RequestSchedulerTest {
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
         DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
         PlacementAvailability availability = new PlacementAvailability();
-        RequestContext gate = context(config, 900L);
+        RequestContext gate = context(config, "900");
         CompletableFuture<Response> gateFuture = new CompletableFuture<>();
         CountDownLatch gatePlanningStarted = new CountDownLatch(1);
         CountDownLatch releaseGatePlanning = new CountDownLatch(1);
@@ -1197,7 +1200,7 @@ class RequestSchedulerTest {
                             registered.data().setFuture(gateFuture);
                             return gateFuture;
                         });
-        when(lifecycle.claimAdmissionHandle(900L, gateFuture))
+        when(lifecycle.claimAdmissionHandle("900", gateFuture))
                 .thenReturn(mock(AdmissionHandle.class));
         when(router.select(gate, null))
                 .thenAnswer(
@@ -1211,7 +1214,7 @@ class RequestSchedulerTest {
         CountDownLatch aggregatePlansStarted = new CountDownLatch(6);
         List<RequestContext> contexts = new ArrayList<>();
         for (long requestId = 901L; requestId < 907L; requestId++) {
-            RequestContext context = context(config, requestId);
+            RequestContext context = context(config, String.valueOf(requestId));
             CompletableFuture<Response> future = new CompletableFuture<>();
             RequestRoute route = mock(RequestRoute.class);
             when(lifecycle.register(
@@ -1224,7 +1227,7 @@ class RequestSchedulerTest {
                                 registered.data().setFuture(future);
                                 return future;
                             });
-            when(lifecycle.claimAdmissionHandle(requestId, future))
+            when(lifecycle.claimAdmissionHandle(String.valueOf(requestId), future))
                     .thenReturn(mock(AdmissionHandle.class));
             when(router.select(context, null))
                     .thenAnswer(
@@ -1274,8 +1277,8 @@ class RequestSchedulerTest {
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
         DecodeAdmission decodeCapacity =
                 org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock();
-        RequestContext lowPriority = context(config, 910L, 10);
-        RequestContext highPriority = context(config, 911L, 90);
+        RequestContext lowPriority = context(config, "910", 10);
+        RequestContext highPriority = context(config, "911", 90);
         CompletableFuture<Response> lowFuture = new CompletableFuture<>();
         CompletableFuture<Response> highFuture = new CompletableFuture<>();
         when(lifecycle.register(
@@ -1298,9 +1301,9 @@ class RequestSchedulerTest {
                             registered.data().setFuture(highFuture);
                             return highFuture;
                         });
-        when(lifecycle.claimAdmissionHandle(910L, lowFuture))
+        when(lifecycle.claimAdmissionHandle("910", lowFuture))
                 .thenReturn(mock(AdmissionHandle.class));
-        when(lifecycle.claimAdmissionHandle(911L, highFuture))
+        when(lifecycle.claimAdmissionHandle("911", highFuture))
                 .thenReturn(mock(AdmissionHandle.class));
         when(router.select(lowPriority, null))
                 .thenReturn(PlacementResult.blocked(PlacementKey.anyGroup(RoleType.PREFILL)));
@@ -1343,8 +1346,8 @@ class RequestSchedulerTest {
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
         PlacementAvailability availability = new PlacementAvailability();
         PlacementKey blocker = PlacementKey.anyGroup(RoleType.PREFILL);
-        RequestContext expired = context(config, 801L);
-        RequestContext follower = context(config, 802L);
+        RequestContext expired = context(config, "801");
+        RequestContext follower = context(config, "802");
         CompletableFuture<Response> expiredFuture = new CompletableFuture<>();
         CompletableFuture<Response> followerFuture = new CompletableFuture<>();
         when(lifecycle.register(
@@ -1367,9 +1370,9 @@ class RequestSchedulerTest {
                             registered.data().setFuture(followerFuture);
                             return followerFuture;
                         });
-        when(lifecycle.claimAdmissionHandle(801L, expiredFuture))
+        when(lifecycle.claimAdmissionHandle("801", expiredFuture))
                 .thenReturn(mock(AdmissionHandle.class));
-        when(lifecycle.claimAdmissionHandle(802L, followerFuture))
+        when(lifecycle.claimAdmissionHandle("802", followerFuture))
                 .thenReturn(mock(AdmissionHandle.class));
         when(router.select(any(), any())).thenReturn(PlacementResult.blocked(blocker));
         RequestScheduler scheduler =
@@ -1405,8 +1408,8 @@ class RequestSchedulerTest {
         RequestWorkerSelector router = mockRouter();
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
         PlacementAvailability availability = new PlacementAvailability();
-        RequestContext blocked = context(config, 803L);
-        RequestContext independent = context(config, 804L);
+        RequestContext blocked = context(config, "803");
+        RequestContext independent = context(config, "804");
         CompletableFuture<Response> blockedFuture = new CompletableFuture<>();
         CompletableFuture<Response> independentFuture = new CompletableFuture<>();
         when(lifecycle.register(
@@ -1429,9 +1432,9 @@ class RequestSchedulerTest {
                             registered.data().setFuture(independentFuture);
                             return independentFuture;
                         });
-        when(lifecycle.claimAdmissionHandle(803L, blockedFuture))
+        when(lifecycle.claimAdmissionHandle("803", blockedFuture))
                 .thenReturn(mock(AdmissionHandle.class));
-        when(lifecycle.claimAdmissionHandle(804L, independentFuture))
+        when(lifecycle.claimAdmissionHandle("804", independentFuture))
                 .thenReturn(mock(AdmissionHandle.class));
         PrefillEndpoint fullEndpoint = mockPrefillEndpoint("full-prefill", 8080);
         PrefillEndpoint availableEndpoint = mock(PrefillEndpoint.class);
@@ -1503,7 +1506,7 @@ class RequestSchedulerTest {
             assertTrue(fixture.requests.get(1).retryBlockedReturn.await(5, TimeUnit.SECONDS));
             fixture.awaitIndependentCommit();
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(fixture.lifecycle, 2);
-            assertEquals(List.of(820L), fixture.admitted);
+            assertEquals(List.of("820"), fixture.admitted);
             assertEquals(0, fixture.availableSlots.get());
             assertEquals(2, fixture.requests.get(0).attempts.get());
             assertEquals(2, fixture.requests.get(1).attempts.get());
@@ -1519,7 +1522,7 @@ class RequestSchedulerTest {
             assertEquals(1, fixture.requests.get(2).attempts.get());
             fixture.releaseSlots(2);
             fixture.awaitAllPublished();
-            assertEquals(List.of(820L, 821L, 822L), fixture.admitted);
+            assertEquals(List.of("820", "821", "822"), fixture.admitted);
             assertEquals(0, fixture.availableSlots.get());
         }
     }
@@ -1550,7 +1553,7 @@ class RequestSchedulerTest {
             fixture.awaitIndependentCommit();
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(fixture.lifecycle, 2);
 
-            assertEquals(List.of(820L), fixture.admitted);
+            assertEquals(List.of("820"), fixture.admitted);
             assertEquals(0, fixture.availableSlots.get());
             assertEquals(
                     3,
@@ -1583,7 +1586,7 @@ class RequestSchedulerTest {
             }
             fixture.availability.changed(fixture.key);
             fixture.awaitAllPublished();
-            assertEquals(List.of(820L, 821L, 822L), fixture.admitted);
+            assertEquals(List.of("820", "821", "822"), fixture.admitted);
             assertEquals(0, fixture.availableSlots.get(), "the original worker stayed full");
             for (CapacityRequest request : fixture.requests) {
                 assertEquals(1, request.attempts.get(), "no retry returned to the full worker");
@@ -1605,7 +1608,7 @@ class RequestSchedulerTest {
             fixture.awaitIndependentCommit();
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(fixture.lifecycle, 1);
 
-            assertEquals(List.of(821L), fixture.admitted);
+            assertEquals(List.of("821"), fixture.admitted);
             assertEquals(0, fixture.availableSlots.get());
             assertEquals(
                     1,
@@ -1630,7 +1633,7 @@ class RequestSchedulerTest {
         try (CapacityFixture fixture = new CapacityFixture(0, false, headFuture, 1)) {
             fixture.submitBlockedRequests();
             PrefillEndpoint independent = mockPrefillEndpoint("independent", 8080);
-            CapacityRequest first = fixture.createRequest(840L, independent);
+            CapacityRequest first = fixture.createRequest("840", independent);
             CountDownLatch publicationStarted = new CountDownLatch(1);
             CountDownLatch allowPublication = new CountDownLatch(1);
             first.beforePublication =
@@ -1648,7 +1651,7 @@ class RequestSchedulerTest {
                         1,
                         callbacks.size(),
                         "the completed active request's cleanup must still be deferred");
-                CapacityRequest second = fixture.createRequest(841L, independent);
+                CapacityRequest second = fixture.createRequest("841", independent);
                 fixture.scheduler.submit(second.context);
                 allowPublication.countDown();
                 second.future.get(5, TimeUnit.SECONDS);
@@ -1666,7 +1669,7 @@ class RequestSchedulerTest {
                 // that was removed from the ordered queue during pruning.
                 fixture.availability.changed(fixture.key);
                 fixture.requests.get(1).future.get(5, TimeUnit.SECONDS);
-                assertEquals(List.of(821L), fixture.admitted);
+                assertEquals(List.of("821"), fixture.admitted);
                 assertEquals(0, fixture.availableSlots.get());
                 assertEquals(1, fixture.requests.get(0).attempts.get());
             } finally {
@@ -1682,7 +1685,7 @@ class RequestSchedulerTest {
             fixture.releaseSlots(initiallyReleasedSlots);
             fixture.awaitAllPublished();
 
-            assertEquals(List.of(820L, 821L, 822L), fixture.admitted);
+            assertEquals(List.of("820", "821", "822"), fixture.admitted);
             assertEquals(0, fixture.availableSlots.get());
         }
     }
@@ -1696,7 +1699,7 @@ class RequestSchedulerTest {
         RequestWorkerSelector router = mockRouter();
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
         PlacementAvailability availability = new PlacementAvailability();
-        RequestContext context = context(config, 807L);
+        RequestContext context = context(config, "807");
         CompletableFuture<Response> future = new CompletableFuture<>();
         when(lifecycle.register(
                         org.mockito.ArgumentMatchers.eq(context),
@@ -1708,7 +1711,7 @@ class RequestSchedulerTest {
                             registered.data().setFuture(future);
                             return future;
                         });
-        when(lifecycle.claimAdmissionHandle(807L, future))
+        when(lifecycle.claimAdmissionHandle("807", future))
                 .thenReturn(mock(AdmissionHandle.class), mock(AdmissionHandle.class));
         PrefillEndpoint staleEndpoint = mockPrefillEndpoint("stale-prefill", 8080);
         RequestRoute staleRoute = mock(RequestRoute.class);
@@ -1832,16 +1835,20 @@ class RequestSchedulerTest {
         return endpoint;
     }
 
-    private static RequestContext context(FlexlbConfig config, long requestId) {
+    private static RequestContext context(FlexlbConfig config, String requestId) {
         return context(config, requestId, 50);
     }
 
-    private static RequestContext context(FlexlbConfig config, long requestId, int priority) {
+    private static RequestContext context(FlexlbConfig config, String requestId, int priority) {
         RequestContext context = new RequestContext(config);
         Request request = Request.builder().requestId(requestId).rawPriority(priority).build();
         context.data().setRequest(request);
         context.data()
-                .setGenerateInputPb(com.google.protobuf.ByteString.copyFromUtf8("test-input"));
+                .setGenerateInputPb(
+                        org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
+                                .setRequestId(Long.parseLong(requestId))
+                                .build()
+                                .toByteString());
         context.data()
                 .setSchedulingMetadata(
                         SchedulingMetadata.explicit(
@@ -1854,7 +1861,8 @@ class RequestSchedulerTest {
      */
     private static final class CapacityFixture implements AutoCloseable {
 
-        private final ConcurrentMap<Long, CapacityRequest> requestsById = new ConcurrentHashMap<>();
+        private final ConcurrentMap<String, CapacityRequest> requestsById =
+                new ConcurrentHashMap<>();
 
         private final RequestWorkerSelector router = mockRouter();
 
@@ -1870,7 +1878,7 @@ class RequestSchedulerTest {
 
         private final AtomicInteger availableSlots = new AtomicInteger();
 
-        private final List<Long> admitted = new CopyOnWriteArrayList<>();
+        private final List<String> admitted = new CopyOnWriteArrayList<>();
 
         private final List<CapacityRequest> requests = new ArrayList<>();
 
@@ -1933,11 +1941,11 @@ class RequestSchedulerTest {
                                 context.data().setFuture(future);
                                 return future;
                             });
-            when(lifecycle.claimAdmissionHandle(anyLong(), any()))
+            when(lifecycle.claimAdmissionHandle(org.mockito.ArgumentMatchers.anyString(), any()))
                     .thenAnswer(
                             invocation -> {
                                 var request =
-                                        requestsById.get(invocation.getArgument(0, Long.class));
+                                        requestsById.get(invocation.getArgument(0, String.class));
                                 var handle = mock(AdmissionHandle.class);
                                 doAnswer(
                                                 finished -> {
@@ -1960,7 +1968,7 @@ class RequestSchedulerTest {
                                 CapacityRequest request =
                                         requestsById.get(context.data().getRequestId());
                                 if (request.plans.incrementAndGet() == 2
-                                        && context.data().getRequestId() == 820L
+                                        && context.data().getRequestId().equals("820")
                                         && pauseHeadRetry) {
                                     headRetryStarted.countDown();
                                     assertTrue(
@@ -1976,8 +1984,9 @@ class RequestSchedulerTest {
                                 QueuedRequestScheduler.Plan plan = invocation.getArgument(0);
                                 RequestContext context =
                                         RequestProtocolTestSupport.planContext(plan);
-                                long requestId = context.data().getRequestId();
-                                CapacityRequest request = requestsById.get(requestId);
+                                String requestId = context.data().getRequestId();
+                                CapacityRequest request =
+                                        requestsById.get(String.valueOf(requestId));
                                 AlternativeRoute alternative = request.alternative;
                                 if (alternative != null
                                         && RequestProtocolTestSupport.planRouting(plan)
@@ -2007,8 +2016,9 @@ class RequestSchedulerTest {
                                         }
                                         return PlacementResult.blocked(key);
                                     }
-                                    admitted.add(requestId);
-                                    if (requestId == 820L && slotsReleasedDuringPublication > 0) {
+                                    admitted.add(Long.toString(Long.parseLong(requestId)));
+                                    if (requestId.equals("820")
+                                            && slotsReleasedDuringPublication > 0) {
                                         // Status reconciliation releases capacity before
                                         // publication returns
                                         // and before the global queue can retire this active
@@ -2025,7 +2035,7 @@ class RequestSchedulerTest {
             // The exact placement scope finishes after the coordinator retires the queue entry.
             // A delayed Future callback therefore cannot hide a lost capacity handoff.
             for (long requestId = 820L; requestId < 823L; requestId++) {
-                requests.add(createRequest(requestId, endpoint));
+                requests.add(createRequest(String.valueOf(requestId), endpoint));
             }
             scheduler =
                     RequestProtocolTestSupport.injectPlacementDependencies(
@@ -2037,13 +2047,13 @@ class RequestSchedulerTest {
                             availability);
         }
 
-        private CapacityRequest createRequest(long requestId, PrefillEndpoint target) {
+        private CapacityRequest createRequest(String requestId, PrefillEndpoint target) {
             CapacityRequest request =
                     new CapacityRequest(
                             config,
                             requestId,
                             target == endpoint,
-                            requestId == 820L ? headFuture : new CompletableFuture<>());
+                            requestId.equals("820") ? headFuture : new CompletableFuture<>());
             RequestRoute route = request.route;
             RequestRoute item = request.item;
             ServerStatus prefill = mock(ServerStatus.class);
@@ -2081,7 +2091,7 @@ class RequestSchedulerTest {
         private void awaitIndependentCommit() throws Exception {
             long requestId = nextIndependentId++;
             PrefillEndpoint independent = mockPrefillEndpoint("independent-" + requestId, 8080);
-            CapacityRequest request = createRequest(requestId, independent);
+            CapacityRequest request = createRequest(String.valueOf(requestId), independent);
             scheduler.submit(request.context);
             request.future.get(5, TimeUnit.SECONDS);
         }
@@ -2121,7 +2131,7 @@ class RequestSchedulerTest {
 
         private CapacityRequest(
                 FlexlbConfig config,
-                long requestId,
+                String requestId,
                 boolean primaryEndpoint,
                 CompletableFuture<Response> future) {
             context = context(config, requestId);
@@ -2132,7 +2142,7 @@ class RequestSchedulerTest {
 
     private static final class Fixture {
 
-        private final long requestId = 701L;
+        private final String requestId = "701";
 
         private final FlexlbConfig config = SchedulingTestConfig.batchConfig();
 

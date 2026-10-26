@@ -128,16 +128,17 @@ class SchedulingErrorCodeMatrixTest {
             if (scenario.equals("duplicate")) {
                 fixture.reserveDecode(70);
                 var original = fixture.service.submit(fixture.context());
-                assertFailure(fixture.schedule(malformed), 8406, UNSPECIFIED, "duplicate");
+                assertFailure(fixture.schedule(malformed), 8406, UNSPECIFIED, "generate_input");
                 assertFalse(original.isDone());
-                fixture.service.cancel(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED);
+                fixture.service.cancel(
+                        String.valueOf(REQUEST_ID), 0L, CancelReason.CLIENT_CANCELLED);
                 assertFailure(original.get(5, TimeUnit.SECONDS), 8504, UNSPECIFIED, "cancel");
             } else if (scenario.equals("expired")) {
                 malformed
                         .data()
                         .setSchedulingMetadata(
                                 SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1));
-                assertFailure(fixture.schedule(malformed), 8431, RESOURCE_EXHAUSTED, "expired");
+                assertFailure(fixture.schedule(malformed), 8406, UNSPECIFIED, "generate_input");
             } else {
                 assertTrue(fixture.schedule(malformed).isSuccess());
             }
@@ -167,7 +168,9 @@ class SchedulingErrorCodeMatrixTest {
             int priority, int code, AdmissionRejectReason reason, String message) throws Exception {
         try (Fixture fixture = new Fixture("DIRECT", 1, 0L)) {
             assertTrue(
-                    fixture.schedule(fixture.harness.context(REQUEST_ID - 1, priority))
+                    fixture.schedule(
+                                    fixture.harness.context(
+                                            String.valueOf(REQUEST_ID - 1), priority))
                             .isSuccess());
             RequestContext context = fixture.context();
             Response failure = fixture.schedule(context);
@@ -283,7 +286,7 @@ class SchedulingErrorCodeMatrixTest {
             assertFailure(
                     fixture.schedule(fixture.context()), 8406, UNSPECIFIED, "duplicate request_id");
             assertFalse(original.isDone());
-            fixture.service.cancel(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED);
+            fixture.service.cancel(String.valueOf(REQUEST_ID), 0L, CancelReason.CLIENT_CANCELLED);
             assertFailure(original.get(5, TimeUnit.SECONDS), 8504, UNSPECIFIED, "cancel");
             assertEquals(1, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
@@ -303,18 +306,18 @@ class SchedulingErrorCodeMatrixTest {
                     "missing serialized generate_input");
             RequestContext malformed = fixture.context();
             malformed.data().setGenerateInputPb(ByteString.copyFrom(new byte[] {(byte) 0xff}));
-            assertFailure(fixture.schedule(malformed), 8510, UNSPECIFIED, "build");
+            assertFailure(fixture.schedule(malformed), 8406, UNSPECIFIED, "generate_input");
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
         }
     }
 
     private static void assertQueueWaitPv(RequestContext context, Response failure, String role) {
         assertSame(failure, context.data().getResponse());
+        context.data().setSuccess(failure.isSuccess());
+        context.data().setErrorMessage(failure.getErrorMessage());
         PvLogData pv =
                 new PvLogData(
-                        context,
-                        failure.isSuccess(),
-                        failure.getErrorMessage(),
+                        context.data(),
                         failure.getCode(),
                         RESOURCE_EXHAUSTED.name(),
                         "MASTER",
@@ -384,7 +387,7 @@ class SchedulingErrorCodeMatrixTest {
         }
 
         RequestContext context() {
-            return harness.context(REQUEST_ID, 50);
+            return harness.context(String.valueOf(REQUEST_ID), 50);
         }
 
         Response schedule(RequestContext context) throws Exception {
@@ -396,7 +399,7 @@ class SchedulingErrorCodeMatrixTest {
             try (var pin = endpoint.tryPinGeneration()) {
                 assertNotNull(
                         SchedulerTestSupport.reserveUnqueuedDecode(
-                                endpoint, pin, REQUEST_ID - 1, 0L, 0L, priority));
+                                endpoint, pin, String.valueOf(REQUEST_ID - 1), 0L, 0L, priority));
             }
         }
 

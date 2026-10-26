@@ -25,7 +25,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -60,7 +60,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** DIRECT uses real admission ledgers and lifecycle while bypassing waiting queues. */
+/**
+ * DIRECT uses real admission ledgers and lifecycle while bypassing waiting queues.
+ */
 class DirectAdmissionContractTest {
 
     @ParameterizedTest
@@ -85,13 +87,13 @@ class DirectAdmissionContractTest {
                     executor.submit(
                             () ->
                                     fixture.scheduler
-                                            .submit(fixture.context(201L))
+                                            .submit(fixture.context("201"))
                                             .get(2L, TimeUnit.SECONDS));
             var second =
                     executor.submit(
                             () ->
                                     fixture.scheduler
-                                            .submit(fixture.context(202L))
+                                            .submit(fixture.context("202"))
                                             .get(2L, TimeUnit.SECONDS));
             var responses =
                     List.of(first.get(3L, TimeUnit.SECONDS), second.get(3L, TimeUnit.SECONDS));
@@ -134,7 +136,7 @@ class DirectAdmissionContractTest {
             throws Exception {
         try (Fixture fixture = new Fixture()) {
             Response response =
-                    fixture.scheduler.submit(fixture.context(101L)).get(2L, TimeUnit.SECONDS);
+                    fixture.scheduler.submit(fixture.context("101")).get(2L, TimeUnit.SECONDS);
 
             assertTrue(response.isSuccess());
             assertFalse(response.isEnqueuedByMaster());
@@ -154,9 +156,10 @@ class DirectAdmissionContractTest {
             assertEquals(
                     RequestState.Phase.ACKNOWLEDGED,
                     SchedulerTestSupport.repository(fixture.requests)
-                            .getRequestState(101L, 0L)
+                            .getRequestState("101", 0L)
                             .state());
-            var reservation = EndpointTestSupport.decodeReservation(fixture.decode, 101L);
+            var reservation =
+                    EndpointTestSupport.decodeReservation(fixture.decode, String.valueOf(101L));
             assertNotNull(reservation);
             assertThrows(
                     IllegalStateException.class,
@@ -198,7 +201,7 @@ class DirectAdmissionContractTest {
                 assertNotNull(pin);
                 occupant =
                         fixture.decode
-                                .tryReserveQueuedRequest(pin, 999L, 32L, 48L, 50, null)
+                                .tryReserveQueuedRequest(pin, "999", 32L, 48L, 50, null)
                                 .handle();
             }
             assertNotNull(occupant);
@@ -216,14 +219,16 @@ class DirectAdmissionContractTest {
                             Duration.ofSeconds(2),
                             () ->
                                     fixture.scheduler
-                                            .submit(fixture.context(102L))
+                                            .submit(fixture.context("102"))
                                             .get(2L, TimeUnit.SECONDS));
 
             assertFalse(response.isSuccess());
             assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
             fixture.assertNoPrefillOwnership();
-            assertNull(EndpointTestSupport.decodeReservation(fixture.decode, 102L));
-            assertEquals(occupant, EndpointTestSupport.decodeReservation(fixture.decode, 999L));
+            assertNull(EndpointTestSupport.decodeReservation(fixture.decode, String.valueOf(102L)));
+            assertEquals(
+                    occupant,
+                    EndpointTestSupport.decodeReservation(fixture.decode, String.valueOf(999L)));
             assertEquals(1, fixture.decode.routingView().engineCapacityUsed());
             assertEquals(
                     48L, EndpointTestSupport.expectedReservedKv(fixture.decode.resourceSnapshot()));
@@ -240,8 +245,8 @@ class DirectAdmissionContractTest {
             doAnswer(
                             call -> {
                                 DecodeResources.ReservationHandle reservation = call.getArgument(0);
-                                assertEquals(103L, reservation.requestId());
-                                fixture.assertItemNotBound(103L);
+                                assertEquals("103", reservation.requestId());
+                                fixture.assertItemNotBound("103");
                                 fixture.applyWorkerStatus(
                                         fixture.decode,
                                         Map.of("103", task(103L, TaskPhase.KV_ALLOCATED)),
@@ -263,7 +268,7 @@ class DirectAdmissionContractTest {
                                         fixture.decode,
                                         Map.of(),
                                         Map.of("103", task(103L, TaskPhase.RUNNING)));
-                                fixture.assertItemNotBound(103L);
+                                fixture.assertItemNotBound("103");
                                 raced.set(true);
                                 return acquired;
                             })
@@ -271,14 +276,14 @@ class DirectAdmissionContractTest {
                     .acquireDispatchPermit(any(), any());
 
             Response response =
-                    fixture.scheduler.submit(fixture.context(103L)).get(2L, TimeUnit.SECONDS);
+                    fixture.scheduler.submit(fixture.context("103")).get(2L, TimeUnit.SECONDS);
 
             assertTrue(raced.get());
             assertFalse(
                     response.isSuccess(),
                     "an already ended request must not receive a new successful route");
             fixture.assertNoPrefillOwnership();
-            assertNull(EndpointTestSupport.decodeReservation(fixture.decode, 103L));
+            assertNull(EndpointTestSupport.decodeReservation(fixture.decode, String.valueOf(103L)));
             assertEquals(0, fixture.decode.routingView().engineCapacityUsed());
             assertEquals(
                     0L, EndpointTestSupport.expectedReservedKv(fixture.decode.resourceSnapshot()));
@@ -297,7 +302,7 @@ class DirectAdmissionContractTest {
                                 DeliveryClaim claim = call.getArgument(0);
                                 claimed.set(claim);
                                 RequestContext context = claim.item().ctx();
-                                assertEquals(105L, context.data().getRequestId());
+                                assertEquals("105", context.data().getRequestId());
                                 assertEquals(
                                         DeliveryClaimKind.ROUTE_DECISION,
                                         context.snapshot().delivery().identity().kind());
@@ -343,7 +348,7 @@ class DirectAdmissionContractTest {
                                 fixture.assertNoPrefillOwnership();
                                 assertNull(
                                         EndpointTestSupport.decodeReservation(
-                                                fixture.decode, 105L));
+                                                fixture.decode, String.valueOf(105L)));
                                 assertEquals(0, fixture.decode.routingView().engineCapacityUsed());
                                 assertEquals(
                                         0L,
@@ -371,7 +376,7 @@ class DirectAdmissionContractTest {
 
             try {
                 Response response =
-                        fixture.scheduler.submit(fixture.context(105L)).get(2L, TimeUnit.SECONDS);
+                        fixture.scheduler.submit(fixture.context("105")).get(2L, TimeUnit.SECONDS);
 
                 assertTrue(raced.get());
                 assertTrue(response.isSuccess());
@@ -407,7 +412,7 @@ class DirectAdmissionContractTest {
     void directCommitKeepsPrimaryFailureWhenPermitCleanupAlsoFails() throws Exception {
         try (Fixture fixture = new Fixture()) {
             var prefill = spy(fixture.prefill);
-            var context = fixture.context(104L);
+            var context = fixture.context("104");
             var future =
                     fixture.scheduler.register(
                             context, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
@@ -423,7 +428,7 @@ class DirectAdmissionContractTest {
                             })
                     .when(fixture.decode)
                     .dispatch(any(), eq(DecodeResources.DispatchOutcome.ABANDONED));
-            try (var mutation = fixture.scheduler.claimAdmissionHandle(104L, future);
+            try (var mutation = fixture.scheduler.claimAdmissionHandle("104", future);
                     var completion = RequestProtocolTestSupport.finishOnExit(mutation);
                     var admission =
                             SchedulingTestConfig.prepareRoute(
@@ -431,14 +436,14 @@ class DirectAdmissionContractTest {
                                             route -> {
                                                 route.add(
                                                         prefill.tryPinGeneration(),
-                                                        Fixture.metadata(prefill, 104L),
+                                                        Fixture.metadata(prefill, "104"),
                                                         30_000L,
                                                         prefill.ownership
                                                                 .progress()
                                                                 .ownershipVersion());
                                                 route.add(
                                                         fixture.decode.tryPinGeneration(),
-                                                        Fixture.metadata(fixture.decode, 104L),
+                                                        Fixture.metadata(fixture.decode, "104"),
                                                         -1L,
                                                         fixture.decode.placementVersion());
                                                 return PlacementResult.success(route);
@@ -454,9 +459,9 @@ class DirectAdmissionContractTest {
                         .dispatch(any(), eq(DecodeResources.DispatchOutcome.ABANDONED));
                 assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
             } finally {
-                fixture.scheduler.cancel(104L, 0L, CancelReason.CLIENT_CANCELLED);
+                fixture.scheduler.cancel("104", 0L, CancelReason.CLIENT_CANCELLED);
             }
-            assertNull(EndpointTestSupport.decodeReservation(fixture.decode, 104L));
+            assertNull(EndpointTestSupport.decodeReservation(fixture.decode, String.valueOf(104L)));
             fixture.assertNoPrefillOwnership();
         }
     }
@@ -464,7 +469,7 @@ class DirectAdmissionContractTest {
     @Test
     void cancellationAfterPrefillCommitRejectsClaimAndSettlesBothLedgers() throws Exception {
         try (Fixture fixture = new Fixture()) {
-            var context = fixture.context(108L);
+            var context = fixture.context("108");
             var prefill = spy(fixture.prefill);
             doAnswer(
                             call -> {
@@ -472,7 +477,7 @@ class DirectAdmissionContractTest {
                                 assertEquals(
                                         1,
                                         fixture.decode.resourceSnapshot().activeDispatchPermits());
-                                fixture.scheduler.cancel(108L, 0L, CancelReason.CLIENT_CANCELLED);
+                                fixture.scheduler.cancel("108", 0L, CancelReason.CLIENT_CANCELLED);
                                 return handoff;
                             })
                     .when(prefill)
@@ -489,14 +494,14 @@ class DirectAdmissionContractTest {
                                             call.getArgument(4, RequestRoute.class)
                                                     .add(
                                                             prefill.tryPinGeneration(),
-                                                            Fixture.metadata(prefill, 108L),
+                                                            Fixture.metadata(prefill, "108"),
                                                             30_000L,
                                                             prefill.ownership
                                                                     .progress()
                                                                     .ownershipVersion())));
             assertFalse(fixture.scheduler.submit(context).get(2, TimeUnit.SECONDS).isSuccess());
             SchedulerTestSupport.awaitRequestWork(fixture.runtime);
-            assertNull(EndpointTestSupport.decodeReservation(fixture.decode, 108L));
+            assertNull(EndpointTestSupport.decodeReservation(fixture.decode, String.valueOf(108L)));
             assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
             fixture.assertNoPrefillOwnership();
             assertEquals(0, SchedulerTestSupport.repository(fixture.requests).liveRequestCount());
@@ -529,10 +534,10 @@ class DirectAdmissionContractTest {
                             new PlacementAvailability(),
                             SchedulingTestConfig.capacity(config),
                             org.mockito.Mockito.mock(
-                                    org.flexlb.service.RecentCacheKeyTraceReporter.class))) {
-                var context = RequestProtocolTestSupport.context(config, 109L);
+                                    org.flexlb.service.TheoryCacheHitReporter.class))) {
+                var context = RequestProtocolTestSupport.context(config, "109");
                 var future = queue.register(context, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
-                try (var handle = queue.claimAdmissionHandle(109L, future);
+                try (var handle = queue.claimAdmissionHandle("109", future);
                         var finish = RequestProtocolTestSupport.finishOnExit(handle)) {
                     assertNotNull(handle);
                     var selected =
@@ -541,7 +546,7 @@ class DirectAdmissionContractTest {
                                             route -> {
                                                 route.add(
                                                         prefill.tryPinGeneration(),
-                                                        Fixture.metadata(prefill, 109L),
+                                                        Fixture.metadata(prefill, "109"),
                                                         30_000L,
                                                         prefill.ownership
                                                                 .progress()
@@ -549,7 +554,7 @@ class DirectAdmissionContractTest {
                                                 if (separateDecode) {
                                                     route.add(
                                                             fixture.decode.tryPinGeneration(),
-                                                            Fixture.metadata(fixture.decode, 109L),
+                                                            Fixture.metadata(fixture.decode, "109"),
                                                             -1L,
                                                             fixture.decode.placementVersion());
                                                 }
@@ -599,7 +604,7 @@ class DirectAdmissionContractTest {
         try (Fixture fixture = new Fixture(4, 2)) {
             assertTrue(
                     fixture.scheduler
-                            .submit(fixture.context(101L))
+                            .submit(fixture.context("101"))
                             .get(2, TimeUnit.SECONDS)
                             .isSuccess());
 
@@ -619,9 +624,8 @@ class DirectAdmissionContractTest {
                                     new PlacementAvailability(),
                                     SchedulingTestConfig.capacity(config),
                                     org.mockito.Mockito.mock(
-                                            org.flexlb.service.RecentCacheKeyTraceReporter
-                                                    .class))) {
-                var request = RequestProtocolTestSupport.context(config, 102L);
+                                            org.flexlb.service.TheoryCacheHitReporter.class))) {
+                var request = RequestProtocolTestSupport.context(config, "102");
                 request.data()
                         .setRequest(request.data().getRequest().toBuilder().seqLen(32L).build());
                 request.data()
@@ -642,21 +646,23 @@ class DirectAdmissionContractTest {
                 fixture.applyWorkerStatus(
                         fixture.decode, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
                 RequestProtocolTestSupport.awaitCondition(
-                        () -> fixture.requests.requests.findActive(101L) == null);
+                        () -> fixture.requests.requests.findActive("101") == null);
                 assertEquals(
                         1,
                         fixture.prefill
                                 .ownership
                                 .admissionSummary(0, fixture.prefill.requestLimit)
                                 .occupiedRequests());
-                assertNotNull(EndpointTestSupport.decodeReservation(fixture.decode, 102L));
+                assertNotNull(
+                        EndpointTestSupport.decodeReservation(
+                                fixture.decode, String.valueOf(102L)));
             }
         }
     }
 
     private static TaskInfo task(long requestId, TaskPhase phase) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         task.setInputLength(32L);
         task.setPhase(phase);
         return task;
@@ -705,7 +711,7 @@ class DirectAdmissionContractTest {
                                     requestReporter,
                                     queuedDelivery,
                                     service,
-                                    mock(org.flexlb.engine.grpc.EngineGrpcClient.class)));
+                                    mock(org.flexlb.engine.grpc.client.EngineGrpcClient.class)));
             prefillSelector = mock(CostBasedPrefillStrategy.class);
             var decodeSelector = mock(DecodeSelector.class);
             var model = mock(ModelMetaConfig.class);
@@ -718,7 +724,7 @@ class DirectAdmissionContractTest {
                             runtime,
                             service,
                             reporter,
-                            mock(RecentCacheKeyTraceReporter.class),
+                            mock(TheoryCacheHitReporter.class),
                             router,
                             mock(DecodeAdmission.class),
                             placement);
@@ -766,20 +772,14 @@ class DirectAdmissionContractTest {
                                                                 .progress()
                                                                 .ownershipVersion()));
                             });
-            when(decodeSelector.select(
-                            any(),
-                            any(),
-                            any(),
-                            org.mockito.ArgumentMatchers.any(RequestRoute.class)))
+            when(decodeSelector.select(any(RequestData.class), any(), any(RequestRoute.class)))
                     .thenAnswer(
                             call -> {
-                                var request =
-                                        call.getArgument(
-                                                0, org.flexlb.dao.loadbalance.Request.class);
+                                var request = call.getArgument(0, RequestData.class).getRequest();
                                 var pin = decode.tryPinGeneration();
                                 assertNotNull(pin);
                                 return PlacementResult.success(
-                                        call.getArgument(3, RequestRoute.class)
+                                        call.getArgument(2, RequestRoute.class)
                                                 .add(
                                                         pin,
                                                         metadata(decode, request.getRequestId()),
@@ -788,7 +788,7 @@ class DirectAdmissionContractTest {
                             });
         }
 
-        private RequestContext context(long requestId) {
+        private RequestContext context(String requestId) {
             var context = RequestProtocolTestSupport.context(config, requestId);
             context.data().setRequest(context.data().getRequest().toBuilder().seqLen(32L).build());
             context.data()
@@ -811,7 +811,7 @@ class DirectAdmissionContractTest {
             assertEquals(0, prefill.ownership.stats().batchCount());
         }
 
-        private void assertItemNotBound(long requestId) {
+        private void assertItemNotBound(String requestId) {
             RequestContext requestContext =
                     SchedulerTestSupport.repository(requests).findActive(requestId);
             assertNotNull(requestContext);
@@ -879,7 +879,7 @@ class DirectAdmissionContractTest {
             return response;
         }
 
-        private static ServerStatus metadata(WorkerEndpoint endpoint, long requestId) {
+        private static ServerStatus metadata(WorkerEndpoint endpoint, String requestId) {
             var result = new ServerStatus();
             result.setSuccess(true);
             result.setRequestId(requestId);

@@ -23,24 +23,32 @@ public final class SchedulingMetadata {
         this.expiresAtMs = expiresAtMs;
     }
 
-    /** Normalize the caller priority once and bind it to the absolute expiry. */
+    /**
+     * Normalize the caller priority once and bind it to the absolute expiry.
+     */
     public static SchedulingMetadata of(
             int rawProtoPriority, String qosHeader, long expiresAtMs, int defaultPriority) {
         int priority = PriorityNormalizer.normalize(rawProtoPriority, qosHeader, defaultPriority);
         return new SchedulingMetadata(priority, expiresAtMs);
     }
 
-    /** Bind an already-normalized priority to its absolute expiry. */
+    /**
+     * Bind an already-normalized priority to its absolute expiry.
+     */
     public static SchedulingMetadata explicit(int priority, long expiresAtMs) {
         return new SchedulingMetadata(priority, expiresAtMs);
     }
 
-    /** Normalized priority (1-100, higher is more important). */
+    /**
+     * Normalized priority (1-100, higher is more important).
+     */
     public int priority() {
         return priority;
     }
 
-    /** Absolute request expiration time in Unix epoch milliseconds. */
+    /**
+     * Absolute request expiration time in Unix epoch milliseconds.
+     */
     public long expiresAtMs() {
         return expiresAtMs;
     }

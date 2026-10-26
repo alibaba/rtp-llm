@@ -10,9 +10,9 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -50,7 +50,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** Real request owner and Decode ledger: releasing an unsent permit cannot expose a committed route to withdrawal. */
+/**
+ * Real request owner and Decode ledger: releasing an unsent permit cannot expose a committed route to withdrawal.
+ */
 @Timeout(15)
 class RejectedDeliveryWithdrawalRaceTest {
     @Test
@@ -65,7 +67,7 @@ class RejectedDeliveryWithdrawalRaceTest {
                         service,
                         reporter,
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         var grpc = mock(EngineGrpcClient.class);
         var dispatcher = new DeliveryDispatcher(grpc, service, reporter);
         ReflectionTestUtils.setField(owner.runtime, "dispatcher", dispatcher);
@@ -75,6 +77,10 @@ class RejectedDeliveryWithdrawalRaceTest {
         var ledger = new DeliverySettlementTestSupport();
         var prefill = mock(PrefillEndpoint.class);
         when(prefill.getIp()).thenReturn("127.0.0.1");
+        var prefillStatus =
+                WorkerStatus.createDiscovered(
+                        RoleType.PREFILL, null, "127.0.0.1", 8080, 8090, null);
+        when(prefill.getStatus()).thenReturn(prefillStatus);
         when(prefill.getGrpcPort()).thenReturn(8090);
         when(prefill.reserveBatch(any(), anyLong(), anyInt()))
                 .thenAnswer(
@@ -115,7 +121,7 @@ class RejectedDeliveryWithdrawalRaceTest {
         ReflectionTestUtils.setField(prefill, "queueRunner", worker);
         ReflectionTestUtils.setField(prefill, "ownership", ledger.prefill);
 
-        var context = RequestProtocolTestSupport.context(config, 1L);
+        var context = RequestProtocolTestSupport.context(config, "1");
         context.data()
                 .setGenerateInputPb(
                         EngineRpcService.GenerateInputPB.newBuilder()
@@ -126,7 +132,7 @@ class RejectedDeliveryWithdrawalRaceTest {
         var future = RequestProtocolTestSupport.register(owner, context);
         DecodeResources.ReservationHandle handle;
         try (var pin = decode.tryPinGeneration()) {
-            handle = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 1L, 1L, 2L, 50);
+            handle = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, "1", 1L, 2L, 50);
         }
         assertNotNull(handle);
         DeliverySettlementTestSupport.queueDecode(decode, handle);

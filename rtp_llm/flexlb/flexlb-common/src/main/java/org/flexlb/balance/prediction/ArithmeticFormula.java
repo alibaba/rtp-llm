@@ -46,7 +46,9 @@ public final class ArithmeticFormula {
         this.referencedVariables = Set.copyOf(referencedVariables);
     }
 
-    /** Parse a scalar expression; batch aggregates are not available. */
+    /**
+     * Parse a scalar expression; batch aggregates are not available.
+     */
     public static ArithmeticFormula parse(String expression, Map<String, Integer> variables) {
         return parse(expression, variables, Set.of(), false);
     }
@@ -93,7 +95,9 @@ public final class ArithmeticFormula {
         }
     }
 
-    /** Includes variables parsed inside a {@code param()} initial value. */
+    /**
+     * Includes variables parsed inside a {@code param()} initial value.
+     */
     public boolean referencesVariable(String variable) {
         return referencedVariables.contains(variable);
     }
@@ -106,7 +110,9 @@ public final class ArithmeticFormula {
         return compiled.full().evaluate(vars, itemVars);
     }
 
-    /** Stable per-item bindings read directly by the compiled aggregate loop. */
+    /**
+     * Stable per-item bindings read directly by the compiled aggregate loop.
+     */
     public interface Variables {
         double variable(int index);
     }
@@ -116,7 +122,9 @@ public final class ArithmeticFormula {
         return compiled.bindings().evaluate(vars, items);
     }
 
-    /** A fresh, caller-owned accumulator for a nonempty append-only batch; null on compiler fallback. */
+    /**
+     * A fresh, caller-owned accumulator for a nonempty append-only batch; null on compiler fallback.
+     */
     public Aggregation newAggregation() {
         return compiled.incremental() == null ? null : new Aggregation(compiled.incremental());
     }

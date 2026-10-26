@@ -7,23 +7,26 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.Map;
 import java.util.WeakHashMap;
 
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Builds and inspects request ownership for API tests. */
+/**
+ * Builds and inspects request ownership for API tests.
+ */
 public final class SchedulerTestSupport {
-    /** Read shadow ownership for assertions, without granting a production lookup capability. */
+    /**
+     * Read shadow ownership for assertions, without granting a production lookup capability.
+     */
     public static DecodeResources.ReservationHandle decodeReservation(
-            DecodeEndpoint endpoint, long requestId) {
+            DecodeEndpoint endpoint, String requestId) {
         return endpoint.isRetired()
                 ? null
                 : decodeReservation(endpoint.resourceSnapshot(), requestId);
     }
 
     private static DecodeResources.ReservationHandle decodeReservation(
-            DecodeResources.ResourceSnapshot snapshot, long requestId) {
-        var request = snapshot.requests().get(requestId);
+            DecodeResources.ResourceSnapshot snapshot, String requestId) {
+        var request = snapshot.requests().get(String.valueOf(requestId));
         if (request == null || request.reservationToken() <= 0L) {
             return null;
         }
@@ -51,8 +54,8 @@ public final class SchedulerTestSupport {
 
     private static RequestRepository mockRepository(AbstractRequestScheduler owner) {
         var repository = mock(RequestRepository.class);
-        when(repository.ownerOf(anyLong())).thenReturn(owner);
-        when(repository.findActive(anyLong()))
+        when(repository.ownerOf(org.mockito.ArgumentMatchers.anyString())).thenReturn(owner);
+        when(repository.findActive(org.mockito.ArgumentMatchers.anyString()))
                 .thenAnswer(
                         call -> {
                             var context = mock(RequestContext.class);

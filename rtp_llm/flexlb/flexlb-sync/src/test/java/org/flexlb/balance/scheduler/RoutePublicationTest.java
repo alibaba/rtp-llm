@@ -40,7 +40,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** NON_BATCH contracts run through the same real Worker preparation/commit path. */
+/**
+ * NON_BATCH contracts run through the same real Worker preparation/commit path.
+ */
 @Timeout(15)
 class RoutePublicationTest {
     @Test
@@ -58,7 +60,7 @@ class RoutePublicationTest {
             org.springframework.test.util.ReflectionTestUtils.invokeMethod(
                     f.worker, "processQueue");
             assertEquals(List.of(first), f.committedItems);
-            assertEquals(List.of(1L), f.claimIds());
+            assertEquals(List.of("1"), f.claimIds());
             assertArrayEquals(new long[] {10L}, f.committedRoutePredictions);
             verify(f.decode, never()).acquireDispatchPermit(eq(second.decodeReservation()), any());
             verify(f.evaluator, never()).predictBatchMs(any());
@@ -89,11 +91,11 @@ class RoutePublicationTest {
                 org.springframework.test.util.ReflectionTestUtils.invokeMethod(
                         f.worker, "processQueue");
             }
-            assertEquals(List.of(1L), f.claimIds());
-            assertEquals(java.util.Set.of(2L), f.preparationFailures.keySet());
+            assertEquals(List.of("1"), f.claimIds());
+            assertEquals(java.util.Set.of("2"), f.preparationFailures.keySet());
             verify(f.owner, times(1)).onDeliveryEvidence(isNull(), isA(PreparationFailure.class));
             verify(f.decode, never()).acquireDispatchPermit(eq(second.decodeReservation()), any());
-            verify(f.permits.get(1L)).release();
+            verify(f.permits.get("1")).release();
         }
     }
 
@@ -115,10 +117,10 @@ class RoutePublicationTest {
             org.springframework.test.util.ReflectionTestUtils.invokeMethod(
                     f.worker, "processQueue");
             assertEquals(List.of(first, second), f.committedItems);
-            assertEquals(List.of(1L, 2L), f.claimIds());
+            assertEquals(List.of("1", "2"), f.claimIds());
             assertArrayEquals(new long[] {10L, 20L}, f.committedRoutePredictions);
-            assertEquals(10L, f.predictions.get(1L));
-            assertEquals(30L, f.predictions.get(2L));
+            assertEquals(10L, f.predictions.get("1"));
+            assertEquals(30L, f.predictions.get("2"));
             verify(f.evaluator, never()).predictBatchMs(any());
             verify(f.prefill, never())
                     .reserveBatch(any(), anyLong(), org.mockito.ArgumentMatchers.anyInt());
@@ -170,12 +172,12 @@ class RoutePublicationTest {
         try (var f = new LinearDeliveryFixture(false)) {
             var first = f.item(1, 10);
             var second = f.item(2, 20);
-            var published = new CopyOnWriteArrayList<Long>();
+            var published = new CopyOnWriteArrayList<String>();
             doAnswer(
                             call -> {
                                 DeliveryClaim claim = call.getArgument(0);
                                 assertEquals(
-                                        List.of(1L, 2L),
+                                        List.of("1", "2"),
                                         f.claimIds(),
                                         "publication must not race the next claim");
                                 assertFalse(Thread.holdsLock(claim.item().ctx()));
@@ -193,12 +195,12 @@ class RoutePublicationTest {
                     .when(f.owner)
                     .onDeliveryEvidence(any(), isA(RouteDelivered.class));
             assertNull(f.process(List.of(first, second), OptionalLong.empty()));
-            assertEquals(List.of(1L, 2L), published);
-            assertEquals(10, f.predictions.get(1L).longValue());
-            assertEquals(30, f.predictions.get(2L).longValue());
+            assertEquals(List.of("1", "2"), published);
+            assertEquals(10, f.predictions.get("1").longValue());
+            assertEquals(30, f.predictions.get("2").longValue());
             assertArrayEquals(new long[] {10, 20}, f.committedRoutePredictions);
-            verify(f.permits.get(1L)).release();
-            verify(f.permits.get(2L)).release();
+            verify(f.permits.get("1")).release();
+            verify(f.permits.get("2")).release();
             verify(f.handoff, times(1)).close();
             verifyNoInteractions(f.grpc);
             verify(f.runtime.deliveries(), never()).tryReserveDelivery();
@@ -215,7 +217,7 @@ class RoutePublicationTest {
             f.process(List.of(first, second, third), OptionalLong.empty());
             assertEquals(List.of(first), f.committedItems);
             assertArrayEquals(new long[] {10}, f.committedRoutePredictions);
-            assertEquals(List.of(1L), f.claimIds());
+            assertEquals(List.of("1"), f.claimIds());
             verify(f.owner)
                     .onDeliveryEvidence(
                             eq(f.claims.getFirst()),
@@ -283,13 +285,13 @@ class RoutePublicationTest {
     @Test
     void routePublicationFailureDoesNotSuppressLaterMembersOrKillWorker() {
         try (var f = new LinearDeliveryFixture(false)) {
-            var published = new CopyOnWriteArrayList<Long>();
+            var published = new CopyOnWriteArrayList<String>();
             f.expectedShutdownFailure = new IllegalStateException("first owner failed");
             doAnswer(
                             call -> {
                                 DeliveryClaim claim = call.getArgument(0);
                                 published.add(claim.item().requestId());
-                                if (claim.item().requestId() == 1) {
+                                if (claim.item().requestId().equals("1")) {
                                     throw f.expectedShutdownFailure;
                                 }
                                 return null;
@@ -298,10 +300,10 @@ class RoutePublicationTest {
                     .onDeliveryEvidence(any(), isA(RouteDelivered.class));
             assertDoesNotThrow(
                     () -> f.process(List.of(f.item(1, 10), f.item(2, 20)), OptionalLong.empty()));
-            assertEquals(List.of(1L, 2L), published);
+            assertEquals(List.of("1", "2"), published);
             verify(f.handoff).close();
-            verify(f.permits.get(1L)).release();
-            verify(f.permits.get(2L)).release();
+            verify(f.permits.get("1")).release();
+            verify(f.permits.get("2")).release();
         }
     }
 
@@ -311,10 +313,10 @@ class RoutePublicationTest {
             var first = f.item(1, 10);
             var second = f.item(2, 20);
             f.expectedShutdownFailure = new IllegalStateException("first permit cleanup failed");
-            doThrow(f.expectedShutdownFailure).when(f.permits.get(1L)).release();
+            doThrow(f.expectedShutdownFailure).when(f.permits.get("1")).release();
             assertDoesNotThrow(() -> f.process(List.of(first, second), OptionalLong.empty()));
-            verify(f.permits.get(1L)).release();
-            verify(f.permits.get(2L)).release();
+            verify(f.permits.get("1")).release();
+            verify(f.permits.get("2")).release();
             verify(f.handoff).close();
             verify(f.owner, times(2)).onDeliveryEvidence(any(), isA(RouteDelivered.class));
         }
@@ -361,7 +363,7 @@ class RoutePublicationTest {
                                     DecodeResources.ReleaseReason.NOT_SENT)
                             .status());
             assertEquals(1, endpoint.resourceSnapshot().requests().size());
-            assertTrue(endpoint.resourceSnapshot().requests().containsKey(2L));
+            assertTrue(endpoint.resourceSnapshot().requests().containsKey("2"));
         }
     }
 
@@ -371,7 +373,7 @@ class RoutePublicationTest {
             var endpoint = f.realDecode();
             var first = f.realItem(endpoint, 1, 10);
             var second = f.realItem(endpoint, 2, 20);
-            f.lostClaims.add(1L);
+            f.lostClaims.add("1");
             var capacitySignals = new AtomicInteger();
             endpoint.watchEngineDispatchCapacity(capacitySignals::incrementAndGet);
             f.process(List.of(first, second), OptionalLong.empty());
@@ -380,9 +382,9 @@ class RoutePublicationTest {
             assertEquals(1, snapshot.queuedCount());
             assertEquals(2, snapshot.requests().size());
             assertEquals(1, endpoint.routingView().engineCapacityUsed());
-            assertTrue(org.flexlb.balance.endpoint.EndpointTestSupport.isQueued(snapshot, 1));
-            assertFalse(org.flexlb.balance.endpoint.EndpointTestSupport.isQueued(snapshot, 2));
-            assertEquals(List.of(2L), f.claimIds());
+            assertTrue(org.flexlb.balance.endpoint.EndpointTestSupport.isQueued(snapshot, "1"));
+            assertFalse(org.flexlb.balance.endpoint.EndpointTestSupport.isQueued(snapshot, "2"));
+            assertEquals(List.of("2"), f.claimIds());
             assertEquals(
                     1,
                     capacitySignals.get(),

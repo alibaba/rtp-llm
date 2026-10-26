@@ -34,7 +34,7 @@ public record QueueSnapshot(
             checkArgument(!activeItems.isEmpty(), "admission block requires an ACTIVE head");
             GroupPlanner.Item head = activeItems.getFirst();
             checkArgument(
-                    head.requestId() == admissionBlock.requestId()
+                    java.util.Objects.equals(head.requestId(), admissionBlock.requestId())
                             && head.enqueueSeq() == admissionBlock.enqueueSeq(),
                     "admission block must identify the exact ACTIVE head");
         }
@@ -45,7 +45,7 @@ public record QueueSnapshot(
      * Null semantics mean the wait only limits delivery, not queue publication.
      */
     public record AdmissionBlock(
-            long requestId,
+            String requestId,
             long enqueueSeq,
             RequestTimeEstimation.AdmissionBlockSemantics semantics) {}
 }

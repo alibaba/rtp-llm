@@ -3,9 +3,9 @@ package org.flexlb.mockengine;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.engine.grpc.EngineGrpcClient.CancelReply;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient.CancelReply;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -114,14 +114,14 @@ class HttpMockCancelIntegrationTest {
         EngineGrpcClient channel = channel();
 
         // 1 running + 1 queued (KV_ALLOCATED under the opt-in flag).
-        assertTrue(scheduleOwnedDecode(1L));
-        assertTrue(scheduleOwnedDecode(2L));
+        assertTrue(scheduleOwnedDecode("1"));
+        assertTrue(scheduleOwnedDecode("2"));
 
         CancelReply outcome =
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefillService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(2L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(2L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         assertEquals(
@@ -135,17 +135,17 @@ class HttpMockCancelIntegrationTest {
                 status.getFinishedTaskListList().stream()
                         .anyMatch(
                                 task ->
-                                        task.getRequestId() == 2L
+                                        task.getRequestId() == 2
                                                 && task.getErrorInfo().getErrorCode()
                                                         == EngineRpcService.ErrorCodePB.CANCELLED
                                                                 .getNumber());
         assertTrue(
                 cancelledReported,
                 "CANCELLED completion must appear in the next WorkerStatus finished list");
-        assertFalse(MockEngineTestSupport.hasDownstreamOwnership(prefillService, 2L));
-        assertFalse(MockEngineTestSupport.hasUpstreamOwnership(decodeService, 2L));
+        assertFalse(MockEngineTestSupport.hasDownstreamOwnership(prefillService, "2"));
+        assertFalse(MockEngineTestSupport.hasUpstreamOwnership(decodeService, "2"));
         assertTrue(
-                MockEngineTestSupport.hasDownstreamOwnership(prefillService, 1L),
+                MockEngineTestSupport.hasDownstreamOwnership(prefillService, "1"),
                 "the unrelated live request must retain its exact ownership");
     }
 
@@ -153,7 +153,7 @@ class HttpMockCancelIntegrationTest {
     void rawHttpCancelOfRunningRequestReportsRunningPhase() throws Exception {
         startGatedDecodeCluster(true);
 
-        assertTrue(scheduleOwnedDecode(11L));
+        assertTrue(scheduleOwnedDecode("11"));
 
         // The channel outcome is intent-only (ACCEPTED, no phase) — the phase
         // evidence lives in the raw control-plane JSON.
@@ -195,7 +195,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefillService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(21L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(21L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         assertEquals(CancelReply.ACCEPTED, first);
@@ -204,7 +204,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefillService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(21L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(21L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         assertEquals(CancelReply.ACCEPTED, second);
@@ -212,7 +212,7 @@ class HttpMockCancelIntegrationTest {
                 workerStatus(prefillService, -1).getFinishedTaskListList().stream()
                         .filter(
                                 task ->
-                                        task.getRequestId() == 21L
+                                        task.getRequestId() == 21
                                                 && task.getErrorInfo().getErrorCode() == 8429L
                                                 && task.getPriorityPreemptionProgress()
                                                         == EngineRpcService
@@ -231,7 +231,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefillService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(424242L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(424242L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         // Never-seen rid over the HTTP control plane: REQUEST_FENCED with the
@@ -288,7 +288,8 @@ class HttpMockCancelIntegrationTest {
     @Test
     void httpWrongWorkerDoesNotScanOtherServices() throws Exception {
         startGatedDecodeCluster(false);
-        assertTrue(scheduleOwnedDecode(23L));
+        EngineGrpcClient client = channel();
+        assertTrue(scheduleOwnedDecode("23"));
 
         int wrongPort = BASE_PORT + nextPortOffset++;
         JavaMockEngineCluster.FastRpcService wrongPrefill =
@@ -304,11 +305,10 @@ class HttpMockCancelIntegrationTest {
         services.put(wrongPort, wrongPrefill);
 
         CancelReply outcome =
-                channel()
-                        .cancelAsync(
+                client.cancelAsync(
                                 "127.0.0.1",
                                 wrongPort,
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(23L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(23L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
 
@@ -324,14 +324,14 @@ class HttpMockCancelIntegrationTest {
     @Test
     void httpDecodeTargetIsUnimplementedAndDoesNotCancelOwnedRequest() throws Exception {
         startGatedDecodeCluster(false);
-        assertTrue(scheduleOwnedDecode(24L));
+        assertTrue(scheduleOwnedDecode("24"));
 
         var future =
                 channel()
                         .cancelAsync(
                                 "127.0.0.1",
                                 decodeService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(24L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(24L)),
                                 5_000);
         assertThrows(
                 ExecutionException.class,
@@ -373,7 +373,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 59999,
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(1L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(1L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         assertEquals(
@@ -390,7 +390,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                         "127.0.0.1",
                         prefillService.getGrpcPort(),
-                        CancelReason.PRIORITY_PREEMPTED.toRequest(1L),
+                        CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(1L)),
                         5_000);
         assertNotNull(future, "cancel must never throw synchronously");
         assertThrows(
@@ -457,8 +457,8 @@ class HttpMockCancelIntegrationTest {
         assertEquals(405, wrongMethod.statusCode());
 
         // Engine-name addressing (Python-compat dual addressing) + full schema.
-        assertTrue(scheduleOwnedDecode(31L));
-        assertTrue(scheduleOwnedDecode(32L));
+        assertTrue(scheduleOwnedDecode("31"));
+        assertTrue(scheduleOwnedDecode("32"));
         HttpResponse<String> ok =
                 http.send(
                         HttpRequest.newBuilder()
@@ -496,7 +496,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                         "127.0.0.1",
                         prefillService.getGrpcPort(),
-                        CancelReason.PRIORITY_PREEMPTED.toRequest(51L),
+                        CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(51L)),
                         5_000);
         ExecutionException failure =
                 assertThrows(
@@ -518,7 +518,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefillService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(51L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(51L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         assertEquals(
@@ -538,7 +538,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                         "127.0.0.1",
                         prefillService.getGrpcPort(),
-                        CancelReason.PRIORITY_PREEMPTED.toRequest(52L),
+                        CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(52L)),
                         5_000);
         ExecutionException failure =
                 assertThrows(
@@ -557,7 +557,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefillService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(52L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(52L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         assertEquals(
@@ -577,7 +577,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                         "127.0.0.1",
                         prefillService.getGrpcPort(),
-                        CancelReason.PRIORITY_PREEMPTED.toRequest(53L),
+                        CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(53L)),
                         5_000);
         ExecutionException failure =
                 assertThrows(
@@ -598,7 +598,7 @@ class HttpMockCancelIntegrationTest {
                 channel.cancelAsync(
                                 "127.0.0.1",
                                 prefillService.getGrpcPort(),
-                                CancelReason.PRIORITY_PREEMPTED.toRequest(53L),
+                                CancelReason.PRIORITY_PREEMPTED.toRequest(String.valueOf(53L)),
                                 5_000)
                         .get(5, TimeUnit.SECONDS);
         assertEquals(
@@ -607,7 +607,9 @@ class HttpMockCancelIntegrationTest {
                 "clearing the injection must restore the normal cancel path");
     }
 
-    /** Arms/disarms a cancel fault injection on prefill-0 via POST /inject. */
+    /**
+     * Arms/disarms a cancel fault injection on prefill-0 via POST /inject.
+     */
     private void inject(String type, boolean enabled) throws Exception {
         HttpResponse<String> response =
                 HttpClient.newHttpClient()
@@ -684,14 +686,18 @@ class HttpMockCancelIntegrationTest {
         controlServer.start();
     }
 
-    private boolean scheduleOwnedDecode(long requestId) throws Exception {
-        prefillService.registerDecodeOwnership(requestId, decodeService);
+    private boolean scheduleOwnedDecode(String requestId) throws Exception {
+        prefillService.registerDecodeOwnership(Long.parseLong(requestId), decodeService);
         boolean accepted =
                 invokeScheduleDecodeCompletion(decodeService, shapeOf(requestId), -1, null);
         if (!accepted) {
-            prefillService.clearDecodeOwnership(requestId, decodeService);
+            prefillService.clearDecodeOwnership(Long.parseLong(requestId), decodeService);
         }
         return accepted;
+    }
+
+    private boolean scheduleOwnedDecode(long requestId) throws Exception {
+        return scheduleOwnedDecode(Long.toString(requestId));
     }
 
     private EngineGrpcClient channel() {
@@ -711,6 +717,10 @@ class HttpMockCancelIntegrationTest {
 
     private MockPerformanceModel.RequestShape shapeOf(long requestId) throws Exception {
         return MockEngineTestSupport.requestShape(decodeService.getPerformance(), requestId, 8);
+    }
+
+    private MockPerformanceModel.RequestShape shapeOf(String requestId) throws Exception {
+        return shapeOf(Long.parseLong(requestId));
     }
 
     private static boolean invokeScheduleDecodeCompletion(

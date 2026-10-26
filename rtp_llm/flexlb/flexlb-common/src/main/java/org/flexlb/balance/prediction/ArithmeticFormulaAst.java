@@ -2,7 +2,9 @@ package org.flexlb.balance.prediction;
 
 import java.util.List;
 
-/** Immutable syntax, exact constant folding, and the small interpreter used for oversized formulas. */
+/**
+ * Immutable syntax, exact constant folding, and the small interpreter used for oversized formulas.
+ */
 final class ArithmeticFormulaAst {
     private ArithmeticFormulaAst() {}
 
@@ -80,7 +82,9 @@ final class ArithmeticFormulaAst {
         return new ConstantNode(evaluate(node, null, null));
     }
 
-    /** Pure evaluation for parameter initializers, constant folding and the JVM size-limit fallback. */
+    /**
+     * Pure evaluation for parameter initializers, constant folding and the JVM size-limit fallback.
+     */
     static double evaluate(Node node, Object vars, List<?> items) {
         return switch (node) {
             case ConstantNode constant -> constant.value();

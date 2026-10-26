@@ -10,7 +10,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 
@@ -21,10 +21,14 @@ import java.util.concurrent.CompletableFuture;
 import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
 import static org.flexlb.balance.scheduler.ContextResult.RouteDelivered;
 
-/** Accepts DIRECT requests and completes one immediate endpoint selection and handoff. */
+/**
+ * Accepts DIRECT requests and completes one immediate endpoint selection and handoff.
+ */
 public final class DirectRequestScheduler extends AbstractRequestScheduler {
 
-    /** Exact committed route and its frozen prediction, before response publication. */
+    /**
+     * Exact committed route and its frozen prediction, before response publication.
+     */
     record RouteDelivery(DeliveryClaim claim, WorkSnapshot precedingWork, long unstartedWorkMs) {
         RouteDelivery {
             Objects.requireNonNull(claim, "claim");
@@ -39,7 +43,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
             SchedulerRuntime runtime,
             FlexlbConfig config,
             DecodeResources.AdmissionCapacity capacity,
-            RecentCacheKeyTraceReporter traceReporter) {
+            TheoryCacheHitReporter traceReporter) {
         super(runtime, config, capacity, traceReporter);
         this.router = Objects.requireNonNull(router, "router");
     }
@@ -50,6 +54,15 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                 RequestSchedulerEntry.tryCompleteVitRequest(context, requests, router);
         if (vitResult != null) {
             return vitResult;
+        }
+        if (context != null && context.data().getRequest() != null) {
+            Response invalid = router.validateRoles(context);
+            if (invalid != null) {
+                return CompletableFuture.completedFuture(invalid);
+            }
+            if (router.isEncoderOnly(context)) {
+                return submitEncoder(context, router::selectEncoder, () -> {});
+            }
         }
         if (context != null && context.data().getConfig().isQueue()) {
             return CompletableFuture.completedFuture(
@@ -176,7 +189,8 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
             RequestRoute route =
                     acquired = RequestRoute.create(context, routing, pendingDecodeRollback);
             CapacityBoundary.Attempt<DeliveryDispatcher.Member> attempt =
-                    DeliveryDispatcher.Member.prepare(route, decodeAdmissionCapacity);
+                    DeliveryDispatcher.Member.prepare(
+                            route, context.data().getDecodeAdmissionCapacity());
             if (!attempt.accepted()) {
                 return switch (attempt.boundary().status()) {
                     case UNAVAILABLE ->
@@ -286,7 +300,9 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
         }
     }
 
-    /** Holds acquisition output without mixing a failed publication with capacity pressure. */
+    /**
+     * Holds acquisition output without mixing a failed publication with capacity pressure.
+     */
     private static final class PrefillReservationAttempt implements Publication {
         private final RequestRoute route;
         private PrefillState.ReservationResult<PrefillState.RouteReservation> result;

@@ -18,9 +18,9 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -48,9 +48,11 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Resource assertions use real endpoint ledgers, not invocations of mocked release methods. */
+/**
+ * Resource assertions use real endpoint ledgers, not invocations of mocked release methods.
+ */
 class RequestResourceAccountingTest {
-    private static final long ID = 101L;
+    private static final String ID = "101";
     private static final long HARD_KV = 160L;
     private static final long EXPECTED_KV = 320L;
     private static final long TOTAL_KV = 10_000L;
@@ -609,10 +611,7 @@ class RequestResourceAccountingTest {
             var requestReporter = mock(RequestSchedulerReporter.class);
             requests =
                     SchedulerTestSupport.create(
-                            service,
-                            reporter,
-                            requestReporter,
-                            mock(RecentCacheKeyTraceReporter.class));
+                            service, reporter, requestReporter, mock(TheoryCacheHitReporter.class));
             var channel = mock(EngineGrpcClient.class);
             when(channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(cleanup);
             org.springframework.test.util.ReflectionTestUtils.setField(
@@ -784,7 +783,7 @@ class RequestResourceAccountingTest {
         void assertCapacityReusable() {
             try (var pin = decode.tryPinGeneration()) {
                 var next =
-                        decode.tryReserveQueuedRequest(pin, 999L, HARD_KV, EXPECTED_KV, 50, null)
+                        decode.tryReserveQueuedRequest(pin, "999", HARD_KV, EXPECTED_KV, 50, null)
                                 .handle();
                 assertNotNull(next);
                 var permit = decode.acquireDispatchPermit(next, capacity);
@@ -796,7 +795,7 @@ class RequestResourceAccountingTest {
             }
             // A second exact request must be able to use the sole Prefill slot too.
             var nextContext =
-                    RequestProtocolTestSupport.context(item.ctx().data().getConfig(), 999L);
+                    RequestProtocolTestSupport.context(item.ctx().data().getConfig(), "999");
             nextContext.data().setFuture(new CompletableFuture<>());
             var next =
                     SchedulingTestConfig.createRoute(
@@ -851,7 +850,7 @@ class RequestResourceAccountingTest {
         }
     }
 
-    private static TaskInfo task(long id) {
+    private static TaskInfo task(String id) {
         var task = new TaskInfo();
         task.setRequestId(id);
         task.setInputLength(HARD_KV);

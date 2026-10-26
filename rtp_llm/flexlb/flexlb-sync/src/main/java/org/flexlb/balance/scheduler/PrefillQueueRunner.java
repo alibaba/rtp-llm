@@ -47,7 +47,9 @@ import static com.google.common.math.LongMath.saturatedAdd;
  */
 public final class PrefillQueueRunner {
 
-    /** Frozen decision evidence; the log representation is materialized only on failure. */
+    /**
+     * Frozen decision evidence; the log representation is materialized only on failure.
+     */
     @lombok.RequiredArgsConstructor(access = lombok.AccessLevel.PRIVATE)
     private static final class QueueWaitSnapshot {
         private final String endpoint;
@@ -111,7 +113,9 @@ public final class PrefillQueueRunner {
         STOPPED
     }
 
-    /** Exact predicate captured by one scheduling cycle. */
+    /**
+     * Exact predicate captured by one scheduling cycle.
+     */
     private record QueueCycle(
             RequestRoute request,
             CapacityBoundary unavailable,
@@ -149,7 +153,9 @@ public final class PrefillQueueRunner {
         }
     }
 
-    /** Priority descending, then enqueue order and request identity. */
+    /**
+     * Priority descending, then enqueue order and request identity.
+     */
     public static final Comparator<RequestRoute> PRIORITY_QUEUE_ORDER =
             (left, right) ->
                     PriorityOrdering.compareWithRequestId(
@@ -160,7 +166,9 @@ public final class PrefillQueueRunner {
                             right.enqueueSeq(),
                             right.requestId());
 
-    /** FIFO order: unique monotonic enqueue sequence. */
+    /**
+     * FIFO order: unique monotonic enqueue sequence.
+     */
     public static final Comparator<RequestRoute> FIFO_QUEUE_ORDER =
             Comparator.comparingLong(RequestRoute::enqueueSeq);
 
@@ -174,13 +182,19 @@ public final class PrefillQueueRunner {
     private final DeliveryDispatcher dispatcher;
     private Runnable removeCapacityListener;
 
-    /** Shared P ownership guard serializes queue changes, wait predicates and subscriptions. */
+    /**
+     * Shared P ownership guard serializes queue changes, wait predicates and subscriptions.
+     */
     private final PrefillState.QueueGuard queueGuard;
 
-    /** Canonical request ownership guarded exclusively by {@link #queueGuard}. */
+    /**
+     * Canonical request ownership guarded exclusively by {@link #queueGuard}.
+     */
     private final PrefillState prefillState;
 
-    /** Exact queued identities whose stop facts must run before normal grouping. */
+    /**
+     * Exact queued identities whose stop facts must run before normal grouping.
+     */
     private final ArrayDeque<RequestRoute> controlInbox = new ArrayDeque<>();
 
     private final Thread workerThread;
@@ -192,10 +206,14 @@ public final class PrefillQueueRunner {
     private volatile boolean drainClaimed;
     public final Runnable capacityAvailableSignal;
 
-    /** Exact active head for which this worker is waiting on a capacity event. */
+    /**
+     * Exact active head for which this worker is waiting on a capacity event.
+     */
     private QueueCycle capacityBlockedHead;
 
-    /** Last waiting decision; timeout readers never acquire queueGuard. */
+    /**
+     * Last waiting decision; timeout readers never acquire queueGuard.
+     */
     private volatile QueueWaitSnapshot latestQueueWaitSnapshot;
 
     public PrefillQueueRunner(
@@ -234,6 +252,12 @@ public final class PrefillQueueRunner {
                                                 key,
                                                 failure))
                         .unstarted(this::runLoop);
+    }
+
+    public long collectionWindowMs() {
+        return grouping == GroupingPolicy.SINGLE
+                ? 0L
+                : prefillEndpoint.collectionWindowMs(settings.collectionWaitMs());
     }
 
     public synchronized void start() {
@@ -292,7 +316,9 @@ public final class PrefillQueueRunner {
         return sizeByPriority;
     }
 
-    /** Caller holds P lock; availability only probes the already subscribed resource. */
+    /**
+     * Caller holds P lock; availability only probes the already subscribed resource.
+     */
     public PlanningView planningViewLocked() {
         queueGuard.requireHeld();
         QueueCycle blocked = capacityBlockedHead;
@@ -463,13 +489,17 @@ public final class PrefillQueueRunner {
         return accepted;
     }
 
-    /** Read the last captured queue wait state without waiting or acquiring the queue lock. */
+    /**
+     * Read the last captured queue wait state without waiting or acquiring the queue lock.
+     */
     public Map<String, Object> getLatestQueueWaitSnapshot() {
         QueueWaitSnapshot snapshot = latestQueueWaitSnapshot;
         return snapshot == null ? INITIAL_QUEUE_WAIT_SNAPSHOT : snapshot.asMap();
     }
 
-    /** Capture fixed-size counters without formatting the PV record on the scheduling loop. */
+    /**
+     * Capture fixed-size counters without formatting the PV record on the scheduling loop.
+     */
     private void recordQueueWait(RequestRoute head, String reason) {
         PrefillState.QueueCounters counters = prefillState.captureQueueCounters();
         DecodeRoutingView decode = head.decodeEp() == null ? null : head.decodeEp().routingView();
@@ -483,10 +513,11 @@ public final class PrefillQueueRunner {
         var engine = status == null ? null : status.committedEngineObservation();
         return new GroupPlanner.Constraints(
                 settings.maxRequests(),
-                schedulingCapacity(engine, PlanningResource.TOKENS),
+                schedulingCapacity(
+                        engine, PlanningResource.TOKENS, settings.fallbackBatchTokenCapacity()),
                 schedulingCapacity(engine, PlanningResource.KV),
                 settings.executionBudgetMs(),
-                settings.collectionWaitMs());
+                collectionWindowMs());
     }
 
     public enum PlanningResource {
@@ -494,9 +525,18 @@ public final class PrefillQueueRunner {
         KV
     }
 
-    /** The same effective limits drive worker selection and status input invalidation. */
+    /**
+     * The same effective limits drive worker selection and status input invalidation.
+     */
     public static long schedulingCapacity(
             WorkerStatus.EngineObservation engine, PlanningResource resource) {
+        return schedulingCapacity(engine, resource, Long.MAX_VALUE);
+    }
+
+    public static long schedulingCapacity(
+            WorkerStatus.EngineObservation engine,
+            PlanningResource resource,
+            long fallbackBatchTokenCapacity) {
         Objects.requireNonNull(resource, "resource");
         if (engine == null) {
             return Long.MAX_VALUE;
@@ -508,7 +548,7 @@ public final class PrefillQueueRunner {
                                 ? engine.maxBatchTokensSize()
                                 : engine.maxSeqLen();
         return maximum <= 0L
-                ? Long.MAX_VALUE
+                ? resource == PlanningResource.TOKENS ? fallbackBatchTokenCapacity : Long.MAX_VALUE
                 : resource == PlanningResource.KV
                         ? Math.clamp(engine.availableKvCacheTokens(), 0L, maximum)
                         : maximum;
@@ -516,7 +556,9 @@ public final class PrefillQueueRunner {
 
     // ==================== Delivery ownership ====================
 
-    /** Prepare an ordered prefix, commit once, and hand off outside all owner locks. */
+    /**
+     * Prepare an ordered prefix, commit once, and hand off outside all owner locks.
+     */
     CapacityBoundary processSelection(
             List<RequestRoute> candidates,
             String reason,
@@ -550,6 +592,7 @@ public final class PrefillQueueRunner {
                                     CapacityBoundary.Resource.PREFILL_REQUEST)
                             : null;
                 }
+                recordDecisionGroup(prep.members, reason);
                 prep.reservation = null;
                 boolean removedFailedMember = prep.committed.removedFailedMember();
                 if (removedFailedMember) {
@@ -618,7 +661,29 @@ public final class PrefillQueueRunner {
         }
     }
 
-    /** Route publication and its committed queue owner finish before telemetry. */
+    private void recordDecisionGroup(List<Member> items, String reason) {
+        String groupId = java.util.UUID.randomUUID().toString();
+        long committedAtMs = System.currentTimeMillis();
+        for (Member member : items) {
+            RequestRoute item = member.route();
+            item.ctx()
+                    .data()
+                    .setDecisionGroup(
+                            new org.flexlb.dao.pv.DecisionGroup(
+                                    groupId,
+                                    settings.grouping().name(),
+                                    settings.dispatcherType().name(),
+                                    prefillEndpoint.getStatus().getMetricIpPort(),
+                                    items.size(),
+                                    reason,
+                                    committedAtMs,
+                                    Math.max(0L, committedAtMs - item.enqueuedAtMs())));
+        }
+    }
+
+    /**
+     * Route publication and its committed queue owner finish before telemetry.
+     */
     private void publishRoutes(
             List<Member> members,
             long[] predictions,
@@ -723,7 +788,7 @@ public final class PrefillQueueRunner {
                     item.decodeEp()
                             .shouldRetryDispatch(
                                     item.decodeReservation(),
-                                    runtime.deliveries().decodeDeliveryCapacity);
+                                    item.ctx().data().getDecodeAdmissionCapacity());
         };
     }
 
@@ -743,7 +808,9 @@ public final class PrefillQueueRunner {
         };
     }
 
-    /** Serialize a delivery commit with queue drain and exact generation ownership. */
+    /**
+     * Serialize a delivery commit with queue drain and exact generation ownership.
+     */
     PrefillState.CommittedHandoff commitSelection(
             java.util.function.LongFunction<PrefillState.CommittedHandoff> commit) {
         queueGuard.lock();
@@ -798,7 +865,9 @@ public final class PrefillQueueRunner {
         return QueueCycle.NO_ACTION;
     }
 
-    /** Once removed, the request must be notified even if a capacity listener fails. */
+    /**
+     * Once removed, the request must be notified even if a capacity listener fails.
+     */
     private void removeAndNotify(
             RequestRoute item, CapacityBoundary failure, boolean alreadyRemoved) {
         if (!alreadyRemoved
@@ -927,7 +996,8 @@ public final class PrefillQueueRunner {
                         snapshot.schedulingInputVersion(),
                         Math.min(
                                 GroupPlanner.collectionDeadlineMs(
-                                        selection.windowOpenedAtMs(), settings.collectionWaitMs()),
+                                        selection.windowOpenedAtMs(),
+                                        constraints.collectionWindowMs()),
                                 first.expiresAtMs()),
                         "Prefill collection window");
             }
@@ -957,7 +1027,9 @@ public final class PrefillQueueRunner {
         }
     }
 
-    /** Checks ordering and the queue-owned allowance; it neither reserves nor consumes capacity. */
+    /**
+     * Checks ordering and the queue-owned allowance; it neither reserves nor consumes capacity.
+     */
     public boolean canBypass(RequestRoute head, RequestRoute candidate) {
         queueGuard.lock();
         try {
@@ -967,7 +1039,9 @@ public final class PrefillQueueRunner {
         }
     }
 
-    /** Only the immediate blocked head may be skipped; a second blocked member stops this batch. */
+    /**
+     * Only the immediate blocked head may be skipped; a second blocked member stops this batch.
+     */
     private List<RequestRoute> bypassCandidates(
             PrefillState.QueueSnapshot snapshot, RequestRoute head) {
         if (snapshot.head() != head) {
@@ -1099,9 +1173,13 @@ public final class PrefillQueueRunner {
         }
     }
 
-    /** Called after Prefill or Decode capacity changes, outside endpoint locks. */
+    /**
+     * Called after Prefill or Decode capacity changes, outside endpoint locks.
+     */
 
-    /** Own the blocked head, its listener and projection invalidation under queueGuard. */
+    /**
+     * Own the blocked head, its listener and projection invalidation under queueGuard.
+     */
     private void setCapacityBlockedHeadLocked(QueueCycle blocked) {
         queueGuard.requireHeld();
         if (capacityBlockedHead == blocked) {
@@ -1124,7 +1202,9 @@ public final class PrefillQueueRunner {
         }
     }
 
-    /** Wake after the status transaction has already committed its planning revision. */
+    /**
+     * Wake after the status transaction has already committed its planning revision.
+     */
     public void wake() {
         queueGuard.lock();
         try {
@@ -1134,7 +1214,9 @@ public final class PrefillQueueRunner {
         }
     }
 
-    /** Wake decisions whose advisory worker-status or predictor input changed. */
+    /**
+     * Wake decisions whose advisory worker-status or predictor input changed.
+     */
     public void signal(boolean capacityOnly) {
         queueGuard.lock();
         try {
@@ -1236,8 +1318,10 @@ public final class PrefillQueueRunner {
                                                 .decodeEp()
                                                 .shouldRetryDispatch(
                                                         bypassedHead.decodeReservation(),
-                                                        runtime.deliveries()
-                                                                .decodeDeliveryCapacity)) {
+                                                        bypassedHead
+                                                                .ctx()
+                                                                .data()
+                                                                .getDecodeAdmissionCapacity())) {
                                     return null;
                                 }
                                 return prefillEndpoint.commitLocked(
@@ -1305,7 +1389,7 @@ public final class PrefillQueueRunner {
             } catch (InvalidPrefillPredictionException failure) {
                 return CapacityBoundary.failed(failure);
             }
-            var attempt = Member.prepare(item, runtime.deliveries().decodeDeliveryCapacity);
+            var attempt = Member.prepare(item, item.ctx().data().getDecodeAdmissionCapacity());
             if (!attempt.accepted()) {
                 return attempt.boundary();
             }

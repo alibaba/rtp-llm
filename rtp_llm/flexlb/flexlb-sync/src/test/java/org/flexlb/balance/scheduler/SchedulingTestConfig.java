@@ -11,12 +11,16 @@ import org.flexlb.config.VictimStage;
 
 import java.util.EnumSet;
 
-/** Test-only builders for the public scheduler and dispatcher variants. */
+/**
+ * Test-only builders for the public scheduler and dispatcher variants.
+ */
 public final class SchedulingTestConfig {
     private static final java.util.concurrent.atomic.AtomicLong fixtureQueueSequence =
             new java.util.concurrent.atomic.AtomicLong();
 
-    /** Construct protocol fixtures without exposing a production route factory that bypasses selection. */
+    /**
+     * Construct protocol fixtures without exposing a production route factory that bypasses selection.
+     */
     public static RequestRoute createRoute(
             RequestContext context,
             org.flexlb.dao.loadbalance.Response response,
@@ -121,7 +125,9 @@ public final class SchedulingTestConfig {
         }
     }
 
-    /** Read a fixture's nullable template without making it a production API. */
+    /**
+     * Read a fixture's nullable template without making it a production API.
+     */
     public static org.flexlb.dao.loadbalance.Response routeResponse(RequestRoute route) {
         return org.flexlb.dao.loadbalance.Response.copyOf(
                 (org.flexlb.dao.loadbalance.Response)
@@ -129,7 +135,9 @@ public final class SchedulingTestConfig {
                                 route, "routeResponse"));
     }
 
-    /** Mutable metadata for deliberate fault injection into a state-only fixture. */
+    /**
+     * Mutable metadata for deliberate fault injection into a state-only fixture.
+     */
     static org.flexlb.dao.loadbalance.ServerStatus prefillTemplate(RequestRoute route) {
         return (org.flexlb.dao.loadbalance.ServerStatus)
                 org.springframework.test.util.ReflectionTestUtils.getField(route, "prefill");

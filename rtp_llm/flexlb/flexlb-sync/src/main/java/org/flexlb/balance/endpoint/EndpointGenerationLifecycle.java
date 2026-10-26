@@ -9,7 +9,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
-/** One endpoint-generation admission gate and its retirement drain. */
+/**
+ * One endpoint-generation admission gate and its retirement drain.
+ */
 final class EndpointGenerationLifecycle {
 
     private static final long DEFAULT_RETIREMENT_TIMEOUT_MS =
@@ -47,14 +49,18 @@ final class EndpointGenerationLifecycle {
         return phase != RetirementPhase.ACCEPTING_HANDOFFS;
     }
 
-    /** Close the gate without waiting or running endpoint cleanup. */
+    /**
+     * Close the gate without waiting or running endpoint cleanup.
+     */
     synchronized void beginRetirement() {
         if (phase == RetirementPhase.ACCEPTING_HANDOFFS) {
             phase = RetirementPhase.RETIRING;
         }
     }
 
-    /** Claim cleanup atomically; return true only when this caller should run it. */
+    /**
+     * Claim cleanup atomically; return true only when this caller should run it.
+     */
     synchronized boolean tryStartCleanup() {
         checkState(
                 phase != RetirementPhase.ACCEPTING_HANDOFFS,
@@ -69,7 +75,9 @@ final class EndpointGenerationLifecycle {
         return phase == RetirementPhase.CLEANUP_SCHEDULED;
     }
 
-    /** Bind the claimed cleanup to its execution thread for reentrant close. */
+    /**
+     * Bind the claimed cleanup to its execution thread for reentrant close.
+     */
     synchronized void beginCleanup() {
         checkState(
                 phase == RetirementPhase.CLEANUP_SCHEDULED && activeHandoffs == 0,
@@ -96,7 +104,9 @@ final class EndpointGenerationLifecycle {
         }
     }
 
-    /** Run finalization only after successful local cleanup, including after a wait timeout. */
+    /**
+     * Run finalization only after successful local cleanup, including after a wait timeout.
+     */
     void onRetired(Runnable completion) {
         retirementCompleted.thenRun(Objects.requireNonNull(completion, "completion"));
     }

@@ -47,13 +47,14 @@ class FlexlbGrpcDrainTest {
         var resume = new CountDownLatch(1);
         var timing = new GrpcServerTimingInterceptor();
         var config = mock(ConfigService.class);
-        when(config.loadBalanceConfig())
-                .thenReturn(
-                        ConfigService.parse(
-                                """
+        var routingConfig =
+                ConfigService.parse(
+                        """
                 {"requestLifecycle":{"request":{"timeoutMs":60000}},
                  "grpcServer":{"shutdownQuietPeriodMs":100}}
-                """));
+                """);
+        routingConfig.setDispatcher(org.flexlb.config.ConfigTestSupport.nonBatch());
+        when(config.loadBalanceConfig()).thenReturn(routingConfig);
         var routes = mock(org.flexlb.balance.scheduler.RequestScheduler.class);
         var success = new Response();
         success.setSuccess(true);
@@ -103,7 +104,13 @@ class FlexlbGrpcDrainTest {
                         .start();
         var grpc =
                 new FlexlbGrpcServer(
-                        service, config, new MockEnvironment(), null, null, timing, null);
+                        service,
+                        config,
+                        new MockEnvironment(),
+                        null,
+                        new io.micrometer.core.instrument.simple.SimpleMeterRegistry(),
+                        timing,
+                        null);
         ReflectionTestUtils.setField(grpc, "server", server);
         var channel =
                 NettyChannelBuilder.forAddress("127.0.0.1", server.getPort())
@@ -115,7 +122,9 @@ class FlexlbGrpcDrainTest {
                     FlexlbServiceGrpc.newFutureStub(channel)
                             .withDeadlineAfter(8, TimeUnit.SECONDS)
                             .schedule(
-                                    FlexlbScheduleRequestPB.newBuilder().setRequestId(101).build());
+                                    FlexlbScheduleRequestPB.newBuilder()
+                                            .setRequestIdStr("101")
+                                            .build());
             assertTrue(accepted.await(3, TimeUnit.SECONDS));
             drainer.start();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
@@ -217,7 +226,13 @@ class FlexlbGrpcDrainTest {
                                             .formatted(quietMs)));
             grpc =
                     new FlexlbGrpcServer(
-                            null, configService, new MockEnvironment(), null, null, timing, null);
+                            null,
+                            configService,
+                            new MockEnvironment(),
+                            null,
+                            new io.micrometer.core.instrument.simple.SimpleMeterRegistry(),
+                            timing,
+                            null);
             server =
                     NettyServerBuilder.forAddress(new java.net.InetSocketAddress("127.0.0.1", 0))
                             .addService(

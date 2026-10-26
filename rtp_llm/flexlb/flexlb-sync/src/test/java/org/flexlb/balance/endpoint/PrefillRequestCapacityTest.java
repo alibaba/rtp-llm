@@ -34,8 +34,7 @@ class PrefillRequestCapacityTest {
     private final PrefillState state =
             new PrefillState(
                     lock,
-                    PrefillActiveIndex.ordered(
-                            16, Comparator.comparingLong(RequestRoute::requestId)),
+                    PrefillActiveIndex.ordered(16, Comparator.comparing(RequestRoute::requestId)),
                     System::currentTimeMillis);
 
     @Test
@@ -277,7 +276,7 @@ class PrefillRequestCapacityTest {
                         }
                         throw new IllegalStateException("queue insertion failed");
                     }
-                    return Long.compare(left.requestId(), right.requestId());
+                    return left.requestId().compareTo(right.requestId());
                 };
         PrefillState ledger =
                 new PrefillState(
@@ -397,7 +396,6 @@ class PrefillRequestCapacityTest {
         when(engine.runningTaskList()).thenReturn(tasks);
         when(engine.waitingQueryLen()).thenReturn(reportedActive);
         when(observation.engine()).thenReturn(engine);
-        when(observation.runningTasks()).thenReturn(tasks);
         lock.lock();
         try {
             state.commitStatusLocked(
@@ -410,7 +408,7 @@ class PrefillRequestCapacityTest {
 
     private static WorkerStatus.TaskObservation observed(long id) {
         return new WorkerStatus.TaskObservation(
-                id,
+                String.valueOf(id),
                 0L,
                 0L,
                 0L,
@@ -423,12 +421,13 @@ class PrefillRequestCapacityTest {
                 0L,
                 TaskPhase.RUNNING,
                 0L,
-                PriorityPreemptionProgress.NONE);
+                PriorityPreemptionProgress.NONE,
+                null);
     }
 
     private static RequestRoute item(long id) {
         RequestRoute item = mock(RequestRoute.class);
-        when(item.requestId()).thenReturn(id);
+        when(item.requestId()).thenReturn(String.valueOf(id));
         return item;
     }
 }

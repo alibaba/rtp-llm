@@ -21,7 +21,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** An exact early wake refreshes scheduling identity without acquiring any termination authority. */
+/**
+ * An exact early wake refreshes scheduling identity without acquiring any termination authority.
+ */
 class RequestDeadlineTokenRefreshTest {
     @ParameterizedTest
     @EnumSource(ExpirationTimer.Kind.class)

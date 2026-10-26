@@ -3,7 +3,9 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 
-/** Defines how requests owned by QUEUE are grouped into one decision. */
+/**
+ * Defines how requests owned by QUEUE are grouped into one decision.
+ */
 @Getter
 @Setter
 public final class DecisionPolicyConfig {
@@ -21,7 +23,9 @@ public final class DecisionPolicyConfig {
     private int maxRequests = DEFAULT_MAX_REQUESTS;
     private long maxCollectionWaitMs = DEFAULT_MAX_COLLECTION_WAIT_MS;
 
-    /** Optional execution-time cap for a fixed-window group. */
+    /**
+     * Optional execution-time cap for a fixed-window group.
+     */
     private Long maxPredictedExecutionMs;
 
     /**

@@ -9,7 +9,6 @@ import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -18,7 +17,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 
@@ -59,7 +58,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 preparationBarrier);
     }
 
-    /** In-memory delivery fixtures own no remote resources; model their explicit cleanup response. */
+    /**
+     * In-memory delivery fixtures own no remote resources; model their explicit cleanup response.
+     */
     private static EngineGrpcClient localDeliveryCleanup() {
         var channel = org.mockito.Mockito.mock(EngineGrpcClient.class);
         org.mockito.Mockito.when(
@@ -148,7 +149,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         eviction,
                         placementAvailability,
                         capacity,
-                        new org.flexlb.service.RecentCacheKeyTraceReporter());
+                        new org.flexlb.service.TheoryCacheHitReporter());
         runtime.registerScheduler(scheduler);
     }
 
@@ -168,14 +169,18 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         return placementAvailability;
     }
 
-    /** Return the canonical request future retained by the exact test context. */
-    public CompletableFuture<Response> requestFuture(long requestId) {
+    /**
+     * Return the canonical request future retained by the exact test context.
+     */
+    public CompletableFuture<Response> requestFuture(String requestId) {
         RequestContext requestContext = requests.findActive(requestId);
         return requestContext == null ? null : requestContext.data().getFuture();
     }
 
-    /** Return the exact item currently owned by a fixture request context. */
-    public RequestRoute activeRoute(long requestId) {
+    /**
+     * Return the exact item currently owned by a fixture request context.
+     */
+    public RequestRoute activeRoute(String requestId) {
         RequestContext requestContext = requests.findActive(requestId);
         if (requestContext == null) {
             return null;
@@ -185,33 +190,41 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
     }
 
-    /** Bind the fixture's router exactly once, after endpoints are published. */
+    /**
+     * Bind the fixture's router exactly once, after endpoints are published.
+     */
     public void bindRouter(RequestWorkerSelector exactRouter) {
         router.bind(exactRouter);
     }
 
-    /** Run the same expiration maintenance edge that Spring schedules. */
+    /**
+     * Run the same expiration maintenance edge that Spring schedules.
+     */
     public void maintainExpiration() {
         runtime.maintainExpiration();
     }
 
-    /** Apply and project one exact worker-status transaction. */
+    /**
+     * Apply and project one exact worker-status transaction.
+     */
     public void applyStatus(WorkerStatus status, WorkerStatusResponse response) {
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(response, "response");
         applyStatus(status, WorkerStatusTestSupport.freezeStatusResponse(status, response));
     }
 
-    /** Apply an immutable protocol observation without a mutable DTO hop. */
+    /**
+     * Apply an immutable protocol observation without a mutable DTO hop.
+     */
     public void applyStatus(WorkerStatus status, WorkerStatus.StatusObservation observation) {
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(observation, "observation");
         RoleType role = observation.role();
-        WorkerEndpoint endpoint = registry.get(role, status.getIpPort(), status);
+        WorkerEndpoint endpoint = registry.get(role, status.getLogicalIpPort(), status);
         if (endpoint == null) {
             throw new IllegalStateException(
                     "status generation has no published endpoint: "
-                            + status.getIpPort()
+                            + status.getLogicalIpPort()
                             + "#"
                             + status.getGenerationId());
         }
@@ -260,7 +273,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 if (status == null) {
                     continue;
                 }
-                String address = status.getServerIp() + ":" + status.getHttpPort();
+                String address = status.getLogicalIpPort();
                 var pin = registry.capture(status.getRole(), address);
                 if (pin == null) {
                     throw new IllegalStateException(
@@ -305,11 +318,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     new CostBasedPrefillStrategy(
                             workers,
                             org.mockito.Mockito.mock(
-                                    org.flexlb.cache.service.CacheAwareService.class),
+                                    org.flexlb.cache.match.CacheAwareService.class),
                             org.mockito.Mockito.mock(
-                                    org.flexlb.service.monitor.EngineHealthReporter.class),
-                            org.mockito.Mockito.mock(CacheMetricsReporter.class),
-                            configService),
+                                    org.flexlb.service.monitor.EngineHealthReporter.class)),
                     new DecodeSelector(workers, configService, capacity),
                     new VitWorkerSelector(workers),
                     emptyModelMeta());

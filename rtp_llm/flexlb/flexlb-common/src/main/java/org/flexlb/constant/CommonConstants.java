@@ -9,6 +9,11 @@ public class CommonConstants {
     public static final String TIMEOUT_HANDLER = "timeoutHandler";
 
     /**
+     * Separator between a physical {@code ip:port} address and its logical engine index.
+     */
+    public static final String LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR = "@";
+
+    /**
      * gRPC timeout message
      */
     public static final String DEADLINE_EXCEEDED_MESSAGE = "DEADLINE_EXCEEDED";

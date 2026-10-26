@@ -23,7 +23,9 @@ import static com.google.common.math.LongMath.saturatedMultiply;
  */
 public final class GroupPlanner {
 
-    /** Allocation hint only; {@link Constraints#maxRequests()} is authoritative. */
+    /**
+     * Allocation hint only; {@link Constraints#maxRequests()} is authoritative.
+     */
     private static final int INITIAL_SELECTION_CAPACITY = 32;
 
     private static final int MAX_CACHED_SELECTION_SIZE = 4096;
@@ -42,7 +44,7 @@ public final class GroupPlanner {
      * already been sorted by the queue's production comparator.
      */
     public record Item(
-            long requestId,
+            String requestId,
             int priority,
             long enqueueSeq,
             long enqueuedAtMs,
@@ -55,7 +57,7 @@ public final class GroupPlanner {
         }
 
         public Item(
-                long requestId,
+                String requestId,
                 int priority,
                 long enqueueSeq,
                 long enqueuedAtMs,
@@ -81,14 +83,18 @@ public final class GroupPlanner {
         }
     }
 
-    /** Read-only request fields consumed by both live and projected planning. */
+    /**
+     * Read-only request fields consumed by both live and projected planning.
+     */
     public interface Input {
         long enqueuedAtMs();
 
         long seqLen();
     }
 
-    /** Frozen policy and resource bounds for one planning operation. */
+    /**
+     * Frozen policy and resource bounds for one planning operation.
+     */
     public record Constraints(
             int maxRequests,
             long batchTokenCapacity,
@@ -101,7 +107,9 @@ public final class GroupPlanner {
         }
     }
 
-    /** Group selection before readiness is evaluated against a clock value. */
+    /**
+     * Group selection before readiness is evaluated against a clock value.
+     */
     public record Selection<T>(
             List<T> items,
             long paddedTokens,
@@ -241,7 +249,9 @@ public final class GroupPlanner {
         }
     }
 
-    /** Return the dispatch reason at this clock, or null while the selected group must wait. */
+    /**
+     * Return the dispatch reason at this clock, or null while the selected group must wait.
+     */
     public static String dispatchReason(
             Selection<?> selection, Constraints constraints, long nowMs) {
         if (selection.predictionBoundaryTriggered()) {

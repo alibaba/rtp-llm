@@ -213,7 +213,7 @@ class ExpirationTimerInstallationRecoveryTest {
             context.recordDeliveryResult(
                     new ContextResult.Prediction(delivery.delivery(), 3000L, 1002L));
             var request = mock(org.flexlb.dao.loadbalance.Request.class);
-            when(request.getRequestId()).thenReturn(7502L);
+            when(request.getRequestId()).thenReturn(String.valueOf(7502L));
             context.data().setRequest(request);
             context.data()
                     .setSchedulingMetadata(

@@ -14,7 +14,9 @@ import java.util.OptionalDouble;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.math.LongMath.saturatedAdd;
 
-/** Inputs, results, and timing rules used by {@link RouteTimelineProjector}. */
+/**
+ * Inputs, results, and timing rules used by {@link RouteTimelineProjector}.
+ */
 public final class RequestTimeEstimation {
 
     private RequestTimeEstimation() {}
@@ -24,13 +26,19 @@ public final class RequestTimeEstimation {
      */
     public interface DeliveryProjection {
 
-        /** Exact service completion for an otherwise empty endpoint queue. */
+        /**
+         * Exact service completion for an otherwise empty endpoint queue.
+         */
         long singletonCompletionOffsetMs(long seqLen, long hitCache, Predictions predictions);
 
-        /** Invocation-local, prefix-aware planning cursor. */
+        /**
+         * Invocation-local, prefix-aware planning cursor.
+         */
         GroupPlanning planning(Predictions predictions);
 
-        /** Compute the one required completion prefix, reusing only this exact planning cursor. */
+        /**
+         * Compute the one required completion prefix, reusing only this exact planning cursor.
+         */
         long completionOffsetMs(
                 List<GroupPlanner.Item> items,
                 int memberIndex,
@@ -47,20 +55,26 @@ public final class RequestTimeEstimation {
     public interface GroupPlanning {
         double durationMs(List<GroupPlanner.Item> candidatePrefix, int requiredThroughIndex);
 
-        /** Only predictions actually evaluated for this cursor's exact prefixes may be reused. */
+        /**
+         * Only predictions actually evaluated for this cursor's exact prefixes may be reused.
+         */
         default OptionalDouble predictedPrefixMs(int size) {
             return OptionalDouble.empty();
         }
     }
 
-    /** Prediction primitives evaluated against one frozen predictor snapshot. */
+    /**
+     * Prediction primitives evaluated against one frozen predictor snapshot.
+     */
     public interface Predictions {
 
         long itemDurationMs(GroupPlanner.Item item);
 
         long itemDurationMs(long seqLen, long hitCache);
 
-        /** Fresh append-only session; full-batch models adapt through Evaluator's default implementation. */
+        /**
+         * Fresh append-only session; full-batch models adapt through Evaluator's default implementation.
+         */
         PrefillTimePredictor.BatchPrediction newBatchPrediction();
 
         long batchDurationMs(List<GroupPlanner.Item> items);
@@ -68,13 +82,17 @@ public final class RequestTimeEstimation {
         long singletonBatchDurationMs(long seqLen, long hitCache);
     }
 
-    /** Effect of a captured blocked head after a probe has overtaken it. */
+    /**
+     * Effect of a captured blocked head after a probe has overtaken it.
+     */
     public enum AfterProbeAdmission {
         BLOCKED,
         UNAVAILABLE
     }
 
-    /** Delivery-independent meaning of one exact captured admission block. */
+    /**
+     * Delivery-independent meaning of one exact captured admission block.
+     */
     public record AdmissionBlockSemantics(
             String blockedDetail,
             AfterProbeAdmission afterProbe,
@@ -85,7 +103,9 @@ public final class RequestTimeEstimation {
         }
     }
 
-    /** Read-only projection result. Invocation-scoped views must not be retained. */
+    /**
+     * Read-only projection result. Invocation-scoped views must not be retained.
+     */
     public interface CandidateView {
         Candidate.State state();
 
@@ -113,7 +133,9 @@ public final class RequestTimeEstimation {
         }
     }
 
-    /** Complete immutable projection used outside the full-fleet hot path. */
+    /**
+     * Complete immutable projection used outside the full-fleet hot path.
+     */
     public record Candidate(
             State state,
             long projectedTtftMsValue,
@@ -157,7 +179,9 @@ public final class RequestTimeEstimation {
         }
     }
 
-    /** Queue and committed work captured under one ownership lock. */
+    /**
+     * Queue and committed work captured under one ownership lock.
+     */
     public record Inputs(QueueSnapshot queue, WorkSnapshot work, long ownershipVersion) {
 
         public Inputs {
@@ -170,7 +194,9 @@ public final class RequestTimeEstimation {
         }
     }
 
-    /** Apply one observed worker admission wait without inventing a release duration. */
+    /**
+     * Apply one observed worker admission wait without inventing a release duration.
+     */
     public static CandidateView applyAdmissionPolicy(QueueSnapshot queue, CandidateView candidate) {
         QueueSnapshot.AdmissionBlock observation = queue.admissionBlock();
         if (!queue.queueScheduling()
@@ -216,13 +242,15 @@ public final class RequestTimeEstimation {
     }
 
     private static final DeliveryProjection BATCH = new BatchProjection();
-    private static final DeliveryProjection ROUTE = new RouteProjectionPolicy();
+    private static final DeliveryProjection ROUTE = new RequestTimeEstimationPolicy();
 
     public static DeliveryProjection forDelivery(DispatcherConfig.Type mode) {
         return mode == DispatcherConfig.Type.BATCH ? BATCH : ROUTE;
     }
 
-    /** One incremental predictor for one live queue selection. */
+    /**
+     * One incremental predictor for one live queue selection.
+     */
     public static GroupPlanner.PrefixPrediction<RequestRoute> newGroupPredictor(
             DispatcherConfig.Type mode, PrefillTimePredictor.Evaluator evaluator) {
         if (mode == DispatcherConfig.Type.BATCH) {
@@ -282,7 +310,9 @@ public final class RequestTimeEstimation {
                     memberIndex + 1 == items.size() ? items : items.subList(0, memberIndex + 1));
         }
 
-        /** One planner invocation; prefixes only grow and the probe boundary never moves backwards. */
+        /**
+         * One planner invocation; prefixes only grow and the probe boundary never moves backwards.
+         */
         private static final class AppendPlanning implements GroupPlanning {
             private final PrefillTimePredictor.BatchPrediction prediction;
             private int size;
@@ -323,7 +353,7 @@ public final class RequestTimeEstimation {
         }
     }
 
-    private static final class RouteProjectionPolicy implements DeliveryProjection {
+    private static final class RequestTimeEstimationPolicy implements DeliveryProjection {
 
         private static final ThreadLocal<TimeAccumulator> PLANNING =
                 ThreadLocal.withInitial(TimeAccumulator::new);

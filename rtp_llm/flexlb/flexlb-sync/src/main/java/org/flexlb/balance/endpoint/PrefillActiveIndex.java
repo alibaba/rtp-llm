@@ -49,7 +49,9 @@ public final class PrefillActiveIndex implements Iterable<RequestRoute> {
         priorityCounts = null;
     }
 
-    /** Immutable membership; prediction objects are materialized outside the owner lock. */
+    /**
+     * Immutable membership; prediction objects are materialized outside the owner lock.
+     */
     public static final class Capture {
         private static final Capture EMPTY = new Capture(List.of());
         private final List<Entry> entries;
@@ -81,7 +83,9 @@ public final class PrefillActiveIndex implements Iterable<RequestRoute> {
         }
     }
 
-    /** One identity in the active index; survives membership snapshot rebuilds. */
+    /**
+     * One identity in the active index; survives membership snapshot rebuilds.
+     */
     private static final class Entry {
         private final RequestRoute request;
         private final long sequence;
@@ -129,7 +133,9 @@ public final class PrefillActiveIndex implements Iterable<RequestRoute> {
                         });
     }
 
-    /** Membership revision; mutations hold the owning ledger lock. */
+    /**
+     * Membership revision; mutations hold the owning ledger lock.
+     */
     public long version() {
         return version;
     }
@@ -193,7 +199,9 @@ public final class PrefillActiveIndex implements Iterable<RequestRoute> {
         version++;
     }
 
-    /** Caller holds the owning ledger lock; reuse membership until it changes. */
+    /**
+     * Caller holds the owning ledger lock; reuse membership until it changes.
+     */
     public Capture capture() {
         if (queue == null) {
             return Capture.EMPTY;

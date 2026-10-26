@@ -24,7 +24,12 @@ class ZkLeadershipShutdownRaceTest {
         var reporter = mock(EngineHealthReporter.class);
         var service =
                 new ZookeeperMasterElectService(
-                        mock(GeneralHttpNettyService.class), reporter, mock(Environment.class));
+                        mock(GeneralHttpNettyService.class),
+                        reporter,
+                        mock(Environment.class),
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                new org.flexlb.config.FlexlbConfig()),
+                        mock(org.flexlb.config.DeploymentIdentity.class));
         var selector = mock(LeaderSelector.class);
         when(selector.getParticipants()).thenReturn(List.of());
         ReflectionTestUtils.setField(service, "leaderSelector", selector);

@@ -129,7 +129,7 @@ final class RequestProtocolTestSupport {
         boolean accepted = false;
         Throwable failure = null;
         try {
-            accepted = plan.accept(endpoint, result.reservation());
+            accepted = plan.accept(endpoint, result.reservation(), result.preemptRequestIds());
             return accepted;
         } catch (RuntimeException | Error failed) {
             failure = failed;
@@ -324,7 +324,9 @@ final class RequestProtocolTestSupport {
         return (QueuedRequestScheduler) requests;
     }
 
-    /** Rewire an already-bound owner only for protocol/fault-injection fixtures. */
+    /**
+     * Rewire an already-bound owner only for protocol/fault-injection fixtures.
+     */
     static RequestScheduler injectPlacementDependencies(
             AbstractRequestScheduler owner,
             org.flexlb.config.ConfigService service,
@@ -417,7 +419,9 @@ final class RequestProtocolTestSupport {
                         : StrategyErrorType.BATCH_SLO_EXPIRED);
     }
 
-    /** Isolates queue ordering from the common request protocol. */
+    /**
+     * Isolates queue ordering from the common request protocol.
+     */
     static AbstractRequestScheduler schedulerMock() {
         var config = SchedulingTestConfig.batchConfig();
         var service = org.mockito.Mockito.mock(org.flexlb.config.ConfigService.class);
@@ -426,7 +430,7 @@ final class RequestProtocolTestSupport {
                 service,
                 org.mockito.Mockito.mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                 org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class));
+                org.mockito.Mockito.mock(org.flexlb.service.TheoryCacheHitReporter.class));
     }
 
     static AbstractRequestScheduler initialize(
@@ -442,8 +446,7 @@ final class RequestProtocolTestSupport {
                                 org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                         org.mockito.Mockito.mock(
                                 org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.service.RecentCacheKeyTraceReporter.class));
+                        org.mockito.Mockito.mock(org.flexlb.service.TheoryCacheHitReporter.class));
         ReflectionTestUtils.setField(owner.runtime, "responseCompletions", publisher);
         ReflectionTestUtils.setField(owner.runtime, "timer", deadlines);
         register(owner, context);
@@ -601,13 +604,17 @@ final class RequestProtocolTestSupport {
 
     private RequestProtocolTestSupport() {}
 
-    static RequestContext context(FlexlbConfig config, long requestId) {
+    static RequestContext context(FlexlbConfig config, String requestId) {
         Request request = Request.builder().requestId(requestId).seqLen(16L).build();
         SchedulingTestConfig.configureRequiredValues(config);
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);
         context.data()
-                .setGenerateInputPb(com.google.protobuf.ByteString.copyFromUtf8("test-input"));
+                .setGenerateInputPb(
+                        org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
+                                .setRequestId(Long.parseLong(requestId))
+                                .build()
+                                .toByteString());
         context.data()
                 .setSchedulingMetadata(
                         SchedulingMetadata.explicit(

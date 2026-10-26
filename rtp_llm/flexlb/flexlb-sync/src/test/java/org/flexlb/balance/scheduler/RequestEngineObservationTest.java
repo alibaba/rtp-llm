@@ -21,7 +21,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Public transitions acquire the monitor themselves; observations cannot partially bypass it. */
+/**
+ * Public transitions acquire the monitor themselves; observations cannot partially bypass it.
+ */
 class RequestEngineObservationTest {
     @Test
     void prefillObservationCannotChangeActivityOrVisibilityOutsideItsAtomicTransition()

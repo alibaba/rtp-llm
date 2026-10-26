@@ -5,14 +5,18 @@ import org.flexlb.balance.preemption.CancelTarget;
 
 import java.util.Objects;
 
-/** Exact victim/attempt identity. Resolution execution belongs to Runtime. */
+/**
+ * Exact victim/attempt identity. Resolution execution belongs to Runtime.
+ */
 public record PreemptionRegistration(
         RequestContext owner,
         long attemptToken,
         DecodeResources.ReservationHandle reservation,
         CancelTarget cancelTarget)
         implements ContextResult.GrantValue {
-    /** Business progress after Scheduler has applied a cancel reply; never a capacity grant. */
+    /**
+     * Business progress after Scheduler has applied a cancel reply; never a capacity grant.
+     */
     public enum Reply {
         WAITING,
         NOT_FOUND,

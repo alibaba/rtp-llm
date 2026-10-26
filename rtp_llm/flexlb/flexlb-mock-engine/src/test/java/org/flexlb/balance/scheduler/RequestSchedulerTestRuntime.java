@@ -10,7 +10,6 @@ import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -19,14 +18,16 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 
 import java.util.List;
 import java.util.Objects;
 
-/** Test-only composition root for mock-engine end-to-end scheduler tests. */
+/**
+ * Test-only composition root for mock-engine end-to-end scheduler tests.
+ */
 public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     private final RequestRepository requests = new RequestRepository();
@@ -40,7 +41,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final java.util.Set<Runnable> deliveryListeners =
             new java.util.concurrent.CopyOnWriteArraySet<>();
 
-    /** Pause only new delivery admission; accepted batches and remote ACKs still execute normally. */
+    /**
+     * Pause only new delivery admission; accepted batches and remote ACKs still execute normally.
+     */
     public void pauseDelivery() {
         deliveryPaused = true;
     }
@@ -115,7 +118,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         decodeCapacity,
                         placementAvailability,
                         capacity,
-                        new org.flexlb.service.RecentCacheKeyTraceReporter());
+                        new org.flexlb.service.TheoryCacheHitReporter());
         runtime.registerScheduler(scheduler);
     }
 
@@ -139,7 +142,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         router.bind(exactRouter);
     }
 
-    /** Translate fixture response metadata into an exact queue admission. */
+    /**
+     * Translate fixture response metadata into an exact queue admission.
+     */
     public PlacementResult<RequestRoute, PlacementKey> routeResult(
             RequestContext context, Response response) {
         Objects.requireNonNull(context, "context");
@@ -157,7 +162,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 if (status == null) {
                     continue;
                 }
-                String address = status.getServerIp() + ":" + status.getHttpPort();
+                String address = status.getLogicalIpPort();
                 var pin = registry.capture(status.getRole(), address);
                 if (pin == null) {
                     throw new IllegalStateException(
@@ -184,16 +189,18 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
     }
 
-    /** Apply a newer worker status or refresh liveness from a same-version heartbeat. */
+    /**
+     * Apply a newer worker status or refresh liveness from a same-version heartbeat.
+     */
     public void applyStatus(WorkerStatus status, WorkerStatusResponse response) {
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(response, "response");
         RoleType role = Objects.requireNonNull(response.getRole(), "response role");
-        WorkerEndpoint endpoint = registry.get(role, status.getIpPort(), status);
+        WorkerEndpoint endpoint = registry.get(role, status.getLogicalIpPort(), status);
         if (endpoint == null) {
             throw new IllegalStateException(
                     "status generation has no published endpoint: "
-                            + status.getIpPort()
+                            + status.getLogicalIpPort()
                             + "#"
                             + status.getGenerationId());
         }
@@ -244,11 +251,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     new CostBasedPrefillStrategy(
                             workers,
                             org.mockito.Mockito.mock(
-                                    org.flexlb.cache.service.CacheAwareService.class),
+                                    org.flexlb.cache.match.CacheAwareService.class),
                             org.mockito.Mockito.mock(
-                                    org.flexlb.service.monitor.EngineHealthReporter.class),
-                            org.mockito.Mockito.mock(CacheMetricsReporter.class),
-                            configService),
+                                    org.flexlb.service.monitor.EngineHealthReporter.class)),
                     new DecodeSelector(workers, configService, capacity),
                     new VitWorkerSelector(workers),
                     emptyModelMeta());

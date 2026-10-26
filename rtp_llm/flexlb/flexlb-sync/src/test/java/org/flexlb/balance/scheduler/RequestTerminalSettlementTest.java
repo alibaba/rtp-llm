@@ -8,7 +8,7 @@ import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.scheduler.SchedulerTestSupport.Stage;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -48,11 +48,11 @@ import static org.mockito.Mockito.when;
 class RequestTerminalSettlementTest {
 
     private static final DecodeResources.ReservationHandle RESERVATION =
-            new DecodeResources.ReservationHandle(1L, 2L, 3L);
+            new DecodeResources.ReservationHandle(1L, "2", 3L);
 
     @Test
     void latePlacementDiagnosticsCannotOverwriteQueueTimeoutEvidence() {
-        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 42L);
+        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), "42");
         var queue = mock(QueuedRequestScheduler.class);
         var timeoutEvidence =
                 java.util.Map.<String, Object>of("cause", "DECODE placement unavailable");
@@ -78,7 +78,7 @@ class RequestTerminalSettlementTest {
 
     @Test
     void oldDecodeRetirementCannotRemoveANewSchedulingGeneration() {
-        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 4202L);
+        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), "4202");
         AbstractRequestScheduler requestOwner =
                 RequestProtocolTestSupport.initialize(
                         mock(ResponseCompletionExecutor.class),
@@ -88,7 +88,7 @@ class RequestTerminalSettlementTest {
                 requestOwner,
                 context,
                 RequestProtocolTestSupport.decodeEndpoint(),
-                new DecodeResources.ReservationHandle(1L, 4202L, 7L));
+                new DecodeResources.ReservationHandle(1L, "4202", 7L));
         SchedulerTestSupport.awaitRequestWork(requestOwner.runtime);
         assertTrue((context.snapshot().phase() == Phase.OPEN));
         assertFalse(context.data().getFuture().isDone());
@@ -1011,6 +1011,40 @@ class RequestTerminalSettlementTest {
         verify(f.item().decodeEp(), times(1))
                 .release(RESERVATION, DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
         verify(timer, times(failures + 1)).update(any(), any());
+    }
+
+    @Test
+    void reportsEndpointCleanupFailureAndStillPublishesTheRequestResult() {
+        var f = fixture(true);
+        var cleanupFailure = new IllegalStateException("endpoint cleanup failed");
+        var decode = f.item().decodeEp();
+        org.mockito.Mockito.doThrow(cleanupFailure)
+                .when(decode)
+                .release(RESERVATION, DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
+        assertSame(
+                cleanupFailure,
+                assertThrows(
+                        IllegalStateException.class,
+                        () ->
+                                f.scheduler()
+                                        .closeRequest(
+                                                f.requestContext(),
+                                                new EndEvidence(
+                                                        f.item(),
+                                                        EndKind.FAILURE,
+                                                        null,
+                                                        false,
+                                                        0L,
+                                                        org.flexlb.dao.loadbalance.StrategyErrorType
+                                                                .DISPATCH_FAILED,
+                                                        "request failed",
+                                                        false,
+                                                        false))));
+        SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
+        assertTrue(f.requestContext().data().getFuture().isDone());
+        assertFalse(f.requestContext().data().getFuture().join().isSuccess());
+        verify(f.scheduler().runtime.requestReporter(), org.mockito.Mockito.atLeastOnce())
+                .reportLifecycleFailure("terminal_cleanup");
     }
 
     private static boolean contextFinished(RequestContext context) {

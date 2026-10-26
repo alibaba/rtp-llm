@@ -412,7 +412,9 @@ class CacheEvictionControlTest {
         controlServer.start();
     }
 
-    /** GenerateInputPB carrying explicit block_cache_keys (uniqueKey metadata). */
+    /**
+     * GenerateInputPB carrying explicit block_cache_keys (uniqueKey metadata).
+     */
     private static EngineRpcService.GenerateInputPB inputWithBlockKeys(
             long requestId, int inputTokens, int decodePort, List<Long> blockKeys) {
         String uniqueKey;
@@ -441,7 +443,9 @@ class CacheEvictionControlTest {
         return input.build();
     }
 
-    /** gRPC getCacheStatus with needCacheKeys — the master-facing sync surface. */
+    /**
+     * gRPC getCacheStatus with needCacheKeys — the master-facing sync surface.
+     */
     private static EngineRpcService.CacheStatusPB cacheStatus(
             JavaMockEngineCluster.FastRpcService service) {
         return unary(
@@ -469,7 +473,9 @@ class CacheEvictionControlTest {
         return null;
     }
 
-    /** Poll until the engine's cache_keys count reaches expected (admits are async). */
+    /**
+     * Poll until the engine's cache_keys count reaches expected (admits are async).
+     */
     private void awaitEngineCacheKeys(String engineName, int expected, long timeoutMs)
             throws Exception {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);

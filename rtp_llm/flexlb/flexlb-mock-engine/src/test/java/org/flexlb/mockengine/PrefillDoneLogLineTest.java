@@ -145,9 +145,12 @@ class PrefillDoneLogLineTest {
                             777L,
                             MockEngineTestSupport.slot(
                                     0,
-                                    MockEngineTestSupport.input(rids[0], inputLens[0]),
-                                    MockEngineTestSupport.input(rids[1], inputLens[1]),
-                                    MockEngineTestSupport.input(rids[2], inputLens[2])));
+                                    MockEngineTestSupport.input(
+                                            String.valueOf(rids[0]), inputLens[0]),
+                                    MockEngineTestSupport.input(
+                                            String.valueOf(rids[1]), inputLens[1]),
+                                    MockEngineTestSupport.input(
+                                            String.valueOf(rids[2]), inputLens[2])));
             EngineRpcService.EnqueueBatchResponsePB response =
                     MockEngineTestSupport.enqueue(prefill, batch);
             assertEquals(

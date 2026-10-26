@@ -6,8 +6,9 @@ import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -19,9 +20,9 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -112,18 +113,14 @@ class PdfusionSchedulingTest {
         }
         EndpointRegistry directory = endpoints;
         CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
         RequestWorkerSelector router =
                 new RequestWorkerSelector(
                         new CostBasedPrefillStrategy(
-                                directory,
-                                cache,
-                                mock(EngineHealthReporter.class),
-                                org.mockito.Mockito.mock(CacheMetricsReporter.class),
-                                SchedulingTestConfig.configService(
-                                        SchedulingTestConfig.newConfig())),
+                                directory, cache, mock(EngineHealthReporter.class)),
                         new DecodeSelector(
                                 directory,
                                 SchedulingTestConfig.configService(
@@ -149,18 +146,18 @@ class PdfusionSchedulingTest {
                         runtime,
                         service,
                         reporter,
-                        mock(RecentCacheKeyTraceReporter.class),
+                        mock(TheoryCacheHitReporter.class),
                         router,
                         mock(DecodeAdmission.class),
                         availability);
         RequestScheduler scheduler = lifecycle;
         try {
-            long requestId = 920001L;
+            String requestId = "920001";
             var context = RequestProtocolTestSupport.context(config, requestId);
             context.data()
                     .setGenerateInputPb(
                             org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
-                                    .setRequestId(requestId)
+                                    .setRequestId(Long.parseLong(requestId))
                                     .build()
                                     .toByteString());
             Response response = scheduler.submit(context).get(3, TimeUnit.SECONDS);
@@ -179,7 +176,7 @@ class PdfusionSchedulingTest {
                             .admissionSummary(0, endpoint.requestLimit)
                             .occupiedRequests());
             var committedWork = endpoint.captureRouteProjectionInputs().work();
-            assertTrue(committedWork.containsRequest(requestId));
+            assertTrue(committedWork.containsRequest(Long.toString(Long.parseLong(requestId))));
             TaskInfo finished = new TaskInfo();
             finished.setRequestId(requestId);
             finished.setBatchId(
@@ -192,7 +189,7 @@ class PdfusionSchedulingTest {
             finished.setErrorCode(0L);
             status.setStatusVersion(2L);
             status.setLatestFinishedVersion(1L);
-            status.setFinishedTaskInfo(Map.of(Long.toString(requestId), finished));
+            status.setFinishedTaskInfo(Map.of(Long.toString(Long.parseLong(requestId)), finished));
             org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange projection;
             worker.lock.lock();
             try {

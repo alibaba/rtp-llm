@@ -16,8 +16,9 @@ import org.flexlb.balance.scheduler.RequestWorkerSelector;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.DecisionPolicyConfig;
@@ -35,8 +36,9 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
@@ -64,7 +66,6 @@ import java.util.function.Function;
 import static org.flexlb.mockengine.MockEngineTestSupport.unary;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -116,13 +117,19 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         schedulerRuntime.resumeDelivery();
     }
 
-    /** requestIds in the order the mock engines actually received them via enqueueBatch. */
+    /**
+     * requestIds in the order the mock engines actually received them via enqueueBatch.
+     */
     final List<Long> engineArrivalOrder = new CopyOnWriteArrayList<>();
 
-    /** requestId -> first enqueueBatch arrival time (nanos), for latency measurements. */
+    /**
+     * requestId -> first enqueueBatch arrival time (nanos), for latency measurements.
+     */
     final Map<Long, Long> engineArrivalNanos = new ConcurrentHashMap<>();
 
-    /** Prefill index chosen by the deterministic fixture route. */
+    /**
+     * Prefill index chosen by the deterministic fixture route.
+     */
     volatile Function<RequestContext, Integer> prefillSelector = ctx -> 0;
 
     private final Map<Integer, WorkerStatus> statusByPort = new ConcurrentHashMap<>();
@@ -295,7 +302,9 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 .thenAnswer(inv -> routeResult(inv.getArgument(0)));
         // ---- E2E bridge: mocked gRPC transport → real in-process mock engine ----
         when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenAnswer(
                         inv -> {
                             int port = inv.getArgument(1);
@@ -392,11 +401,9 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     private void registerEndpoint(RoleType role, JavaMockEngineCluster.FastRpcService svc) {
         int grpcPort = svc.getGrpcPort();
-        int httpPort = httpPort(grpcPort);
         WorkerStatus ws = publishEndpoint(role, svc);
-        String ipPort = "127.0.0.1:" + httpPort;
         statusByPort.put(grpcPort, ws);
-        ipPortByEnginePort.put(grpcPort, ipPort);
+        ipPortByEnginePort.put(grpcPort, ws.getLogicalIpPort());
     }
 
     private static int httpPort(int grpcPort) {
@@ -420,7 +427,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             WorkerStatus.PreparedStatus prepared =
                     status.prepareNewStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, initial));
-            endpointRegistry.publishPreparedEndpoint(status.getIpPort(), status, prepared);
+            endpointRegistry.publishPreparedEndpoint(status.getLogicalIpPort(), status, prepared);
         } finally {
             status.lock.unlock();
         }
@@ -504,12 +511,12 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         config.priorityOrdering().setPreemption(preemption);
     }
 
-    private ServerStatus prefillServer(int index, long requestId) {
+    private ServerStatus prefillServer(int index, String requestId) {
         int grpcPort = prefillEngines.get(index).getGrpcPort();
         return server(RoleType.PREFILL, "127.0.0.1", httpPort(grpcPort), grpcPort, requestId);
     }
 
-    private ServerStatus decodeServer(int index, long requestId) {
+    private ServerStatus decodeServer(int index, String requestId) {
         int grpcPort = decodeEngines.get(index).getGrpcPort();
         return server(RoleType.DECODE, "127.0.0.1", httpPort(grpcPort), grpcPort, requestId);
     }
@@ -536,17 +543,13 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     private RequestWorkerSelector productionRouter() {
         EndpointRegistry workers = endpointRegistry;
         CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
         ModelMetaConfig modelMeta = mock(ModelMetaConfig.class);
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.DECODE, RoleType.PREFILL));
         return new RequestWorkerSelector(
-                new CostBasedPrefillStrategy(
-                        workers,
-                        cache,
-                        healthReporter,
-                        org.mockito.Mockito.mock(CacheMetricsReporter.class),
-                        configService),
+                new CostBasedPrefillStrategy(workers, cache, healthReporter),
                 new DecodeSelector(
                         workers,
                         configService,
@@ -557,7 +560,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     }
 
     private static ServerStatus server(
-            RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
+            RoleType role, String ip, int httpPort, int grpcPort, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);
@@ -572,11 +575,11 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     // ==================== request construction ====================
 
-    RequestContext context(long requestId, int priority) {
+    RequestContext context(String requestId, int priority) {
         return context(requestId, priority, 128, 8);
     }
 
-    RequestContext context(long requestId, int priority, long seqLen, int maxNewTokens) {
+    RequestContext context(String requestId, int priority, long seqLen, int maxNewTokens) {
         Request request =
                 Request.builder()
                         .requestId(requestId)
@@ -601,10 +604,13 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         return ctx;
     }
 
-    static byte[] generateInputBytes(long requestId, int inputTokens, int maxNewTokens) {
+    RequestContext context(long requestId, int priority, long seqLen, int maxNewTokens) {
+        return context(Long.toString(requestId), priority, seqLen, maxNewTokens);
+    }
+
+    static byte[] generateInputBytes(String requestId, int inputTokens, int maxNewTokens) {
         EngineRpcService.GenerateInputPB.Builder input =
-                EngineRpcService.GenerateInputPB.newBuilder()
-                        .setRequestId(requestId)
+                RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                         .setGenerateConfig(
                                 EngineRpcService.GenerateConfigPB.newBuilder()
                                         .setMaxNewTokens(maxNewTokens)
@@ -654,7 +660,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     static TaskInfo toTaskInfo(EngineRpcService.TaskInfoPB task) {
         TaskInfo info = new TaskInfo();
-        info.setRequestId(task.getRequestId());
+        info.setRequestId(RequestId.parse(task));
         info.setInputLength(task.getInputLength());
         info.setBatchId(task.getBatchId());
         info.setErrorCode(task.getErrorInfo().getErrorCode());

@@ -55,6 +55,13 @@ public class RequestSchedulerReporter {
         this.monitor = SafeFlexMonitor.wrap(monitor);
     }
 
+    public void reportLifecycleFailure(String stage) {
+        monitor.report(
+                org.flexlb.constant.MetricConstant.REQUEST_LIFECYCLE_FAILURES_TOTAL,
+                FlexMetricTags.of("stage", stage),
+                1.0);
+    }
+
     private static FlexMetricTags[] buildPriorityTags() {
         FlexMetricTags[] tags = new FlexMetricTags[PriorityNormalizer.MAX_PRIORITY + 1];
         for (int priority = 0; priority < tags.length; priority++) {
@@ -71,6 +78,13 @@ public class RequestSchedulerReporter {
 
     @PostConstruct
     public void init() {
+        monitor.register(
+                org.flexlb.constant.MetricConstant.REQUEST_LIFECYCLE_FAILURES_TOTAL,
+                FlexMetricType.COUNTER,
+                FlexPriorityType.PRECISE);
+        monitor.register(
+                org.flexlb.constant.MetricConstant.AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT,
+                org.flexlb.enums.FlexMetricType.QPS);
         monitor.register(AUTO_TPM_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(
                 AUTO_TPM_SCHEDULE_LATENCY_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
@@ -105,11 +119,20 @@ public class RequestSchedulerReporter {
         log.info("RequestSchedulerReporter initialized");
     }
 
+    public void reportPreemptionTargetInvalid(String mode, String reason) {
+        monitor.report(
+                org.flexlb.constant.MetricConstant.AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT,
+                FlexMetricTags.of("mode", mode, "reason", reason),
+                1.0);
+    }
+
     public void reportRequest(int priority) {
         monitor.report(AUTO_TPM_REQUEST_COUNT, priorityTags(priority), 1.0);
     }
 
-    /** Schedule response latency in milliseconds, tagged by priority and result. */
+    /**
+     * Schedule response latency in milliseconds, tagged by priority and result.
+     */
     public void reportScheduleLatency(int priority, String result, long latencyMs) {
         monitor.report(
                 AUTO_TPM_SCHEDULE_LATENCY_MS,
@@ -128,7 +151,9 @@ public class RequestSchedulerReporter {
         }
     }
 
-    /** Planning and commit outcomes share incoming priority, eviction case and result tags. */
+    /**
+     * Planning and commit outcomes share incoming priority, eviction case and result tags.
+     */
     public void reportEviction(EvictionEvent event, int priority, String evCase, String result) {
         monitor.report(
                 event.metric,
@@ -137,7 +162,9 @@ public class RequestSchedulerReporter {
                 1.0);
     }
 
-    /** Report the victim and its priority-preemption event. */
+    /**
+     * Report the victim and its priority-preemption event.
+     */
     public void reportVictim(
             int victimPriority, int incomingPriority, String stage, String evCase) {
         monitor.report(
@@ -160,7 +187,9 @@ public class RequestSchedulerReporter {
                 AUTO_TPM_PREFILL_QUEUE_DEPTH, FlexMetricTags.of("endpoint", endpoint), depth);
     }
 
-    /** Hard KV tokens actually released by one victim. */
+    /**
+     * Hard KV tokens actually released by one victim.
+     */
     public void reportVictimKvTokens(int victimPriority, String stage, long kvTokens) {
         monitor.report(
                 AUTO_TPM_VICTIM_KV_TOKENS,
@@ -169,12 +198,16 @@ public class RequestSchedulerReporter {
                 kvTokens);
     }
 
-    /** Master arrival-to-response latency: a lower bound of actual Engine TTFT. */
+    /**
+     * Master arrival-to-response latency: a lower bound of actual Engine TTFT.
+     */
     public void reportTtft(int priority, long latencyMs) {
         monitor.report(AUTO_TPM_TTFT_MS, priorityTags(priority), latencyMs);
     }
 
-    /** Count one Engine Cancel intent by victim priority and cancellation reason. */
+    /**
+     * Count one Engine Cancel intent by victim priority and cancellation reason.
+     */
     public void reportCancel(int priority, String reason) {
         monitor.report(
                 AUTO_TPM_CANCEL_QPS,
@@ -183,11 +216,17 @@ public class RequestSchedulerReporter {
     }
 
     public enum CancelEvent {
-        /** One issued cancel, tagged with the victim's priority. */
+        /**
+         * One issued cancel, tagged with the victim's priority.
+         */
         REQUEST(AUTO_TPM_CANCEL_REQUEST_COUNT),
-        /** Release confirmation, including after a timed-out wait; uses victim priority. */
+        /**
+         * Release confirmation, including after a timed-out wait; uses victim priority.
+         */
         CONFIRM(AUTO_TPM_CANCEL_CONFIRM_COUNT),
-        /** Failed plan wait; uses incoming priority and does not release the victim. */
+        /**
+         * Failed plan wait; uses incoming priority and does not release the victim.
+         */
         TIMEOUT(AUTO_TPM_CANCEL_TIMEOUT_COUNT);
 
         private final String metric;
@@ -204,7 +243,9 @@ public class RequestSchedulerReporter {
                 1.0);
     }
 
-    /** Report one snapshot: local reservations, accepted/running Engine tasks and Engine-facing load. */
+    /**
+     * Report one snapshot: local reservations, accepted/running Engine tasks and Engine-facing load.
+     */
     public void reportDecodeAdmission(String endpoint, ResourceSnapshot view) {
         FlexMetricTags tags = FlexMetricTags.of("endpoint", endpoint);
         monitor.report(AUTO_TPM_DECODE_RESERVED_COUNT, tags, view.reservedCount());

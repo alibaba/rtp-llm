@@ -12,7 +12,9 @@ import io.grpc.Status;
 
 import java.util.function.LongSupplier;
 
-/** Records transport progress without inspecting messages or changing the RPC outcome. */
+/**
+ * Records transport progress without inspecting messages or changing the RPC outcome.
+ */
 public final class GrpcCallTrace extends ClientStreamTracer.Factory {
     public static final CallOptions.Key<GrpcCallTrace> CALL_TRACE =
             CallOptions.Key.create("flexlb.grpc.call-trace");
@@ -110,6 +112,11 @@ public final class GrpcCallTrace extends ClientStreamTracer.Factory {
         }
     }
 
+    public long receivedResponseBytes() {
+        TraceStream stream = latestStream;
+        return stream == null ? -1L : stream.responseBytes;
+    }
+
     public Snapshot snapshot() {
         try {
             TraceStream stream = latestStream;
@@ -190,6 +197,15 @@ public final class GrpcCallTrace extends ClientStreamTracer.Factory {
     }
 
     private final class TraceStream extends ClientStreamTracer {
+        private volatile long responseBytes = -1L;
+
+        @Override
+        public void inboundUncompressedSize(long bytes) {
+            if (bytes >= 0L) {
+                responseBytes = Math.max(0L, responseBytes) + bytes;
+            }
+        }
+
         private volatile long createdNanos = UNSET;
         private volatile long outboundHeadersNanos = UNSET;
         private volatile long inboundHeadersNanos = UNSET;

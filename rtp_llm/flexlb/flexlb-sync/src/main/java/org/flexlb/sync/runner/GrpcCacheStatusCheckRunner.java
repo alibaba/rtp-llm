@@ -2,8 +2,8 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
@@ -53,7 +53,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             boolean fullSnapshotDebugMode,
             Executor callbackExecutor) {
 
-        this.ipPort = workerStatus.getIpPort();
+        this.ipPort = workerStatus.getLogicalIpPort();
         this.roleType = workerStatus.getRole();
         this.modelName = modelName;
         this.workerStatus = workerStatus;
@@ -88,7 +88,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                     ipPort,
                     workerStatusRpcClient.getCacheStatusAsync(
                             workerStatus.getIp(),
-                            workerStatus.getGrpcPort(),
+                            workerStatus.getWorkerStatusPort(),
                             currentCacheVersion,
                             requestTimeoutMs,
                             roleType),
@@ -163,15 +163,17 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 pollLease.trace().record(Stage.CACHE_MUTATION_LOCK_RELEASED);
             }
 
-            engineHealthReporter.reportCacheStatusCheckRemoteInfo(
-                    modelName, roleType.name(), startTime);
+            engineHealthReporter.reportCacheStatusCheckRemoteInfo(workerStatus, startTime);
             engineHealthReporter.reportCacheStatusCheckerSuccess(
-                    modelName, workerStatus, successfulIntervalUs);
+                    workerStatus, successfulIntervalUs);
         } catch (Throwable e) {
             pollLease.trace().record(Stage.CACHE_RESPONSE_FAILED, e);
             log("engine cache status check via gRPC exception, msg: " + e.getMessage(), e);
-            engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE, roleType);
+            org.flexlb.metric.SafeFlexMonitor.run(
+                    "cacheStatusCheckFailure",
+                    () ->
+                            engineHealthReporter.reportCacheStatusCheckerFail(
+                                    workerStatus, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE));
         }
     }
 
@@ -218,7 +220,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private boolean updateLocalKvCache() {
         try {
             pollLease.trace().record(Stage.CACHE_INDEX_UPDATE_BEGIN);
-            WorkerCacheUpdateResult result = cacheAwareService.updateEngineBlockCache(workerStatus);
+            WorkerCacheUpdateResult result = cacheAwareService.updateFromWorkerStatus(workerStatus);
             if (result != null && result.isSuccess()) {
                 pollLease.trace().record(Stage.CACHE_INDEX_UPDATE_END);
                 return true;
@@ -229,8 +231,11 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                     ipPort,
                     workerStatus.getGenerationId(),
                     result == null ? "no update result" : result.getErrorMessage());
-            engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, BalanceStatusEnum.CACHE_UPDATE_FAILED, roleType);
+            org.flexlb.metric.SafeFlexMonitor.run(
+                    "cacheStatusCheckFailure",
+                    () ->
+                            engineHealthReporter.reportCacheStatusCheckerFail(
+                                    workerStatus, BalanceStatusEnum.CACHE_UPDATE_FAILED));
         } catch (Exception e) {
             pollLease.trace().record(Stage.CACHE_INDEX_UPDATE_FAILED, e);
             logger.debug(
@@ -238,8 +243,11 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                     ipPort,
                     workerStatus.getGenerationId(),
                     e.getMessage());
-            engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, BalanceStatusEnum.CACHE_UPDATE_FAILED, roleType);
+            org.flexlb.metric.SafeFlexMonitor.run(
+                    "cacheStatusCheckFailure",
+                    () ->
+                            engineHealthReporter.reportCacheStatusCheckerFail(
+                                    workerStatus, BalanceStatusEnum.CACHE_UPDATE_FAILED));
         }
         return false;
     }
@@ -272,11 +280,17 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 ex);
         // Report specific error based on exception type
         if (io.grpc.Status.fromThrowable(ex).getCode() == io.grpc.Status.Code.DEADLINE_EXCEEDED) {
-            engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, BalanceStatusEnum.CACHE_GRPC_TIMEOUT, roleType);
+            org.flexlb.metric.SafeFlexMonitor.run(
+                    "cacheStatusCheckFailure",
+                    () ->
+                            engineHealthReporter.reportCacheStatusCheckerFail(
+                                    workerStatus, BalanceStatusEnum.CACHE_GRPC_TIMEOUT));
         } else {
-            engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE, roleType);
+            org.flexlb.metric.SafeFlexMonitor.run(
+                    "cacheStatusCheckFailure",
+                    () ->
+                            engineHealthReporter.reportCacheStatusCheckerFail(
+                                    workerStatus, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE));
         }
     }
 

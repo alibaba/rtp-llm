@@ -16,7 +16,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Missing remote cleanup proof keeps accounting visible and prevents a successful shutdown. */
+/**
+ * Missing remote cleanup proof keeps accounting visible and prevents a successful shutdown.
+ */
 class WorkerOfflineTest extends FlexLBMockTestBase {
 
     @Override

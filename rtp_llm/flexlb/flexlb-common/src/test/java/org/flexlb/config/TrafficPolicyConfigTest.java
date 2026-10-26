@@ -36,15 +36,8 @@ class TrafficPolicyConfigTest {
 
         Request vip = request(1, "key-a", 8192);
         Request regular = request(2, "key-b", 8192);
-        assertEquals(
-                "vip-long",
-                config.resolveTargetGroup(vip.getRequestId(), vip.getApiKey(), vip.getSeqLen())
-                        .orElseThrow());
-        assertEquals(
-                "long",
-                config.resolveTargetGroup(
-                                regular.getRequestId(), regular.getApiKey(), regular.getSeqLen())
-                        .orElseThrow());
+        assertEquals("vip-long", config.resolveTargetGroup(vip).orElseThrow());
+        assertEquals("long", config.resolveTargetGroup(regular).orElseThrow());
     }
 
     @Test
@@ -62,15 +55,8 @@ class TrafficPolicyConfigTest {
                 """);
         Request request = request(12345, "key", 128);
 
-        String first =
-                config.resolveTargetGroup(
-                                request.getRequestId(), request.getApiKey(), request.getSeqLen())
-                        .orElseThrow();
-        assertEquals(
-                first,
-                config.resolveTargetGroup(
-                                request.getRequestId(), request.getApiKey(), request.getSeqLen())
-                        .orElseThrow());
+        String first = config.resolveTargetGroup(request).orElseThrow();
+        assertEquals(first, config.resolveTargetGroup(request).orElseThrow());
         org.junit.jupiter.api.Assertions.assertTrue(Set.of("blue", "green").contains(first));
     }
 
@@ -158,7 +144,11 @@ class TrafficPolicyConfigTest {
 
     private static Request request(long id, String apiKey, long inputTokens) {
         Request request =
-                Request.builder().requestId(id).apiKey(apiKey).seqLen(inputTokens).build();
+                Request.builder()
+                        .requestId(Long.toString(id))
+                        .apiKey(apiKey)
+                        .seqLen(inputTokens)
+                        .build();
         return request;
     }
 }

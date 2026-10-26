@@ -7,7 +7,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -33,7 +33,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** A selected failure must not consume the cleanup deadline while admission still owns resources. */
+/**
+ * A selected failure must not consume the cleanup deadline while admission still owns resources.
+ */
 class RequestAdmissionExpirationRaceTest {
     @Test
     void shutdownPublishesEveryClaimedResponseDespiteTheFirstCleanupFailure() throws Exception {
@@ -46,7 +48,7 @@ class RequestAdmissionExpirationRaceTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         var contexts = new ArrayList<RequestContext>();
         var futures = new ArrayList<CompletableFuture<Response>>();
         var prefill = mock(PrefillEndpoint.class);
@@ -62,7 +64,7 @@ class RequestAdmissionExpirationRaceTest {
                         });
         try {
             for (long requestId = 310L; requestId < 313L; requestId++) {
-                var context = RequestProtocolTestSupport.context(config, requestId);
+                var context = RequestProtocolTestSupport.context(config, String.valueOf(requestId));
                 var future = RequestProtocolTestSupport.register(registry, context);
                 contexts.add(context);
                 futures.add(future);
@@ -76,7 +78,8 @@ class RequestAdmissionExpirationRaceTest {
                                 null,
                                 null,
                                 context.snapshot().createdAtMs());
-                try (var admission = registry.claimAdmissionHandle(requestId, future);
+                try (var admission =
+                                registry.claimAdmissionHandle(String.valueOf(requestId), future);
                         var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
                     assertNotNull(admission);
                     assertEquals(
@@ -134,8 +137,8 @@ class RequestAdmissionExpirationRaceTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
-        var context = RequestProtocolTestSupport.context(config, 314L);
+                        mock(TheoryCacheHitReporter.class));
+        var context = RequestProtocolTestSupport.context(config, "314");
         try {
             var future = RequestProtocolTestSupport.register(registry, context);
             var prefill = mock(PrefillEndpoint.class);
@@ -149,7 +152,7 @@ class RequestAdmissionExpirationRaceTest {
                             null,
                             null,
                             context.snapshot().createdAtMs());
-            try (var admission = registry.claimAdmissionHandle(314L, future);
+            try (var admission = registry.claimAdmissionHandle("314", future);
                     var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertEquals(
@@ -198,11 +201,11 @@ class RequestAdmissionExpirationRaceTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         try {
-            var context = RequestProtocolTestSupport.context(config, 302L);
+            var context = RequestProtocolTestSupport.context(config, "302");
             var future = RequestProtocolTestSupport.register(registry, context);
-            var requestContext = registry.requests.findActive(302L);
+            var requestContext = registry.requests.findActive("302");
             var prefill = mock(PrefillEndpoint.class);
             context.data().setFuture(future);
             var item =
@@ -217,7 +220,7 @@ class RequestAdmissionExpirationRaceTest {
                             requestContext.snapshot().createdAtMs());
             var cleanupFailure = new IllegalStateException("Prefill cleanup failed");
             when(prefill.release(null, item)).thenThrow(cleanupFailure).thenReturn(true);
-            try (var admission = registry.claimAdmissionHandle(302L, future);
+            try (var admission = registry.claimAdmissionHandle("302", future);
                     var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertTrue(
@@ -284,18 +287,19 @@ class RequestAdmissionExpirationRaceTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         try {
-            var context = RequestProtocolTestSupport.context(config, requestId);
+            var context = RequestProtocolTestSupport.context(config, String.valueOf(requestId));
             var prefill = mock(PrefillEndpoint.class);
             var decode = RequestProtocolTestSupport.decodeEndpoint();
-            var reservation = new DecodeResources.ReservationHandle(1L, requestId, 1L);
+            var reservation =
+                    new DecodeResources.ReservationHandle(1L, String.valueOf(requestId), 1L);
             var prefillStatus = new ServerStatus();
             prefillStatus.setRole(RoleType.PREFILL);
             prefillStatus.setServerIp("127.0.0.1");
             prefillStatus.setGrpcPort(8081);
             var future = RequestProtocolTestSupport.register(registry, context);
-            RequestContext requestContext = registry.requests.findActive(requestId);
+            RequestContext requestContext = registry.requests.findActive(String.valueOf(requestId));
             context.data().setFuture(future);
             var item =
                     org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(
@@ -308,7 +312,7 @@ class RequestAdmissionExpirationRaceTest {
                             reservation,
                             requestContext.snapshot().createdAtMs());
 
-            try (var admission = registry.claimAdmissionHandle(requestId, future);
+            try (var admission = registry.claimAdmissionHandle(String.valueOf(requestId), future);
                     var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertTrue(
@@ -316,7 +320,7 @@ class RequestAdmissionExpirationRaceTest {
                                         item, RequestProtocolTestSupport.publication(() -> true))
                                 == org.flexlb.balance.PlacementResult.Status.SUCCESS));
                 if (clientCancellation) {
-                    registry.cancel(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+                    registry.cancel(String.valueOf(requestId), 0L, CancelReason.CLIENT_CANCELLED);
                 }
                 registry.onDeliveryEvidence(
                         null,
@@ -331,7 +335,7 @@ class RequestAdmissionExpirationRaceTest {
                     assertEquals(
                             RequestState.Phase.FAILED,
                             org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
-                                    .getRequestState(requestId, 0L)
+                                    .getRequestState(String.valueOf(requestId), 0L)
                                     .state());
                 }
                 assertFalse(
@@ -379,7 +383,7 @@ class RequestAdmissionExpirationRaceTest {
             assertEquals(
                     clientCancellation ? RequestState.Phase.CANCELLED : RequestState.Phase.FAILED,
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
-                            .getRequestState(requestId, 0L)
+                            .getRequestState(String.valueOf(requestId), 0L)
                             .state());
             assertEquals(
                     0,

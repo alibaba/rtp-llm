@@ -7,7 +7,6 @@ import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.RequestTimeEstimation.Candidate;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Probe;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -30,7 +29,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Canonical frozen-snapshot route timeline and candidate contract. */
+/**
+ * Canonical frozen-snapshot route timeline and candidate contract.
+ */
 class RequestTimeEstimationTest {
 
     @Test
@@ -67,7 +68,7 @@ class RequestTimeEstimationTest {
                             snapshot,
                             noCommittedWork(),
                             evaluator,
-                            probe(99L, 50, 20L, 0L),
+                            probe("99", 50, 20L, 0L),
                             delivery),
                     50L);
         }
@@ -105,7 +106,7 @@ class RequestTimeEstimationTest {
                                     queue(true, limits, active),
                                     noCommittedWork(),
                                     TOKEN_EVALUATOR,
-                                    probe(99L, 101 - 2 * position, 7L, 0L),
+                                    probe("99", 101 - 2 * position, 7L, 0L),
                                     delivery);
                     assertModeled(result, precedingMs + 7L);
                 }
@@ -134,7 +135,7 @@ class RequestTimeEstimationTest {
                             snapshot,
                             noCommittedWork(),
                             TOKEN_EVALUATOR,
-                            probe(99L, 70, 80L, 0L),
+                            probe("99", 70, 80L, 0L),
                             delivery),
                     159L);
         }
@@ -148,7 +149,7 @@ class RequestTimeEstimationTest {
                             queue(false, constraints(4, 30L), List.of()),
                             noCommittedWork(),
                             TOKEN_EVALUATOR,
-                            probe(99L, 50, 20L, 0L),
+                            probe("99", 50, 20L, 0L),
                             delivery);
             assertModeled(waiting, 50L);
             var capped =
@@ -160,7 +161,7 @@ class RequestTimeEstimationTest {
                                     List.of()),
                             noCommittedWork(),
                             TOKEN_EVALUATOR,
-                            probe(99L, 50, 20L, 0L),
+                            probe("99", 50, 20L, 0L),
                             delivery);
             assertModeled(capped, 20L);
         }
@@ -175,7 +176,7 @@ class RequestTimeEstimationTest {
                             queue(false, limits, List.of()),
                             noCommittedWork(),
                             TOKEN_EVALUATOR,
-                            probe(99L, 50, 20L, 0L),
+                            probe("99", 50, 20L, 0L),
                             delivery);
             assertEquals(Candidate.State.BLOCKED, result.state());
             assertEquals("PREFILL_KV_CAPACITY", result.detail());
@@ -189,7 +190,7 @@ class RequestTimeEstimationTest {
                 work(
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 100L)),
+                                        "1", WorkSnapshot.Phase.ENGINE_RUNNING, 100L)),
                         List.of(),
                         0L);
 
@@ -198,7 +199,7 @@ class RequestTimeEstimationTest {
                         queue(false, constraints(4, 30L), List.of()),
                         committed,
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         BATCH);
 
         assertModeled(result, 120L);
@@ -212,7 +213,7 @@ class RequestTimeEstimationTest {
                         queue(false, constraints(1, 30L), List.of()),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         BATCH);
 
         assertModeled(result, 20L);
@@ -227,7 +228,7 @@ class RequestTimeEstimationTest {
                         queue(false, constraints(2, 30L), active),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         BATCH);
 
         assertModeled(result, 50L);
@@ -238,14 +239,15 @@ class RequestTimeEstimationTest {
         WorkSnapshot committed =
                 work(
                         List.of(
-                                new WorkSnapshot.RequestWork(1L, WorkSnapshot.Phase.COMMITTED, 10L),
                                 new WorkSnapshot.RequestWork(
-                                        2L, WorkSnapshot.Phase.ENGINE_QUEUED, 20L),
+                                        "1", WorkSnapshot.Phase.COMMITTED, 10L),
                                 new WorkSnapshot.RequestWork(
-                                        3L, WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
+                                        "2", WorkSnapshot.Phase.ENGINE_QUEUED, 20L),
+                                new WorkSnapshot.RequestWork(
+                                        "3", WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
                         List.of(
                                 new WorkSnapshot.BatchWork(
-                                        List.of(4L, 5L),
+                                        List.of("4", "5"),
                                         WorkSnapshot.Phase.ENGINE_RUNNING,
                                         OptionalLong.of(40L))),
                         0L);
@@ -255,7 +257,7 @@ class RequestTimeEstimationTest {
                         queue(false, false, constraints(1, 0L), List.of(), null),
                         committed,
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         ROUTE);
 
         assertModeled(result, 120L);
@@ -275,7 +277,7 @@ class RequestTimeEstimationTest {
     @Test
     void fifoAndPriorityPlaceProbeInDifferentDecisionGroups() {
         List<GroupPlanner.Item> active = List.of(item(1L, 100, 1L, 10L), item(2L, 10, 2L, 100L));
-        Probe probe = probe(99L, 90, 20L, 0L);
+        RequestTimeEstimationTestSupport.Probe probe = probe("99", 90, 20L, 0L);
 
         Candidate fifo =
                 project(
@@ -308,7 +310,7 @@ class RequestTimeEstimationTest {
                         queue(true, constraints(3, 0L), active),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 90, 20L, 0L),
+                        probe("99", 90, 20L, 0L),
                         BATCH);
 
         assertModeled(result, 30L);
@@ -323,7 +325,7 @@ class RequestTimeEstimationTest {
                         queue(true, constraints(3, 0L), active),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 90, 20L, 0L),
+                        probe("99", 90, 20L, 0L),
                         ROUTE);
 
         assertModeled(result, 30L);
@@ -331,8 +333,12 @@ class RequestTimeEstimationTest {
 
     @Test
     void endpointCacheHitChangesServiceAndCandidateMetadata() {
-        Probe coldProbe = new Probe(99L, 50, NOW_MS, Long.MAX_VALUE, 1_000L, 0L, 123L);
-        Probe warmProbe = new Probe(100L, 50, NOW_MS, Long.MAX_VALUE, 1_000L, 800L, 900L);
+        RequestTimeEstimationTestSupport.Probe coldProbe =
+                new RequestTimeEstimationTestSupport.Probe(
+                        "99", 50, NOW_MS, Long.MAX_VALUE, 1_000L, 0L, 123L);
+        RequestTimeEstimationTestSupport.Probe warmProbe =
+                new RequestTimeEstimationTestSupport.Probe(
+                        "100", 50, NOW_MS, Long.MAX_VALUE, 1_000L, 800L, 900L);
 
         Candidate cold =
                 project(
@@ -373,7 +379,7 @@ class RequestTimeEstimationTest {
                         queue(true, constraints(1, 0L), List.of()),
                         noCommittedWork(),
                         failing,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         ROUTE);
 
         assertEquals(Candidate.State.UNAVAILABLE, result.state());
@@ -393,7 +399,7 @@ class RequestTimeEstimationTest {
                         queue(true, constraints(1, 0L), List.of()),
                         noCommittedWork(),
                         invalid,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         ROUTE);
 
         assertInvalidPrediction(result);
@@ -411,7 +417,7 @@ class RequestTimeEstimationTest {
                             queue(true, constraints(1, 0L), List.of()),
                             noCommittedWork(),
                             invalid,
-                            probe(99L, 50, 20L, 0L),
+                            probe("99", 50, 20L, 0L),
                             BATCH);
 
             assertInvalidPrediction(result);
@@ -430,7 +436,7 @@ class RequestTimeEstimationTest {
                         queue(true, predictionBounded, List.of()),
                         noCommittedWork(),
                         invalid,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         BATCH);
 
         assertInvalidPrediction(result);
@@ -443,7 +449,7 @@ class RequestTimeEstimationTest {
                         queue(true, constraints(1, 0L), List.of()),
                         work(List.of(), List.of(), 1L),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         ROUTE);
 
         assertEquals(Candidate.State.UNMODELED_ENGINE_WORK, candidate.state());
@@ -460,7 +466,7 @@ class RequestTimeEstimationTest {
                         List.of(),
                         List.of(
                                 new WorkSnapshot.BatchWork(
-                                        List.of(1L),
+                                        List.of("1"),
                                         WorkSnapshot.Phase.ENGINE_RUNNING,
                                         OptionalLong.empty())),
                         0L);
@@ -470,7 +476,7 @@ class RequestTimeEstimationTest {
                         queue(true, constraints(1, 0L), List.of()),
                         unknown,
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         ROUTE);
 
         assertEquals(Candidate.State.UNMODELED_ENGINE_WORK, result.state());
@@ -485,7 +491,7 @@ class RequestTimeEstimationTest {
                         queue(false, constraints(1, 0L), List.of(item(1L, 50, 1L, 100L, 0L))),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         ROUTE);
 
         assertModeled(result, 20L);
@@ -500,7 +506,7 @@ class RequestTimeEstimationTest {
                         queue(false, constraints(4, 30L), List.of()),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, NOW_MS, NOW_MS + 30L, 20L, 0L),
+                        probe("99", 50, NOW_MS, NOW_MS + 30L, 20L, 0L),
                         BATCH);
 
         assertEquals(Candidate.State.UNAVAILABLE, result.state());
@@ -518,7 +524,7 @@ class RequestTimeEstimationTest {
                                 List.of(item(1L, 50, 1L, 10L, NOW_MS + 10L))),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         BATCH);
 
         assertModeled(result, 50L);
@@ -570,7 +576,7 @@ class RequestTimeEstimationTest {
                                 active),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, NOW_MS, NOW_MS + 30L, 20L, 0L),
+                        probe("99", 50, NOW_MS, NOW_MS + 30L, 20L, 0L),
                         counted);
         assertModeled(waited, 59L);
         assertEquals(1, planningCalls.get());
@@ -587,7 +593,7 @@ class RequestTimeEstimationTest {
                                 List.of(item(0L, 50, 0L, 10L, NOW_MS), active.getFirst())),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, NOW_MS, NOW_MS + 30L, 20L, 0L),
+                        probe("99", 50, NOW_MS, NOW_MS + 30L, 20L, 0L),
                         counted);
         assertModeled(expiredPrefix, 59L);
         assertEquals(
@@ -606,7 +612,7 @@ class RequestTimeEstimationTest {
                                 active),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, NOW_MS, NOW_MS + 29L, 20L, 0L),
+                        probe("99", 50, NOW_MS, NOW_MS + 29L, 20L, 0L),
                         counted);
         assertEquals(Candidate.State.UNAVAILABLE, expired.state());
         assertEquals("INCOMING_EXPIRED_BEFORE_DISPATCH", expired.detail());
@@ -621,7 +627,7 @@ class RequestTimeEstimationTest {
                                 active),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, NOW_MS, NOW_MS + 29L, 20L, 0L),
+                        probe("99", 50, NOW_MS, NOW_MS + 29L, 20L, 0L),
                         counted);
         assertModeled(budgetReady, 30L);
         assertEquals(1, planningCalls.get());
@@ -669,7 +675,7 @@ class RequestTimeEstimationTest {
                     };
             // The remaining probe opens its own window at NOW_MS after the full prefix is consumed.
             assertModeled(
-                    project(snapshot, noCommittedWork(), counted, probe(99L, 90, 20L, 0L), BATCH),
+                    project(snapshot, noCommittedWork(), counted, probe("99", 90, 20L, 0L), BATCH),
                     snapshot == blockedSuffix ? 59L : 50L);
             assertEquals(
                     snapshot == blockedSuffix ? 1 : 2,
@@ -698,7 +704,7 @@ class RequestTimeEstimationTest {
                                         .orElse(0L));
 
         assertModeled(
-                project(snapshot, noCommittedWork(), nonlinear, probe(99L, 70, 20L, 0L), BATCH),
+                project(snapshot, noCommittedWork(), nonlinear, probe("99", 70, 20L, 0L), BATCH),
                 49L);
     }
 
@@ -724,7 +730,7 @@ class RequestTimeEstimationTest {
                             snapshot,
                             noCommittedWork(),
                             TOKEN_EVALUATOR,
-                            probe(99L, 50, 80L, 0L),
+                            probe("99", 50, 80L, 0L),
                             delivery);
 
             // The full first group takes 15 ms. The remaining group waits until
@@ -744,14 +750,14 @@ class RequestTimeEstimationTest {
                         queue(false, strict, List.of(item(1L, 50, 1L, 100L))),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         ROUTE);
         Candidate invalidProbe =
                 project(
                         queue(false, strict, List.of()),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(100L, 50, 100L, 0L),
+                        probe("100", 50, 100L, 0L),
                         ROUTE);
 
         assertModeled(afterInvalidHead, 120L);
@@ -771,7 +777,7 @@ class RequestTimeEstimationTest {
                                 List.of(item(1L, 100, 1L, 10L), item(2L, 10, 2L, 999L))),
                         noCommittedWork(),
                         suffixFailingSingleEvaluator(),
-                        probe(99L, 90, 20L, 0L),
+                        probe("99", 90, 20L, 0L),
                         ROUTE);
 
         assertEquals(Candidate.State.MODELED, result.state());
@@ -786,7 +792,7 @@ class RequestTimeEstimationTest {
                         queue(true, constraints(1, 0L), List.of(item(1L, 10, 1L, 999L))),
                         noCommittedWork(),
                         suffixFailingBatchEvaluator(),
-                        probe(99L, 90, 20L, 0L),
+                        probe("99", 90, 20L, 0L),
                         BATCH);
 
         assertEquals(Candidate.State.MODELED, result.state());
@@ -799,8 +805,10 @@ class RequestTimeEstimationTest {
         GroupPlanner.Constraints splitByComputeShape =
                 new GroupPlanner.Constraints(2, 150L, 1_000_000L, 0L, 30L);
         QueueSnapshot snapshot = queue(true, splitByComputeShape, List.of(expiringSuffix));
-        Probe probe = probe(99L, 90, NOW_MS - 30L, Long.MAX_VALUE, 20L, 0L);
-        Candidate result = project(snapshot, noCommittedWork(), TOKEN_EVALUATOR, probe, ROUTE);
+        RequestTimeEstimationTestSupport.Probe probe =
+                probe("99", 90, NOW_MS - 30L, Long.MAX_VALUE, 20L, 0L);
+        RequestTimeEstimation.Candidate result =
+                project(snapshot, noCommittedWork(), TOKEN_EVALUATOR, probe, ROUTE);
 
         assertModeled(result, 20L);
     }
@@ -815,7 +823,7 @@ class RequestTimeEstimationTest {
                         queue(true, kvLimited, List.of(item(1L, 10, 1L, 100L))),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 100, 20L, 0L),
+                        probe("99", 100, 20L, 0L),
                         ROUTE);
 
         assertEquals(Candidate.State.MODELED, result.state());
@@ -830,7 +838,7 @@ class RequestTimeEstimationTest {
                         queue(false, constraints(1, 0L), List.of(item(99L, 50, 1L, 20L))),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         ROUTE);
         Candidate committed =
                 project(
@@ -838,11 +846,11 @@ class RequestTimeEstimationTest {
                         work(
                                 List.of(
                                         new WorkSnapshot.RequestWork(
-                                                99L, WorkSnapshot.Phase.ENGINE_RUNNING, 20L)),
+                                                "99", WorkSnapshot.Phase.ENGINE_RUNNING, 20L)),
                                 List.of(),
                                 0L),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         ROUTE);
 
         assertEquals(Candidate.State.UNAVAILABLE, active.state());
@@ -876,7 +884,7 @@ class RequestTimeEstimationTest {
                                 List.of()),
                         noCommittedWork(),
                         evaluator,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         BATCH);
 
         assertEquals(20L, result.projectedTtftMsValue());
@@ -902,7 +910,7 @@ class RequestTimeEstimationTest {
                         false,
                         new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 500L, 0L),
                         List.of());
-        Probe probe = probe(100L, 50, 20L, 0L);
+        RequestTimeEstimationTestSupport.Probe probe = probe("100", 50, 20L, 0L);
 
         assertTrue(project(empty, noCommittedWork(), first, probe, BATCH).selectable());
         assertTrue(project(empty, noCommittedWork(), second, probe, BATCH).selectable());

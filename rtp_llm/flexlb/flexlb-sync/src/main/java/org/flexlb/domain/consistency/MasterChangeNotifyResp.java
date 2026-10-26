@@ -4,7 +4,9 @@ import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
 
-/** Master-change notification response. */
+/**
+ * Master-change notification response.
+ */
 @ToString
 @Getter
 @Setter

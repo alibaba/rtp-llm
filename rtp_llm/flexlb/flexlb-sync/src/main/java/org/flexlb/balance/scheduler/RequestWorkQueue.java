@@ -7,7 +7,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
 
-/** Serializes resource settlement only. Notifications wait here, never in RequestContext. */
+/**
+ * Serializes resource settlement only. Notifications wait here, never in RequestContext.
+ */
 final class RequestWorkQueue {
     private final ConcurrentMap<RequestContext, Lane> lanes = new ConcurrentHashMap<>();
 
@@ -88,7 +90,9 @@ final class RequestWorkQueue {
             }
         }
 
-        /** A failed start resolves every counted task, including a notification queued during handoff. */
+        /**
+         * A failed start resolves every counted task, including a notification queued during handoff.
+         */
         private void reject(Throwable cause) {
             Task abandoned;
             synchronized (this) {

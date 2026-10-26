@@ -8,8 +8,8 @@ import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -43,7 +43,7 @@ class PlacementConfigurationTest {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mock(RequestWorkerSelector.class);
-        var request = RequestProtocolTestSupport.context(config, 8972L);
+        var request = RequestProtocolTestSupport.context(config, "8972");
         when(router.select(request, null))
                 .thenReturn(
                         PlacementResult.rejected(
@@ -65,8 +65,7 @@ class PlacementConfigurationTest {
             spring.registerBean(
                     RequestSchedulerReporter.class, () -> mock(RequestSchedulerReporter.class));
             spring.registerBean(
-                    RecentCacheKeyTraceReporter.class,
-                    () -> mock(RecentCacheKeyTraceReporter.class));
+                    TheoryCacheHitReporter.class, () -> mock(TheoryCacheHitReporter.class));
             spring.registerBean(EngineGrpcClient.class, () -> mock(EngineGrpcClient.class));
             spring.registerBean(DeliveryDispatcher.class, () -> batchDispatcher);
             spring.register(
@@ -74,6 +73,16 @@ class PlacementConfigurationTest {
                     RequestRepository.class,
                     PlacementConfiguration.class,
                     SchedulerRuntime.class);
+            for (String source :
+                    java.util.List.of(
+                            "environmentConfigSource",
+                            "nacosConfigSource",
+                            "uniConfigConfigSource")) {
+                spring.registerBean(
+                        source,
+                        org.flexlb.service.config.ConfigSource.class,
+                        () -> mock(org.flexlb.service.config.ConfigSource.class));
+            }
             spring.refresh();
 
             assertEquals(1, spring.getBeansOfType(DeliveryDispatcher.class).size());
@@ -90,7 +99,12 @@ class PlacementConfigurationTest {
                 verify(environment, never()).getProperty("server.port");
             }
             repository = spring.getBean(RequestRepository.class);
-            request.data().setGenerateInputPb(com.google.protobuf.ByteString.copyFromUtf8("input"));
+            request.data()
+                    .setGenerateInputPb(
+                            org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
+                                    .setRequestId(Long.parseLong(request.data().getRequestId()))
+                                    .build()
+                                    .toByteString());
             var future = scheduler.submit(request);
             assertSame(future, request.data().getFuture());
             assertEquals(

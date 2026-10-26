@@ -1,6 +1,8 @@
 package org.flexlb.config;
 
-/** Configuration factories used only by test fixtures. */
+/**
+ * Configuration factories used only by test fixtures.
+ */
 public final class ConfigTestSupport {
     private ConfigTestSupport() {}
 
@@ -28,12 +30,15 @@ public final class ConfigTestSupport {
         return config;
     }
 
-    public static java.util.Optional<PreemptionConfig> preemptionPolicy(QueueOrderingConfig ordering) {
+    public static java.util.Optional<PreemptionConfig> preemptionPolicy(
+            QueueOrderingConfig ordering) {
         return ordering.getType() == QueueOrderingConfig.Type.PRIORITY
-            ? java.util.Optional.ofNullable(ordering.getPreemption()) : java.util.Optional.empty();
+                ? java.util.Optional.ofNullable(ordering.getPreemption())
+                : java.util.Optional.empty();
     }
 
     public static boolean isSingleDecision(FlexlbConfig config) {
-        return config.isQueue() && config.decisionPolicy().getType() == DecisionPolicyConfig.Type.SINGLE;
+        return config.isQueue()
+                && config.decisionPolicy().getType() == DecisionPolicyConfig.Type.SINGLE;
     }
 }

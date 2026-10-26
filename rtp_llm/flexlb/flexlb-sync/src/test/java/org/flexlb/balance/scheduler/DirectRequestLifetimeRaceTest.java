@@ -14,7 +14,7 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -59,19 +59,19 @@ class DirectRequestLifetimeRaceTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class),
+                        mock(TheoryCacheHitReporter.class),
                         router,
                         mock(org.flexlb.balance.eviction.DecodeAdmission.class),
                         new PlacementAvailability());
         try {
-            var context = RequestProtocolTestSupport.context(config, 101L);
+            var context = RequestProtocolTestSupport.context(config, "101");
             var prefill = mock(PrefillEndpoint.class);
             var pin = mock(WorkerEndpoint.GenerationPin.class);
             when(pin.endpoint()).thenReturn(prefill);
             var metadata = new ServerStatus();
             metadata.setSuccess(true);
             metadata.setRole(RoleType.PDFUSION);
-            metadata.setRequestId(101L);
+            metadata.setRequestId("101");
             metadata.setServerIp("127.0.0.1");
             metadata.setHttpPort(8080);
             metadata.setGrpcPort(8081);
@@ -109,9 +109,9 @@ class DirectRequestLifetimeRaceTest {
             AtomicBoolean lateConfirmation = new AtomicBoolean();
             doAnswer(
                             invocation -> {
-                                RequestContext requestContext = requests.requests.findActive(101L);
+                                RequestContext requestContext = requests.requests.findActive("101");
                                 if (reason != CancelReason.DEADLINE_EXCEEDED) {
-                                    requests.cancel(101L, 0L, reason);
+                                    requests.cancel("101", 0L, reason);
                                 }
                                 RequestProtocolTestSupport.expireInactiveRequest(
                                         requests,
@@ -120,7 +120,7 @@ class DirectRequestLifetimeRaceTest {
                                 assertTrue(
                                         org.flexlb.balance.scheduler.SchedulerTestSupport
                                                 .repository(requests)
-                                                .getRequestState(101L, 0L)
+                                                .getRequestState("101", 0L)
                                                 .state()
                                                 .isTerminal());
                                 Object result = invocation.callRealMethod();

@@ -14,11 +14,12 @@ import static com.google.common.base.Preconditions.checkArgument;
 public final class WorkSnapshot {
 
     private static final long[] EMPTY_LONGS = new long[0];
+    private static final String[] EMPTY_STRINGS = new String[0];
 
     private final long capturedAtMs;
     private final long knownNonRunningWorkMs;
     private final long[] runningWorkMs;
-    private final long[] requestIds;
+    private final String[] requestIds;
     private final boolean unknownWork;
 
     public WorkSnapshot(
@@ -55,7 +56,7 @@ public final class WorkSnapshot {
 
         this.knownNonRunningWorkMs = nonRunningMs;
         this.runningWorkMs = runningCount == 0 ? EMPTY_LONGS : new long[runningCount];
-        this.requestIds = requestIdCount == 0 ? EMPTY_LONGS : new long[requestIdCount];
+        this.requestIds = requestIdCount == 0 ? EMPTY_STRINGS : new String[requestIdCount];
         this.unknownWork = hasUnknown;
         int runningIndex = 0;
         int requestIdIndex = 0;
@@ -66,7 +67,7 @@ public final class WorkSnapshot {
             }
         }
         for (BatchWork batch : batches) {
-            for (long requestId : batch.requestIds()) {
+            for (String requestId : batch.requestIds()) {
                 requestIds[requestIdIndex++] = requestId;
             }
             if (batch.phase() == Phase.ENGINE_RUNNING && batch.remainingWorkMs().isPresent()) {
@@ -80,23 +81,29 @@ public final class WorkSnapshot {
         return capturedAtMs;
     }
 
-    /** Lifecycle phase visible to a projection. Only ENGINE_RUNNING consumes time. */
+    /**
+     * Lifecycle phase visible to a projection. Only ENGINE_RUNNING consumes time.
+     */
     public enum Phase {
         COMMITTED,
         ENGINE_QUEUED,
         ENGINE_RUNNING
     }
 
-    /** One individually delivered request, identified by request id. */
-    public record RequestWork(long requestId, Phase phase, long remainingWorkMs) {
+    /**
+     * One individually delivered request, identified by request id.
+     */
+    public record RequestWork(String requestId, Phase phase, long remainingWorkMs) {
 
         public RequestWork {
             checkArgument(remainingWorkMs >= 0L, "remaining request work must be non-negative");
         }
     }
 
-    /** One shared EnqueueBatch work unit and its live request identities. */
-    public record BatchWork(List<Long> requestIds, Phase phase, OptionalLong remainingWorkMs) {
+    /**
+     * One shared EnqueueBatch work unit and its live request identities.
+     */
+    public record BatchWork(List<String> requestIds, Phase phase, OptionalLong remainingWorkMs) {
 
         public BatchWork {
             requestIds = List.copyOf(requestIds);
@@ -110,7 +117,7 @@ public final class WorkSnapshot {
         return unknownWork;
     }
 
-    public boolean containsRequest(long requestId) {
+    public boolean containsRequest(String requestId) {
         return Arrays.binarySearch(requestIds, requestId) >= 0;
     }
 
@@ -121,14 +128,18 @@ public final class WorkSnapshot {
         return totalRemainingWorkMsAt(capturedAtMs);
     }
 
-    /** Complete preceding work at a later clock; only observed running work consumes time. */
+    /**
+     * Complete preceding work at a later clock; only observed running work consumes time.
+     */
     public OptionalLong totalRemainingWorkMsAt(long observedAtMs) {
         return hasUnknownWork()
                 ? OptionalLong.empty()
                 : OptionalLong.of(knownRemainingWorkMsAt(observedAtMs));
     }
 
-    /** Known work rebased to a later planning clock without copying the snapshot. */
+    /**
+     * Known work rebased to a later planning clock without copying the snapshot.
+     */
     public long knownRemainingWorkMsAt(long planningAtMs) {
         long elapsedMs = planningAtMs <= capturedAtMs ? 0L : planningAtMs - capturedAtMs;
         long total = knownNonRunningWorkMs;

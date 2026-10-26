@@ -25,6 +25,12 @@ public final class FlexlbConfig {
     private WorkerRegistryConfig workerRegistry = new WorkerRegistryConfig();
     private ObservabilityConfig observability = new ObservabilityConfig();
     private GrpcServerConfig grpcServer = new GrpcServerConfig();
+    private ServiceDiscoveryRuntimeConfig serviceDiscovery = new ServiceDiscoveryRuntimeConfig();
+    private CacheMatchingConfig cacheMatching = new LocalSyncCacheMatchingConfig();
+    private OptimizerRuntimeConfig optimizer = new OptimizerRuntimeConfig();
+    private ConsistencyConfig consistency = new NoConsistencyConfig();
+    private boolean enableFallback;
+    private long fallbackBatchTokenCapacity = 1_048_576L;
 
     @JsonIgnore private final InternalRuntimeSettings internalRuntime;
 
@@ -52,6 +58,29 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
+    public boolean isKvcmCacheMatching() {
+        return cacheMatching instanceof KvcmCacheMatchingConfig;
+    }
+
+    @JsonIgnore
+    public KvcmCacheMatchingConfig kvcmCacheMatching() {
+        if (cacheMatching instanceof KvcmCacheMatchingConfig kvcm) {
+            return kvcm;
+        }
+        throw new IllegalStateException("KVCM cache matching configuration is not active");
+    }
+
+    @JsonIgnore
+    public boolean isConsistencyEnabled() {
+        return consistency instanceof ZookeeperConsistencyConfig;
+    }
+
+    @JsonIgnore
+    public boolean isBatchDispatch() {
+        return dispatcher.getType() == DispatcherConfig.Type.BATCH;
+    }
+
+    @JsonIgnore
     public boolean allowsPreemption(VictimStage stage) {
         return isPriorityOrdering()
                 && scheduler.getOrdering().getPreemption() != null
@@ -68,7 +97,9 @@ public final class FlexlbConfig {
         return isPriorityOrdering() ? scheduler.getOrdering().getDefaultPriority() : 50;
     }
 
-    /** Resolve the QUEUE decision policy from its single configuration owner. */
+    /**
+     * Resolve the QUEUE decision policy from its single configuration owner.
+     */
     @JsonIgnore
     public DecisionPolicyConfig decisionPolicy() {
         return queueScheduler().getDecision();
@@ -103,19 +134,29 @@ public final class FlexlbConfig {
         private int executorMaxSize = 1000;
         private int executorQueueSize = 1000;
 
-        /** Zero derives Direct / 4 as a logical receiving wire-byte budget at startup. */
+        /**
+         * Zero derives Direct / 4 as a logical receiving wire-byte budget at startup.
+         */
         private long receiveBudgetBytes = 0L;
 
-        /** Zero derives Schedule receiving slots with body headroom, at most 1024 total. */
+        /**
+         * Zero derives Schedule receiving slots with body headroom, at most 1024 total.
+         */
         private int maxReceivingRequests = 0;
 
-        /** Zero derives a reserved Cancel receiving lane; not shared with Schedule. */
+        /**
+         * Zero derives a reserved Cancel receiving lane; not shared with Schedule.
+         */
         private int maxReceivingControlRequests = 0;
 
-        /** Headers to decoded half-close; does not limit accepted scheduler queue time. */
+        /**
+         * Headers to decoded half-close; does not limit accepted scheduler queue time.
+         */
         private long receiveTimeoutMs = 30_000L;
 
-        /** 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。 */
+        /**
+         * 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。
+         */
         private long shutdownQuietPeriodMs = 5_000L;
     }
 }

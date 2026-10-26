@@ -1,18 +1,22 @@
 package org.flexlb.consistency;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.domain.consistency.LBConsistencyConfig;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.ConsistencyConfig;
+import org.flexlb.config.DeploymentIdentity;
+import org.flexlb.config.ZookeeperConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.util.JsonUtils;
+import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 
-/** Local node and elected master status exposed to routing and administration. */
 @Slf4j
 @Component
 public class MasterStatusService implements MasterStatusView {
@@ -20,15 +24,34 @@ public class MasterStatusService implements MasterStatusView {
     public static final String MASTER_CHANGE_NOTIFY_PATH = "/rtp_llm/notify_master";
 
     private final ZookeeperMasterElectService zookeeperMasterElectService;
-    private final LBConsistencyConfig lbConsistencyConfig;
-    private final ZookeeperMasterElectService.LocalNodeIdentity localNode;
+    private final Environment environment;
+    private final ConsistencyConfig consistencyConfig;
+    private final DeploymentIdentity deploymentIdentity;
+    private ZookeeperMasterElectService.LocalNodeIdentity localNode;
+    private String serverPort;
+    private String roleId;
+    private String localHostIp;
 
-    public MasterStatusService(ZookeeperMasterElectService zookeeperMasterElectService) {
+    public MasterStatusService(
+            ZookeeperMasterElectService zookeeperMasterElectService,
+            Environment environment,
+            ConfigService configService,
+            DeploymentIdentity deploymentIdentity) {
         this.zookeeperMasterElectService = zookeeperMasterElectService;
-        lbConsistencyConfig = zookeeperMasterElectService.getLbConsistencyConfig();
-        localNode = zookeeperMasterElectService.localNodeIdentity();
+        this.environment = environment;
+        this.consistencyConfig = configService.loadBalanceConfig().getConsistency();
+        this.deploymentIdentity = deploymentIdentity;
+        this.init();
     }
 
+    public void init() {
+        localNode = zookeeperMasterElectService.localNodeIdentity();
+        localHostIp = localNode.hostIp();
+        serverPort = localNode.serverPort();
+        roleId = localNode.roleId();
+    }
+
+    @Override
     public void start() {
         if (!isNeedConsistency()) {
             log.warn("start: lbConsistencyConfig is closed.");
@@ -37,6 +60,7 @@ public class MasterStatusService implements MasterStatusView {
         this.zookeeperMasterElectService.start();
     }
 
+    @Override
     public void offline() {
         if (!isNeedConsistency()) {
             log.warn("offline: lbConsistencyConfig is closed.");
@@ -45,6 +69,7 @@ public class MasterStatusService implements MasterStatusView {
         this.zookeeperMasterElectService.offline();
     }
 
+    @Override
     @PreDestroy
     public void destroy() {
         if (!isNeedConsistency()) {
@@ -56,7 +81,7 @@ public class MasterStatusService implements MasterStatusView {
 
     @Override
     public boolean isNeedConsistency() {
-        return lbConsistencyConfig.isNeedConsistency();
+        return consistencyConfig instanceof ZookeeperConsistencyConfig;
     }
 
     @Override
@@ -67,19 +92,26 @@ public class MasterStatusService implements MasterStatusView {
         return zookeeperMasterElectService.isMaster();
     }
 
+    @Override
+    public void refreshMasterHost(boolean forceSync) {
+        if (isNeedConsistency() && forceSync) {
+            zookeeperMasterElectService.updateLatestMaster();
+        }
+    }
+
     public String getMasterHostIpPort() {
         if (!isNeedConsistency()) {
             return null;
         }
-        String masterHostIp = zookeeperMasterElectService.getMasterHostIp();
+        String masterHostIp = zookeeperMasterElectService.getMasterHostIp(false);
         if (masterHostIp == null) {
             return null;
         }
-        return masterHostIp + ":" + localNode.serverPort();
+        return masterHostIp + ":" + serverPort;
     }
 
     public String getLocalHostIp() {
-        return localNode.hostIp();
+        return localHostIp;
     }
 
     /**
@@ -90,13 +122,13 @@ public class MasterStatusService implements MasterStatusView {
      */
     public MasterChangeNotifyResp handleMasterChange(MasterChangeNotifyReq req) {
         log.warn("recv MasterChangeNotifyReq:{}.", req);
-        if (!isNeedConsistency() || !localNode.roleId().equals(req.getRoleId())) {
+        if (!isNeedConsistency() || roleId == null || !Objects.equals(roleId, req.getRoleId())) {
             MasterChangeNotifyResp resp = new MasterChangeNotifyResp();
             resp.setSuccess(false);
-            resp.setMsg("roleId not match this:" + localNode.roleId());
+            resp.setMsg("roleId not match this:" + roleId);
             return resp;
         }
-        zookeeperMasterElectService.updateLatestMaster();
+        this.refreshMasterHost(true);
         MasterChangeNotifyResp resp = new MasterChangeNotifyResp();
         resp.setSuccess(true);
         return resp;
@@ -107,9 +139,9 @@ public class MasterStatusService implements MasterStatusView {
         Map<String, Object> snapshot = new LinkedHashMap<>();
         snapshot.put("consistency_enabled", isNeedConsistency());
         snapshot.put("master", isMaster());
-        snapshot.put("local_host", localNode.hostIp());
+        snapshot.put("local_host", localHostIp);
         snapshot.put("master_host", getMasterHostIpPort());
-        snapshot.put("server_port", localNode.serverPort());
+        snapshot.put("server_port", serverPort);
         resp.setSuccess(true);
         resp.setMsg("leadership snapshot");
         resp.setLbStatus(JsonUtils.toStringOrEmpty(snapshot));

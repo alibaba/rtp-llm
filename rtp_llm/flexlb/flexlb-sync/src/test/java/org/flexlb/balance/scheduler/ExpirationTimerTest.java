@@ -47,7 +47,8 @@ class ExpirationTimerTest {
         var config = SchedulingTestConfig.newConfig();
         config.setScheduler(org.flexlb.config.ConfigTestSupport.direct());
         config.setDispatcher(org.flexlb.config.ConfigTestSupport.nonBatch());
-        var context = RequestProtocolTestSupport.context(config, 9400L + kind.ordinal());
+        var context =
+                RequestProtocolTestSupport.context(config, String.valueOf(9400L + kind.ordinal()));
         config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
         long nowMs = System.currentTimeMillis();
         context.data()
@@ -64,7 +65,7 @@ class ExpirationTimerTest {
                         service,
                         mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                         mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        mock(org.flexlb.service.RecentCacheKeyTraceReporter.class));
+                        mock(org.flexlb.service.TheoryCacheHitReporter.class));
         var runtime = owner.runtime;
         var timer = runtime.deadlines();
         ((ScheduledThreadPoolExecutor) ReflectionTestUtils.getField(timer, "executor"))
@@ -440,7 +441,7 @@ class ExpirationTimerTest {
     private static RequestContext registeredContext() {
         var context = mock(RequestContext.class);
         var snapshot = mock(ContextResult.Snapshot.class);
-        when(snapshot.key()).thenReturn(new ContextResult.Identity(1L, 1L));
+        when(snapshot.key()).thenReturn(new ContextResult.Identity("1", 1L));
         when(context.snapshot()).thenReturn(snapshot);
         return context;
     }

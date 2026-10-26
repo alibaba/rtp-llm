@@ -17,7 +17,9 @@ import static org.flexlb.balance.prediction.ArithmeticFormulaAst.evaluate;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.function;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.unary;
 
-/** Recursive-descent grammar and binding/aggregate validation. */
+/**
+ * Recursive-descent grammar and binding/aggregate validation.
+ */
 final class ArithmeticFormulaParser {
     private final String input;
     private final Map<String, ConstantNode> parameters = new LinkedHashMap<>();

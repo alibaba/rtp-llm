@@ -17,7 +17,9 @@ import java.util.concurrent.ThreadLocalRandom;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Random selection for the stateless VIT role. */
+/**
+ * Random selection for the stateless VIT role.
+ */
 @Component
 public final class VitWorkerSelector {
     private static final Logger LOGGER = LoggerFactory.getLogger(VitWorkerSelector.class);
@@ -28,7 +30,7 @@ public final class VitWorkerSelector {
         this.endpointRegistry = endpointRegistry;
     }
 
-    public ServerStatus select(long requestId, RoleType role, String group, RequestRoute route) {
+    public ServerStatus select(String requestId, RoleType role, String group, RequestRoute route) {
         checkArgument(role == RoleType.VIT, "RANDOM endpoint selection is supported only for VIT");
         List<String> addresses = endpointRegistry.endpointAddressSnapshot(RoleType.VIT);
         if (addresses.isEmpty()) {
@@ -54,7 +56,8 @@ public final class VitWorkerSelector {
         return null;
     }
 
-    private ServerStatus capture(String address, String group, long requestId, RequestRoute route) {
+    private ServerStatus capture(
+            String address, String group, String requestId, RequestRoute route) {
         WorkerEndpoint.GenerationPin pin = endpointRegistry.capture(RoleType.VIT, address);
         if (pin == null) {
             return null;

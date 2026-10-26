@@ -17,7 +17,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Real endpoint accounting used by delivery callback ordering tests. */
+/**
+ * Real endpoint accounting used by delivery callback ordering tests.
+ */
 public final class DeliverySettlementTestSupport {
     private final ReentrantLock lock = new ReentrantLock();
     public final PrefillState prefill;
@@ -25,7 +27,7 @@ public final class DeliverySettlementTestSupport {
             new EndpointGenerationLifecycle(() -> {});
 
     public DeliverySettlementTestSupport() {
-        this(Comparator.comparingLong(RequestRoute::requestId));
+        this(Comparator.comparing(RequestRoute::requestId));
     }
 
     public DeliverySettlementTestSupport(Comparator<RequestRoute> ordering) {
@@ -100,7 +102,8 @@ public final class DeliverySettlementTestSupport {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setRunningTaskInfo(Map.of());
-        response.setFinishedTaskInfo(Map.of(Long.toString(item.requestId()), finished));
+        response.setFinishedTaskInfo(
+                Map.of(Long.toString(Long.parseLong(item.requestId())), finished));
         var observation =
                 WorkerStatusTestSupport.freezeStatusResponse(
                         EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090),
@@ -135,18 +138,18 @@ public final class DeliverySettlementTestSupport {
                 permit.dispatch().status());
     }
 
-    public static void decodeStatus(DecodeEndpoint endpoint, long requestId, boolean finished) {
+    public static void decodeStatus(DecodeEndpoint endpoint, String requestId, boolean finished) {
         decodeStatus(endpoint, requestId, finished, 0L);
     }
 
     public static void decodeStatus(
-            DecodeEndpoint endpoint, long requestId, boolean finished, long errorCode) {
+            DecodeEndpoint endpoint, String requestId, boolean finished, long errorCode) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setErrorCode(errorCode);
         task.setPhase(finished ? null : TaskPhase.KV_ALLOCATED);
         WorkerStatusResponse response = new WorkerStatusResponse();
-        var tasks = Map.of(Long.toString(requestId), task);
+        var tasks = Map.of(Long.toString(Long.parseLong(requestId)), task);
         response.setRunningTaskInfo(finished ? Map.of() : tasks);
         response.setFinishedTaskInfo(finished ? tasks : Map.of());
         response.setAvailableKvCacheTokens(10_000L);

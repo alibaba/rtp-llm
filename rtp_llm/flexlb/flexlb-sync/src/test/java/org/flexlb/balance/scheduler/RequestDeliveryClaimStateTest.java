@@ -4,7 +4,6 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -301,16 +300,16 @@ class RequestDeliveryClaimStateTest {
     }
 
     static Fixture fixture(DeliveryClaimKind kind, boolean fusion) {
-        var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(7502L, 1000L, 100_000L, 10_000L);
+        var context = new RequestContext(SchedulingTestConfig.newConfig());
+        context.register("7502", 1000L, 100_000L, 10_000L);
         var prefill = mock(PrefillEndpoint.class);
         var decode =
                 fusion
                         ? null
                         : org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
-        var reservation = fusion ? null : new DecodeResources.ReservationHandle(1L, 7502L, 1L);
+        var reservation = fusion ? null : new DecodeResources.ReservationHandle(1L, "7502", 1L);
         var route = mock(RequestRoute.class);
-        when(route.requestId()).thenReturn(7502L);
+        when(route.requestId()).thenReturn(String.valueOf(7502L));
         when(route.ctx()).thenReturn(context);
         when(route.prefillEp()).thenReturn(prefill);
         when(route.decodeEp()).thenReturn(decode);

@@ -1,7 +1,7 @@
 package org.flexlb.httpserver;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestData;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -32,7 +32,7 @@ public class ServerScheduleLatencyRecorder {
         window.arrivals.record(arrivalNanos);
     }
 
-    public void recordCompletion(RequestContext context, long responseCompletedNanos) {
+    public void recordCompletion(RequestData context, long responseCompletedNanos) {
         if (context == null) {
             return;
         }
@@ -40,15 +40,15 @@ public class ServerScheduleLatencyRecorder {
         current.completions.record(responseCompletedNanos);
 
         long grpcEntryNanos =
-                context.data().getGrpcEntryNanos() > 0
-                        ? context.data().getGrpcEntryNanos()
-                        : context.data().getServiceStartNanos();
+                context.getGrpcEntryNanos() > 0
+                        ? context.getGrpcEntryNanos()
+                        : context.getServiceStartNanos();
         current.serverTotal.recordBetween(grpcEntryNanos, responseCompletedNanos);
-        current.grpcQueue.recordBetween(grpcEntryNanos, context.data().getServiceStartNanos());
+        current.grpcQueue.recordBetween(grpcEntryNanos, context.getServiceStartNanos());
         current.routeSubmit.recordBetween(
-                context.data().getServiceStartNanos(), context.data().getRouteSubmittedNanos());
-        long routeSubmittedNanos = context.data().getRouteSubmittedNanos();
-        long batchDispatchedNanos = context.data().getBatchDispatchedNanos();
+                context.getServiceStartNanos(), context.getRouteSubmittedNanos());
+        long routeSubmittedNanos = context.getRouteSubmittedNanos();
+        long batchDispatchedNanos = context.getBatchDispatchedNanos();
         current.batchWait.recordBetween(routeSubmittedNanos, batchDispatchedNanos);
         if (routeSubmittedNanos > 0 && batchDispatchedNanos >= routeSubmittedNanos) {
             current.batchWaitByPriority
@@ -56,8 +56,8 @@ public class ServerScheduleLatencyRecorder {
                     .recordBetween(routeSubmittedNanos, batchDispatchedNanos);
         }
         current.dispatchAck.recordBetween(
-                context.data().getBatchDispatchedNanos(), context.data().getAckAtNanos());
-        current.ackResponse.recordBetween(context.data().getAckAtNanos(), responseCompletedNanos);
+                context.getBatchDispatchedNanos(), context.getAckAtNanos());
+        current.ackResponse.recordBetween(context.getAckAtNanos(), responseCompletedNanos);
     }
 
     public Map<String, Object> snapshot() {
@@ -133,15 +133,15 @@ public class ServerScheduleLatencyRecorder {
 
     /**
      * Normalized priority used as the batch-wait histogram bucket key.
-     * Delegates to {@link org.flexlb.balance.scheduler.RequestData#getPriority()} (immutable scheduling
+     * Delegates to {@link RequestData#getPriority()} (immutable scheduling
      * metadata first, then {@code request.priority}); falls back to 0 when
      * neither source is present.
      */
-    private static int resolvePriority(RequestContext context) {
-        if (context.data().getSchedulingMetadata() == null && context.data().getRequest() == null) {
+    private static int resolvePriority(RequestData context) {
+        if (context.schedulingMetadata() == null && context.getRequest() == null) {
             return 0;
         }
-        return context.data().getPriority();
+        return context.getPriority();
     }
 
     private static final class Window {

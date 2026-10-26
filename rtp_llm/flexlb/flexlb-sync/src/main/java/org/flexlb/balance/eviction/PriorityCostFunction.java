@@ -20,15 +20,21 @@ public final class PriorityCostFunction {
 
     // h(case) cross-type weights (design doc 7.6). A combined slot+KV plan
     // sums its already-weighted parts and is never multiplied again.
-    /** h(DECODE_SLOT_FULL): frees concurrency, may affect D admission. */
+    /**
+     * h(DECODE_SLOT_FULL): frees concurrency, may affect D admission.
+     */
     public static final long H_DECODE_SLOT_FULL = 4L;
 
-    /** h(DECODE_KV_FULL): KV-sensitive, released KV needs confirmation. */
+    /**
+     * h(DECODE_KV_FULL): KV-sensitive, released KV needs confirmation.
+     */
     public static final long H_DECODE_KV_FULL = 8L;
 
     private PriorityCostFunction() {}
 
-    /** Rank 0..4 of a normalized priority (30..70), clamped for safety. */
+    /**
+     * Rank 0..4 of a normalized priority (30..70), clamped for safety.
+     */
     public static int rank(int priority) {
         return Math.clamp(
                 (priority - PRIORITY_RANK_BASE) / PRIORITY_POINTS_PER_RANK,
@@ -36,7 +42,9 @@ public final class PriorityCostFunction {
                 MAX_PRIORITY_RANK);
     }
 
-    /** Single-value victim cost: 1024^rank. */
+    /**
+     * Single-value victim cost: 1024^rank.
+     */
     public static long f(int priority) {
         return LongMath.pow(COST_RADIX, rank(priority));
     }
@@ -54,7 +62,9 @@ public final class PriorityCostFunction {
         };
     }
 
-    /** KV bucket of a reservation: ceil(kvTokens / 1024) (design doc 12.3). */
+    /**
+     * KV bucket of a reservation: ceil(kvTokens / 1024) (design doc 12.3).
+     */
     public static long kvBucket(long kvTokens) {
         return Math.ceilDiv(Math.max(0L, kvTokens), KV_TOKENS_PER_COST_BUCKET);
     }

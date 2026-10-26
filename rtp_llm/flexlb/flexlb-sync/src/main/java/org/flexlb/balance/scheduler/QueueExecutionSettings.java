@@ -6,14 +6,17 @@ import org.flexlb.config.FlexlbConfig;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Only the immutable configuration shared by all PrefillQueueRunners. */
+/**
+ * Only the immutable configuration shared by all PrefillQueueRunners.
+ */
 public record QueueExecutionSettings(
         boolean priorityOrdering,
         DispatcherConfig.Type dispatcherType,
         DecisionPolicyConfig.Type grouping,
         int maxRequests,
         long collectionWaitMs,
-        long executionBudgetMs) {
+        long executionBudgetMs,
+        long fallbackBatchTokenCapacity) {
     public static QueueExecutionSettings capture(FlexlbConfig config) {
         checkArgument(config.isQueue(), "QUEUE settings required");
         var decision = config.decisionPolicy();
@@ -26,6 +29,7 @@ public record QueueExecutionSettings(
                 single ? 0L : Math.max(0L, decision.getMaxCollectionWaitMs()),
                 single || decision.getMaxPredictedExecutionMs() == null
                         ? 0L
-                        : decision.getMaxPredictedExecutionMs());
+                        : decision.getMaxPredictedExecutionMs(),
+                config.getFallbackBatchTokenCapacity());
     }
 }

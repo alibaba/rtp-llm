@@ -16,7 +16,9 @@ import java.util.Arrays;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Protect the migrated consumer boundaries, without constraining unrelated endpoint APIs. */
+/**
+ * Protect the migrated consumer boundaries, without constraining unrelated endpoint APIs.
+ */
 class SchedulerArchitectureTest {
     @Test
     void placementAndDeliveryConsumersCannotRetainOrAcceptTheWholeScheduler() {
@@ -46,6 +48,7 @@ class SchedulerArchitectureTest {
         org.junit.jupiter.api.Assertions.assertEquals(
                 java.util.Set.of("submit", "cancel"),
                 Arrays.stream(RequestScheduler.class.getDeclaredMethods())
+                        .filter(method -> !method.isSynthetic())
                         .map(java.lang.reflect.Method::getName)
                         .collect(java.util.stream.Collectors.toSet()));
         for (Class<?> type :
@@ -101,7 +104,9 @@ class SchedulerArchitectureTest {
                                 consumer.getSimpleName() + " references " + owner + "." + name));
     }
 
-    /** Include method bodies and method-reference handles, which reflection cannot inspect. */
+    /**
+     * Include method bodies and method-reference handles, which reflection cannot inspect.
+     */
     private static void inspectCalls(
             Class<?> consumer, java.util.function.BiConsumer<String, String> check)
             throws IOException {

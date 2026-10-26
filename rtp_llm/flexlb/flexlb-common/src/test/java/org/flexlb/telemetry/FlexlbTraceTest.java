@@ -77,7 +77,7 @@ class FlexlbTraceTest {
             assertNull(FlexlbTrace.startServer("server", context));
             assertNull(FlexlbTrace.startClient("client", context));
             assertEquals(context, FlexlbTrace.withSpan(Span.getInvalid(), context));
-            FlexlbTrace.setRequestAttributes(owner, 42L);
+            FlexlbTrace.setRequestAttributes(owner, "42");
             FlexlbTrace.setScheduleAttribute(context, AttributeKey.stringKey("mode"), "BATCH");
             FlexlbTrace.setScheduleAttribute(context, AttributeKey.booleanKey("batch"), true);
             FlexlbTrace.markBusinessError(context, 500, "FLEXLB_INTERNAL_ERROR");
@@ -179,7 +179,7 @@ class FlexlbTraceTest {
         Tracer tracer = GlobalOpenTelemetry.getTracer("test");
         Span root = tracer.spanBuilder("root").setSpanKind(SpanKind.SERVER).startSpan();
         try {
-            FlexlbTrace.setRequestAttributes(root, 3540218608800727041L);
+            FlexlbTrace.setRequestAttributes(root, "3540218608800727041");
         } finally {
             root.end();
         }
@@ -206,7 +206,9 @@ class FlexlbTraceTest {
         FlexlbTrace.markBusinessError(poisoned, 8402, "FLEXLB_BUSINESS_REJECTED");
     }
 
-    /** Same contract for the terminal path, including the marker-map access. */
+    /**
+     * Same contract for the terminal path, including the marker-map access.
+     */
     @Test
     void finishSwallowsAThrowingSpan() {
         FlexlbTrace.finish(new ThrowingSpan(), null);

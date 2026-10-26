@@ -5,7 +5,9 @@ import org.flexlb.dao.loadbalance.Response;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
-/** External writes remain synchronous and arbitrate through Scheduler; owned writes run outside Context. */
+/**
+ * External writes remain synchronous and arbitrate through Scheduler; owned writes run outside Context.
+ */
 public final class RequestFuture extends CompletableFuture<Response> {
     public enum Completion {
         RESPONSE,

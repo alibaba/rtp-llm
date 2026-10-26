@@ -3,17 +3,21 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimResolution;
+import org.flexlb.balance.strategy.EncoderSelection;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient.CancelReply;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.engine.grpc.client.EngineGrpcClient.CancelReply;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Failures;
@@ -24,6 +28,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -80,13 +85,184 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     protected final SchedulerRuntime runtime;
     protected final DecodeResources.AdmissionCapacity decodeAdmissionCapacity;
     protected final boolean queued;
-    private final RecentCacheKeyTraceReporter cacheTrace;
+    private final TheoryCacheHitReporter cacheTrace;
+    private EncoderQueueCoordinator encoderQueue;
+
+    public record PlacementCounts(int queued, int blocked) {}
+
+    public PlacementCounts placementCounts() {
+        return encoderPlacementCounts();
+    }
+
+    protected final PlacementCounts encoderPlacementCounts() {
+        return encoderQueue == null
+                ? new PlacementCounts(0, 0)
+                : new PlacementCounts(encoderQueue.size(), encoderQueue.blockedSize());
+    }
+
+    protected final void initializeEncoderQueue(
+            Function<RequestContext, PlacementResult<EncoderSelection, PlacementKey>> selectEncoder,
+            boolean hasEncoderRole,
+            PlacementAvailability availability,
+            FlexlbConfig config) {
+        if (config.isQueue() && hasEncoderRole) {
+            encoderQueue =
+                    new EncoderQueueCoordinator(
+                            this, selectEncoder, availability, config.isPriorityOrdering());
+        }
+    }
+
+    protected final CompletableFuture<Response> submitEncoder(
+            RequestContext context,
+            Function<RequestContext, PlacementResult<EncoderSelection, PlacementKey>> selectEncoder,
+            Runnable onRegistered) {
+        context.data().setRequestPhase(RequestPhase.ENCODER);
+        var future =
+                register(
+                        context,
+                        onRegistered,
+                        queued
+                                ? StrategyErrorType.RESOURCE_EXHAUSTED
+                                : StrategyErrorType.BATCH_SLO_EXPIRED);
+        if (future.isDone()) {
+            return future;
+        }
+        if (queued) {
+            if (encoderQueue == null || !encoderQueue.offer(context)) {
+                publish(context, Response.error(StrategyErrorType.DISPATCH_FAILED), false);
+            }
+        } else {
+            decideEncoder(context, selectEncoder);
+        }
+        return future;
+    }
+
+    boolean decideEncoder(
+            RequestContext context,
+            Function<RequestContext, PlacementResult<EncoderSelection, PlacementKey>>
+                    selectEncoder) {
+        if (!requests.isCurrent(context) || context.data().getFuture().isDone()) {
+            return true;
+        }
+        try {
+            var selection = selectEncoder.apply(context);
+            context.data().setSchedulingDiagnostics(selection.diagnostics());
+            if (selection.status() == PlacementResult.Status.BLOCKED && queued) {
+                return false;
+            }
+            if (selection.status() != PlacementResult.Status.SUCCESS) {
+                publish(
+                        context,
+                        selection.failure() == null
+                                ? Response.error(StrategyErrorType.NO_ENCODER_WORKER)
+                                : selection.failure(),
+                        false);
+                return true;
+            }
+            try (var selected = selection.value()) {
+                var pin = selected.generationPin();
+                WorkerEndpoint endpoint = pin.endpoint();
+                endpoint.requirePinnedGeneration(pin);
+                if (!(endpoint instanceof EncoderEndpoint encoder)
+                        || !context.claimEncoderRoute(encoder, System.currentTimeMillis())) {
+                    publish(context, Response.error(StrategyErrorType.REQUEST_CANCELLED), false);
+                    return true;
+                }
+                Response response = new Response();
+                response.setSuccess(true);
+                response.setServerStatus(java.util.List.of(selected.serverStatus()));
+                try (var publication = new ResponsePublication(runtime, context, false)) {
+                    var candidate =
+                            new ResponseCandidate(
+                                    context,
+                                    ResponseKind.ENCODER_ACK,
+                                    null,
+                                    System.currentTimeMillis());
+                    publication.submit(
+                            () -> {
+                                var chosen = context.selectResponse(candidate);
+                                if (!(chosen instanceof Granted<?>)) {
+                                    return false;
+                                }
+                                runtime.deadlines().update(context, context.snapshot().deadlines());
+                                return publication.complete(
+                                        RequestFuture.Completion.RESPONSE, response, null);
+                            });
+                }
+            }
+        } catch (RuntimeException failure) {
+            Logger.warn(
+                    "Encoder placement failed: request_id={}",
+                    context.data().getRequestId(),
+                    failure);
+            closeRequest(
+                    context,
+                    new EndEvidence(
+                            null,
+                            EndKind.FAILURE,
+                            RoleType.ENCODER,
+                            false,
+                            0L,
+                            StrategyErrorType.DISPATCH_FAILED,
+                            "Encoder placement failed",
+                            false,
+                            true));
+        }
+        return true;
+    }
+
+    public final void onEncoderStatus(
+            RequestContext context,
+            EncoderEndpoint source,
+            org.flexlb.dao.master.WorkerStatus.TaskObservation task,
+            boolean finished) {
+        if (!requests.isCurrent(context) || context.data().getScheduler() != this) {
+            return;
+        }
+        try (var accepted = runtime.tryRegisterRequestWork(context)) {
+            if (accepted == null) {
+                return;
+            }
+            var update =
+                    context.recordEncoderStatus(source, task, finished, System.currentTimeMillis());
+            if (update.kind() == UpdateKind.STALE) {
+                return;
+            }
+            accepted.submit(
+                    () -> {
+                        var pending = context.snapshot().pendingEnd();
+                        if (pending != null) {
+                            closeRequest(context, pending);
+                        }
+                        runtime.deadlines().update(context, context.snapshot().deadlines());
+                    });
+        }
+    }
+
+    public final void onEncoderRetired(RequestContext context, EncoderEndpoint source) {
+        var facts = context.snapshot().encoder();
+        if (facts == null || facts.endpoint() != source || !requests.isCurrent(context)) {
+            return;
+        }
+        closeRequest(
+                context,
+                new EndEvidence(
+                        null,
+                        EndKind.RETIREMENT,
+                        RoleType.ENCODER,
+                        false,
+                        0L,
+                        StrategyErrorType.DISPATCH_FAILED,
+                        "Encoder endpoint generation retired",
+                        false,
+                        true));
+    }
 
     protected AbstractRequestScheduler(
             SchedulerRuntime runtime,
             FlexlbConfig config,
             DecodeResources.AdmissionCapacity capacity,
-            RecentCacheKeyTraceReporter cacheTrace) {
+            TheoryCacheHitReporter cacheTrace) {
         this.runtime = Objects.requireNonNull(runtime);
         requests = runtime.requests();
         queued = Objects.requireNonNull(config).isQueue();
@@ -108,6 +284,23 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                             StrategyErrorType.DISPATCH_FAILED,
                             "request scheduler is not accepting this request configuration"));
         }
+        if (data.getRequestPhase() != RequestPhase.ENCODER
+                && config.getDispatcher().requiresGenerateInput()
+                && data.hasGenerateInput()) {
+            try {
+                if (!java.util.Objects.equals(data.generateInputRequestId(), data.getRequestId())) {
+                    return CompletableFuture.completedFuture(
+                            Response.buildErrorResponse(
+                                    StrategyErrorType.INVALID_REQUEST,
+                                    "BATCH request_id must be the canonical int64 decimal string matching generate_input.request_id"));
+                }
+            } catch (Exception malformed) {
+                return CompletableFuture.completedFuture(
+                        Response.buildErrorResponse(
+                                StrategyErrorType.INVALID_REQUEST,
+                                "generate_input must contain a valid GenerateInputPB"));
+            }
+        }
         long expires = data.getRequestExpiresAtMs();
         if (expires <= 0L || System.currentTimeMillis() >= expires) {
             var rejected =
@@ -122,7 +315,17 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 new RequestFuture(
                         (kind, response, failure) ->
                                 completeExternal(ctx, kind, response, failure, true));
-        var result = requests.register(ctx, this, future);
+        RequestRepository.RegistrationResult result;
+        try {
+            result = requests.register(ctx, this, future);
+        } catch (RuntimeException failure) {
+            org.flexlb.metric.SafeFlexMonitor.run(
+                    "request registration failure",
+                    () -> runtime.requestReporter().reportLifecycleFailure("registration"));
+            Logger.warn("Request registration failed: request_id={}", data.getRequestId(), failure);
+            return CompletableFuture.completedFuture(
+                    Response.error(StrategyErrorType.DISPATCH_FAILED));
+        }
         if (result == RequestRepository.RegistrationResult.INPUT_REQUIRED) {
             return CompletableFuture.completedFuture(
                     Response.buildErrorResponse(
@@ -150,7 +353,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 (response, failure) -> {
                     try {
                         if (failure == null && response != null && response.isSuccess()) {
-                            cacheTrace.report(ctx);
+                            cacheTrace.report(ctx.data());
                         }
                     } catch (RuntimeException error) {
                         Logger.warn("Route tracing failed", error);
@@ -169,9 +372,15 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     @Override
-    public final RequestState cancel(long id, long batchId, CancelReason reason) {
+    public final RequestState cancel(String id, long batchId, CancelReason reason) {
+        return cancel(id, batchId, reason, RequestPhase.GENERATION);
+    }
+
+    @Override
+    public final RequestState cancel(
+            String id, long batchId, CancelReason reason, RequestPhase phase) {
         Objects.requireNonNull(reason);
-        var ctx = requests.findActive(id);
+        var ctx = requests.findActive(id, phase);
         if (ctx != null) {
             if (ctx.data().getScheduler() != this) {
                 return null;
@@ -181,7 +390,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 return result;
             }
         }
-        var terminal = requests.findTerminal(id);
+        var terminal = requests.findTerminal(id, phase);
         return terminal != null
                         && terminal.owner() == this
                         && terminal.state().matchesBatch(batchId)
@@ -189,7 +398,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 : null;
     }
 
-    /** Cancellation freezes its first cause, then directs the owner of the real resource. */
+    /**
+     * Cancellation freezes its first cause, then directs the owner of the real resource.
+     */
     public final RequestState cancel(RequestContext ctx, long batchId, CancelReason reason) {
         if (ctx == null || ctx.data().getScheduler() != this || !requests.isCurrent(ctx)) {
             return null;
@@ -230,7 +441,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (claim instanceof Granted<CancelPermit> granted) {
                 var permission = granted.value();
                 switch (permission.kind()) {
-                    case GLOBAL_QUEUE, WAIT_PLACEMENT -> queueControl(ctx, null);
+                    case GLOBAL_QUEUE, WAIT_PLACEMENT -> signalQueueControl(ctx);
                     case WORKER_QUEUE -> {
                         if (!permission
                                 .route()
@@ -261,7 +472,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (runtime.deadlines().needsUpdate(ctx, deadlines)) {
                 runtime.deadlines().update(ctx, deadlines);
             }
-            return requests.getRequestState(ctx.data().getRequestId(), batchId);
+            return requests.getRequestState(
+                    ctx.data().getRequestId(), batchId, ctx.data().getRequestPhase());
         }
     }
 
@@ -336,7 +548,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         Failures.rethrow(failure, "queue event processing failed");
     }
 
-    /** Match Engine identity and merge facts before submitting external follow-up work. */
+    /**
+     * Match Engine identity and merge facts before submitting external follow-up work.
+     */
     public void onEngineEvidence(RequestContext ctx, EngineEvidence evidence) {
         if (ctx == null || ctx.data().getScheduler() != this) {
             return;
@@ -446,7 +660,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    public boolean isAdmissionOpen(long id, CompletableFuture<?> future) {
+    public boolean isAdmissionOpen(String id, CompletableFuture<?> future) {
         var ctx = requests.findActive(id);
         if (requests.isClosed()
                 || ctx == null
@@ -462,7 +676,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    public AdmissionHandle claimAdmissionHandle(long id, CompletableFuture<?> future) {
+    public AdmissionHandle claimAdmissionHandle(String id, CompletableFuture<?> future) {
         if (!runtime.registerAdmission()) {
             return null;
         }
@@ -789,7 +1003,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    /** True transfers effects to confirmation/close; false leaves only deadline synchronization. */
+    /**
+     * True transfers effects to confirmation/close; false leaves only deadline synchronization.
+     */
     private boolean confirmDelivery(RequestContext ctx) {
         ResponsePublication publication = null;
         ResponseCandidate candidate = null;
@@ -1053,7 +1269,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    /** Select one effect owner after recording facts; that owner also handles its failures. */
+    /**
+     * Select one effect owner after recording facts; that owner also handles its failures.
+     */
     private void advanceRequest(RequestContext ctx, Snapshot state) {
         Throwable failure = null;
         if (state.preemption() != null) {
@@ -1095,7 +1313,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         Failures.rethrow(failure, "request continuation failed");
     }
 
-    /** The exact reconciliation owns ledger retries and its post-commit capacity/resumption effects. */
+    /**
+     * The exact reconciliation owns ledger retries and its post-commit capacity/resumption effects.
+     */
     private void reconcilePreemption(RequestContext ctx) {
         ReconciliationPermit permit;
         DecodeEndpoint decode;
@@ -1163,7 +1383,34 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    /** Own closing through completion or a recorded wait, including recovery after an effect fails. */
+    private Response completedResponse(RequestContext context, EndToken token, Snapshot snapshot) {
+        if (token.route() != null) {
+            return token.route()
+                    .successResponse(
+                            snapshot.delivery() != null
+                                    && snapshot.delivery().identity().kind()
+                                            == DeliveryClaimKind.BATCH_ENQUEUE);
+        }
+        var worker = snapshot.encoder().endpoint().getStatus();
+        var selected = new org.flexlb.dao.loadbalance.ServerStatus();
+        selected.setSuccess(true);
+        selected.setRole(RoleType.ENCODER);
+        selected.setRequestId(context.data().getRequestId());
+        selected.setServerIp(worker.getIp());
+        selected.setHttpPort(worker.getPort());
+        selected.setGrpcPort(worker.getGrpcPort());
+        selected.setGroup(worker.getGroup());
+        selected.setSelectedEngineIndex(worker.getEngineIndex(), worker.getMultiEngineNum());
+        var response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(java.util.List.of(selected));
+        return response;
+    }
+
+    /**
+     * Own closing through completion or a recorded wait, including recovery after an effect fails.
+     */
     void closeRequest(RequestContext ctx, EndEvidence evidence) {
         if (ctx.data().getScheduler() != this || !requests.isCurrent(ctx)) {
             return;
@@ -1224,7 +1471,11 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                     granted.after().delivery() != null
                                             && granted.after().delivery().identity().kind()
                                                     == DeliveryClaimKind.BATCH_ENQUEUE;
-                            response = CloseTask.response(outcome, token.route(), batched);
+                            response =
+                                    outcome.outcome().phase() == RequestState.Phase.COMPLETED
+                                                    && granted.after().encoder() != null
+                                            ? completedResponse(ctx, token, granted.after())
+                                            : CloseTask.response(outcome, token.route(), batched);
                         }
                     } else if (publication != null) {
                         publication.close();
@@ -1254,7 +1505,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    /** Owns close effects and response-publication cleanup after terminal selection. */
+    /**
+     * Owns close effects and response-publication cleanup after terminal selection.
+     */
     private final class CloseTask implements Runnable {
         private final RequestContext ctx;
         private final EndToken token;
@@ -1419,7 +1672,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             try {
                 Throwable cleanup =
                         completion == RequestFuture.Completion.CANCELLATION
-                                ? Failures.run(null, () -> queueControl(ctx, null))
+                                ? Failures.run(null, () -> signalQueueControl(ctx))
                                 : null;
                 var after = ctx.snapshot();
                 if (token != null) {
@@ -1614,6 +1867,14 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     static Settlement releaseResources(ClosePermit permit) {
         var route = permit.route();
         if (route == null) {
+            var encoder = permit.owner().snapshot().encoder();
+            if (encoder != null) {
+                try {
+                    encoder.endpoint().forgetRequest(permit.owner().data().getRequestId());
+                } catch (Throwable failure) {
+                    return new Settlement(false, true, failure);
+                }
+            }
             return new Settlement(true, true, null);
         }
         boolean prefill = permit.prefillSettled();
@@ -1649,7 +1910,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         return new Settlement(prefill, decode, failure);
     }
 
-    /** Local submission failure uses the same arbitration as external Future completion. */
+    /**
+     * Local submission failure uses the same arbitration as external Future completion.
+     */
     boolean publish(RequestContext ctx, Response response, boolean synchronous) {
         return completeExternal(
                 ctx, RequestFuture.Completion.RESPONSE, response, null, synchronous);
@@ -1810,6 +2073,37 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
         }
         Failures.rethrow(failure, "request shutdown finalization failed");
+    }
+
+    final void closeAllPlacement() {
+        Throwable failure = encoderQueue == null ? null : Failures.run(null, encoderQueue::close);
+        failure = Failures.run(failure, this::closePlacement);
+        Failures.rethrow(failure, "placement shutdown failed");
+    }
+
+    private void signalQueueControl(RequestContext context) {
+        if (context.data().getRequestPhase() != RequestPhase.ENCODER) {
+            queueControl(context, null);
+            return;
+        }
+        if (encoderQueue != null) {
+            encoderQueue.remove(context);
+        }
+        var state = context.snapshot();
+        if (state.cancellation() != null) {
+            closeRequest(
+                    context,
+                    new EndEvidence(
+                            null,
+                            EndKind.FRONTEND,
+                            RoleType.ENCODER,
+                            false,
+                            0L,
+                            state.cancellation().errorType(),
+                            state.cancellation().detail(),
+                            false,
+                            true));
+        }
     }
 
     void closePlacement() {}

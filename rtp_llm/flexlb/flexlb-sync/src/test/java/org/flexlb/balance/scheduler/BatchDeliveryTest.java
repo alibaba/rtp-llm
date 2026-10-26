@@ -13,13 +13,14 @@ import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -74,7 +75,6 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.anyLong;
-import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.argThat;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
@@ -89,7 +89,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** The production Worker -> Dispatcher -> Runtime path; only protocol owners and transport are simulated. */
+/**
+ * The production Worker -> Dispatcher -> Runtime path; only protocol owners and transport are simulated.
+ */
 @Timeout(15)
 class BatchDeliveryTest {
     @Test
@@ -107,7 +109,7 @@ class BatchDeliveryTest {
             ReflectionTestUtils.invokeMethod(f.worker, "processQueue");
             f.drain();
             assertEquals(List.of(first), f.committedItems);
-            assertEquals(List.of(1L), f.sentIds());
+            assertEquals(List.of("1"), f.sentIds());
             assertEquals(1, f.sent.size());
             assertEquals(701L, f.claims.getFirst().batchId());
             assertEquals(DeliveryClaimKind.BATCH_ENQUEUE, f.claims.getFirst().kind());
@@ -218,6 +220,51 @@ class BatchDeliveryTest {
         }
     }
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+        "NON_BATCH,SINGLE,1,0,single_request",
+        "BATCH,SINGLE,1,0,single_request",
+        "NON_BATCH,FIXED_WINDOW,2,60000,batch_full",
+        "BATCH,FIXED_WINDOW,2,60000,batch_full",
+        "NON_BATCH,FIXED_WINDOW,1,0,fixed_window_timeout",
+        "BATCH,FIXED_WINDOW,1,0,fixed_window_timeout"
+    })
+    void committedGroupIsVisibleBeforeDeliveryPublication(
+            String dispatcher, String policy, int count, long windowMs, String expectedReason) {
+        try (var fixture =
+                new LinearDeliveryFixture(
+                        dispatcher.equals("BATCH"), DecisionPolicyConfig.Type.valueOf(policy))) {
+            fixture.config.decisionPolicy().setMaxCollectionWaitMs(windowMs);
+            var items = new ArrayList<RequestRoute>();
+            for (int index = 0; index < count; index++) {
+                items.add(fixture.item(100L + index, 10L));
+            }
+            var observed = new CopyOnWriteArrayList<org.flexlb.dao.pv.DecisionGroup>();
+            fixture.beforeCompletion =
+                    claim -> observed.add(claim.owner().data().getDecisionGroup());
+            assertNull(
+                    fixture.worker.processSelection(
+                            items,
+                            expectedReason,
+                            fixture.evaluator,
+                            OptionalLong.of(count * 10L),
+                            null));
+            fixture.drain();
+            assertEquals(count, observed.size());
+            String groupId = observed.getFirst().id();
+            assertNotNull(groupId);
+            observed.forEach(
+                    group -> {
+                        assertEquals(groupId, group.id());
+                        assertEquals(count, group.committedSize());
+                        assertEquals(expectedReason, group.reason());
+                        assertEquals(policy, group.policy());
+                        assertEquals(dispatcher, group.dispatcher());
+                        assertTrue(group.requestWaitMs() >= 0L);
+                    });
+        }
+    }
+
     @Test
     void queuedBatchStillRechecksCurrentDispatcherConfigurationBeforeRpc() {
         try (var f = new LinearDeliveryFixture(true)) {
@@ -246,8 +293,8 @@ class BatchDeliveryTest {
             f.drain();
             assertEquals(List.of(first), f.committedItems);
             assertEquals(10, f.committedPrediction);
-            assertEquals(List.of(1L), f.sentIds());
-            assertEquals(List.of(1L), f.claimIds());
+            assertEquals(List.of("1"), f.sentIds());
+            assertEquals(List.of("1"), f.claimIds());
             verify(f.decode, never()).acquireDispatchPermit(eq(third.decodeReservation()), any());
             verify(f.prefill, never()).release(any(PrefillState.Reservation.class), isNull());
             assertEquals(DeliveryResult.Status.DELIVERED, f.result(1).status());
@@ -293,14 +340,14 @@ class BatchDeliveryTest {
             var primary = new IllegalStateException("prediction failed");
             var cleanup = new IllegalStateException("permit cleanup failed");
             doThrow(primary).when(f.evaluator).predictBatchMs(any());
-            doThrow(cleanup).when(f.permits.get(1L)).release();
+            doThrow(cleanup).when(f.permits.get(String.valueOf(1L))).release();
             assertSame(
                     primary,
                     assertThrows(
                             IllegalStateException.class,
                             () -> f.process(List.of(first, second), OptionalLong.empty())));
             assertTrue(Arrays.asList(primary.getSuppressed()).contains(cleanup));
-            verify(f.permits.get(2L)).release();
+            verify(f.permits.get(String.valueOf(2L))).release();
             verify(f.prefill).release(f.reservation, null);
             assertTrue(f.runtime.deliveries().deliveryCapacityAvailable());
             verifyNoInteractions(f.grpc);
@@ -352,7 +399,7 @@ class BatchDeliveryTest {
                     };
             f.process(List.of(first, second), OptionalLong.of(30));
             f.drain();
-            assertEquals(List.of(1L, 2L), f.sentIds());
+            assertEquals(List.of("1", "2"), f.sentIds());
             assertEquals(2, f.results.size());
             verify(f.handoff, times(1)).close();
             assertTrue(f.events.indexOf("handoff-close") < f.events.indexOf("complete-1"));
@@ -404,7 +451,7 @@ class BatchDeliveryTest {
                                 };
                             })
                     .when(f.grpc)
-                    .batchEnqueueAsync(anyString(), anyInt(), any());
+                    .batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any());
             f.process(List.of(f.item(1, 10), f.item(2, 20)), OptionalLong.of(30));
             f.drain();
             assertEquals(2, f.results.size());
@@ -413,8 +460,9 @@ class BatchDeliveryTest {
                     .forEach(
                             result ->
                                     assertEquals(DeliveryResult.Status.UNCERTAIN, result.status()));
-            assertEquals(Map.of(1L, 1, 2L, 1), f.completionCounts);
-            verify(f.grpc, times(1)).batchEnqueueAsync(anyString(), anyInt(), any());
+            assertEquals(Map.of("1", 1, "2", 1), f.completionCounts);
+            verify(f.grpc, times(1))
+                    .batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any());
         }
     }
 
@@ -425,7 +473,7 @@ class BatchDeliveryTest {
             var items = List.of(f.item(1, 10), f.item(2, 20), f.item(3, 30));
             for (int i = 0; i < 3; i++) {
                 if ((refusedMask & (1 << i)) != 0) {
-                    f.refusedSends.add((long) i + 1);
+                    f.refusedSends.add(String.valueOf((long) i + 1));
                 }
             }
             f.process(items, OptionalLong.of(60));
@@ -441,7 +489,7 @@ class BatchDeliveryTest {
                         f.refusedSends.contains(item.requestId())
                                 ? DeliveryResult.Status.NOT_SENT
                                 : DeliveryResult.Status.DELIVERED,
-                        f.result(item.requestId()).status());
+                        f.result(Long.parseLong(item.requestId())).status());
                 assertEquals(1, f.completionCounts.get(item.requestId()));
             }
             if (expected.isEmpty()) {
@@ -459,7 +507,7 @@ class BatchDeliveryTest {
             f.drain();
             assertEquals(DeliveryResult.Status.DELIVERED, f.result(1).status());
             assertEquals(DeliveryResult.Status.DELIVERED, f.result(2).status());
-            assertEquals(Map.of(1L, 1, 2L, 1), f.completionCounts);
+            assertEquals(Map.of("1", 1, "2", 1), f.completionCounts);
             verify(f.grpc, times(1)).batchEnqueueAsync(anyString(), anyInt(), any());
         }
     }
@@ -479,7 +527,7 @@ class BatchDeliveryTest {
                                                     System.currentTimeMillis()));
             f.process(List.of(f.item(1L, 10L)), OptionalLong.of(10L));
             f.drain();
-            assertEquals(Map.of(1L, 1), f.completionCounts);
+            assertEquals(Map.of("1", 1), f.completionCounts);
             assertNotNull(f.claims.getFirst().owner().snapshot().delivery().abandonment());
             verify(dispatcher, never()).stop(any());
         }
@@ -493,7 +541,7 @@ class BatchDeliveryTest {
             var permitFailure = new IllegalStateException("permit cleanup failed");
             var handoffFailure = new IllegalStateException("handoff close failed");
             f.expectedShutdownFailure = permitFailure;
-            doThrow(permitFailure).when(f.permits.get(1L)).release();
+            doThrow(permitFailure).when(f.permits.get(String.valueOf(1L))).release();
             doAnswer(
                             call -> {
                                 f.handoffClosed.set(true);
@@ -505,7 +553,7 @@ class BatchDeliveryTest {
             f.drain();
             assertEquals(DeliveryResult.Status.DELIVERED, f.result(1).status());
             assertEquals(DeliveryResult.Status.DELIVERED, f.result(2).status());
-            verify(f.permits.get(2L)).release();
+            verify(f.permits.get(String.valueOf(2L))).release();
             verify(f.handoff).close();
             assertTrue(Arrays.asList(permitFailure.getSuppressed()).contains(handoffFailure));
         }
@@ -522,7 +570,7 @@ class BatchDeliveryTest {
                     .shutdown();
             assertDoesNotThrow(() -> f.process(List.of(first, second), OptionalLong.of(30)));
             f.drain();
-            assertEquals(Set.of(1L, 2L), f.preparationFailures.keySet());
+            assertEquals(Set.of("1", "2"), f.preparationFailures.keySet());
             assertTrue(f.results.isEmpty());
             verify(f.owner, times(1))
                     .onDeliveryEvidence(
@@ -538,15 +586,17 @@ class BatchDeliveryTest {
                                     e ->
                                             e instanceof PreparationFailure failure
                                                     && failure.route() == second));
-            verify(f.permits.get(1L), times(1)).release();
-            verify(f.permits.get(2L), times(1)).release();
+            verify(f.permits.get(String.valueOf(1L)), times(1)).release();
+            verify(f.permits.get(String.valueOf(2L)), times(1)).release();
             verify(f.handoff, times(1)).close();
             verifyNoInteractions(f.grpc);
         }
     }
 }
 
-/** No transaction/state-machine fake: calls real preparation, commitment orchestration and asynchronous transport. */
+/**
+ * No transaction/state-machine fake: calls real preparation, commitment orchestration and asynchronous transport.
+ */
 final class LinearDeliveryFixture implements AutoCloseable {
     final FlexlbConfig config;
     final DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
@@ -567,14 +617,14 @@ final class LinearDeliveryFixture implements AutoCloseable {
     final List<String> events = new CopyOnWriteArrayList<>();
     final List<DeliveryClaim> claims = new CopyOnWriteArrayList<>();
     final List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
-    final Map<Long, DecodeEndpoint.EngineDispatchPermit> permits = new ConcurrentHashMap<>();
-    final Map<Long, Long> predictions = new ConcurrentHashMap<>();
-    final Map<Long, DeliveryResult> results = new ConcurrentHashMap<>();
-    final Map<Long, Integer> completionCounts = new ConcurrentHashMap<>();
-    final Map<Long, String> preparationFailures = new ConcurrentHashMap<>();
-    final Set<Long> lostClaims = ConcurrentHashMap.newKeySet();
-    final Set<Long> refusedSends = ConcurrentHashMap.newKeySet();
-    final Set<Long> blockedDecode = ConcurrentHashMap.newKeySet();
+    final Map<String, DecodeEndpoint.EngineDispatchPermit> permits = new ConcurrentHashMap<>();
+    final Map<String, Long> predictions = new ConcurrentHashMap<>();
+    final Map<String, DeliveryResult> results = new ConcurrentHashMap<>();
+    final Map<String, Integer> completionCounts = new ConcurrentHashMap<>();
+    final Map<String, String> preparationFailures = new ConcurrentHashMap<>();
+    final Set<String> lostClaims = ConcurrentHashMap.newKeySet();
+    final Set<String> refusedSends = ConcurrentHashMap.newKeySet();
+    final Set<String> blockedDecode = ConcurrentHashMap.newKeySet();
     final SchedulerRuntime runtime;
     final DeliveryDispatcher dispatcher;
     final PrefillQueueRunner worker;
@@ -603,6 +653,10 @@ final class LinearDeliveryFixture implements AutoCloseable {
 
     LinearDeliveryFixture(boolean batch) {
         this(batch, config -> {});
+    }
+
+    LinearDeliveryFixture(boolean batch, DecisionPolicyConfig.Type grouping) {
+        this(batch, config -> config.decisionPolicy().setType(grouping));
     }
 
     LinearDeliveryFixture(boolean batch, Consumer<FlexlbConfig> configure) {
@@ -643,7 +697,12 @@ final class LinearDeliveryFixture implements AutoCloseable {
                         dispatcher,
                         queueOwnership);
         when(prefill.getIp()).thenReturn("127.0.0.1");
+        when(prefill.getStatus())
+                .thenReturn(
+                        org.flexlb.dao.master.WorkerStatus.createDiscovered(
+                                RoleType.PREFILL, "contract", "127.0.0.1", 8080, 8090, "contract"));
         when(prefill.getGrpcPort()).thenReturn(8090);
+        when(prefill.collectionWindowMs(anyLong())).thenAnswer(call -> call.getArgument(0));
         when(prefill.reserveBatch(any(), anyLong(), anyInt()))
                 .thenReturn(
                         new PrefillState.ReservationResult<>(
@@ -720,6 +779,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
                                         prediction.delivery().item().requestId(),
                                         duration(prediction.predictedAtMs(), prediction.nowMs()));
                             } else if (evidence instanceof RouteDelivered delivered) {
+                                beforeCompletion.accept(delivered.delivery());
                                 predictions.put(
                                         delivered.delivery().item().requestId(),
                                         duration(delivered.predictedAtMs(), delivered.nowMs()));
@@ -729,7 +789,9 @@ final class LinearDeliveryFixture implements AutoCloseable {
                                 results.put(claim.item().requestId(), result.result());
                                 completionCounts.merge(claim.item().requestId(), 1, Integer::sum);
                                 events.add("complete-" + claim.item().requestId());
-                                if (claim.item().requestId() == throwCompletionFor) {
+                                if (claim.item()
+                                        .requestId()
+                                        .equals(String.valueOf(throwCompletionFor))) {
                                     throw expectedShutdownFailure;
                                 }
                             } else if (evidence instanceof PreparationFailure failed) {
@@ -754,7 +816,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
                                                     .ACQUIRED,
                                             permits.get(handle.requestId()));
                         });
-        when(grpc.batchEnqueueAsync(anyString(), anyInt(), any()))
+        when(grpc.batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(
                         call -> {
                             var request =
@@ -782,8 +844,13 @@ final class LinearDeliveryFixture implements AutoCloseable {
                         org.flexlb.balance.endpoint.DecodeResources.ResourceChange.of(
                                 DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                                 false));
-        permits.put(id, permit);
-        return item(id, seqLen, decode, new DecodeResources.ReservationHandle(1, id, id), payload);
+        permits.put(String.valueOf(id), permit);
+        return item(
+                id,
+                seqLen,
+                decode,
+                new DecodeResources.ReservationHandle(1, String.valueOf(id), id),
+                payload);
     }
 
     RequestRoute item(
@@ -802,7 +869,12 @@ final class LinearDeliveryFixture implements AutoCloseable {
             ByteString payload) {
         var context = new RequestContext(config);
         context.data()
-                .setRequest(Request.builder().requestId(id).seqLen(seqLen).rawPriority(50).build());
+                .setRequest(
+                        Request.builder()
+                                .requestId(String.valueOf(id))
+                                .seqLen(seqLen)
+                                .rawPriority(50)
+                                .build());
         context.data().setFuture(new CompletableFuture<>());
         context.data()
                 .setGenerateInputPb(
@@ -816,7 +888,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
                                         .toByteString());
         context.data().register(owner, new RequestFuture((kind, response, failure) -> false));
         long now = System.currentTimeMillis();
-        context.register(id, now, Long.MAX_VALUE, 60_000L);
+        context.register(String.valueOf(id), now, Long.MAX_VALUE, 60_000L);
         var route =
                 SchedulingTestConfig.createRoute(
                         context, null, null, null, prefill, endpoint, handle, now);
@@ -850,14 +922,16 @@ final class LinearDeliveryFixture implements AutoCloseable {
     RequestRoute realItem(DecodeEndpoint endpoint, long id, long seqLen) {
         DecodeResources.ReservationHandle handle;
         try (var pin = endpoint.tryPinGeneration()) {
-            handle = endpoint.tryReserveQueuedRequest(pin, id, 100, 200, 50, null).handle();
+            handle =
+                    endpoint.tryReserveQueuedRequest(pin, String.valueOf(id), 100, 200, 50, null)
+                            .handle();
         }
         assertNotNull(handle);
         return item(id, seqLen, endpoint, handle);
     }
 
     void blockDecode(long id) {
-        blockedDecode.add(id);
+        blockedDecode.add(String.valueOf(id));
     }
 
     CapacityBoundary process(List<RequestRoute> items, OptionalLong prediction) {
@@ -869,18 +943,18 @@ final class LinearDeliveryFixture implements AutoCloseable {
     }
 
     DeliveryResult result(long id) {
-        return Objects.requireNonNull(results.get(id), "missing result " + id);
+        return Objects.requireNonNull(results.get(String.valueOf(id)), "missing result " + id);
     }
 
-    List<Long> claimIds() {
+    List<String> claimIds() {
         return claims.stream().map(claim -> claim.item().requestId()).toList();
     }
 
-    List<Long> sentIds() {
+    List<String> sentIds() {
         return sent.stream()
                 .flatMap(request -> request.getDpSlotsList().stream())
                 .flatMap(slot -> slot.getRequestsList().stream())
-                .map(member -> member.getInput().getRequestId())
+                .map(member -> Long.toString(member.getInput().getRequestId()))
                 .toList();
     }
 

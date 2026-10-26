@@ -2,16 +2,20 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.Objects;
 
 import static com.google.common.math.LongMath.saturatedAdd;
 
-/** Immutable facts and exact permissions, without execution callbacks or infrastructure handles. */
+/**
+ * Immutable facts and exact permissions, without execution callbacks or infrastructure handles.
+ */
 public final class ContextResult {
     private ContextResult() {}
 
@@ -78,7 +82,8 @@ public final class ContextResult {
         TERMINAL,
         CANCELLATION,
         EXTERNAL_SUCCESS,
-        EXTERNAL_FAILURE
+        EXTERNAL_FAILURE,
+        ENCODER_ACK
     }
 
     public enum CancelKind {
@@ -124,7 +129,17 @@ public final class ContextResult {
         RELEASE
     }
 
-    public record Identity(long requestId, long incarnation) {}
+    public record Identity(
+            String requestId,
+            long incarnation,
+            long originalNumericRequestId,
+            RequestPhase requestPhase) {
+        public Identity(String requestId, long incarnation) {
+            this(requestId, incarnation, 0L, RequestPhase.GENERATION);
+        }
+    }
+
+    public record EncoderFacts(EncoderEndpoint endpoint, boolean acknowledged) {}
 
     public record End(
             EndKind kind, TerminalOutcome outcome, StrategyErrorType errorType, String detail) {}
@@ -541,6 +556,10 @@ public final class ContextResult {
         }
     }
 
+    /**
+     * @param restorationObserved whether Prefill ACTIVE or Decode KV_ALLOCATED was observed
+     *                            after this preemption was registered; earlier reports do not count
+     */
     public record PreemptionFacts(
             PreemptionRegistration identity,
             PreemptionCancelPhase phase,
@@ -726,7 +745,9 @@ public final class ContextResult {
         }
     }
 
-    /** Control facts are shared by observations that change only activity timestamps. */
+    /**
+     * Control facts are shared by observations that change only activity timestamps.
+     */
     public record SnapshotFacts(
             Identity key,
             long createdAtMs,
@@ -746,13 +767,64 @@ public final class ContextResult {
             boolean deliveryReleasable,
             boolean preparedDelivery,
             boolean localEndEligible,
-            boolean frontendCancelEligible) {}
+            boolean frontendCancelEligible,
+            EncoderFacts encoder) {}
 
     public record Snapshot(
             @lombok.experimental.Delegate SnapshotFacts facts,
             long lastWorkerAtMs,
             long updatedAtMs,
-            long inactivityExpiresAtMs) {}
+            long inactivityExpiresAtMs) {
+        public Snapshot(
+                Identity key,
+                long createdAtMs,
+                Phase phase,
+                RequestRoute route,
+                PlacementFacts placement,
+                DeliveryFacts delivery,
+                EngineFacts engine,
+                PreemptionFacts preemption,
+                CancellationFacts cancellation,
+                End outcome,
+                EndEvidence pendingEnd,
+                ResponseSelection selectedResponse,
+                CloseFacts close,
+                ExpirationTimer.Plan deadlines,
+                RequestState terminalRecord,
+                long lastWorkerAtMs,
+                long updatedAtMs,
+                boolean deliveryReleasable,
+                boolean preparedDelivery,
+                boolean localEndEligible,
+                boolean frontendCancelEligible,
+                long inactivityExpiresAtMs) {
+            this(
+                    new SnapshotFacts(
+                            key,
+                            createdAtMs,
+                            phase,
+                            route,
+                            placement,
+                            delivery,
+                            engine,
+                            preemption,
+                            cancellation,
+                            outcome,
+                            pendingEnd,
+                            selectedResponse,
+                            close,
+                            deadlines,
+                            terminalRecord,
+                            deliveryReleasable,
+                            preparedDelivery,
+                            localEndEligible,
+                            frontendCancelEligible,
+                            null),
+                    lastWorkerAtMs,
+                    updatedAtMs,
+                    inactivityExpiresAtMs);
+        }
+    }
 
     public record Update(UpdateKind kind, Snapshot before, Snapshot after) {
         public Update {

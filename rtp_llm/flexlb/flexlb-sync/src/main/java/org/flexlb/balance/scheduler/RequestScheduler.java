@@ -1,10 +1,13 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.route.RequestPhase;
 
 import java.util.concurrent.CompletableFuture;
 
-/** Request scheduling and cancellation. Runtime owns service shutdown. */
+/**
+ * Request scheduling and cancellation. Runtime owns service shutdown.
+ */
 public interface RequestScheduler {
     /**
      * Accept a request and return its scheduling result, not an enqueue acknowledgement.
@@ -34,5 +37,7 @@ public interface RequestScheduler {
      * Request cancellation from the owning scheduler. Acceptance does not imply
      * immediate resource release. Returns null when no matching request is known.
      */
-    RequestState cancel(long requestId, long batchId, CancelReason reason);
+    RequestState cancel(String requestId, long batchId, CancelReason reason);
+
+    RequestState cancel(String requestId, long batchId, CancelReason reason, RequestPhase phase);
 }

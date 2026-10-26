@@ -1,5 +1,6 @@
 package org.flexlb.service.monitor;
 
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -14,8 +15,12 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_KV_RESERVED_TOKENS;
+import static org.flexlb.constant.MetricConstant.DECODE_INPUT_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_TOTAL_LOAD;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
@@ -26,6 +31,7 @@ import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
+import static org.flexlb.constant.MetricConstant.TRACKED_REQUEST_COUNT;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
@@ -95,6 +101,23 @@ class DeliveryMetricsReporterTest {
     }
 
     @Test
+    void workerInflightUsesSeparateRolesAndConfirmationScope() {
+        reporter.reportInflightRequestCount("PREFILL", "prefill:8080", 3);
+        reporter.reportInflightRequestCount("DECODE", "decode:8080", 2);
+        verify(monitor)
+                .report(
+                        org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT,
+                        FlexMetricTags.ofEngine(
+                                "prefill:8080", "role", "PREFILL", "scope", "worker"),
+                        3.0);
+        verify(monitor)
+                .report(
+                        org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT,
+                        FlexMetricTags.ofEngine("decode:8080", "role", "DECODE", "scope", "worker"),
+                        2.0);
+    }
+
+    @Test
     void should_register_dispatch_reason_metric_on_init() {
         reporter.init();
 
@@ -131,6 +154,16 @@ class DeliveryMetricsReporterTest {
                         "engineIp", "10.0.0.1",
                         "reason", "batch_full");
         verify(monitor).report(ENGINE_BALANCING_MASTER_DISPATCH_REASON, tags, 1.0);
+    }
+
+    @Test
+    void batch_dispatch_does_not_count_selected_requests_or_cache_hits_twice() {
+        reporter.reportBatchCacheHitMetrics("PREFILL", "10.0.0.1:8080", 120L, 300L);
+
+        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL", "engineIp", "10.0.0.1:8080");
+        verify(monitor, never()).report(eq(CACHE_HIT_COUNT), any(), anyDouble());
+        verify(monitor).report(CACHE_HIT_RATIO, tags, 0.4);
+        verify(monitor, never()).report(eq(CACHE_REQUEST_TOTAL), any(), anyDouble());
     }
 
     @Test
@@ -180,7 +213,7 @@ class DeliveryMetricsReporterTest {
                 .register(INFLIGHT_TTL_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         verify(monitor)
                 .register(
-                        DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS,
+                        DECODE_INPUT_KV_RESERVED_TOKENS,
                         FlexMetricType.GAUGE,
                         FlexPriorityType.PRECISE);
     }
@@ -199,11 +232,15 @@ class DeliveryMetricsReporterTest {
     @Test
     void prefillSnapshotKeepsTotalOwnershipDistinctFromIndividualOwnership() {
         reporter.reportPrefillInflight(
-                "10.0.0.1", new org.flexlb.balance.endpoint.PrefillState.Stats(7, 3, 2, 42L));
+                "10.0.0.1", new org.flexlb.balance.endpoint.PrefillState.Stats(7, 7, 3, 2, 42L));
 
         var tags = FlexMetricTags.ofEngine("10.0.0.1", "role", "PREFILL");
         verify(monitor).report(org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT, tags, 2.0);
-        verify(monitor).report(INFLIGHT_REQUEST_COUNT, tags, 7.0);
+        verify(monitor)
+                .report(
+                        INFLIGHT_REQUEST_COUNT,
+                        FlexMetricTags.ofEngine("10.0.0.1", "role", "PREFILL", "scope", "worker"),
+                        7.0);
         verify(monitor).report(INFLIGHT_MAX_AGE_MS, tags, 42.0);
         verifyNoMoreInteractions(monitor);
     }
@@ -256,6 +293,23 @@ class DeliveryMetricsReporterTest {
     }
 
     @Test
+    void should_report_scheduler_inflight_size_by_role() {
+        reporter.reportTrackedRequestCount(RoleType.PREFILL, 3);
+        reporter.reportTrackedRequestCount(RoleType.ENCODER, 2);
+
+        verify(monitor)
+                .report(
+                        TRACKED_REQUEST_COUNT,
+                        FlexMetricTags.of("role", "PREFILL", "engineIp", "scheduler"),
+                        3.0);
+        verify(monitor)
+                .report(
+                        TRACKED_REQUEST_COUNT,
+                        FlexMetricTags.of("role", "ENCODER", "engineIp", "scheduler"),
+                        2.0);
+    }
+
+    @Test
     void should_report_endpoint_inflight_ttl_expired_with_reason_bucket() {
         reporter.reportEndpointInflightTtlExpired("PREFILL", "10.0.0.1", "ttl", 2);
 
@@ -284,7 +338,11 @@ class DeliveryMetricsReporterTest {
         reporter.reportDecodeInflight("10.0.0.2", 2, 5, 9_216L, 8_192L, 42L);
 
         FlexMetricTags tags = FlexMetricTags.ofEngine("10.0.0.2", "role", "DECODE");
-        verify(monitor).report(INFLIGHT_REQUEST_COUNT, tags, 2.0);
+        verify(monitor)
+                .report(
+                        INFLIGHT_REQUEST_COUNT,
+                        FlexMetricTags.ofEngine("10.0.0.2", "role", "DECODE", "scope", "worker"),
+                        2.0);
         verify(monitor).report(DECODE_TOTAL_LOAD, tags, 5.0);
         verify(monitor).report(DECODE_INFLIGHT_KV_RESERVED_TOKENS, tags, 9_216.0);
         verify(monitor).report(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, tags, 8_192.0);
@@ -298,7 +356,11 @@ class DeliveryMetricsReporterTest {
         var item = org.mockito.Mockito.mock(org.flexlb.balance.scheduler.RequestRoute.class);
         var endpoint = org.mockito.Mockito.mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
         org.mockito.Mockito.when(item.prefillEp()).thenReturn(endpoint);
-        org.mockito.Mockito.when(endpoint.getIp()).thenReturn("10.0.0.1");
+        var worker = org.mockito.Mockito.mock(org.flexlb.dao.master.WorkerStatus.class);
+        org.mockito.Mockito.when(endpoint.getStatus()).thenReturn(worker);
+        org.mockito.Mockito.when(worker.getMetricIpPort()).thenReturn("10.0.0.1");
+        org.mockito.Mockito.when(worker.getRole())
+                .thenReturn(org.flexlb.dao.route.RoleType.PREFILL);
         org.mockito.Mockito.when(item.enqueuedAtMs()).thenReturn(Long.MAX_VALUE);
         org.mockito.Mockito.when(item.priority()).thenReturn(17);
         if (batchId != 0L) {
@@ -321,14 +383,17 @@ class DeliveryMetricsReporterTest {
             var reasonTags =
                     FlexMetricTags.ofEngine("10.0.0.1", "role", "PREFILL", "reason", "batch_full");
             verify(monitor).report(ENGINE_BALANCING_MASTER_DISPATCH_REASON, reasonTags, 1.0);
-            verify(monitor)
+            verify(monitor, never())
                     .report(
-                            org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT,
-                            tags,
-                            (double) Long.MAX_VALUE);
+                            eq(org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT),
+                            any(),
+                            anyDouble());
             verify(monitor).report(org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO, tags, 1.0);
-            verify(monitor)
-                    .report(org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL, tags, 1.0);
+            verify(monitor, never())
+                    .report(
+                            eq(org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL),
+                            any(),
+                            anyDouble());
             verify(monitor)
                     .report(
                             org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE,
@@ -351,7 +416,11 @@ class DeliveryMetricsReporterTest {
         var item = org.mockito.Mockito.mock(org.flexlb.balance.scheduler.RequestRoute.class);
         var endpoint = org.mockito.Mockito.mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
         org.mockito.Mockito.when(item.prefillEp()).thenReturn(endpoint);
-        org.mockito.Mockito.when(endpoint.getIp()).thenReturn("10.0.0.1");
+        var worker = org.mockito.Mockito.mock(org.flexlb.dao.master.WorkerStatus.class);
+        org.mockito.Mockito.when(endpoint.getStatus()).thenReturn(worker);
+        org.mockito.Mockito.when(worker.getMetricIpPort()).thenReturn("10.0.0.1");
+        org.mockito.Mockito.when(worker.getRole())
+                .thenReturn(org.flexlb.dao.route.RoleType.PREFILL);
         reporter.reportDelivery(71L, "batch_full", 0, java.util.List.of(item), 7L);
 
         verify(monitor, never())
@@ -389,7 +458,11 @@ class DeliveryMetricsReporterTest {
         var item = org.mockito.Mockito.mock(org.flexlb.balance.scheduler.RequestRoute.class);
         var endpoint = org.mockito.Mockito.mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
         org.mockito.Mockito.when(item.prefillEp()).thenReturn(endpoint);
-        org.mockito.Mockito.when(endpoint.getIp()).thenReturn("10.0.0.1");
+        var worker = org.mockito.Mockito.mock(org.flexlb.dao.master.WorkerStatus.class);
+        org.mockito.Mockito.when(endpoint.getStatus()).thenReturn(worker);
+        org.mockito.Mockito.when(worker.getMetricIpPort()).thenReturn("10.0.0.1");
+        org.mockito.Mockito.when(worker.getRole())
+                .thenReturn(org.flexlb.dao.route.RoleType.PREFILL);
         org.mockito.Mockito.doAnswer(
                         call -> {
                             if (BATCHER_QUEUE_SIZE.equals(call.getArgument(0))) {

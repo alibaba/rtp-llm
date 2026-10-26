@@ -103,12 +103,13 @@ class EvictionPlannerDecodeContractTest {
     private static org.flexlb.config.PreemptionConfig engineOwned() {
         PreemptionConfig p = new PreemptionConfig();
         p.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_ENGINE_OWNED));
+        p.setEngineCancellation(new org.flexlb.config.EngineCancellationConfig());
         return p;
     }
 
     private static DecodeRequestView accepted(long id, int priority, long kvTokens) {
         return new DecodeRequestView(
-                id,
+                Long.toString(id),
                 priority,
                 kvTokens,
                 kvTokens,
@@ -180,7 +181,7 @@ class EvictionPlannerDecodeContractTest {
     private static DecodeEvictionProposal plan(
             int priority, long hardKvTokens, EndpointFixture ep, Map<String, String> failures) {
         return planDecode(
-                Request.builder().requestId(99L).seqLen(hardKvTokens).maxNewTokens(0).build(),
+                Request.builder().requestId("99").seqLen(hardKvTokens).maxNewTokens(0).build(),
                 priority,
                 ep.capacity(),
                 ep.snapshot(),
@@ -199,20 +200,20 @@ class EvictionPlannerDecodeContractTest {
                         : EnumSet.noneOf(VictimStage.class));
         var proposal =
                 planDecode(
-                        Request.builder().requestId(99L).seqLen(0L).maxNewTokens(0).build(),
+                        Request.builder().requestId("99").seqLen(0L).maxNewTokens(0).build(),
                         70,
                         engine.capacity(),
                         engine.snapshot(),
                         enginePolicy,
                         new HashMap<>());
         if (engineOwnedAllowed) {
-            assertEquals(List.of(1L), victimIds(proposal));
+            assertEquals(List.of("1"), victimIds(proposal));
         } else {
             assertNull(proposal);
         }
         var local =
                 new DecodeRequestView(
-                        2L,
+                        "2",
                         10,
                         100L,
                         100L,
@@ -225,17 +226,17 @@ class EvictionPlannerDecodeContractTest {
         var localEndpoint = endpoint(1_000L, 1_000L, 1, 1, List.of(local));
         var localProposal =
                 planDecode(
-                        Request.builder().requestId(99L).seqLen(0L).maxNewTokens(0).build(),
+                        Request.builder().requestId("99").seqLen(0L).maxNewTokens(0).build(),
                         70,
                         localEndpoint.capacity(),
                         localEndpoint.snapshot(),
                         policy,
                         new HashMap<>());
         assertNotNull(localProposal);
-        assertEquals(List.of(2L), victimIds(localProposal));
+        assertEquals(List.of("2"), victimIds(localProposal));
     }
 
-    private static List<Long> victimIds(DecodeEvictionProposal p) {
+    private static List<String> victimIds(DecodeEvictionProposal p) {
         return p.victims().stream().map(DecodeRequestView::requestId).toList();
     }
 
@@ -260,7 +261,8 @@ class EvictionPlannerDecodeContractTest {
         DecodeEvictionProposal proposal = plan(70, demand, ep, new HashMap<>());
 
         assertEquals(DecodeEvictionProposal.CASE_SLOT_AND_KV, proposal.evictionCase());
-        assertEquals(kvFirst ? List.of(1L, 5L, 2L) : List.of(1L, 2L, 3L), victimIds(proposal));
+        assertEquals(
+                kvFirst ? List.of("1", "5", "2") : List.of("1", "2", "3"), victimIds(proposal));
         long cost = kvFirst ? 320L : 256L;
         assertEquals(cost, proposal.priorityHarmProfile().totalCost());
         assertEquals(
@@ -290,7 +292,7 @@ class EvictionPlannerDecodeContractTest {
             var ep = endpoint(500L, 1000L, 2, 4L, List.of());
             var decision =
                     EvictionPlanner.planDecode(
-                            Request.builder().requestId(99L).seqLen(200L).maxNewTokens(0).build(),
+                            Request.builder().requestId("99").seqLen(200L).maxNewTokens(0).build(),
                             70,
                             ep.capacity(),
                             ep.snapshot(),
@@ -315,7 +317,7 @@ class EvictionPlannerDecodeContractTest {
             Map<String, String> f = new HashMap<>();
             DecodeEvictionProposal p =
                     plan(70, 0L, endpoint(1000L, 0L, 1, 1L, List.of(accepted(1L, 30, 128L))), f);
-            assertEquals(List.of(1L), victimIds(p));
+            assertEquals(List.of("1"), victimIds(p));
             assertEquals(DecodeEvictionProposal.CASE_SLOT, p.evictionCase());
             // cost = H_SLOT * f(30) * g(ACCEPTED) = 4 * 1 * 16 = 64
             assertEquals(64L, p.priorityHarmProfile().totalCost());
@@ -328,7 +330,7 @@ class EvictionPlannerDecodeContractTest {
             var ep = endpoint(1000L, 0L, 1, 1L, List.of(accepted(1L, 70, 128L)));
             var decision =
                     EvictionPlanner.planDecode(
-                            Request.builder().requestId(99L).seqLen(0L).maxNewTokens(0).build(),
+                            Request.builder().requestId("99").seqLen(0L).maxNewTokens(0).build(),
                             70,
                             ep.capacity(),
                             ep.snapshot(),
@@ -345,7 +347,7 @@ class EvictionPlannerDecodeContractTest {
             var ep = endpoint(100L, 1000L, 1, 1L, List.of(accepted(1L, 30, 512L)));
             var decision =
                     EvictionPlanner.planDecode(
-                            Request.builder().requestId(99L).seqLen(300L).maxNewTokens(0).build(),
+                            Request.builder().requestId("99").seqLen(300L).maxNewTokens(0).build(),
                             70,
                             ep.capacity(),
                             ep.snapshot(),
@@ -353,7 +355,7 @@ class EvictionPlannerDecodeContractTest {
                             new HashMap<>());
             assertEquals(DecodeEvictionProposal.CASE_SLOT_AND_KV, decision.evictionCase());
             assertEquals(DecodeEvictionProposal.CASE_SLOT, decision.proposal().evictionCase());
-            assertEquals(List.of(1L), victimIds(decision.proposal()));
+            assertEquals(List.of("1"), victimIds(decision.proposal()));
         }
 
         @Test
@@ -387,7 +389,7 @@ class EvictionPlannerDecodeContractTest {
                                     0L,
                                     List.of(accepted(1L, 30, 2048L), accepted(2L, 30, 512L))),
                             f);
-            assertEquals(List.of(1L), victimIds(p));
+            assertEquals(List.of("1"), victimIds(p));
             assertEquals(DecodeEvictionProposal.CASE_KV, p.evictionCase());
             // cost = H_KV * f(30) * g(ACCEPTED) * lengthWasteCost(2048)
             //      = 8 * 1 * 16 * round(sqrt(ceil(2048/1024))) = 8*16*round(sqrt(2))

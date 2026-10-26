@@ -1,15 +1,17 @@
 package org.flexlb.service.grpc;
 
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
 
-/** Engine gRPC service for worker and cache status queries. */
+/**
+ * Engine gRPC service for worker and cache status queries.
+ */
 @Component
 public class WorkerStatusRpcClient {
 

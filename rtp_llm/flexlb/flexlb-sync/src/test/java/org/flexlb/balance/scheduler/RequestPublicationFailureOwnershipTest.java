@@ -6,7 +6,7 @@ import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -63,7 +63,7 @@ class RequestPublicationFailureOwnershipTest {
     void closePreparationFailureReturnsPublicationAndFrozenOutcomeStillCompletes(
             boolean beforeFreeze) throws Exception {
         try (var f = new Fixture()) {
-            var context = spy(RequestProtocolTestSupport.context(f.config, 9301L));
+            var context = spy(RequestProtocolTestSupport.context(f.config, "9301"));
             var future = RequestProtocolTestSupport.register(f.owner, context);
             var endpoint = mock(PrefillEndpoint.class);
             var route =
@@ -130,7 +130,7 @@ class RequestPublicationFailureOwnershipTest {
     void acknowledgementPreparationFailureCompletesFutureAndKeepsPhysicalOwnershipUntilWorkerProof(
             boolean timerFailure) throws Exception {
         try (var f = new Fixture()) {
-            var context = RequestProtocolTestSupport.context(f.config, 9302L);
+            var context = RequestProtocolTestSupport.context(f.config, "9302");
             var future = RequestProtocolTestSupport.register(f.owner, context);
             var endpoint = mock(PrefillEndpoint.class);
             var route =
@@ -204,7 +204,7 @@ class RequestPublicationFailureOwnershipTest {
     void rejectedCompletionUsesNewPublicationAndLateOldTaskCannotReviveItsCandidate()
             throws Exception {
         try (var f = new Fixture()) {
-            var context = RequestProtocolTestSupport.context(f.config, 9305L);
+            var context = RequestProtocolTestSupport.context(f.config, "9305");
             var future = RequestProtocolTestSupport.register(f.owner, context);
             var endpoint = mock(PrefillEndpoint.class);
             var route =
@@ -306,7 +306,7 @@ class RequestPublicationFailureOwnershipTest {
     void externalCancelControlFailureStillCompletesTheAlreadySelectedCancellation()
             throws Exception {
         try (var f = new Fixture()) {
-            var context = RequestProtocolTestSupport.context(f.config, 9303L);
+            var context = RequestProtocolTestSupport.context(f.config, "9303");
             var future = RequestProtocolTestSupport.register(f.owner, context);
             var endpoint = mock(PrefillEndpoint.class);
             var route =
@@ -320,7 +320,7 @@ class RequestPublicationFailureOwnershipTest {
                             null,
                             System.currentTimeMillis());
             var failure = new IllegalStateException("control notification failed");
-            try (var admission = f.owner.claimAdmissionHandle(9303L, future)) {
+            try (var admission = f.owner.claimAdmissionHandle("9303", future)) {
                 assertNotNull(admission);
                 assertEquals(
                         org.flexlb.balance.PlacementResult.Status.SUCCESS,
@@ -368,7 +368,7 @@ class RequestPublicationFailureOwnershipTest {
     void deferredSubmissionFailureDistinguishesUnusedPublicationFromAnAlreadyRunningOwner(
             boolean alreadyRunning) throws Exception {
         try (var f = new Fixture()) {
-            var context = RequestProtocolTestSupport.context(f.config, 9304L);
+            var context = RequestProtocolTestSupport.context(f.config, "9304");
             var future = RequestProtocolTestSupport.register(f.owner, context);
             var source = f.runtime.registerRequestWork(context);
             SchedulerRuntime.WorkRegistration accepted;
@@ -492,7 +492,7 @@ class RequestPublicationFailureOwnershipTest {
                             service,
                             mock(DeliveryMetricsReporter.class),
                             mock(RequestSchedulerReporter.class),
-                            mock(RecentCacheKeyTraceReporter.class));
+                            mock(TheoryCacheHitReporter.class));
             runtime = owner.runtime;
         }
 

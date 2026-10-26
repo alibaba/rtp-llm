@@ -22,7 +22,9 @@ import static org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.queu
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
-/** Exact observed-head admission policy on top of the pure route timeline. */
+/**
+ * Exact observed-head admission policy on top of the pure route timeline.
+ */
 class RouteAdmissionPolicyTest {
 
     @Test
@@ -33,7 +35,7 @@ class RouteAdmissionPolicyTest {
                         blockedQueue(false, head, null),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         ROUTE);
 
         assertEquals(RequestTimeEstimation.Candidate.State.MODELED, result.state());
@@ -54,7 +56,7 @@ class RouteAdmissionPolicyTest {
                                 semantics(RequestTimeEstimation.AfterProbeAdmission.BLOCKED)),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 100, 20L, 0L),
+                        probe("99", 100, 20L, 0L),
                         ROUTE);
 
         assertEquals(RequestTimeEstimation.Candidate.State.BLOCKED, result.state());
@@ -76,7 +78,7 @@ class RouteAdmissionPolicyTest {
                             blocked,
                             noCommittedWork(),
                             TOKEN_EVALUATOR,
-                            probe(99L, probePriority, 20L, 0L),
+                            probe("99", probePriority, 20L, 0L),
                             ROUTE);
             assertEquals(RequestTimeEstimation.Candidate.State.BLOCKED, result.state());
             assertEquals(
@@ -96,7 +98,7 @@ class RouteAdmissionPolicyTest {
                                 semantics(RequestTimeEstimation.AfterProbeAdmission.BLOCKED)),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 90, 20L, 0L),
+                        probe("99", 90, 20L, 0L),
                         ROUTE);
 
         assertEquals(RequestTimeEstimation.Candidate.State.BLOCKED, result.state());
@@ -116,7 +118,7 @@ class RouteAdmissionPolicyTest {
                                         RoleType.DECODE)),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 90, 20L, 0L),
+                        probe("99", 90, 20L, 0L),
                         ROUTE);
 
         assertEquals(RequestTimeEstimation.Candidate.State.UNAVAILABLE, result.state());
@@ -138,7 +140,7 @@ class RouteAdmissionPolicyTest {
                                         RoleType.DECODE)),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 40, 20L, 0L),
+                        probe("99", 40, 20L, 0L),
                         ROUTE);
 
         assertEquals(RequestTimeEstimation.Candidate.State.BLOCKED, result.state());
@@ -160,7 +162,7 @@ class RouteAdmissionPolicyTest {
                         unknownWork,
                         TOKEN_EVALUATOR,
                         new RequestTimeEstimationTestSupport.Probe(
-                                99L,
+                                "99",
                                 90,
                                 RequestTimeEstimationTestSupport.NOW_MS,
                                 Long.MAX_VALUE,
@@ -193,7 +195,7 @@ class RouteAdmissionPolicyTest {
                                 semantics(RequestTimeEstimation.AfterProbeAdmission.BLOCKED)),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe(99L, 50, 20L, 0L),
+                        probe("99", 50, 20L, 0L),
                         ROUTE);
 
         assertEquals(RequestTimeEstimation.Candidate.State.MODELED, result.state());
@@ -215,7 +217,7 @@ class RouteAdmissionPolicyTest {
                         block(head, semantics(RequestTimeEstimation.AfterProbeAdmission.BLOCKED)));
 
         RequestTimeEstimation.Candidate result =
-                project(queue, noCommittedWork(), TOKEN_EVALUATOR, probe(99L, 50, 20L, 0L), ROUTE);
+                project(queue, noCommittedWork(), TOKEN_EVALUATOR, probe("99", 50, 20L, 0L), ROUTE);
 
         assertEquals(RequestTimeEstimation.Candidate.State.MODELED, result.state());
         assertEquals(20L, result.projectedTtftMsValue());

@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.telemetry.FlexlbTrace;
 
@@ -17,7 +18,9 @@ import java.util.concurrent.CompletionException;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Complete payload preparation and atomic whole-response validation; no request lifecycle effects. */
+/**
+ * Complete payload preparation and atomic whole-response validation; no request lifecycle effects.
+ */
 final class BatchCodec {
     static EngineRpcService.EnqueueBatchRequestPB prepare(
             long batchId, List<DeliveryClaim> claims) {
@@ -69,10 +72,12 @@ final class BatchCodec {
         }
     }
 
-    /** Remove abandoned members from an already complete immutable payload without parsing again. */
+    /**
+     * Remove abandoned members from an already complete immutable payload without parsing again.
+     */
     static EngineRpcService.EnqueueBatchRequestPB retain(
             EngineRpcService.EnqueueBatchRequestPB prepared, List<DeliveryClaim> sending) {
-        var ids = new HashSet<Long>();
+        var ids = new HashSet<String>();
         for (DeliveryClaim claim : sending) {
             ids.add(claim.item().requestId());
         }
@@ -80,7 +85,7 @@ final class BatchCodec {
         for (var slot : prepared.getDpSlotsList()) {
             var selected = slot.toBuilder().clearRequests();
             for (var member : slot.getRequestsList()) {
-                if (ids.contains(member.getInput().getRequestId())) {
+                if (ids.contains(RequestId.parse(member.getInput()))) {
                     selected.addRequests(member);
                 }
             }
@@ -91,7 +96,9 @@ final class BatchCodec {
         return filtered.build();
     }
 
-    /** Results have the exact sending-claim order. One malformed member invalidates the entire ACK. */
+    /**
+     * Results have the exact sending-claim order. One malformed member invalidates the entire ACK.
+     */
     static List<DeliveryResult> validate(
             long batchId,
             List<DeliveryClaim> claims,
@@ -109,11 +116,11 @@ final class BatchCodec {
             }
             return Collections.nCopies(claims.size(), DeliveryResult.uncertain(problem));
         }
-        var expected = HashMap.<Long, Integer>newHashMap(claims.size());
+        var expected = HashMap.<String, Integer>newHashMap(claims.size());
         var results = new DeliveryResult[claims.size()];
         var violations = new ArrayList<String>();
         for (int i = 0; i < claims.size(); i++) {
-            long id = claims.get(i).item().requestId();
+            String id = claims.get(i).item().requestId();
             if (expected.put(id, i) != null) {
                 violations.add("duplicate sending request_id=" + id);
             }
@@ -127,7 +134,7 @@ final class BatchCodec {
             acknowledge(
                     expected,
                     results,
-                    error.getRequestId(),
+                    RequestId.parse(error),
                     DeliveryResult.prefillRejected(
                             new RuntimeException(
                                     "EnqueueBatch rejected request "
@@ -142,7 +149,7 @@ final class BatchCodec {
             acknowledge(
                     expected,
                     results,
-                    success.getRequestId(),
+                    RequestId.parse(success),
                     DeliveryResult.delivered(),
                     violations);
         }
@@ -164,9 +171,9 @@ final class BatchCodec {
     }
 
     private static void acknowledge(
-            Map<Long, Integer> expected,
+            Map<String, Integer> expected,
             DeliveryResult[] results,
-            long id,
+            String id,
             DeliveryResult result,
             List<String> violations) {
         String kind = result.status() == DeliveryResult.Status.DELIVERED ? "success" : "error";
@@ -204,7 +211,7 @@ final class BatchCodec {
         }
         var input = prepared.toWireBuilder();
         checkArgument(
-                input.getRequestId() == item.requestId(),
+                RequestId.parse(input).equals(item.requestId()),
                 "request_id mismatch between schedule request and GenerateInputPB");
         if (FlexlbTrace.isEnabled() && item.ctx().data().getTraceContext() != null) {
             try {
@@ -245,7 +252,7 @@ final class BatchCodec {
             return cached;
         }
         return EngineRpcService.RoleAddrPB.newBuilder()
-                .setRole(RoleTypeProtoConverter.toLegacyProto(role))
+                .setRole(RoleTypeProtoConverter.toRoleAddrProto(role))
                 .setRoleStr(role.getCode())
                 .setIp(status.getServerIp())
                 .setHttpPort(status.getHttpPort())

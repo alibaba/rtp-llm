@@ -17,7 +17,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** Pure victim selection for the selected Prefill or Decode generation. */
+/**
+ * Pure victim selection for the selected Prefill or Decode generation.
+ */
 public final class EvictionPlanner {
 
     private EvictionPlanner() {}
@@ -28,7 +30,9 @@ public final class EvictionPlanner {
                 && candidatePriority < incomingPriority;
     }
 
-    /** A decode plan never mixes Master-local removal with Engine Cancel. */
+    /**
+     * A decode plan never mixes Master-local removal with Engine Cancel.
+     */
     private enum VictimOwnership {
         MASTER_LOCAL,
         ENGINE_CANCEL
@@ -44,7 +48,7 @@ public final class EvictionPlanner {
     static final Comparator<DecodeRequestView> DECODE_SLOT_ORDER =
             Comparator.comparingInt(DecodeRequestView::priority)
                     .thenComparingInt(v -> v.phase().ordinal())
-                    .thenComparingLong(DecodeRequestView::requestId);
+                    .thenComparing(DecodeRequestView::requestId);
 
     /**
      * Candidate preference for KV eviction (design doc 12.4): priority asc →
@@ -57,9 +61,11 @@ public final class EvictionPlanner {
                     .thenComparing(
                             v -> PriorityCostFunction.kvBucket(v.kvTokens()),
                             Comparator.reverseOrder())
-                    .thenComparingLong(DecodeRequestView::requestId);
+                    .thenComparing(DecodeRequestView::requestId);
 
-    /** One snapshot's capacity decision and its optional single-ownership eviction. */
+    /**
+     * One snapshot's capacity decision and its optional single-ownership eviction.
+     */
     public record DecodeEvictionDecision(CapacityDeficit deficit, DecodeEvictionProposal proposal) {
         public String evictionCase() {
             if (deficit.requests() > 0L && deficit.needsKv()) {
@@ -72,7 +78,9 @@ public final class EvictionPlanner {
         }
     }
 
-    /** Plan the cheapest single-ownership eviction for this snapshot's capacity deficit. */
+    /**
+     * Plan the cheapest single-ownership eviction for this snapshot's capacity deficit.
+     */
     static DecodeEvictionDecision planDecode(
             Request request,
             int incomingPriority,
@@ -127,7 +135,9 @@ public final class EvictionPlanner {
         return new DecodeEvictionDecision(deficit, proposal);
     }
 
-    /** Try each needed dimension, then combine disjoint prefixes when neither suffices. */
+    /**
+     * Try each needed dimension, then combine disjoint prefixes when neither suffices.
+     */
     private static DecodeEvictionProposal planDecodeOneOwnership(
             Request request,
             int incomingPriority,
@@ -221,7 +231,7 @@ public final class EvictionPlanner {
             failures.put(ep.routing().address(), first.failReason());
             return null;
         }
-        Set<Long> excluded = new java.util.HashSet<>(first.victims().size());
+        Set<String> excluded = new java.util.HashSet<>(first.victims().size());
         for (DecodeRequestView victim : first.victims()) {
             excluded.add(victim.requestId());
         }
@@ -259,14 +269,16 @@ public final class EvictionPlanner {
                 release.hardKvTokens());
     }
 
-    /** Select an ordered prefix, stopping at the requested slot or hard/expected KV deficit. */
+    /**
+     * Select an ordered prefix, stopping at the requested slot or hard/expected KV deficit.
+     */
     private static DecodeVictimSet selectVictims(
             Request request,
             int incomingPriority,
             AdmissionCapacity capacity,
             ResourceSnapshot ep,
             CapacityRelease priorRelease,
-            Set<Long> excludedVictimIds,
+            Set<String> excludedVictimIds,
             VictimOwnership ownership,
             boolean reclaimKv) {
         List<DecodeRequestView> candidates = new ArrayList<>();
@@ -344,9 +356,11 @@ public final class EvictionPlanner {
             List<DecodeRequestView> victims,
             PriorityHarmProfile harmProfile,
             long freedKvTokens) {
-        long tieBreak = Long.MAX_VALUE;
+        String tieBreak = null;
         for (DecodeRequestView victim : victims) {
-            tieBreak = Math.min(tieBreak, victim.requestId());
+            if (tieBreak == null || victim.requestId().compareTo(tieBreak) < 0) {
+                tieBreak = victim.requestId();
+            }
         }
         return new DecodeEvictionProposal(
                 ep.routing().address(),

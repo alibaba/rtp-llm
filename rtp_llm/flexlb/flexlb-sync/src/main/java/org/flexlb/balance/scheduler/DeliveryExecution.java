@@ -31,7 +31,9 @@ import java.util.function.Consumer;
 
 import static com.google.common.base.Preconditions.checkState;
 
-/** Batch admission, transport execution and real RPC response drain. No request policy lives here. */
+/**
+ * Batch admission, transport execution and real RPC response drain. No request policy lives here.
+ */
 final class DeliveryExecution {
     private final Consumer<Throwable> failures;
     private final ThreadPoolExecutor dispatchExecutor;
@@ -111,6 +113,13 @@ final class DeliveryExecution {
                                 .register(registry));
     }
 
+    void reportExecutorMetrics(org.flexlb.service.monitor.DeliveryMetricsReporter reporter) {
+        reporter.reportDispatchExecutorMetrics(
+                dispatchExecutor.getActiveCount(),
+                dispatchExecutor.getQueue().size(),
+                dispatchExecutor.getPoolSize());
+    }
+
     long nextBatchId() {
         return batchIds.nextId();
     }
@@ -150,7 +159,9 @@ final class DeliveryExecution {
         return () -> deliveryCapacityListeners.remove(wake);
     }
 
-    /** One infrastructure permit. No business state or callbacks run under an infrastructure lock. */
+    /**
+     * One infrastructure permit. No business state or callbacks run under an infrastructure lock.
+     */
     final class DeliveryPermit implements AutoCloseable {
         private static final int RESERVED = 0;
         private static final int SUBMITTED = 1;

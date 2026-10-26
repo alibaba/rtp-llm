@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeResources;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -36,7 +35,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Stale release results never contribute proof to a subsequent exact operation. */
+/**
+ * Stale release results never contribute proof to a subsequent exact operation.
+ */
 class RequestCleanupPassTest {
     @Test
     void staleCompletionCannotSettleAnOutstandingRelease() {
@@ -98,8 +99,8 @@ class RequestCleanupPassTest {
 
     @Test
     void completedRollbackAllowsAnotherRouteInTheSamePlacementScope() {
-        var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(990L, 1000L, 100_000L, 10_000L);
+        var context = new RequestContext(SchedulingTestConfig.newConfig());
+        context.register("990", 1000L, 100_000L, 10_000L);
         var operation = granted(context.beginPlacement(null));
         var first = route(context, 990L);
         granted(context.bindPlacement(operation, first, PublicationResult.PREPARED));
@@ -123,8 +124,8 @@ class RequestCleanupPassTest {
 
     @Test
     void samePlacementRollbackKeepsCancellationWithoutTheDiscardedRouteIdentity() {
-        var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(991L, 1000L, 100_000L, 10_000L);
+        var context = new RequestContext(SchedulingTestConfig.newConfig());
+        context.register("991", 1000L, 100_000L, 10_000L);
         var operation = granted(context.beginPlacement(null));
         var route = route(context, 991L);
         granted(context.bindPlacement(operation, route, PublicationResult.PREPARED));
@@ -184,8 +185,8 @@ class RequestCleanupPassTest {
 
     @Test
     void realAdmissionFailureSupersedesUnclaimedShutdownEvidence() {
-        var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(993L, 1000L, 100_000L, 10_000L);
+        var context = new RequestContext(SchedulingTestConfig.newConfig());
+        context.register("993", 1000L, 100_000L, 10_000L);
         var placement = granted(context.beginPlacement(null));
         var route = route(context, 993L);
         granted(context.bindPlacement(placement, route, PublicationResult.PREPARED));
@@ -228,8 +229,8 @@ class RequestCleanupPassTest {
     @ValueSource(booleans = {false, true})
     void lateAcquisitionPreservesTerminalProgressAndRequiresFreshNotificationClaim(
             boolean notificationsFinished) {
-        var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(994L, 1000L, 100_000L, 10_000L);
+        var context = new RequestContext(SchedulingTestConfig.newConfig());
+        context.register("994", 1000L, 100_000L, 10_000L);
         var placement = granted(context.beginPlacement(null));
         var originalRoute = route(context, 994L);
         granted(context.bindPlacement(placement, originalRoute, PublicationResult.PREPARED));
@@ -313,24 +314,24 @@ class RequestCleanupPassTest {
     static RequestRoute route(RequestContext context, long id) {
         var route = mock(RequestRoute.class);
         when(route.ctx()).thenReturn(context);
-        when(route.requestId()).thenReturn(id);
+        when(route.requestId()).thenReturn(String.valueOf(id));
         var decode = SchedulerTestSupport.mockDecodeEndpoint();
         when(route.decodeEp()).thenReturn(decode);
         when(route.decodeReservation())
-                .thenReturn(new DecodeResources.ReservationHandle(1L, id, 1L));
+                .thenReturn(new DecodeResources.ReservationHandle(1L, String.valueOf(id), 1L));
         return route;
     }
 
     static RequestContext openContext(long id) {
-        var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register(id, 1000L, 100_000L, 10_000L);
+        var context = new RequestContext(SchedulingTestConfig.newConfig());
+        context.register(String.valueOf(id), 1000L, 100_000L, 10_000L);
         var route = mock(RequestRoute.class);
         when(route.ctx()).thenReturn(context);
-        when(route.requestId()).thenReturn(id);
+        when(route.requestId()).thenReturn(String.valueOf(id));
         var decode = SchedulerTestSupport.mockDecodeEndpoint();
         when(route.decodeEp()).thenReturn(decode);
         when(route.decodeReservation())
-                .thenReturn(new DecodeResources.ReservationHandle(1L, id, 1L));
+                .thenReturn(new DecodeResources.ReservationHandle(1L, String.valueOf(id), 1L));
         var placement = granted(context.beginPlacement(null));
         granted(context.bindPlacement(placement, route, PublicationResult.PREPARED));
         granted(context.bindPlacement(placement, route, PublicationResult.PUBLISHED));

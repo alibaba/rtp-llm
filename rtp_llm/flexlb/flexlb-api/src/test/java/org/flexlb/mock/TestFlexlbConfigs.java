@@ -2,7 +2,9 @@ package org.flexlb.mock;
 
 import org.flexlb.config.FlexlbConfig;
 
-/** Workload values shared by API test fixtures. */
+/**
+ * Workload values shared by API test fixtures.
+ */
 public final class TestFlexlbConfigs {
     public static FlexlbConfig create() {
         FlexlbConfig config = new FlexlbConfig();

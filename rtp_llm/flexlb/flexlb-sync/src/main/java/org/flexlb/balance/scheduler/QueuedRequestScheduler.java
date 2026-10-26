@@ -10,7 +10,7 @@ import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
@@ -78,13 +78,17 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     private final OrderedRequestQueue orderedQueue;
     private final PlacementCapacityWaitQueue waitingRequests;
 
-    /** Entries exist only while the scheduler owns global placement. */
+    /**
+     * Entries exist only while the scheduler owns global placement.
+     */
     private final Map<RequestContext, GlobalQueueEntry> queuedEntries = new IdentityHashMap<>();
 
     private final ArrayDeque<QueueEvent> events = new ArrayDeque<>();
     private final Set<Plan> pendingPreemptions = Collections.newSetFromMap(new IdentityHashMap<>());
 
-    /** Waiting on local preemption slots, independent of physical Worker capacity edges. */
+    /**
+     * Waiting on local preemption slots, independent of physical Worker capacity edges.
+     */
     private final Set<GlobalQueueEntry> preemptionQuotaWaiters =
             Collections.newSetFromMap(new IdentityHashMap<>());
 
@@ -95,7 +99,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     private final ArrayDeque<Plan> completedPlans = new ArrayDeque<>();
     private final ArrayDeque<RequestContext> controlInbox = new ArrayDeque<>();
 
-    /** Published by the decision thread; timeout readers never acquire the queue lock. */
+    /**
+     * Published by the decision thread; timeout readers never acquire the queue lock.
+     */
     private volatile Map<String, Object> latestQueueWaitSnapshot =
             Map.of("cause", "waiting for placement");
 
@@ -113,7 +119,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             SchedulerRuntime runtime,
             PlacementAvailability availability,
             DecodeResources.AdmissionCapacity capacity,
-            RecentCacheKeyTraceReporter traceReporter) {
+            TheoryCacheHitReporter traceReporter) {
         super(runtime, config, capacity, traceReporter);
         this.queueSettings = QueueExecutionSettings.capture(config);
         this.router = Objects.requireNonNull(router, "router");
@@ -139,14 +145,33 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                     close();
                 });
         availability.addListener(availabilityListener);
+        initializeEncoderQueue(
+                router::selectEncoder, router.hasEncoderRole(), availability, config);
     }
 
-    /** Start scheduler workers before accepting requests. */
+    @Override
+    public PlacementCounts placementCounts() {
+        PlacementCounts encoder = encoderPlacementCounts();
+        lock.lock();
+        try {
+            return new PlacementCounts(
+                    queuedEntries.size() + encoder.queued(),
+                    waitingRequests.size() + encoder.blocked());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Start scheduler workers before accepting requests.
+     */
     void start() {
         decisionThread.start();
     }
 
-    /** Latest queue wait cause and counters; this snapshot is not specific to the current request. */
+    /**
+     * Latest queue wait cause and counters; this snapshot is not specific to the current request.
+     */
     Map<String, Object> getLatestQueueWaitSnapshot() {
         return latestQueueWaitSnapshot;
     }
@@ -276,7 +301,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         return true;
     }
 
-    /** Enqueue without selecting an endpoint on the ingress thread. */
+    /**
+     * Enqueue without selecting an endpoint on the ingress thread.
+     */
     @Override
     public CompletableFuture<Response> submit(RequestContext context) {
         return submit(context, () -> {});
@@ -289,6 +316,15 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                 RequestSchedulerEntry.tryCompleteVitRequest(context, requests, router);
         if (vitResult != null) {
             return vitResult;
+        }
+        if (context != null && context.data().getRequest() != null) {
+            Response invalid = router.validateRoles(context);
+            if (invalid != null) {
+                return CompletableFuture.completedFuture(invalid);
+            }
+            if (router.isEncoderOnly(context)) {
+                return submitEncoder(context, router::selectEncoder, onRegistered);
+            }
         }
         if (context != null && context.data().getConfig().isDirect()) {
             return CompletableFuture.completedFuture(
@@ -363,7 +399,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         }
     }
 
-    /** A withdrawal is not a new request: keep its sequence, context, Future and absolute deadline. */
+    /**
+     * A withdrawal is not a new request: keep its sequence, context, Future and absolute deadline.
+     */
     public boolean requeue(RequestRoute previous) {
         if (previous.future().isDone()) {
             return true;
@@ -685,7 +723,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         }
     }
 
-    /** Caller holds lock; every examined entry counts against the scan budget. */
+    /**
+     * Caller holds lock; every examined entry counts against the scan budget.
+     */
     private List<GlobalQueueEntry> planningCandidates(int slots) {
         waitingRequests.resumeReady(slots, orderedQueue::markRequestReadyForRetry);
         return orderedQueue.scanForPlanningCandidates(
@@ -811,13 +851,15 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                                             request.getHardKvTokens(),
                                             request.getExpectedKvTokens(),
                                             routing.priority(),
-                                            decodeAdmissionCapacity)
+                                            context.data().getDecodeAdmissionCapacity())
                                     .handle();
             if (routing.decodeEp() != null && plan.pendingDecodeRollback == null) {
                 return PlacementResult.blocked(routing.placementKey(RoleType.DECODE));
             }
         }
-        RequestRoute route = RequestRoute.create(context, routing, plan.pendingDecodeRollback);
+        RequestRoute route =
+                RequestRoute.create(
+                        context, routing, plan.pendingDecodeRollback, plan.returnedVictimIds);
         plan.acquired = route;
         var placement = context.snapshot().placement();
         plan.placementToken = placement == null ? null : placement.operation();
@@ -1044,6 +1086,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         private AdmissionHandle handle;
         private DecodeResources.ReservationHandle pendingDecodeRollback;
         private RequestRoute acquired;
+        private List<String> returnedVictimIds = List.of();
         private PlacementToken placementToken;
         private boolean published;
         private Throwable rollbackFailure;
@@ -1079,9 +1122,13 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             return entry.context;
         }
 
-        /** A false result leaves ownership with DecodeAdmission. */
+        /**
+         * A false result leaves ownership with DecodeAdmission.
+         */
         public synchronized boolean accept(
-                DecodeEndpoint endpoint, DecodeResources.ReservationHandle reservation) {
+                DecodeEndpoint endpoint,
+                DecodeResources.ReservationHandle reservation,
+                List<String> preemptRequestIds) {
             var route = result == null ? null : result.value();
             var ctx = context();
             synchronized (ctx) {
@@ -1091,7 +1138,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                         || route == null
                         || route.decodeEp() != endpoint
                         || pendingDecodeRollback != null
-                        || reservation.requestId() != route.requestId()
+                        || !Objects.equals(reservation.requestId(), route.requestId())
                         || ctx.data().getFuture().isDone()
                         || state.phase() != Phase.OPEN
                         || state.cancellation() != null
@@ -1106,6 +1153,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                 return false;
             }
             pendingDecodeRollback = reservation;
+            returnedVictimIds = List.copyOf(preemptRequestIds);
             return true;
         }
 

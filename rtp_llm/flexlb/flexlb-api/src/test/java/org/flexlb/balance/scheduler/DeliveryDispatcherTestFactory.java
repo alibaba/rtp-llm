@@ -1,10 +1,12 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.config.ConfigService;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 
-/** Creates a bounded dispatcher through its production configuration. */
+/**
+ * Creates a bounded dispatcher through its production configuration.
+ */
 public final class DeliveryDispatcherTestFactory {
 
     private DeliveryDispatcherTestFactory() {}
@@ -28,7 +30,9 @@ public final class DeliveryDispatcherTestFactory {
         return new RuntimeSizedDispatcher(grpcClient, dispatcherService, reporter);
     }
 
-    /** Executor sizing belongs to Runtime, so carry the same test configuration into composition. */
+    /**
+     * Executor sizing belongs to Runtime, so carry the same test configuration into composition.
+     */
     static ConfigService runtimeConfigFor(DeliveryDispatcher dispatcher, ConfigService fallback) {
         return dispatcher instanceof RuntimeSizedDispatcher sized ? sized.config : fallback;
     }

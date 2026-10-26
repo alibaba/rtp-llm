@@ -12,9 +12,9 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService.CancelRequestPB;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -39,7 +39,10 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyLong;
@@ -58,7 +61,7 @@ class DeliverySettlementTest {
     private DeliverySettlementTestSupport ledger;
     private PrefillEndpoint prefill;
     private final java.util.Map<
-                    Long, java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply>>
+                    String, java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply>>
             cancellations = new java.util.concurrent.ConcurrentHashMap<>();
 
     @BeforeEach
@@ -71,7 +74,7 @@ class DeliverySettlementTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
         org.springframework.test.util.ReflectionTestUtils.setField(
                 registry.runtime, "engineClient", channel);
@@ -79,7 +82,9 @@ class DeliverySettlementTest {
                 .thenAnswer(
                         call ->
                                 cancellations.computeIfAbsent(
-                                        call.<CancelRequestPB>getArgument(2).getRequestId(),
+                                        Long.toString(
+                                                call.<CancelRequestPB>getArgument(2)
+                                                        .getRequestId()),
                                         ignored -> new java.util.concurrent.CompletableFuture<>()));
         ledger = new DeliverySettlementTestSupport();
         prefill = mock(PrefillEndpoint.class);
@@ -145,23 +150,23 @@ class DeliverySettlementTest {
                                 registry.requests));
         DecodeResources.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
-            reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 2L, 1L, 1L, 50);
+            reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, "2", 1L, 1L, 50);
         }
         Member member = member(2L, 12L, decode, reservation);
         ledger.commit(12L, List.of(member.item()));
         DeliverySettlementTestSupport.dispatchDecode(decode, reservation);
         if (observed) {
-            DeliverySettlementTestSupport.decodeStatus(decode, 2L, false);
+            DeliverySettlementTestSupport.decodeStatus(decode, "2", false);
         }
         reject(member);
         cancellations
-                .computeIfAbsent(2L, ignored -> new java.util.concurrent.CompletableFuture<>())
+                .computeIfAbsent("2", ignored -> new java.util.concurrent.CompletableFuture<>())
                 .complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
         assertEquals(1, decode.routingView().engineCapacityUsed());
         assertOccupancy(1, 1);
         assertFalse(
                 registry.runtime.signals().delivery(member.claim()).toCompletableFuture().isDone());
-        DeliverySettlementTestSupport.decodeStatus(decode, 2L, true);
+        DeliverySettlementTestSupport.decodeStatus(decode, "2", true);
         registry.runtime
                 .signals()
                 .delivery(member.claim())
@@ -267,7 +272,7 @@ class DeliverySettlementTest {
                                 await(start);
                                 cancellations
                                         .computeIfAbsent(
-                                                40L,
+                                                "40",
                                                 ignored ->
                                                         new java.util.concurrent
                                                                 .CompletableFuture<>())
@@ -302,7 +307,7 @@ class DeliverySettlementTest {
         ledger.commit(50L, List.of(old.item()));
         reject(old);
         cleaned(old);
-        var terminal = registry.requests.findTerminal(50L);
+        var terminal = registry.requests.findTerminal("50");
         assertTrue(registry.requests.removeExactTerminal(terminal, Long.MAX_VALUE));
         Member replacement = member(50L, 51L);
         ledger.commit(51L, List.of(replacement.item()));
@@ -332,7 +337,7 @@ class DeliverySettlementTest {
                                                 System.currentTimeMillis())));
         SchedulerTestSupport.awaitRequestWork(registry.runtime);
         assertOccupancy(1, 1);
-        assertSame(replacement.requestContext(), registry.requests.findActive(50L));
+        assertSame(replacement.requestContext(), registry.requests.findActive("50"));
         assertFalse(replacement.item().future().isDone());
     }
 
@@ -416,12 +421,12 @@ class DeliverySettlementTest {
             DecodeResources.ReservationHandle reservation;
             try (var pin = decode.tryPinGeneration()) {
                 reservation =
-                        EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 131L, 1L, 2L, 50);
+                        EndpointTestSupport.reserveUnqueuedDecode(decode, pin, "131", 1L, 2L, 50);
             }
             var member = member(131L, 131L, decode, reservation, DeliveryClaimKind.ROUTE_DECISION);
             ledger.commit(131L, List.of(member.item()));
             DeliverySettlementTestSupport.dispatchDecode(decode, reservation);
-            DeliverySettlementTestSupport.decodeStatus(decode, 131L, false);
+            DeliverySettlementTestSupport.decodeStatus(decode, "131", false);
             registry.onDeliveryEvidence(
                     member.claim(),
                     new ContextResult.RouteDelivered(
@@ -429,7 +434,7 @@ class DeliverySettlementTest {
             assertTrue(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
             assertTrue(decode.ownership(reservation).confirmed());
             assertEquals(1, decode.routingView().engineCapacityUsed());
-            registry.cancel(131L, 0L, CancelReason.CLIENT_CANCELLED);
+            registry.cancel("131", 0L, CancelReason.CLIENT_CANCELLED);
             assertNull(
                     member.requestContext().snapshot().delivery().abandonment(),
                     "route cancellation does not need batch abandonment");
@@ -444,7 +449,7 @@ class DeliverySettlementTest {
                     .cancelAsync(
                             any(),
                             anyInt(),
-                            eq(CancelReason.CLIENT_CANCELLED.toRequest(131L)),
+                            eq(CancelReason.CLIENT_CANCELLED.toRequest(String.valueOf(131L))),
                             eq(500L));
             verify(decode).release(reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP);
             assertFalse(
@@ -454,7 +459,7 @@ class DeliverySettlementTest {
             assertEquals(0, decode.routingView().inflightHardKv());
             assertOccupancy(0, 0);
             assertFalse(registry.requests.isCurrent(member.requestContext()));
-            assertNotNull(registry.requests.findTerminal(131L));
+            assertNotNull(registry.requests.findTerminal("131"));
             assertTrue(
                     member.item().future().join().isSuccess(),
                     "cancellation must preserve the first frontend ACK");
@@ -482,9 +487,9 @@ class DeliverySettlementTest {
                                 registry.requests));
         DecodeResources.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
-            reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 91L, 1L, 2L, 50);
+            reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, "91", 1L, 2L, 50);
         }
-        var context = RequestProtocolTestSupport.context(config, 91L);
+        var context = RequestProtocolTestSupport.context(config, "91");
         var item =
                 SchedulingTestConfig.createRoute(
                         context,
@@ -497,7 +502,7 @@ class DeliverySettlementTest {
                         System.currentTimeMillis());
         DeliverySettlementTestSupport.dispatchDecode(decode, reservation);
         if (accepted) {
-            DeliverySettlementTestSupport.decodeStatus(decode, 91L, false);
+            DeliverySettlementTestSupport.decodeStatus(decode, "91", false);
         }
         try {
             assertEquals(1, decode.routingView().engineCapacityUsed());
@@ -677,7 +682,7 @@ class DeliverySettlementTest {
                                 registry.requests));
         DecodeResources.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
-            reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 70L, 1L, 2L, 50);
+            reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, "70", 1L, 2L, 50);
         }
         Member member = member(70L, 70L, decode, reservation);
         ledger.commit(70L, List.of(member.item()));
@@ -728,7 +733,7 @@ class DeliverySettlementTest {
                                                                 null,
                                                                 System.currentTimeMillis())));
                 case 'D' -> {
-                    DeliverySettlementTestSupport.decodeStatus(decode, 70L, true);
+                    DeliverySettlementTestSupport.decodeStatus(decode, "70", true);
                     decodeEnded = true;
                 }
                 default -> throw new AssertionError(order);
@@ -750,7 +755,7 @@ class DeliverySettlementTest {
         assertEquals(0, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
         assertFalse(registry.requests.isCurrent(member.requestContext()));
         assertTrue(cancellations.isEmpty(), "normal completion must not start Engine cancel");
-        DeliverySettlementTestSupport.decodeStatus(decode, 70L, true);
+        DeliverySettlementTestSupport.decodeStatus(decode, "70", true);
         ledger.finish(70L, member.item())
                 .forEach(
                         status ->
@@ -788,7 +793,7 @@ class DeliverySettlementTest {
         DeliveryResult unknown = DeliveryResult.uncertain(new IllegalStateException("reply lost"));
         try {
             if (decodeStatusFirst) {
-                DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), 122L, false);
+                DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), "122", false);
             } else {
                 registry.onDeliveryEvidence(
                         member.claim(),
@@ -807,7 +812,7 @@ class DeliverySettlementTest {
                         new ContextResult.TransportResult(
                                 member.claim(), unknown, System.currentTimeMillis()));
             } else {
-                DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), 122L, false);
+                DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), "122", false);
             }
             SchedulerTestSupport.awaitRequestWork(registry.runtime);
             synchronized (member.requestContext()) {
@@ -860,7 +865,7 @@ class DeliverySettlementTest {
                                                     status.errorCode(),
                                                     null,
                                                     System.currentTimeMillis())));
-            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), 122L, true);
+            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), "122", true);
             SchedulerTestSupport.awaitRequestWork(registry.runtime);
         }
     }
@@ -880,10 +885,10 @@ class DeliverySettlementTest {
                             DeliveryResult.delivered(),
                             System.currentTimeMillis()));
             assertTrue(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
-            registry.cancel(120L, 0L, CancelReason.CLIENT_CANCELLED);
+            registry.cancel("120", 0L, CancelReason.CLIENT_CANCELLED);
             cancellations
                     .computeIfAbsent(
-                            120L, ignored -> new java.util.concurrent.CompletableFuture<>())
+                            "120", ignored -> new java.util.concurrent.CompletableFuture<>())
                     .complete(ack);
             SchedulerTestSupport.awaitRequestWork(registry.runtime);
             assertFalse(
@@ -919,7 +924,7 @@ class DeliverySettlementTest {
                                                     status.errorCode(),
                                                     null,
                                                     System.currentTimeMillis())));
-            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), 120L, true);
+            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), "120", true);
             SchedulerTestSupport.awaitRequestWork(registry.runtime);
 
             assertTerminalsSettledAndArchived(member);
@@ -940,10 +945,10 @@ class DeliverySettlementTest {
             throws Exception {
         Member member = dispatchedMember(123L);
         try {
-            registry.cancel(123L, 0L, CancelReason.CLIENT_CANCELLED);
+            registry.cancel("123", 0L, CancelReason.CLIENT_CANCELLED);
             cancellations
                     .computeIfAbsent(
-                            123L, ignored -> new java.util.concurrent.CompletableFuture<>())
+                            "123", ignored -> new java.util.concurrent.CompletableFuture<>())
                     .complete(EngineGrpcClient.CancelReply.UNSUPPORTED);
             for (int i = 0; i < order.length(); i++) {
                 switch (order.charAt(i)) {
@@ -983,7 +988,7 @@ class DeliverySettlementTest {
                                                                     System.currentTimeMillis())));
                     case 'D' ->
                             DeliverySettlementTestSupport.decodeStatus(
-                                    member.item().decodeEp(), 123L, true);
+                                    member.item().decodeEp(), "123", true);
                     case 'S' ->
                             registry.onDeliveryEvidence(
                                     member.claim(),
@@ -1050,9 +1055,9 @@ class DeliverySettlementTest {
                             () -> {
                                 await(start);
                                 DeliverySettlementTestSupport.decodeStatus(
-                                        member.item().decodeEp(), 124L, false);
+                                        member.item().decodeEp(), "124", false);
                                 DeliverySettlementTestSupport.decodeStatus(
-                                        member.item().decodeEp(), 124L, false);
+                                        member.item().decodeEp(), "124", false);
                             });
             start.countDown();
             sender.get(5, TimeUnit.SECONDS);
@@ -1094,7 +1099,7 @@ class DeliverySettlementTest {
                                                     status.errorCode(),
                                                     null,
                                                     System.currentTimeMillis())));
-            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), 124L, true);
+            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), "124", true);
             SchedulerTestSupport.awaitRequestWork(registry.runtime);
         }
         assertTerminalsSettledAndArchived(member);
@@ -1132,7 +1137,7 @@ class DeliverySettlementTest {
                                                     status.errorCode(),
                                                     null,
                                                     System.currentTimeMillis())));
-            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), 121L, true, 42L);
+            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), "121", true, 42L);
             SchedulerTestSupport.awaitRequestWork(registry.runtime);
             synchronized (member.requestContext()) {
                 assertNull(
@@ -1150,7 +1155,7 @@ class DeliverySettlementTest {
                     "Worker terminals cannot substitute for sender exit");
 
             assertFalse(
-                    cancellations.containsKey(121L),
+                    cancellations.containsKey(String.valueOf(121L)),
                     "both Worker terminals already prove remote cleanup; no Cancel ACK is required");
             registry.onDeliveryEvidence(
                     member.claim(),
@@ -1213,7 +1218,7 @@ class DeliverySettlementTest {
                                                 null,
                                                 System.currentTimeMillis())));
         DeliverySettlementTestSupport.decodeStatus(
-                member.item().decodeEp(), 125L, true, workerSuccessful ? 0L : 42L);
+                member.item().decodeEp(), "125", true, workerSuccessful ? 0L : 42L);
         member.item().future().get(5, TimeUnit.SECONDS);
         long responseObservedAtNanos = System.nanoTime();
         if (!senderFirst) {
@@ -1248,7 +1253,9 @@ class DeliverySettlementTest {
                         registry.requests);
         DecodeResources.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
-            reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, id, 1L, 2L, 50);
+            reservation =
+                    EndpointTestSupport.reserveUnqueuedDecode(
+                            decode, pin, String.valueOf(id), 1L, 2L, 50);
         }
         Member member = member(id, id, decode, reservation);
         ledger.commit(id, List.of(member.item()));
@@ -1281,7 +1288,7 @@ class DeliverySettlementTest {
                 id,
                 batchId,
                 RequestProtocolTestSupport.decodeEndpoint(),
-                new DecodeResources.ReservationHandle(1L, id, id));
+                new DecodeResources.ReservationHandle(1L, String.valueOf(id), id));
     }
 
     private Member member(
@@ -1298,7 +1305,7 @@ class DeliverySettlementTest {
             DecodeEndpoint decode,
             DecodeResources.ReservationHandle reservation,
             DeliveryClaimKind kind) {
-        var context = RequestProtocolTestSupport.context(config, id);
+        var context = RequestProtocolTestSupport.context(config, String.valueOf(id));
         context.data()
                 .setGenerateInputPb(
                         org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
@@ -1332,7 +1339,7 @@ class DeliverySettlementTest {
         if (kind == DeliveryClaimKind.BATCH_ENQUEUE) {
             assertTrue(claim.item().ctx().data().getScheduler().tryStartSend(claim));
         }
-        return new Member(item, registry.requests.findActive(id), claim);
+        return new Member(item, registry.requests.findActive(String.valueOf(id)), claim);
     }
 
     private void cleaned(Member member) throws Exception {

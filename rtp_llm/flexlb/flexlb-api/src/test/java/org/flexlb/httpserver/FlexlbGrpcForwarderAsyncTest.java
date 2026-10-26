@@ -8,6 +8,9 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.epoll.Epoll;
+import io.netty.channel.epoll.EpollEventLoopGroup;
+import io.netty.channel.nio.NioEventLoopGroup;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanContext;
@@ -47,6 +50,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -57,6 +61,67 @@ class FlexlbGrpcForwarderAsyncTest {
 
     private static final String MASTER_HTTP_ADDRESS = "10.0.0.2:7001";
     private static final String MASTER_CHANNEL_KEY = "10.0.0.2:7003";
+
+    @Test
+    @Timeout(value = 15, unit = TimeUnit.SECONDS)
+    void forwardsScheduleUsingNioTransport() throws Exception {
+        assertScheduleWithTransport(new NioEventLoopGroup(1));
+    }
+
+    @Test
+    @Timeout(value = 15, unit = TimeUnit.SECONDS)
+    void forwardsScheduleUsingEpollTransport() throws Exception {
+        assumeTrue(Epoll.isAvailable(), "Epoll native transport is unavailable on this platform");
+        assertScheduleWithTransport(new EpollEventLoopGroup(1));
+    }
+
+    private static void assertScheduleWithTransport(EventLoopGroup eventLoopGroup)
+            throws Exception {
+        AtomicReference<FlexlbScheduleProtocol.FlexlbScheduleRequestPB> received =
+                new AtomicReference<>();
+        try (RpcFixture fixture =
+                RpcFixture.start(
+                        (request, observer) -> {
+                            received.set(request);
+                            observer.onNext(
+                                    FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                                            .setSuccess(true)
+                                            .setCode(200)
+                                            .build());
+                            observer.onCompleted();
+                        })) {
+            MasterStatusService consistency = mock(MasterStatusService.class);
+            when(consistency.getMasterHostIpPort())
+                    .thenReturn(
+                            "127.0.0.1:"
+                                    + (fixture.server.getPort()
+                                            - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET));
+            when(consistency.getLocalHostIp()).thenReturn("127.0.0.2");
+            ConfigService config = mock(ConfigService.class);
+            when(config.loadBalanceConfig()).thenReturn(new org.flexlb.config.FlexlbConfig());
+            FlexlbGrpcForwarder forwarder =
+                    new FlexlbGrpcForwarder(
+                            consistency,
+                            config,
+                            mock(EngineHealthReporter.class),
+                            eventLoopGroup,
+                            Runnable::run);
+            try {
+                var response =
+                        await(forwarder.forwardScheduleToMaster(request("transport-schedule")))
+                                .response();
+                assertNotNull(response);
+                assertTrue(response.getSuccess());
+                assertEquals(200, response.getCode());
+                assertEquals("transport-schedule", received.get().getRequestIdStr());
+                assertEquals(1, received.get().getForwardHop());
+            } finally {
+                forwarder.shutdown();
+            }
+        } finally {
+            eventLoopGroup.shutdownGracefully(0, 5, TimeUnit.SECONDS).sync();
+        }
+    }
 
     @Test
     @Timeout(value = 20, unit = TimeUnit.SECONDS)
@@ -82,7 +147,7 @@ class FlexlbGrpcForwarderAsyncTest {
                         forwarder(fixture.channel, mock(EngineHealthReporter.class));
                 CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> pending;
                 try (var scope = traceParent().makeCurrent()) {
-                    pending = forwarder.forwardScheduleToMaster(request(901L));
+                    pending = forwarder.forwardScheduleToMaster(request("901"));
                 }
                 assertTrue(received.await(3, TimeUnit.SECONDS));
                 assertTrue(capture.spans.isEmpty(), "async return must not end the CLIENT span");
@@ -170,7 +235,7 @@ class FlexlbGrpcForwarderAsyncTest {
                     forwarder(fixture.channel, mock(EngineHealthReporter.class));
             CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> pending;
             try (var scope = traceParent().makeCurrent()) {
-                pending = forwarder.forwardScheduleToMaster(request(902L));
+                pending = forwarder.forwardScheduleToMaster(request("902"));
             }
             assertTrue(received.await(3, TimeUnit.SECONDS));
             pending.toCompletableFuture().cancel(true);
@@ -220,8 +285,8 @@ class FlexlbGrpcForwarderAsyncTest {
                                                                             FlexlbScheduleProtocol
                                                                                     .FlexlbCancelRequestPB
                                                                                     .newBuilder()
-                                                                                    .setRequestId(
-                                                                                            903L)
+                                                                                    .setRequestIdStr(
+                                                                                            "903")
                                                                                     .build(),
                                                                             MASTER_HTTP_ADDRESS,
                                                                             traceParent())))
@@ -313,7 +378,7 @@ class FlexlbGrpcForwarderAsyncTest {
             FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, reporter);
 
             FlexlbGrpcForwarder.MasterForwardResult result =
-                    await(forwarder.forwardScheduleToMaster(request(101L)));
+                    await(forwarder.forwardScheduleToMaster(request("101")));
 
             assertNotNull(result.response());
             assertTrue(result.response().getSuccess());
@@ -337,7 +402,7 @@ class FlexlbGrpcForwarderAsyncTest {
             FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, reporter);
 
             FlexlbGrpcForwarder.MasterForwardResult result =
-                    await(forwarder.forwardScheduleToMaster(request(102L)));
+                    await(forwarder.forwardScheduleToMaster(request("102")));
 
             assertTrue(result.masterFound());
             assertEquals("UNAVAILABLE", result.failure());
@@ -359,7 +424,7 @@ class FlexlbGrpcForwarderAsyncTest {
                         .build();
         FlexlbGrpcForwarder forwarder = forwarder(channel, mock(EngineHealthReporter.class));
         try {
-            var result = await(forwarder.forwardScheduleToMaster(request(107L)));
+            var result = await(forwarder.forwardScheduleToMaster(request("107")));
             assertEquals(Status.Code.UNAVAILABLE, Status.fromThrowable(result.error()).getCode());
             Throwable cause = result.error();
             while (cause != null && !(cause instanceof java.net.UnknownHostException)) {
@@ -383,7 +448,7 @@ class FlexlbGrpcForwarderAsyncTest {
             Context.CancellableContext inbound = Context.current().withCancellation();
 
             CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> pending =
-                    inbound.call(() -> forwarder.forwardScheduleToMaster(request(103L)));
+                    inbound.call(() -> forwarder.forwardScheduleToMaster(request("103")));
             assertTrue(masterReceivedRequest.await(2, TimeUnit.SECONDS));
             assertFalse(pending.toCompletableFuture().isDone());
 
@@ -409,7 +474,7 @@ class FlexlbGrpcForwarderAsyncTest {
                     Context.current().withDeadlineAfter(500, TimeUnit.MILLISECONDS, deadlineTimer);
 
             CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> pending =
-                    inbound.call(() -> forwarder.forwardScheduleToMaster(request(104L)));
+                    inbound.call(() -> forwarder.forwardScheduleToMaster(request("104")));
             assertTrue(masterReceivedRequest.await(2, TimeUnit.SECONDS));
             FlexlbGrpcForwarder.MasterForwardResult result = await(pending);
 
@@ -442,7 +507,7 @@ class FlexlbGrpcForwarderAsyncTest {
             FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, reporter);
 
             FlexlbGrpcForwarder.MasterForwardResult result =
-                    await(forwarder.forwardScheduleToMaster(request(105L)));
+                    await(forwarder.forwardScheduleToMaster(request("105")));
 
             assertNotNull(result.response());
             assertTrue(result.response().getSuccess());
@@ -478,7 +543,7 @@ class FlexlbGrpcForwarderAsyncTest {
                                     forwarder.forwardCancelToMaster(
                                             FlexlbScheduleProtocol.FlexlbCancelRequestPB
                                                     .newBuilder()
-                                                    .setRequestId(106L)
+                                                    .setRequestIdStr(String.valueOf(106L))
                                                     .build())));
             assertTrue(masterReceivedRequest.await(2, TimeUnit.SECONDS));
             assertFalse(pending.get().toCompletableFuture().isDone());
@@ -565,7 +630,7 @@ class FlexlbGrpcForwarderAsyncTest {
 
     private static FlexlbScheduleProtocol.FlexlbCancelRequestPB cancelRequest(long requestId) {
         return FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestIdStr(Long.toString(requestId))
                 .build();
     }
 
@@ -615,9 +680,9 @@ class FlexlbGrpcForwarderAsyncTest {
         return forwarder;
     }
 
-    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
+    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(String requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestIdStr(requestId)
                 .build();
     }
 

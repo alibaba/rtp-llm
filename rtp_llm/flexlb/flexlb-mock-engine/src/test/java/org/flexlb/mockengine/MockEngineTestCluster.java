@@ -14,7 +14,9 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
-/** Lifecycle fixture for the standard in-process prefill/decode test cluster. */
+/**
+ * Lifecycle fixture for the standard in-process prefill/decode test cluster.
+ */
 final class MockEngineTestCluster implements AutoCloseable {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

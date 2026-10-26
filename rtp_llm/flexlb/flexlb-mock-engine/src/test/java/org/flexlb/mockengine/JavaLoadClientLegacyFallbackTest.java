@@ -47,7 +47,9 @@ class JavaLoadClientLegacyFallbackTest {
 
     @TempDir Path tempDir;
 
-    /** Loopback ports with no listener: connects fail fast (RST). */
+    /**
+     * Loopback ports with no listener: connects fail fast (RST).
+     */
     private static final String UNREACHABLE_MASTER = "127.0.0.1:1";
 
     private static final String UNREACHABLE_ENGINE = "127.0.0.1:2";

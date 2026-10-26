@@ -16,9 +16,9 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -59,7 +59,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** Real executor, request context and endpoint ledgers; only the Engine transport is simulated. */
+/**
+ * Real executor, request context and endpoint ledgers; only the Engine transport is simulated.
+ */
 class QueuedBatchDeliveryTest {
     private static final long TIMEOUT_MS = TimeUnit.HOURS.toMillis(1);
     private final CountDownLatch releaseExecutor = new CountDownLatch(1);
@@ -95,9 +97,9 @@ class QueuedBatchDeliveryTest {
                         service,
                         reporter,
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         grpc = mock(EngineGrpcClient.class);
-        when(grpc.batchEnqueueAsync(anyString(), anyInt(), any()))
+        when(grpc.batchEnqueueAsync(org.mockito.ArgumentMatchers.anyString(), anyInt(), any()))
                 .thenAnswer(
                         call -> {
                             sent.add(call.getArgument(2));
@@ -110,6 +112,10 @@ class QueuedBatchDeliveryTest {
         ReflectionTestUtils.setField(registry.runtime, "dispatcher", dispatcher);
         prefill = mock(PrefillEndpoint.class);
         when(prefill.getIp()).thenReturn("127.0.0.1");
+        when(prefill.getStatus())
+                .thenReturn(
+                        org.flexlb.dao.master.WorkerStatus.createDiscovered(
+                                RoleType.PREFILL, "contract", "127.0.0.1", 8080, 8090, "contract"));
         when(prefill.getGrpcPort()).thenReturn(8090);
         when(prefill.reserveBatch(any(), anyLong(), anyInt()))
                 .thenAnswer(
@@ -208,12 +214,12 @@ class QueuedBatchDeliveryTest {
         assertEquals(
                 DeliveryClaimKind.NONE,
                 SchedulerTestSupport.repository(registry)
-                        .getRequestState(1L, 0L)
+                        .getRequestState("1", 0L)
                         .deliveryClaimKind());
         assertEquals(
                 DeliveryClaimKind.NONE,
                 SchedulerTestSupport.repository(registry)
-                        .getRequestState(2L, 0L)
+                        .getRequestState("2", 0L)
                         .deliveryClaimKind());
         assertOccupancy(1, 2);
         for (RequestRoute item : all ? List.of(first, second) : List.of(first)) {
@@ -241,7 +247,7 @@ class QueuedBatchDeliveryTest {
         assertEquals(
                 DeliveryClaimKind.NONE,
                 SchedulerTestSupport.repository(registry)
-                        .getRequestState(1L, 0L)
+                        .getRequestState("1", 0L)
                         .deliveryClaimKind());
         int survivors = all ? 0 : 1;
         if (all) {
@@ -266,7 +272,7 @@ class QueuedBatchDeliveryTest {
             assertEquals(
                     DeliveryClaimKind.BATCH_ENQUEUE,
                     SchedulerTestSupport.repository(registry)
-                            .getRequestState(2L, 0L)
+                            .getRequestState("2", 0L)
                             .deliveryClaimKind());
             reply.complete(ack(2L));
             assertTrue(second.future().get(5, TimeUnit.SECONDS).isSuccess());
@@ -275,10 +281,10 @@ class QueuedBatchDeliveryTest {
                             requestStatus ->
                                     RequestProtocolTestSupport.applyPrefillStatus(
                                             registry, prefill, RoleType.PREFILL, requestStatus));
-            DeliverySettlementTestSupport.decodeStatus(decode, 2L, true);
+            DeliverySettlementTestSupport.decodeStatus(decode, "2", true);
         }
         // Repeated terminal events cannot subtract the other member or leak a batch permit.
-        registry.cancel(1L, 0L, CancelReason.CLIENT_CANCELLED);
+        registry.cancel("1", 0L, CancelReason.CLIENT_CANCELLED);
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());
@@ -293,7 +299,7 @@ class QueuedBatchDeliveryTest {
     void lateHandoffStartsOneBoundedObservationWindowWithoutFabricatingWorkerActivity(boolean ack)
             throws Exception {
         RequestRoute item = item(1L);
-        RequestContext requestContext = registry.requests.findActive(1L);
+        RequestContext requestContext = registry.requests.findActive("1");
         long lastStatus = System.currentTimeMillis() - TIMEOUT_MS + 10_000L;
         ReflectionTestUtils.setField(requestContext, "lastWorkerAtMs", lastStatus);
         ReflectionTestUtils.invokeMethod(requestContext, "refresh", System.currentTimeMillis());
@@ -400,7 +406,7 @@ class QueuedBatchDeliveryTest {
         awaitDispatchTasks();
         reply.complete(ack(1L));
         RequestProtocolTestSupport.awaitCondition(
-                () -> SchedulerTestSupport.repository(registry).findTerminal(1L) != null);
+                () -> SchedulerTestSupport.repository(registry).findTerminal("1") != null);
         assertOccupancy(0, 0);
     }
 
@@ -542,7 +548,7 @@ class QueuedBatchDeliveryTest {
         } else {
             assertEquals(1, sent.size());
             assertEquals(
-                    survivors.stream().map(RequestRoute::requestId).toList(),
+                    survivors.stream().map(item -> Long.parseLong(item.requestId())).toList(),
                     sent.getFirst().getDpSlotsList().stream()
                             .flatMap(requestContext -> requestContext.getRequestsList().stream())
                             .map(request -> request.getInput().getRequestId())
@@ -552,7 +558,7 @@ class QueuedBatchDeliveryTest {
                     item ->
                             ack.addSuccesses(
                                     EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                                            .setRequestId(item.requestId())));
+                                            .setRequestId(Long.parseLong(item.requestId()))));
             reply.complete(ack.build());
             for (RequestRoute item : survivors) {
                 assertTrue(item.future().get(5, TimeUnit.SECONDS).isSuccess());
@@ -620,10 +626,10 @@ class QueuedBatchDeliveryTest {
         var ack = EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(201L);
         ack.addSuccesses(
                 EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                        .setRequestId(first.requestId()));
+                        .setRequestId(Long.parseLong(first.requestId())));
         ack.addSuccesses(
                 EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                        .setRequestId(second.requestId()));
+                        .setRequestId(Long.parseLong(second.requestId())));
         reply.complete(ack.build());
         assertTrue(callbackExited.await(2, TimeUnit.SECONDS));
         assertTrue(first.future().get(2, TimeUnit.SECONDS).isSuccess());
@@ -709,10 +715,10 @@ class QueuedBatchDeliveryTest {
         var ack = EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(201L);
         ack.addSuccesses(
                 EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                        .setRequestId(first.requestId()));
+                        .setRequestId(Long.parseLong(first.requestId())));
         ack.addSuccesses(
                 EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                        .setRequestId(second.requestId()));
+                        .setRequestId(Long.parseLong(second.requestId())));
         reply.complete(ack.build());
         assertTrue(first.future().get(2, TimeUnit.SECONDS).isSuccess());
         assertTrue(second.future().get(2, TimeUnit.SECONDS).isSuccess());
@@ -968,10 +974,8 @@ class QueuedBatchDeliveryTest {
     private void enableBypass(
             boolean priorityOrdering, DecisionPolicyConfig.Type grouping, int maxRequests) {
         ReflectionTestUtils.setField(prefill, "predictor", new FormulaPredictor("1"));
-        ReflectionTestUtils.setField(
-                registry.runtime.deliveries(),
-                "decodeDeliveryCapacity",
-                new DecodeResources.AdmissionCapacity(1, 100L));
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(100L);
         worker =
                 org.mockito.Mockito.spy(
                         new PrefillQueueRunner(
@@ -983,7 +987,8 @@ class QueuedBatchDeliveryTest {
                                         grouping,
                                         maxRequests,
                                         0L,
-                                        0L),
+                                        0L,
+                                        config.getFallbackBatchTokenCapacity()),
                                 dispatcher,
                                 ledger.prefill));
         ReflectionTestUtils.setField(prefill, "queueRunner", worker);
@@ -1057,7 +1062,7 @@ class QueuedBatchDeliveryTest {
                                 .toList(),
                         sent.getFirst().getDpSlotsList().stream()
                                 .flatMap(dp -> dp.getRequestsList().stream())
-                                .map(request -> request.getInput().getRequestId())
+                                .map(request -> String.valueOf(request.getInput().getRequestId()))
                                 .toList());
             } else {
                 assertTrue(sent.isEmpty());
@@ -1182,7 +1187,8 @@ class QueuedBatchDeliveryTest {
                                 org.flexlb.config.DecisionPolicyConfig.Type.SINGLE,
                                 1,
                                 0L,
-                                0L),
+                                0L,
+                                config.getFallbackBatchTokenCapacity()),
                         dispatcher,
                         ledger.prefill);
         ReflectionTestUtils.setField(prefill, "queueRunner", worker);
@@ -1223,7 +1229,8 @@ class QueuedBatchDeliveryTest {
                                 org.flexlb.config.DecisionPolicyConfig.Type.FIXED_WINDOW,
                                 3,
                                 0L,
-                                1_000L),
+                                1_000L,
+                                config.getFallbackBatchTokenCapacity()),
                         dispatcher,
                         ledger.prefill);
         var head = item(1L);
@@ -1334,7 +1341,7 @@ class QueuedBatchDeliveryTest {
 
     private DecodeResources.ReservationHandle blockDecode() {
         try (var pin = decode.tryPinGeneration()) {
-            return EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 90_000L, 1L, 2L, 50);
+            return EndpointTestSupport.reserveUnqueuedDecode(decode, pin, "90000", 1L, 2L, 50);
         }
     }
 
@@ -1352,25 +1359,30 @@ class QueuedBatchDeliveryTest {
 
     private RequestRoute item(
             long id, com.google.protobuf.ByteString payload, DecodeEndpoint target, int priority) {
-        var context = RequestProtocolTestSupport.context(config, id);
+        var context = RequestProtocolTestSupport.context(config, String.valueOf(id));
         context.data()
                 .setSchedulingMetadata(
                         org.flexlb.dao.SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         context.data()
                 .setGenerateInputPb(
-                        payload != null
-                                ? payload
-                                : EngineRpcService.GenerateInputPB.newBuilder()
-                                        .setRequestId(id)
-                                        .setGenerateConfig(
-                                                EngineRpcService.GenerateConfigPB.newBuilder())
-                                        .build()
-                                        .toByteString());
+                        EngineRpcService.GenerateInputPB.newBuilder()
+                                .setRequestId(id)
+                                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder())
+                                .build()
+                                .toByteString());
         var future = RequestProtocolTestSupport.register(registry, context);
+        if (payload != null) {
+            ReflectionTestUtils.setField(
+                    context.data(),
+                    "generateInput",
+                    new java.util.concurrent.FutureTask<>(
+                            () -> EngineRpcService.GenerateInputPB.parseFrom(payload)));
+        }
         DecodeResources.ReservationHandle reservation;
         try (var pin = target.tryPinGeneration()) {
             reservation =
-                    EndpointTestSupport.reserveUnqueuedDecode(target, pin, id, 1L, 2L, priority);
+                    EndpointTestSupport.reserveUnqueuedDecode(
+                            target, pin, String.valueOf(id), 1L, 2L, priority);
         }
         assertNotNull(reservation);
         DeliverySettlementTestSupport.queueDecode(target, reservation);

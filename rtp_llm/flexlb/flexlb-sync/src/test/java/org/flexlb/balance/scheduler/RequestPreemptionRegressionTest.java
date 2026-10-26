@@ -18,7 +18,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -45,11 +45,13 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Cross-component regressions: frontend progress and remote resource ownership are independent. */
+/**
+ * Cross-component regressions: frontend progress and remote resource ownership are independent.
+ */
 @Timeout(15)
 class RequestPreemptionRegressionTest {
-    private static final long REQUEST_ID = 9781L;
-    private static final long INCOMING_ID = 9782L;
+    private static final String REQUEST_ID = "9781";
+    private static final String INCOMING_ID = "9782";
     private static final long ATTEMPT = 41L;
     private static final long BATCH_ID = 17L;
     private static final long KV_TOKENS = 100L;
@@ -77,7 +79,7 @@ class RequestPreemptionRegressionTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         SchedulerTestSupport.timer(scheduler.runtime).close();
         ReflectionTestUtils.setField(scheduler.runtime, "timer", mock(ExpirationTimer.class));
         SchedulerTestSupport.responseCompletions(scheduler.runtime).close();
@@ -329,9 +331,8 @@ class RequestPreemptionRegressionTest {
         task.setRequestId(REQUEST_ID);
         task.setInputLength(KV_TOKENS);
         task.setPhase(phase);
-        report.setRunningTaskInfo(
-                phase == null ? Map.of() : Map.of(Long.toString(REQUEST_ID), task));
-        report.setFinishedTaskInfo(terminal ? Map.of(Long.toString(REQUEST_ID), task) : Map.of());
+        report.setRunningTaskInfo(phase == null ? Map.of() : Map.of(REQUEST_ID, task));
+        report.setFinishedTaskInfo(terminal ? Map.of(REQUEST_ID, task) : Map.of());
         var status = decode.getStatus();
         org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange change;
         status.lock.lock();

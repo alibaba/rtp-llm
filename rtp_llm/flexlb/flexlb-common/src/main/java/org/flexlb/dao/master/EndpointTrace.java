@@ -360,7 +360,9 @@ public final class EndpointTrace {
         removedMappings = removed;
     }
 
-    /** WorkerStatus holds its health monitor so only an admitted poll replaces the latest snapshot. */
+    /**
+     * WorkerStatus holds its health monitor so only an admitted poll replaces the latest snapshot.
+     */
     public Poll beginPoll(String kind, long cycle) {
         Poll pollTrace = new Poll(kind, ++nextPollId, cycle);
         switch (kind) {
@@ -547,7 +549,9 @@ public final class EndpointTrace {
         }
     }
 
-    /** Captures both poll kinds without locks; concurrent fields can describe adjacent instants. */
+    /**
+     * Captures both poll kinds without locks; concurrent fields can describe adjacent instants.
+     */
     public Snapshot snapshot() {
         Poll statusPoll = latestStatusPoll;
         Poll cachePoll = latestCachePoll;

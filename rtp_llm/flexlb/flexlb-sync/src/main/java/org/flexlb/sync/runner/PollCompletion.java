@@ -10,7 +10,9 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
 
-/** Completes asynchronous polls and releases their exact leases, including executor rejection. */
+/**
+ * Completes asynchronous polls and releases their exact leases, including executor rejection.
+ */
 final class PollCompletion {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 

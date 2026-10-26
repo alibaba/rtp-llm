@@ -15,7 +15,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Verifies cleanup and recovery when EnqueueBatch returns an error response. */
+/**
+ * Verifies cleanup and recovery when EnqueueBatch returns an error response.
+ */
 class DispatchFailureTest extends FlexLBMockTestBase {
 
     @Override
@@ -34,7 +36,7 @@ class DispatchFailureTest extends FlexLBMockTestBase {
 
     @Test
     void dispatchFailure_requestFailsAndRecovers() throws Exception {
-        CompletableFuture<Response> future = submitRequest(7001);
+        CompletableFuture<Response> future = submitRequest("7001");
         Response response = future.get(5, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess(), "Request should fail when EnqueueBatch returns error");
@@ -45,7 +47,7 @@ class DispatchFailureTest extends FlexLBMockTestBase {
         InflightAssertions.assertResourcesReleasedWithin(getPrefillEndpoint(), null, 5_000L);
 
         mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().build());
-        Response recovered = submitRequest(7002).get(5, TimeUnit.SECONDS);
+        Response recovered = submitRequest("7002").get(5, TimeUnit.SECONDS);
         assertTrue(recovered.isSuccess(), "Subsequent request should succeed after recovery");
         assertEquals(2, mockPrefillWorker.getEnqueueCount());
     }

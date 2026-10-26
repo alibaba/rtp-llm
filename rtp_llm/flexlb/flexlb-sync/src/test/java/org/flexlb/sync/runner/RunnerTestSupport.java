@@ -16,7 +16,9 @@ import org.mockito.Mockito;
 
 import java.util.Map;
 
-/** Package-local fixtures for the frozen status/endpoint composition boundary. */
+/**
+ * Package-local fixtures for the frozen status/endpoint composition boundary.
+ */
 public final class RunnerTestSupport {
     public static void awaitCondition(java.util.function.BooleanSupplier condition) {
         long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
@@ -101,7 +103,8 @@ public final class RunnerTestSupport {
             WorkerStatus.PreparedStatus prepared =
                     status.prepareNewStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, response));
-            WorkerEndpoint endpoint = registry.publishPreparedEndpoint(address, status, prepared);
+            WorkerEndpoint endpoint =
+                    registry.publishPreparedEndpoint(status.getLogicalIpPort(), status, prepared);
             status.recordSuccessfulPoll(true);
             return endpoint;
         } finally {

@@ -29,7 +29,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
-/** Shared protocol primitives for in-process mock-engine tests. */
+/**
+ * Shared protocol primitives for in-process mock-engine tests.
+ */
 final class MockEngineTestSupport {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -38,13 +40,18 @@ final class MockEngineTestSupport {
     private MockEngineTestSupport() {}
 
     static boolean isReserved(
-            org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot snapshot, long requestId) {
-        var request = snapshot.requests().get(requestId);
+            org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot snapshot,
+            String requestId) {
+        var request = snapshot.requests().get(String.valueOf(requestId));
         return request != null && !request.phase().isEngineConfirmed();
     }
 
     static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
         return input(requestId, inputTokens, 1, null);
+    }
+
+    static EngineRpcService.GenerateInputPB input(String requestId, int inputTokens) {
+        return input(Long.parseLong(requestId), inputTokens);
     }
 
     static EngineRpcService.GenerateInputPB inputWithDecode(
@@ -53,8 +60,18 @@ final class MockEngineTestSupport {
     }
 
     static EngineRpcService.GenerateInputPB inputWithDecode(
+            String requestId, int inputTokens, int decodePort) {
+        return inputWithDecode(Long.parseLong(requestId), inputTokens, decodePort);
+    }
+
+    static EngineRpcService.GenerateInputPB inputWithDecode(
             long requestId, int inputTokens, int decodePort, int outputTokens) {
         return input(requestId, inputTokens, outputTokens, decodePort);
+    }
+
+    static EngineRpcService.GenerateInputPB inputWithDecode(
+            String requestId, int inputTokens, int decodePort, int outputTokens) {
+        return inputWithDecode(Long.parseLong(requestId), inputTokens, decodePort, outputTokens);
     }
 
     /**
@@ -87,6 +104,11 @@ final class MockEngineTestSupport {
             input.addTokenIds(token);
         }
         return input.build();
+    }
+
+    static EngineRpcService.GenerateInputPB inputWithBlockKeys(
+            String requestId, int inputTokens, List<Long> blockKeys) {
+        return inputWithBlockKeys(Long.parseLong(requestId), inputTokens, blockKeys);
     }
 
     private static EngineRpcService.GenerateInputPB input(
@@ -254,7 +276,8 @@ final class MockEngineTestSupport {
 
     static MockPerformanceModel.RequestShape requestShape(
             MockPerformanceModel model, long requestId, int inputTokens) {
-        return model.shape(input(requestId, inputTokens), new MockLruBlockCache(100));
+        return model.shape(
+                input(String.valueOf(requestId), inputTokens), new MockLruBlockCache(100));
     }
 
     static JavaMockEngineCluster.FastRpcService decodeService(
@@ -287,7 +310,8 @@ final class MockEngineTestSupport {
         while (System.nanoTime() < deadline) {
             if (service.getInflightCount() == 0
                     && service.getRunningCount() == 0
-                    && activeDecodeRequests(service) == 0) {
+                    && activeDecodeRequests(service) == 0
+                    && getOccupiedKvTokens(service) == 0) {
                 return;
             }
             Thread.sleep(10);
@@ -393,15 +417,15 @@ final class MockEngineTestSupport {
     }
 
     static boolean hasDownstreamOwnership(
-            JavaMockEngineCluster.FastRpcService service, long requestId) {
+            JavaMockEngineCluster.FastRpcService service, String requestId) {
         return ((java.util.Map<?, ?>) field(service, "downstreamDecodeOwners"))
-                .containsKey(requestId);
+                .containsKey(Long.parseLong(requestId));
     }
 
     static boolean hasUpstreamOwnership(
-            JavaMockEngineCluster.FastRpcService service, long requestId) {
+            JavaMockEngineCluster.FastRpcService service, String requestId) {
         return ((java.util.Map<?, ?>) field(service, "upstreamPrefillOwners"))
-                .containsKey(requestId);
+                .containsKey(Long.parseLong(requestId));
     }
 
     static long getTotalKvTokens(JavaMockEngineCluster.FastRpcService service) {

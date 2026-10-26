@@ -13,6 +13,7 @@ import org.flexlb.config.VictimStage;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter.CancelEvent;
@@ -20,7 +21,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
@@ -28,14 +31,18 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -64,6 +71,7 @@ class DecodeAdmissionTest {
     private DecodeEndpoint blockedEndpoint;
 
     private DecodeAdmission acquirer;
+    private FlexlbConfig configuredConfig;
 
     @BeforeEach
     void setUp() {
@@ -78,6 +86,7 @@ class DecodeAdmissionTest {
     }
 
     private void configureAdmission(FlexlbConfig config) {
+        configuredConfig = config;
         acquirer =
                 org.mockito.Mockito.spy(
                         new DecodeAdmission(
@@ -131,7 +140,7 @@ class DecodeAdmissionTest {
         var view = mock(DecodeResources.ResourceSnapshot.class);
         var victim =
                 new DecodeResources.DecodeRequestView(
-                        901L,
+                        "901",
                         30,
                         128L,
                         128L,
@@ -148,7 +157,7 @@ class DecodeAdmissionTest {
                 .thenReturn(new DecodeResources.CapacityUsage(1L, 20_000L, 10_000L, 0L, 10_000L));
 
         var completion = new CompletableFuture<DecodeAdmission.PreemptionResult>();
-        var incoming = Request.builder().requestId(902L).seqLen(128L).rawPriority(70).build();
+        var incoming = Request.builder().requestId("902").seqLen(128L).rawPriority(70).build();
         var context = new RequestContext(config);
         context.data().setRequest(incoming);
         context.data()
@@ -162,14 +171,14 @@ class DecodeAdmissionTest {
         var frozenRequest = context.data().getRequest();
         configureAdmission(config);
         org.mockito.Mockito.doReturn(completion).when(acquirer).preempt(any(), any());
-        when(requests.isAdmissionOpen(902L, future)).thenReturn(admissionOpen);
+        when(requests.isAdmissionOpen("902", future)).thenReturn(admissionOpen);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(99L);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(1L);
         var changed = incoming.toBuilder().seqLen(4_096L).maxNewTokens(1_024).build();
         assertEquals(4_096L, changed.getSeqLen());
 
         var outcome = acquirer.tryReclaim(context, endpoint);
-        verify(requests).isAdmissionOpen(902L, future);
+        verify(requests).isAdmissionOpen("902", future);
         verifyNoMoreInteractions(requests);
         if (!admissionOpen) {
             assertNull(outcome);
@@ -189,7 +198,7 @@ class DecodeAdmissionTest {
         assertSame(frozenRequest, command.getValue().request());
         assertEquals(List.of(victim), command.getValue().victims());
 
-        var exact = new DecodeResources.ReservationHandle(7L, 902L, 31L);
+        var exact = new DecodeResources.ReservationHandle(7L, "902", 31L);
         completion.complete(new DecodeAdmission.PreemptionResult(exact, false, "committed"));
         assertSame(exact, outcome.join().reservation());
         assertNull(
@@ -227,6 +236,9 @@ class DecodeAdmissionTest {
                 .setMaxEngineRequests(capacityBlocked ? 1L : 4L);
         configureAdmission(config);
         when(context.data().getFuture()).thenReturn(new CompletableFuture<>());
+        when(context.data().getConfig()).thenReturn(config);
+        var capacity = SchedulingTestConfig.capacity(config);
+        when(context.data().getDecodeAdmissionCapacity()).thenReturn(capacity);
         var endpoint = org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
         var snapshot = mock(DecodeResources.ResourceSnapshot.class);
         var routing = mock(DecodeResources.DecodeRoutingView.class);
@@ -238,9 +250,9 @@ class DecodeAdmissionTest {
         when(snapshot.requests())
                 .thenReturn(
                         Map.of(
-                                901L,
+                                "901",
                                 new DecodeResources.DecodeRequestView(
-                                        901L,
+                                        "901",
                                         70,
                                         128L,
                                         128L,
@@ -277,6 +289,9 @@ class DecodeAdmissionTest {
     private CompletableFuture<DecodeAdmission.PreemptionResult> tryReclaim(
             RequestContext context, CompletableFuture<Response> future) {
         when(context.data().getFuture()).thenReturn(future);
+        when(context.data().getConfig()).thenReturn(configuredConfig);
+        var capacity = SchedulingTestConfig.capacity(configuredConfig);
+        when(context.data().getDecodeAdmissionCapacity()).thenReturn(capacity);
         return acquirer.tryReclaim(context, blockedEndpoint);
     }
 
@@ -340,6 +355,7 @@ class DecodeAdmissionTest {
     void minimumValidPriorityPassesGuard() {
         var context = ctx(1);
         when(context.data().getFuture()).thenReturn(new CompletableFuture<>());
+        when(context.data().getConfig()).thenReturn(configuredConfig);
         var endpoint = org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
         when(endpoint.isRetired()).thenReturn(true);
         assertNull(acquirer.tryReclaim(context, endpoint));
@@ -380,5 +396,311 @@ class DecodeAdmissionTest {
                 .thenReturn(org.flexlb.dao.SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         when(ctx.data().getRequestExpiresAtMs()).thenReturn(Long.MAX_VALUE);
         return ctx;
+    }
+
+    @Test
+    void engineNotFoundReplyIsNotAMasterTargetValidationFailure() {
+        try (var fixture = new ValidationFixture()) {
+            fixture.claims(1);
+            when(fixture.channel.cancelAsync(
+                            any(), org.mockito.ArgumentMatchers.anyInt(), any(), anyLong()))
+                    .thenReturn(
+                            CompletableFuture.completedFuture(
+                                    EngineGrpcClient.CancelReply.NOT_FOUND));
+            var result = fixture.rpc(List.of(fixture.victim("11"))).join();
+            assertFalse(result.committed());
+            assertFalse(result.controlFailure());
+            assertEquals("cancel_not_found", result.detail());
+            verify(fixture.endpoint).abortPreemption(1L);
+            verify(fixture.reporter, never()).reportPreemptionTargetInvalid(any(), any());
+        }
+    }
+
+    private static Stream<Arguments> beginResults() {
+        return Stream.of(DecodeResources.PreemptionBeginResult.values())
+                .flatMap(
+                        result ->
+                                Stream.of(Arguments.of(true, result), Arguments.of(false, result)));
+    }
+
+    @ParameterizedTest
+    @MethodSource("beginResults")
+    void reportsOnlyTargetValidationFailuresOncePerPlan(
+            boolean returnInstructions, DecodeResources.PreemptionBeginResult beginResult) {
+        try (var fixture = new ValidationFixture()) {
+            fixture.claims(2);
+            fixture.beginResult(beginResult);
+            var resultFuture =
+                    returnInstructions
+                            ? fixture.returned()
+                            : fixture.rpc(List.of(fixture.victim("11"), fixture.victim("12")));
+            fixture.completeVictims();
+            var result = resultFuture.join();
+            assertEquals(
+                    beginResult == DecodeResources.PreemptionBeginResult.SUCCESS,
+                    result.committed());
+            assertEquals(
+                    beginResult == DecodeResources.PreemptionBeginResult.ENDPOINT_RETIRED,
+                    result.controlFailure());
+            if (!result.committed()) {
+                assertEquals(
+                        (returnInstructions ? "return_" : "begin_")
+                                + beginResult.name().toLowerCase(),
+                        result.detail());
+                verifyNoInteractions(fixture.channel);
+                if (!returnInstructions) {
+                    fixture.assertReleased("11");
+                    fixture.assertReleased("12");
+                }
+            }
+            String reason =
+                    switch (beginResult) {
+                        case VICTIM_GONE -> "victim_state_changed";
+                        case VICTIM_ALREADY_CLAIMED -> "victim_already_claimed";
+                        case INVALID_PRIORITY -> "priority_not_preemptible";
+                        default -> null;
+                    };
+            if (reason == null) {
+                verify(fixture.reporter, never()).reportPreemptionTargetInvalid(any(), any());
+            } else {
+                verify(fixture.reporter)
+                        .reportPreemptionTargetInvalid(
+                                returnInstructions ? "return" : "rpc", reason);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void reportsRejectedRequestClaimAndReleasesEarlierClaim(boolean reporterFails) {
+        try (var fixture = new ValidationFixture()) {
+            fixture.claims(1);
+            fixture.failMetrics(reporterFails, "rpc", "request_claim_rejected");
+            var result = fixture.rpc(List.of(fixture.victim("11"), fixture.victim("12"))).join();
+            assertFalse(result.committed());
+            assertFalse(result.controlFailure());
+            assertEquals("victim_inflight_gone", result.detail());
+            verify(fixture.reporter).reportPreemptionTargetInvalid("rpc", "request_claim_rejected");
+            fixture.assertReleased("11");
+            verifyNoInteractions(fixture.channel);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void reportsUnavailableCancelTargetWithoutStartingPreemption(boolean reporterFails) {
+        try (var fixture = new ValidationFixture()) {
+            when(fixture.repository.ownerOf("12")).thenReturn(null);
+            fixture.failMetrics(reporterFails, "rpc", "cancel_target_unavailable");
+            var result = fixture.rpc(List.of(fixture.victim("11"), fixture.victim("12"))).join();
+            assertFalse(result.committed());
+            assertTrue(result.controlFailure());
+            assertEquals("cancel_owner_missing:12", result.detail());
+            verify(fixture.reporter)
+                    .reportPreemptionTargetInvalid("rpc", "cancel_target_unavailable");
+            verify(fixture.owner, never()).tryClaim(any(), anyLong());
+            verifyNoInteractions(fixture.channel);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void metricsFailureCannotInterruptTargetValidation(boolean returnInstructions) {
+        try (var fixture = new ValidationFixture()) {
+            fixture.claims(1);
+            fixture.beginResult(DecodeResources.PreemptionBeginResult.VICTIM_GONE);
+            fixture.failMetrics(
+                    true, returnInstructions ? "return" : "rpc", "victim_state_changed");
+            var result =
+                    (returnInstructions
+                                    ? fixture.returned()
+                                    : fixture.rpc(List.of(fixture.victim("11"))))
+                            .join();
+            assertFalse(result.committed());
+            assertFalse(result.controlFailure());
+            assertEquals(
+                    returnInstructions ? "return_victim_gone" : "begin_victim_gone",
+                    result.detail());
+            if (!returnInstructions) {
+                fixture.assertReleased("11");
+            }
+            verifyNoInteractions(fixture.channel);
+        }
+    }
+
+    private static final class ValidationFixture implements AutoCloseable {
+        final EngineGrpcClient channel = mock(EngineGrpcClient.class);
+        final RequestSchedulerReporter reporter = mock(RequestSchedulerReporter.class);
+        final AbstractRequestScheduler owner = mock(AbstractRequestScheduler.class);
+        final org.flexlb.balance.scheduler.RequestRepository repository =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(owner);
+        final DecodeAdmissionProtocolTest protocol = new DecodeAdmissionProtocolTest();
+        final DecodeEndpoint endpoint =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
+        final DecodeResources.AdmissionCapacity capacity =
+                new DecodeResources.AdmissionCapacity(2L, 100L);
+        final DecodeAdmission coordinator;
+        final java.util.Map<String, org.flexlb.balance.scheduler.PreemptionRegistration> claims =
+                new java.util.HashMap<>();
+        final java.util.List<CompletableFuture<org.flexlb.balance.preemption.VictimResolution>>
+                terminals = new java.util.ArrayList<>();
+
+        ValidationFixture() {
+            protocol.createRuntime();
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                    owner, "runtime", protocol.runtime);
+            var status = mock(org.flexlb.dao.master.WorkerStatus.class);
+            when(endpoint.getStatus()).thenReturn(status);
+            when(status.getGenerationId()).thenReturn(9L);
+            when(owner.onPreemption(any(), any())).thenReturn(true);
+            when(owner.tryClaim(any(), anyLong()))
+                    .thenAnswer(
+                            call ->
+                                    java.util.Optional.ofNullable(
+                                            claims.get(
+                                                    call.getArgument(
+                                                                    0,
+                                                                    DecodeResources
+                                                                            .ReservationHandle
+                                                                            .class)
+                                                            .requestId())));
+            when(endpoint.updatePreemption(anyLong(), any()))
+                    .thenReturn(
+                            DecodeResources.ResourceChange.of(
+                                    DecodeResources.MutationStatus.APPLIED, false));
+            when(endpoint.commitPreemption(anyLong()))
+                    .thenReturn(new DecodeResources.ReservationHandle(9L, "20", 100L));
+            when(channel.cancelAsync(
+                            any(), org.mockito.ArgumentMatchers.anyInt(), any(), anyLong()))
+                    .thenReturn(
+                            CompletableFuture.completedFuture(
+                                    EngineGrpcClient.CancelReply.ACCEPTED));
+            coordinator =
+                    new DecodeAdmission(
+                            protocol.dispatcher(channel),
+                            repository,
+                            protocol.runtime,
+                            reporter,
+                            SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
+                            capacity);
+            beginResult(DecodeResources.PreemptionBeginResult.SUCCESS);
+        }
+
+        void beginResult(DecodeResources.PreemptionBeginResult status) {
+            when(endpoint.beginPreemption(
+                            anyLong(),
+                            org.mockito.ArgumentMatchers.anyList(),
+                            org.mockito.ArgumentMatchers.anyString(),
+                            anyLong(),
+                            anyLong(),
+                            anyInt(),
+                            any()))
+                    .thenReturn(status);
+            when(endpoint.beginReturnedPreemption(
+                            anyLong(),
+                            org.mockito.ArgumentMatchers.anyList(),
+                            org.mockito.ArgumentMatchers.anyString(),
+                            anyLong(),
+                            anyLong(),
+                            anyInt(),
+                            any()))
+                    .thenReturn(
+                            new DecodeResources.ReturnedPreemption(
+                                    status,
+                                    status == DecodeResources.PreemptionBeginResult.SUCCESS
+                                            ? new DecodeResources.ReservationHandle(9L, "20", 100L)
+                                            : null));
+        }
+
+        void claims(int count) {
+            for (int index = 0; index < count; index++) {
+                String id = Integer.toString(11 + index);
+                var terminal =
+                        new CompletableFuture<org.flexlb.balance.preemption.VictimResolution>();
+                terminals.add(terminal);
+                claims.put(id, protocol.claim(owner, id, terminal));
+            }
+        }
+
+        void completeVictims() {
+            for (int index = 0; index < terminals.size(); index++) {
+                terminals
+                        .get(index)
+                        .complete(
+                                new org.flexlb.balance.preemption.VictimResolution(
+                                        Integer.toString(11 + index),
+                                        org.flexlb.balance.preemption.VictimResolution.Outcome
+                                                .REQUEST_END));
+            }
+        }
+
+        DecodeResources.DecodeRequestView victim(String id) {
+            return new DecodeResources.DecodeRequestView(
+                    id,
+                    30,
+                    64L,
+                    64L,
+                    DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                    true,
+                    id.equals("11") ? 101L : 102L,
+                    false);
+        }
+
+        CompletableFuture<DecodeAdmission.PreemptionResult> rpc(
+                List<DecodeResources.DecodeRequestView> victims) {
+            return protocol.preempt(
+                    coordinator,
+                    new DecodeAdmission.PreemptionCommand(
+                            endpoint,
+                            Request.builder().requestId("20").seqLen(64).build(),
+                            SchedulingMetadata.explicit(70, Long.MAX_VALUE),
+                            victims,
+                            1000L,
+                            1000L,
+                            () -> true,
+                            "test"));
+        }
+
+        CompletableFuture<DecodeAdmission.PreemptionResult> returned() {
+            var context = mock(RequestContext.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+            when(context.data().getDecodeAdmissionCapacity()).thenReturn(capacity);
+            when(context.data().getPriority()).thenReturn(70);
+            when(context.data().getRequestId()).thenReturn("20");
+            var proposal =
+                    new DecodeEvictionProposal(
+                            "decode",
+                            List.of(victim("11"), victim("12")),
+                            DecodeEvictionProposal.CASE_SLOT,
+                            128L,
+                            PriorityHarmProfile.empty(),
+                            "11");
+            return org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                    coordinator,
+                    "prepareReturnedPreemption",
+                    context,
+                    proposal,
+                    endpoint,
+                    Request.builder().requestId("20").seqLen(64L).build(),
+                    SchedulingMetadata.explicit(70, Long.MAX_VALUE));
+        }
+
+        void assertReleased(String id) {
+            verify(owner)
+                    .onPreemption(
+                            eq(claims.get(String.valueOf(id))),
+                            org.mockito.ArgumentMatchers.argThat(event -> event.release()));
+        }
+
+        void failMetrics(boolean fail, String mode, String reason) {
+            if (fail) {
+                doThrow(new IllegalStateException("metrics unavailable"))
+                        .when(reporter)
+                        .reportPreemptionTargetInvalid(mode, reason);
+            }
+        }
+
+        public void close() {
+            protocol.closeRuntime();
+        }
     }
 }

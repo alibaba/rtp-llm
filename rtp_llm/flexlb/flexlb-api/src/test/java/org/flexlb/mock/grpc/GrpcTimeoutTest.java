@@ -17,7 +17,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Lost EnqueueBatch ACKs remain pending until request inactivity expires their local accounting. */
+/**
+ * Lost EnqueueBatch ACKs remain pending until request inactivity expires their local accounting.
+ */
 class GrpcTimeoutTest extends FlexLBMockTestBase {
 
     @Override

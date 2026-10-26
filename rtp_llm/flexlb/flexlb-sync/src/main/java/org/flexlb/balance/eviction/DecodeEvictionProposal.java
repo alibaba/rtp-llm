@@ -15,7 +15,7 @@ public record DecodeEvictionProposal(
         String evictionCase,
         long freedKvTokens,
         PriorityHarmProfile priorityHarmProfile,
-        long deterministicTieBreak) {
+        String deterministicTieBreak) {
 
     public DecodeEvictionProposal {
         victims = List.copyOf(victims);
@@ -31,13 +31,19 @@ public record DecodeEvictionProposal(
         return !victims.isEmpty() && victims.get(0).phase().requiresEngineCancel();
     }
 
-    /** Concurrency slots exhausted (design doc 11). */
+    /**
+     * Concurrency slots exhausted (design doc 11).
+     */
     public static final String CASE_SLOT = "decode_slot_full";
 
-    /** Real KV available below the incoming hard demand (design doc 12). */
+    /**
+     * Real KV available below the incoming hard demand (design doc 12).
+     */
     public static final String CASE_KV = "decode_kv_full";
 
-    /** Both deficits at once (design doc 13). */
+    /**
+     * Both deficits at once (design doc 13).
+     */
     public static final String CASE_SLOT_AND_KV = "decode_slot_and_kv_full";
 
     /**
@@ -47,6 +53,6 @@ public record DecodeEvictionProposal(
     public static final Comparator<DecodeEvictionProposal> ORDER =
             Comparator.comparing(DecodeEvictionProposal::priorityHarmProfile)
                     .thenComparingInt(proposal -> proposal.victims().size())
-                    .thenComparingLong(DecodeEvictionProposal::deterministicTieBreak)
+                    .thenComparing(DecodeEvictionProposal::deterministicTieBreak)
                     .thenComparing(DecodeEvictionProposal::endpointId);
 }

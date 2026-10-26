@@ -21,7 +21,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
-/** Measures selected-worker capacity classification without delivery or event sinks in the loop. */
+/**
+ * Measures selected-worker capacity classification without delivery or event sinks in the loop.
+ */
 @Tag("performance-regression")
 class PrefillAdmissionFailurePerformanceTest {
     @Test
@@ -115,7 +117,7 @@ class PrefillAdmissionFailurePerformanceTest {
                         new java.util.concurrent.locks.ReentrantLock(),
                         PrefillActiveIndex.ordered(
                                 4,
-                                java.util.Comparator.comparingLong(
+                                java.util.Comparator.comparing(
                                         org.flexlb.balance.scheduler.RequestRoute::requestId)),
                         System::currentTimeMillis);
         long threadId = Thread.currentThread().threadId();

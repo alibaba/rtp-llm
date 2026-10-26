@@ -9,8 +9,8 @@ import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -38,15 +38,15 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.anyLong;
-import static org.mockito.Mockito.argThat;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
-/** Transport proof and sender exit cannot stand in for actual local P/D settlement. */
+/**
+ * Transport proof and sender exit cannot stand in for actual local P/D settlement.
+ */
 @Timeout(15)
 class DeliverySettlementSignalContractTest {
     private enum Side {
@@ -152,7 +152,7 @@ class DeliverySettlementSignalContractTest {
                             service,
                             mock(DeliveryMetricsReporter.class),
                             mock(RequestSchedulerReporter.class),
-                            mock(RecentCacheKeyTraceReporter.class));
+                            mock(TheoryCacheHitReporter.class));
             runtime = scheduler.runtime;
             dispatcher = SchedulerTestSupport.dispatcher(runtime);
             when(channel.cancelAsync(
@@ -204,10 +204,12 @@ class DeliverySettlementSignalContractTest {
             decode.publishStatus(projection);
             DecodeResources.ReservationHandle reservation;
             try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.tryReserveQueuedRequest(pin, ID, 10L, 10L, 50, null).handle();
+                reservation =
+                        decode.tryReserveQueuedRequest(pin, String.valueOf(ID), 10L, 10L, 50, null)
+                                .handle();
             }
             assertNotNull(reservation);
-            context = RequestProtocolTestSupport.context(config, ID);
+            context = RequestProtocolTestSupport.context(config, String.valueOf(ID));
             var future = RequestProtocolTestSupport.register(scheduler, context);
             route =
                     SchedulingTestConfig.createRoute(
@@ -220,7 +222,7 @@ class DeliverySettlementSignalContractTest {
                             reservation,
                             System.currentTimeMillis());
             var state = prefill.ownership;
-            try (var admission = scheduler.claimAdmissionHandle(ID, future)) {
+            try (var admission = scheduler.claimAdmissionHandle(String.valueOf(ID), future)) {
                 assertNotNull(admission);
                 assertEquals(
                         org.flexlb.balance.PlacementResult.Status.SUCCESS,
@@ -305,7 +307,7 @@ class DeliverySettlementSignalContractTest {
                             DeliveryResult.uncertain(
                                     new IllegalStateException("transport response lost")),
                             System.currentTimeMillis()));
-            scheduler.cancel(ID, BATCH, CancelReason.CLIENT_CANCELLED);
+            scheduler.cancel(String.valueOf(ID), BATCH, CancelReason.CLIENT_CANCELLED);
             session = cleanupSession();
             assertFalse(settled.isDone());
             proof.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);

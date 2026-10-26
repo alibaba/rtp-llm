@@ -44,7 +44,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** The configured limit, real worker publication lock and canonical request ledger together. */
+/**
+ * The configured limit, real worker publication lock and canonical request ledger together.
+ */
 class PrefillQueueRunnerRequestCapacityTest {
 
     @ParameterizedTest
@@ -125,7 +127,8 @@ class PrefillQueueRunnerRequestCapacityTest {
             var first = committed.getFirst();
             assertFalse(
                     fixture.endpoint.release(
-                            null, item(config, fixture.endpoint, first.requestId())));
+                            null,
+                            item(config, fixture.endpoint, Long.parseLong(first.requestId()))));
             assertFalse(fixture.endpoint.ownership.requestCapacityAvailable(4, 1));
             assertTrue(fixture.endpoint.release(null, first));
             assertFalse(fixture.endpoint.release(null, first));
@@ -400,7 +403,8 @@ class PrefillQueueRunnerRequestCapacityTest {
 
     private static RequestRoute item(
             FlexlbConfig config, PrefillEndpoint endpoint, long requestId, int priority) {
-        Request request = Request.builder().requestId(requestId).seqLen(100L).build();
+        Request request =
+                Request.builder().requestId(String.valueOf(requestId)).seqLen(100L).build();
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));

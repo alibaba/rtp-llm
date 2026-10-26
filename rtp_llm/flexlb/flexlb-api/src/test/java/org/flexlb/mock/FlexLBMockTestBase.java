@@ -15,6 +15,7 @@ import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
 import org.flexlb.balance.scheduler.RequestWorkerSelector;
+import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.InternalRuntimeSettings;
@@ -25,10 +26,11 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -167,8 +169,7 @@ public abstract class FlexLBMockTestBase {
         // 2. Create config
         config = createConfig();
         // These tests need config values, not an ever-growing history of config reads.
-        configService = mock(ConfigService.class, withSettings().stubOnly());
-        when(configService.loadBalanceConfig()).thenReturn(config);
+        configService = createConfigService();
 
         // 3. Create gRPC infrastructure
         InternalRuntimeSettings runtime = config.getInternalRuntime();
@@ -181,18 +182,13 @@ public abstract class FlexLBMockTestBase {
                         TimeUnit.SECONDS,
                         new LinkedBlockingQueue<>(runtime.getGrpcClientExecutorQueueCapacity()));
 
-        CustomNameResolver nameResolver =
-                (listener) -> {
-                    /* no-op */
-                };
         GrpcReporter grpcReporter = new GrpcReporter(new NoOpFlexMonitor());
         grpcClient =
                 new EngineGrpcClient(
-                        nameResolver,
-                        grpcExecutor,
-                        eventLoopGroup,
+                        mock(EngineAddressResolver.class),
+                        new GrpcChannelFactory(grpcExecutor, eventLoopGroup),
                         grpcReporter,
-                        1_000,
+                        mock(CacheMatchConfiguration.class),
                         enqueueTimeoutMillis());
 
         // 4. Reporter is a constructor dependency of the shared delivery dispatcher.
@@ -278,7 +274,7 @@ public abstract class FlexLBMockTestBase {
             mockDecodeWorker.stop();
         }
         if (grpcClient != null) {
-            grpcClient.shutdownChannelPool();
+            grpcClient.shutdown();
         }
         if (grpcExecutor != null) {
             grpcExecutor.shutdownNow();
@@ -360,6 +356,12 @@ public abstract class FlexLBMockTestBase {
         return 5_000L;
     }
 
+    protected ConfigService createConfigService() {
+        ConfigService service = mock(ConfigService.class, withSettings().stubOnly());
+        when(service.loadBalanceConfig()).thenReturn(config);
+        return service;
+    }
+
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = org.flexlb.mock.TestFlexlbConfigs.create();
         cfg.decisionPolicy().setMaxRequests(1); // single request triggers dispatch
@@ -372,23 +374,33 @@ public abstract class FlexLBMockTestBase {
      * Submit a request with the given ID and default seq_len=128.
      */
     protected CompletableFuture<Response> submitRequest(long requestId) {
-        return scheduler.submit(createRequestContext(requestId));
+        return scheduler.submit(createRequestContext(String.valueOf(requestId)));
+    }
+
+    protected CompletableFuture<Response> submitRequest(String requestId) {
+        return scheduler.submit(createRequestContext(String.valueOf(requestId)));
     }
 
     /**
      * Submit a request with the given ID and seq_len.
      */
     protected CompletableFuture<Response> submitRequest(long requestId, long seqLen) {
-        return scheduler.submit(createRequestContext(requestId, seqLen));
+        return scheduler.submit(createRequestContext(String.valueOf(requestId), seqLen));
+    }
+
+    protected CompletableFuture<Response> submitRequest(String requestId, long seqLen) {
+        return scheduler.submit(createRequestContext(String.valueOf(requestId), seqLen));
     }
 
     // ==================== Helper: endpoint accessors ====================
     protected PrefillEndpoint getPrefillEndpoint() {
-        return (PrefillEndpoint) endpointRegistry.get(RoleType.PREFILL, prefillIpPort);
+        return (PrefillEndpoint)
+                endpointRegistry.get(RoleType.PREFILL, logicalWorkerIpPort(prefillIpPort));
     }
 
     protected DecodeEndpoint getDecodeEndpoint() {
-        return (DecodeEndpoint) endpointRegistry.get(RoleType.DECODE, decodeIpPort);
+        return (DecodeEndpoint)
+                endpointRegistry.get(RoleType.DECODE, logicalWorkerIpPort(decodeIpPort));
     }
 
     // ==================== Helper: multi-worker support ====================
@@ -433,10 +445,33 @@ public abstract class FlexLBMockTestBase {
     }
 
     /**
-     * Get the {@code ip:httpPort} string for a mock worker (for routing/endpoint lookup).
+     * Get the {@code ip:httpPort} string for a mock worker.
      */
     protected static String workerIpPort(MockWorker worker) {
         return "127.0.0.1:" + worker.getHttpPort();
+    }
+
+    protected static String logicalWorkerIpPort(String ipPort) {
+        return ipPort.contains("@") ? ipPort : ipPort + "@0";
+    }
+
+    /**
+     * Get the physical {@code ip:httpPort} address exposed by the RTP-LLM mock frontend.
+     */
+    protected static String physicalWorkerIpPort(MockWorker worker) {
+        return "127.0.0.1:" + worker.getHttpPort();
+    }
+
+    /**
+     * Get a physical frontend address from its independent host and port fields.
+     */
+    protected static String physicalIpPort(String ip, int httpPort) {
+        return ip + ":" + httpPort;
+    }
+
+    protected static String physicalIpPort(String ipPort) {
+        int separator = ipPort.indexOf('@');
+        return separator >= 0 ? ipPort.substring(0, separator) : ipPort;
     }
 
     /**
@@ -518,11 +553,11 @@ public abstract class FlexLBMockTestBase {
     }
 
     // ==================== Internal: RequestContext construction ====================
-    protected RequestContext createRequestContext(long requestId) {
-        return createRequestContext(requestId, 128);
+    protected RequestContext createRequestContext(String requestId) {
+        return createRequestContext(String.valueOf(requestId), 128);
     }
 
-    protected RequestContext createRequestContext(long requestId, long seqLen) {
+    protected RequestContext createRequestContext(String requestId, long seqLen) {
         Request request =
                 Request.builder()
                         .requestId(requestId)
@@ -534,7 +569,14 @@ public abstract class FlexLBMockTestBase {
 
         RequestContext ctx = new RequestContext(config);
         ctx.data().setRequest(request);
-        ctx.data().setGenerateInputPb(ByteString.copyFrom(generateInputBytes(requestId)));
+        try {
+            long numericId = Long.parseLong(requestId);
+            if (Long.toString(numericId).equals(requestId)) {
+                ctx.data().setGenerateInputPb(ByteString.copyFrom(generateInputBytes(numericId)));
+            }
+        } catch (NumberFormatException ignored) {
+            // String-only routes have no int64 engine input.
+        }
         return ctx;
     }
 
@@ -562,7 +604,8 @@ public abstract class FlexLBMockTestBase {
     }
 
     private void discover(WorkerStatus status) {
-        engineWorkerStatus.currentOrDiscover(status.getRole(), status.getIpPort(), () -> status);
+        engineWorkerStatus.currentOrDiscover(
+                status.getRole(), status.getLogicalIpPort(), () -> status);
     }
 
     /**
@@ -604,7 +647,8 @@ public abstract class FlexLBMockTestBase {
             WorkerStatus.PreparedStatus prepared =
                     status.prepareNewStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, initial));
-            return endpointRegistry.publishPreparedEndpoint(status.getIpPort(), status, prepared);
+            return endpointRegistry.publishPreparedEndpoint(
+                    status.getLogicalIpPort(), status, prepared);
         } finally {
             status.lock.unlock();
         }
@@ -623,7 +667,7 @@ public abstract class FlexLBMockTestBase {
         return response;
     }
 
-    private Response successRoute(long requestId) {
+    private Response successRoute(String requestId) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(
@@ -644,7 +688,7 @@ public abstract class FlexLBMockTestBase {
     }
 
     private static ServerStatus serverStatus(
-            RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
+            RoleType role, String ip, int httpPort, int grpcPort, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);

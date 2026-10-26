@@ -118,7 +118,7 @@ class BatchCodecTest {
         var ctx = spy(new RequestContext(SchedulingTestConfig.batchConfig()));
         var route = mock(RequestRoute.class);
         when(route.ctx()).thenReturn(ctx);
-        when(route.requestId()).thenReturn(id);
+        when(route.requestId()).thenReturn(String.valueOf(id));
         return new DeliveryClaim(ctx, 1, route, DeliveryClaimKind.BATCH_ENQUEUE, 17);
     }
 }

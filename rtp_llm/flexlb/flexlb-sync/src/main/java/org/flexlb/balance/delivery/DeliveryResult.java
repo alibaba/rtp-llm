@@ -2,7 +2,9 @@ package org.flexlb.balance.delivery;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Transport result for one exact delivery claim. */
+/**
+ * Transport result for one exact delivery claim.
+ */
 public record DeliveryResult(Status status, Throwable cause) {
 
     public DeliveryResult {
@@ -34,9 +36,13 @@ public record DeliveryResult(Status status, Throwable cause) {
 
     public enum Status {
         DELIVERED,
-        /** Local failure before RPC invocation; no remote work was started by this claim. */
+        /**
+         * Local failure before RPC invocation; no remote work was started by this claim.
+         */
         NOT_SENT,
-        /** Final per-member EnqueueBatch error; Decode may already own resources. */
+        /**
+         * Final per-member EnqueueBatch error; Decode may already own resources.
+         */
         PREFILL_REJECTED,
         UNCERTAIN
     }

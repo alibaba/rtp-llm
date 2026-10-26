@@ -504,7 +504,9 @@ class DecodeReuseAdmissionTest {
         return (MockLruBlockCache) field.get(service);
     }
 
-    /** Waits until the engine reports {@code expected} running decode streams. */
+    /**
+     * Waits until the engine reports {@code expected} running decode streams.
+     */
     private static void awaitRunningStreams(
             JavaMockEngineCluster.FastRpcService service, int expected) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);

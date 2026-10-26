@@ -69,8 +69,11 @@ public class FlexlbGrpcServer {
     private Server server;
     private NioEventLoopGroup bossGroup;
     private ThreadPoolExecutor grpcExecutor;
+    private final org.flexlb.metric.FlexMonitor monitor;
     private ThreadPoolExecutor grpcControlExecutor;
     private GrpcReceivingGuard receivingGuard;
+    private GrpcOverloadInterceptor overloadInterceptor;
+    private long reportedRejectedCalls;
     private CountingCallerRunsHandler countingCallerRunsHandler;
 
     public FlexlbGrpcServer(
@@ -81,6 +84,29 @@ public class FlexlbGrpcServer {
             @Autowired(required = false) MeterRegistry meterRegistry,
             GrpcServerTimingInterceptor grpcServerTimingInterceptor,
             GrpcQosHeaderInterceptor grpcQosHeaderInterceptor) {
+        this(
+                flexlbServiceImpl,
+                configService,
+                environment,
+                grpcServerEventLoopGroup,
+                meterRegistry,
+                grpcServerTimingInterceptor,
+                grpcQosHeaderInterceptor,
+                org.flexlb.metric.NoOpFlexMonitor.getInstance());
+    }
+
+    @Autowired
+    public FlexlbGrpcServer(
+            FlexlbServiceImpl flexlbServiceImpl,
+            ConfigService configService,
+            Environment environment,
+            @Qualifier("grpcServerEventLoopGroup") EventLoopGroup grpcServerEventLoopGroup,
+            @Autowired(required = false) MeterRegistry meterRegistry,
+            GrpcServerTimingInterceptor grpcServerTimingInterceptor,
+            GrpcQosHeaderInterceptor grpcQosHeaderInterceptor,
+            org.flexlb.metric.FlexMonitor monitor) {
+        this.monitor = org.flexlb.metric.SafeFlexMonitor.wrap(monitor);
+        this.flexMonitor = this.monitor;
         this.flexlbServiceImpl = flexlbServiceImpl;
         this.configService = configService;
         this.environment = environment;
@@ -166,6 +192,8 @@ public class FlexlbGrpcServer {
                         receiving.controlBudgetBytes(),
                         receiving.initialReservationBytes());
 
+        this.overloadInterceptor = new GrpcOverloadInterceptor(grpcExecutor, grpcControlExecutor);
+
         // Register monitoring metrics for the gRPC server executor
         registerMetrics();
         registerReceivingMetrics();
@@ -182,7 +210,7 @@ public class FlexlbGrpcServer {
                         .directExecutor()
                         .callExecutor(receivingGuard)
                         .addStreamTracerFactory(receivingGuard)
-                        .intercept(new GrpcOverloadInterceptor(grpcExecutor, grpcControlExecutor))
+                        .intercept(overloadInterceptor)
                         .intercept(receivingGuard)
                         .addService(
                                 ServerInterceptors.intercept(
@@ -215,6 +243,21 @@ public class FlexlbGrpcServer {
      * metric registration is silently skipped.
      */
     private void registerMetrics() {
+        for (String metric :
+                java.util.List.of(
+                        MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS,
+                        MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE,
+                        MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE,
+                        MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
+                        MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS)) {
+            monitor.register(
+                    metric,
+                    metric.equals(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS)
+                            ? org.flexlb.enums.FlexMetricType.COUNTER
+                            : org.flexlb.enums.FlexMetricType.GAUGE,
+                    org.flexlb.enums.FlexPriorityType.PRECISE);
+        }
+        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 0.0);
         if (meterRegistry == null) {
             Logger.info("MeterRegistry not available, skipping gRPC server executor metrics");
             return;
@@ -293,6 +336,28 @@ public class FlexlbGrpcServer {
         Logger.info("FlexLB gRPC server executor metric registration finished");
     }
 
+    @org.springframework.scheduling.annotation.Scheduled(fixedRate = 2_000L)
+    public synchronized void reportExecutorMetrics() {
+        var executor = grpcExecutor;
+        if (executor == null) {
+            return;
+        }
+        monitor.report(
+                MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS, executor.getActiveCount());
+        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE, executor.getQueue().size());
+        monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, executor.getPoolSize());
+        monitor.report(
+                MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE, executor.getMaximumPoolSize());
+        long rejectedCalls =
+                (receivingGuard == null ? 0L : receivingGuard.rejected())
+                        + (overloadInterceptor == null ? 0L : overloadInterceptor.rejected());
+        long newRejections = rejectedCalls - reportedRejectedCalls;
+        reportedRejectedCalls = rejectedCalls;
+        if (newRejections > 0) {
+            monitor.report(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, newRejections);
+        }
+    }
+
     private static final String[] RECEIVING_METRICS = {
         "app.grpc.server.receiving.active", "app.grpc.server.receiving.control.active",
         "app.grpc.server.receiving.rejected.total", "app.grpc.server.receiving.timed.out.total",
@@ -310,7 +375,9 @@ public class FlexlbGrpcServer {
         }
     }
 
-    /** Report cumulative totals as gauges: query deltas across samples, not gauge sums. */
+    /**
+     * Report cumulative totals as gauges: query deltas across samples, not gauge sums.
+     */
     @Scheduled(fixedDelay = 1000)
     public void reportReceivingMetrics() {
         GrpcReceivingGuard guard = receivingGuard;
@@ -336,7 +403,9 @@ public class FlexlbGrpcServer {
         }
     }
 
-    /** Called before Spring destroys any serving resources. */
+    /**
+     * Called before Spring destroys any serving resources.
+     */
     public synchronized void drain() {
         if (server == null || server.isTerminated()) {
             return;
@@ -407,7 +476,9 @@ public class FlexlbGrpcServer {
         }
     }
 
-    /** Accepted transport callbacks retain cleanup ownership even during executor shutdown. */
+    /**
+     * Accepted transport callbacks retain cleanup ownership even during executor shutdown.
+     */
     static class CountingCallerRunsHandler implements RejectedExecutionHandler {
         private final AtomicLong callerRunsCount = new AtomicLong();
 

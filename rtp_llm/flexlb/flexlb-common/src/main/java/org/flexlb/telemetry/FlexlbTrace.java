@@ -96,7 +96,9 @@ public final class FlexlbTrace {
 
     private FlexlbTrace() {}
 
-    /** 完整初始化成功后注入 Provider；null 表示关闭。 */
+    /**
+     * 完整初始化成功后注入 Provider；null 表示关闭。
+     */
     public static void configure(OpenTelemetry sdk, String scopeVersion) {
         enabled = false;
         tracer =
@@ -110,7 +112,9 @@ public final class FlexlbTrace {
         return enabled;
     }
 
-    /** Only explicit admission/validation codes imply a business rejection. */
+    /**
+     * Only explicit admission/validation codes imply a business rejection.
+     */
     public static String scheduleFailureType(int code) {
         if (code == StatusEnum.INTERNAL_ERROR.getCode()) {
             return "FLEXLB_INTERNAL_ERROR";
@@ -163,9 +167,8 @@ public final class FlexlbTrace {
         }
     }
 
-    public static void setRequestAttributes(Span span, long requestId) {
-        // Match the C++ and Python registries without changing the business ID.
-        setAttribute(span, REQUEST_ID, Long.toString(requestId));
+    public static void setRequestAttributes(Span span, String requestId) {
+        setAttribute(span, REQUEST_ID, requestId);
     }
 
     public static <T> void setAttribute(Span span, AttributeKey<T> key, T value) {
@@ -270,7 +273,9 @@ public final class FlexlbTrace {
         }
     }
 
-    /** Marks an already-created span from an asynchronous scheduling callback. */
+    /**
+     * Marks an already-created span from an asynchronous scheduling callback.
+     */
     public static void markBusinessError(Context context, long code, String type) {
         if (!enabled) {
             return;

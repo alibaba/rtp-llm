@@ -12,7 +12,9 @@ import java.net.SocketAddress;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
-/** Keeps the first socket failure for streams already using that physical connection. */
+/**
+ * Keeps the first socket failure for streams already using that physical connection.
+ */
 public final class GrpcTransportObserver {
     private final ConcurrentMap<SocketKey, SocketState> sockets = new ConcurrentHashMap<>();
 
@@ -31,6 +33,65 @@ public final class GrpcTransportObserver {
 
     public NioSocketChannel newChannel() {
         return new ObservedChannel();
+    }
+
+    public io.netty.channel.epoll.EpollSocketChannel newEpollChannel() {
+        var channel = new io.netty.channel.epoll.EpollSocketChannel();
+        channel.pipeline()
+                .addLast(
+                        new io.netty.channel.ChannelDuplexHandler() {
+                            private SocketKey key;
+                            private final SocketState state = new SocketState();
+
+                            @Override
+                            public void channelActive(ChannelHandlerContext context)
+                                    throws Exception {
+                                try {
+                                    key =
+                                            new SocketKey(
+                                                    channel.localAddress(),
+                                                    channel.remoteAddress());
+                                    sockets.put(key, state);
+                                } catch (RuntimeException | Error ignored) {
+                                    // Socket diagnostics cannot prevent an established connection
+                                    // from becoming active.
+                                }
+                                context.fireChannelActive();
+                            }
+
+                            @Override
+                            public void exceptionCaught(
+                                    ChannelHandlerContext context, Throwable failure)
+                                    throws Exception {
+                                state.recordFailure(true, failure);
+                                context.fireExceptionCaught(failure);
+                            }
+
+                            @Override
+                            public void write(
+                                    ChannelHandlerContext context,
+                                    Object message,
+                                    io.netty.channel.ChannelPromise promise)
+                                    throws Exception {
+                                promise.addListener(
+                                        result -> {
+                                            if (!result.isSuccess()) {
+                                                state.recordFailure(false, result.cause());
+                                            }
+                                        });
+                                context.write(message, promise);
+                            }
+
+                            @Override
+                            public void channelInactive(ChannelHandlerContext context)
+                                    throws Exception {
+                                if (key != null) {
+                                    sockets.remove(key, state);
+                                }
+                                context.fireChannelInactive();
+                            }
+                        });
+        return channel;
     }
 
     public SocketState find(Attributes attributes) {

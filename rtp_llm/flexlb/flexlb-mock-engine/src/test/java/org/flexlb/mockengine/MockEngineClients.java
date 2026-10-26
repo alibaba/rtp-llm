@@ -2,10 +2,10 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.engine.grpc.EngineGrpcClient.CancelReply;
 import org.flexlb.engine.grpc.EngineRpcService.CancelRequestPB;
 import org.flexlb.engine.grpc.EngineRpcService.RequestCancelReasonPB;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient.CancelReply;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -21,7 +21,9 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Test fixtures at the Worker client boundary, backed by the mock engine's control endpoints. */
+/**
+ * Test fixtures at the Worker client boundary, backed by the mock engine's control endpoints.
+ */
 final class MockEngineClients {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Duration HTTP_TIMEOUT = Duration.ofMillis(500);

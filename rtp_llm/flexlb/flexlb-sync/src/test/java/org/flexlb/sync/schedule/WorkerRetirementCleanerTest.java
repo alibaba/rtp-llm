@@ -1,7 +1,7 @@
 package org.flexlb.sync.schedule;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -41,6 +41,13 @@ class WorkerRetirementCleanerTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         try (AnnotationConfigApplicationContext context =
                 new AnnotationConfigApplicationContext()) {
+            for (String name :
+                    java.util.List.of(
+                            "environmentConfigSource",
+                            "nacosConfigSource",
+                            "uniConfigConfigSource")) {
+                context.registerBean(name, Object.class, Object::new);
+            }
             context.registerBean("configService", ConfigService.class, () -> configService);
             context.registerBean(CacheAwareService.class, () -> mock(CacheAwareService.class));
             context.registerBean(EndpointRegistry.class, () -> mock(EndpointRegistry.class));
@@ -64,8 +71,8 @@ class WorkerRetirementCleanerTest {
         WorkerStatus first = status("127.0.0.1", 8080);
         WorkerStatus second = status("127.0.0.2", 8080);
         EndpointRegistry directory = registry;
-        directory.currentOrDiscover(RoleType.PREFILL, first.getIpPort(), () -> first);
-        directory.currentOrDiscover(RoleType.PREFILL, second.getIpPort(), () -> second);
+        directory.currentOrDiscover(RoleType.PREFILL, first.getLogicalIpPort(), () -> first);
+        directory.currentOrDiscover(RoleType.PREFILL, second.getLogicalIpPort(), () -> second);
         first.markRemovedFromDiscovery();
         second.markRemovedFromDiscovery();
 
@@ -78,7 +85,7 @@ class WorkerRetirementCleanerTest {
                             return null;
                         })
                 .when(cache)
-                .removeEngineBlockCache(first.getIpPort());
+                .removeEngineBlockCache(first.getLogicalIpPort());
         WorkerRetirementCleaner cleaner = new WorkerRetirementCleaner(cache, directory);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
@@ -93,8 +100,8 @@ class WorkerRetirementCleanerTest {
             releaseCleanup.countDown();
             org.flexlb.sync.runner.RunnerTestSupport.awaitCondition(
                     () -> directory.statusSnapshot(RoleType.PREFILL).isEmpty());
-            verify(cache).removeEngineBlockCache(first.getIpPort());
-            verify(cache).removeEngineBlockCache(second.getIpPort());
+            verify(cache).removeEngineBlockCache(first.getLogicalIpPort());
+            verify(cache).removeEngineBlockCache(second.getLogicalIpPort());
         } finally {
             releaseCleanup.countDown();
             executor.shutdownNow();
@@ -112,8 +119,8 @@ class WorkerRetirementCleanerTest {
         CacheAwareService cache = mock(CacheAwareService.class);
         WorkerStatus first = status("127.0.0.1", 8080);
         WorkerStatus second = status("127.0.0.2", 8080);
-        registry.currentOrDiscover(RoleType.PREFILL, first.getIpPort(), () -> first);
-        registry.currentOrDiscover(RoleType.PREFILL, second.getIpPort(), () -> second);
+        registry.currentOrDiscover(RoleType.PREFILL, first.getLogicalIpPort(), () -> first);
+        registry.currentOrDiscover(RoleType.PREFILL, second.getLogicalIpPort(), () -> second);
         first.markRemovedFromDiscovery();
         second.markRemovedFromDiscovery();
         var began = new java.util.concurrent.atomic.AtomicReference<WorkerStatus>();
@@ -150,7 +157,7 @@ class WorkerRetirementCleanerTest {
                         .iterator()
                         .next()
                         .isActiveGeneration());
-        verify(cache).removeEngineBlockCache(began.get().getIpPort());
+        verify(cache).removeEngineBlockCache(began.get().getLogicalIpPort());
         registry.close();
     }
 

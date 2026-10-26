@@ -2,6 +2,7 @@ package org.flexlb.dao.master;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 
@@ -41,12 +42,16 @@ public class WorkerStatus {
     private static final AtomicLong NEXT_GENERATION_ID = new AtomicLong();
     private static final long MAX_CONSECUTIVE_WORKER_FAILURES = 3L;
 
-    /** Serializes lifecycle transitions for this generation. */
+    /**
+     * Serializes lifecycle transitions for this generation.
+     */
     public final transient ReentrantLock lock = new ReentrantLock();
 
     private final long generationId = NEXT_GENERATION_ID.incrementAndGet();
 
-    /** Set under {@link #lock}; read lock-free by poll gates. */
+    /**
+     * Set under {@link #lock}; read lock-free by poll gates.
+     */
     private volatile boolean retiring;
 
     private final Object healthGate = new Object();
@@ -63,7 +68,9 @@ public class WorkerStatus {
 
     private volatile RetirementReason retirementReason;
 
-    /** Serializes cache-index writes and exact-generation cleanup. */
+    /**
+     * Serializes cache-index writes and exact-generation cleanup.
+     */
     public final transient ReentrantLock cacheMutationLock = new ReentrantLock();
 
     public enum RetirementReason {
@@ -91,11 +98,48 @@ public class WorkerStatus {
         return !retiring && retirementReason == null;
     }
 
-    public record TopologySnapshot(String group, String ip, int port, int grpcPort, String site) {}
+    public record TopologySnapshot(
+            String group,
+            String ip,
+            int port,
+            int grpcPort,
+            String site,
+            String deploymentName,
+            int engineIndex,
+            int multiEngineNum,
+            int workerStatusPort) {
 
-    /** Deeply immutable copy of the task fields reported by one status RPC. */
+        public TopologySnapshot(
+                String group,
+                String ip,
+                int port,
+                int grpcPort,
+                String site,
+                String deploymentName,
+                int engineIndex,
+                int multiEngineNum) {
+            this(
+                    group,
+                    ip,
+                    port,
+                    grpcPort,
+                    site,
+                    deploymentName,
+                    engineIndex,
+                    multiEngineNum,
+                    grpcPort);
+        }
+
+        public TopologySnapshot(String group, String ip, int port, int grpcPort, String site) {
+            this(group, ip, port, grpcPort, site, null, 0, 1);
+        }
+    }
+
+    /**
+     * Deeply immutable copy of the task fields reported by one status RPC.
+     */
     public record TaskObservation(
-            long requestId,
+            String requestId,
             long prefixLength,
             long prefillTime,
             long inputLength,
@@ -108,9 +152,12 @@ public class WorkerStatus {
             long batchId,
             TaskPhase phase,
             long executionTimeMs,
-            PriorityPreemptionProgress priorityPreemptionProgress) {
+            PriorityPreemptionProgress priorityPreemptionProgress,
+            TaskTelemetry telemetry) {
 
-        /** A pending observation that reports only priority cancellation progress. */
+        /**
+         * A pending observation that reports only priority cancellation progress.
+         */
         @JsonIgnore
         public boolean isPriorityCancelOverlayOnly() {
             return (priorityPreemptionProgress == PriorityPreemptionProgress.CANCELING
@@ -118,6 +165,77 @@ public class WorkerStatus {
                     && phase == TaskPhase.PENDING;
         }
     }
+
+    /**
+     * Immutable request telemetry retained from the Engine status RPC.
+     * Nullable prefill progress values preserve omitted protobuf fields.
+     */
+    public record TaskTelemetry(
+            boolean prefixLengthValid,
+            long requestReceivedTimeMs,
+            long inputQueueEnqueueTimeMs,
+            long inputQueueDrainTimeMs,
+            long waitingEnteredTimeMs,
+            long runningEnteredTimeMs,
+            long remoteKvWaitMs,
+            long firstTokenTimeMs,
+            long hbmLocalMatchTokens,
+            long remoteKvAddedMatchTokens,
+            long firstPrefillStepId,
+            long lastPrefillStepId,
+            long prefillStepCount,
+            long prefillNonfinalChunkTokensMin,
+            long prefillNonfinalChunkTokensMax,
+            Long completedPrefillTokens,
+            Long remainingPrefillTokens,
+            Long lastCompletedPrefillStepId) {
+
+        public TaskTelemetry(
+                boolean prefixLengthValid,
+                long requestReceivedTimeMs,
+                long inputQueueEnqueueTimeMs,
+                long inputQueueDrainTimeMs,
+                long waitingEnteredTimeMs,
+                long runningEnteredTimeMs,
+                long remoteKvWaitMs,
+                long firstTokenTimeMs,
+                long hbmLocalMatchTokens,
+                long remoteKvAddedMatchTokens,
+                long firstPrefillStepId,
+                long lastPrefillStepId,
+                long prefillStepCount,
+                long prefillNonfinalChunkTokensMin,
+                long prefillNonfinalChunkTokensMax) {
+            this(
+                    prefixLengthValid,
+                    requestReceivedTimeMs,
+                    inputQueueEnqueueTimeMs,
+                    inputQueueDrainTimeMs,
+                    waitingEnteredTimeMs,
+                    runningEnteredTimeMs,
+                    remoteKvWaitMs,
+                    firstTokenTimeMs,
+                    hbmLocalMatchTokens,
+                    remoteKvAddedMatchTokens,
+                    firstPrefillStepId,
+                    lastPrefillStepId,
+                    prefillStepCount,
+                    prefillNonfinalChunkTokensMin,
+                    prefillNonfinalChunkTokensMax,
+                    null,
+                    null,
+                    null);
+        }
+    }
+
+    public record StepMetrics(
+            long stepId,
+            long completedTimeMs,
+            long totalScheduledTokens,
+            long prefillRequestCount,
+            long prefillTokens,
+            long tokenBudget,
+            double budgetFillRatio) {}
 
     /**
      * Immutable view of one atomically published Engine status observation.
@@ -135,14 +253,58 @@ public class WorkerStatus {
             long dpSize,
             long tpSize,
             long dpRank,
+            long blockSize,
+            int blockHashLookaheadTokens,
+            int cacheMatchRollbackBlocks,
+            KvCacheGroupMode kvCacheGroupMode,
             long maxSeqLen,
             long maxBatchTokensSize,
             long runningQueryLen,
-            long waitingQueryLen) {
+            long waitingQueryLen,
+            StepMetrics lastStepMetrics) {
 
         public EngineObservation {
             Objects.requireNonNull(role, "role");
+            kvCacheGroupMode =
+                    kvCacheGroupMode == null ? KvCacheGroupMode.UNSPECIFIED : kvCacheGroupMode;
             runningTaskList = Map.copyOf(runningTaskList);
+        }
+
+        public EngineObservation(
+                RoleType role,
+                Long availableConcurrency,
+                long availableKvCacheTokens,
+                long totalKvCacheTokens,
+                Map<String, TaskObservation> runningTaskList,
+                double stepLatencyMs,
+                long iterateCount,
+                long dpSize,
+                long tpSize,
+                long dpRank,
+                long maxSeqLen,
+                long maxBatchTokensSize,
+                long runningQueryLen,
+                long waitingQueryLen) {
+            this(
+                    role,
+                    availableConcurrency,
+                    availableKvCacheTokens,
+                    totalKvCacheTokens,
+                    runningTaskList,
+                    stepLatencyMs,
+                    iterateCount,
+                    dpSize,
+                    tpSize,
+                    dpRank,
+                    0L,
+                    0,
+                    0,
+                    KvCacheGroupMode.UNSPECIFIED,
+                    maxSeqLen,
+                    maxBatchTokensSize,
+                    runningQueryLen,
+                    waitingQueryLen,
+                    null);
         }
     }
 
@@ -153,7 +315,9 @@ public class WorkerStatus {
      */
     public record AppliedStatusCursor(long statusVersion, long latestFinishedTaskVersion) {}
 
-    /** The single public value for one successfully committed status round. */
+    /**
+     * The single public value for one successfully committed status round.
+     */
     public record CommittedWorkerStatus(EngineObservation fields, AppliedStatusCursor cursor) {}
 
     /**
@@ -178,7 +342,9 @@ public class WorkerStatus {
     public record CacheIndexSnapshot(
             CacheStatus cacheStatus, boolean indexInitialized, long indexedVersion) {}
 
-    /** One deeply frozen RPC observation shared by every status reducer. */
+    /**
+     * One deeply frozen RPC observation shared by every status reducer.
+     */
     public static final class StatusObservation {
         private final WorkerStatus owner;
         private final EngineObservation engine;
@@ -202,7 +368,9 @@ public class WorkerStatus {
             this.finishedTasks = finishedTasks;
         }
 
-        /** Exact service-discovery generation which issued this observation. */
+        /**
+         * Exact service-discovery generation which issued this observation.
+         */
         public WorkerStatus owner() {
             return owner;
         }
@@ -227,7 +395,10 @@ public class WorkerStatus {
             return latestFinishedVersion;
         }
 
-        public Map<String, TaskObservation> runningTasks() {
+        /**
+         * Returns all active task phases reported in running_task_info.
+         */
+        public Map<String, TaskObservation> activeTasks() {
             return engine.runningTaskList();
         }
 
@@ -261,11 +432,15 @@ public class WorkerStatus {
 
     private final AtomicReference<TopologySnapshot> topology;
 
+    private final WorkerIdentity workerIdentity;
+
     private final AtomicReference<CommittedWorkerStatus> committedStatus;
 
     private final AtomicReference<PollHealth> pollHealth;
 
-    /** Cache polling is independent from worker-status polling. */
+    /**
+     * Cache polling is independent from worker-status polling.
+     */
     private final AtomicReference<CacheIndexSnapshot> cacheIndexSnapshot =
             new AtomicReference<>(new CacheIndexSnapshot(null, false, -1L));
 
@@ -323,6 +498,11 @@ public class WorkerStatus {
 
     private WorkerStatus(TopologySnapshot initialTopology, EngineObservation initialStatus) {
         topology = new AtomicReference<>(initialTopology);
+        workerIdentity =
+                new WorkerIdentity(
+                        initialTopology.ip(),
+                        initialTopology.port(),
+                        initialTopology.engineIndex());
         committedStatus =
                 new AtomicReference<>(
                         new CommittedWorkerStatus(
@@ -331,14 +511,78 @@ public class WorkerStatus {
         pollHealth = new AtomicReference<>(new PollHealth(discoveredAtUs, 0L, 0L, false));
     }
 
-    /** Create one fully initialized service-discovery generation. */
+    /**
+     * Create one fully initialized service-discovery generation.
+     */
     public static WorkerStatus createDiscovered(
             RoleType role, String group, String ip, int port, int grpcPort, String site) {
+        return createDiscovered(role, group, ip, port, grpcPort, site, null);
+    }
+
+    public static WorkerStatus createDiscovered(
+            RoleType role,
+            String group,
+            String ip,
+            int port,
+            int grpcPort,
+            String site,
+            String deploymentName) {
+        return createDiscovered(role, group, ip, port, grpcPort, site, deploymentName, 0, 1);
+    }
+
+    public static WorkerStatus createDiscovered(
+            RoleType role,
+            String group,
+            String ip,
+            int port,
+            int grpcPort,
+            String site,
+            String deploymentName,
+            int engineIndex,
+            int multiEngineNum) {
+        return createDiscovered(
+                role,
+                group,
+                ip,
+                port,
+                grpcPort,
+                site,
+                deploymentName,
+                engineIndex,
+                multiEngineNum,
+                grpcPort);
+    }
+
+    public static WorkerStatus createDiscovered(
+            RoleType role,
+            String group,
+            String ip,
+            int port,
+            int grpcPort,
+            String site,
+            String deploymentName,
+            int engineIndex,
+            int multiEngineNum,
+            int workerStatusPort) {
         Objects.requireNonNull(role, "role");
         Objects.requireNonNull(ip, "ip");
-        checkArgument(port > 0 && grpcPort > 0, "worker ports must be positive");
+        if (port <= 0 || grpcPort <= 0 || workerStatusPort <= 0) {
+            throw new IllegalArgumentException("worker ports must be positive");
+        }
+        if (engineIndex < 0 || multiEngineNum <= 0 || engineIndex >= multiEngineNum) {
+            throw new IllegalArgumentException("invalid logical worker index");
+        }
         return new WorkerStatus(
-                new TopologySnapshot(group, ip, port, grpcPort, site),
+                new TopologySnapshot(
+                        group,
+                        ip,
+                        port,
+                        grpcPort,
+                        site,
+                        deploymentName,
+                        engineIndex,
+                        multiEngineNum,
+                        workerStatusPort),
                 new EngineObservation(
                         role, null, 0L, 0L, Map.of(), 0.0, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L));
     }
@@ -364,7 +608,9 @@ public class WorkerStatus {
         return committedStatus.get().cursor();
     }
 
-    /** Bind an already immutable protocol conversion to this exact generation. */
+    /**
+     * Bind an already immutable protocol conversion to this exact generation.
+     */
     public StatusObservation bindStatusObservation(
             EngineObservation engine,
             boolean reportedAlive,
@@ -382,7 +628,9 @@ public class WorkerStatus {
                         : Map.copyOf(finishedTasks));
     }
 
-    /** Bind a strictly newer frozen observation to the current commit holder. */
+    /**
+     * Bind a strictly newer frozen observation to the current commit holder.
+     */
     public PreparedStatus prepareNewStatus(StatusObservation observation) {
         requireGenerationLock();
         requireActiveGeneration();
@@ -434,7 +682,9 @@ public class WorkerStatus {
                 "prepared status is stale or has already been published");
     }
 
-    /** Record a validated response for a status transaction. */
+    /**
+     * Record a validated response for a status transaction.
+     */
     public PollHealth recordSuccessfulPoll(boolean reportedAlive) {
         requireGenerationLock();
         requireActiveGeneration();
@@ -443,7 +693,9 @@ public class WorkerStatus {
         }
     }
 
-    /** The RPC owner records health before any local conversion or application. */
+    /**
+     * The RPC owner records health before any local conversion or application.
+     */
     public void recordStatusRpcResult(PollLease lease, boolean valid, boolean alive) {
         synchronized (healthGate) {
             if (lease == null
@@ -485,7 +737,9 @@ public class WorkerStatus {
         return next;
     }
 
-    /** One local application may outlive its RPC; later RPCs still update health. */
+    /**
+     * One local application may outlive its RPC; later RPCs still update health.
+     */
     public PollLease tryBeginStatusApplication(PollLease rpcLease) {
         synchronized (healthGate) {
             requireStatusPollLease(rpcLease);
@@ -502,13 +756,17 @@ public class WorkerStatus {
         checkState(lock.isHeldByCurrentThread(), "status transaction requires generation lock");
     }
 
-    /** Reject any new publication or ownership after retirement starts. */
+    /**
+     * Reject any new publication or ownership after retirement starts.
+     */
     public void requireActiveGeneration() {
         requireGenerationLock();
         checkState(!retiring, "WorkerStatus generation is retiring: %s", generationId);
     }
 
-    /** Require an operation to target the one retiring generation. */
+    /**
+     * Require an operation to target the one retiring generation.
+     */
     public void requireRetiringGeneration() {
         requireGenerationLock();
         checkState(retiring, "WorkerStatus generation is not retiring: %s", generationId);
@@ -545,14 +803,28 @@ public class WorkerStatus {
                 : Math.max(current.latestFinishedTaskVersion(), responseFinishedVersion);
     }
 
-    /** Atomically refresh discovery-owned placement labels for this generation. */
+    /**
+     * Atomically refresh discovery-owned placement labels for this generation.
+     */
     public void updateDiscoveryLabels(String site, String group) {
+        updateDiscoveryLabels(site, group, topology.get().deploymentName());
+    }
+
+    public void updateDiscoveryLabels(String site, String group, String deploymentName) {
         requireGenerationLock();
         requireActiveGeneration();
         topology.updateAndGet(
                 current ->
                         new TopologySnapshot(
-                                group, current.ip(), current.port(), current.grpcPort(), site));
+                                group,
+                                current.ip(),
+                                current.port(),
+                                current.grpcPort(),
+                                site,
+                                deploymentName,
+                                current.engineIndex(),
+                                current.multiEngineNum(),
+                                current.workerStatusPort()));
     }
 
     public RoleType getRole() {
@@ -573,6 +845,14 @@ public class WorkerStatus {
 
     public int getGrpcPort() {
         return topology.get().grpcPort();
+    }
+
+    public int getWorkerStatusPort() {
+        return topology.get().workerStatusPort();
+    }
+
+    public String getDeploymentName() {
+        return topology.get().deploymentName();
     }
 
     public String getSite() {
@@ -626,7 +906,9 @@ public class WorkerStatus {
         cacheIndexSnapshot.set(new CacheIndexSnapshot(current.cacheStatus(), true, version));
     }
 
-    /** Preserve cache cadence when a coalesced discovery cycle crosses a due tick. */
+    /**
+     * Preserve cache cadence when a coalesced discovery cycle crosses a due tick.
+     */
     public boolean shouldPollCache(long cycleId, long intervalCycles) {
         checkArgument(intervalCycles > 0L, "cache poll interval must be positive");
         long previous = lastCachePollCycle.getAndAccumulate(cycleId, Math::max);
@@ -662,12 +944,28 @@ public class WorkerStatus {
         return committedStatus.get().fields().dpRank();
     }
 
-    /** Model-level maximum sequence length reported by the Engine. */
+    public int getBlockHashLookaheadTokens() {
+        return committedStatus.get().fields().blockHashLookaheadTokens();
+    }
+
+    public int getCacheMatchRollbackBlocks() {
+        return committedStatus.get().fields().cacheMatchRollbackBlocks();
+    }
+
+    public KvCacheGroupMode getKvCacheGroupMode() {
+        return committedStatus.get().fields().kvCacheGroupMode();
+    }
+
+    /**
+     * Model-level maximum sequence length reported by the Engine.
+     */
     public long getMaxSeqLen() {
         return committedStatus.get().fields().maxSeqLen();
     }
 
-    /** Strict aggregate context-token limit for an Engine batch/group. */
+    /**
+     * Strict aggregate context-token limit for an Engine batch/group.
+     */
     public long getMaxBatchTokensSize() {
         return committedStatus.get().fields().maxBatchTokensSize();
     }
@@ -676,7 +974,13 @@ public class WorkerStatus {
         return pollHealth.get();
     }
 
-    /** Acquire the one in-flight status-poll slot for this generation. */
+    public boolean isAlive() {
+        return pollHealth.get().reportedAlive();
+    }
+
+    /**
+     * Acquire the one in-flight status-poll slot for this generation.
+     */
     public PollLease tryBeginStatusPoll() {
         return tryBeginStatusPoll(0L);
     }
@@ -706,7 +1010,9 @@ public class WorkerStatus {
         requirePollLease(lease, PollKind.STATUS, statusPollLease);
     }
 
-    /** Acquire the independent cache-poll slot for this generation. */
+    /**
+     * Acquire the independent cache-poll slot for this generation.
+     */
     public PollLease tryBeginCachePoll() {
         return tryBeginCachePoll(0L);
     }
@@ -746,13 +1052,36 @@ public class WorkerStatus {
         }
     }
 
-    /** Get the HTTP IP:PORT address. */
+    /**
+     * Get the HTTP IP:PORT address.
+     */
     public String getIpPort() {
-        TopologySnapshot current = topology.get();
-        if (current.ip() == null) {
-            return null;
-        }
-        return current.ip() + ":" + current.port();
+        return workerIdentity.getPhysicalIpPort();
+    }
+
+    public WorkerIdentity getWorkerIdentity() {
+        return workerIdentity;
+    }
+
+    public String getPhysicalIpPort() {
+        return workerIdentity.getPhysicalIpPort();
+    }
+
+    public String getLogicalIpPort() {
+        return workerIdentity.getLogicalIpPort();
+    }
+
+    @JsonIgnore
+    public String getMetricIpPort() {
+        return workerIdentity.getMetricIpPort(getMultiEngineNum());
+    }
+
+    public int getEngineIndex() {
+        return workerIdentity.getEngineIndex();
+    }
+
+    public int getMultiEngineNum() {
+        return topology.get().multiEngineNum();
     }
 
     @Override

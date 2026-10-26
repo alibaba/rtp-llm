@@ -3,7 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.RequestRepository;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
@@ -30,15 +30,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Function;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
-/** Owns discovered worker identities and their published routing generations. */
+/**
+ * Owns discovered worker identities and their published routing generations.
+ */
 @Component
-public class EndpointRegistry {
+public class EndpointRegistry implements org.flexlb.dao.master.WorkerStatusProvider {
 
     /**
      * One non-owning Prefill generation exposed to routing.
@@ -54,7 +56,9 @@ public class EndpointRegistry {
         }
     }
 
-    /** Owns one retiring status identity and its optional published endpoint. */
+    /**
+     * Owns one retiring status identity and its optional published endpoint.
+     */
     public final class Retirement {
         private final RoleType role;
         private final String address;
@@ -74,7 +78,9 @@ public class EndpointRegistry {
             return status;
         }
 
-        /** The registry close barrier retains ownership until this cleanup finishes. */
+        /**
+         * The registry close barrier retains ownership until this cleanup finishes.
+         */
         public void completeAsync(CacheAwareService cacheAwareService, org.slf4j.Logger logger) {
             try {
                 WorkerEndpoint.executeRetirement(() -> complete(cacheAwareService, logger, false));
@@ -83,7 +89,9 @@ public class EndpointRegistry {
             }
         }
 
-        /** Drain outside the generation lock, then clear cache and remove this exact status. */
+        /**
+         * Drain outside the generation lock, then clear cache and remove this exact status.
+         */
         public void complete(CacheAwareService cacheAwareService, org.slf4j.Logger logger) {
             complete(cacheAwareService, logger, true);
         }
@@ -140,12 +148,21 @@ public class EndpointRegistry {
             roleMaps(RoleType.values());
 
     private final EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> endpointsByRole =
-            roleMaps(RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION, RoleType.VIT);
+            roleMaps(
+                    RoleType.PREFILL,
+                    RoleType.DECODE,
+                    RoleType.PDFUSION,
+                    RoleType.VIT,
+                    RoleType.ENCODER);
 
-    /** Advisory Prefill generations, atomically replaced after each map write. */
+    /**
+     * Advisory Prefill generations, atomically replaced after each map write.
+     */
     private volatile List<PrefillRoutingEntry> prefillDirectory = List.of();
 
-    /** PDFusion uses the same Prefill planning path but a distinct role map. */
+    /**
+     * PDFusion uses the same Prefill planning path but a distinct role map.
+     */
     private volatile List<PrefillRoutingEntry> pdFusionDirectory = List.of();
 
     /**
@@ -164,7 +181,9 @@ public class EndpointRegistry {
     private final PlacementAvailability placementAvailability;
     private final Object lifecycleGate = new Object();
 
-    /** Null while open; every closing caller observes the same completed cleanup result. */
+    /**
+     * Null while open; every closing caller observes the same completed cleanup result.
+     */
     private volatile CompletableFuture<Throwable> closeCompletion;
 
     private int inflightPublications;
@@ -317,7 +336,9 @@ public class EndpointRegistry {
         return captured.get();
     }
 
-    /** Return the endpoint only when it belongs to the expected status generation. */
+    /**
+     * Return the endpoint only when it belongs to the expected status generation.
+     */
     public WorkerEndpoint get(RoleType roleType, String ipPort, WorkerStatus expectedStatus) {
         WorkerEndpoint endpoint = get(roleType, ipPort);
         return endpoint != null && endpoint.getStatus() == expectedStatus ? endpoint : null;
@@ -490,7 +511,9 @@ public class EndpointRegistry {
         }
     }
 
-    /** Keep the immutable directory in address order; request routing then needs no full sort. */
+    /**
+     * Keep the immutable directory in address order; request routing then needs no full sort.
+     */
     private <T> List<T> directoryAfterMutation(
             List<T> previous, String address, Function<T, String> addressOf, T next) {
         if (closeCompletion != null) {
@@ -514,7 +537,9 @@ public class EndpointRegistry {
         return List.copyOf(updated);
     }
 
-    /** Detach confirmed unavailable generations without waiting for local status application. */
+    /**
+     * Detach confirmed unavailable generations without waiting for local status application.
+     */
     public Retirement beginRequestedRetirement(RoleType role, String address, WorkerStatus status) {
         if (status.retirementReason() == null || !status.lock.tryLock()) {
             return null;
@@ -575,7 +600,9 @@ public class EndpointRegistry {
         return retirement;
     }
 
-    /** Resolve the barrier after the exact generation's drain and finalization. */
+    /**
+     * Resolve the barrier after the exact generation's drain and finalization.
+     */
     private void resolveDetachedGeneration() {
         synchronized (lifecycleGate) {
             checkState(inflightDetachedRetirements > 0, "Detached retirement count underflow");
@@ -611,12 +638,13 @@ public class EndpointRegistry {
             case PREFILL, PDFUSION ->
                     new PrefillEndpoint(
                             status,
-                            configService.loadBalanceConfig(),
+                            configService::loadBalanceConfig,
                             dispatcher,
                             reporter,
                             placementAvailability);
             case DECODE -> new DecodeEndpoint(status, requests, placementAvailability);
             case VIT -> new WorkerEndpoint(status);
+            case ENCODER -> new EncoderEndpoint(status, requests, placementAvailability);
             case FRONTEND -> throw new AssertionError("validated above");
         };
     }
@@ -670,7 +698,9 @@ public class EndpointRegistry {
         Failures.rethrow(failure, "EndpointRegistry close failed");
     }
 
-    /** Wait for every generation detached before the close gate linearized. */
+    /**
+     * Wait for every generation detached before the close gate linearized.
+     */
     private void awaitDetachedRetirements() {
         boolean interrupted = false;
         long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(retirementTimeoutMs);
@@ -773,7 +803,9 @@ public class EndpointRegistry {
         return failure;
     }
 
-    /** Immutable diagnostic view; callers know the role of each resource owner. */
+    /**
+     * Immutable diagnostic view; callers know the role of each resource owner.
+     */
     public Map<String, WorkerEndpoint> endpointSnapshot(RoleType role) {
         Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(role);
         return endpoints == null ? Map.of() : Map.copyOf(endpoints);
@@ -781,7 +813,9 @@ public class EndpointRegistry {
 
     public record Counts(int discovered, int published) {}
 
-    /** Cheap role counts; no endpoint or request snapshots are constructed. */
+    /**
+     * Cheap role counts; no endpoint or request snapshots are constructed.
+     */
     public Counts counts(RoleType role) {
         Objects.requireNonNull(role, "role");
         Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(role);
@@ -796,7 +830,7 @@ public class EndpointRegistry {
      * @param retainForSchedulerCleanup current directory lookup, called outside endpoint locks;
      *                                  candidates are revalidated under the ledger lock before eviction
      */
-    public void evictExpiredOrphans(long ttlMs, LongPredicate retainForSchedulerCleanup) {
+    public void evictExpiredOrphans(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
         for (RoleType role : List.of(RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION)) {
             endpointsByRole
                     .get(role)
@@ -824,7 +858,9 @@ public class EndpointRegistry {
         }
     }
 
-    /** Immutable point-in-time view of discovered generations for one role. */
+    /**
+     * Immutable point-in-time view of discovered generations for one role.
+     */
     public Map<String, WorkerStatus> statusSnapshot(RoleType role) {
         if (role == null) {
             return Map.of();
@@ -832,7 +868,9 @@ public class EndpointRegistry {
         return Map.copyOf(statusesByRole.get(role));
     }
 
-    /** Accept updates only for an exact current generation while this registry is open. */
+    /**
+     * Accept updates only for an exact current generation while this registry is open.
+     */
     public boolean isCurrentStatus(RoleType role, String address, WorkerStatus expected) {
         return closeCompletion == null
                 && expected != null
@@ -862,13 +900,20 @@ public class EndpointRegistry {
         WorkerStatus discovered =
                 Objects.requireNonNull(discoveredFactory.get(), "discovered status");
         checkArgument(
-                discovered.getRole() == role && address.equals(discovered.getIpPort()),
+                discovered.getRole() == role && address.equals(discovered.getLogicalIpPort()),
                 "Discovered WorkerStatus identity does not match directory key");
         synchronized (lifecycleGate) {
             checkState(closeCompletion == null, "EndpointRegistry is closing");
             WorkerStatus raced = statuses.putIfAbsent(address, discovered);
             return raced == null ? discovered : raced;
         }
+    }
+
+    @Override
+    public List<WorkerStatus> getWorkerStatuses(RoleType role, String group) {
+        return statusSnapshot(role).values().stream()
+                .filter(worker -> group == null || group.equals(worker.getGroup()))
+                .toList();
     }
 
     public int discoveredCount() {

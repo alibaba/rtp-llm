@@ -95,7 +95,7 @@ class EndpointRegistryRoleTest {
                         EndpointTestSupport.publishEndpoint(
                                 registry, role, "127.0.0.1:8001", status(role, 8001));
         EndpointTestSupport.commitUnqueued(endpoint, 91L, 20L);
-        registry.evictExpiredOrphans(0, id -> id == 91L);
+        registry.evictExpiredOrphans(0, id -> id.equals("91"));
         assertEquals(1, endpoint.ownership.stats().locallyOwnedRequests());
         registry.evictExpiredOrphans(0, ignored -> false);
         assertEquals(0, endpoint.ownership.stats().locallyOwnedRequests());
@@ -107,7 +107,7 @@ class EndpointRegistryRoleTest {
             names = {"PREFILL", "PDFUSION", "DECODE", "VIT"})
     void notificationFailureWithdrawsPublishedGenerationAndClosesItsResources(RoleType role) {
         WorkerStatus status = status(role, 8091);
-        String address = status.getIpPort();
+        String address = status.getLogicalIpPort();
         IllegalStateException failure =
                 new IllegalStateException("publication notification failed");
         java.util.concurrent.atomic.AtomicReference<WorkerEndpoint> published =
@@ -323,7 +323,7 @@ class EndpointRegistryRoleTest {
                 detachUnderGenerationLock(RoleType.PREFILL, secondAddress, secondStatus);
         assertNotNull(detached);
         detached.complete(
-                org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
+                org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
                 org.slf4j.LoggerFactory.getLogger(getClass()));
         assertEquals(
                 Set.of(firstAddress, thirdAddress),
@@ -368,7 +368,7 @@ class EndpointRegistryRoleTest {
                 detachUnderGenerationLock(RoleType.VIT, ipPort, replacement);
         assertNotNull(detached);
         detached.complete(
-                org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
+                org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
                 org.slf4j.LoggerFactory.getLogger(getClass()));
         assertNull(registry.get(RoleType.VIT, ipPort));
     }
@@ -384,7 +384,7 @@ class EndpointRegistryRoleTest {
         try (WorkerEndpoint.GenerationPin pin = oldEndpoint.tryPinGeneration()) {
             assertTrue(pin != null);
             oldReservation =
-                    oldEndpoint.tryReserveQueuedRequest(pin, 41L, 100L, 110L, 50, null).handle();
+                    oldEndpoint.tryReserveQueuedRequest(pin, "41", 100L, 110L, 50, null).handle();
         }
 
         retire(RoleType.DECODE, ipPort, oldEndpoint.getStatus());
@@ -408,7 +408,7 @@ class EndpointRegistryRoleTest {
     @Test
     void unpublishedRetirementOwnsFinalizationAndCannotRemoveItsReplacement() throws Exception {
         WorkerStatus status = status(RoleType.PREFILL, 8300);
-        String address = status.getIpPort();
+        String address = status.getLogicalIpPort();
         registry.currentOrDiscover(RoleType.PREFILL, address, () -> status);
         EndpointRegistry.Retirement retirement =
                 detachUnderGenerationLock(RoleType.PREFILL, address, status);
@@ -416,7 +416,7 @@ class EndpointRegistryRoleTest {
         assertSame(status, retirement.status());
         assertFalse(status.isActiveGeneration());
         assertSame(status, registry.statusSnapshot(RoleType.PREFILL).get(address));
-        var cache = mock(org.flexlb.cache.service.CacheAwareService.class);
+        var cache = mock(org.flexlb.cache.match.CacheAwareService.class);
         org.mockito.Mockito.doThrow(new IllegalStateException("cache unavailable"))
                 .doNothing()
                 .when(cache)
@@ -461,7 +461,7 @@ class EndpointRegistryRoleTest {
         EndpointRegistry.Retirement detached = detachUnderGenerationLock(role, address, status);
         assertNotNull(detached);
         detached.complete(
-                org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
+                org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
                 org.slf4j.LoggerFactory.getLogger(getClass()));
     }
 }

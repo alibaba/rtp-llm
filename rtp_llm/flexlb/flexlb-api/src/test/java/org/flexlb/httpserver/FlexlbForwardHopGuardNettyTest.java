@@ -52,7 +52,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Real Netty boundaries for forwarding guards and exact-owner cancellation. */
+/**
+ * Real Netty boundaries for forwarding guards and exact-owner cancellation.
+ */
 class FlexlbForwardHopGuardNettyTest {
 
     @Test
@@ -261,10 +263,10 @@ class FlexlbForwardHopGuardNettyTest {
                 Client client = Client.connect(originalMaster.grpcPort())) {
             when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                     originalMaster.requestState)
-                            .getRequestState(requestId, 0L))
+                            .getRequestState(String.valueOf(requestId), 0L))
                     .thenReturn(requestState(requestId, RequestState.Phase.ACKNOWLEDGED));
             when(originalMaster.requestScheduler.cancel(
-                            requestId, 0L, CancelReason.CLIENT_CANCELLED))
+                            String.valueOf(requestId), 0L, CancelReason.CLIENT_CANCELLED))
                     .thenReturn(requestState(requestId, RequestState.Phase.CANCELLED));
 
             originalMaster.isMaster.set(true);
@@ -294,7 +296,7 @@ class FlexlbForwardHopGuardNettyTest {
                     FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_CANCELLED,
                     response.getLifecycle().getState());
             verify(originalMaster.requestScheduler)
-                    .cancel(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+                    .cancel(String.valueOf(requestId), 0L, CancelReason.CLIENT_CANCELLED);
             assertEquals(2, originalMaster.inboundCalls.get());
             originalMaster.awaitExecutorIdle();
         }
@@ -311,10 +313,10 @@ class FlexlbForwardHopGuardNettyTest {
             follower.masterAddress.set(currentMaster.httpAddress());
             currentMaster.isMaster.set(true);
             when(follower.requestScheduler.cancel(
-                            unrelatedLocalId, 0L, CancelReason.CLIENT_CANCELLED))
+                            String.valueOf(unrelatedLocalId), 0L, CancelReason.CLIENT_CANCELLED))
                     .thenReturn(requestState(unrelatedLocalId, RequestState.Phase.CANCELLED));
             when(currentMaster.requestScheduler.cancel(
-                            requestedId, 0L, CancelReason.CLIENT_CANCELLED))
+                            String.valueOf(requestedId), 0L, CancelReason.CLIENT_CANCELLED))
                     .thenReturn(requestState(requestedId, RequestState.Phase.CANCELLED));
 
             FlexlbScheduleProtocol.FlexlbCancelResponsePB response =
@@ -330,11 +332,14 @@ class FlexlbForwardHopGuardNettyTest {
             assertFalse(response.getFound());
             assertFalse(response.hasLifecycle());
             verify(follower.requestScheduler)
-                    .cancel(requestedId, 0L, CancelReason.CLIENT_CANCELLED);
+                    .cancel(String.valueOf(requestedId), 0L, CancelReason.CLIENT_CANCELLED);
             verify(follower.requestScheduler, never())
-                    .cancel(unrelatedLocalId, 0L, CancelReason.CLIENT_CANCELLED);
+                    .cancel(String.valueOf(unrelatedLocalId), 0L, CancelReason.CLIENT_CANCELLED);
             verify(currentMaster.requestScheduler, never())
-                    .cancel(anyLong(), anyLong(), any(CancelReason.class));
+                    .cancel(
+                            org.mockito.ArgumentMatchers.anyString(),
+                            anyLong(),
+                            any(CancelReason.class));
             assertEquals(1, follower.inboundCalls.get());
             assertEquals(0, currentMaster.inboundCalls.get());
             follower.awaitExecutorIdle();
@@ -350,7 +355,15 @@ class FlexlbForwardHopGuardNettyTest {
     }
 
     private static RequestState requestState(long requestId, RequestState.Phase phase) {
-        return new RequestState(requestId, phase, DeliveryClaimKind.NONE, 0L, 1L, 2L, phase.name());
+        return new RequestState(
+                Long.toString(requestId),
+                requestId,
+                phase,
+                DeliveryClaimKind.NONE,
+                0L,
+                1L,
+                2L,
+                phase.name());
     }
 
     private static final class Client implements AutoCloseable {
@@ -399,8 +412,9 @@ class FlexlbForwardHopGuardNettyTest {
             when(consistency.getMasterHostIpPort()).thenAnswer(invocation -> masterAddress.get());
 
             ConfigService configService = mock(ConfigService.class);
-            when(configService.loadBalanceConfig())
-                    .thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
+            var config = org.flexlb.mock.TestFlexlbConfigs.create();
+            config.setDispatcher(org.flexlb.config.ConfigTestSupport.nonBatch());
+            when(configService.loadBalanceConfig()).thenReturn(config);
             requestScheduler = mock(RequestScheduler.class);
             Response local = new Response();
             local.setSuccess(true);

@@ -7,12 +7,22 @@ package org.flexlb.balance.scheduler;
  * records whether the corresponding external delivery has actually started.</p>
  */
 public enum DeliveryClaimKind {
-    /** The request is still wholly owned by the scheduler. */
+    /**
+     * The request is still wholly owned by the scheduler.
+     */
     NONE,
 
-    /** An EnqueueBatch operation may have made the request visible to the engine. */
+    /**
+     * An EnqueueBatch operation may have made the request visible to the engine.
+     */
     BATCH_ENQUEUE,
 
-    /** The route decision may have been returned to the caller. */
-    ROUTE_DECISION
+    /**
+     * The route decision may have been returned to the caller.
+     */
+    ROUTE_DECISION;
+
+    public boolean isClaimed() {
+        return this != NONE;
+    }
 }

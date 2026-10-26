@@ -12,7 +12,9 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Regression coverage for production endpoint selection in the mock-engine loop. */
+/**
+ * Regression coverage for production endpoint selection in the mock-engine loop.
+ */
 class ProductionRoutingDeadlineE2ETest {
 
     private static final int BASE_PORT = 63300;
@@ -43,7 +45,7 @@ class ProductionRoutingDeadlineE2ETest {
 
             CompletableFuture<Response> first = h.scheduler.submit(nearDeadline);
             CompletableFuture<Response> second =
-                    h.scheduler.submit(h.context(batchFollowerId, 50, 10_000L, 8));
+                    h.scheduler.submit(h.context(Long.toString(batchFollowerId), 50, 10_000L, 8));
             Response firstResponse = first.get(1, TimeUnit.SECONDS);
             Response secondResponse = second.get(1, TimeUnit.SECONDS);
 

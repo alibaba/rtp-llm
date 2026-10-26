@@ -31,7 +31,7 @@ import java.util.List;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
@@ -104,7 +104,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public Acquisition<ReserveStatus, ReservationHandle> tryReserveQueuedRequest(
             GenerationPin pin,
-            long requestId,
+            String requestId,
             long hardKv,
             long expectedKv,
             int priority,
@@ -113,7 +113,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return state.tryReserveQueuedRequest(requestId, hardKv, expectedKv, priority, capacity);
     }
 
-    /** LOCAL_ROLLBACK requires local ownership; other evidence may leave Engine/protocol ownership intact. */
+    /**
+     * LOCAL_ROLLBACK requires local ownership; other evidence may leave Engine/protocol ownership intact.
+     */
     public ResourceChange<ReservationReleaseResult> release(
             ReservationHandle reservation, ReleaseReason reason) {
         ResourceChange<ReservationReleaseResult> result = state.release(reservation, reason);
@@ -123,7 +125,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return result;
     }
 
-    /** Exact resource obligation; absence also covers retired or replaced reservation identities. */
+    /**
+     * Exact resource obligation; absence also covers retired or replaced reservation identities.
+     */
     public DecodeResources.Ownership ownership(ReservationHandle reservation) {
         return state.ownership(reservation);
     }
@@ -157,7 +161,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    /** Resolve a permit once. ENGINE_OWNED means handoff, not Worker acceptance. */
+    /**
+     * Resolve a permit once. ENGINE_OWNED means handoff, not Worker acceptance.
+     */
     public ResourceChange<EngineDispatchPermitTransferStatus> dispatch(
             EngineDispatchPermit permit, DispatchOutcome outcome) {
         java.util.Objects.requireNonNull(permit, "permit");
@@ -198,7 +204,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    /** Lock-free waiter hint, including retirement or lost ownership. Acquisition still rechecks capacity. */
+    /**
+     * Lock-free waiter hint, including retirement or lost ownership. Acquisition still rechecks capacity.
+     */
     public boolean shouldRetryDispatch(ReservationHandle reservation, AdmissionCapacity capacity) {
         return isRetired() || state.shouldRetryDispatch(reservation, capacity);
     }
@@ -208,7 +216,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         private final DecodeEndpoint endpoint;
         private final DecodeState.DispatchLease lease;
 
-        /** Null until resolved; cached result for dispatch, including ownership lost after release. */
+        /**
+         * Null until resolved; cached result for dispatch, including ownership lost after release.
+         */
         private EngineDispatchPermitTransferStatus dispatchResult;
 
         private EngineDispatchPermit(DecodeEndpoint endpoint, DecodeState.DispatchLease lease) {
@@ -216,7 +226,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
             this.lease = lease;
         }
 
-        /** Identity check uses immutable lease fields; it does not acquire the resource lock. */
+        /**
+         * Identity check uses immutable lease fields; it does not acquire the resource lock.
+         */
         public boolean belongsTo(DecodeEndpoint expected, ReservationHandle reservation) {
             return endpoint == expected
                     && reservation != null
@@ -240,7 +252,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    /** The caller owns this subscription and closes it when its capacity wait ends. */
+    /**
+     * The caller owns this subscription and closes it when its capacity wait ends.
+     */
     public Runnable watchEngineDispatchCapacity(Runnable listener) {
         java.util.Objects.requireNonNull(listener, "listener");
         engineDispatchCapacityListeners.add(listener);
@@ -251,7 +265,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public ReservationHandle replaceQueuedRequests(
             List<ReservationHandle> victims,
-            long incomingRequestId,
+            String incomingRequestId,
             long hardKv,
             long expectedKv,
             int priority,
@@ -274,7 +288,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public PreemptionBeginResult beginPreemption(
             long attemptToken,
             List<ReservationHandle> victims,
-            long incomingRequestId,
+            String incomingRequestId,
             long hardKv,
             long expectedKv,
             int priority,
@@ -298,7 +312,34 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    /** Resource transaction only. Its workflow owner publishes the returned edge after unlocking. */
+    public DecodeResources.ReturnedPreemption beginReturnedPreemption(
+            long token,
+            List<ReservationHandle> victims,
+            String incomingRequestId,
+            long inputKv,
+            long inputAndMaxOutputKv,
+            int priority,
+            AdmissionCapacity capacity) {
+        GenerationPin pin = tryPinGeneration();
+        if (pin == null) {
+            return new DecodeResources.ReturnedPreemption(
+                    PreemptionBeginResult.ENDPOINT_RETIRED, null);
+        }
+        try (pin) {
+            return state.beginReturnedPreemption(
+                    token,
+                    victims,
+                    incomingRequestId,
+                    inputKv,
+                    inputAndMaxOutputKv,
+                    priority,
+                    capacity);
+        }
+    }
+
+    /**
+     * Resource transaction only. Its workflow owner publishes the returned edge after unlocking.
+     */
     public ResourceChange<MutationStatus> updatePreemption(
             long attemptToken, PreemptionUpdate update) {
         return state.updatePreemption(attemptToken, update);
@@ -429,7 +470,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    public int evictExpiredRequests(long ttlMs, LongPredicate retainForSchedulerCleanup) {
+    public int evictExpiredRequests(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
         var orphanCandidates = state.cleanupCandidates();
         orphanCandidates.keySet().removeIf(retainForSchedulerCleanup::test);
         DecodeState.CleanupResult result = state.evictExpiredRequests(ttlMs, orphanCandidates);
@@ -444,7 +485,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public void reportBatchMetrics(DeliveryMetricsReporter reporter) {
         DecodeState.Stats stats = state.stats();
         reporter.reportDecodeInflight(
-                getIp(),
+                getStatus().getMetricIpPort(),
                 stats.inflight(),
                 stats.totalLoad(),
                 stats.expectedKv(),
@@ -453,7 +494,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     public void reportAdmissionMetrics(RequestSchedulerReporter reporter) {
-        reporter.reportDecodeAdmission(ipPort(), resourceSnapshot());
+        reporter.reportDecodeAdmission(getStatus().getMetricIpPort(), resourceSnapshot());
     }
 
     public enum CapacityEdge {

@@ -7,7 +7,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -31,7 +31,9 @@ import static org.mockito.Mockito.nullable;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Real registration and queue lifecycle; endpoint selection is isolated by a mock router. */
+/**
+ * Real registration and queue lifecycle; endpoint selection is isolated by a mock router.
+ */
 class QueueRegistrationCancellationTest {
     @Test
     void registrationHookRunsBeforeSelectionAndNormalRequestsStillStart() throws Exception {
@@ -72,7 +74,7 @@ class QueueRegistrationCancellationTest {
                             () -> {
                                 assertSame(f.queue, context.data().getScheduler());
                                 assertNotNull(
-                                        f.queue.cancel(902L, 0L, CancelReason.CLIENT_CANCELLED));
+                                        f.queue.cancel("902", 0L, CancelReason.CLIENT_CANCELLED));
                             });
             assertFalse(result.get(2L, TimeUnit.SECONDS).isSuccess());
             assertEquals(0, RequestProtocolTestSupport.queuedCount(f.queue));
@@ -102,7 +104,7 @@ class QueueRegistrationCancellationTest {
                                             }));
             try {
                 assertTrue(registered.await(2L, TimeUnit.SECONDS));
-                assertNotNull(f.queue.cancel(903L, 0L, CancelReason.CLIENT_CANCELLED));
+                assertNotNull(f.queue.cancel("903", 0L, CancelReason.CLIENT_CANCELLED));
                 SchedulerTestSupport.runtime(f.queue).shutdown();
 
                 assertFalse(submitted.isDone(), "a cancelled hook holds no scheduling resources");
@@ -163,13 +165,13 @@ class QueueRegistrationCancellationTest {
                             new PlacementAvailability(),
                             SchedulingTestConfig.capacity(config),
                             org.mockito.Mockito.mock(
-                                    org.flexlb.service.RecentCacheKeyTraceReporter.class));
+                                    org.flexlb.service.TheoryCacheHitReporter.class));
             runtime.registerScheduler(queue);
             queue.start();
         }
 
         RequestContext context(long id) {
-            return RequestProtocolTestSupport.context(config, id);
+            return RequestProtocolTestSupport.context(config, String.valueOf(id));
         }
 
         @Override
