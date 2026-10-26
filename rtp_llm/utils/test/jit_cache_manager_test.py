@@ -945,6 +945,33 @@ class JitCacheTest(unittest.TestCase):
         self.assertIsNotNone(scope)
         self.assertTrue(scope.startswith("cxx-"))
 
+    def test_startup_uses_configured_root_with_and_without_remote(self):
+        base = self.root / "configured"
+        local_root = base / jit.RTP_JIT_VERSION
+        remote = self.root / "remote"
+        remote.mkdir()
+        with _fake_scopes(), mock.patch.object(
+            jit, "Observer", return_value=mock.Mock()
+        ), mock.patch.object(
+            store, "restore_lock", wraps=store.restore_lock
+        ) as lock:
+            for remote_dir in ("", str(remote)):
+                ready = threading.Event()
+                manager = backend._setup_jit_cache(
+                    remote_dir, 0, ready, local_jit_dir=str(base)
+                )
+                self.assertTrue(ready.is_set())
+                self.assertTrue(
+                    Path(os.environ["TRITON_CACHE_DIR"]).is_relative_to(local_root)
+                )
+                if remote_dir:
+                    self.managers.append(manager)
+                    self.assertEqual(manager.local_root, local_root)
+                    lock.assert_called_once_with(local_root)
+                else:
+                    self.assertIsNone(manager)
+                    lock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

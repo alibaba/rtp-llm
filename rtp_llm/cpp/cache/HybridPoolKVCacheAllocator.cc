@@ -257,6 +257,15 @@ void HybridPoolKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesTy
     }
 }
 
+std::vector<torch::Tensor> HybridPoolKVCacheAllocator::gpuCacheTensors() const {
+    std::vector<torch::Tensor> tensors;
+    for (const auto& pool : group_block_pools_) {
+        const auto& buffers = pool->gpuCacheTensors();
+        tensors.insert(tensors.end(), buffers.begin(), buffers.end());
+    }
+    return tensors;
+}
+
 CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     CacheLayerLayout layout;
     layout.layer_to_groups          = config_.layer_to_group_id;

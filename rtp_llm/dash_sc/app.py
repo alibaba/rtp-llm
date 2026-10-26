@@ -15,7 +15,7 @@ import signal
 import threading
 import time
 import traceback
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from rtp_llm.config.engine_config import derive_grammar_compile_threads
 from rtp_llm.config.grammar_tokenizer_info import (
@@ -43,6 +43,7 @@ from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
+from rtp_llm.utils.scr_template_lifecycle import get_template_lifecycle
 
 _PROXY_MODE_ENV_KEY = "DASH_SC_GRPC_PROXY_MODE"
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
@@ -556,7 +557,25 @@ class DashScApp:
         except Exception as e:
             logging.warning("[DashScApp] servicer cleanup failed: %s", e, exc_info=True)
 
-    def start(self, ready_pipe_writer=None, bind_barrier=None) -> None:
+    def start(
+        self,
+        ready_pipe_writer=None,
+        bind_barrier=None,
+        on_ready: Optional[Callable[[], None]] = None,
+        on_prebind: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Start the gRPC server and block on the process service loop.
+
+        ``on_prebind`` runs after local process initialization and the local
+        bind barrier, but before the network listener is created.  It is used
+        by the SCR template path to make the control-plane barrier the last
+        startup gate before serving.
+
+        ``on_ready`` runs after ``start_on_loop`` has successfully bound the
+        gRPC endpoint, but before this method enters its shutdown wait.  The
+        callback is deliberately here (rather than in the launcher after
+        ``start``) because ``start`` is a blocking, main-thread lifecycle.
+        """
         servicer: Any = None
         try:
             port = self.server_config.dash_sc_grpc_server_port
@@ -624,9 +643,7 @@ class DashScApp:
                     and grammar_config.grammar_backend.strip().lower() == "xgrammar"
                 ):
                     grammar_validator = GrammarValidator(
-                        build_model_grammar_tokenizer_info_json(
-                            base_tok, model_config
-                        ),
+                        build_model_grammar_tokenizer_info_json(base_tok, model_config),
                         grammar_config,
                         self.py_env_configs.grammar_admission_config,
                     )
@@ -643,6 +660,9 @@ class DashScApp:
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
                     grammar_validator=grammar_validator,
+                )
+                get_template_lifecycle().register_fixup(
+                    f"dash-inference:{id(servicer)}", servicer
                 )
 
             loop = self._start_enqueue_loop()
@@ -671,6 +691,8 @@ class DashScApp:
                 self.server_config.rank_id,
                 self.server_config.frontend_server_id,
             )
+            if on_prebind is not None:
+                on_prebind()
             logging.info(
                 "[DashScApp] starting gRPC server rank_id=%s server_id=%s port=%s mode=%s",
                 self.server_config.rank_id,
@@ -689,6 +711,8 @@ class DashScApp:
                 rank_id=self.server_config.rank_id,
             )
             logging.info("[DashScApp] gRPC server bound on port %s", port)
+            if on_ready is not None:
+                on_ready()
         except BaseException as e:
             _abort_bind_barrier(bind_barrier)
             error_trace = traceback.format_exc()

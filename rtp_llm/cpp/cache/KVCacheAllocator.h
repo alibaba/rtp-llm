@@ -43,6 +43,8 @@ public:
                                                             const CacheKeysType&   cache_keys,
                                                             bool                   is_connector = false) = 0;
 
+    virtual std::vector<torch::Tensor> gpuCacheTensors() const;
+
     virtual CacheLayerLayout allLayerCacheBase() const                                     = 0;
     virtual bool             updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                            const std::vector<int>&        block_src_batch,

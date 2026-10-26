@@ -173,13 +173,15 @@ class RemoteSnapshotStore:
         target: Path,
         cancel: threading.Event | None = None,
         commit=None,
+        *,
+        prepare=None,
     ) -> bool:
         # commit: context manager entered around every tree swap/claim so the
         # caller's adopt-vs-abandon decision is atomic; providing it means the
         # caller already holds restore_lock(target).
         if commit is None:
             with restore_lock(target):
-                return self.restore(target, cancel, nullcontext())
+                return self.restore(target, cancel, nullcontext(), prepare=prepare)
         ready = target.with_name(f"{target.name}.ready")
         if ready.exists() or (cancel and cancel.is_set()):
             return False
@@ -195,6 +197,8 @@ class RemoteSnapshotStore:
                 staging.mkdir(parents=True)
                 try:
                     extract_zstd_tar(snapshot, staging)
+                    if prepare is not None:
+                        prepare(staging, target)
                 except Exception:
                     logging.warning("JIT snapshot unusable: %s", snapshot)
                     continue

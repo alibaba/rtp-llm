@@ -15,8 +15,11 @@ py_library(
     ]),
     deps = [
         ":request_headers",
+        "//rtp_llm:lora",
         "//rtp_llm:warmup",
         "//rtp_llm:vipserver",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
         "//rtp_llm/cpp/model_rpc/proto:flexlb_schedule_service_py_proto",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
     ]
 )

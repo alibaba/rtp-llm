@@ -12,9 +12,29 @@ cc_import(
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
 )
 
+cc_library(
+    name = "cuda13_arm_torch_runtime",
+    # Torch 2.11 ARM bundles these outside the legacy torch.libs directory.
+    # Test executables need explicit link and runfiles dependencies.
+    srcs = [
+        "@pip_cuda13_arm_torch_torch//:site-packages/torch/lib/libarm_compute.so",
+        "@pip_cuda13_arm_torch_torch//:site-packages/torch/lib/libarm_compute_graph.so",
+        "@pip_cuda13_arm_torch_torch//:site-packages/torch/lib/libgfortran.so.5",
+        "@pip_cuda13_arm_torch_torch//:site-packages/torch/lib/libnvpl_blas_core.so.0",
+        "@pip_cuda13_arm_torch_torch//:site-packages/torch/lib/libnvpl_blas_lp64_gomp.so.0",
+        "@pip_cuda13_arm_torch_torch//:site-packages/torch/lib/libnvpl_lapack_core.so.0",
+        "@pip_cuda13_arm_torch_torch//:site-packages/torch/lib/libnvpl_lapack_lp64_gomp.so.0",
+        "@pip_cuda13_arm_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+        "@pip_cuda13_arm_torch_nvidia_nvshmem_cu13//:site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3",
+    ],
+)
+
 cuda13_torch_link_deps = select({
     "@//:using_cuda13_x86": [
         ":cuda13_torch_nvshmem",
+    ],
+    "@//:using_cuda13_arm": [
+        ":cuda13_arm_torch_runtime",
     ],
     "//conditions:default": [],
 })
@@ -101,4 +121,18 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
     exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "deferred_engine_start_test",
+    srcs = ["DeferredEngineStartTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":mock_engine",
+        "//rtp_llm/cpp/model_rpc:model_rpc_server",
+        "@havenask//aios/autil:base64",
+        "@havenask//aios/autil:zlib",
+    ] + cuda13_torch_link_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20"},
 )

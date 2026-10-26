@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.server_config_setup import set_parallelism_config
 
 torch.cuda.set_device = lambda x: None
 
@@ -269,7 +269,7 @@ class DistributedServerTest(unittest.TestCase):
         @patch.dict(
             "os.environ",
             {
-                "GANG_ANNOCATION_PATH": "rtp_llm/distribute/test/testdata/annocation",
+                "GANG_ANNOTATION_PATH": "rtp_llm/distribute/test/testdata/annocation",
                 "TP_SIZE": "2",
                 "PP_SIZE": "1",
                 "WORLD_SIZE": "2",
@@ -330,7 +330,7 @@ class DistributedServerTest(unittest.TestCase):
         @patch.dict(
             "os.environ",
             {
-                "GANG_ANNOCATION_PATH": "rtp_llm/distribute/test/testdata/annocation",
+                "GANG_ANNOTATION_PATH": "rtp_llm/distribute/test/testdata/annocation",
                 "MODEL_TYPE": "fake_model",
             },
             clear=True,

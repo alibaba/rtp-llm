@@ -79,6 +79,9 @@ public:
         int block_index, int layer_id, KVCacheRegionName region_name, int partition_count, int partition_id) const;
 
     CacheLayerLayout allLayerCacheBase() const;
+    std::vector<torch::Tensor> gpuCacheTensors() const {
+        return allocator_ ? allocator_->gpuCacheTensors() : std::vector<torch::Tensor>{};
+    }
 
     // for main model; it's too hack for mtp module, but we need to keep it for now
     CacheLayerLayout getMainModelCacheLayerLayout() const;

@@ -1,11 +1,13 @@
 import hashlib
 import importlib.metadata
+import json
 import logging
 import os
 import platform
 import shlex
 import subprocess
 import sysconfig
+import tempfile
 import threading
 import time
 from contextlib import suppress
@@ -32,6 +34,16 @@ RTP_JIT_VERSION = "v1"
 # fill it and the rest reuse it (artifacts are content-addressed; builders self-coordinate).
 LOCAL_JIT_DIR = f"/tmp/rtp-llm/.jit_cache/{RTP_JIT_VERSION}"
 CUDA, ROCM = "cuda", "rocm"
+
+
+def resolve_local_root(value: str = "") -> Path:
+    """Resolve an optional cache base directory; keep the versioned layout."""
+    if not value.strip():
+        return Path(LOCAL_JIT_DIR)
+    base = Path(value.strip()).expanduser()
+    if not base.is_absolute():
+        raise ValueError("LOCAL_JIT_DIR must be an absolute local directory")
+    return Path(os.path.abspath(base)) / RTP_JIT_VERSION
 
 
 def resolve_remote_root(value) -> Path | None:
@@ -178,14 +190,16 @@ COMPONENTS = (
 # fmt: on
 
 
-def _resolve_components() -> tuple[Component, ...]:
+def _resolve_components(local_root: Path | None = None) -> tuple[Component, ...]:
     import torch
 
-    root = Path(LOCAL_JIT_DIR)
+    root = local_root if local_root is not None else Path(LOCAL_JIT_DIR)
     backend = ROCM if torch.version.hip else CUDA if torch.version.cuda else None
     if not backend:
         return ()
     accelerator, cpp = _accelerator_scope(backend), _cpp_runtime_scope()
+    if local_root is not None and cpp is None:
+        raise RuntimeError("cannot resolve the Triton cache scope for LOCAL_JIT_DIR")
     scopes = {
         "accelerator": accelerator,
         "torch": _torch_scope(accelerator, cpp),
@@ -205,24 +219,41 @@ def _resolve_components() -> tuple[Component, ...]:
     return tuple(result)
 
 
-def clear_jit_locks() -> None:
+def clear_jit_locks(local_root: Path | None = None) -> None:
     # Reap dead builder locks so the next load() doesn't hang on a corpse left by
     # a killed build; reap_dead_lock spares any a live process still holds.
     try:
-        for lock in Path(LOCAL_JIT_DIR).rglob("*lock"):
+        root = local_root if local_root is not None else Path(LOCAL_JIT_DIR)
+        for lock in root.rglob("*lock"):
             if is_lock_file(lock.name):
                 reap_dead_lock(lock)
     except OSError:
         logging.warning("JIT lock cleanup skipped", exc_info=True)
 
 
-def setup_jit_cache_env() -> tuple[tuple[Component, ...], bool]:
+def setup_jit_cache_env(
+    local_root: Path | None = None,
+) -> tuple[tuple[Component, ...], bool]:
+    if local_root is not None:
+        # An explicit location may be required for checkpoint correctness. Do not
+        # silently fall back to upstream cache paths if it cannot load/build .so's.
+        # Probe the stable base, not the versioned tree rank 0 may be swapping
+        # while another rank runs setup before waiting on jit_cache_ready.
+        base = local_root.parent
+        base.mkdir(parents=True, exist_ok=True)
+        if os.statvfs(base).f_flag & os.ST_NOEXEC:
+            raise ValueError(f"LOCAL_JIT_DIR is on a noexec mount: {local_root}")
+        with tempfile.TemporaryFile(dir=base):
+            pass
     try:
-        components = _resolve_components()
+        components = _resolve_components(local_root)
     except Exception:
+        if local_root is not None:
+            raise
         logging.exception("JIT cache environment setup failed; using upstream defaults")
         return (), False
-    clear_jit_locks()
+    clear_jit_locks(local_root)
+    logging.info("JIT local cache root: %s", local_root or LOCAL_JIT_DIR)
     managed = []
     for item in components:
         local = str(item.local_dir)
@@ -237,6 +268,29 @@ def setup_jit_cache_env() -> tuple[tuple[Component, ...], bool]:
                 resolved,
             )
     return tuple(managed), any("torch" in item.scopes for item in managed)
+
+
+def _relocate_triton_groups(staging: Path, target: Path) -> None:
+    # FileCacheManager stores absolute child_paths. Rebase only the unpublished
+    # snapshot, otherwise a relocated cache can still read artifacts from /tmp.
+    for group in (staging / "triton").rglob("__grp__*.json"):
+        data = json.loads(group.read_text())
+        children = data.get("child_paths")
+        if not isinstance(children, dict):
+            continue
+        relocated = {}
+        for name in children:
+            if (
+                not isinstance(name, str)
+                or Path(name).name != name
+                or name in (".", "..")
+            ):
+                raise ValueError(f"unsafe Triton cache group member: {name}")
+            child = group.parent / name
+            if child.is_file():
+                relocated[name] = str(target / child.relative_to(staging))
+        data["child_paths"] = relocated
+        group.write_text(json.dumps(data))
 
 
 class _EventHandler(FileSystemEventHandler):
@@ -259,8 +313,16 @@ class _EventHandler(FileSystemEventHandler):
 
 
 class JitCacheManager:
-    def __init__(self, remote_root: Path, components: tuple[Component, ...]):
-        self.local_root = Path(LOCAL_JIT_DIR)
+    def __init__(
+        self,
+        remote_root: Path,
+        components: tuple[Component, ...],
+        local_root: Path | None = None,
+    ):
+        self.local_root = local_root if local_root is not None else Path(LOCAL_JIT_DIR)
+        self._prepare_restore = (
+            _relocate_triton_groups if local_root is not None else None
+        )
         self.components = components
         self.store = RemoteSnapshotStore(remote_root)
         self._dirty, self._stop = threading.Event(), threading.Event()
@@ -271,7 +333,9 @@ class JitCacheManager:
         if self._observer:
             return
         try:
-            if self.store.restore(self.local_root, cancel, commit):
+            if self.store.restore(
+                self.local_root, cancel, commit, prepare=self._prepare_restore
+            ):
                 logging.info("loaded JIT cache from remote snapshot")
         except Exception:
             logging.exception("JIT cache restore failed")
