@@ -75,12 +75,11 @@ public:
     // ---- Eviction selection & migration (caller owns synchronization) ----
     // Selection, task preparation, settlement, and abort mutate tree/group-set/pool/heap
     // state and must run under BlockTreeCache's mutex. Task execution is lock-free.
-    // Allocation pressure requires the entire drop plan to release its device blocks immediately.
+    // Direct DEVICE drops require the entire drop plan to release its device blocks immediately.
     bool dropLocked(size_t      group_set_id,
                     Tier        source_tier,
                     bool        notify_settled,
-                    const char* trigger_type = "force_drop",
-                    bool        require_reclaimable_device = false);
+                    const char* trigger_type = "force_drop");
     void   scheduleWatermarkEvictionsLocked(Tier tier, const TierWatermark& watermark);
     size_t computeWatermarkEvictCount(const GroupSet& group_set, Tier tier, const TierWatermark& watermark);
     // Release a detached operation's source CACHE reference after it settles, without publishing its target.
@@ -130,8 +129,7 @@ private:
     bool                              isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const;
     std::optional<TransferDescriptor> chooseVictim(size_t group_set_id,
                                                   Tier   tier,
-                                                  bool   force_drop = false,
-                                                  bool   require_reclaimable_device = false);
+                                                  bool   force_drop = false);
     bool canReclaimDeviceDrop(const TransferDescriptor& desc) const;
     // Builds the drop closure without reserving or detaching its resources.
     EvictionDropTask planDropTask(TransferDescriptor                        eviction_desc,
