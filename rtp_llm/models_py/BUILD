@@ -134,8 +134,6 @@ py_library(
     ] + select({
         # cuda13 locks ship flashinfer-python and deep-ep.
         "@//:using_cuda13_x86": flashinfer + deep + [
-            cuda13_requirement("humming-kernels"),  # Dense W8A8 still uses this.
-            "@flashinfer_opensource_sidecar//:pkg",  # Separate SM90 W4A8 MoE namespace.
             "@flash_mla_sm90_sidecar//:pkg",  # Hopper sparse attention.
         ],
         "@//:using_cuda13_arm": flashinfer + deep,

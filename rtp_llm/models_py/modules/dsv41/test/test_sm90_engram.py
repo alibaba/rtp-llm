@@ -1,4 +1,4 @@
-"""Small-table SM90 regression of the real UVA -> Humming -> inject chain."""
+"""Small-table SM90 regression of the real UVA -> DeepGEMM -> inject chain."""
 
 import hashlib
 import math

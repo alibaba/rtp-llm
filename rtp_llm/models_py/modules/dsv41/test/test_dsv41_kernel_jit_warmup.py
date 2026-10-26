@@ -397,7 +397,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self,
     ):
         # CP8 at 1M scheduler tokens must not allocate a 131072 x 32768
-        # BF16 GEMM result just to compile Humming's M-independent kernels.
+        # BF16 GEMM result merely to cover bounded kernel and quantizer signatures.
         grid = warmup._sm90_dense_m_grid(131072, 1280)
         self.assertEqual(grid, (1, 2, 3, 4, 16, 17, 511, 512, 3276, 3277, 4096))
         # Small-K linears still cover the activation quantizer's 4M boundary.
@@ -414,16 +414,24 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual(warmup._sm90_deepgemm_m_grid(3, 1280), (1, 2, 3))
         self.assertEqual(warmup._sm90_deepgemm_m_grid(0, 1280), ())
 
-    def test_sm90_backend_default_respects_updated_package_architecture(self):
+    def test_sm90_backend_is_deepgemm_on_all_architectures_and_rejects_legacy(self):
         from rtp_llm.models_py.modules.dsv41 import sm90_deepgemm_dense as dense
 
-        for arch, backend in (("x86_64", "deepgemm"), ("aarch64", "humming")):
-            with mock.patch.object(dense.platform, "machine", return_value=arch):
-                self.assertEqual(dense.select_sm90_dense_backend(5120, 8192), backend)
+        for arch in ("x86_64", "aarch64"):
+            with mock.patch("platform.machine", return_value=arch):
+                self.assertEqual(dense.select_sm90_dense_backend(5120, 8192), "deepgemm")
         with mock.patch.dict(
-            os.environ, {"DSV41_SM90_DENSE_BACKEND_MAP": '{"5120x8192":"humming"}'}
+            os.environ, {"DSV41_SM90_DENSE_BACKEND_MAP": '{"5120x8192":"deepgemm"}'}
         ):
-            self.assertEqual(dense.select_sm90_dense_backend(5120, 8192), "humming")
+            self.assertEqual(dense.select_sm90_dense_backend(5120, 8192), "deepgemm")
+        for env in (
+            {"DSV41_SM90_DENSE_BACKEND": "humming"},
+            {"DSV41_SM90_DENSE_BACKEND_MAP": '{"5120x8192":"humming"}'},
+            {"DSV41_SM90_DENSE_BACKEND_MAP": '{"1x1":"humming"}'},
+        ):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                with self.assertRaisesRegex(ValueError, "deepgemm"):
+                    dense.select_sm90_dense_backend(5120, 8192)
 
     def test_v41_single_accumulator_allows_n256_without_changing_v4(self):
         kwargs = dict(m_value=1024, n_value=32768, k_value=1536, num_sms=152)
@@ -517,7 +525,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                 warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
         self.assertFalse(warmup._DENSE_WARMED)
 
-    def test_sm90_dense_warms_production_adapter_without_deepgemm(self):
+    def test_sm90_dense_warms_production_deepgemm_adapter(self):
         operation = self.dense_fixture()
         operation._sm90_linear = object()
         self.stack.enter_context(
@@ -526,12 +534,10 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         for name in (
             "_get_deep_gemm_num_sms",
             "_generate_dense_gemm_warmup_m_grid",
-            "_run_deepgemm_warmup_launch_with_retry",
-            "_run_deepgemm_warmup_launches_serialized",
         ):
             self.stack.enter_context(
                 mock.patch.object(
-                    warmup.common, name, side_effect=AssertionError("DeepGEMM on SM90")
+                    warmup.common, name, side_effect=AssertionError("SM100 layout discovery on SM90")
                 )
             )
         self.stack.enter_context(
@@ -564,7 +570,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         with mock.patch.object(
             torch.cuda, "get_device_capability", return_value=(9, 0)
         ):
-            with self.assertRaisesRegex(RuntimeError, "no Humming fallback"):
+            with self.assertRaisesRegex(RuntimeError, "no DeepGEMM fallback"):
                 warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
         self.assertFalse(warmup._DENSE_WARMED)
 
@@ -574,7 +580,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         with mock.patch.object(
             torch.cuda, "get_device_capability", return_value=(9, 0)
         ):
-            with self.assertRaisesRegex(RuntimeError, "no Humming adapter"):
+            with self.assertRaisesRegex(RuntimeError, "no DeepGEMM adapter"):
                 warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
         self.assertFalse(warmup._DENSE_WARMED)
 
@@ -658,12 +664,10 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         for name in (
             "_get_deep_gemm_num_sms",
             "_generate_dense_gemm_warmup_m_grid",
-            "_run_deepgemm_warmup_launch_with_retry",
-            "_run_deepgemm_warmup_launches_serialized",
         ):
             self.stack.enter_context(
                 mock.patch.object(
-                    warmup.common, name, side_effect=AssertionError("DeepGEMM on SM90")
+                    warmup.common, name, side_effect=AssertionError("SM100 layout discovery on SM90")
                 )
             )
         self.stack.enter_context(
@@ -685,12 +689,14 @@ class V41KernelJitWarmupTest(unittest.TestCase):
     def test_sm90_grouped_wo_a_warms_actual_grid_without_per_group_linears(self):
         output, attn, operation = self.sm90_grouped_output_fixture()
         with mock.patch.object(
-            warmup, "_sm90_dense_m_grid", wraps=warmup._sm90_dense_m_grid
+            warmup, "_sm90_deepgemm_m_grid", wraps=warmup._sm90_deepgemm_m_grid
         ) as grid:
             warmup.warmup_v41_dense_jit(object(), max_m=1025, device="cuda:0")
             warmup.warmup_v41_dense_jit(object(), max_m=1025, device="cuda:0")
         grid.assert_called_once_with(1025, 4096)
-        expected_m = [1, 2, 3, 4, 16, 17, 511, 512, 1023, 1024, 1025]
+        expected_m = list(warmup._sm90_deepgemm_m_grid(1025, 4096))
+        for boundary in (32, 33, 64, 65, 128, 129, 256, 257, 1023, 1024, 1025):
+            self.assertIn(boundary, expected_m)
         self.assertEqual(
             [call.args[0].shape[0] for call in operation.call_args_list], expected_m
         )
@@ -730,7 +736,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual(replacement.calls.call_count, 6)
         self.assertEqual(len(warmup._DENSE_WARMED), 3)
 
-    def test_sm90_native_backend_uses_deepgemm_retry_and_distinct_memoization(self):
+    def test_sm90_native_backend_uses_deepgemm_retry_and_memoizes(self):
         _, attn, operation = self.sm90_grouped_output_fixture()
         attn._sm90_wo_a.backend = "deepgemm"
         with mock.patch.object(
@@ -740,10 +746,13 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         ) as retry:
             warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
             self.assertEqual(retry.call_count, 3)
-        attn._sm90_wo_a.backend = "humming"
-        warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
-        self.assertEqual(operation.call_count, 6)
-        self.assertEqual(len(warmup._DENSE_WARMED), 2)
+        with mock.patch.object(
+            warmup.common, "_run_triton_warmup_launch_with_retry",
+            side_effect=AssertionError("Unexpected alternate GEMM retry path"),
+        ):
+            warmup.warmup_v41_dense_jit(object(), max_m=3, device="cuda:0")
+        self.assertEqual(operation.call_count, 3)
+        self.assertEqual(len(warmup._DENSE_WARMED), 1)
 
     def test_sm90_grouped_wo_a_compile_failure_does_not_poison_retry(self):
         output, _, operation = self.sm90_grouped_output_fixture()
@@ -1190,14 +1199,14 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         )
         return model, calls
 
-    def test_sm90_shared_expert_keeps_fp32_routed_accumulator_contract(self):
+    def test_sm90_shared_expert_keeps_mega_bf16_routed_contract(self):
         model, _, combine = self.shared_fixture()
-        model.moe._strategy = types.SimpleNamespace(name="sm90_flashinfer")
+        model.moe._strategy = types.SimpleNamespace(name="mega")
         signatures = warmup._shared_expert_signatures(model)
-        self.assertEqual(set(signatures), {(8, 12, 7.0, torch.float32, (8, 1))})
+        self.assertEqual(set(signatures), {(8, 12, 7.0, torch.bfloat16, (8, 1))})
         warmup.warmup_v41_shared_expert_jit(model, max_m=4, device="cuda:0")
         routed, shared, output_dtype = combine.call_args.args
-        self.assertEqual(routed.dtype, torch.float32)
+        self.assertEqual(routed.dtype, torch.bfloat16)
         self.assertEqual(shared.dtype, torch.bfloat16)
         self.assertEqual(output_dtype, torch.bfloat16)
 

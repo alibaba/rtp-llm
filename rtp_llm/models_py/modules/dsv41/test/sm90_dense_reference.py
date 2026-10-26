@@ -1,6 +1,5 @@
 """Independent reference helpers for the production SM90 dense contract."""
 
-import copy
 import hashlib
 
 import torch
@@ -60,18 +59,3 @@ def _hash(tensor):
     return hashlib.sha256(
         tensor.contiguous().view(torch.uint8).cpu().numpy().tobytes()
     ).hexdigest()
-
-
-def _selected_default(adapter, rows):
-    from humming.kernel.humming import HummingKernel
-
-    _, _, intervals = HummingKernel._resolve_configs(
-        adapter.config.to_str(), adapter.compute_config, None, adapter.weight.device
-    )
-    assert isinstance(
-        intervals, list
-    ), "Record actual default interval dispatch, not get_config(M)"
-    selected = [entry for entry in intervals if entry[0] < rows <= entry[1]]
-    assert len(selected) == 1
-    low, high, config = selected[0]
-    return (low, high), copy.deepcopy(config)

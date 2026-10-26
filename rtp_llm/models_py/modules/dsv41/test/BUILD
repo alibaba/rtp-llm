@@ -3,71 +3,11 @@ load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
 
 package(default_visibility = ["//visibility:public"])
 
-py_test(
-    name = "test_sm90_flashinfer_glue",
-    srcs = ["test_sm90_flashinfer_glue.py", "//rtp_llm/test/pytest:pytest_main.py"],
-    main = "//rtp_llm/test/pytest:pytest_main.py",
-    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_sm90_flashinfer_glue.py)"],
-    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm:jit_cache_env", test_requirement("pytest")],
-    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
-    env = {"GPU_COUNT": "1"},
-    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
-    target_compatible_with = select({"@//:using_cuda13_x86": [], "//conditions:default": ["@platforms//:incompatible"]}),
-    legacy_create_init = 0,
-)
-
-py_test(
-    name = "test_sm90_flashinfer_meta_init",
-    srcs = ["test_sm90_flashinfer_meta_init.py", "//rtp_llm/test/pytest:pytest_main.py"],
-    main = "//rtp_llm/test/pytest:pytest_main.py",
-    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_sm90_flashinfer_meta_init.py)"],
-    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm:jit_cache_env", "@flashinfer_opensource_sidecar//:pkg", test_requirement("pytest")],
-    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
-    env = {"GPU_COUNT": "1"},
-    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
-    target_compatible_with = select({"@//:using_cuda13_x86": [], "//conditions:default": ["@platforms//:incompatible"]}),
-    legacy_create_init = 0,
-)
 
 
-py_test(
-    name = "test_sm90_flashinfer_strategy",
-    srcs = ["test_sm90_flashinfer_strategy.py", "//rtp_llm/test/pytest:pytest_main.py"],
-    main = "//rtp_llm/test/pytest:pytest_main.py",
-    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_sm90_flashinfer_strategy.py)"],
-    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm:jit_cache_env", test_requirement("pytest")],
-    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
-    env = {"GPU_COUNT": "1"},
-    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
-    target_compatible_with = select({"@//:using_cuda13_x86": [], "//conditions:default": ["@platforms//:incompatible"]}),
-    legacy_create_init = 0,
-)
 
-py_test(
-    name = "test_sm90_flashinfer_local",
-    srcs = ["test_sm90_flashinfer_local.py", "sm90_flashinfer_reference.py", "//rtp_llm/test/pytest:pytest_main.py"],
-    main = "//rtp_llm/test/pytest:pytest_main.py",
-    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_sm90_flashinfer_local.py)"],
-    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm:jit_cache_env", "@flashinfer_opensource_sidecar//:pkg", test_requirement("pytest")],
-    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
-    env = {"GPU_COUNT": "1"},
-    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
-    target_compatible_with = select({"@//:using_cuda13_x86": [], "//conditions:default": ["@platforms//:incompatible"]}),
-    legacy_create_init = 0,
-)
 
-py_test(
-    name = "test_sm90_flashinfer_moe",
-    srcs = ["test_sm90_flashinfer_moe.py", "//rtp_llm/test/pytest:pytest_main.py"],
-    main = "//rtp_llm/test/pytest:pytest_main.py",
-    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_sm90_flashinfer_moe.py)"],
-    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm:jit_cache_env", "@flashinfer_opensource_sidecar//:pkg", test_requirement("pytest")],
-    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
-    env = {"GPU_COUNT": "1"},
-    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
-    target_compatible_with = select({"@//:using_cuda13_x86": [], "//conditions:default": ["@platforms//:incompatible"]}),
-    legacy_create_init = 0,
-)
+
 
 
 py_test(
@@ -175,18 +115,6 @@ py_test(
 )
 
 
-py_test(
-    name = "test_sm90_dense_native_a8",
-    srcs = ["test_sm90_dense_native_a8.py", "sm90_dense_reference.py", "//rtp_llm/test/pytest:pytest_main.py"],
-    main = "//rtp_llm/test/pytest:pytest_main.py",
-    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_sm90_dense_native_a8.py)"],
-    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm:jit_cache_env", test_requirement("pytest")],
-    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
-    env = {"GPU_COUNT": "1"},
-    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
-    target_compatible_with = select({"@//:using_cuda13_x86": [], "//conditions:default": ["@platforms//:incompatible"]}),
-    legacy_create_init = 0,
-)
 
 py_test(
     name = "test_sm90_deepgemm_dense",
@@ -309,30 +237,6 @@ py_test(
 )
 
 
-py_test(
-    name = "test_sm90_humming_version_regression",
-    srcs = [
-        "test_sm90_humming_version_regression.py",
-        "test_sm90_mxfp8_dense.py",
-        "//rtp_llm/test/pytest:pytest_main.py",
-    ],
-    main = "//rtp_llm/test/pytest:pytest_main.py",
-    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_sm90_humming_version_regression.py)"],
-    deps = [
-        "//rtp_llm:testlib",
-        "//rtp_llm/models_py:modules",
-        "//rtp_llm:jit_cache_env",
-        test_requirement("pytest"),
-    ],
-    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
-    env = {"GPU_COUNT": "1", "PYTHONNOUSERSITE": "1"},
-    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
-    target_compatible_with = select({
-        "@//:using_cuda13_x86": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
-    legacy_create_init = 0,
-)
 
 # Run the same prenorm/Graph contracts on Hopper without changing the SM100
 # CI targets or relaxing their reference tolerances.

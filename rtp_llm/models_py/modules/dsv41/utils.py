@@ -38,23 +38,15 @@ class V41MXFP8Linear(torch.nn.Module):
                 Sm90DeepGEMMMXFP8Linear,
                 select_sm90_dense_backend,
             )
-            from rtp_llm.models_py.modules.dsv41.sm90_dense import Sm90MXFP8Linear
 
-            backend = select_sm90_dense_backend(self.N, self.K)
-            adapter = (
-                Sm90DeepGEMMMXFP8Linear if backend == "deepgemm" else Sm90MXFP8Linear
-            )
-            self._sm90_linear = adapter(weight, scales)
-            # Retain exactly the selected backend's executable allocation.
-            # DeepGEMM uses the checkpoint layout itself; Humming repacks it.
+            select_sm90_dense_backend(self.N, self.K)  # Reject stale backend overrides.
+            self._sm90_linear = Sm90DeepGEMMMXFP8Linear(weight, scales)
+            # Retain the original executable checkpoint layout.
             self.weight = self._sm90_linear.weight
             self._sm90_checkpoint_weight_ref = (
                 weakref.ref(weight)
                 if isinstance(weight, torch.Tensor)
-                and (
-                    backend == "humming"
-                    or not self._sm90_linear.retains_checkpoint_weight
-                )
+                and not self._sm90_linear.retains_checkpoint_weight
                 else None
             )
             return

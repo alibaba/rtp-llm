@@ -22,13 +22,13 @@ LENGTHS = (32768, 65536)
 
 
 def configure_jit_cache():
-    # Humming hashes absolute header/include paths. Different Bazel targets
+    # DeepGEMM hashes absolute header/include paths. Different Bazel targets
     # must import the selected wheel through its same real directory.
-    if "humming" in sys.modules:
-        raise RuntimeError("normalize Humming path before importing it")
-    spec = importlib.util.find_spec("humming")
+    if "deep_gemm" in sys.modules:
+        raise RuntimeError("normalize DeepGEMM path before importing it")
+    spec = importlib.util.find_spec("deep_gemm")
     if spec is None or spec.origin is None:
-        raise RuntimeError("selected Bazel Humming wheel was not found")
+        raise RuntimeError("selected Bazel DeepGEMM wheel was not found")
     site_packages = str(Path(spec.origin).resolve().parent.parent)
     sys.path.insert(0, site_packages)
     paths = [
@@ -46,7 +46,7 @@ def configure_jit_cache():
     )
     cache.mkdir(parents=True, exist_ok=True)
     return {
-        "humming_site_packages": site_packages,
+        "deep_gemm_site_packages": site_packages,
         "pytorch_kernel_cache_path": str(cache),
     }
 
@@ -81,16 +81,14 @@ def recipe(role, mode, checkpoint, tokenizer):
         "use_batch_decode_scheduler": 1,
     }
     if not decode:
-        # Attention CP transport; MoE remains DeepEP V2 (not AG/AR MoE).
+        # Attention CP transport; routed MoE uses native fused MegaMoE.
         options["cp_rotate_method"] = "ALL_GATHER"
     env = {
         "WORLD_SIZE": "8",
         "LOAD_PYTHON_MODEL": "1",
-        # Perf A/B switch: SM90_PERF_MOE_STRATEGY=mega_sm90 selects the opt-in
-        # Hopper fused MegaMoE instead of the FlashInfer adapter. The default
-        # keeps the validated adapter so existing numbers stay comparable.
+        # Hopper uses the native DeepGEMM fused MegaMoE path.
         "DSV4_MOE_STRATEGY": os.environ.get(
-            "SM90_PERF_MOE_STRATEGY", "sm90_flashinfer"
+            "SM90_PERF_MOE_STRATEGY", "mega_sm90"
         ),
         "MOE_STRATEGY": "auto",
         "DSV41_SM90_MOE_COMM": "v2",
@@ -107,10 +105,10 @@ def recipe(role, mode, checkpoint, tokenizer):
         "DSV41_ENGRAM_REGISTER_CHUNK_MB": "256",
         # The fused Hopper kernel needs the MoE input chunked (its tile
         # schedule asserts num_stages >= 2, which a whole CP8 prefill chunk
-        # violates); the FlashInfer/DeepEP baseline was measured unchunked.
+        # violates).
         "DSV4_MOE_CHUNK_PREFILL": (
             "1"
-            if os.environ.get("SM90_PERF_MOE_STRATEGY", "sm90_flashinfer")
+            if os.environ.get("SM90_PERF_MOE_STRATEGY", "mega_sm90")
             == "mega_sm90"
             else "0"
         ),
@@ -224,7 +222,7 @@ def validate_startup(text, role):
         for enabled, size in warmup
     ):
         raise AssertionError(f"unexpected optional CP warmup records: {warmup}")
-    if os.environ.get("SM90_PERF_MOE_STRATEGY", "sm90_flashinfer") == "mega_sm90":
+    if os.environ.get("SM90_PERF_MOE_STRATEGY", "mega_sm90") == "mega_sm90":
         # The fused Hopper kernel owns dispatch and combine, so DeepEP V2 is
         # never initialised on that path; assert its own startup marker instead.
         if "[DSV4 SM90 MegaMoE] allocated symm buffer" not in text:

@@ -61,6 +61,36 @@ class Sm90MegaMoEGateTest(unittest.TestCase):
 
 
 class Sm90MegaMoEStrategyTest(unittest.TestCase):
+    def test_sm90_auto_selects_native_without_legacy_opt_in(self):
+        from rtp_llm.models_py.modules.dsv41.moe.strategies.base import select_strategy
+
+        cfg = mock.Mock()
+        base = "rtp_llm.models_py.modules.dsv41.moe.strategies.base"
+        with (
+            mock.patch(f"{base}.is_cuda", return_value=True),
+            mock.patch("torch.cuda.get_device_capability", return_value=(9, 0)),
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch.object(SM90MegaMoEStrategy, "can_handle", return_value=True) as gate,
+        ):
+            self.assertIs(select_strategy(cfg), SM90MegaMoEStrategy)
+            gate.assert_called_once_with(cfg, explicit=True)
+            with self.assertRaisesRegex(RuntimeError, "requires mega_sm90"):
+                select_strategy(cfg, forced="sm90_flashinfer")
+
+    def test_native_unavailable_does_not_restore_retired_backend(self):
+        from rtp_llm.models_py.modules.dsv41.moe.strategies.base import select_strategy
+
+        base = "rtp_llm.models_py.modules.dsv41.moe.strategies.base"
+        mega = "rtp_llm.models_py.modules.dsv41.moe.strategies.mega_sm90"
+        with (
+            mock.patch(f"{base}.is_cuda", return_value=True),
+            mock.patch("torch.cuda.get_device_capability", return_value=(9, 0)),
+            mock.patch.object(SM90MegaMoEStrategy, "can_handle", return_value=False),
+            mock.patch(f"{mega}.sm90_mega_moe_unavailable_reason", return_value="missing kernel"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "missing kernel"):
+                select_strategy(mock.Mock())
+
     def test_registered_as_a_routed_only_strategy(self):
         self.assertEqual(SM90MegaMoEStrategy.name, "mega_sm90")
         # SymmBufferSM90 has no shared-expert fusion, so the MoE layer must

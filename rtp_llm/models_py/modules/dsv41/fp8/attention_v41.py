@@ -684,7 +684,7 @@ class AttentionV41FP8(AttentionFP8):
             from ._v41_sm90_output_projection import Sm90GroupedOutputProjection
 
             # One prepared weight set for every group and both phases. Do not
-            # also construct eight independent transformed Humming weights.
+            # also construct eight independent projection adapters.
             self._sm90_wo_a = Sm90GroupedOutputProjection(
                 self._wo_a_stk_w, self._wo_a_stk_s
             )

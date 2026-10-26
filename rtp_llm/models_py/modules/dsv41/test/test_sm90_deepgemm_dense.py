@@ -12,7 +12,7 @@ from rtp_llm.models_py.modules.dsv41.sm90_deepgemm_dense import (
     Sm90DeepGEMMMXFP8Linear,
     select_sm90_dense_backend,
 )
-from rtp_llm.models_py.modules.dsv41.sm90_dense import Sm90MXFP8Linear
+from rtp_llm.models_py.modules.dsv41.sm90_dense import unpack_ue8m0_input_scales
 from rtp_llm.models_py.modules.dsv41.test.sm90_dense_reference import (
     SHAPES,
     _metrics,
@@ -66,7 +66,8 @@ def test_policy_is_static_per_layer_without_humming_repack(monkeypatch):
     assert loader.weights[0]["used"] is w
     monkeypatch.setenv("DSV41_SM90_DENSE_BACKEND", "humming")
     monkeypatch.delenv("DSV41_SM90_DENSE_BACKEND_MAP")
-    assert select_sm90_dense_backend(256, 512) == "humming"
+    with pytest.raises(ValueError, match="must be deepgemm"):
+        select_sm90_dense_backend(256, 512)
     assert linear._sm90_linear.backend == "deepgemm"
 
 
@@ -98,7 +99,7 @@ def test_invalid_override_rejected(monkeypatch, policy):
     "shape", ["merged_qkv", "cp8_q_b", "cp8_o_b", "shared_w13", "shared_w2"]
 )
 @pytest.mark.parametrize("rows", [1, 128, 512])
-def test_actual_shapes_are_bitwise_equal_to_humming(shape, rows):
+def test_actual_shapes_are_bitwise_equal_to_row_major_deepgemm(shape, rows):
     _run_actual_shape(shape, rows, strict_reference=False)
 
 
@@ -110,6 +111,20 @@ def test_actual_shapes_match_independent_reference(shape, rows):
     _run_actual_shape(shape, rows, strict_reference=True)
 
 
+def _row_major_reference(q, packed, w, s):
+    # Original DG path: independently decode row-major scales; DG converts
+    # them to MN-major internally. Compare against direct-TMA kernel writes.
+    import deep_gemm
+    m, k = q.numel() // w.shape[1], w.shape[1]
+    out = torch.empty((m, w.shape[0]), device=q.device, dtype=torch.bfloat16)
+    deep_gemm.fp8_gemm_nt(
+        (q.reshape(m, k).contiguous(), unpack_ue8m0_input_scales(packed)[:, :k // 32]),
+        (w.contiguous(), s.float().contiguous()), out,
+        recipe=(1, 32, 32), compiled_dims="",
+    )
+    return out.view(*q.shape[:-1], w.shape[0])
+
+
 def _run_actual_shape(shape, rows, *, strict_reference):
     n, k = SHAPES[shape]
     linear, w, s = _linear(n, k)
@@ -118,7 +133,7 @@ def _run_actual_shape(shape, rows, *, strict_reference):
     q_saved, packed_saved = q.view(torch.uint8).clone(), packed.clone()
     out = torch.empty(rows, n, device="cuda", dtype=torch.bfloat16)
     assert linear.forward_quantized(q, packed, out=out) is out
-    baseline = Sm90MXFP8Linear(w, s).forward_quantized(q, packed)
+    baseline = _row_major_reference(q, packed, w, s)
     torch.testing.assert_close(out, baseline, rtol=0, atol=0)
     print(
         "NATIVE_G32_BASELINE "
@@ -175,7 +190,6 @@ def _run_graph_case(rows, n, k, leading, *, strict_reference):
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         linear.forward_quantized(q, packed, out=out)
-    baseline = Sm90MXFP8Linear(w, s)
     observations = []
     for multiplier in (16.0, 0.03125):
         new_q, new_packed = linear._quantize_input(torch.randn_like(x) * multiplier)
@@ -183,7 +197,7 @@ def _run_graph_case(rows, n, k, leading, *, strict_reference):
         packed.copy_(new_packed)
         graph.replay()
         torch.testing.assert_close(
-            out, baseline.forward_quantized(q, packed), rtol=0, atol=0
+            out, _row_major_reference(q, packed, w, s), rtol=0, atol=0
         )
         torch.testing.assert_close(
             out, linear.forward_quantized(q, packed), rtol=0, atol=0

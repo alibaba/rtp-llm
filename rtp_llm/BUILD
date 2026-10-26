@@ -839,7 +839,6 @@ rename_wheel(
 # Include isolated SM90 backend packages in CUDA 13 x86 wheels.
 sm90_backend_wheel_deps = select({
     "@//:using_cuda13_x86": [
-        "@flashinfer_opensource_sidecar//:wheel_package",
         "@flash_mla_sm90_sidecar//:wheel_package",
     ],
     "//conditions:default": [],

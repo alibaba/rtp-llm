@@ -1,13 +1,13 @@
 """SM90MegaMoEStrategy: DeepGEMM ``sm90_fp8_fp4_mega_moe`` Hopper fused kernel.
 
-Opt-in via ``DSV4_USE_MEGA_MOE_SM90=1`` (or ``DSV4_MOE_STRATEGY=mega_sm90``).
+Default native SM90 strategy; ``DSV4_MOE_STRATEGY=mega_sm90`` selects it explicitly.
 The Hopper kernel fuses dispatch + L1 GEMM + SwiGLU + L2 GEMM + combine over a
 ``SymmBufferSM90`` collective buffer, but its protocol has no shared-expert
 fusion, so the ``MoE`` layer keeps its standalone shared expert
 (``routed_includes_shared = False``).
 
 Weights are re-encoded at load time by
-``deep_gemm.transform_weights_for_mega_moe_sm90`` into Humming-compatible
+``deep_gemm.transform_weights_for_mega_moe_sm90`` into the kernel's processed
 MXFP4 triples. That preparation is lossy when an expert's K32 exponent span
 exceeds 11 (small groups are requantized to E2M1); it is not a permutation of
 the checkpoint bytes. See DeepGEMM ``opt_sm90/h20_mega_moe_sm90.md``.

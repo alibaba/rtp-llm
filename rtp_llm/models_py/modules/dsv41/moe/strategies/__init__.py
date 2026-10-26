@@ -37,7 +37,6 @@ from .grouped_fp4 import (  # noqa: F401  ep_size==1 + kernel
 )
 from .deepep import DeepEPStrategy  # noqa: F401  ep_size>1 fallback
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
-from .sm90_flashinfer import SM90FlashInferStrategy  # noqa: F401  SM90 default
 from .mega_sm90 import SM90MegaMoEStrategy  # noqa: F401  SM90 opt-in fused Mega
 
 __all__ = [

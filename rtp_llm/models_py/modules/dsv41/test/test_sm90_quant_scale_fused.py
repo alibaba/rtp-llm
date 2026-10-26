@@ -1,7 +1,7 @@
 """SM90 direct-FP32-scale quantization: exact contracts before clean timing.
 
 Requires a parent-owned GPU. The benchmark includes quantization, scales and
-the unchanged Humming GEMM; it does not time a copy under a new name.
+the unchanged DeepGEMM GEMM; it does not time a copy under a new name.
 """
 
 import json
@@ -299,7 +299,7 @@ class SM90QuantScaleFusedTest(unittest.TestCase):
     @unittest.skipUnless(
         os.environ.get("DSV41_QUANT_SCALE_BENCH") == "1", "explicit clean benchmark"
     )
-    def test_clean_wo_a_humming_chain_benchmark(self):
+    def test_clean_wo_a_deepgemm_chain_benchmark(self):
         from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_output_projection import (
             Sm90GroupedOutputProjection,
         )
@@ -351,22 +351,8 @@ class SM90QuantScaleFusedTest(unittest.TestCase):
                 payload, scales = fused.quantize_wo_a_g32(
                     o, freqs, n_groups=groups, heads_per_group=8
                 )
-                result = linear._forward(
-                    linear.config,
-                    inputs=payload.transpose(0, 1).view(groups * rows, width),
-                    input_scale=scales.transpose(0, 1).view(groups * rows, width // 32),
-                    weight=linear.weight,
-                    weight_scale=linear.weight_scale,
-                    weight_scale_2=linear.weight_scale_2,
-                    expert_layout=None if groups == 1 else linear._offsets(rows),
-                    locks=linear.locks,
-                    compute_config=linear.compute_config,
-                )
-                return (
-                    result.view(groups, rows, output)
-                    .transpose(0, 1)
-                    .reshape(rows, groups * output)
-                )
+                out = torch.empty((rows, groups * output), device=o.device, dtype=torch.bfloat16)
+                return linear._forward_with_scales(payload, scales.transpose(0, 1), out)
 
             for fn in (before, after):
                 torch.testing.assert_close(fn(), oracle, rtol=0.015, atol=0.02)
@@ -403,7 +389,7 @@ class SM90QuantScaleFusedTest(unittest.TestCase):
     @unittest.skipUnless(
         os.environ.get("DSV41_QUANT_SCALE_BENCH") == "1", "explicit clean benchmark"
     )
-    def test_clean_quant_and_humming_chain_benchmark(self):
+    def test_clean_quant_and_deepgemm_chain_benchmark(self):
         from rtp_llm.models_py.modules.dsv41.sm90_dense import Sm90MXFP8Linear
 
         def time_graph(graph):
@@ -439,16 +425,7 @@ class SM90QuantScaleFusedTest(unittest.TestCase):
 
             def gemm(quantizer):
                 q, sf = quantizer()
-                return linear._forward(
-                    linear.config,
-                    inputs=q,
-                    input_scale=sf,
-                    weight=linear.weight,
-                    weight_scale=linear.weight_scale,
-                    weight_scale_2=linear.weight_scale_2,
-                    locks=linear.locks,
-                    compute_config=linear.compute_config,
-                )
+                return linear._forward_with_scales(q, sf)
 
             # Independent FP32 gate before timing the unchanged GEMM.
             q, sf = before()

@@ -100,7 +100,7 @@ class RoutedExpertsStrategy(nn.Module):
     """
 
     # Registered names currently include mega, mega_se, mega_fused,
-    # grouped_fp4, local_loop, deepep, and sm90_flashinfer.
+    # grouped_fp4, local_loop, deepep, and mega_sm90.
     name: ClassVar[str]
 
     # True when ``forward`` already returns ``routed + shared`` (the strategy
@@ -275,28 +275,15 @@ def select_strategy(
     # overriding an operator's backend selection.
     if is_cuda() and torch.cuda.get_device_capability() == (9, 0):
         from .mega_sm90 import SM90MegaMoEStrategy, sm90_mega_moe_unavailable_reason
-        from .sm90_flashinfer import SM90FlashInferStrategy
-
-        # Opt-in Hopper fused MegaMoE (DSV4_USE_MEGA_MOE_SM90=1). Its collective
-        # protocol has no shared-expert fusion, so it only replaces the
-        # FlashInfer adapter when the operator asks for it.
-        if forced in (None, "mega_sm90"):
-            if SM90MegaMoEStrategy.can_handle(cfg, explicit=forced == "mega_sm90"):
-                return SM90MegaMoEStrategy
-            if forced == "mega_sm90":
-                raise RuntimeError(
-                    "SM90 MegaMoE cannot handle the V4.1 MoE shape/topology: "
-                    f"{sm90_mega_moe_unavailable_reason() or 'shape unsupported'}"
-                )
-        if forced is None or forced == "sm90_flashinfer" or not strict:
-            if SM90FlashInferStrategy.can_handle(cfg):
-                return SM90FlashInferStrategy
+        if forced not in (None, "mega_sm90") and strict:
             raise RuntimeError(
-                "SM90 FlashInfer cannot handle the V4.1 MoE shape/topology"
+                f"V4.1 SM90 requires mega_sm90; requested strategy {forced!r}"
             )
+        if SM90MegaMoEStrategy.can_handle(cfg, explicit=True):
+            return SM90MegaMoEStrategy
         raise RuntimeError(
-            "V4.1 SM90 requires sm90_flashinfer or mega_sm90; "
-            f"requested strategy {forced!r}"
+            "SM90 MegaMoE cannot handle the V4.1 MoE shape/topology: "
+            f"{sm90_mega_moe_unavailable_reason() or 'shape unsupported'}"
         )
 
     # Native shared activations use K32 for both weight recipes. V4.1's

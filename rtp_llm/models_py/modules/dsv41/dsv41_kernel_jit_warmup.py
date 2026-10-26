@@ -171,8 +171,7 @@ def _dense_m_grid(max_m, n, k, num_sms, groups=1):
 def _sm90_dense_m_grid(max_m, k):
     """Exercise RTP quantization specializations, not SM100 GEMM heuristics.
 
-    Humming 0.1.16's prepare_kernels compiles every configured M interval on
-    the first call. The actual wrapper launches below additionally cover RTP's
+    The wrapper launches cover RTP's
     packed-scale alignment and both quantizer dispatch branches. Full scheduler
     capacity is not a GEMM compile key: materializing its output can consume
     several GiB in addition to the already allocated weights and KV cache.
@@ -200,10 +199,10 @@ def _sm90_dense_m_grid(max_m, k):
 
 
 def _run_sm90_dense_warmup_serialized(launch):
-    """Bound concurrent Humming compiler load without importing DeepGEMM."""
+    """Bound concurrent native SM90 compiler load."""
     import fcntl
 
-    path = os.path.join("/tmp", f"rtp_llm_dsv41_humming_warmup_{os.getuid()}.lock")
+    path = os.path.join("/tmp", f"rtp_llm_dsv41_deepgemm_warmup_{os.getuid()}.lock")
     with open(path, "a", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
@@ -233,8 +232,8 @@ def _sm90_deepgemm_m_grid(max_m, k):
 
 
 def _sm90_backend(adapter):
-    backend = getattr(adapter, "backend", "humming")
-    return backend if isinstance(backend, str) else "humming"
+    backend = getattr(adapter, "backend", "deepgemm")
+    return backend if isinstance(backend, str) else "deepgemm"
 
 
 @torch.inference_mode()
@@ -245,7 +244,7 @@ def warmup_v41_dense_jit(model, *, max_m, device):
     linears, outputs = collect_v41_dense_shapes(model)
     sm90 = is_cuda() and torch.cuda.get_device_capability(device) == (9, 0)
     if sm90:
-        # SM90 uses a grouped Humming WO_A, never SM100's stacked DeepGEMM
+        # SM90 uses a grouped native DeepGEMM WO_A, never SM100's stacked DeepGEMM
         # kernel. Retain validation for older per-group owners/fixtures.
         for (groups, n, k), (name, attn) in outputs.items():
             if getattr(attn, "_sm90_wo_a", None) is not None:
@@ -255,12 +254,12 @@ def warmup_v41_dense_jit(model, *, max_m, device):
                 getattr(linear, "_sm90_linear", None) is None for linear in fallback
             ):
                 raise RuntimeError(
-                    f"SM90 output projection has no Humming fallback: {name}"
+                    f"SM90 output projection has no DeepGEMM fallback: {name}"
                 )
         for _, (name, module) in linears.items():
             if getattr(module, "_sm90_linear", None) is None:
                 raise RuntimeError(
-                    f"SM90 V41 dense projection has no Humming adapter: {name}"
+                    f"SM90 V41 dense projection has no DeepGEMM adapter: {name}"
                 )
     sms = 0 if sm90 else common._get_deep_gemm_num_sms(device)
     key = (
@@ -458,7 +457,6 @@ def _shared_expert_signatures(model):
             "local_loop",
             "grouped_fp4",
             "deepep",
-            "sm90_flashinfer",
         ):
             routed_dtype, routed_stride = torch.float32, (dim, 1)
         else:

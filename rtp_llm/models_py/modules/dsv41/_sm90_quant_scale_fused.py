@@ -1,4 +1,4 @@
-"""RTP G32 quantization with direct FP32 scales for native SM90 GEMMs.
+"""RTP G32 quantization with direct FP32 scales for SM90 DeepGEMM.
 
 No GEMM or scale-policy change: mirror the local legacy/v2 CUDA quantizers,
 including their different small-value floors. WO_A also preserves the
@@ -111,6 +111,9 @@ def _woa_quant_kernel(
     head_stride,
     frequency_stride,
     frequency_column_stride,
+    scale_group_stride,
+    scale_row_stride,
+    scale_column_stride,
     G: tl.constexpr,
     HEADS: tl.constexpr,
     TOKENS_PER_FREQ: tl.constexpr,
@@ -143,13 +146,18 @@ def _woa_quant_kernel(
     payload, scale = _quantize(rounded.reshape((16, 32)), V2)
     destination = (group * rows + row) * (HEADS * 512) + local_head * 512
     tl.store(q + destination + columns, payload.reshape((512,)))
-    tl.store(scales + destination // 32 + tl.arange(0, 16), scale)
+    tl.store(
+        scales + group * scale_group_stride + row * scale_row_stride
+        + (local_head * 16 + tl.arange(0, 16)) * scale_column_stride,
+        scale,
+    )
 
 
 @triton.jit(do_not_specialize=["rows", "row_stride", "column_stride"])
 def _unpack_kernel(
     packed, out, rows, row_stride, column_stride,
-    out_row_stride, out_column_stride, COLUMNS: tl.constexpr,
+    rows_per_group, out_group_stride, out_row_stride,
+    out_column_stride, COLUMNS: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     column = tl.program_id(1) * 128 + tl.arange(0, 128)
@@ -160,7 +168,8 @@ def _unpack_kernel(
     ).to(tl.uint32)
     exponent = (word >> ((column % 4) * 8)) & 255
     tl.store(
-        out + row * out_row_stride + column * out_column_stride,
+        out + (row // rows_per_group) * out_group_stride
+        + (row % rows_per_group) * out_row_stride + column * out_column_stride,
         _decode_exponent(exponent), column < COLUMNS,
     )
 
@@ -197,13 +206,16 @@ def _output(out, shape, dtype, device, operands):
     return out
 
 
-def _scale_output(rows, columns, device, mn_major):
+def _scale_output(rows, columns, device, *, groups=1, mn_major=False):
     if mn_major:
         padded_rows = max(4, triton.cdiv(rows, 4) * 4)
         return torch.empty_strided(
-            (rows, columns), (1, padded_rows), dtype=torch.float32, device=device
+            (groups, rows, columns),
+            (padded_rows * columns, 1, padded_rows),
+            dtype=torch.float32,
+            device=device,
         )
-    return torch.empty((rows, columns), dtype=torch.float32, device=device)
+    return torch.empty((groups, rows, columns), dtype=torch.float32, device=device)
 
 
 def quantize_g32(x, *, out_q=None, out_scale=None, mn_major=False):
@@ -215,7 +227,7 @@ def quantize_g32(x, *, out_q=None, out_scale=None, mn_major=False):
     if mn_major:
         expected = (1, max(4, triton.cdiv(rows, 4) * 4))
         if out_scale is None:
-            scale = _scale_output(rows, width // 32, x.device, True)
+            scale = _scale_output(rows, width // 32, x.device, mn_major=True)[0]
         elif (
             out_scale.shape != (rows, width // 32)
             or out_scale.dtype != torch.float32
@@ -246,7 +258,9 @@ def quantize_g32(x, *, out_q=None, out_scale=None, mn_major=False):
     return q, scale
 
 
-def quantize_wo_a_g32(o, freqs, *, n_groups, heads_per_group, imaginary_fma_first=True):
+def quantize_wo_a_g32(
+    o, freqs, *, n_groups, heads_per_group, imaginary_fma_first=True, mn_major=False
+):
     """Return logical [M,G,K] and [M,G,K/32], both physically group-major.
 
     Dispatch policy is per original linear's M*K, never G*M*K. BF16 inverse
@@ -287,8 +301,8 @@ def quantize_wo_a_g32(o, freqs, *, n_groups, heads_per_group, imaginary_fma_firs
     width = heads_per_group * 512
     v2 = use_v2(rows, width)
     q = torch.empty((n_groups, rows, width), dtype=torch.float8_e4m3fn, device=o.device)
-    scale = torch.empty(
-        (n_groups, rows, width // 32), dtype=torch.float32, device=o.device
+    scale = _scale_output(
+        rows, width // 32, o.device, groups=n_groups, mn_major=mn_major
     )
     if rows:
         flat = o.view(rows, n_groups * heads_per_group, 512)
@@ -303,6 +317,9 @@ def quantize_wo_a_g32(o, freqs, *, n_groups, heads_per_group, imaginary_fma_firs
             flat.stride(1),
             freq.stride(0),
             freq.stride(1),
+            scale.stride(0),
+            scale.stride(1),
+            scale.stride(2),
             n_groups,
             heads_per_group,
             rows // freqs.shape[0],
@@ -314,8 +331,12 @@ def quantize_wo_a_g32(o, freqs, *, n_groups, heads_per_group, imaginary_fma_firs
     return q.transpose(0, 1), scale.transpose(0, 1)
 
 
-def unpack_ue8m0_to_fp32(packed, *, mn_major=False):
-    """Decode packed 2D scales; optionally write TMA-ready MN-major FP32."""
+def unpack_ue8m0_to_fp32(packed, *, mn_major=False, n_groups=1):
+    """Decode packed [G*M,K/128] scales, preserving all UE8M0 bit patterns.
+
+    G=1 returns [M,K/32]; G>1 returns [G,M,K/32]. Optional MN-major
+    storage independently pads every group to four rows for TMA alignment.
+    """
     if (
         not packed.is_cuda
         or packed.dtype != torch.int32
@@ -325,7 +346,14 @@ def unpack_ue8m0_to_fp32(packed, *, mn_major=False):
     ):
         raise ValueError("Expected CUDA int32 [M,packed_K] scales")
     rows, words = packed.shape
-    out = _scale_output(rows, words * 4, packed.device, mn_major)
+    if not isinstance(n_groups, int) or n_groups < 1 or rows % n_groups:
+        raise ValueError("Scale rows must be divisible by positive n_groups")
+    rows_per_group = rows // n_groups
+    grouped = _scale_output(
+        rows_per_group, words * 4, packed.device,
+        groups=n_groups, mn_major=mn_major,
+    )
+    out = grouped[0] if n_groups == 1 else grouped
     if rows and words:
         _unpack_kernel[(rows, triton.cdiv(words * 4, 128))](
             packed,
@@ -333,8 +361,10 @@ def unpack_ue8m0_to_fp32(packed, *, mn_major=False):
             rows,
             packed.stride(0),
             packed.stride(1),
-            out.stride(0),
-            out.stride(1),
+            rows_per_group,
+            grouped.stride(0),
+            grouped.stride(1),
+            grouped.stride(2),
             words * 4,
             num_warps=4,
         )

@@ -81,7 +81,7 @@ def is_supported(attn) -> bool:
     ):
         return False
     qw = linear.weight
-    # SM90 uses Humming-packed weights without the SM10x scale layout.
+    # SM90 uses native block32 weights without the SM10x scale layout.
     # Reject unsupported hardware before reading backend-specific fields.
     if (
         not qw.is_cuda

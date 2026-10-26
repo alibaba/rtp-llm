@@ -22,9 +22,8 @@ class DeepSeekV41Sm90PDContractTest(pd_contract.DeepSeekV41PDContractTest):
     # CP4 canonical cache keys cover 256 * 4 tokens. Exercise two keys;
     # retain every original cache-hit and output/logit assertion.
     prefix_reuse_min_tokens = 2048
-    # SM90_SMOKE_MOE_STRATEGY=mega_sm90 runs the same contract against the
-    # opt-in Hopper fused MegaMoE backend.
-    moe_strategy = os.environ.get("SM90_SMOKE_MOE_STRATEGY", "sm90_flashinfer")
+    # Hopper contract uses the native DeepGEMM fused MegaMoE backend.
+    moe_strategy = os.environ.get("SM90_SMOKE_MOE_STRATEGY", "mega_sm90")
     extra_server_env = {
         "MOE_STRATEGY": "auto",
         "DSV41_SM90_MOE_COMM": "v2",
@@ -45,18 +44,9 @@ class DeepSeekV41Sm90PDContractTest(pd_contract.DeepSeekV41PDContractTest):
         ):
             raise RuntimeError("SM90 P4/D4 contract requires eight locked SM90 GPUs")
         super().start_servers()
-        mega_sm90 = self.moe_strategy == "mega_sm90"
         for manager in (self.server, self.graph_server):
             startup = Path(manager.log_file_path).read_text(errors="replace")
-            if mega_sm90:
-                # The fused Hopper kernel replaces both the FlashInfer adapter
-                # and the DeepEP V2 link, so assert its own startup marker.
-                self.assertIn(
-                    "[DSV4 SM90 MegaMoE] allocated symm buffer", startup
-                )
-            else:
-                self.assertIn("opensource FlashInfer CUTLASS W4A8", startup)
-                self.assertIn("SM90 DeepEP V2:", startup)
+            self.assertIn("[DSV4 SM90 MegaMoE] allocated symm buffer", startup)
             self.assertNotIn("E8M0 decoded for BF16 MMA", startup)
             enabled = self.extra_server_env["DSV41_ENGRAM_PREFETCH"] == "1"
             self.assertEqual("SM90 Engram UVA prefetch enabled" in startup, enabled)

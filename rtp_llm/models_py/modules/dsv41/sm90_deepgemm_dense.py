@@ -2,7 +2,6 @@
 
 import json
 import os
-import platform
 from functools import lru_cache
 
 import torch
@@ -10,10 +9,7 @@ import torch
 
 def select_sm90_dense_backend(n, k):
     """Choose once per layer; P/D may supply different process-local maps."""
-    native_default = (
-        "deepgemm" if platform.machine().lower() in ("x86_64", "amd64") else "humming"
-    )
-    default = os.environ.get("DSV41_SM90_DENSE_BACKEND", native_default).strip().lower()
+    default = os.environ.get("DSV41_SM90_DENSE_BACKEND", "deepgemm").strip().lower()
     raw = os.environ.get("DSV41_SM90_DENSE_BACKEND_MAP", "{}").strip()
     return _backend_policy(default, raw).get(f"{n}x{k}", default)
 
@@ -21,8 +17,8 @@ def select_sm90_dense_backend(n, k):
 @lru_cache(maxsize=16)
 def _backend_policy(default, raw):
     """Validate a process policy once, including overrides not used by a layer."""
-    if default not in ("humming", "deepgemm"):
-        raise ValueError("DSV41_SM90_DENSE_BACKEND must be humming or deepgemm")
+    if default != "deepgemm":
+        raise ValueError("DSV41_SM90_DENSE_BACKEND must be deepgemm")
     try:
         overrides = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -31,17 +27,17 @@ def _backend_policy(default, raw):
         not isinstance(shape, str)
         or len(shape.split("x")) != 2
         or not all(part.isdigit() and int(part) > 0 for part in shape.split("x"))
-        or backend not in ("humming", "deepgemm")
+        or backend != "deepgemm"
         for shape, backend in overrides.items()
     ):
-        raise ValueError("Expected a map of positive NxK shapes to humming/deepgemm")
+        raise ValueError("Expected a map of positive NxK shapes to deepgemm")
     return overrides
 
 
 class Sm90DeepGEMMMXFP8Linear:
     """Native E4M3/UE8M0 data, FP8 WGMMA float accumulator and BF16 output.
 
-    The original FP8 weight remains the executable weight. No Humming repack,
+    The original FP8 weight remains the executable weight. No secondary weight repack,
     BF16 weight cache, or activation/weight requantization is retained.
     """
 

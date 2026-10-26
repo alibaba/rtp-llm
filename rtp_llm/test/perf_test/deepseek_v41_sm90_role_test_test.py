@@ -17,15 +17,20 @@ from rtp_llm.test.perf_test.deepseek_v41_sm90_role_test import (
 
 
 class FixedRoleTest(unittest.TestCase):
+    def setUp(self):
+        self.env_patch = mock.patch.dict(os.environ, {}, clear=True)
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+
     def test_jit_paths_are_shared_across_bazel_targets_without_home(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            origin = root / "wheel/site-packages/humming/__init__.py"
+            origin = root / "wheel/site-packages/deep_gemm/__init__.py"
             origin.parent.mkdir(parents=True)
             origin.touch()
             results = []
             for target in ("smoke", "perf"):
-                alias = root / target / "humming/__init__.py"
+                alias = root / target / "deep_gemm/__init__.py"
                 alias.parent.mkdir(parents=True)
                 alias.symlink_to(origin)
                 with mock.patch(
@@ -39,6 +44,7 @@ class FixedRoleTest(unittest.TestCase):
                     results.append(configure_jit_cache())
                     self.assertEqual(sys.path[0], str(origin.parent.parent))
                     self.assertEqual(os.environ["PYTHONPATH"], sys.path[0])
+                    self.assertEqual(results[-1]["deep_gemm_site_packages"], sys.path[0])
                     self.assertTrue((root / "torch").is_dir())
                     self.assertNotIn("HOME", os.environ)
             self.assertEqual(results[0], results[1])
@@ -52,6 +58,7 @@ class FixedRoleTest(unittest.TestCase):
             self.assertEqual(options["cp_rotate_method"], "ALL_GATHER")
             self.assertEqual(options["use_all_gather"], 0)
             self.assertEqual(env["DSV41_SM90_MOE_COMM"], "v2")
+            self.assertEqual(env["DSV4_MOE_STRATEGY"], "mega_sm90")
             self.assertEqual(env["DSV41_SM90_DECODE_GRAPH"], "0")
             self.assertEqual((batches, output, LENGTHS), ((1,), 1, (32768, 65536)))
 
@@ -126,7 +133,10 @@ class FixedRoleTest(unittest.TestCase):
                     f"parallelism: world=8 tp=0/1 ep={rank}/8 dp={rank % dp}/{dp}"
                     for rank in range(8)
                 ]
-                + [f"cp_enabled={cp > 1} cp_size={cp}", f"SM90 DeepEP V2: role={role}"]
+                + [
+                    f"cp_enabled={cp > 1} cp_size={cp}",
+                    "[DSV4 SM90 MegaMoE] allocated symm buffer",
+                ]
                 + (
                     [f"CP={cp}: max_tokens_per_rank 66560 -> 8320"] * 8
                     if cp > 1
@@ -142,7 +152,10 @@ class FixedRoleTest(unittest.TestCase):
         for bad in (
             text("prefill", 8, 1),
             text("prefill", 1, 1),
-            text("prefill", 1, 8).replace("DeepEP V2", "legacy"),
+            text("prefill", 1, 8).replace(
+                "[DSV4 SM90 MegaMoE] allocated symm buffer",
+                "SM90 DeepEP V2: role=prefill",
+            ),
             text("prefill", 1, 8).replace("cp_enabled=True", "cp_enabled=False"),
         ):
             with self.subTest(bad=bad), self.assertRaises(AssertionError):
