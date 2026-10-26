@@ -4,6 +4,9 @@ Date: 2026-10-26. Tests ran inside `luoli_gpu` with JDK 21 and the offline
 `opensource,!internal` Maven profiles. No production settings or performance
 thresholds were relaxed.
 
+The initial sections describe commit `e598eb5f57`. The callback-reduction
+follow-up has its own source identity and results at the end of this document.
+
 ## Scope and source identity
 
 - The before snapshot is the working tree captured before this implementation,
@@ -123,3 +126,84 @@ It contains `before.tar`, source manifests, `final-budgets.tsv`, `accepted-ut.lo
 the archived UT XML reports, individual before/after performance logs,
 `results.json`, and reproducible validation scripts. Failed intermediate runs
 and the obsolete-fixture failures remain separate historical artifacts.
+
+## Follow-up callback reduction
+
+The follow-up change makes a Dispatcher preemption ACK with an active delivery
+claim enter Scheduler once. Scheduler records both the attempt and delivery
+proof under the Context identity lock, then runs the common continuation outside
+that lock. Engine and delivery evidence use the same continuation. There is no
+deferred-continuation flag, thread-local or new executor.
+
+The ACK aggregation path in `DecodeAdmission` also removes an intermediate
+continuation method. Ordinary replies reuse the original victim observer; only
+mixed unresolved NOT_FOUND replies create a subset observer. This avoids an
+extra list and per-victim minimal-stage/future copies on the ordinary path. The existing
+NOT_FOUND early rejection, UNKNOWN waiting, timeout freeze and Decode-ledger
+commit checks are unchanged.
+
+New regression coverage checks both facts before the first continuation, a stale
+attempt with current delivery proof, transient fact-application failure, and a
+new cancellation RPC after three failed local applications. Remote proof never
+completes the local settlement signal by itself.
+
+Final UT and performance results for this follow-up are recorded separately
+below; the results above describe the preceding commit.
+
+- Production scope: three files, net +9 lines relative to `e598eb5f57`; no new
+  service classes, execution threads or global locks.
+- Method budgets: Scheduler 30 / longest 100 lines; Dispatcher 20 / 97;
+  DecodeAdmission 19 / 97. Context and Queue are unchanged.
+- SHA-256 of the 575-file `verified-source.sha256` manifest:
+  `72b11cce6fce742cf846e4b39c9fa5f43234b72d11538488dcad670951ff8ac7`.
+- Two independent reviews found no definite new ownership or lock-order defect.
+  The Decode ledger mutation has no callbacks; capacity publication and workflow
+  continuation stay outside the Context monitor.
+- Protocol boundaries are retained: an ACK is not resource release, and the
+  admission result remains subject to canonical victim facts and the Decode
+  ledger. The admission change removes redundant continuation/future mapping;
+  it does not collapse these two distinct completion meanings.
+
+The final frozen source passed the complete UT reactor in `luoli_gpu`:
+**3,280 tests, 0 failures, 0 errors, 1 skipped**, with Maven `BUILD SUCCESS`.
+`verified-ut.log` contains the console results; `verified-ut-reports.tar` preserves
+the Surefire reports before performance execution overwrites them.
+
+An intermediate run's XML remains under `callback-final-ut`; its console log
+was overwritten after a wrapper-edit error. That run is historical evidence,
+not the final source's verification result.
+
+The final continuation removes two extra snapshot monitor acquisitions and two
+capturing Runnable evaluations per normal delivery evidence that were found in
+the intermediate implementation. Independent direct try/catch blocks preserve
+the remaining cleanup attempts after an effect fails. This costs source lines
+but avoids introducing these extra normal-path operations merely to share code.
+
+The follow-up performance primary set contains the same 25 cases and retains
+the same heap, leak detector, workloads and SLO limits: **20 pass, 4 failures,
+1 error**. Sync passes 5/5, API passes 14/16, BATCH matrix passes 0/2,
+NON_BATCH passes 1/2. API failures are the burst server P99 of 562ms and the
+4P/8D, 10,000-QPS server P99 of 60ms (ceiling 50ms). Matrix results:
+
+| Mode / target QPS  | Client QPS | Client P99 | Server P99 | Result                                            |
+| ------------------ | ---------: | ---------: | ---------: | ------------------------------------------------- |
+| BATCH / 3,000      |        N/A |        N/A |        N/A | Error during warmup: receiving budget full        |
+| BATCH / 10,000     |    9,969.5 |  261.679ms |       52ms | Fail: client P99; server P99 also exceeds ceiling |
+| NON_BATCH / 3,000  |    2,995.7 |   16.785ms |        4ms | Pass                                              |
+| NON_BATCH / 10,000 |    9,994.9 |   61.595ms |       10ms | Fail: client P99                                  |
+
+**Performance remains unaccepted.** These sequential runs use a shared host and
+do not establish a causal speedup or rule out regression. Final logs use the
+`verified-` prefix; `verified-results.json` contains totals and matrix metrics.
+The 575-file manifest still matches after all tests. Intermediate `unified-` and
+`callback-final-` logs are historical only; their more favorable measurements do
+not replace this final result.
+
+Isolated burst diagnostics also leave a regression concern: parent `e598eb5f57`
+measured 7,655.8 client QPS / 427.297ms client P99 / 427ms server P99, while an
+intermediate candidate after eliminating the extra snapshot/wrapper costs
+measured 5,804.4 / 620.921ms / 620ms. Logs are `parent-isolated-burst.log` and
+`candidate-snapshot-burst.log`. These are separate diagnostic runs, not additional
+passing cases or a controlled explanation of the difference. Eliminating the
+identified extra operations did not establish the cause of the remaining tail
+latency; this change cannot yet be certified as free of performance regression.

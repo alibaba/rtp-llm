@@ -12,7 +12,7 @@ request future cannot grant capacity to another request.
 | `Plan`                      | `accept(DecodeEndpoint, ReservationHandle) -> boolean`                  | `true` transfers ownership; `false` leaves it with Admission. `close()` owns the uncommitted-capacity rollback attempt; repeated close calls are idempotent. A thrown rollback failure is not successful release.                                                         |
 | `AdmissionHandle`           | `complete(PublicationResult)`, `terminate(Response)`                    | Exactly one call enters Scheduler placement completion. Success kinds are `PUBLISHED`, `RESTORED`, `WITHDRAWN`; failure uses `FAILED`.                                                                                                                                    |
 | Scheduler                   | `completePlacement(...)`                                                | Removes the old Prefill route on withdrawal, records state, resolves pending cancellation/end, then asks Queue to requeue if still eligible.                                                                                                                              |
-| Scheduler                   | `applyCancelReply(...) -> PreemptionRegistration.Reply`                 | Interprets the ACK for the original request and initiates its reconciliation. `WAITING` is not capacity release.                                                                                                                                                          |
+| Scheduler                   | `onPreemption(registration, receipt)`                                   | Records the exact attempt and delivery proof together, then runs one continuation. The Scheduler-owned receipt maps application status to `Reply`; `WAITING` is not capacity release.                                                                                     |
 | Dispatcher                  | `preempt(...) -> CompletableFuture<Reply>`                              | Publishes the normalized first response within the remaining attempt budget; retains late callback processing.                                                                                                                                                            |
 | Dispatcher                  | `stop(DeliveryClaim)`                                                   | Accepts ownership of stopping that exact delivery, including late send results and bounded remote retries.                                                                                                                                                                |
 | Context                     | Existing placement, cancellation, preemption and close state operations | Atomically validates identities and records facts. It owns no RPC, timer, retry task or queue execution.                                                                                                                                                                  |
@@ -79,7 +79,8 @@ sequenceDiagram
     A->>X: preempt(exact claim, remaining ACK budget)
     X->>E: cancel when queued work starts before deadline
     E-->>X: ACK
-    X->>S: applyCancelReply
+    X->>S: onPreemption(registration, receipt)
+    Note over S: Record attempt and delivery proof before callbacks
     S->>D: reconcile exact victim facts
     X-->>A: normalized Reply
     S-->>A: canonical victim resolution
@@ -125,6 +126,20 @@ request evidence can still be applied; its bounded cutoff reports failure withou
 manufacturing release proof.
 
 ## Concurrency and allocation
+
+Engine, delivery and preemption evidence share Scheduler's `advanceRequest`:
+reconcile the Decode ledger, select a response or end, update deadlines, and
+request local settlement when eligible. A combined receipt records both facts
+under the Context identity lock before this continuation runs outside the lock.
+No execution-mode flag or thread-local controls whether an event is finished.
+Delivery passes the snapshot returned by its fact update into this continuation.
+Engine callbacks read state when their queued work runs, and preemption reads it
+after capacity notifications. The normal delivery path adds neither snapshot
+monitor acquisitions nor capturing Runnable wrappers for its effects.
+
+The Decode resource transaction is allowed under the Context identity lock: it
+does not invoke workflow callbacks. Capacity notifications, future completion,
+remote calls and local resource cleanup remain outside that lock.
 
 - Plan serializes `accept` and `close`. It checks Context state briefly, then
   calls `markQueued` outside the Context monitor because that call publishes
