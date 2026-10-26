@@ -283,8 +283,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 }
             }
             if (kind != Signal.INPUT) {
-                var topology = getStatus().topologySnapshot();
-                placementAvailability.changed(getStatus().getRole(), topology.group(), ipPort());
+                placementAvailability.changed(getStatus(), ipPort());
             }
         } catch (Throwable failed) {
             if (kind != Signal.CAPACITY) {

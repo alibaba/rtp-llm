@@ -492,10 +492,7 @@ class PrefillEndpointTest {
                             return null;
                         })
                 .when(availability)
-                .changed(
-                        org.mockito.ArgumentMatchers.any(),
-                        org.mockito.ArgumentMatchers.any(),
-                        org.mockito.ArgumentMatchers.any());
+                .changed(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
         var first = createRequestRoute(90L, 100L, 0L);
         PrefillState.RouteReservation open;
         try (var pin = endpoint.tryPinGeneration()) {
@@ -546,10 +543,7 @@ class PrefillEndpointTest {
                             return null;
                         })
                 .when(availability)
-                .changed(
-                        org.mockito.ArgumentMatchers.any(),
-                        org.mockito.ArgumentMatchers.any(),
-                        org.mockito.ArgumentMatchers.any());
+                .changed(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
         var first = createRequestRoute(90L, 100L, 0L);
         var preparation = EndpointTestSupport.reserveUnqueued(endpoint, first, 10L);
         assertTrue(endpoint.release(null, first));

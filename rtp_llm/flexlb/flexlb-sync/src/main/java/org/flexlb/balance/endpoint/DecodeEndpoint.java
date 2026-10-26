@@ -473,8 +473,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
         }
         if (edge != CapacityEdge.DISPATCH) {
-            var topology = getStatus().topologySnapshot();
-            placementAvailability.changed(RoleType.DECODE, topology.group(), ipPort());
+            placementAvailability.changed(getStatus(), ipPort());
         }
     }
 }
