@@ -424,7 +424,7 @@ class KimiK3MlaImpl(MlaImplBase):
 
     def _run_bf16_partial(self, q, k, v, qo_indptr, kv_indptr, *,
                           max_q, max_k, causal):
-        import flash_mla.cuda as flash_mla_cuda
+        import flash_mla  # noqa: F401 -- registers the stable Torch operators
 
         output = torch.empty(
             (q.shape[0], self.num_heads, self.v_head_dim),
@@ -433,7 +433,7 @@ class KimiK3MlaImpl(MlaImplBase):
         lse = torch.empty(
             (self.num_heads, q.shape[0]), dtype=torch.float32, device=q.device,
         ).transpose(0, 1)
-        flash_mla_cuda.dense_prefill_fwd(
+        torch.ops.flash_mla.dense_prefill_fwd(
             _bf16_flash_mla_workspace(q.device),
             q, k, v, qo_indptr, kv_indptr, output, lse,
             int(causal), self.scale,

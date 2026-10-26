@@ -203,7 +203,7 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
             "sys.modules",
             {
                 name: SimpleNamespace(flash_mla_sparse_fwd=sparse_fwd)
-                for name in ("flash_mla", "flash_mla_legacy")
+                for name in ("flash_mla", "flash_mla_legacy", "flash_mla.legacy")
             },
         ):
             out = attn._attn_fp8_swa_via_concat(qkv, common)
