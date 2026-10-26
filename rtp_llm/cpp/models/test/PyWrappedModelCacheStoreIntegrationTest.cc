@@ -435,6 +435,7 @@ py::dict runExactPrefixPdGatherScenario(int cp_rank) {
     torch_ext::PyCacheStoreInputs store_inputs;
     store_inputs.input_lengths_host = to_host(inputs.input_lengths);
     store_inputs.prefix_lengths_host = to_host(inputs.prefix_lengths);
+    store_inputs.publish_start_tokens = to_host(inputs.cache_store_publish_start_tokens);
     store_inputs.host_kv_cache_offset = to_host(inputs.kv_cache_block_id).select(0, 0);
     store_inputs.request_id = inputs.request_id;
     store_inputs.request_pd_separation = inputs.request_pd_separation;
