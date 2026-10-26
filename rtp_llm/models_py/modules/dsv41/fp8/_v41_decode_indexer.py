@@ -328,6 +328,7 @@ def score_decode_indexer(
                 candidate_blocks,
                 capacity=max_ctx_len,
                 logical_entries=logical_entries,
+                output_dtype=torch.bfloat16 if preserve_score_dtype else torch.float32,
             )
             if candidate_logits is not None:
                 return candidate_logits
@@ -340,6 +341,7 @@ def score_decode_indexer(
             context_lens,
             max_ctx_len,
             logical_entries,
+            output_dtype=torch.bfloat16 if preserve_score_dtype else torch.float32,
         )
     from ._indexer_score import fp8_fp4_paged_indexer_score
 

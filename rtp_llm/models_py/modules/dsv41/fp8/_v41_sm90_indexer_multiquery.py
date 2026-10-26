@@ -301,7 +301,7 @@ def dense_score_two_queries(
         out = torch.empty((rows, capacity), device=q.device, dtype=torch.float32)
     if (
         out.shape != (rows, capacity)
-        or out.dtype != torch.float32
+        or out.dtype not in (torch.float32, torch.bfloat16)
         or out.device != q.device
         or not out.is_contiguous()
     ):

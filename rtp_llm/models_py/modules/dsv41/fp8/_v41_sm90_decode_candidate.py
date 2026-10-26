@@ -66,8 +66,10 @@ def is_supported(
     )
 
 
+# Optional BF16 storage preserves the kernel's existing final BF16 rounding.
 def try_score(
-    q, q_scale, pool, weights, table, lengths, candidates, *, capacity, logical_entries
+    q, q_scale, pool, weights, table, lengths, candidates, *, capacity, logical_entries,
+    output_dtype=torch.float32,
 ):
     """Return full-width masked logits, or None for unsupported input metadata.
 
@@ -98,4 +100,5 @@ def try_score(
         table=table,
         logical_entries=logical_entries,
         candidate_plan=plan,
+        output_dtype=output_dtype,
     )

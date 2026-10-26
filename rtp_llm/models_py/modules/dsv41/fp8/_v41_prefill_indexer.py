@@ -245,7 +245,10 @@ def score_indexer_chunk(
     if is_cuda() and torch.cuda.get_device_capability(q_payload.device) == (9, 0):
         from ._v41_sm90_indexer import dense_score
 
-        return dense_score(q_payload, q_sf, k_payload, k_sf, weights, starts, ends)
+        return dense_score(
+            q_payload, q_sf, k_payload, k_sf, weights, starts, ends,
+            output_dtype=torch.bfloat16 if return_bf16 else torch.float32,
+        )
     from ._indexer_score import fp8_fp4_mqa_indexer_score
 
     # The scheduler skips future K tiles. Its SM100 cleaner writes every

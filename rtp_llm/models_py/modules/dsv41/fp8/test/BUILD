@@ -417,3 +417,24 @@ cuda13_sm100_py_test(
         ("test_v41_decode_global", "V41DecodeGlobalCPU"),
     ]
 ]
+
+py_test(
+    name = "test_v41_sm90_score_bf16_storage",
+    srcs = ["test_v41_sm90_score_bf16_storage.py", "test_v41_sm90_decode_candidate.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_score_bf16_storage.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)

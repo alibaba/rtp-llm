@@ -152,16 +152,20 @@ def _score(
     table=None,
     logical_entries=None,
     candidate_plan=None,
+    output_dtype=torch.float32,
 ):
+    if output_dtype not in (torch.float32, torch.bfloat16):
+        raise ValueError("SM90 score output must be FP32 or BF16")
     heads = q.shape[-2]
     if heads not in (32, 64) or q.shape[-1] != 64:
         raise ValueError("SM90 V4.1 indexer requires 32/64 heads with packed dim 64")
     rows = q.numel() // (heads * 64)
+    # Both producers already round final scores to BF16; storage adds no rounding.
     output = (
-        torch.empty((rows, capacity), dtype=torch.float32, device=q.device)
+        torch.empty((rows, capacity), dtype=output_dtype, device=q.device)
         if candidate_plan is None
         else torch.full(
-            (rows, capacity), -torch.inf, dtype=torch.float32, device=q.device
+            (rows, capacity), -torch.inf, dtype=output_dtype, device=q.device
         )
     )
     if rows == 0 or capacity == 0:
@@ -276,7 +280,9 @@ def candidate_score(q, q_scales, keys, key_scales, weights, plan):
     )
 
 
-def dense_score(q, q_scales, keys, key_scales, weights, starts, ends):
+def dense_score(
+    q, q_scales, keys, key_scales, weights, starts, ends, *, output_dtype=torch.float32
+):
     return _score(
         q,
         q_scales,
@@ -286,10 +292,14 @@ def dense_score(q, q_scales, keys, key_scales, weights, starts, ends):
         starts,
         ends,
         keys.shape[0],
+        output_dtype=output_dtype,
     )
 
 
-def paged_score(q, q_scales, pool, weights, table, lengths, capacity, logical_entries):
+def paged_score(
+    q, q_scales, pool, weights, table, lengths, capacity, logical_entries,
+    *, output_dtype=torch.float32,
+):
     if capacity > table.shape[1] * logical_entries:
         raise ValueError("Indexer capacity exceeds block-table coverage")
     lengths = lengths.reshape(-1).to(torch.int32).clamp(0, capacity)
@@ -304,4 +314,5 @@ def paged_score(q, q_scales, pool, weights, table, lengths, capacity, logical_en
         capacity,
         table=table,
         logical_entries=logical_entries,
+        output_dtype=output_dtype,
     )
