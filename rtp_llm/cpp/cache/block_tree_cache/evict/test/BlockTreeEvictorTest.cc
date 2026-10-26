@@ -3384,8 +3384,9 @@ TEST_F(BlockTreeEvictorTest, InvalidationDetachesBusyDescendantAndReclaimsAfterD
                             {makeResource(Tier::HOST, (*blocks)[1])},
                             {makeResource(Tier::HOST, (*blocks)[2])}});
     ASSERT_EQ(inserted.inserted_nodes.size(), 3u);
-    TreeNode* const busy_child                        = inserted.inserted_nodes[2];
+    TreeNode* const busy_child = inserted.inserted_nodes[2];
     const TransferDescriptor child_transfer(busy_child, 0, 2, Tier::HOST, Tier::DISK, {(*blocks)[2]});
+    // Model both source reservation and timing ownership of an in-flight eviction.
     evictor_->reserveSource({child_transfer});
     evictor_->heaps_[0].pending_timings.emplace(
         busy_child, EvictionTimingSnapshot(busy_child->group_set_resources[0].candidate_meta));
