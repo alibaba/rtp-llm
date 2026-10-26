@@ -127,8 +127,37 @@ def _project_before_small_cp_gather(x, cp_ctx, output_width) -> bool:
     )
 
 
-def _prefill_x_group_plan(x, cp_ctx):
-    """Bound consecutive whole requests; unsupported layouts keep owner tiles."""
+def _prefill_x_group_fits(x, cp_ctx, local_rows, real_rows):
+    limit = min(_CP_X_GROUP_MAX_ROWS, _SMALL_CP_X_GATHER_MAX_ROWS)
+    padded = cp_ctx.cp_size * local_rows
+    row_bytes = x.shape[1] * x.element_size()
+    return (
+        0 < limit
+        and padded <= limit
+        and (padded + real_rows) * row_bytes + 3 * real_rows * 8
+        <= _CP_X_GROUP_MAX_BYTES
+    )
+
+
+def _prefill_projected_group_fits(cp_ctx, local_rows, real_rows, output_width):
+    # FP32 send, rank-major gather and restored output coexist. Packing the
+    # original GEMM tiles into send needs less storage than this gather peak.
+    projected_rows = (1 + cp_ctx.cp_size) * local_rows + real_rows
+    return (
+        output_width > 0
+        and projected_rows * output_width * torch.float32.itemsize + 3 * real_rows * 8
+        <= _CP_X_GROUP_MAX_BYTES
+    )
+
+
+def _prefill_x_group_plan(x, cp_ctx, *, allow_owner_tiles=False, output_width=None):
+    """Keep short groups; fit long requests or their CP halves by FP32 bytes.
+
+    Each tuple is (local_start, local_end, real_start, real_end). A half
+    contains the same front/back local slice on every rank, so its boundary
+    never cuts an original owner GEMM or producer tile. Halves exceeding the
+    budget retain bounded owner broadcasts.
+    """
     lengths = getattr(cp_ctx, "input_lengths_global_host", None)
     chunks = getattr(cp_ctx, "chunk_lengths_per_req", None)
     restore = getattr(cp_ctx, "unpad_restore", None)
@@ -138,7 +167,9 @@ def _prefill_x_group_plan(x, cp_ctx):
         or cp_ctx.cp_size < 1
         or _use_small_cp_x_gather(cp_ctx)
         or lengths is None
-        or len(lengths) <= 1
+        or len(lengths) == 0
+        or (len(lengths) == 1 and output_width is None)
+        or (output_width is not None and output_width <= 0)
         or chunks is None
         or len(chunks) != len(lengths)
         or getattr(cp_ctx, "gather_restore_positions", None) is not None
@@ -158,27 +189,64 @@ def _prefill_x_group_plan(x, cp_ctx):
         or restore.device != x.device
     ):
         return None
-    row_bytes = x.shape[1] * x.element_size()
 
     def fits(local_rows, real_rows):
-        padded = cp_ctx.cp_size * local_rows
-        return (
-            padded <= limit
-            and (padded + real_rows) * row_bytes + 3 * real_rows * 8
-            <= _CP_X_GROUP_MAX_BYTES
-        )
+        return _prefill_x_group_fits(x, cp_ctx, local_rows, real_rows)
 
     groups = []
     local_start = real_start = local_end = real_end = 0
     for length, chunk in zip(lengths, chunks):
-        if length <= 0 or chunk != 2 * ((length + 7) // 8) or not fits(chunk, length):
+        if length <= 0 or chunk != 2 * ((length + 7) // 8):
             return None
+        if not fits(chunk, length):
+            if not allow_owner_tiles:
+                return None
+            if local_end > local_start:
+                groups.append((local_start, local_end, real_start, real_end))
+            if (
+                output_width is not None
+                and length > cp_ctx.cp_size * (chunk // 2)
+                and not _prefill_projected_group_fits(
+                    cp_ctx, chunk, length, output_width
+                )
+            ):
+                half = chunk // 2
+                front_rows = min(length, cp_ctx.cp_size * half)
+                groups.append(
+                    (local_end, local_end + half, real_end, real_end + front_rows)
+                )
+                groups.append(
+                    (
+                        local_end + half,
+                        local_end + chunk,
+                        real_end + front_rows,
+                        real_end + length,
+                    )
+                )
+            else:
+                groups.append(
+                    (local_end, local_end + chunk, real_end, real_end + length)
+                )
+            local_end += chunk
+            real_end += length
+            local_start, real_start = local_end, real_end
+            continue
         if not fits(local_end + chunk - local_start, real_end + length - real_start):
             groups.append((local_start, local_end, real_start, real_end))
             local_start, real_start = local_end, real_end
         local_end += chunk
         real_end += length
-    groups.append((local_start, local_end, real_start, real_end))
+    if local_end > local_start:
+        groups.append((local_start, local_end, real_start, real_end))
+    if not any(
+        (
+            fits(l1 - l0, r1 - r0)
+            if output_width is None
+            else _prefill_projected_group_fits(cp_ctx, l1 - l0, r1 - r0, output_width)
+        )
+        for l0, l1, r0, r1 in groups
+    ):
+        return None
     return tuple(groups)
 
 
@@ -214,9 +282,14 @@ def _prefill_raw_x_groups(x, cp_ctx, groups):
 
 
 def _prefill_projected_x_groups(x, cp_ctx, groups, weights, *, whole_groups=False):
-    """Project each original owner segment, then gather bounded FP32 groups."""
+    """Gather bounded FP32 groups; oversized halves retain owner broadcasts."""
     from rtp_llm.models_py.modules.dsv41.fp8.compressor import _linear_bf16_bf16_fp32
 
+    if whole_groups and any(
+        not _prefill_x_group_fits(x, cp_ctx, l1 - l0, r1 - r0)
+        for l0, l1, r0, r1 in groups
+    ):
+        raise ValueError("Owner-tile requests cannot use whole-group production")
     batched = None
     if whole_groups and x.is_cuda:
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_batched_producer as batched
@@ -226,6 +299,38 @@ def _prefill_projected_x_groups(x, cp_ctx, groups, weights, *, whole_groups=Fals
     t0 = 0
     for local_start, local_end, real_start, real_end in groups:
         local_rows = local_end - local_start
+        if not _prefill_projected_group_fits(
+            cp_ctx, local_rows, real_end - real_start, head * len(weights)
+        ):
+            owner_tiles = []
+            while t0 < real_end:
+                tile = next(segments)
+                owner_tiles.append(tile)
+                t0 += tile[2]
+            plan = iter(owner_tiles)
+            first_tile = next(plan)
+            buffers = [
+                torch.empty(
+                    (_PRODUCE_GLOBAL_TILE_ROWS, head * len(weights)),
+                    device=x.device,
+                    dtype=torch.float32,
+                )
+                for _ in range(2)
+            ]
+            pending = _start_prefill_x_gather_async(
+                x, cp_ctx, first_tile, buffers[0], weights
+            )
+            tiles = _prefill_x_tiles(x, cp_ctx, plan, pending, buffers, weights)
+            # The iterator owns the pending handle and buffers until it closes.
+            del pending
+            try:
+                for offset, tile in tiles:
+                    yield real_start + offset, tile
+                    del tile
+            finally:
+                tiles.close()
+                del tiles, buffers
+            continue
         send = torch.zeros(
             (local_rows, head * len(weights)), device=x.device, dtype=torch.float32
         )
@@ -404,20 +509,27 @@ def _wait_prefill_x_gather(handle: _V41AsyncXGather) -> torch.Tensor:
 def _prefill_x_tiles(x, cp_ctx, plan, pending, buffers, weights=()):
     offset = 0
     next_buffer = 1
-    while pending is not None:
-        tile = _wait_prefill_x_gather(pending)
-        next_tile = next(plan, None)
-        pending = (
-            _start_prefill_x_gather_async(
-                x, cp_ctx, next_tile, buffers[next_buffer], weights
+    try:
+        while pending is not None:
+            tile = _wait_prefill_x_gather(pending)
+            next_tile = next(plan, None)
+            pending = (
+                _start_prefill_x_gather_async(
+                    x, cp_ctx, next_tile, buffers[next_buffer], weights
+                )
+                if next_tile is not None
+                else None
             )
-            if next_tile is not None
-            else None
-        )
-        yield offset, tile
-        offset += tile.shape[0]
-        next_buffer = 1 - next_buffer
-        del tile
+            yield offset, tile
+            offset += tile.shape[0]
+            next_buffer = 1 - next_buffer
+            del tile
+    finally:
+        if pending is not None:
+            # A consumer may close after yield while the next broadcast is in
+            # flight. Join its completion back to the allocation stream before
+            # the caller releases either buffer; this adds a GPU edge only.
+            _wait_prefill_x_gather(pending)
 
 
 def rms_norm(x, weight, eps):
@@ -2501,7 +2613,12 @@ class AttentionV41FP8(AttentionFP8):
         small_cp = common.cp_on and _use_small_cp_x_gather(common.cp_ctx)
         projected_small_cp = False
         x_groups = (
-            _prefill_x_group_plan(x, common.cp_ctx)
+            _prefill_x_group_plan(
+                x,
+                common.cp_ctx,
+                allow_owner_tiles=True,
+                output_width=self.head_dim * (2 if self.compress_ratio == 2 else 1),
+            )
             if self.is_kv_source and common.cp_on and not small_cp
             else None
         )
@@ -2591,7 +2708,10 @@ class AttentionV41FP8(AttentionFP8):
                     _wait_prefill_x_gather(x_gather), common.cp_ctx
                 )
             elif x_groups is not None:
-                if os.environ.get("RTP_V41_BATCHED_PRODUCER", "0") == "1":
+                if os.environ.get("RTP_V41_BATCHED_PRODUCER", "0") == "1" and all(
+                    _prefill_x_group_fits(x, common.cp_ctx, l1 - l0, r1 - r0)
+                    for l0, l1, r0, r1 in x_groups
+                ):
                     from . import _v41_batched_producer
 
                     batched_groups = _v41_batched_producer.can_batch_groups(

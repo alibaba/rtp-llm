@@ -124,8 +124,44 @@ _X86_TESTS = [
         env = {"RTP_V41_PREFILL_DEEPSELECT_GPU_TEST": "1"} if name == "test_v41_prefill_deepselect" else {},
         legacy_create_init = 0,
     )
-    for name in _TESTS if name not in ["test_v41_qkv_rope_cache", "test_v41_global_overlap"]
+    for name in _TESTS if name not in ["test_v41_qkv_rope_cache", "test_v41_global_overlap", "test_attention_v41_cp_raw_groups"]
 ]
+
+
+cuda13_sm100_py_test(
+    name = "test_attention_v41_cp_raw_groups",
+    srcs = ["test_attention_v41_cp_raw_groups.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "$(location :test_attention_v41_cp_raw_groups.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)
+
+
+cuda13_sm100_py_test(
+    name = "test_attention_v41_cp_mixed_nccl",
+    srcs = [
+        "test_attention_v41_cp_mixed_nccl.py",
+        "test_attention_v41_cp_raw_groups.py",
+        "//rtp_llm/test/pytest:pytest_main.py",
+    ],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "4", "$(location :test_attention_v41_cp_mixed_nccl.py)"],
+    gpu_count = 4,
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/utils:test_util",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13"],
+    legacy_create_init = 0,
+)
 
 
 cuda13_sm100_py_test(
