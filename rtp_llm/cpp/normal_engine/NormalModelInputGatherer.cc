@@ -42,7 +42,6 @@ struct GatherModelInputContext {
     bool              has_mm_extra_input;
     size_t            total_decode_batch_size;
     int*              prefix_lengths;
-    int*              prefix_lengths_host;
     int*              merged_text_mask;
     int*              mm_features_locs;
     int               token_idx;
@@ -72,7 +71,6 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
     ctx.has_multimodal_input = config.is_multimodal && stream_groups.has_multimodal_input();
     ctx.has_mm_extra_input   = config.is_multimodal && stream_groups.hasMMExtraInput();
     ctx.prefix_lengths       = model_input.prefix_lengths.data_ptr<int32_t>();
-    ctx.prefix_lengths_host  = nullptr;
     ctx.merged_text_mask     = ctx.has_multimodal_input ? model_input.text_tokens_mask.data_ptr<int32_t>() : nullptr;
     ctx.mm_features_locs     = ctx.has_multimodal_input ? model_input.mm_features_locs.data_ptr<int32_t>() : nullptr;
 
@@ -489,11 +487,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
     std::vector<torch::Tensor> gathered_mm_features;
     std::vector<torch::Tensor> gathered_mm_extra_input;
-    const auto                 context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
-    auto                       prefix_lengths_host =
-        torch::empty({context_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
-    auto ctx                = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
-    ctx.prefix_lengths_host = prefix_lengths_host.data_ptr<int32_t>();
+    // Fill the canonical host snapshot; publish core tensors together below.
+    // CUDA planning consumes host lengths, so publishing only prefix lengths
+    // here would force an immediate D2H copy in PyWrappedModel.
+    auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
 
     for (const auto& stream : stream_groups.contextStreams()) {
         model_input.need_all_logits =
@@ -526,8 +523,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                 }
             }
 
-            ctx.input_lengths[ctx.batch_idx]           = input_tokens.size();
-            ctx.prefix_lengths_host[prefill_batch_idx] = stream->prefixLength();
+            ctx.input_lengths[ctx.batch_idx]      = input_tokens.size();
+            ctx.prefix_lengths[prefill_batch_idx] = stream->prefixLength();
             gatherMultimodalInputsForContextBatch(
                 stream, ctx, gathered_mm_features, gathered_mm_extra_input, host_holder);
 
@@ -579,8 +576,6 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         && ctx.mm_feature_index < model_input.mm_features_locs.numel()) {
         model_input.mm_features_locs = model_input.mm_features_locs.slice(0, 0, ctx.mm_feature_index);
     }
-    model_input.prefix_lengths =
-        deviceInputEnabled() ? publishInt32ToCuda(prefix_lengths_host, host_holder) : prefix_lengths_host;
     return absl::OkStatus();
 }
 

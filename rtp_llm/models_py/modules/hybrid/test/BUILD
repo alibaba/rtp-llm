@@ -1,5 +1,12 @@
 test_envs = {}
 
+py_test(
+    name = "causal_attention_center_test",
+    srcs = ["causal_attention_center_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu': 'H20'},
+)
+
 flashinfer_test_envs = {
     "FLASHINFER_JIT_VERBOSE": "1",  # Enable verbose JIT compilation logs
 }

@@ -254,9 +254,10 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         stream->generate_status_->status = StreamState::RUNNING;
     }
 
-    {
-        StreamGroups stream_groups(streams);
-        TensorHolder holder;
+    for (const auto* device_input : {"0", "1"}) {
+        autil::EnvGuard device_input_guard("RTP_LLM_DEVICE_INPUT", device_input);
+        StreamGroups    stream_groups(streams);
+        TensorHolder    holder;
 
         auto merge_input_status = processor.gatherModelInput(stream_groups, holder);
 
@@ -271,6 +272,12 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(input_lengths, toVec<int>(model_input.input_lengths));
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
+        EXPECT_EQ(model_input.input_lengths.device(), model_input.prefix_lengths.device());
+#if USING_CUDA
+        EXPECT_TRUE(model_input.input_lengths.is_cpu());
+        EXPECT_TRUE(model_input.prefix_lengths.is_cpu());
+        EXPECT_TRUE(model_input.prefix_lengths.is_pinned());
+#endif
         EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
         EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.kv_block_stride_bytes);
         EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.kv_scale_stride_bytes);

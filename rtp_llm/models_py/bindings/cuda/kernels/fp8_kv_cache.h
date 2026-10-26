@@ -15,6 +15,8 @@ namespace rtp_llm {
 // requests in one-token decode. Padded output rows are zeroed and do not write K/V.
 // Return rotated Q, or packed QKV when output_qkv=true. Omitting both cache tensors
 // requires output_qkv=true and performs rotation without a cache write.
+// key_center is an optional fixed FP32 [KVH, D] shift applied after RoPE to
+// both returned and cached K. All keys in one attention must use the same shift.
 at::Tensor
 fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&                qkv,
                                            const std::optional<at::Tensor>& kv_cache,
@@ -32,7 +34,8 @@ fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&                qkv,
                                            const std::optional<at::Tensor>& kv_lengths           = std::nullopt,
                                            const std::optional<at::Tensor>& token_indptr         = std::nullopt,
                                            const std::optional<at::Tensor>& decode_input_lengths = std::nullopt,
-                                           bool                             output_qkv           = false);
+                                           bool                             output_qkv           = false,
+                                           const std::optional<at::Tensor>& key_center           = std::nullopt);
 
 // Quantize post-RoPE K/V one [H, D] row at a time and write it into a
 // persistent paged FP8 cache. target_physical_page_ids and token_offsets are

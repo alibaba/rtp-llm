@@ -17,6 +17,178 @@ class Fp8KvCacheTest(unittest.TestCase):
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
 
+    def test_fixed_center_applies_after_rope_to_cached_and_returned_keys(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                torch.manual_seed(83)
+                n, qh, kh, dim, page_size = 6, 4, 2, 64, 4
+                center = torch.randn(kh, dim, device="cuda") * 3
+                center[:, -1] = 400
+                qkv = torch.randn(n, qh + 2 * kh, dim, device="cuda", dtype=dtype)
+                qkv[:, qh : qh + kh] += center.to(dtype)
+                qkv = qkv.flatten(1).contiguous()
+                batch = torch.zeros(n, device="cuda", dtype=torch.int32)
+                positions = torch.arange(n, device="cuda", dtype=torch.int32)
+                indptr = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
+                pages = torch.tensor([1, 0], device="cuda", dtype=torch.int32)
+                rope = RopeConfig()
+                rope.style, rope.dim, rope.base = RopeStyle.Base, dim, 1000000
+                args = (batch, positions, indptr, pages, qh, kh, page_size, rope)
+                plain = rtp_llm_ops.fused_rope_quantize_and_write_fp8_kv_cache(
+                    qkv, None, None, *args, output_qkv=True
+                ).view(n, qh + 2 * kh, dim)
+                cache = torch.zeros(
+                    (2, 2, kh, page_size, dim), device="cuda", dtype=torch.float8_e4m3fn
+                )
+                scales = torch.ones((2, 2 * kh * page_size), device="cuda")
+                centered = rtp_llm_ops.fused_rope_quantize_and_write_fp8_kv_cache(
+                    qkv, cache, scales, *args, output_qkv=True, key_center=center
+                ).view_as(plain)
+                expected_k = (
+                    (plain[:, qh : qh + kh].float() - center).to(dtype).contiguous()
+                )
+                torch.testing.assert_close(
+                    centered[:, :qh], plain[:, :qh], rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    centered[:, qh : qh + kh], expected_k, rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    centered[:, qh + kh :], plain[:, qh + kh :], rtol=0, atol=0
+                )
+                oracle, oracle_scales = torch.zeros_like(cache), torch.ones_like(scales)
+                quantize_and_write_fp8_kv_cache(
+                    expected_k,
+                    plain[:, qh + kh :].contiguous(),
+                    oracle,
+                    oracle_scales,
+                    pages[positions // page_size],
+                    positions % page_size,
+                    page_size,
+                    page_size,
+                    1,
+                )
+                torch.testing.assert_close(
+                    cache.float(), oracle.float(), rtol=0, atol=0
+                )
+                torch.testing.assert_close(scales, oracle_scales, rtol=1e-6, atol=1e-7)
+
+    def test_centered_writer_graph_replay_masks_padding_and_moves_pages(self):
+        torch.manual_seed(84)
+        dim, page_size = 64, 4
+        qkv = torch.randn(3, 4 * dim, device="cuda", dtype=torch.bfloat16)
+        center = torch.randn(1, dim, device="cuda")
+        center[:, -1] = 400
+        batch = torch.zeros(3, device="cuda", dtype=torch.int32)
+        positions = torch.arange(3, device="cuda", dtype=torch.int32)
+        indptr = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+        pages = torch.tensor([0], device="cuda", dtype=torch.int32)
+        live = torch.tensor([0, 3], device="cuda", dtype=torch.int32)
+        rope = RopeConfig()
+        rope.style = RopeStyle.No
+        cache = torch.zeros(
+            (2, 2, 1, page_size, dim), device="cuda", dtype=torch.float8_e4m3fn
+        )
+        scales = torch.ones((2, 2 * page_size), device="cuda")
+
+        def run(payload, scale):
+            return rtp_llm_ops.fused_rope_quantize_and_write_fp8_kv_cache(
+                qkv,
+                payload,
+                scale,
+                batch,
+                positions,
+                indptr,
+                pages,
+                2,
+                1,
+                page_size,
+                rope,
+                token_indptr=live,
+                key_center=center,
+            )
+
+        run(cache, scales)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = run(cache, scales)
+        for count, page in ((2, 1), (3, 0), (1, 1)):
+            qkv.normal_()
+            cache.zero_()
+            scales.fill_(1)
+            live[1] = count
+            pages[0] = page
+            graph.replay()
+            expected_cache, expected_scales = torch.zeros_like(cache), torch.ones_like(
+                scales
+            )
+            expected = run(expected_cache, expected_scales)
+            torch.testing.assert_close(output, expected, rtol=0, atol=0)
+            torch.testing.assert_close(
+                cache.float(), expected_cache.float(), rtol=0, atol=0
+            )
+            torch.testing.assert_close(scales, expected_scales, rtol=0, atol=0)
+
+    def test_center_rejects_wrong_shape_dtype_and_device(self):
+        qkv = torch.zeros(1, 4 * 64, device="cuda", dtype=torch.bfloat16)
+        zero = torch.zeros(1, device="cuda", dtype=torch.int32)
+        indptr = torch.tensor([0, 1], device="cuda", dtype=torch.int32)
+        rope = RopeConfig()
+        rope.style = RopeStyle.No
+        for center in (
+            torch.zeros(1, 64),
+            torch.zeros(1, 64, device="cuda", dtype=torch.bfloat16),
+            torch.zeros(64, device="cuda"),
+            torch.zeros(2, 64, device="cuda"),
+        ):
+            with self.subTest(
+                shape=center.shape, dtype=center.dtype, device=center.device
+            ):
+                with self.assertRaisesRegex(RuntimeError, "key_center"):
+                    rtp_llm_ops.fused_rope_quantize_and_write_fp8_kv_cache(
+                        qkv,
+                        None,
+                        None,
+                        zero,
+                        zero,
+                        indptr,
+                        zero,
+                        2,
+                        1,
+                        4,
+                        rope,
+                        output_qkv=True,
+                        key_center=center,
+                    )
+
+    def test_paired_padding_leaves_cache_and_scales_untouched(self):
+        k = torch.randn(4, 1, 64, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn_like(k)
+        cache = torch.full(
+            (2, 2, 1, 4, 64), 3.0, device="cuda", dtype=torch.float8_e4m3fn
+        )
+        scales = torch.full((2, 8), 13.0, device="cuda")
+        pages = torch.tensor([-1, 1, -1, -1], device="cuda", dtype=torch.int32)
+        offsets = torch.tensor([-1, 2, -1, -1], device="cuda", dtype=torch.int32)
+        expected_cache, expected_scales = cache.clone(), scales.clone()
+        quantize_and_write_fp8_kv_cache(k, v, cache, scales, pages, offsets, 4, 4, 1)
+        quantize_and_write_fp8_kv_cache(
+            k[1:2],
+            v[1:2],
+            expected_cache,
+            expected_scales,
+            pages[1:2],
+            offsets[1:2],
+            4,
+            4,
+            1,
+        )
+        torch.testing.assert_close(
+            cache.float(), expected_cache.float(), rtol=0, atol=0
+        )
+        torch.testing.assert_close(scales, expected_scales, rtol=0, atol=0)
+
     @staticmethod
     def _quantize_row(row: torch.Tensor) -> tuple[torch.Tensor, float]:
         row = row.float()

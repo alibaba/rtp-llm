@@ -256,9 +256,13 @@ class ModelFactory:
         Returns:
             BaseEngine instance (RPCEngine or EmbeddingCppEngine)
         """
-        # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs
-        # for RoPE cache sizing in speculative decoding
-        model_config.gen_num_per_cycle = engine_config.sp_config.gen_num_per_cycle
+        # RoPE capacity follows active speculative execution, not an unused
+        # proposal-width default on a non-speculative server.
+        model_config.gen_num_per_cycle = (
+            engine_config.sp_config.gen_num_per_cycle
+            if engine_config.sp_config.type != SpeculativeType.NONE
+            else 0
+        )
 
         model = ModelFactory._create_model(
             model_config=model_config,

@@ -236,6 +236,7 @@ class DynamicFp8RopeKVCacheOp:
         token_indptr: Optional[torch.Tensor] = None,
         decode_input_lengths: Optional[torch.Tensor] = None,
         output_qkv: bool = False,
+        key_center: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         scales = None
         if kv_cache is not None:
@@ -260,6 +261,7 @@ class DynamicFp8RopeKVCacheOp:
             token_indptr=token_indptr,
             decode_input_lengths=decode_input_lengths,
             output_qkv=output_qkv,
+            key_center=key_center,
         )
 
 
@@ -1488,11 +1490,14 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         return query, key, value
 
     def _apply_rope_and_split(
-        self, qkv: torch.Tensor
+        self, qkv: torch.Tensor, key_center: Optional[torch.Tensor] = None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.use_per_token_fp8_kv_cache:
             rotated_qkv = self.rope_impl.forward(
-                qkv, output_qkv=True, token_indptr=self.fmha_params.qo_indptr_d
+                qkv,
+                output_qkv=True,
+                token_indptr=self.fmha_params.qo_indptr_d,
+                key_center=key_center,
             )
             return self._split_qkv(rotated_qkv)
         if isinstance(self.rope_impl, FusedRopeKVCachePrefillOpQKVOut):
@@ -1507,9 +1512,11 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
+        *,
+        key_center: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Common forward implementation for all prefill implementations."""
-        query, key, value = self._apply_rope_and_split(qkv)
+        query, key, value = self._apply_rope_and_split(qkv, key_center)
 
         # Mode 1 shares unit-scale FP8 K/V between the cache and attention.
         # Mode 2 retains base-dtype K/V for per-token quantization and ragged attention.
@@ -1559,14 +1566,22 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         return (query,)
 
     def forward(
-        self, qkv: torch.Tensor, kv_cache: Optional[LayerKVCache], layer_idx: int = 0
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        layer_idx: int = 0,
+        *,
+        key_center: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if not self.use_per_token_fp8_kv_cache:
-            return super().forward(qkv, kv_cache, layer_idx)
+            return super().forward(qkv, kv_cache, layer_idx, key_center=key_center)
         if kv_cache is None:
             raise ValueError("FP8 paged prefill requires a KV cache")
         query = self.rope_impl.forward(
-            qkv, kv_cache, token_indptr=self.fmha_params.qo_indptr_d
+            qkv,
+            kv_cache,
+            token_indptr=self.fmha_params.qo_indptr_d,
+            key_center=key_center,
         )
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
@@ -1615,9 +1630,11 @@ class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
+        *,
+        key_center: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Run ragged attention, append KV, then run paged prefix attention."""
-        query, key, value = self._apply_rope_and_split(qkv)
+        query, key, value = self._apply_rope_and_split(qkv, key_center)
 
         if not self.use_per_token_fp8_kv_cache:
             query = quantize_to_fp8_if_needed(query, attn_q_dtype(self.attn_configs))
@@ -2085,6 +2102,8 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
+        *,
+        key_center: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.use_per_token_fp8_kv_cache:
             if kv_cache is None:
@@ -2092,6 +2111,7 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
             qkv = self.rope_impl.forward(
                 qkv,
                 kv_cache,
+                key_center=key_center,
                 decode_input_lengths=(
                     self.attn_inputs.input_lengths_device
                     if self.attn_inputs.is_cuda_graph

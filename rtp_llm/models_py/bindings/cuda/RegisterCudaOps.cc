@@ -86,7 +86,8 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("kv_lengths")           = std::nullopt,
                   py::arg("token_indptr")         = std::nullopt,
                   py::arg("decode_input_lengths") = std::nullopt,
-                  py::arg("output_qkv")           = false);
+                  py::arg("output_qkv")           = false,
+                  py::arg("key_center")           = std::nullopt);
 
     rtp_ops_m.def("quantize_and_write_fp8_kv_cache",
                   &quantize_and_write_fp8_kv_cache,
