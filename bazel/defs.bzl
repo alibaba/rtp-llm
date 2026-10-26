@@ -1,3 +1,35 @@
+load("//bazel:tf_proto.bzl", tf_cc_proto = "cc_proto")
+
+# cc_proto re-export: aios/network/rdma BUILDs (open-sourced from the closed
+# @alibaba_rdma repository, which used to carry its own copy of tf_proto.bzl)
+# load cc_proto from defs.bzl; the public bazel/tf_proto.bzl is the identical
+# implementation already used by every other proto package in this repo.
+cc_proto = tf_cc_proto
+
+# if_rdma: RDMA-gating select keyed on the public root using_rdma
+# config_setting (default OFF; no public platform config enables it — only
+# the internal overlay sets --define=use_rdma=true). Mirrors the internal
+# @alibaba_rdma//bazel:defs.bzl if_rdma, whose enable_rdma key is driven by
+# the same define. accl-barex deps must appear only in the ON branch so a
+# default public build never resolves @alibaba_rdma.
+def if_rdma(a, b = []):
+    return select({
+        "//:using_rdma": a,
+        "//conditions:default": b,
+    })
+
+# if_arm: used by the moved aios/network/rdma BUILDs for the arm-only
+# -DDISABLE_TNET copt (tnet is x86-only). Keys on using_cuda12_arm — the
+# define every CUDA arm config sets (cuda12_arm and cuda13_arm both carry
+# it), the same key the previously moved RDMA impl BUILDs use for this copt.
+# A cpu/arm RDMA-ON build is not a supported configuration (RDMA impls
+# require CUDA; build:cuda is what sets use_rdma).
+def if_arm(a, b = []):
+    return select({
+        "//:using_cuda12_arm": a,
+        "//conditions:default": b,
+    })
+
 def copy_so(target):
     name = 'lib' + target.split(':')[1] + '_so'
     so_name = 'lib' + target.split(':')[1] + '.so'
