@@ -3,9 +3,12 @@
 #include <chrono>
 #include <cstdlib>
 #include <future>
+#include <functional>
+#include <stdexcept>
 #include <memory>
 #include <string>
 #include "torch/all.h"
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 
 #define private public
 #define protected public
@@ -288,6 +291,132 @@ TEST_P(EngineStopTest, BatchStopFinalizesAfterInFlightDecodeDispatch) {
 
 TEST_P(EngineStopTest, BatchStopFinalizesAfterInFlightPrefillOnlyDispatch) {
     checkStopWaitsForDispatch(0, true);
+}
+
+// These tests exercise the real NormalEngine::loop and step dispatch. They set
+// the already-claimed per-engine protocol flag deliberately: public UDS frame
+// validation/claim is covered separately by CpuTpBroadcasterTest. No fork occurs
+// in this GPU fixture, and no production test hook is introduced.
+class CpuTpLoopExecutor: public Executor {
+public:
+    explicit CpuTpLoopExecutor(std::function<absl::Status()> process): process_(std::move(process)) {}
+
+    absl::Status process(const std::list<GenerateStreamPtr>&, int64_t) override {
+        return process_();
+    }
+
+private:
+    std::function<absl::Status()> process_;
+};
+
+class CpuTpEngineLoopTest: public DeviceTestBase {
+protected:
+    std::shared_ptr<NormalEngine> follower() {
+        CustomConfig config;
+        auto         engine                = createPausedBatchEngine(config);
+        engine->parallelism_config.tp_rank = 1;
+        engine->parallelism_config.tp_size = 2;
+        engine->parallelism_config.dp_size = 1;
+        engine->cpu_tp_shutdown_           = true;
+        engine->running_                   = false;
+        return engine;
+    }
+
+    void finish(const std::shared_ptr<NormalEngine>& engine) {
+        auto* observed = static_cast<ObservedBatchScheduler*>(engine->scheduler_.get());
+        // A terminal frame ends dispatch; it must not itself free executor/KV.
+        EXPECT_NE(engine->executor_, nullptr);
+        EXPECT_EQ(observed->finalize_calls.load(), 0);
+        EXPECT_TRUE(engine->stop().ok());
+        EXPECT_EQ(engine->executor_, nullptr);
+        EXPECT_TRUE(observed->loop_joined.load());
+        EXPECT_TRUE(observed->executor_drained.load());
+        EXPECT_EQ(observed->finalize_calls.load(), 1);
+    }
+};
+
+TEST_F(CpuTpEngineLoopTest, FollowerAlreadyLocallyStoppedConsumesDataBeforeTerminal) {
+    auto engine       = follower();
+    int  calls        = 0;
+    engine->executor_ = std::make_unique<CpuTpLoopExecutor>([&]() -> absl::Status {
+        if (++calls <= 2) {
+            return absl::OkStatus();
+        }
+        throw CpuTpShutdown();
+    });
+    engine->loop();
+    EXPECT_EQ(calls, 3);
+    EXPECT_FALSE(engine->running_.load());
+    finish(engine);
+}
+
+TEST_F(CpuTpEngineLoopTest, LocalStopInsideCompleteStepStillReceivesRootTerminal) {
+    auto engine       = follower();
+    engine->running_  = true;
+    int calls         = 0;
+    engine->executor_ = std::make_unique<CpuTpLoopExecutor>([&]() -> absl::Status {
+        if (++calls == 1) {
+            engine->running_ = false;
+            return absl::OkStatus();
+        }
+        throw CpuTpShutdown();
+    });
+    engine->loop();
+    EXPECT_EQ(calls, 2);
+    EXPECT_FALSE(engine->running_.load());
+    finish(engine);
+}
+
+TEST_F(CpuTpEngineLoopTest, PausedLocallyStoppedFollowerReachesTerminalReceive) {
+    auto engine = follower();
+    // Written before loop entry, avoiding concurrent access to existing pause_.
+    engine->pause_    = true;
+    int calls         = 0;
+    engine->executor_ = std::make_unique<CpuTpLoopExecutor>([&]() -> absl::Status {
+        ++calls;
+        throw CpuTpShutdown();
+    });
+    engine->loop();
+    EXPECT_EQ(calls, 1);
+    EXPECT_FALSE(engine->running_.load());
+    engine->pause_ = false;
+    finish(engine);
+}
+
+TEST_F(CpuTpEngineLoopTest, OrdinaryTransportErrorStillEscapesLocallyStoppedFollower) {
+    auto engine       = follower();
+    int  calls        = 0;
+    engine->executor_ = std::make_unique<CpuTpLoopExecutor>([&]() -> absl::Status {
+        ++calls;
+        throw std::runtime_error("injected ordinary transport EOF");
+    });
+    EXPECT_THROW(engine->loop(), std::runtime_error);
+    EXPECT_EQ(calls, 1);
+    EXPECT_FALSE(engine->running_.load());
+    finish(engine);
+}
+
+TEST_F(CpuTpEngineLoopTest, TerminalOutsideCoordinatedFollowerRemainsAnError) {
+    auto engine              = follower();
+    engine->cpu_tp_shutdown_ = false;
+    engine->running_         = true;
+    int calls                = 0;
+    engine->executor_        = std::make_unique<CpuTpLoopExecutor>([&]() -> absl::Status {
+        ++calls;
+        throw CpuTpShutdown();
+    });
+    bool rejected            = false;
+    try {
+        engine->loop();
+    } catch (const CpuTpShutdown&) {
+        ADD_FAILURE() << "unexpected typed terminal must be converted to a protocol error";
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    engine->running_ = false;
+    EXPECT_TRUE(rejected);
+    EXPECT_EQ(calls, 1);
+    finish(engine);
 }
 
 INSTANTIATE_TEST_SUITE_P(SerialAndParallel, EngineStopTest, ::testing::Values(0, 2));

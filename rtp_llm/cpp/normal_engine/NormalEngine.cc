@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -44,6 +45,13 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+// This terminal protocol covers one intra-node TP group only. Preserve the old
+// path for cross-node/NCCL, DP/PP collectives and FFN-disaggregate coordination.
+bool shouldCoordinateCpuTpShutdown(const ParallelismConfig& parallelism, const FfnDisAggregateConfig& ffn) {
+    return parallelism.tp_size > 1 && parallelism.dp_size == 1 && parallelism.pp_size == 1
+           && !ffn.enable_ffn_disaggregate && !ffn.is_ffn_service() && CpuTpBroadcaster::instance().isInitialized();
+}
+
 // 释放glibc缓存的host内存，将其归还给操作系统
 // 在模型加载完成后调用，可以显著减少常驻内存占用
 void releaseHostMemoryCache() {
@@ -143,6 +151,12 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    // Claim before warmup/initExecutor can consume this shared CPU TP channel.
+    // A deferred start_loop=false engine owns the session during preparation too.
+    if (shouldCoordinateCpuTpShutdown(parallelism_config, ffn_disaggregate_config)) {
+        CpuTpBroadcaster::instance().claimEngineSession(parallelism_config.tp_rank, parallelism_config.tp_size);
+        cpu_tp_shutdown_ = true;
+    }
     // As in PyWrappedModel, failed construction must release Python references under the GIL.
     auto cleanup_on_failure = [](NormalEngine* engine) noexcept {
         if (engine->custom_output_selector_) {
@@ -668,6 +682,10 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
 }
 
 absl::Status NormalEngine::startLoop() {
+    if (!cpu_tp_shutdown_ && shouldCoordinateCpuTpShutdown(parallelism_config, ffn_disaggregate_config)) {
+        CpuTpBroadcaster::instance().claimEngineSession(parallelism_config.tp_rank, parallelism_config.tp_size);
+        cpu_tp_shutdown_ = true;
+    }
 #if !USING_CUDA
     // Deferred RPC startup runs outside the constructor's device guard.
     c10::DeviceGuard startup_device_guard(
@@ -711,12 +729,25 @@ void NormalEngine::loop() {
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
-    while (running_) {
-        auto status = step();
-        if (!status.ok()) {
-            RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
-            THROW_IF_STATUS_ERROR(trySaveStepError());
+    const bool follow_root = cpu_tp_shutdown_ && parallelism_config.tp_rank != 0;
+    // A local signal cannot skip a peer's in-flight step or its next input frame.
+    // Only root chooses the terminal boundary after a complete step() returns.
+    while (running_ || follow_root) {
+        try {
+            auto status = step();
+            if (!status.ok()) {
+                RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
+                THROW_IF_STATUS_ERROR(trySaveStepError());
+            }
+        } catch (const CpuTpShutdown&) {
+            RTP_LLM_CHECK_WITH_INFO(follow_root, "unexpected CPU TP shutdown outside a coordinated follower");
+            running_ = false;
+            RTP_LLM_LOG_INFO("normal engine follower received ordered CPU TP shutdown");
+            break;
         }
+    }
+    if (cpu_tp_shutdown_ && parallelism_config.tp_rank == 0) {
+        CpuTpBroadcaster::instance().sendShutdown();
     }
 }
 
@@ -851,8 +882,8 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
 
 absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
-    while (pause_) {
-        // wait 50ms if system paused.
+    while (pause_ && running_) {
+        // Stop must reach the existing step boundary even if the engine is paused.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
