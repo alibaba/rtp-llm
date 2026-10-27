@@ -98,8 +98,10 @@ class EngineHealthReporterTest {
     void shouldRegisterCacheHitComparisonMetrics() {
         reporter.init();
 
-        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
-        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS,
+                FlexMetricType.COUNTER, FlexPriorityType.NORMAL);
+        verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS,
+                FlexMetricType.COUNTER, FlexPriorityType.NORMAL);
         verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS,
                 FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         verify(monitor).register(MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
