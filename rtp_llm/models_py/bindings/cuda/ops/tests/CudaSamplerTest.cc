@@ -47,6 +47,37 @@ void assertCumLogProbMatches(const std::vector<float>&   cum_log_probs,
     }
 }
 
+void assertSparseTopKPreservesDistribution(const torch::Tensor&                            logits,
+                                           const std::tuple<torch::Tensor, torch::Tensor>& selected) {
+    const auto& values  = std::get<0>(selected);
+    const auto& indices = std::get<1>(selected);
+    ASSERT_EQ(indices.scalar_type(), torch::kInt64);
+    ASSERT_EQ(indices.dim(), 2);
+    ASSERT_EQ(indices.size(0), logits.size(0));
+    ASSERT_EQ(indices.size(1), 4096);
+    ASSERT_EQ(values.sizes(), indices.sizes());
+
+    // Check on the host before gather/scatter so a broken selector fails without poisoning CUDA.
+    auto        indices_cpu = indices.cpu().contiguous();
+    const auto* ids         = indices_cpu.data_ptr<int64_t>();
+    for (int64_t row = 0; row < indices.size(0); ++row) {
+        SCOPED_TRACE(row);
+        std::vector<int64_t> sorted(ids + row * 4096, ids + (row + 1) * 4096);
+        std::sort(sorted.begin(), sorted.end());
+        ASSERT_GE(sorted.front(), 0);
+        ASSERT_LT(sorted.back(), logits.size(1));
+        ASSERT_EQ(std::adjacent_find(sorted.begin(), sorted.end()), sorted.end());
+    }
+
+    ASSERT_TRUE(torch::equal(values, logits.gather(1, indices)));
+    auto probabilities = torch::softmax(values, -1);
+    auto restored      = torch::zeros_like(logits);
+    restored.scatter_(1, indices, probabilities);
+    EXPECT_TRUE(torch::equal(restored, torch::softmax(logits, -1)));
+    EXPECT_TRUE(restored.select(1, logits.size(1) - 1).eq(1.0f).all().item<bool>());
+    EXPECT_TRUE(restored.sum(-1).eq(1.0f).all().item<bool>());
+}
+
 }  // namespace
 
 class CudaSamplerTest: public DeviceTestBase {
@@ -101,6 +132,42 @@ TEST_F(CudaSamplerTest, testDeepSelect4096ReturnsOriginalValues) {
         auto expected = logits.gather(1, std::get<1>(selected));
         EXPECT_TRUE(torch::equal(std::get<0>(selected).view(torch::kInt32), expected.view(torch::kInt32)))
             << "vocab_size=" << vocab_size;
+    }
+}
+
+TEST_F(CudaSamplerTest, testDeepSelect4096SparseLogitsKeepValidUniqueIndices) {
+    const auto* properties = at::cuda::getDeviceProperties(0);
+    if (!torch_ext::deepselect_fp32_available() || properties->major != 10
+        || (properties->minor != 0 && properties->minor != 3)) {
+        GTEST_SKIP() << "DeepSelect FP32 requires SM100 or SM103";
+    }
+    constexpr int64_t vocab_size = 129280;
+    const auto        options    = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    for (int64_t batch_size : {6, 12, 16}) {
+        SCOPED_TRACE(batch_size);
+        for (float masked_logit : {-std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::max()}) {
+            SCOPED_TRACE(masked_logit);
+            auto logits = torch::full({batch_size, vocab_size}, masked_logit, options);
+            logits.select(1, vocab_size - 1).zero_();
+            auto temperature = torch::full({batch_size}, 0.5f, options);
+            auto scaled      = logits / temperature.unsqueeze(1);
+            ASSERT_TRUE(scaled.select(1, 0).eq(-std::numeric_limits<float>::infinity()).all().item<bool>());
+
+            {
+                SCOPED_TRACE("ordinary");
+                assertSparseTopKPreservesDistribution(scaled, torch_ext::deepselect_fp32_topk(scaled, 4096));
+            }
+            {
+                SCOPED_TRACE("prefilter");
+                assertSparseTopKPreservesDistribution(scaled, torch_ext::deepselect_fp32_topk_prefilter(scaled));
+            }
+            {
+                SCOPED_TRACE("markov_prefilter");
+                auto bias = torch::zeros_like(logits, options.dtype(torch::kBFloat16));
+                assertSparseTopKPreservesDistribution(
+                    scaled, torch_ext::deepselect_fp32_markov_topk_prefilter(logits, bias, temperature));
+            }
+        }
     }
 }
 
@@ -1429,6 +1496,48 @@ TEST_F(CudaSamplerTest, testForceTopKReturnsVocabularyProbabilities) {
     EXPECT_EQ(tight_probs[3], 0.0f);
     auto [full_token, full_probs] = run(0, 0, 1.0f);
     EXPECT_GT(full_probs[0], 0.0f);
+}
+
+TEST_F(CudaSamplerTest, testForceTopK4096SparseMaskPreservesProbabilityMass) {
+    const auto* properties = at::cuda::getDeviceProperties(0);
+    if (!torch_ext::deepselect_fp32_available() || properties->major != 10
+        || (properties->minor != 0 && properties->minor != 3)) {
+        GTEST_SKIP() << "DeepSelect FP32 requires SM100 or SM103";
+    }
+    constexpr int64_t vocab_size = 129280;
+    const auto        options    = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    for (int64_t batch_size : {6, 12, 16}) {
+        SCOPED_TRACE(batch_size);
+        // A packed FP32 mask uses -FLT_MAX; temperature below one turns it into -INF.
+        auto scores = torch::full({batch_size, vocab_size}, -std::numeric_limits<float>::max(), options);
+        scores.select(1, vocab_size - 1).zero_();
+        auto         tokens = torch::zeros({batch_size, 2}, options.dtype(torch::kInt32));
+        auto         probs  = torch::zeros_like(scores);
+        GreedyParams params({scores,
+                             cudaIntTensor(std::vector<int32_t>(batch_size, -1), {batch_size}),
+                             cudaIntTensor(std::vector<int32_t>(batch_size, 1), {batch_size}),
+                             tokens,
+                             1,
+                             pinnedIntTensor(std::vector<int32_t>(batch_size, 0)),
+                             pinnedFloatTensor(std::vector<float>(batch_size, 0.8f)),
+                             pinnedFloatTensor(std::vector<float>(batch_size, 0.5f))});
+        params.output_all_probs          = probs;
+        params.skip_logits_probs_restore = true;
+        params.force_topk                = 4096;
+        for (int64_t row = 0; row < batch_size; ++row) {
+            auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+            generator.set_current_seed(20261027 + row);
+            params.generator.push_back(generator);
+        }
+
+        auto output = execSampleGreedy(params);
+        check_cuda_error();
+        assertAllValid(output.success);
+        EXPECT_TRUE(tokens.select(1, 0).eq(0).all().item<bool>());
+        EXPECT_TRUE(tokens.select(1, 1).eq(vocab_size - 1).all().item<bool>());
+        EXPECT_TRUE(probs.select(1, vocab_size - 1).eq(1.0f).all().item<bool>());
+        EXPECT_TRUE(probs.slice(1, 0, vocab_size - 1).eq(0.0f).all().item<bool>());
+    }
 }
 
 TEST_F(CudaSamplerTest, testExactJointSmallTopKUsesFullVocabularyTopPAndRetainsTies) {
