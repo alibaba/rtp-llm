@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
@@ -17,6 +18,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheSender.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "autil/NetUtil.h"
 #include <torch/torch.h>
@@ -186,6 +188,90 @@ TEST_F(TcpSenderOnlyTest, F1_EmptyBlockInfo_ImmediateBuildFailed) {
     EXPECT_EQ(code, TransferErrorCode::BUILD_REQUEST_FAILED);
 }
 
+TEST_F(TcpSenderOnlyTest, F2_MixedCudaDevices_ImmediateBuildFailed) {
+    char source[2] = {};
+    auto blocks    = std::make_shared<KeyBlockInfo>();
+    blocks->blocks.push_back(BlockInfo{true, 0, 0, source, 1});
+    blocks->blocks.push_back(BlockInfo{true, 1, 0, source + 1, 1});
+
+    SendRequest req;
+    req.ip            = "127.0.0.1";
+    req.port          = unused_port_;
+    req.unique_key    = "k_mixed_devices";
+    req.block_info[1] = blocks;
+    req.deadline_ms   = currentTimeMs() + 5000;
+    req.timeout_ms    = 5000;
+
+    // The invalid device combination must fail before either pointer is copied.
+    EXPECT_EQ(syncSend(*sender_, req), TransferErrorCode::BUILD_REQUEST_FAILED);
+}
+
+TEST_F(TcpSenderOnlyTest, SingleAndRaggedCudaBlocksRetainIndependentProtobufPayloads) {
+    if (!device_initialized_) {
+        GTEST_SKIP() << "No GPU device";
+    }
+
+    const std::vector<std::vector<size_t>> shapes = {{17}, {1, 17, 64, 257, 4097}};
+    for (const auto& sizes : shapes) {
+        SCOPED_TRACE(sizes.size());
+        SendRequest req;
+        req.unique_key = "k_batch_payload_" + std::to_string(sizes.size());
+        req.timeout_ms = 5000;
+
+        std::unordered_map<int64_t, std::vector<std::string>>      expected;
+        std::unordered_map<int64_t, std::shared_ptr<KeyBlockInfo>> blocks_by_key;
+        std::vector<torch::Tensor>                                 sources;
+        size_t                                                     total_bytes = 0;
+        for (size_t i = 0; i < sizes.size(); ++i) {
+            const int64_t cache_key = 100 + i % 2;
+            std::string   content(sizes[i], '\0');
+            for (size_t j = 0; j < content.size(); ++j) {
+                content[j] = static_cast<char>((i * 37 + j) % 256);
+            }
+            auto host   = torch::from_blob(content.data(), {static_cast<int64_t>(sizes[i])}, torch::kUInt8);
+            auto source = torch::empty({static_cast<int64_t>(sizes[i])},
+                                       torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+            source.copy_(host);
+            at::cuda::getCurrentCUDAStream().synchronize();
+            auto& blocks = blocks_by_key[cache_key];
+            if (!blocks) {
+                blocks = std::make_shared<KeyBlockInfo>();
+            }
+            blocks->blocks.push_back(
+                BlockInfo{true, static_cast<int32_t>(source.get_device()), 0, source.data_ptr(), sizes[i]});
+            sources.push_back(source);
+            expected[cache_key].push_back(content);
+            total_bytes += sizes[i];
+        }
+
+        for (const auto& [key, blocks] : blocks_by_key)
+            req.block_info.emplace(key, blocks);
+        auto collector = std::make_shared<TransferClientMetricsCollector>();
+        auto wire      = sender_->makeTransferRequest(req, collector);
+        ASSERT_NE(wire, nullptr);
+        EXPECT_EQ(wire->unique_key(), req.unique_key);
+        EXPECT_EQ(wire->timeout_ms(), req.timeout_ms);
+        EXPECT_EQ(collector->block_count, sizes.size());
+        EXPECT_EQ(collector->total_block_size, total_bytes);
+
+        // makeTransferRequest must complete D2H and give each protobuf its own bytes.
+        for (auto& source : sources) {
+            source.zero_();
+        }
+        at::cuda::getCurrentCUDAStream().synchronize();
+        ASSERT_EQ(static_cast<size_t>(wire->blocks_size()), expected.size());
+        for (const auto& key_block : wire->blocks()) {
+            const auto& contents = expected.at(key_block.key());
+            ASSERT_EQ(static_cast<size_t>(key_block.blocks_size()), contents.size());
+            for (size_t i = 0; i < contents.size(); ++i) {
+                const auto& block = key_block.blocks(static_cast<int>(i));
+                EXPECT_EQ(block.len(), contents[i].size());
+                EXPECT_EQ(block.content(), contents[i]);
+            }
+        }
+    }
+}
+
 // ===========================================================================
 // D. Connection errors
 // ===========================================================================
@@ -216,44 +302,7 @@ TEST_F(TcpSenderOnlyTest, D1_ConnectionFailed_ReceiverNotRunning) {
 
 // B1: Receiver is running but has not called recv(); the RPC enters wait_tasks_
 //     and times out after the deadline.
-TEST_F(TcpSenderOnlyTest, BusyStagedScratchSelectsDirectCopyWithoutWaitingForItsOwner) {
-    std::unique_lock<std::mutex> owner(sender_->staged_scratch_mutex_);
-    auto source = torch::ones({64}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
-    auto target = torch::zeros({64}, torch::kUInt8);
-    std::vector<CopyTask> tasks(4);
-    for (size_t i = 0; i < tasks.size(); ++i) {
-        tasks[i].src_ptr = source.data_ptr<uint8_t>() + 16 * i;
-        tasks[i].dst_ptr = reinterpret_cast<char*>(target.data_ptr<uint8_t>()) + 16 * i;
-        tasks[i].size = 16;
-    }
-    auto attempt = std::async(std::launch::async, [&] {
-        return sender_->tryStagedGatherCopyToHost(tasks, 0);
-    });
-    const auto ready = attempt.wait_for(std::chrono::seconds(5));
-    // Keep the owner locked through the observation; release on every path
-    // before joining so a regression cannot hang test teardown.
-    EXPECT_EQ(ready, std::future_status::ready);
-    owner.unlock();
-    EXPECT_FALSE(attempt.get());
-}
-
-TEST_F(TcpSenderOnlyTest, MixedDeviceTasksSelectDirectCopyBeforeStagedSubmission) {
-    auto source = torch::ones({64}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
-    auto target = torch::zeros({64}, torch::kUInt8);
-    std::vector<CopyTask> tasks(4);
-    for (size_t i = 0; i < tasks.size(); ++i) {
-        tasks[i].src_ptr = source.data_ptr<uint8_t>() + 16 * i;
-        tasks[i].dst_ptr = reinterpret_cast<char*>(target.data_ptr<uint8_t>()) + 16 * i;
-        tasks[i].size = 16;
-        tasks[i].device_index = source.get_device();
-    }
-    // Metadata alone must reject this batch before dereferencing on another GPU.
-    tasks.back().device_index = source.get_device() + 1;
-    EXPECT_FALSE(sender_->tryStagedGatherCopyToHost(tasks, source.get_device()));
-    EXPECT_EQ(target.sum().item<int64_t>(), 0);
-}
-
-TEST_F(TcpSenderOnlyTest, BusyStagedScratchDirectFallbackPreservesEverySerializedByte) {
+TEST_F(TcpSenderOnlyTest, AsyncBatchCopyPreservesEverySerializedByte) {
     auto source = torch::arange(64, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
     at::cuda::getCurrentCUDAStream().synchronize();
     SendRequest request;
@@ -263,12 +312,10 @@ TEST_F(TcpSenderOnlyTest, BusyStagedScratchDirectFallbackPreservesEverySerialize
         block->blocks.push_back(BlockInfo{true, 0, 0, source.data_ptr<uint8_t>() + 16 * i, 16});
         request.block_info.emplace(100 + i, std::move(block));
     }
-    auto metrics = std::make_shared<TransferClientMetricsCollector>();
-    std::unique_lock<std::mutex> owner(sender_->staged_scratch_mutex_);
-    auto building = std::async(std::launch::async, [&] { return sender_->makeTransferRequest(request, metrics); });
+    auto metrics     = std::make_shared<TransferClientMetricsCollector>();
+    auto building    = std::async(std::launch::async, [&] { return sender_->makeTransferRequest(request, metrics); });
     const auto ready = building.wait_for(std::chrono::seconds(5));
     EXPECT_EQ(ready, std::future_status::ready);
-    owner.unlock();
     auto serialized = building.get();
     ASSERT_NE(serialized, nullptr);
     ASSERT_EQ(serialized->blocks_size(), 4);
