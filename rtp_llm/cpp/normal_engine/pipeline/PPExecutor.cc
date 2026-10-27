@@ -1373,6 +1373,16 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
 
     /** 2. do the sync across the all ranks in the same stage. */
     tpSyncModelInputs(plan.model_input, parallelism_config_);
+    if (parallelism_config_.tp_size > 1) {
+        // Non-root PP peers receive an empty plan. Model-input sync alone does
+        // not carry these control flags: all TP ranks must agree whether to
+        // enter the draft collectives or advance to the next target chunk.
+        auto control = torch::tensor({int64_t(plan.is_decode), int64_t(plan.dspark_intermediate_chunk)},
+                                     torch::TensorOptions(torch::kInt64).pinned_memory(true));
+        execBroadcastCpu({{control}, 0});
+        plan.is_decode                 = control.data_ptr<int64_t>()[0] != 0;
+        plan.dspark_intermediate_chunk = control.data_ptr<int64_t>()[1] != 0;
+    }
 
     releaseAllModelBuffers();
 

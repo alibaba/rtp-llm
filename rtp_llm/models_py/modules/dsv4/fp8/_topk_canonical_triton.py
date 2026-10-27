@@ -5,15 +5,17 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+# Chunk widths and row strides vary at runtime. Specialize only the tile
+# geometry, not each exact fastgen chunk shape.
+@triton.jit(do_not_specialize=["WIDTH", "SCORE_STRIDE", "OUT_STRIDE"])
 def _canonical_topk_kernel(
     scores,
     output,
     starts,
     ends,
-    WIDTH: tl.constexpr,
-    SCORE_STRIDE: tl.constexpr,
-    OUT_STRIDE: tl.constexpr,
+    WIDTH,
+    SCORE_STRIDE,
+    OUT_STRIDE,
     K: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,

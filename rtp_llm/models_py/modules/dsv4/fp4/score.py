@@ -7,15 +7,17 @@ import triton.language as tl
 from rtp_llm.models_py.modules.dsv4.fp4.quantization import dequantize_rows, e2m1_value
 
 
-@triton.jit
+# Keep chunk sizes dynamic to avoid per-shape compilation inside forwards
+# that overlap NCCL collectives on other ranks.
+@triton.jit(do_not_specialize=["T", "B"])
 def _gather_cache(
     CACHE,
     TABLE,
     CU,
     Q,
     S,
-    T: tl.constexpr,
-    B: tl.constexpr,
+    T,
+    B,
     EB: tl.constexpr,
     STRIDE: tl.constexpr,
     COL_STRIDE: tl.constexpr,

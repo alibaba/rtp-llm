@@ -691,6 +691,7 @@ struct DraftSyncCase {
     bool            is_verify;
     bool            fake;
     bool            all_failed;
+    bool            intermediate_chunk = false;
 };
 
 class PPDraftSyncTest: public PPBatchStreamProcessorTest, public ::testing::WithParamInterface<DraftSyncCase> {
@@ -739,6 +740,7 @@ TEST_P(PPDraftSyncTest, PreservesGlobalInputsLocalHiddenAndAcceptedRows) {
     }
 
     PPExecutionPlan plan;
+    plan.dspark_intermediate_chunk    = scenario.intermediate_chunk;
     plan.is_decode                    = scenario.is_verify;
     plan.model_input.is_target_verify = scenario.is_verify;
     plan.model_input.is_fake_stream   = scenario.fake;
@@ -816,6 +818,7 @@ TEST_P(PPDraftSyncTest, PreservesGlobalInputsLocalHiddenAndAcceptedRows) {
         params.parallelism_config.world_rank = 2 + rank;
         auto       propose_params            = makeMtpProposeParams(params);
         PPExecutor tail(params, nullptr, false, MlaOpsType::AUTO, nullptr, nullptr, propose_params.get());
+        tail.chunked_prefill_enabled_ = scenario.intermediate_chunk;
         tail.position_id_len_factor_ = type == SP_TYPE_MTP ? 2 : 1;
         std::vector<size_t> forward_positions;
         auto                record_forward = [&]() { forward_positions.push_back(broadcasts.position()); };
@@ -860,6 +863,27 @@ TEST_P(PPDraftSyncTest, PreservesGlobalInputsLocalHiddenAndAcceptedRows) {
         ASSERT_EQ(target_model->inputs.size(), 1u);
         EXPECT_EQ(target_model->inputs[0].is_target_verify, scenario.is_verify);
         EXPECT_TRUE(torch::equal(target_model->inputs[0].input_lengths.cpu(), plan.model_input.input_lengths));
+        if (scenario.intermediate_chunk) {
+            // Peers receive an empty PP plan. They must learn the root's skip
+            // decision before entering any hidden-buffer read/draft collective.
+            EXPECT_TRUE(target_model->hidden_requests.empty());
+            EXPECT_TRUE(draft_inputs->empty());
+            EXPECT_TRUE(tail.sampling_states_.empty());
+            ASSERT_EQ(forward_positions.size(), 1u);
+            if (rank == 0) {
+                root_forward_positions = forward_positions;
+                ASSERT_EQ(wire->sent_tensors.size(), 2u);
+                const auto result = pp_serialization::deserializeExecutionResult(wire->sent_tensors.back());
+                EXPECT_EQ(result.new_token_ids.numel(), 0);
+                EXPECT_EQ(tensorToVector<int32_t>(result.new_token_lengths), (std::vector<int32_t>{0, 0, 0}));
+                EXPECT_FALSE(result.propose_token_ids.defined());
+            } else {
+                EXPECT_TRUE(wire->sent_tensors.empty());
+                EXPECT_EQ(forward_positions, root_forward_positions);
+                EXPECT_EQ(broadcasts.position(), broadcasts.size());
+            }
+            continue;
+        }
         EXPECT_EQ(target_model->hidden_requests,
                   (std::vector<int64_t>{scenario.cp_enabled ? -1 : plan.model_input.combo_tokens.numel()}));
         ASSERT_EQ(draft_inputs->size(), scenario.cp_enabled ? 1u : type == SP_TYPE_DSPARK ? 2u : 3u);
@@ -1005,7 +1029,8 @@ TEST_P(PPDraftSyncTest, PreservesGlobalInputsLocalHiddenAndAcceptedRows) {
 INSTANTIATE_TEST_SUITE_P(
     PP,
     PPDraftSyncTest,
-    ::testing::Values(DraftSyncCase{"MtpCpFakePrefill", SP_TYPE_MTP, true, false, true, false},
+    ::testing::Values(DraftSyncCase{"MtpCpIntermediatePrefill", SP_TYPE_MTP, true, false, false, false, true},
+                      DraftSyncCase{"MtpCpFakePrefill", SP_TYPE_MTP, true, false, true, false},
                       DraftSyncCase{"MtpCpSampledPrefill", SP_TYPE_MTP, true, false, false, false},
                       DraftSyncCase{"MtpSampledPrefill", SP_TYPE_MTP, false, false, false, false},
                       DraftSyncCase{"MtpFakeVerify", SP_TYPE_MTP, false, true, true, false},
