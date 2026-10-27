@@ -4,6 +4,7 @@ from typing import Dict, List
 from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_base import (
     MetricBase,
     MetricDataPoint,
+    normalize_tags,
 )
 
 
@@ -15,7 +16,7 @@ class GaugeMetric(MetricBase):
 
     def report(self, value: float = 1, tags: Dict[str, str] = {}) -> None:
         report_tags = self.tags.copy()
-        report_tags.update(tags)
+        report_tags.update(normalize_tags(tags))
         data_point = MetricDataPoint(value, report_tags)
         with self.lock:
             self.report_queue.append(data_point)

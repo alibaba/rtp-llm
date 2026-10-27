@@ -4,13 +4,14 @@ import os
 import time
 import traceback
 from threading import Lock, Thread
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from rtp_llm.aios.kmonitor.python_client.flume.pyflume import FlumeClient
 from rtp_llm.aios.kmonitor.python_client.flume.ttypes import ThriftFlumeEvent
 from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_base import (
     MetricBase,
     MetricDataPoint,
+    normalize_tag_value,
 )
 from rtp_llm.aios.kmonitor.python_client.kmonitor.utils.hippo_helper import HippoHelper
 
@@ -19,6 +20,7 @@ _ReportWorker__REPORT_PORT = 4141
 _ReportWorker__FLUME_CLIENT_TIMEOUT_MS = 1000
 
 _ReportWorker__REPORT_INTERVAL_SECOND = 1
+_ReportWorker__ERROR_LOG_INTERVAL_SECOND = 60
 _ReportWorker__REPORT_HEADERS = {"topic": "py_kmonitor"}
 _ReportWorker__REPORT_KMONITOR_MULTI_SEP = "@"
 _ReportWorker__REPORT_KMONITOR_KEYVALUE_SEP = "^"
@@ -34,7 +36,10 @@ class ReportWorker(object):
         )
         self.metrics: Dict[str, MetricBase] = {}
         self.metric_lock: Lock = Lock()
+        self.error_log_lock: Lock = Lock()
         self.started = False
+        self.report_thread: Optional[Thread] = None
+        self.last_error_log_time: Optional[float] = None
         if HippoHelper.is_hippo_env():
             self.flume = FlumeClient(
                 _ReportWorker__REPORT_HOST,
@@ -76,22 +81,50 @@ class ReportWorker(object):
     ) -> ThriftFlumeEvent:
         value_str = str(data_point.value)
         tag_str: str = " ".join(
-            ["=".join([k, v]) for (k, v) in list(data_point.tags.items())]
+            [
+                "=".join([normalize_tag_value(k, ""), normalize_tag_value(v, "")])
+                for (k, v) in list(data_point.tags.items())
+            ]
         )
         report_message: bytes = " ".join(
             [metric_name, str(timestamp), value_str, tag_str]
         ).encode("utf-8")
         return ThriftFlumeEvent(_ReportWorker__REPORT_HEADERS, report_message)
 
+    def log_error_limited(self, message: str) -> None:
+        # Reserve one log record per interval across the report loop and flush().
+        # Callers may already hold metric_lock, so use a separate lock.
+        with self.error_log_lock:
+            now = time.monotonic()
+            last = self.last_error_log_time
+            interval = _ReportWorker__ERROR_LOG_INTERVAL_SECOND
+            if last is not None and now - last < interval:
+                return
+            self.last_error_log_time = now
+        logging.error(message)
+
     def get_report_events(self) -> List[ThriftFlumeEvent]:
         events: List[ThriftFlumeEvent] = []
         timestamp: int = int(round(time.time()))
         with self.metric_lock:
             for metric_name, metric in self.metrics.items():
-                reported_data = metric.fetch_reported_data()
+                try:
+                    reported_data = metric.fetch_reported_data()
+                except Exception as e:
+                    self.log_error_limited(
+                        f"kmonitor fetch metric [{metric_name}] failed: {e}"
+                    )
+                    continue
+                # Isolate each data point so one bad series cannot hide the others.
                 for data_point in reported_data:
-                    event = self.render_event(metric_name, timestamp, data_point)
-                    events.append(event)
+                    try:
+                        events.append(
+                            self.render_event(metric_name, timestamp, data_point)
+                        )
+                    except Exception as e:
+                        self.log_error_limited(
+                            f"kmonitor render metric [{metric_name}] failed: {e}"
+                        )
         return events
 
     def do_report(self) -> None:
@@ -105,19 +138,23 @@ class ReportWorker(object):
                 # logging.debug(event.body)
 
     def report_cycle(self) -> None:
-        try:
-            while self.started:
-                time.sleep(_ReportWorker__REPORT_INTERVAL_SECOND)
+        # Never let one failed cycle end the thread; otherwise the process stops
+        # reporting all python metrics until restart.
+        while self.started:
+            time.sleep(_ReportWorker__REPORT_INTERVAL_SECOND)
+            try:
                 self.do_report()
-        except Exception as e:
-            logging.error(f"kmonitor report thread error: {e} {traceback.format_exc()}")
+            except Exception as e:
+                self.log_error_limited(
+                    f"kmonitor report thread error: {e} {traceback.format_exc()}"
+                )
         logging.warn("kmonitor report process exited.")
 
     def start(self) -> None:
         self.started = True
-        report_thread = Thread(target=self.report_cycle)
-        report_thread.daemon = True
-        report_thread.start()
+        self.report_thread = Thread(target=self.report_cycle)
+        self.report_thread.daemon = True
+        self.report_thread.start()
 
     def stop(self) -> None:
         self.started = False
