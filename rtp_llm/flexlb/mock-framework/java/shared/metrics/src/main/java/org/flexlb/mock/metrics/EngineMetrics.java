@@ -8,6 +8,10 @@ import java.util.function.Supplier;
 
 /** Common engine observations. The engine decides when work/cache events actually occurred. */
 public final class EngineMetrics {
+    public static final String CACHE_LOOKUPS = "mock_engine_cache_lookup_tokens_total";
+    public static final String CACHE_HITS = "mock_engine_cache_hit_tokens_total";
+    public static final String FORWARD_TOKENS = "mock_engine_forward_tokens_total";
+    public static final String FORWARD_SECONDS = "mock_engine_forward_seconds";
     public enum Outcome { success, cancelled, timeout, error }
     public record State(long waiting, long running, long totalTokens, long availableTokens,
                         long freeTokens, long heldTokens) {
@@ -30,15 +34,15 @@ public final class EngineMetrics {
         Objects.requireNonNull(state);
         String[] identity = {engine, role, node};
         started = counter("mock_engine_requests_started_total", "Accepted engine requests.").labels(identity);
-        cacheInputs = counter("mock_engine_cache_lookup_tokens_total", "Input tokens considered by successful KV admission.").labels(identity);
-        cacheHits = counter("mock_engine_cache_hit_tokens_total", "Historical prefix tokens reused at KV admission.").labels(identity);
+        cacheInputs = counter(CACHE_LOOKUPS, "Input tokens considered by successful KV admission.").labels(identity);
+        cacheHits = counter(CACHE_HITS, "Historical prefix tokens reused at KV admission.").labels(identity);
         var results = Counter.build().name("mock_engine_requests_finished_total").help("Terminal engine requests by outcome.")
             .labelNames("engine", "role", "node", "outcome").register(registry);
         for (var outcome : Outcome.values()) finished.put(outcome, results.labels(engine, role, node, outcome.name()));
-        var work = Counter.build().name("mock_engine_forward_tokens_total").help("Tokens in completed forwards; input includes cache, compute excludes it.")
+        var work = Counter.build().name(FORWARD_TOKENS).help("Tokens in completed forwards; input includes cache, compute excludes it.")
             .labelNames("engine", "role", "node", "kind").register(registry);
         for (String kind : List.of("input", "compute", "output")) tokens.put(kind, work.labels(engine, role, node, kind));
-        forward = Histogram.build().name("mock_engine_forward_seconds").help("Elapsed time of completed simulated forwards, excluding request queue time.")
+        forward = Histogram.build().name(FORWARD_SECONDS).help("Elapsed time of completed simulated forwards, excluding request queue time.")
             .labelNames(LABELS).register(registry).labels(identity);
         // Pull one state snapshot per scrape: no cached gauge values or background sampler.
         new Collector() {

@@ -1,6 +1,6 @@
 # Mock框架
 
-Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP节点支持状态RPC、设备缓存、本地单token请求与Prometheus抓取；P/D链路、多JVM Client播放、历史指标存储和正式历史查看服务尚未接入，不由测试组件模拟验收。
+Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP节点支持状态RPC、设备缓存、本地单token请求、Prometheus抓取与指标查询；P/D链路、多JVM Client播放、Runner管理历史指标存储和正式历史查看服务尚未接入，不由测试组件模拟验收。
 
 ## 目录与构建
 
@@ -9,7 +9,7 @@ Python负责case配置编译和执行组织，Java负责组件共享接口与实
 - `python/mock_framework/execution/`：本地进程初始化、顺序执行、HTTP调用、门禁比较、收尾和运行记录。
 - `java/runtime/`：将接口实现绑定为HTTP端点，按接口清单校验参数与回执，提供单次调用上下文。
 - `java/shared/compute/`：共享Forward batch、公式绑定、确定性噪声与可取消计时执行。
-- `java/shared/metrics/`：共享Engine指标定义、独立Prometheus注册表与标准文本导出。
+- `java/shared/metrics/`：共享Engine指标定义、独立注册表、Prometheus导出与查询实现。
 - `java/engine/rtp/`：RTP节点入口、原生配置读取、KV块租约和生产proto状态RPC。
 - `tests/`：编译与跨语言接口扩展验证；Java测试跟随模块。
 - `scripts/`：构建和验证入口。
@@ -169,7 +169,7 @@ Mock容量通过点分键capacity.device_blocks配置，单位为本实例的物
 
 设备块池按引用管理共享前缀：可用容量包含空闲块和未被引用的LRU块，物理free不包含LRU数据。分配先引用命中、再检查净新增需求与reserve，失败回滚引用；需要空闲物理块时才淘汰LRU。增长失败保留已增长的部分，最终由原owner释放。DeviceCache封装原始池租约，完成、取消和关闭只有一次所有权转换；publish可保留已计算P数据供连接器使用，但不会自动推进P/D协议。取消后不能再次发布，关闭清除缓存并拒绝新分配。
 
-组件目录同时保存endpoints.json，记录本实例原生RPC地址、控制地址、支持的RPC和本地生成范围。HTTP /health仅报告已绑定的公共业务接口清单；当前RTP节点该清单为空，不把原生状态RPC或健康探测扩充为case业务接口。Enqueue、Fetch、原生Cancel、RemoteGenerate和P/D接续尚未绑定，调用返回gRPC UNIMPLEMENTED；EngineApi动作/指标查询适配尚未提供，Prometheus原始抓取见下文。节点启动通过不表示压测或完整RTP行为通过。
+组件目录同时保存endpoints.json，记录本实例原生RPC地址、控制地址、支持的RPC和本地生成范围。HTTP /health仅报告已绑定的公共业务接口清单；未配置Prometheus查询时清单为空，配置后绑定下述5个只读接口，不把健康探测扩充为case业务接口。Enqueue、Fetch、原生Cancel、RemoteGenerate和P/D接续尚未绑定，调用返回gRPC UNIMPLEMENTED；EngineApi动作适配尚未提供。节点启动通过不表示压测或完整RTP行为通过。
 
 ### 本地单token请求
 
@@ -202,4 +202,53 @@ EngineMetrics放在共享目录，不依赖RTP协议、缓存实现或调度器�
 
 累计量预建为0，抓取不会清零。缓存命中率按hit tokens增量除以lookup tokens增量做token加权，不能平均每请求命中率。Prefill计算TPS可由完成的compute tokens增量除以Forward seconds sum增量得到，带cache TPS使用input tokens；若要墙钟吞吐则取token counter的rate，两者分母不同。共享层只保存观测值，由查询接口选择对应口径。分母为0时没有可判断的比率，不补成100%或0来通过门禁。
 
-这些指标是新框架的公共口径，不冒充KMonitor原指标。后续语义查询接口负责PromQL，case仍优先调用接口；Grafana旧大盘的指标映射、Runner管理Prometheus与历史保留、Client请求指标尚未接入。打包测试保存一次metrics.prom供核对，不代表历史采集完成。
+这些指标是新框架的公共口径，不冒充KMonitor原指标。语义查询接口负责PromQL，case优先调用接口；Grafana旧大盘的指标映射、Runner管理Prometheus与历史保留、Client请求指标尚未接入。节点打包测试保存一次metrics.prom供核对，不代表历史采集完成。
+
+### Prometheus指标查询
+
+在RTP组件业务配置中补充两个Mock点分参数，即可在已有控制端口启用查询，不增加新服务进程或case顶层配置：
+
+```yaml
+environment:
+  prefill:
+    engine: rtp
+    config:
+      # 其余原生配置与Mock容量照常填写
+      prometheus.url: http://127.0.0.1:9090
+      prometheus.job: experiment
+```
+
+Prometheus由调用方提供，并采集节点endpoints.json中的metrics地址。job应只覆盖本次实验；多个实验共用Prometheus时要使用不同job。共享PrometheusQueries绑定EngineMetricsApi的4个读接口和PrometheusApi；EngineApi继承这些读定义，仍是原有公共接口，没有另列一份路由表。只读节点不会宣称支持scale_in。指标名由EngineMetrics提供，查询不另造一套指标名。
+
+| 接口 | 计算口径 |
+| --- | --- |
+| `engine/cache/hit_rate` | Prefill历史命中token增量／输入token增量，可用engines选择节点；结果0～1。 |
+| `engine/prefill/tps` | Prefill实际计算token增量／完成Forward耗时增量。 |
+| `engine/prefill/tps_with_cache` | Prefill输入token增量／完成Forward耗时增量，输入包含命中部分。 |
+| `engine/decode/tps` | Decode完成Forward的output token增量／墙钟时间。本地D尚未执行请求，不能据此宣称D请求链路已完成。 |
+| `prometheus/query` | 原始表达式在固定query_time执行一次，返回scalar或float instant vector，记录标签、数值和sample_time。 |
+
+普通Engine接口自动过滤配置的job和engine，并按接口限定role；先对每条Counter计算增量，再聚合，保留多节点重启Counter reset的正确处理。缓存命中率做token加权，不平均节点比率；空engines集合直接报错，不能退化为选全部。选择器值做PromQL字符串和正则转义。
+
+显式range使用Runner已经记录的绝对start/end，不在网络调用时重新取时钟。后端用单次instant query在end求值，窗口为end-start；例如[-60s,-10s]查询的是过去50秒，终点也在过去。时间精度为Prometheus的毫秒；小于1ms的范围拒绝执行。latest使用检查时刻前60秒内最近两次采样的irate，表示当前采集周期，不平均整分钟；最近一分钟没有足够采样或没有可计算的Forward时会报错。
+
+已产生数据时，case仍这样检查：
+
+```yaml
+- check:
+    id: prefill_tps
+    describe: 检查过去一分钟的Prefill计算速度
+    interface: engine/prefill/tps
+    args: {range: [-60s, 0s]}
+    expect: {gte: 100}
+```
+
+prometheus/query不接受外层range，也不调用query_range；若表达式需要观察历史，在PromQL中自行使用范围函数，并返回单点数值。该逃生接口按原始表达式执行，不自动改写job/engine过滤条件。matrix、string、原生histogram返回类型、非有限值、查询警告和后端失败不作为有效门禁数据；普通指标必须恰好返回一个有限值。原始PromQL空向量可返回空samples，但Runner会将门禁记为ERROR。查询不重试，HTTP与Prometheus求值均受当前步骤剩余预算限制。
+
+真实采集集成测试需显式提供本机Prometheus，未提供时只跳过这项集成测试，其余仍执行：
+
+```sh
+PROMETHEUS_BIN=/path/to/prometheus ./scripts/check.sh
+```
+
+测试启动独立Prometheus和两个RTP JVM，保留TSDB、日志、配置、门禁值及时间范围，并检查进程回收。这不表示生产Runner已经负责启动和保留Prometheus；自动采集管理仍待接入。
