@@ -464,6 +464,7 @@ class EmbeddingConfig:
         self.embedding_grpc_keepalive: bool = False
         self.embedding_rpc_timeout_s: Optional[float] = None
         self.qwen3_reranker_fixed_head: bool = True
+        self.qwen3_reranker_input_format: str = "template"
 
     def to_string(self):
         return (
@@ -471,7 +472,8 @@ class EmbeddingConfig:
             f"embedding_share_grpc_channel: {self.embedding_share_grpc_channel}\n"
             f"embedding_grpc_keepalive: {self.embedding_grpc_keepalive}\n"
             f"embedding_rpc_timeout_s: {self.embedding_rpc_timeout_s}\n"
-            f"qwen3_reranker_fixed_head: {self.qwen3_reranker_fixed_head}"
+            f"qwen3_reranker_fixed_head: {self.qwen3_reranker_fixed_head}\n"
+            f"qwen3_reranker_input_format: {self.qwen3_reranker_input_format}"
         )
 
 

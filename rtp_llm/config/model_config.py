@@ -82,6 +82,7 @@ class ModelConfig(CppModelConfig):
         "lora_infos",
         "headwise_config",
         "qwen3_reranker_fixed_head",
+        "qwen3_reranker_input_format",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -568,6 +569,7 @@ class ModelConfig(CppModelConfig):
         self.enable_w4a16_sm120_dense_ffn: bool = False
         self.enable_int8_allreduce_fp16_scale: bool = False
         self.qwen3_reranker_fixed_head: bool = True
+        self.qwen3_reranker_input_format: str = "template"
         self.src_quantization_bit: int = 0
         self.config_dtype: Optional[str] = None
 
@@ -927,6 +929,9 @@ def build_model_config(
     if embedding_config is not None:
         model_config.qwen3_reranker_fixed_head = (
             embedding_config.qwen3_reranker_fixed_head
+        )
+        model_config.qwen3_reranker_input_format = (
+            embedding_config.qwen3_reranker_input_format
         )
 
     # Set quantization from quantization_config
