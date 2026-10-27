@@ -63,11 +63,11 @@ std::string resolveKVCacheEventInstanceGroup(const std::string& event_group, con
     return event_group.empty() ? reco_group : event_group;
 }
 
-std::string cacheEventSpecName(int32_t block_size_tokens, const std::string& tag) {
-    if (tag == "global_kv_1") {
+std::string cacheEventSpecName(int32_t block_size_tokens, const std::string& tag, bool legacy_dsv41_specs) {
+    if (tag == "global_kv_1" || (legacy_dsv41_specs && tag == "hca_kv")) {
         return "F0";
     }
-    if (tag == "global_kv_2") {
+    if (tag == "global_kv_2" || (legacy_dsv41_specs && tag == "csa_kv")) {
         return "F1";
     }
     if (tag == "indexer_kv") {
@@ -838,7 +838,18 @@ void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporte
             return;
         }
 
-        const std::vector<std::string> full_group_tags{"global_kv_1", "global_kv_2", "indexer_kv"};
+        // Match the runtime pool tags while keeping the published F/F0/F1/F2 schema stable.
+        const bool legacy_dsv41_specs = runtime_config_.model_name == "DeepSeekV41"
+                                        || runtime_config_.model_name == "DeepSeekV41DSpark";
+        std::vector<std::string> full_group_tags{"global_kv_1", "global_kv_2", "indexer_kv"};
+        if (legacy_dsv41_specs
+            && std::find(reuse_group_tags.begin(), reuse_group_tags.end(), "hca_kv") != reuse_group_tags.end()) {
+            full_group_tags[0] = "hca_kv";
+        }
+        if (legacy_dsv41_specs
+            && std::find(reuse_group_tags.begin(), reuse_group_tags.end(), "csa_kv") != reuse_group_tags.end()) {
+            full_group_tags[1] = "csa_kv";
+        }
         const auto&                    group_sets       = block_tree_cache_->groupSets();
         const bool                     merge_full_specs =
             std::any_of(group_sets.begin(), group_sets.end(), [&](const auto& group_set) {
@@ -854,8 +865,8 @@ void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporte
         if (merge_full_specs) {
             // One representative still requires every member of the shared FULL GroupSet to be resident.
             reuse_group_tags.erase(
-                std::remove_if(reuse_group_tags.begin(), reuse_group_tags.end(), [](const auto& tag) {
-                    return tag == "global_kv_2" || tag == "indexer_kv";
+                std::remove_if(reuse_group_tags.begin(), reuse_group_tags.end(), [&](const auto& tag) {
+                    return tag == full_group_tags[1] || tag == full_group_tags[2];
                 }),
                 reuse_group_tags.end());
         }
@@ -881,8 +892,9 @@ void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporte
         // Pipeline parallelism is rejected above because a unique PP owner is
         // not represented in ParallelismConfig yet.
         for (const auto& tag : reuse_group_tags) {
-            const auto name = merge_full_specs && tag == "global_kv_1" ?
-                                  "F" : cacheEventSpecName(publisher_context.block_size_tokens, tag);
+            const auto name = merge_full_specs && tag == full_group_tags[0] ?
+                                  "F" :
+                                  cacheEventSpecName(publisher_context.block_size_tokens, tag, legacy_dsv41_specs);
             publisher_context.specs.push_back({name, "event_report://" + publisher_context.host_ip_port + "/hbm"});
         }
         publisher_context.tp_size = static_cast<int32_t>(parallelism_config_.tp_size);

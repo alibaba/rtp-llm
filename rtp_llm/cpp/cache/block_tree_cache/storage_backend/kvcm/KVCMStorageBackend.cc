@@ -210,7 +210,8 @@ public:
                     (void)group_id;
                     for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
                         const std::string legacy_name = "tp" + std::to_string(rank) + "_" + group.group_name;
-                        const std::string expected_name = kvcm::genLocationSpecName(rank, group.group_name);
+                        const std::string expected_name =
+                            kvcm::genLocationSpecName(rank, group.group_name, runtime_config_.model_name);
                         if (legacy_name != expected_name && configured_infos.count(legacy_name) != 0) {
                             RTP_LLM_LOG_ERROR("KVCM_CLIENT_CONFIG must replace location spec [%s] with [%s]",
                                               legacy_name.c_str(), expected_name.c_str());
@@ -709,7 +710,7 @@ private:
                 (void)id;
                 bool available = true;
                 for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
-                    const auto name = kvcm::genLocationSpecName(rank, group.group_name);
+                    const auto name = kvcm::genLocationSpecName(rank, group.group_name, runtime_config_.model_name);
                     const auto found = present.find(name);
                     available = available && found != present.end() && !found->second->uri.empty();
                 }
@@ -822,11 +823,14 @@ private:
         auto infos  = std::make_shared<kvcm::KVCMConfig::LocationSpecInfoMap>();
         auto groups = std::make_shared<kvcm::KVCMConfig::LocationSpecGroups>();
         RTP_LLM_CHECK_WITH_INFO(
-            group_policy_->buildLocationSpecGroups(static_cast<int>(parallelism_config_.tp_size), *groups),
+            group_policy_->buildLocationSpecGroups(static_cast<int>(parallelism_config_.tp_size),
+                                                    *groups,
+                                                    runtime_config_.model_name),
             "failed to build KVCM location spec groups");
         for (const auto& [group_id, group] : group_policy_->groups()) {
             for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
-                const std::string spec_name = kvcm::genLocationSpecName(rank, group.group_name);
+                const std::string spec_name =
+                    kvcm::genLocationSpecName(rank, group.group_name, runtime_config_.model_name);
                 infos->emplace(spec_name, cache_config_.blockSizeBytesForGroup(group.tag));
             }
         }
@@ -942,7 +946,8 @@ private:
             kvcm::ClientWrapper::PoolRegistration registration{
                 {pool->getBaseAddress(), registration_size},
                 kvcm::genLocationSpecName(static_cast<int>(parallelism_config_.tp_rank),
-                                          groups.at(group_id).group_name)};
+                                          groups.at(group_id).group_name,
+                                          runtime_config_.model_name)};
             if (use_gdr) {
 #if USING_CUDA
                 const long page_size = sysconf(_SC_PAGESIZE);
