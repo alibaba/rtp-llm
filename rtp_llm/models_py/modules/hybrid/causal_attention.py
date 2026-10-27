@@ -71,6 +71,23 @@ class CausalAttention(nn.Module):
                 attn_config.size_per_head,
                 layernorm_eps,
             )
+        self.fp8_key_center = None
+        qkv_bias = weights.get(W.attn_qkv_b)
+        if (
+            attn_config.fp8_kv_cache_mode == 2
+            and self.qk_fuse_norm is None
+            and qkv_bias is not None
+        ):
+            # One checkpoint-derived shift for every token, request and cache
+            # reuse. Subtract after RoPE: subtracting the projection bias before
+            # rotation would change relative-position attention scores.
+            kv_size = attn_config.kv_head_num * self.head_dim
+            self.fp8_key_center = (
+                qkv_bias.reshape(-1)[self.q_size : self.q_size + kv_size]
+                .reshape(attn_config.kv_head_num, self.head_dim)
+                .float()
+                .contiguous()
+            )
 
     def forward(
         self,
@@ -86,7 +103,12 @@ class CausalAttention(nn.Module):
             qkv = self.qkv_proj(hidden_states)
         if self.qk_fuse_norm is not None:
             qkv = self.qk_fuse_norm(qkv)
-        attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
+        if self.fp8_key_center is None:
+            attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
+        else:
+            attn_output = fmha_impl.forward(
+                qkv, kv_cache, self.layer_idx, key_center=self.fp8_key_center
+            )
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)

@@ -113,6 +113,8 @@ class FMHAImplBase(ABC):
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
+        *,
+        key_center: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """执行前向传播计算。
 

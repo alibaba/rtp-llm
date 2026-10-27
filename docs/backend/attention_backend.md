@@ -21,6 +21,26 @@ FA4 only serves speculative decoding target verify and draft prefill, and additi
 BF16 activations with a non-quantized KV cache. Its kernel is only packaged in the CUDA 12.9 x86
 build; other builds fall back to the FlashInfer/TRT prefill backends automatically.
 
+## Qwen2 per-token FP8 KV accuracy
+
+With `--fp8_kv_cache 2`, biased QKV projections without Q/K normalization
+use a fixed per-layer K center derived from the checkpoint's local K bias.
+The fused writer subtracts this center **after RoPE**, before per-token FP8
+quantization. Fresh ragged keys and cached prefix/decode keys use the same
+center. This reduces quantization error from large K offsets in Qwen2/2.5.
+It is automatic and requires no additional server argument or tuning value.
+
+For each query, subtracting the same vector from every key changes all
+attention logits by the same constant, so softmax is unchanged in exact
+arithmetic. BF16/FP16 rounding and FP8 quantization still make the result
+approximate. Modes 0/1, bias-free projections and Q/K-normalized layers keep
+their existing path.
+
+Deploy matching Python code and rebuilt CUDA extensions. Recreate caches when
+upgrading: centered mode-2 keys cannot be shared with older writers/readers.
+All P/D and remote-cache peers must run the same build, as required by the
+existing KV-sharing contract.
+
 ## ROCm KV-cache V layout and PA flag combinations
 
 The matrix uses `[prefill writer:layout] (decode reader:layout)`, where `V` is vectorized and `L` is

@@ -128,7 +128,13 @@ void validate_unique_destinations_async(const at::Tensor& physical_page_ids,
     if (physical_page_ids.numel() <= 1) {
         return;
     }
-    const auto destinations        = physical_page_ids.to(at::kLong) * physical_page_size + token_offsets.to(at::kLong);
+    const auto padding = physical_page_ids.eq(-1);
+    at::_assert_async(padding.eq(token_offsets.eq(-1)).all(),
+                      "FP8 KV cache write padding must use paired (-1, -1) mappings");
+    const auto destinations =
+        at::where(padding,
+                  -(at::arange(physical_page_ids.numel(), physical_page_ids.options().dtype(at::kLong)) + 1),
+                  physical_page_ids.to(at::kLong) * physical_page_size + token_offsets.to(at::kLong));
     const auto sorted_destinations = std::get<0>(destinations.sort());
     const auto unique_destinations = sorted_destinations.slice(0, 1, sorted_destinations.numel())
                                          .ne(sorted_destinations.slice(0, 0, sorted_destinations.numel() - 1))
@@ -200,6 +206,7 @@ __global__ void fused_rope_quantize_and_write_fp8_kv_cache_kernel(const T* __res
                                                                   const int32_t* __restrict__ decode_input_lengths,
                                                                   const int32_t* __restrict__ page_indptr,
                                                                   const int32_t* __restrict__ page_indices,
+                                                                  const float* __restrict__ key_center,
                                                                   int64_t       num_tokens,
                                                                   int64_t       metadata_tokens,
                                                                   int64_t       num_q_heads,
@@ -328,6 +335,13 @@ __global__ void fused_rope_quantize_and_write_fp8_kv_cache_kernel(const T* __res
         }
     }
 
+    if (in_head && owns_kv && key_center != nullptr) {
+#pragma unroll
+        for (int i = 0; i < vec_size; ++i) {
+            reinterpret_cast<T*>(&k)[i] = static_cast<T>(static_cast<float>(reinterpret_cast<T*>(&k)[i])
+                                                         - key_center[head_idx * head_dim + vec_offset + i]);
+        }
+    }
     if (in_head) {
         const int64_t q_offset                       = token_idx * output_width + head_idx * head_dim + vec_offset;
         *reinterpret_cast<Vec*>(q_output + q_offset) = q;
@@ -454,6 +468,7 @@ void launch_fused_rope_quantize_and_write(const at::Tensor&                qkv,
                                           const float2*                    cos_sin_cache,
                                           int64_t                          cos_sin_rows,
                                           bool                             output_qkv,
+                                          const std::optional<at::Tensor>& key_center,
                                           cudaStream_t                     stream) {
     if (qkv.size(0) == 0) {
         return;
@@ -482,6 +497,7 @@ void launch_fused_rope_quantize_and_write(const at::Tensor&                qkv,
         decode_input_lengths ? decode_input_lengths->data_ptr<int32_t>() : nullptr,
         page_indptr.data_ptr<int32_t>(),
         page_indices.data_ptr<int32_t>(),
+        key_center ? key_center->data_ptr<float>() : nullptr,
         qkv.size(0),
         metadata_tokens,
         num_q_heads,
@@ -527,7 +543,10 @@ __global__ void quantize_and_write_fp8_kv_cache_kernel(const T* __restrict__ k,
 
     const int64_t physical_page = static_cast<int64_t>(physical_page_ids[n]);
     const int64_t token_offset  = static_cast<int64_t>(token_offsets[n]);
-    const bool    valid_mapping =
+    if (physical_page == -1 && token_offset == -1) {
+        return;
+    }
+    const bool valid_mapping =
         physical_page >= 0 && physical_page < physical_pages && token_offset >= 0 && token_offset < physical_page_size;
     CUDA_KERNEL_ASSERT_MSG(valid_mapping, "FP8 KV cache write mapping is out of bounds");
     if (!valid_mapping) {
@@ -724,7 +743,8 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
                                                       const std::optional<at::Tensor>& kv_lengths,
                                                       const std::optional<at::Tensor>& token_indptr,
                                                       const std::optional<at::Tensor>& decode_input_lengths,
-                                                      bool                             output_qkv) {
+                                                      bool                             output_qkv,
+                                                      const std::optional<at::Tensor>& key_center) {
 #ifndef ENABLE_FP8
     TORCH_CHECK(false, "FP8 support is not enabled in this CUDA build");
 #else
@@ -748,6 +768,13 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
                 ", got ",
                 head_dim);
     TORCH_CHECK(kernel_page_size > 0, "kernel_page_size must be positive");
+    if (key_center) {
+        check_cuda_contiguous(*key_center, "key_center");
+        check_same_device(qkv, *key_center, "key_center");
+        TORCH_CHECK(key_center->scalar_type() == at::ScalarType::Float && key_center->dim() == 2
+                        && key_center->size(0) == num_kv_heads && key_center->size(1) == head_dim,
+                    "key_center must be float32 with shape [num_kv_heads, head_dim]");
+    }
     TORCH_CHECK(batch_indices.dim() == 1 && (token_indptr.has_value() || batch_indices.numel() >= qkv.size(0)),
                 "batch_indices must be a vector covering N tokens unless token_indptr masks padding");
     TORCH_CHECK(positions.dim() == 1 && (token_indptr.has_value() || positions.numel() >= qkv.size(0)),
@@ -866,6 +893,7 @@ at::Tensor fused_rope_quantize_and_write_fp8_kv_cache(const at::Tensor&         
                                                                      cos_sin_ptr,                                      \
                                                                      cos_sin_rows,                                     \
                                                                      output_qkv,                                       \
+                                                                     key_center,                                       \
                                                                      stream);                                          \
     })
     if (qkv.scalar_type() == at::ScalarType::Half) {
