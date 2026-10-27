@@ -50,7 +50,7 @@ class EngineGrpcClientTransportTest {
     private final NioEventLoopGroup eventLoopGroup = new NioEventLoopGroup(1);
     private final GrpcReporter reporter = mock(GrpcReporter.class);
     private final EngineGrpcClient client = new EngineGrpcClient(
-            mock(CustomNameResolver.class), executor, eventLoopGroup, reporter, 2000, 5000);
+            mock(CustomNameResolver.class), executor, eventLoopGroup, reporter, 2000, 5000, 8 * 1024 * 1024);
     private final CountDownLatch releaseCallbacks = new CountDownLatch(1);
     private Server server;
 

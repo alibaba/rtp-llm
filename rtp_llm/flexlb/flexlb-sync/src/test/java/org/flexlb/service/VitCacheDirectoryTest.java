@@ -330,7 +330,7 @@ class VitCacheDirectoryTest {
         var executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(2);
         var eventLoop = new NioEventLoopGroup(1);
         var client = new EngineGrpcClient(mock(CustomNameResolver.class), executor, eventLoop,
-                mock(GrpcReporter.class), 1000, 5000);
+                mock(GrpcReporter.class), 1000, 5000, 8 * 1024 * 1024);
         try {
             var request = CacheVersionPB.newBuilder().setNeedCacheKeys(true).build();
             for (int i = 0; i < 2; i++) {

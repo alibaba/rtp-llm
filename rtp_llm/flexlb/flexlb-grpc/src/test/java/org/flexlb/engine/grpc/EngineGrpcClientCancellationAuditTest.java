@@ -202,7 +202,7 @@ class EngineGrpcClientCancellationAuditTest {
         final CountDownLatch retryStarting = new CountDownLatch(1), allowRetryStart = new CountDownLatch(1);
         final AtomicBoolean contextCancelledAtStart = new AtomicBoolean();
         TestClient(ThreadPoolExecutor executor, NioEventLoopGroup loop, boolean blockRetryCreation) {
-            super(mock(CustomNameResolver.class), executor, loop, mock(GrpcReporter.class), 2000, 5000);
+            super(mock(CustomNameResolver.class), executor, loop, mock(GrpcReporter.class), 2000, 5000, 8 * 1024 * 1024);
             this.blockRetryCreation = blockRetryCreation;
         }
         @Override protected ManagedChannel createChannel(String key) {

@@ -567,7 +567,7 @@ class EngineGrpcClientCompletionTest {
         private RuntimeException callStartFailure;
 
         private TestClient(String name, ThreadPoolExecutor executor, GrpcReporter reporter) {
-            super(mock(CustomNameResolver.class), executor, mock(EventLoopGroup.class), reporter, 20, 5000);
+            super(mock(CustomNameResolver.class), executor, mock(EventLoopGroup.class), reporter, 20, 5000, 8 * 1024 * 1024);
             this.name = name;
         }
 

@@ -159,7 +159,7 @@ public abstract class FlexLBMockTestBase {
         GrpcReporter grpcReporter = new GrpcReporter(new NoOpFlexMonitor());
         grpcClient = new EngineGrpcClient(
                 nameResolver, grpcExecutor, eventLoopGroup,
-                grpcReporter, 1_000, enqueueTimeoutMillis());
+                grpcReporter, 1_000, enqueueTimeoutMillis(), 8 * 1024 * 1024);
 
         // 4. Create real dispatcher
         dispatcher = createDispatcher();
