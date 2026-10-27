@@ -962,6 +962,8 @@ void KVCacheManager::reportMetricsLoop() {
     kmonitor::MetricsTags tags;
     constexpr auto        kFrozenLogInterval   = std::chrono::minutes(1);
     auto                  last_frozen_log_time = std::chrono::steady_clock::now() - kFrozenLogInterval;
+    uint64_t previous_queue_full_count = 0;
+    uint64_t previous_report_failed_count = 0;
     while (!stop_.load(std::memory_order_acquire)) {
         if (!metrics_reporter_ || !coordinator_manager_) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -970,6 +972,17 @@ void KVCacheManager::reportMetricsLoop() {
 
         RtpLLMCacheMetricsCollector global_metrics = collectGlobalCacheMetrics(coordinator_manager_);
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &global_metrics);
+
+        if (cache_event_publisher_) {
+            const auto status = cache_event_publisher_->status();
+            RtpLLMCacheEventDropMetricsCollector event_metrics;
+            event_metrics.queue_full_count = status.queue_full_count - previous_queue_full_count;
+            event_metrics.report_failed_count = status.report_failed_count - previous_report_failed_count;
+            previous_queue_full_count = status.queue_full_count;
+            previous_report_failed_count = status.report_failed_count;
+            metrics_reporter_->report<RtpLLMCacheEventDropMetrics, RtpLLMCacheEventDropMetricsCollector>(
+                &tags, &event_metrics);
+        }
 
         const auto now = std::chrono::steady_clock::now();
         if (isAllocatorOwner() && now - last_frozen_log_time >= kFrozenLogInterval) {
