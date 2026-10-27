@@ -866,8 +866,10 @@ class AttentionV41FP8(AttentionFP8):
 
     def init_rope_cache(self, device=None):
         super().init_rope_cache(device=device)
+        from ._v41_full_projection import prepare as prepare_full_projection
         from ._v41_mega_attention import prepare
 
+        prepare_full_projection(self)
         if self._mega_attention is not None:
             # Reinitialization must refresh the buffers captured by existing
             # graphs, including the shared Main/Indexer Q-B weight slices.
@@ -3002,7 +3004,7 @@ class AttentionV41FP8(AttentionFP8):
             out=self._prefill_output_buffer(x, qkv.qr.shape[0]),
         )
 
-    def _produce_global_decode(self, x, positions, req_ids, starts):
+    def _produce_global_decode(self, x, positions, req_ids, starts, *, projected=None):
         """Fixed-shape global writes and index reads, safe for CUDA graphs."""
         from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
             dequantize_indexer_k_fp4,
@@ -3018,7 +3020,9 @@ class AttentionV41FP8(AttentionFP8):
             try_produce_global,
         )
 
-        if not try_produce_global(self, x, positions, req_ids, starts):
+        if not try_produce_global(
+            self, x, positions, req_ids, starts, projected=projected
+        ):
             flat = x.reshape(B * S, -1)
             values = _linear_bf16_bf16_fp32(flat, self.global_wkv)
             if self.compress_ratio == 2:

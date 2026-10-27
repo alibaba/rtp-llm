@@ -274,7 +274,7 @@ cuda13_sm100_py_test(
         tags = ["dsv41_cuda13"],
         legacy_create_init = 0,
     )
-    for name in ["test_v41_deepgemm_producers", "test_v41_qkv_rope_cache", "test_v41_global_overlap"]
+    for name in ["test_v41_deepgemm_producers", "test_v41_qkv_rope_cache", "test_v41_global_overlap", "test_v41_full_projection"]
 ]
 
 dsv4_sm100_py_test(

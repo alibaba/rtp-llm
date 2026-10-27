@@ -120,6 +120,8 @@ def _compress_norm_main_store_kernel(
     latent_out,
     S: tl.constexpr,
     ROWS: tl.constexpr,
+    VALUE_STRIDE: tl.constexpr,
+    SCORE_STRIDE: tl.constexpr,
     RATIO: tl.constexpr,
     EPS: tl.constexpr,
     STATE_EB: tl.constexpr,
@@ -143,9 +145,9 @@ def _compress_norm_main_store_kernel(
     columns = tl.arange(0, 512)
     position = tl.load(positions + token).to(tl.int64)
     request = tl.load(requests + token).to(tl.int64)
-    current = tl.load(values + token * 512 + columns)
+    current = tl.load(values + token * VALUE_STRIDE + columns)
     if RATIO == 2:
-        current_score = tl.load(scores + token * 512 + columns)
+        current_score = tl.load(scores + token * SCORE_STRIDE + columns)
         if token % S == 0:
             previous_position = tl.maximum(
                 tl.load(starts + request).to(tl.int64) - 1, 0
@@ -164,8 +166,8 @@ def _compress_norm_main_store_kernel(
                 state + row * 1024 + 512 + columns, block > 0, other=0
             )
         else:
-            previous = tl.load(values + (token - 1) * 512 + columns)
-            previous_score = tl.load(scores + (token - 1) * 512 + columns)
+            previous = tl.load(values + (token - 1) * VALUE_STRIDE + columns)
+            previous_score = tl.load(scores + (token - 1) * SCORE_STRIDE + columns)
         maximum = tl.maximum(previous_score, current_score)
         # Match torch.softmax's expf and rounded division. Approximate exp2
         # and reciprocal can flip BF16 latent values exactly at a midpoint.
@@ -250,6 +252,8 @@ def _index_norm_store_state_kernel(
     state,
     state_table,
     S: tl.constexpr,
+    VALUE_STRIDE: tl.constexpr,
+    SCORE_STRIDE: tl.constexpr,
     RATIO: tl.constexpr,
     EPS: tl.constexpr,
     INDEX_EB: tl.constexpr,
@@ -323,11 +327,12 @@ def _index_norm_store_state_kernel(
             row = block * STATE_EB + position % STATE_EB
             columns = tl.arange(0, 512)
             tl.store(
-                state + row * 1024 + columns, tl.load(values + token * 512 + columns)
+                state + row * 1024 + columns,
+                tl.load(values + token * VALUE_STRIDE + columns),
             )
             tl.store(
                 state + row * 1024 + 512 + columns,
-                tl.load(scores + token * 512 + columns),
+                tl.load(scores + token * SCORE_STRIDE + columns),
             )
 
 
@@ -439,7 +444,7 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
     return True
 
 
-def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
+def try_produce_global(attn, x, positions, req_ids, starts, *, projected=None) -> bool:
     """Write main/index/state pools, or return False without mutations.
 
     The caller retains ownership of the shared paged-index descriptor. The
@@ -452,12 +457,15 @@ def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
 
     batch, span, _ = x.shape
     tokens = batch * span
-    values = _linear_bf16_bf16_fp32(x.view(tokens, -1), attn.global_wkv)
-    scores = (
-        _linear_bf16_bf16_fp32(x.view(tokens, -1), attn.global_wgate)
-        if attn.compress_ratio == 2
-        else values
-    )
+    if projected is None:
+        values = _linear_bf16_bf16_fp32(x.view(tokens, -1), attn.global_wkv)
+        scores = (
+            _linear_bf16_bf16_fp32(x.view(tokens, -1), attn.global_wgate)
+            if attn.compress_ratio == 2
+            else values
+        )
+    else:
+        values, scores = projected
     latent = torch.empty((tokens, 512), device=x.device, dtype=torch.bfloat16)
     index_positions = torch.empty(tokens, device=x.device, dtype=torch.int64)
     index_slots = torch.empty_like(index_positions)
@@ -499,6 +507,8 @@ def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
         latent,
         S=span,
         ROWS=tokens,
+        VALUE_STRIDE=values.stride(0),
+        SCORE_STRIDE=scores.stride(0),
         RATIO=attn.compress_ratio,
         EPS=attn.eps,
         MAIN_EB=main.shape[1],
@@ -535,6 +545,8 @@ def try_produce_global(attn, x, positions, req_ids, starts) -> bool:
         state,
         state_table,
         S=span,
+        VALUE_STRIDE=values.stride(0),
+        SCORE_STRIDE=scores.stride(0),
         RATIO=attn.compress_ratio,
         EPS=attn.eps,
         INDEX_EB=index.shape[1],
