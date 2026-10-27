@@ -141,6 +141,7 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyContextParallelParams>(m, "PyContextParallelParams")
         .def(pybind11::init<>())
+        .def("__copy__", [](const PyContextParallelParams& params) { return params; })
         .def_readwrite("prefill_qkv_restore_indice_cpu", &PyContextParallelParams::prefill_qkv_restore_indice_cpu)
         .def_readwrite("prefill_qkv_padding_mask_cpu", &PyContextParallelParams::prefill_qkv_padding_mask_cpu)
         .def_readwrite("prefill_mm_spans", &PyContextParallelParams::prefill_mm_spans)

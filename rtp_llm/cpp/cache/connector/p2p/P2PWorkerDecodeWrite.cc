@@ -158,7 +158,7 @@ std::shared_ptr<p2p_internal::WriteTaskGroup> P2PWorkerDecodeWrite::holdSourceRe
     return groups_.emplace(unique_key, group).second ? group : nullptr;
 }
 
-bool P2PWorkerDecodeWrite::cancelWrite(const std::string& unique_key, int64_t deadline_ms, bool wait_stopped) {
+bool P2PWorkerDecodeWrite::cancelWrite(const std::string& unique_key, int64_t deadline_ms) {
     if (unique_key.empty()) {
         return false;
     }
@@ -175,9 +175,20 @@ bool P2PWorkerDecodeWrite::cancelWrite(const std::string& unique_key, int64_t de
         }
     }
     group->cancel();
-    if (wait_stopped) {
-        group->waitStopped();
+    return true;
+}
+
+bool P2PWorkerDecodeWrite::queryLeaseStatus(
+    const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto                  it = groups_.find(unique_key);
+    if (it == groups_.end()) {
+        sealed      = false;
+        started_ops = finished_ops = 0;
+        stopped                    = false;
+        return false;
     }
+    it->second->queryLeaseStatus(sealed, started_ops, finished_ops, stopped);
     return true;
 }
 

@@ -1052,6 +1052,19 @@ TEST_F(DecodeWritebackIntegrationTest, DisabledWritebackPreservesLocalRelease) {
     auto disabled            = makeManager(RoleType::DECODE, source_, false);
     disabled->p2p_connector_ = decode_->p2p_connector_;
     decode_                  = std::move(disabled);
+    ASSERT_FALSE(decode_->writebackEnabled());
+    prepare();
+    stream_->releaseResource();
+    EXPECT_TRUE(drained());
+    EXPECT_EQ(prefill_service_.handshakes, 0);
+    EXPECT_EQ(sourceRefs(1), 1u);
+}
+
+TEST_F(DecodeWritebackIntegrationTest, NonDecodeRolePreservesLocalReleaseWithoutWriteback) {
+    auto prefill_role            = makeManager(RoleType::PREFILL, source_);
+    prefill_role->p2p_connector_ = decode_->p2p_connector_;
+    decode_                      = std::move(prefill_role);
+    ASSERT_FALSE(decode_->writebackEnabled());
     prepare();
     stream_->releaseResource();
     EXPECT_TRUE(drained());

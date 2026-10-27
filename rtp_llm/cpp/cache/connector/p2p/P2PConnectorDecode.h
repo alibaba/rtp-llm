@@ -47,7 +47,9 @@ public:
                            int64_t            request_deadline_ms,
                            FunctionResponsePB& response);
 
-    bool queryLeaseStatusPerRank(const std::string& unique_key, FunctionResponsePB& response);
+    bool queryLeaseStatusPerRank(const std::string&        unique_key,
+                                 P2PConnectorBroadcastType operation,
+                                 FunctionResponsePB&       response);
 
 public:
     ErrorInfo selectWriteSource(KVCacheResource&               resource,

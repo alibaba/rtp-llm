@@ -243,23 +243,46 @@ TEST_F(P2PConnectorTest, TransferBackendCreatesOnlyTheRequestedEndpoint) {
     EXPECT_EQ(receiver.sender, nullptr);
 }
 
-TEST_F(P2PConnectorTest, MissingReadLeaseRemainsStoppedThroughUnifiedQuery) {
-    P2PConnector decode(createDecodeConfig(), mock_layer_block_converter_, nullptr);
-    ASSERT_TRUE(decode.init());
-    FunctionRequestPB request;
-    auto*             query = request.mutable_p2p_request();
-    query->set_type(QUERY_LEASE_STATUS);
-    query->set_lease_operation(READ);
-    query->set_unique_key("missing-read-lease");
-    FunctionResponsePB response;
-    ASSERT_TRUE(decode.executeFunction(request, response));
-    EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
-    ASSERT_TRUE(response.p2p_response().has_lease_status());
-    const auto& status = response.p2p_response().lease_status();
-    EXPECT_TRUE(status.sealed());
-    EXPECT_TRUE(status.stopped());
-    EXPECT_EQ(status.started_ops(), 0);
-    EXPECT_EQ(status.finished_ops(), 0);
+TEST_F(P2PConnectorTest, UnifiedLeaseQueryPreservesReadAndWriteSemantics) {
+    for (const bool writeback_enabled : {false, true}) {
+        SCOPED_TRACE(writeback_enabled);
+        auto config = createDecodeConfig();
+        config.p2p_writeback_enable = writeback_enabled;
+        P2PConnector decode(config, mock_layer_block_converter_, nullptr);
+        ASSERT_TRUE(decode.init());
+        FunctionRequestPB request;
+        auto*             query = request.mutable_p2p_request();
+        query->set_type(QUERY_LEASE_STATUS);
+        query->set_lease_operation(READ);
+        query->set_unique_key("missing-lease");
+        FunctionResponsePB response;
+        ASSERT_TRUE(decode.executeFunction(request, response));
+        EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+        ASSERT_TRUE(response.p2p_response().has_lease_status());
+        EXPECT_TRUE(response.p2p_response().lease_status().sealed());
+        EXPECT_TRUE(response.p2p_response().lease_status().stopped());
+        EXPECT_EQ(response.p2p_response().lease_status().started_ops(), 0);
+        EXPECT_EQ(response.p2p_response().lease_status().finished_ops(), 0);
+
+        query->set_lease_operation(WRITE);
+        EXPECT_FALSE(decode.executeFunction(request, response));
+        EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+        EXPECT_FALSE(response.p2p_response().has_lease_status());
+
+        if (writeback_enabled) {
+            query->set_type(CANCEL_WRITE);
+            ASSERT_TRUE(decode.executeFunction(request, response));
+            query->set_type(QUERY_LEASE_STATUS);
+            ASSERT_TRUE(decode.executeFunction(request, response));
+            EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+            ASSERT_TRUE(response.p2p_response().has_lease_status());
+            EXPECT_TRUE(response.p2p_response().lease_status().sealed());
+            EXPECT_TRUE(response.p2p_response().lease_status().stopped());
+        }
+        query->set_lease_operation(HANDLE_READ);
+        EXPECT_FALSE(decode.executeFunction(request, response));
+        EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::INVALID_PARAMS);
+    }
 }
 
 TEST_F(P2PConnectorTest, WriteCommandsAreDisabledByDefault) {

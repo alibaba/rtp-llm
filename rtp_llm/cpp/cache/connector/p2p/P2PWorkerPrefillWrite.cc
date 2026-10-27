@@ -139,11 +139,7 @@ bool P2PWorkerPrefillWrite::queryLeaseStatus(
         stopped                    = false;
         return false;
     }
-    const auto& lease = it->second->lease;
-    sealed            = lease->isSealed();
-    started_ops       = lease->startedOps();
-    finished_ops      = lease->finishedOps();
-    stopped           = lease->isStopped();
+    it->second->queryLeaseStatus(sealed, started_ops, finished_ops, stopped);
     return true;
 }
 

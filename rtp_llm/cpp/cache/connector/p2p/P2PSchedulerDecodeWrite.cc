@@ -226,8 +226,7 @@ std::shared_ptr<P2PConnectorAsyncWriteContext> P2PSchedulerDecodeWrite::asyncWri
     }
     const auto timeout = std::min<int64_t>(
         {config_.p2p_writeback_timeout_ms, config_.load_cache_timeout_ms, std::numeric_limits<int>::max()});
-    const auto budget_deadline = currentTimeMs() + timeout;
-    const auto deadline = routing.deadline_ms > 0 ? std::min(budget_deadline, routing.deadline_ms) : budget_deadline;
+    const auto deadline        = currentTimeMs() + timeout;
     auto       source_group    = worker_.holdSourceResource(routing.unique_key, deadline, std::move(resource));
     if (!source_group) {
         return nullptr;
