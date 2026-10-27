@@ -30,6 +30,8 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_writ
     MlaKVCacheWriteOp,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
+from rtp_llm.models_py.modules.offload.plan import LayerOffloadPlan
+from rtp_llm.models_py.modules.offload.runtime import KVReadView
 from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
     triton_convert_req_index_to_global_index,
 )
@@ -130,6 +132,17 @@ class SparseMlaOp(object):
         )
 
         return global_indices_3d
+
+    def translate_selection(self, topk_indices: torch.Tensor) -> torch.Tensor:
+        return self._convert_topk_indices_to_global(topk_indices).contiguous()
+
+    def forward_resident(
+        self, q: torch.Tensor, view: KVReadView, layer_id: int = 0
+    ) -> torch.Tensor:
+        kv = view.planes[0].view(-1, 1, view.planes[0].shape[-1])
+        return flash_mla_sparse_fwd(
+            q, kv, view.indices, self.scale, d_v=self.kv_lora_rank
+        )[0]
 
     def forward(
         self,
@@ -254,6 +267,14 @@ class SparseMlaFp8Op(SparseMlaOp):
         # Convert per-request indices to global slots (decode) or workspace offsets (prefill)
         # Output shape: [total_q_len, h_kv, topk]
         global_topk_indices = self._convert_topk_indices_to_global(topk_indices)
+        return self._forward_global(q, kv, global_topk_indices, layer_id)
+
+    def forward_resident(
+        self, q: torch.Tensor, view: KVReadView, layer_id: int = 0
+    ) -> torch.Tensor:
+        return self._forward_global(q, view.planes[0], view.indices, layer_id)
+
+    def _forward_global(self, q, kv, global_topk_indices, layer_id):
 
         # Squeeze h_kv dimension if it's 1 (MLA typically uses h_kv=1)
         # Shape: [total_q_len, topk]
@@ -489,6 +510,9 @@ class SparseMlaImpl(MlaImplBase):
         kv_cache: Optional[KVCache],
         layer_id: int,
         topk_indices: Optional[torch.Tensor] = None,
+        *,
+        offload_plan: Optional[LayerOffloadPlan] = None,
+        offload_writer: Optional[MlaKVCacheWriteOp] = None,
     ) -> torch.Tensor:
         """
         Forward pass for sparse MLA attention (prefill or decode).
@@ -516,32 +540,48 @@ class SparseMlaImpl(MlaImplBase):
         """
         assert self.rope_impl is not None and self.rope_params is not None
         assert topk_indices is not None, "topk_indices is required for sparse MLA"
-        assert kv_cache is not None, "kv_cache is required for sparse MLA"
+        plan = offload_plan
+        assert (
+            kv_cache is not None or plan is not None
+        ), "kv_cache is required for sparse MLA"
         assert self.fmha_impl is not None, "fmha_impl is not initialized"
 
         # Apply RoPE to q_pe and k_pe
         q_pe = q[:, :, self.nope_head_dim :]
         self.rope_impl.forward(q_pe, k_pe, self.rope_params)
-        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
-        common.apply_write_cache_store(
-            self.write_cache_store_impl, self.attn_inputs, kv_cache
-        )
+        if plan is not None:
+            data = offload_writer.pack(compressed_kv, k_pe, self.rope_params)
+            plan.runtime.write(plan.storage_index, data)
+        else:
+            self.kv_cache_write_op.forward(
+                compressed_kv, k_pe, kv_cache, self.rope_params
+            )
+            common.apply_write_cache_store(
+                self.write_cache_store_impl, self.attn_inputs, kv_cache
+            )
 
         # Apply input BMM to transform query
         q_transformed = self._apply_input_bmm(q, layer_id)
 
         # Get full KV cache: [num_blocks * page_size, kv_lora_rank + rope_head_dim]
         # Reshape from [num_blocks, page_size, kv_dim] to [num_blocks * page_size, h_kv, kv_dim]
-        kv_cache_flat = kv_cache.kv_cache_base.view(
-            -1, 1, kv_cache.kv_cache_base.size(-1)
-        )
-        # Call unified Op with input kv (returns [total_q_len, num_heads, kv_lora_rank])
-        attn_output = self.fmha_impl.forward(
-            q_transformed, kv_cache_flat, topk_indices, layer_id=layer_id
-        )
+        if plan is not None:
+            view = plan.runtime.acquire(plan.storage_index)
+            attn_output = self.fmha_impl.forward_resident(
+                q_transformed, view, layer_id=layer_id
+            )
+        else:
+            kv_cache_flat = kv_cache.kv_cache_base.view(
+                -1, 1, kv_cache.kv_cache_base.size(-1)
+            )
+            attn_output = self.fmha_impl.forward(
+                q_transformed, kv_cache_flat, topk_indices, layer_id=layer_id
+            )
 
         # Apply output BMM to get final output
         output = self._apply_output_bmm(attn_output, layer_id)
+        if plan is not None and plan.drain:
+            plan.runtime.drain()
 
         return output
 

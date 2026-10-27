@@ -67,9 +67,40 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
         .def_readonly("tag", &LayerKVCache::tag, "Cache group tag");
 
+    using OffloadStorage    = rtp_llm::OffloadStorage;
+    const auto planes_tuple = [](const std::vector<torch::Tensor>& planes) {
+        pybind11::tuple result(planes.size());
+        for (size_t i = 0; i < planes.size(); ++i) {
+            result[i] = pybind11::cast(planes[i]);
+        }
+        return result;
+    };
+    pybind11::class_<OffloadStorage, std::shared_ptr<OffloadStorage>>(m, "OffloadStorage")
+        .def_readonly("tag", &OffloadStorage::tag)
+        .def_readonly("owner_layer", &OffloadStorage::owner_layer)
+        .def_readonly("total_blocks", &OffloadStorage::total_blocks)
+        .def_readonly("hbm_blocks", &OffloadStorage::hbm_blocks)
+        .def_readonly("rows_per_block", &OffloadStorage::rows_per_block)
+        .def_readonly("rows_per_page", &OffloadStorage::rows_per_page)
+        .def_readonly("max_selected_rows", &OffloadStorage::max_selected_rows)
+        .def_readonly("generations", &OffloadStorage::generations)
+        .def_property_readonly(
+            "host_planes", [planes_tuple](const OffloadStorage& storage) { return planes_tuple(storage.host_planes); })
+        .def_property_readonly("resident_planes", [planes_tuple](const OffloadStorage& storage) {
+            return planes_tuple(storage.resident_planes);
+        });
+
     pybind11::class_<KVCache>(m, "KVCache")
         .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology publication order")
         .def_property_readonly("layer_count", &KVCache::layerCount, "Number of model-local cache layers")
+        .def(
+            "get_offload_storage",
+            [](const KVCache& cache, int layer_id, const std::string& tag) {
+                // Python gets read-only properties; ownership remains in the C++ layout.
+                return std::const_pointer_cast<OffloadStorage>(cache.getOffloadStorage(layer_id, tag));
+            },
+            pybind11::arg("layer_id"),
+            pybind11::arg("tag"))
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int) const>(&KVCache::getLayerCache),
              "Return a per-layer LayerKVCache for the given global layer id")

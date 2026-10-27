@@ -1991,7 +1991,12 @@ void CudaGraphRunner::replayGraph(int key) {
 }
 
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
-    auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
+    auto       inputs        = graph_instances_[key].mem_hold_.py_model_inputs_;
+    const auto reset_offload = [&]() {
+        if (py::hasattr(py_instance_, "reset_sparse_kv_offload")) {
+            py_instance_.attr("reset_sparse_kv_offload")();
+        }
+    };
 
     size_t pre_capture_reserved = cuda_graph::graphReservedBytes();
 
@@ -2010,6 +2015,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         throw;
     }
     RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
+    reset_offload();
 
     {
         // sync before capture
@@ -2075,6 +2081,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                          graph_pool_delta / 1024 / 1024,
                          post_capture_reserved / 1024 / 1024);
     }
+    reset_offload();
 }
 
 void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {

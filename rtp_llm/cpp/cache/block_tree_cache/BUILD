@@ -20,6 +20,7 @@ cc_library(
         "//rtp_llm/cpp/cache:block_info",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:memory_layout_strategy",
+        "//rtp_llm/models_py/bindings/core:type_convert",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps() + select({

@@ -29,6 +29,8 @@ class MlaAttention(nn.Module):
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
         global_weights: Optional[Dict[str, torch.Tensor]] = None,
+        has_indexer: Optional[bool] = None,
+        reuse_topk_indices: bool = False,
     ):
         super().__init__()
         self.attn_config = attn_config
@@ -45,8 +47,14 @@ class MlaAttention(nn.Module):
         self.softmax_scale = self.q_head_dim ** (-0.5)
         self.layer_idx = layer_idx
         self.token_per_block = attn_config.kernel_tokens_per_block
+        self.offload_plan = None
+        self.offload_writer = None
 
-        if attn_config.is_sparse:
+        self.reuse_topk_indices = reuse_topk_indices
+        self.has_indexer = (
+            bool(attn_config.is_sparse) if has_indexer is None else has_indexer
+        )
+        if self.has_indexer:
             self.indexer = Indexer(
                 attn_config,
                 weights,
@@ -103,6 +111,15 @@ class MlaAttention(nn.Module):
             hw_kernel_config=hw_kernel_config,
         )
 
+    def configure_offload(self, plan, max_write_rows: int) -> None:
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
+            MlaKVCacheWriteOp,
+        )
+
+        self.offload_plan = plan
+        self.offload_writer = MlaKVCacheWriteOp(self.attn_config.kv_cache_dtype)
+        self.offload_writer.configure_offload(plan.storage, max_write_rows)
+
     def _run_sparse_indexer(
         self,
         hidden_states: torch.Tensor,
@@ -110,7 +127,16 @@ class MlaAttention(nn.Module):
         q_view: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         fmha_impl: MlaImplBase,
+        prev_topk_indices: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
+        if self.reuse_topk_indices:
+            if not fmha_impl.is_sparse():
+                return None
+            if prev_topk_indices is None and kv_cache is not None:
+                raise RuntimeError(
+                    f"DSA shared layer {self.layer_idx} needs previous top-k"
+                )
+            return prev_topk_indices
         if self.indexer is None or kv_cache is None:
             return None
         q_for_indexer = q_c if self.q_lora_rank > 0 else q_view
@@ -139,8 +165,12 @@ class MlaAttention(nn.Module):
         hidden_states: torch.Tensor,
         fmha_impl: MlaImplBase | Mapping[str, MlaImplBase],
         kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
-    ) -> torch.Tensor:
-        if self.indexer is not None:
+        prev_topk_indices: Optional[torch.Tensor] = None,
+        return_topk: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, Optional[torch.Tensor]]:
+        is_sparse = self.indexer is not None or self.reuse_topk_indices
+        offload_plan = self.offload_plan
+        if is_sparse:
             required_tags = {"default", "indexer_kv"}
             if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != required_tags:
                 raise RuntimeError(
@@ -158,9 +188,10 @@ class MlaAttention(nn.Module):
             elif isinstance(kv_cache, Mapping) and set(kv_cache) == required_tags:
                 default_kv_cache = kv_cache["default"]
                 indexer_kv_cache = kv_cache["indexer_kv"]
-                if not isinstance(default_kv_cache, LayerKVCache) or not isinstance(
-                    indexer_kv_cache, LayerKVCache
-                ):
+                if (
+                    not isinstance(default_kv_cache, LayerKVCache)
+                    and not (default_kv_cache is None and offload_plan is not None)
+                ) or not isinstance(indexer_kv_cache, LayerKVCache):
                     raise RuntimeError(
                         "sparse MLA cache routes must contain LayerKVCache"
                     )
@@ -177,6 +208,7 @@ class MlaAttention(nn.Module):
 
         input_shape = hidden_states.shape[:-1]
         q_c = None
+        topk_indices = None
         if self.q_lora_rank > 0:
             fused_qkv = self.fused_qkv_a_proj(hidden_states)
             kv_offset = self.q_lora_rank
@@ -189,7 +221,8 @@ class MlaAttention(nn.Module):
                 dim=-1,
             )
             q_c = self.q_a_layernorm(q.contiguous())
-            q = self.q_b_proj(q_c)
+            if offload_plan is None:
+                q = self.q_b_proj(q_c)
         else:
             fused_qkv = self.fused_qkv_proj(hidden_states)
             kv_offset = self.num_heads * self.attn_config.size_per_head
@@ -201,6 +234,26 @@ class MlaAttention(nn.Module):
                 ],
                 dim=-1,
             )
+        if offload_plan is not None:
+            indexer_q = (
+                q_c
+                if self.q_lora_rank > 0
+                else q.reshape(-1, self.num_heads, self.q_head_dim)
+            )
+            topk_indices = self._run_sparse_indexer(
+                hidden_states,
+                q_c,
+                indexer_q,
+                indexer_kv_cache,
+                indexer_fmha_impl,
+                prev_topk_indices,
+            )
+            if offload_plan.begin:
+                offload_plan.runtime.begin(
+                    default_fmha_impl.fmha_impl.translate_selection(topk_indices)
+                )
+            if self.q_lora_rank > 0:
+                q = self.q_b_proj(q_c)
         q_view = q.reshape(-1, self.num_heads, self.q_head_dim)
 
         compressed_kv, k_pe = torch.split(
@@ -209,15 +262,20 @@ class MlaAttention(nn.Module):
 
         compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
-        topk_indices = None
-        if self.indexer is not None:
+        if is_sparse and offload_plan is None:
             topk_indices = self._run_sparse_indexer(
                 hidden_states,
                 q_c,
                 q_view,
                 indexer_kv_cache,
                 indexer_fmha_impl,
+                prev_topk_indices,
             )
+        offload_args = (
+            {"offload_plan": offload_plan, "offload_writer": self.offload_writer}
+            if offload_plan is not None
+            else {}
+        )
         attn_output = default_fmha_impl.forward(
             q_view,
             compressed_kv,
@@ -225,6 +283,7 @@ class MlaAttention(nn.Module):
             default_kv_cache,
             self.layer_idx,
             topk_indices,
+            **offload_args,
         )
 
         if attn_output is not None:
@@ -238,4 +297,4 @@ class MlaAttention(nn.Module):
         attn_output = self.o_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
-        return attn_output
+        return (attn_output, topk_indices) if return_topk else attn_output

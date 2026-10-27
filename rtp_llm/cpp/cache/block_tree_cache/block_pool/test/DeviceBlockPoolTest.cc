@@ -71,6 +71,32 @@ std::shared_ptr<DeviceBlockPoolConfig> makeMixedScaleConfig() {
     return config;
 }
 
+std::shared_ptr<DeviceBlockPoolConfig> makeOffloadConfig(bool padded = false, uint32_t total = 6) {
+    KVCacheSpecPtr spec;
+    if (padded) {
+        KVCacheSpecDesc desc;
+        desc.tag                          = "global_kv_1";
+        desc.cache_type                   = OpaqueKV;
+        desc.entry_elems                  = 288;
+        desc.entry_dtype                  = TYPE_UINT8;
+        desc.entry_count_mode             = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+        desc.compression_ratio            = 8;
+        desc.block_stride_bytes_alignment = 8192;
+        SpecBuildContext ctx;
+        ctx.seq_size_per_block      = 256;
+        ctx.kernel_tokens_per_block = 128;
+        spec                        = SpecBuilder::build(desc, ctx);
+    } else {
+        spec                            = test::makeResolvedMlaSpec(TYPE_BF16, 512, 64, 256, "default");
+        spec->kernel_seq_size_per_block = 128;
+    }
+    auto cache    = test::makeSingleGroupCacheConfig(spec, CacheGroupType::FULL, 2, total);
+    cache.use_mla = true;
+    cache.tiered_cache_configs.emplace(spec->tag, TieredCacheConfig{total, 2, padded ? 17u : 129u});
+    return std::make_shared<DeviceBlockPoolConfig>(
+        DeviceBlockPoolConfigHelper::createConfigForGroup(cache, cache.group(spec->tag)));
+}
+
 CacheConfig makeMtpCacheConfig() {
     CacheConfig main = rtp_llm::test::makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/3, /*seq_size_per_block=*/1, TYPE_FP16, /*local_head_num_kv=*/1, 64);
@@ -98,6 +124,178 @@ TEST(DeviceBlockPoolTest, InitKeepsBlockZeroInvalid) {
     auto block = pool.malloc();
     ASSERT_TRUE(block.has_value());
     EXPECT_NE(*block, 0);
+}
+
+TEST(DeviceBlockPoolTest, OffloadNativePlanesAndSegmentBoundaries) {
+    for (const bool raw_device : {false, true}) {
+        auto config                       = makeOffloadConfig();
+        config->use_device_malloc_backing = raw_device;
+        DeviceBlockPool pool(config);
+        ASSERT_TRUE(pool.init());
+        const auto& storages = pool.allLayerOffloadStorage();
+        ASSERT_EQ(storages.size(), 2u);
+        EXPECT_EQ(storages[0]->generations.data_ptr(), storages[1]->generations.data_ptr());
+        EXPECT_EQ(storages[0]->generations.scalar_type(), torch::kInt64);
+        EXPECT_EQ(storages[0]->generations.numel(), 6);
+        EXPECT_FALSE(pool.validBlock(0));
+        for (int owner = 0; owner < 2; ++owner) {
+            const auto& storage = *storages[owner];
+            EXPECT_EQ(storage.owner_layer, owner);
+            EXPECT_EQ(storage.rows_per_block, 256u);
+            EXPECT_EQ(storage.rows_per_page, 128u);
+            const auto& gpu  = storage.resident_planes[0];
+            const auto& host = storage.host_planes[0];
+            EXPECT_EQ(gpu.sizes().vec(), (std::vector<int64_t>{6, 128, 576}));
+            EXPECT_EQ(host.sizes().vec(), (std::vector<int64_t>{8, 128, 576}));
+            EXPECT_EQ(gpu.scalar_type(), torch::kBFloat16);
+            EXPECT_TRUE(gpu.is_cuda());
+            EXPECT_FALSE(host.is_cuda());
+            EXPECT_TRUE(host.is_pinned());
+            EXPECT_EQ(gpu.narrow(0, 0, 2).count_nonzero().item<int64_t>(), 0);
+            const size_t block_bytes = 256 * 576 * 2;
+            for (int block = 0; block < 6; ++block) {
+                const auto buffers = pool.convertIndexToBuffer(owner, block);
+                ASSERT_EQ(buffers.size(), 1u);
+                const auto& actual = buffers[0];
+                EXPECT_EQ(actual.is_cuda, block < 2);
+                const auto&  base  = block < 2 ? gpu : host;
+                const size_t local = block < 2 ? block : block - 2;
+                EXPECT_EQ(actual.addr, static_cast<char*>(base.data_ptr()) + local * block_bytes);
+                EXPECT_EQ(actual.size_bytes, block_bytes);
+            }
+        }
+        EXPECT_EQ(pool.blockSizeBytes(), 2u * 256 * 576 * 2);
+        EXPECT_GT(pool.getTotalSizeBytes(), config->total_size_bytes);
+        EXPECT_ANY_THROW(pool.allLayerCacheBase());
+    }
+}
+
+TEST(DeviceBlockPoolTest, OffloadPreservesPagePaddingAndHostLocalOffsets) {
+    DeviceBlockPool pool(makeOffloadConfig(true));
+    ASSERT_TRUE(pool.init());
+    const auto& storage = *pool.allLayerOffloadStorage()[0];
+    EXPECT_EQ(storage.rows_per_block, 32u);
+    EXPECT_EQ(storage.rows_per_page, 16u);
+    const auto& host = storage.host_planes[0];
+    EXPECT_EQ(host.sizes().vec(), (std::vector<int64_t>{8, 16, 288}));
+    EXPECT_EQ(host.strides().vec(), (std::vector<int64_t>{8192, 288, 1}));
+    EXPECT_EQ(host.scalar_type(), torch::kUInt8);
+    EXPECT_EQ(pool.convertIndexToBuffer(0, 2)[0].addr, host.data_ptr());
+    EXPECT_EQ(pool.convertIndexToBuffer(0, 3)[0].addr, static_cast<char*>(host.data_ptr()) + 16384);
+    EXPECT_EQ(pool.convertIndexToBuffer(0, 3)[0].size_bytes, 16384u);
+    EXPECT_EQ(pool.convertIndexToBuffer(0, 0, 4, 2)[0].size_bytes, 16384u);
+}
+
+TEST(DeviceBlockPoolTest, OffloadReallocationChangesGenerationButReferencesDoNot) {
+    DeviceBlockPool pool(makeOffloadConfig());
+    ASSERT_TRUE(pool.init());
+    const auto blocks = pool.malloc(5);
+    ASSERT_TRUE(blocks.has_value());
+    pool.incRef(*blocks);
+    EXPECT_EQ(pool.takeOffloadVersionUpdates().size(), 5u);
+    pool.incRef(2);
+    pool.decRef(2);
+    EXPECT_TRUE(pool.takeOffloadVersionUpdates().empty());
+    pool.decRef(2);
+    const auto reused = pool.malloc();
+    ASSERT_TRUE(reused.has_value());
+    EXPECT_EQ(*reused, 2);
+    pool.incRef(*reused);
+    const auto updates = pool.takeOffloadVersionUpdates();
+    ASSERT_EQ(updates.size(), 1u);
+    EXPECT_EQ(updates[0].first, 2);
+    EXPECT_EQ(updates[0].second, 2);
+    pool.markOffloadOverwrite({2});
+    pool.markOffloadOverwrite({2});
+    const auto overwritten = pool.takeOffloadVersionUpdates();
+    ASSERT_EQ(overwritten.size(), 1u);
+    EXPECT_EQ(overwritten[0].second, 4);
+    pool.decRef(*blocks);
+}
+
+TEST(DeviceBlockPoolTest, OffloadMhaPlanesPreserveNativeTransferBuffers) {
+    for (uint32_t total : {6u, 2u}) {
+        auto spec  = test::makeResolvedMhaSpec(TYPE_INT8, 2, 8, 8, "sparse_heads");
+        auto cache = test::makeSingleGroupCacheConfig(spec, CacheGroupType::FULL, 2, total);
+        cache.tiered_cache_configs.emplace(spec->tag, TieredCacheConfig{total, 2, 16});
+        auto config = std::make_shared<DeviceBlockPoolConfig>(
+            DeviceBlockPoolConfigHelper::createConfigForGroup(cache, cache.group(spec->tag)));
+        DeviceBlockPool pool(config);
+        ASSERT_TRUE(pool.init());
+        for (int layer = 0; layer < 2; ++layer) {
+            const auto& storage = *pool.allLayerOffloadStorage()[layer];
+            ASSERT_EQ(storage.resident_planes.size(), 4u);
+            EXPECT_EQ(storage.resident_planes[0].sizes().vec(), (std::vector<int64_t>{4, 8, 2, 8}));
+            EXPECT_EQ(storage.resident_planes[0].strides().vec(), (std::vector<int64_t>{256, 8, 64, 1}));
+            EXPECT_EQ(storage.resident_planes[2].strides().vec(), (std::vector<int64_t>{32, 1, 8}));
+            EXPECT_EQ(storage.host_planes[1].size(0), total - 2);
+            for (const auto* planes : {&storage.resident_planes, &storage.host_planes}) {
+                (*planes)[0].fill_(7);
+                (*planes)[1].fill_(9);
+                (*planes)[2].fill_(0.25);
+                (*planes)[3].fill_(0.5);
+            }
+            for (uint32_t block = 1; block < total; ++block) {
+                const auto buffers = pool.convertIndexToBuffer(layer, block);
+                ASSERT_EQ(buffers.size(), 2u);
+                EXPECT_EQ(buffers[0].size_bytes, 256u);
+                EXPECT_EQ(buffers[1].size_bytes, 128u);
+                const auto options = torch::TensorOptions().device(block < 2 ? torch::kCUDA : torch::kCPU);
+                const auto kv      = torch::from_blob(buffers[0].addr, {2, 2, 8, 8}, options.dtype(torch::kInt8)).cpu();
+                const auto scales  = torch::from_blob(buffers[1].addr, {2, 2, 8}, options.dtype(torch::kFloat32)).cpu();
+                EXPECT_TRUE(kv[0].eq(7).all().item<bool>());
+                EXPECT_TRUE(kv[1].eq(9).all().item<bool>());
+                EXPECT_TRUE(scales[0].eq(0.25).all().item<bool>());
+                EXPECT_TRUE(scales[1].eq(0.5).all().item<bool>());
+                const auto whole = pool.convertIndexToBuffer(layer, block, 1, 0);
+                ASSERT_EQ(whole.size(), 4u);
+                EXPECT_EQ(whole[0].size_bytes + whole[1].size_bytes, buffers[0].size_bytes);
+                EXPECT_EQ(whole[2].size_bytes + whole[3].size_bytes, buffers[1].size_bytes);
+                const auto parts = pool.convertIndexToBuffer(layer, block, 2, 1);
+                ASSERT_EQ(parts.size(), 4u);
+                EXPECT_EQ(parts[0].addr, static_cast<char*>(buffers[0].addr) + 64);
+                EXPECT_EQ(parts[1].addr, static_cast<char*>(buffers[0].addr) + 192);
+                EXPECT_EQ(parts[2].addr, static_cast<char*>(buffers[1].addr) + 32);
+                EXPECT_EQ(parts[3].addr, static_cast<char*>(buffers[1].addr) + 96);
+            }
+        }
+    }
+}
+
+TEST(DeviceBlockPoolTest, OffloadDonorTransferChangesGeneration) {
+    DeviceBlockPool pool(makeOffloadConfig());
+    ASSERT_TRUE(pool.init());
+    const auto blocks = pool.malloc(5);
+    ASSERT_TRUE(blocks.has_value());
+    pool.incRef(*blocks);
+    (void)pool.takeOffloadVersionUpdates();
+    BlockIndicesType replacements;
+    int              required = -1;
+    ASSERT_TRUE(pool.tryReplaceRequestReferences({{2, 1, 0}}, 1, replacements, required));
+    EXPECT_EQ(required, 0);
+    EXPECT_EQ(replacements, (BlockIndicesType{2}));
+    const auto updates = pool.takeOffloadVersionUpdates();
+    ASSERT_EQ(updates.size(), 1u);
+    EXPECT_EQ(updates[0].first, 2);
+    EXPECT_EQ(updates[0].second, 2);
+    pool.decRef(*blocks);
+}
+
+TEST(DeviceBlockPoolTest, OffloadViewsRetainBackingAndSupportNoHostBlocks) {
+    OffloadStoragePtr storage;
+    {
+        auto config                       = makeOffloadConfig(false, 2);
+        config->use_device_malloc_backing = true;
+        config->offload_version_owner     = false;
+        DeviceBlockPool pool(config);
+        ASSERT_TRUE(pool.init());
+        storage = pool.allLayerOffloadStorage()[0];
+        EXPECT_EQ(storage->host_planes[0].size(0), 0);
+        EXPECT_TRUE(storage->host_planes[0].is_pinned());
+        EXPECT_TRUE(pool.takeOffloadVersionUpdates().empty());
+    }
+    storage->resident_planes[0].fill_(17);
+    EXPECT_TRUE(storage->resident_planes[0].eq(17).all().item<bool>());
 }
 
 TEST(DeviceBlockPoolTest, ConstructorRejectsInvalidConfigMatrix) {

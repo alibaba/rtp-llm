@@ -91,6 +91,11 @@ public:
         return grouped_layout_.topology().groupTags();
     }
 
+    rtp_llm::OffloadStoragePtr getOffloadStorage(int layer_id, const std::string& tag) const {
+        validateLayer(layer_id);
+        return grouped_layout_.at(tag, static_cast<size_t>(layer_id)).offload;
+    }
+
     size_t layerCount() const {
         return grouped_layout_.topology().layers().size();
     }
@@ -145,6 +150,8 @@ private:
 
     LayerKVCache
     makeLayerCache(int layer_id, const rtp_llm::GroupBase& group, const rtp_llm::BlockBufferPtrInfo& buffers) const {
+        RTP_LLM_CHECK_WITH_INFO(
+            !buffers.offload, "offload tag=%s has no full-GPU cache view; use get_offload_storage", group.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(buffers.kv_addr.defined(),
                                 "KV cache tensor must be defined for layer=%d tag=%s",
                                 layer_id,

@@ -15,6 +15,7 @@ py_test(
 py_test(
     name = "sparse_mla_fp8_decode_op_test",
     srcs = ["sparse_mla_decode_op_test.py"],
+    main = "sparse_mla_decode_op_test.py",
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],

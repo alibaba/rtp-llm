@@ -78,6 +78,9 @@ struct KVCacheSpecDesc {
     std::optional<CacheMemoryPolicyDesc>   memory;
     std::optional<CacheTailPolicyDesc>     tail;
     std::optional<CacheCpPolicyDesc>       cp;
+    std::optional<CacheOffloadPolicy>      offload;
+    // Equal IDs within a tag share runtime metadata; unset means one runtime per storage.
+    std::optional<uint32_t> offload_runtime_group;
 };
 
 struct SpecBuildContext {

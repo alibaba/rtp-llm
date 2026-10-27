@@ -547,6 +547,34 @@ inline CacheConfig makeSingleLayerCacheConfig(KVCacheSpecPtr spec, CacheGroupTyp
     return makeSingleGroupCacheConfig(std::move(spec), group_type, /*layer_num=*/1, block_num);
 }
 
+inline CacheConfig makeSparseOffloadTestConfig(const std::vector<std::string>& tags = {"default"}) {
+    CacheConfig config;
+    config.dtype              = TYPE_BF16;
+    config.layer_num          = 2;
+    config.seq_size_per_block = 8;
+    std::vector<KVCacheSpecPtr>   specs;
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& tag : tags) {
+        auto spec                       = makeResolvedMlaSpec(TYPE_BF16, 16, 8, 8, tag);
+        spec->kernel_seq_size_per_block = 4;
+        specs.push_back(spec);
+        CacheGroupPolicy policy;
+        policy.group_type = CacheGroupType::FULL;
+        policy.offload    = {true, 8};
+        policies.push_back(policy);
+    }
+    config.fromGroupedSpecs(specs,
+                            std::vector<std::vector<int>>(tags.size(), {0, 1}),
+                            std::vector<CacheGroupType>(tags.size(), CacheGroupType::FULL),
+                            tags,
+                            policies);
+    config.finalizeBlockNums(10, RuntimeConfig{});
+    for (const auto& tag : tags) {
+        config.tiered_cache_configs.emplace(tag, TieredCacheConfig{10, 5, 8});
+    }
+    return config;
+}
+
 inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
                                             int               block_num,
                                             size_t            tokens_per_block,

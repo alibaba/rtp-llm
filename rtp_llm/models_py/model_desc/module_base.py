@@ -55,15 +55,14 @@ class GptModelBase(nn.Module):
         )
         self.layer_num: int = config.num_layers
         self.vocab_size: int = config.vocab_size
+        self.max_generate_batch_size = max_generate_batch_size
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()
         self._mtp_aux_capture_layer_ids = tuple(
             config.capture_aux_hidden_layer_ids or ()
         )
-        self._mtp_aux_capture_layer_id_set = frozenset(
-            self._mtp_aux_capture_layer_ids
-        )
+        self._mtp_aux_capture_layer_id_set = frozenset(self._mtp_aux_capture_layer_ids)
         self._mtp_target_hidden_states: Optional[torch.Tensor] = None
         self._mtp_target_graph_buffer: Optional[torch.Tensor] = None
         self._mtp_target_prompt_buffer: Optional[torch.Tensor] = None
@@ -100,22 +99,20 @@ class GptModelBase(nn.Module):
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:
-            num_layers = self.kv_cache.layer_count
-            layer0_caches = (
-                self.kv_cache.get_layer_cache_groups(0) if num_layers > 0 else []
-            )
-            layer0_shapes = [cache.kv_cache_base.shape for cache in layer0_caches]
-            layer0_scale_count = sum(
-                cache.kv_scale_base is not None and cache.kv_scale_base.numel() > 0
-                for cache in layer0_caches
-            )
             logging.info(
-                f"GptModelBase initialized with "
-                f"num_kv_layers={num_layers}, "
-                f"layer0_kv_cache_shapes={layer0_shapes}, "
-                f"layer0_scale_groups={layer0_scale_count}, "
+                "GptModelBase initialized with num_kv_layers=%d, cache_tags=%s",
+                self.kv_cache.layer_count,
+                self.kv_cache.group_tags,
             )
         return True
+
+    def reset_sparse_kv_offload(self) -> None:
+        runtimes = {
+            plan.runtime for plan in getattr(self, "offload_plans", {}).values()
+        }
+        for runtime in runtimes:
+            runtime.drain()
+            runtime.reset()
 
     def prepare_fmha_impl(
         self,
@@ -243,9 +240,7 @@ class GptModelBase(nn.Module):
             : self._mtp_aux_capture_rows
         ]
 
-    def get_mtp_target_hidden_states(
-        self, num_tokens: int
-    ) -> Optional[torch.Tensor]:
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         hidden = self._mtp_target_hidden_states
         if hidden is None:
             return None

@@ -3,6 +3,18 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "tiered_cache_config_test",
+    srcs = ["TieredCacheConfigTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:cache_config",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
 cc_import(
     name = "cuda13_torch_nvshmem",
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
@@ -156,6 +168,8 @@ cc_library(
     copts = copts(),
     deps = [
         "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager",
+        "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ] + torch_deps(),
