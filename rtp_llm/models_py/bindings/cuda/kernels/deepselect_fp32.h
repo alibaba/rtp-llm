@@ -25,16 +25,16 @@ void deepselect_fp32(const torch::Tensor& logits,
                      torch::Tensor*       output_values);
 
 // Materialize the DSpARK logits + native-dtype Markov bias, divided by
-// per-row temperature, as contiguous FP32 input for DeepSelect.
+// per-row temperature, as contiguous FP32 input for candidate selection.
 torch::Tensor
 markov_scaled_logits(const torch::Tensor& logits, const torch::Tensor& markov_bias, const torch::Tensor& temperature);
 
-// K=4096 uses the vendored DeepSelect FP32 kernel on aligned Blackwell inputs;
-// other shapes use ATen topk. Returned indices are int64 for gather/scatter.
+// K<=512 uses DeepSelect on supported Blackwell inputs. K4096 uses ATen topk
+// so sparse -INF rows retain valid indices. Returned indices are int64.
 std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk(const torch::Tensor& logits, int64_t k);
 
-// DSV4.1 K4096 candidate selection with GPU-only exact full-vocabulary
-// fallback for rows whose candidate count or finite-value check fails.
+// Compatibility entry points for DSV4.1 K4096 selection. Both use exact
+// full-vocabulary ATen topk, including after the optional Markov transform.
 std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk_prefilter(const torch::Tensor& logits);
 std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_markov_topk_prefilter(const torch::Tensor& logits,
                                                                                const torch::Tensor& markov_bias,

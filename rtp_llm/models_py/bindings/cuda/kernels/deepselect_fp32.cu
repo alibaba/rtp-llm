@@ -1,8 +1,6 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 
 #include <cstdint>
-#include <cub/cub.cuh>
-#include <math_constants.h>
 #include <limits>
 
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
@@ -57,117 +55,6 @@ __global__ void markovScaledLogitsKernel(const float* __restrict__ logits,
 
 constexpr int kPrefilterVocab   = 129280;
 constexpr int kPrefilterK       = 4096;
-constexpr int kPrefilterCap     = 8192;
-constexpr int kPrefilterThreads = 256;
-constexpr int kPrefilterChunk   = 2048;
-
-template<bool WithMarkov>
-__device__ __forceinline__ float prefilterValue(
-    const float* logits, int64_t stride, const __nv_bfloat16* bias, const float* temperature, int row, int col) {
-    float value = logits[int64_t(row) * stride + col];
-    if constexpr (WithMarkov) {
-        value = (value + __bfloat162float(bias[int64_t(row) * kPrefilterVocab + col])) / temperature[row];
-    }
-    return value;
-}
-
-template<bool WithMarkov>
-__global__ void prefilterThresholdKernel(const float*         logits,
-                                         int64_t              stride,
-                                         const __nv_bfloat16* bias,
-                                         const float*         temperature,
-                                         float*               threshold,
-                                         int*                 counts,
-                                         int*                 full_ends) {
-    constexpr int items = WithMarkov ? 8 : 16;
-    constexpr int rank  = WithMarkov ? 100 : 200;
-    using Sort          = cub::BlockRadixSort<float, kPrefilterThreads, items>;
-    __shared__ typename Sort::TempStorage storage;
-    float                                 keys[items];
-    const int                             row = blockIdx.x;
-#pragma unroll
-    for (int i = 0; i < items; ++i) {
-        const int col = (threadIdx.x * items + i) * (kPrefilterVocab / (kPrefilterThreads * items));
-        keys[i]       = prefilterValue<WithMarkov>(logits, stride, bias, temperature, row, col);
-    }
-    Sort(storage).SortDescending(keys);
-    if (threadIdx.x == (rank - 1) / items)
-        threshold[row] = keys[(rank - 1) % items];
-    if (threadIdx.x == 0) {
-        counts[row]    = 0;
-        full_ends[row] = kPrefilterVocab;
-    }
-}
-
-template<bool WithMarkov>
-__global__ void prefilterCompactKernel(const float*         logits,
-                                       int64_t              stride,
-                                       const __nv_bfloat16* bias,
-                                       const float*         temperature,
-                                       const float*         threshold,
-                                       float*               candidate_values,
-                                       int*                 candidate_indices,
-                                       int*                 counts) {
-    using Scan = cub::BlockScan<int, kPrefilterThreads>;
-    __shared__ typename Scan::TempStorage scan_storage;
-    __shared__ int                        block_base;
-    const int                             row    = blockIdx.y;
-    const int                             start  = blockIdx.x * kPrefilterChunk + threadIdx.x * 8;
-    const float                           cutoff = threshold[row];
-    const bool bad_scale = WithMarkov && (!isfinite(temperature[row]) || temperature[row] <= 0.0f);
-    float      values[8];
-    if (start + 7 < kPrefilterVocab) {
-        const float4* source = reinterpret_cast<const float4*>(logits + int64_t(row) * stride + start);
-        const float4  a = source[0], b = source[1];
-        const float   raw[8] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
-#pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            float value = raw[i];
-            if constexpr (WithMarkov) {
-                value = (value + __bfloat162float(bias[int64_t(row) * kPrefilterVocab + start + i])) / temperature[row];
-            }
-            values[i] = value;
-        }
-    } else {
-#pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const int col = start + i;
-            values[i]     = col < kPrefilterVocab ?
-                                prefilterValue<WithMarkov>(logits, stride, bias, temperature, row, col) :
-                                -CUDART_INF_F;
-        }
-    }
-    bool keep[8];
-    int  kept = 0;
-    bool bad  = bad_scale || isnan(cutoff) || cutoff == CUDART_INF_F;
-#pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        const bool in_range = start + i < kPrefilterVocab;
-        bad |= in_range && (isnan(values[i]) || values[i] == CUDART_INF_F);
-        keep[i] = in_range && values[i] >= cutoff;
-        kept += keep[i];
-    }
-    int prefix, total;
-    Scan(scan_storage).ExclusiveSum(kept, prefix, total);
-    if (threadIdx.x == 0) {
-        block_base = atomicAdd(counts + row, total) & 0x7fffffff;
-    }
-    __syncthreads();
-    if (bad)
-        atomicOr(reinterpret_cast<unsigned int*>(counts + row), 0x80000000u);
-    int destination = block_base + prefix;
-#pragma unroll
-    for (int i = 0; i < 8; ++i) {
-        if (keep[i]) {
-            if (destination < kPrefilterCap) {
-                const int offset          = row * kPrefilterCap + destination;
-                candidate_values[offset]  = values[i];
-                candidate_indices[offset] = start + i;
-            }
-            ++destination;
-        }
-    }
-}
 }  // namespace
 #endif
 
@@ -379,20 +266,17 @@ void deepselect_fp32(const torch::Tensor& logits,
 
 std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk(const torch::Tensor& logits, int64_t k) {
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
-    if ((k == 4096 || (k > 0 && k <= 512)) && logits.is_cuda() && logits.scalar_type() == torch::kFloat32
-        && logits.dim() == 2 && logits.size(1) >= (k == 4096 ? 4096 : 512) && logits.is_contiguous()
-        && logits.stride(0) % 256 == 0 && at::cuda::getDeviceProperties(logits.get_device())->major == 10
+    if (k > 0 && k <= 512 && logits.is_cuda() && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2
+        && logits.size(1) >= 512 && logits.is_contiguous() && logits.stride(0) % 256 == 0
+        && at::cuda::getDeviceProperties(logits.get_device())->major == 10
         && (at::cuda::getDeviceProperties(logits.get_device())->minor == 0
             || at::cuda::getDeviceProperties(logits.get_device())->minor == 3)) {
-        const int64_t width   = k == 4096 ? 4096 : 512;
-        auto          indices = torch::empty({logits.size(0), width}, logits.options().dtype(torch::kInt32));
-        auto          ends    = torch::full({logits.size(0)}, logits.size(1), logits.options().dtype(torch::kInt32));
-        auto          values  = k == 4096 ? torch::empty({logits.size(0), width}, logits.options()) : torch::Tensor();
-        deepselect_fp32(logits, ends, indices, /*filter_finite=*/false, values.defined() ? &values : nullptr);
+        constexpr int64_t width   = 512;
+        auto              indices = torch::empty({logits.size(0), width}, logits.options().dtype(torch::kInt32));
+        auto              ends = torch::full({logits.size(0)}, logits.size(1), logits.options().dtype(torch::kInt32));
+        deepselect_fp32(logits, ends, indices, /*filter_finite=*/false);
         auto indices64 = indices.to(torch::kInt64);
-        if (!values.defined()) {
-            values = logits.gather(1, indices64);
-        }
+        auto values    = logits.gather(1, indices64);
         if (k == width) {
             return {values, indices64};
         }
@@ -400,6 +284,8 @@ std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk(const torch::Tenso
         return {std::get<0>(selected), indices64.gather(1, std::get<1>(selected))};
     }
 #endif
+    // K4096 DeepSelect can select padded -INF entries on sparse masked rows.
+    // Keep the candidate cap, but require valid, unique vocabulary indices.
     auto selected = torch::topk(logits, k, -1, /*largest=*/true, /*sorted=*/false);
     return {std::get<0>(selected), std::get<1>(selected)};
 }
@@ -420,77 +306,8 @@ prefilter_topk4096(const torch::Tensor& logits, const torch::Tensor* markov_bias
                         && temperature->is_contiguous(),
                     "Markov K4096 prefilter requires BF16 contiguous bias and FP32 temperatures");
     }
-    const c10::cuda::CUDAGuard guard(logits.device());
-    const int                  rows            = logits.size(0);
-    auto                       int_options     = logits.options().dtype(torch::kInt32);
-    auto                       thresholds      = torch::empty({rows}, logits.options());
-    auto                       candidates      = torch::empty({rows, kPrefilterCap}, logits.options());
-    auto                       candidate_ids   = torch::empty({rows, kPrefilterCap}, int_options);
-    auto                       counts          = torch::empty({rows}, int_options);
-    auto                       full_ends       = torch::empty({rows}, int_options);
-    auto                       selected_values = torch::empty({rows, kPrefilterK}, logits.options());
-    auto                       selected_ids    = torch::empty({rows, kPrefilterK}, int_options);
-    auto                       stream          = at::cuda::getCurrentCUDAStream(logits.get_device());
-    const auto*  bias_ptr = with_markov ? reinterpret_cast<const __nv_bfloat16*>(markov_bias->data_ptr()) : nullptr;
-    const float* temperature_ptr = with_markov ? temperature->data_ptr<float>() : nullptr;
-    if (with_markov) {
-        prefilterThresholdKernel<true><<<rows, kPrefilterThreads, 0, stream>>>(logits.data_ptr<float>(),
-                                                                               logits.stride(0),
-                                                                               bias_ptr,
-                                                                               temperature_ptr,
-                                                                               thresholds.data_ptr<float>(),
-                                                                               counts.data_ptr<int>(),
-                                                                               full_ends.data_ptr<int>());
-        prefilterCompactKernel<true>
-            <<<dim3((kPrefilterVocab + kPrefilterChunk - 1) / kPrefilterChunk, rows), kPrefilterThreads, 0, stream>>>(
-                logits.data_ptr<float>(),
-                logits.stride(0),
-                bias_ptr,
-                temperature_ptr,
-                thresholds.data_ptr<float>(),
-                candidates.data_ptr<float>(),
-                candidate_ids.data_ptr<int>(),
-                counts.data_ptr<int>());
-    } else {
-        prefilterThresholdKernel<false><<<rows, kPrefilterThreads, 0, stream>>>(logits.data_ptr<float>(),
-                                                                                logits.stride(0),
-                                                                                nullptr,
-                                                                                nullptr,
-                                                                                thresholds.data_ptr<float>(),
-                                                                                counts.data_ptr<int>(),
-                                                                                full_ends.data_ptr<int>());
-        prefilterCompactKernel<false>
-            <<<dim3((kPrefilterVocab + kPrefilterChunk - 1) / kPrefilterChunk, rows), kPrefilterThreads, 0, stream>>>(
-                logits.data_ptr<float>(),
-                logits.stride(0),
-                nullptr,
-                nullptr,
-                thresholds.data_ptr<float>(),
-                candidates.data_ptr<float>(),
-                candidate_ids.data_ptr<int>(),
-                counts.data_ptr<int>());
-    }
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-
-    // The mask is evaluated on the GPU. The compact selector writes only valid
-    // rows; invalid rows are overwritten by the exact full-vocabulary selector.
-    deepselect_fp32_impl(candidates, counts, selected_ids, false, &selected_values, &counts, false, &candidate_ids);
-    torch::Tensor fallback_logits = logits;
-    if (with_markov) {
-        fallback_logits       = torch::empty(logits.sizes(), logits.options());
-        constexpr int threads = 256;
-        const dim3    grid((kPrefilterVocab + threads * 4 - 1) / (threads * 4), rows);
-        markovScaledLogitsKernel<__nv_bfloat16, true><<<grid, threads, 0, stream>>>(logits.data_ptr<float>(),
-                                                                                    logits.stride(0),
-                                                                                    bias_ptr,
-                                                                                    temperature_ptr,
-                                                                                    fallback_logits.data_ptr<float>(),
-                                                                                    kPrefilterVocab,
-                                                                                    counts.data_ptr<int>());
-        C10_CUDA_KERNEL_LAUNCH_CHECK();
-    }
-    deepselect_fp32_impl(fallback_logits, full_ends, selected_ids, false, &selected_values, &counts, true, nullptr);
-    return {selected_values, selected_ids.to(torch::kInt64)};
+    auto scores = with_markov ? markov_scaled_logits(logits, *markov_bias, *temperature) : logits;
+    return deepselect_fp32_topk(scores, kPrefilterK);
 }
 #endif
 
