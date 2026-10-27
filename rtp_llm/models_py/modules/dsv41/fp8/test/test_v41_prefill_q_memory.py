@@ -79,7 +79,7 @@ class PrefillQMemoryTest(unittest.TestCase):
                             min(rows, 4),
                         )
 
-    def _case(self, rows):
+    def _case(self, rows, reuse_output=False):
         torch.manual_seed(7)
         owner = attention.AttentionV41FP8.__new__(attention.AttentionV41FP8)
         torch.nn.Module.__init__(owner)
@@ -170,6 +170,11 @@ class PrefillQMemoryTest(unittest.TestCase):
                     },
                 )
             )
+            output = (
+                torch.empty(rows, owner.dim, dtype=torch.bfloat16)
+                if reuse_output
+                else None
+            )
             result = owner._prefill_sparse_attention(
                 PrefillQKV(qr=qr, q=None, kv_full=kv[:, 0]),
                 common,
@@ -177,8 +182,11 @@ class PrefillQMemoryTest(unittest.TestCase):
                 indices=indices,
                 topk_length=lengths,
                 profile_name="test.v41.q",
+                out=output,
             )
         torch.testing.assert_close(result, reference, rtol=0, atol=0)
+        if reuse_output:
+            self.assertIs(result, output)
         owner._prefill_output_all_reduce.assert_called_once_with(result)
         expected = []
         for start in range(0, rows, 4):
@@ -190,10 +198,50 @@ class PrefillQMemoryTest(unittest.TestCase):
     def test_chunked_matches_full_projection_including_padding_and_tail(self):
         for rows in (0, 1, 4, 5, 11):
             for legacy_flag in ("0", "1"):
-                with self.subTest(rows=rows, legacy_flag=legacy_flag), patch.dict(
-                    os.environ, {"DSV41_PREFILL_Q_CHUNKED": legacy_flag}
-                ):
-                    self._case(rows)
+                for reuse_output in (False, True):
+                    with self.subTest(
+                        rows=rows,
+                        legacy_flag=legacy_flag,
+                        reuse_output=reuse_output,
+                    ), patch.dict(os.environ, {"DSV41_PREFILL_Q_CHUNKED": legacy_flag}):
+                        self._case(rows, reuse_output=reuse_output)
+
+    def test_prefill_query_reuses_dead_input_as_output_buffer(self):
+        owner = attention.AttentionV41FP8.__new__(attention.AttentionV41FP8)
+        torch.nn.Module.__init__(owner)
+        owner.dim = 5
+        owner.head_dim = 8
+        owner.compress_ratio = 0
+        owner._prefill_sparse_attention = Mock(return_value="output")
+        x = torch.zeros(3, owner.dim, dtype=torch.bfloat16)
+        qkv = PrefillQKV(
+            qr=torch.zeros(3, 4, dtype=torch.bfloat16),
+            q=None,
+            kv_full=torch.zeros(3, owner.head_dim, dtype=torch.bfloat16),
+        )
+        common = SimpleNamespace(
+            topk_idxs=torch.zeros(3, 1, 1, dtype=torch.int32),
+            swa_meta=SimpleNamespace(
+                topk_length_kv_full=torch.ones(3, dtype=torch.int32)
+            ),
+        )
+
+        result = owner._prefill_query(x, common, qkv, None, None)
+
+        self.assertEqual(result, "output")
+        kwargs = owner._prefill_sparse_attention.call_args.kwargs
+        self.assertIs(kwargs["out"], x)
+
+    def test_prefill_output_buffer_requires_owned_contiguous_bf16_storage(self):
+        owner = attention.AttentionV41FP8.__new__(attention.AttentionV41FP8)
+        torch.nn.Module.__init__(owner)
+        owner.dim = 5
+        valid = torch.zeros(3, 5, dtype=torch.bfloat16)
+        self.assertIs(owner._prefill_output_buffer(valid, 3), valid)
+        self.assertIsNone(owner._prefill_output_buffer(valid.view(3, 5), 3))
+        self.assertIsNone(owner._prefill_output_buffer(valid[:, 1:], 3))
+        self.assertIsNone(owner._prefill_output_buffer(valid.float(), 3))
+        self.assertIsNone(owner._prefill_output_buffer(valid[:2], 3))
 
     def test_cpu_rope_falls_back_and_empty_does_not_launch(self):
         x = torch.tensor([[[1, 2, 3, 4]]], dtype=torch.bfloat16)

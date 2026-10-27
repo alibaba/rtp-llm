@@ -1188,15 +1188,45 @@ class AttentionV41FP8(AttentionFP8):
             return _prefill_q_rope(q, freqs_cis, self.rope_head_dim, rope_view=q_rope)
 
     def _prefill_sparse_attention(
-        self, qkv, common, *, kv, indices, topk_length, profile_name
+        self,
+        qkv,
+        common,
+        *,
+        kv,
+        indices,
+        topk_length,
+        profile_name,
+        out=None,
     ):
-        """Project Q into reusable chunk storage immediately before its MLA call."""
+        """Project Q into reusable chunk storage immediately before its MLA call.
+
+        ``out`` may be a caller-owned, full-row BF16 buffer whose previous
+        consumer has completed.  V4.1's prefill query input is such a buffer:
+        after sparse-index construction it is dead, so reusing it avoids a
+        second ``[rows, dim]`` allocation for the final attention output.
+        """
         rows = qkv.qr.shape[0]
+        if out is not None:
+            expected = (rows, self.dim)
+            if (
+                not isinstance(out, torch.Tensor)
+                or tuple(out.shape) != expected
+                or out.dtype != torch.bfloat16
+                or out.device != qkv.qr.device
+                or not out.is_contiguous()
+            ):
+                raise ValueError(
+                    "prefill output buffer must be contiguous BF16 [rows, dim]"
+                )
         if rows == 0:
-            out = qkv.qr.new_empty((0, self.dim))
+            if out is None:
+                out = qkv.qr.new_empty((0, self.dim))
             self._prefill_output_all_reduce(out)
             return out
-        out = torch.empty((rows, self.dim), dtype=torch.bfloat16, device=qkv.qr.device)
+        if out is None:
+            out = torch.empty(
+                (rows, self.dim), dtype=torch.bfloat16, device=qkv.qr.device
+            )
         chunk = _FLASH_MLA_SPARSE_Q_CHUNK
         freqs_chunks, index_chunks, length_chunks = common.workspace.attention_metadata(
             common.freqs_cis, indices, topk_length, rows, chunk
@@ -1252,6 +1282,19 @@ class AttentionV41FP8(AttentionFP8):
             dispose_tensor(o)
         self._prefill_output_all_reduce(out)
         return out
+
+    def _prefill_output_buffer(self, x, rows):
+        """Return the dead normalized input when it can safely hold attention output."""
+        if (
+            isinstance(x, torch.Tensor)
+            and x.ndim == 2
+            and tuple(x.shape) == (rows, self.dim)
+            and x.dtype == torch.bfloat16
+            and x.is_contiguous()
+            and x._base is None
+        ):
+            return x
+        return None
 
     def _begin_forward(self):
         if self.layer_id == min(self._shared_attention["layers"]):
@@ -2866,6 +2909,7 @@ class AttentionV41FP8(AttentionFP8):
                     indices=meta.combined_indices,
                     topk_length=meta.combined_lens,
                     profile_name="dsv41.prefill.swa_concat.flash_mla",
+                    out=self._prefill_output_buffer(x, qkv.qr.shape[0]),
                 )
             topk = common.topk_idxs
             if topk.dim() == 3:
@@ -2877,6 +2921,7 @@ class AttentionV41FP8(AttentionFP8):
                 indices=topk.to(torch.int32),
                 topk_length=common.swa_meta.topk_length_kv_full,
                 profile_name="dsv41.prefill.swa.flash_mla_kv_full",
+                out=self._prefill_output_buffer(x, qkv.qr.shape[0]),
             )
             dispose_tensor(qkv.kv_full)
             return out
@@ -2954,6 +2999,7 @@ class AttentionV41FP8(AttentionFP8):
             indices=indices,
             topk_length=lens,
             profile_name="dsv41.prefill.shared_global",
+            out=self._prefill_output_buffer(x, qkv.qr.shape[0]),
         )
 
     def _produce_global_decode(self, x, positions, req_ids, starts):
