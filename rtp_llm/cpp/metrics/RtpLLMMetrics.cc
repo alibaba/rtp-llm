@@ -16,6 +16,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingGlobalMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSchedulerMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheEventDropMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheOperationMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCachePoolMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheTransferMetrics);
@@ -622,6 +623,21 @@ void RtpLLMCacheMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheMe
     REPORT_MUTABLE_METRIC(kv_cache_item_num_metric, collector->kv_cache_item_num);
     REPORT_MUTABLE_METRIC(kv_cache_left_seq_metric, collector->kv_cache_left_seq);
     REPORT_MUTABLE_METRIC(mr_cost_time_ms_metric, collector->mr_cost_time_ms);
+}
+
+bool RtpLLMCacheEventDropMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(drop_qps_metric, "rtp_llm_kv_cache_event_drop_qps");
+    return true;
+}
+
+void RtpLLMCacheEventDropMetrics::report(const kmonitor::MetricsTags* tags,
+                                        RtpLLMCacheEventDropMetricsCollector* collector) {
+    kmonitor::MetricsTags queue_tags = tags ? *tags : kmonitor::MetricsTags{};
+    queue_tags.AddTag("reason", "queue_full");
+    drop_qps_metric->Report(&queue_tags, collector->queue_full_count);
+    kmonitor::MetricsTags report_tags = tags ? *tags : kmonitor::MetricsTags{};
+    report_tags.AddTag("reason", "report_failed");
+    drop_qps_metric->Report(&report_tags, collector->report_failed_count);
 }
 
 bool RtpLLMCacheOperationMetrics::init(kmonitor::MetricsGroupManager* manager) {
