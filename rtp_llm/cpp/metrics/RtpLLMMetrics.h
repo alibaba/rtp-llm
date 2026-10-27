@@ -1028,6 +1028,22 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMCacheEventDropMetricsCollector final {
+public:
+    uint64_t queue_full_count    = 0;
+    uint64_t report_failed_count = 0;
+};
+
+class RtpLLMCacheEventDropMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheEventDropMetricsCollector* collector);
+
+private:
+    kmonitor::MutableMetric* drop_qps_metric = nullptr;
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMCacheOperationMetricsCollector final {
 public:
     enum class OpType : int8_t {
