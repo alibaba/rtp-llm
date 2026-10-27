@@ -1267,6 +1267,7 @@ class AttentionV41FP8(AttentionFP8):
                     pending.wait()
             self._shared_attention["global"] = {}
             self._shared_attention["topk"] = {}
+            self._shared_attention.pop("decode_global_slots", None)
             self._shared_attention["candidates"] = None
             self._shared_attention.pop("candidate_mask", None)
             self._shared_attention.pop("decode_sparse_plan", None)
@@ -3516,13 +3517,54 @@ class AttentionV41FP8(AttentionFP8):
                 translate_local_to_global_slots,
             )
 
-            return translate_local_to_global_slots(
+            shared = getattr(self, "_shared_attention", None)
+            reuse = (
+                shared is not None
+                and shared.get("topk", {}).get(
+                    getattr(self, "index_source_layer_id", None)
+                )
+                is selected
+            )
+            if reuse:
+                layout = (
+                    self.index_source_layer_id,
+                    self.kv_source_layer_id,
+                    region,
+                    self.compress_ratio,
+                    logical_entries,
+                    pool.data_ptr(),
+                    pool.shape,
+                    pool.stride(),
+                    table.data_ptr(),
+                    table.shape,
+                    table.stride(),
+                    req.data_ptr(),
+                    req.shape,
+                    req.stride(),
+                    selected.shape,
+                    selected.stride(),
+                    torch.cuda.current_stream(selected.device).cuda_stream,
+                )
+                cached = shared.get("decode_global_slots")
+                if cached is not None and cached[0] is selected and cached[1] == layout:
+                    return cached[2]
+            slots = translate_local_to_global_slots(
                 req,
                 table,
                 selected,
                 entries_per_block=pool.shape[1],
                 tokens_per_block_for_block_table=logical_entries,
             )
+            if reuse:
+                # Capture records one producer per mapping; every replay still
+                # refreshes its output. Retain inputs until the forward ends.
+                shared["decode_global_slots"] = (
+                    selected,
+                    layout,
+                    slots,
+                    (pool, table, req),
+                )
+            return slots
         slots = self._slots(
             region,
             (selected.long().clamp_min(0) + 1).reshape(-1) * self.compress_ratio - 1,
