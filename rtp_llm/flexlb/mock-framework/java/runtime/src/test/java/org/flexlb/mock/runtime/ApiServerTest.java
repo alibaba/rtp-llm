@@ -65,7 +65,8 @@ class ApiServerTest {
         Path target = Path.of("target"); Files.createDirectories(target);
         var catalog = new TreeMap<>(InterfaceRegistry.standard());
         catalog.putAll(InterfaceRegistry.describe(TransportProbe.Api.class));
-        Files.write(target.resolve("probe-catalog.json"), JsonWire.JSON.writeValueAsBytes(Map.of("interfaces", catalog)));
+        Files.write(target.resolve("probe-catalog.json"), JsonWire.JSON.writeValueAsBytes(Map.of("interfaces", catalog,
+                "configuration", InterfaceRegistry.configuration())));
         Files.writeString(target.resolve("probe-classpath.txt"), System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")));
     }
 }

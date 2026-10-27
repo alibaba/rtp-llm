@@ -186,6 +186,10 @@ def compile_case(path: str | Path, registry: Registry, *, shared_root: str | Pat
     describe = text(raw['describe'], 'describe')
     name = text(raw['name'], 'name') if 'name' in raw else None
     environment = compile_environment(raw['environment'])
+    if 'compute' in environment:
+        if 'compute' not in registry.configuration:
+            raise ConfigError('Java catalog is missing the compute configuration schema; rebuild it')
+        environment['compute'] = _value(environment['compute'], registry.configuration['compute'], {}, 'environment.compute')
     def asset(value):
         value = text(value, 'path')
         if '://' in value:

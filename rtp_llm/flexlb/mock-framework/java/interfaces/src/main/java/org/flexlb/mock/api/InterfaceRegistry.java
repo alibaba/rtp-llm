@@ -7,6 +7,7 @@ import org.flexlb.mock.api.engine.EngineApi;
 import org.flexlb.mock.api.client.ClientApi;
 import org.flexlb.mock.api.metrics.PrometheusApi;
 import org.flexlb.mock.api.model.Types;
+import org.flexlb.mock.api.model.ComputeSpec;
 
 /** Metadata comes from method signatures, not a parallel handwritten catalog. */
 public final class InterfaceRegistry {
@@ -14,6 +15,10 @@ public final class InterfaceRegistry {
 
     public static Map<String, Object> standard() {
         return describe(MasterApi.class, EngineApi.class, ClientApi.class, PrometheusApi.class);
+    }
+
+    public static Map<String, Object> configuration() {
+        return Map.of("compute", schema(ComputeSpec.class));
     }
 
     public static Map<String, Object> describe(Class<?>... interfaces) {

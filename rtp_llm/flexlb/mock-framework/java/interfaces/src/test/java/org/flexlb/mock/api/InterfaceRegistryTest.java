@@ -39,7 +39,7 @@ class InterfaceRegistryTest {
         var combined = new TreeMap<>(InterfaceRegistry.standard());
         combined.putAll(extra);
         Files.writeString(Path.of("target/test-extension-catalog.json"),
-                CatalogMain.json(Map.of("interfaces", combined)));
+                CatalogMain.json(Map.of("interfaces", combined, "configuration", InterfaceRegistry.configuration())));
     }
     @Test void rejectsDuplicateAndUnannotatedMethods() {
         assertThrows(IllegalArgumentException.class, () -> InterfaceRegistry.describe(Extension.class, Duplicate.class));
@@ -54,5 +54,13 @@ class InterfaceRegistryTest {
         for (String value : new String[]{"uniform", "normal", "lognormal", "choice", "same_length", "positive_sum"})
             assertTrue(catalog.contains("\"" + value + "\""), value);
         assertTrue(catalog.contains("\"bits\":64")); // Seed is an int64, not a float.
+    }
+
+    @Test void computeConfigurationIsExportedWithoutInventingBusinessEndpoints() {
+        String config = CatalogMain.json(InterfaceRegistry.configuration());
+        assertTrue(config.contains("\"prefill\""));
+        assertTrue(config.contains("\"stddev_ratio\""));
+        assertTrue(config.contains("\"max_deviation_ms\""));
+        assertEquals(18, InterfaceRegistry.standard().size());
     }
 }

@@ -13,7 +13,8 @@ public final class CatalogMain {
         if (args.length != 1) throw new IllegalArgumentException("Usage: CatalogMain OUTPUT.json");
         Path output = Path.of(args[0]);
         if (output.toAbsolutePath().getParent() != null) Files.createDirectories(output.toAbsolutePath().getParent());
-        Files.writeString(output, json(Map.of("interfaces", InterfaceRegistry.standard())) + "\n", StandardCharsets.UTF_8);
+        Files.writeString(output, json(Map.of("interfaces", InterfaceRegistry.standard(),
+                "configuration", InterfaceRegistry.configuration())) + "\n", StandardCharsets.UTF_8);
     }
 
     static String json(Object value) {
