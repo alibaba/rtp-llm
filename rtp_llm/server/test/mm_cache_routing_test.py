@@ -701,7 +701,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.request.mm_inputs[0].url,
         )
 
-    async def test_short_route_deadline_preserves_request_timeout(self):
+    async def test_vit_route_uses_request_timeout(self):
         client = MasterClient(
             host_service=SimpleNamespace(
                 get_master_addr=lambda: "master:8000",
@@ -721,7 +721,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         )
         call = client._send_schedule_request.call_args
         self.assertEqual(call.args[1].generate_timeout, 30000)
-        self.assertEqual(call.args[2], 0.5)
+        self.assertEqual(call.args[2], 30.0)
         self.assertTrue(call.args[1].vit_route_only)
         self.assertEqual(call.args[1].generate_input, b"")
         await client.close()
