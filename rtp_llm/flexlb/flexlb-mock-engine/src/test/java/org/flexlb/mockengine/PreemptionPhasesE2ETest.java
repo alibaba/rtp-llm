@@ -343,6 +343,7 @@ class PreemptionPhasesE2ETest {
         config.queueScheduler().setOrdering(ConfigTestSupport.priority());
         config.queueScheduler().setDecision(decision);
         config.setDispatcher(new org.flexlb.config.DispatcherConfig());
+        config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.BATCH);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
         var preemption = config.priorityOrdering().getPreemption();
         preemption.setAllowedVictimStages(java.util.EnumSet.of(

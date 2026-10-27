@@ -78,6 +78,8 @@ class ConfigServiceTest {
     void retained_defaults_have_one_owner() {
         FlexlbConfig config = ConfigTestFixtures.parse("{}");
         assertEquals(3, config.getSchemaVersion());
+        assertEquals(DispatcherConfig.Type.NON_BATCH, config.getDispatcher().getType());
+        assertFalse(config.getDispatcher().requiresGenerateInput());
         assertTrue(config.isQueue());
         assertFalse(config.isPriorityOrdering());
         assertTrue(config.isFixedWindowDecision());

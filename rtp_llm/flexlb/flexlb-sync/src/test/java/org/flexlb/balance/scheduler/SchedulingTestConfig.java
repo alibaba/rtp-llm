@@ -173,6 +173,7 @@ public final class SchedulingTestConfig {
             return config.getDispatcher();
         }
         DispatcherConfig batch = new DispatcherConfig();
+        batch.setType(DispatcherConfig.Type.BATCH);
         batch.setMaxInflightPerPrefillWorker(2);
         config.setDispatcher(batch);
         return batch;

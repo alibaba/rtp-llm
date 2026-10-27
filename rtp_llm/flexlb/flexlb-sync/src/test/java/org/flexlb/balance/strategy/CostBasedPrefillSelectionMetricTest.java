@@ -167,9 +167,7 @@ class CostBasedPrefillSelectionMetricTest {
     @CsvSource({"false,NON_BATCH", "true,BATCH"})
     void everyDeliveryModeReportsItsSelectionEstimates(
             boolean batchDelivery, String deliveryMode) {
-        config.setDispatcher(batchDelivery
-                ? new DispatcherConfig()
-                : ConfigTestSupport.nonBatch());
+        config.getDispatcher().setType(DispatcherConfig.Type.valueOf(deliveryMode));
         refreshContext();
 
         try (RequestRoute selected = select()) {

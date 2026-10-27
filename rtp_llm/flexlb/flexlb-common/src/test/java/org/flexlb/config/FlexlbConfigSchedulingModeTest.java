@@ -31,6 +31,14 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
+    void direct_defaults_to_non_batch_delivery() {
+        FlexlbConfig config = ConfigTestFixtures.parse("{\"scheduler\":{\"type\":\"DIRECT\"}}");
+        assertTrue(config.isDirect());
+        assertEquals(DispatcherConfig.Type.NON_BATCH, config.getDispatcher().getType());
+        assertFalse(config.getDispatcher().requiresGenerateInput());
+    }
+
+    @Test
     void fifo_queue_supports_all_decision_by_dispatcher_combinations() {
         assertMode(parseQueue("FIFO", "SINGLE", "NON_BATCH"), false, true, false);
         assertMode(parseQueue("FIFO", "SINGLE", "BATCH"), false, true, true);
