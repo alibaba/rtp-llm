@@ -337,6 +337,15 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             save_output("first_token_all_probs",
                         update_info.all_probs,
                         config.return_all_probs != ReturnAllProbsMode::NONE);
+            if (config.return_prompt_logits && update_info.prompt_logits.has_value()) {
+                const auto& scores      = *update_info.prompt_logits;
+                side_data.prompt_logits = scores;
+                auto& snapshot          = *side_data.prompt_logits;
+                snapshot.topk_logprobs  = scores.topk_logprobs.to(torch::kCPU, false, true).contiguous();
+                snapshot.topk_token_ids = scores.topk_token_ids.to(torch::kCPU, false, true).contiguous();
+                if (scores.target_logprobs.defined())
+                    snapshot.target_logprobs = scores.target_logprobs.to(torch::kCPU, false, true).contiguous();
+            }
             if (!getProposeToken().empty()) {
                 side_data.propose_tokens = getProposeToken();
             }

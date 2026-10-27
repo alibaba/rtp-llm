@@ -2,7 +2,7 @@ import asyncio
 import json
 from typing import Any
 from unittest import TestCase, main
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import torch
 from pydantic import BaseModel
@@ -94,6 +94,33 @@ class FrontendServerTest(TestCase):
     async def _async_run(self, *args: Any, **kwargs: Any):
         res = await self.frontend_server.inference(*args, **kwargs)
         return res
+
+    def test_batch_request_ids_do_not_overlap_other_batches_or_single_requests(self):
+        worker = MagicMock()
+        worker.batch_infer = AsyncMock(return_value=FakePipelinResponse(res="batch"))
+        self.frontend_server._frontend_worker = worker
+        self.frontend_server._global_controller.request_counter.value = 4093
+        with patch(
+            "rtp_llm.frontend.frontend_server.generate_request_id",
+            side_effect=lambda ip, port, server_id, sequence: sequence,
+        ):
+            for count in (3, 2):
+                asyncio.run(
+                    self.frontend_server.batch_infer(
+                        {"prompt_batch": ["hello"] * count}, FakeRawRequest()
+                    )
+                )
+        ids = []
+        for call in worker.batch_infer.call_args_list:
+            start = call.kwargs["request_id"]
+            self.assertLessEqual(start % 4096 + len(call.kwargs["prompts"]), 4096)
+            ids.extend(range(start, start + len(call.kwargs["prompts"])))
+        controller = self.frontend_server._global_controller
+        single_id = controller.increment()
+        controller.decrement()
+        self.assertEqual(len(set(ids)), 5)
+        self.assertNotIn(single_id, ids)
+        self.assertEqual(controller.current_concurrency.value, 0)
 
     def test_simple(self):
         loop = asyncio.new_event_loop()

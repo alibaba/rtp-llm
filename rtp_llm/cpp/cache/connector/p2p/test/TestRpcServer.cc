@@ -110,6 +110,7 @@ namespace rtp_llm {
     if (start_load_response_success_) {
         response->set_error_code(ErrorCodePB::NONE_ERROR);
         auto* payload = response->mutable_payload();
+        payload->set_has_first_generate_token(has_first_generate_token_);
         payload->set_first_generate_token_id(first_generate_token_id_);
         payload->set_total_reuse_len(10);
         payload->set_local_reuse_len(4);

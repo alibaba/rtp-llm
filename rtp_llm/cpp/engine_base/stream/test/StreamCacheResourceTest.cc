@@ -5,6 +5,7 @@
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
 #include <utility>
+#include <tuple>
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "kmonitor/client/core/MetricsData.h"
@@ -328,6 +329,7 @@ protected:
         RuntimeConfig cache_runtime_config;
         if (pd_sep_config.role_type == RoleType::PREFILL || pd_sep_config.role_type == RoleType::DECODE) {
             cache_runtime_config.worker_grpc_addrs = {"127.0.0.1:12345"};
+            cache_runtime_config.worker_addrs      = {"127.0.0.1:12344:12345"};
         }
         cache_manager_ = std::make_shared<KVCacheManager>(cache_config,
                                                           /*warmup=*/false,
@@ -975,7 +977,7 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_WithoutAllocatorContext_Retur
 }
 
 TEST_F(StreamCacheResourceTest, NonPDRequestSkipsRegistrationWithEmptyOrBusinessKey) {
-    for (const std::string key : {std::string{}, std::string{"business-key"}}) {
+    for (const std::string& key : {std::string{}, std::string{"business-key"}}) {
         SCOPED_TRACE(key);
         ASSERT_NO_FATAL_FAILURE(prepareP2PRegistrationResource(/*query_pd=*/false, key));
         auto& resource = stream_->streamCacheResource();
@@ -2297,12 +2299,52 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenFinishesSingleTokenRequestAfter
     EXPECT_EQ(stream_->seqLength(), stream_->inputLength() + 1);
 }
 
+TEST_F(StreamCacheResourceTest, testP2PFirstTokenAllowsAbsentPromptScoresForEmptySlice) {
+    autil::EnvGuard real_outputs("PERF_TEST", "0");
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    stream_->generateConfig()->pd_separation        = true;
+    stream_->generateConfig()->return_prompt_logits = true;
+    stream_->generateConfig()->prompt_logits_start  = 1;
+    stream_->generateConfig()->prompt_logits_end    = 1;
+    stream_->generateConfig()->max_new_tokens       = 1;
+    stream_->generate_status_->status               = StreamState::LOADING_CACHE;
+    auto result                                     = std::make_shared<DecodeLoadHelper::Result>();
+    result->side_channel_payload.has_data           = true;
+    result->side_channel_payload.has_first_token    = true;
+    result->side_channel_payload.first_token_id     = 7;
+    result->done_                                   = true;
+    result->success_                                = true;
+    auto context                                    = std::make_shared<P2PConnectorAsyncReadContext>(
+        std::make_shared<KVCacheResource>(),
+        std::make_shared<P2PBroadcastClient::Result>("empty-prompt-scores"),
+        result,
+        std::make_shared<P2PConnectorMetricsCollector>(),
+        0,
+        true);
+    context->checkDone();
+    ASSERT_TRUE(context->success());
+    stream_->streamCacheResource().p2p_load_context_ = context;
+    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    ASSERT_FALSE(stream_->hasError());
+    auto output = stream_->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_FALSE(output.value().generate_outputs.empty());
+    for (const auto& item : output.value().generate_outputs) {
+        EXPECT_FALSE(item.prompt_logits.has_value());
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoad) {
     autil::EnvGuard real_outputs("PERF_TEST", "0");
-    for (const auto& [requested, hybrid] :
-         {std::pair{false, false}, std::pair{true, false}, std::pair{false, true}, std::pair{true, true}}) {
+    for (const auto& [requested, hybrid, prompt_scores] : {std::tuple{false, false, false},
+                                                           std::tuple{true, false, false},
+                                                           std::tuple{false, true, false},
+                                                           std::tuple{true, true, false},
+                                                           std::tuple{true, false, true},
+                                                           std::tuple{true, true, true}}) {
         for (bool eos : {false, true}) {
-            SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", hybrid=" << hybrid << ", eos=" << eos);
+            SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", hybrid=" << hybrid << ", eos=" << eos
+                                              << ", prompt_scores=" << prompt_scores);
             const std::string key = "first-token-outputs";
             ASSERT_NO_FATAL_FAILURE(prepareP2PRegistrationResource(true, key, hybrid));
             auto&      prefill_connector = *cache_manager_->p2p_connector_->prefill_;
@@ -2327,6 +2369,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
                 config.return_cum_log_probs     = requested;
                 config.return_all_probs         = requested ? ReturnAllProbsMode::DEFAULT : ReturnAllProbsMode::NONE;
                 config.calculate_loss           = requested ? 2 : 0;
+                config.return_prompt_logits     = prompt_scores;
                 ModelConfig model;
                 model.max_seq_len                  = 32;
                 model.vocab_size                   = 16;
@@ -2349,23 +2392,31 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
                 std::vector<MultimodalInput>{MultimodalInput("image", 1), MultimodalInput("video", 2)};
             prefill->generateInput()->multimodal_features =
                 std::vector<torch::Tensor>{torch::zeros({4, 2}), torch::zeros({2, 2})};
-            auto       logits       = torch::arange(16, torch::kFloat32).reshape({1, 16});
-            auto       hidden       = torch::arange(4, torch::kFloat32).reshape({1, 4});
-            auto       all_hidden   = torch::arange(24, torch::kFloat32).reshape({6, 4});
-            auto       probs        = torch::full({1, 16}, 0.0625f);
-            auto       loss         = torch::arange(5, torch::kFloat32);
+            auto               logits     = torch::arange(16, torch::kFloat32).reshape({1, 16});
+            auto               hidden     = torch::arange(4, torch::kFloat32).reshape({1, 4});
+            auto               all_hidden = torch::arange(24, torch::kFloat32).reshape({6, 4});
+            auto               probs      = torch::full({1, 16}, 0.0625f);
+            auto               loss       = torch::arange(5, torch::kFloat32);
+            PromptLogitsOutput scores;
+            scores.topk_logprobs  = torch::arange(6, torch::kFloat32).reshape({3, 2});
+            scores.topk_token_ids = torch::arange(6, torch::kInt32).reshape({3, 2});
+            if (!eos)
+                scores.target_logprobs = torch::arange(3, torch::kFloat32);
+            scores.start_pos        = 1;
+            scores.end_pos          = 4;
             const auto graph_status = eos ? GenerationPrefillCudaGraphStatus::REPLAYED :
                                             GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE;
             prefill->step();
-            prefill->update({.new_tokens                           = torch::tensor({7}, torch::kInt32).reshape({1, 1}),
-                             .num_new_tokens                       = 1,
-                             .hidden_states                        = hidden,
-                             .logits                               = logits,
-                             .softmax_probs                        = torch::full({1, 1}, 0.75f),
-                             .cum_log_probs                        = torch::full({1}, -0.5f),
-                             .all_probs                            = probs,
-                             .loss                                 = requested ? loss : torch::Tensor{},
-                             .all_hidden_states                    = all_hidden,
+            prefill->update({.new_tokens        = torch::tensor({7}, torch::kInt32).reshape({1, 1}),
+                             .num_new_tokens    = 1,
+                             .hidden_states     = hidden,
+                             .logits            = logits,
+                             .softmax_probs     = torch::full({1, 1}, 0.75f),
+                             .cum_log_probs     = torch::full({1}, -0.5f),
+                             .all_probs         = probs,
+                             .loss              = requested ? loss : torch::Tensor{},
+                             .all_hidden_states = all_hidden,
+                             .prompt_logits     = prompt_scores ? std::make_optional(scores) : std::nullopt,
                              .generation_prefill_cuda_graph_status = graph_status});
             ASSERT_FALSE(prefill->hasError());
             PrefillResultStore::SideChannelData published;
@@ -2373,6 +2424,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             EXPECT_EQ(published.first_token_tensors.size(), requested ? 7u : 0u);
             EXPECT_EQ(published.multimodal_lengths, (std::map<int, int>{{1, 4}, {2, 2}}));
             EXPECT_EQ(published.prefill_use_independent_block_pools, hybrid);
+            EXPECT_EQ(published.prompt_logits.has_value(), prompt_scores);
             EXPECT_EQ(published.generation_prefill_cuda_graph_status, static_cast<uint32_t>(graph_status));
             // Reusing executor buffers after publication must not change the payload.
             logits.fill_(-1);
@@ -2380,6 +2432,10 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             all_hidden.fill_(-1);
             probs.fill_(-1);
             loss.fill_(-1);
+            scores.topk_logprobs.fill_(-1);
+            scores.topk_token_ids.fill_(-1);
+            if (scores.target_logprobs.defined())
+                scores.target_logprobs.fill_(-1);
 
             auto result = std::make_shared<DecodeLoadHelper::Result>();
             ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(published, result->response).ok());
@@ -2416,7 +2472,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             if (requested) {
                 EXPECT_EQ(output.aux_info.multimodal_lengths, published.multimodal_lengths);
             }
-            EXPECT_EQ(output.finished, eos);
+            EXPECT_EQ(output.finished, eos || prompt_scores);
             EXPECT_EQ(decode->prefillUsesIndependentBlockPools(), hybrid);
             EXPECT_EQ(decode->generationPrefillCudaGraphStatus(), graph_status);
             if (requested) {
@@ -2434,10 +2490,24 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
             ASSERT_EQ(output.aux_info.softmax_probs.has_value(), requested);
             ASSERT_EQ(output.aux_info.cum_log_probs.has_value(), requested);
             ASSERT_EQ(output.aux_info.all_probs.has_value(), requested);
+            ASSERT_EQ(output.prompt_logits.has_value(), prompt_scores);
             if (requested) {
+                if (prompt_scores) {
+                    const auto& restored = *output.prompt_logits;
+                    EXPECT_EQ(restored.start_pos, 1);
+                    EXPECT_EQ(restored.end_pos, 4);
+                    EXPECT_TRUE(
+                        torch::equal(restored.topk_logprobs, torch::arange(6, torch::kFloat32).reshape({3, 2})));
+                    EXPECT_TRUE(torch::equal(restored.topk_token_ids, torch::arange(6, torch::kInt32).reshape({3, 2})));
+                    EXPECT_EQ(restored.target_logprobs.defined(), !eos);
+                    if (!eos) {
+                        EXPECT_TRUE(torch::equal(restored.target_logprobs, torch::arange(3, torch::kFloat32)));
+                    }
+                }
                 EXPECT_TRUE(torch::equal(*output.logits, torch::tensor({2.f, 0.f}).reshape({1, 2})));
                 EXPECT_TRUE(torch::equal(*output.hidden_states,
-                                         torch::arange(eos ? 2 : 4, torch::kFloat32).reshape({1, eos ? 2 : 4})));
+                                         torch::arange((eos || prompt_scores) ? 2 : 4, torch::kFloat32)
+                                             .reshape({1, (eos || prompt_scores) ? 2 : 4})));
                 EXPECT_TRUE(
                     torch::equal(*output.all_hidden_states, torch::arange(24, torch::kFloat32).reshape({6, 4})));
                 EXPECT_TRUE(torch::equal(*output.loss, torch::arange(5, torch::kFloat32)));
@@ -2445,12 +2515,14 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenOutputsRoundTripThroughStartLoa
                 EXPECT_FLOAT_EQ(output.aux_info.cum_log_probs->item<float>(), -0.5f);
                 EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, torch::full({1, 16}, 0.0625f)));
             }
-            if (!eos) {
+            if (!eos && !prompt_scores) {
                 // Later Decode updates default to NOT_REQUESTED and must retain Prefill's status.
                 decode->step();
                 decode->update({.new_tokens     = torch::tensor({8}, torch::kInt32).reshape({1, 1}),
                                 .num_new_tokens = 1,
-                                .all_probs      = requested ? torch::full({1, 16}, 0.0625f) : torch::Tensor{}});
+                                .softmax_probs  = torch::full({1, 1}, 0.75f),
+                                .cum_log_probs  = torch::full({1}, -0.5f),
+                                .all_probs      = torch::full({1, 16}, 0.0625f)});
                 ASSERT_FALSE(decode->hasError());
                 EXPECT_EQ(decode->generationPrefillCudaGraphStatus(), graph_status);
                 auto next_result = decode->nextOutput();

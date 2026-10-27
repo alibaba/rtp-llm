@@ -1683,15 +1683,14 @@ class ModelRpcClient(object):
             )
             for inp in inputs
         ]
-        if self._role_type in (RoleType.PREFILL, RoleType.DECODE) or any(
-            role == RoleType.DECODE
-            or (self._role_type == RoleType.FRONTEND and role != RoleType.PDFUSION)
-            or getattr(inp, "enqueued_by_master", False)
+        if any(
+            (self._role_type == RoleType.FRONTEND and role is None)
+            or (role == RoleType.PDFUSION and getattr(inp, "enqueued_by_master", False))
             for role, inp in zip(selected_roles, inputs)
         ):
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,
-                "/batch_infer is not supported for PD roles",
+                "batch route is incompatible with its Prefill admission",
             )
 
         # Keep validation/normalization inside trans_input off caller-owned configs.

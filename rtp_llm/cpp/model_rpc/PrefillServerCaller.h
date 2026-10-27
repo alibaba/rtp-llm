@@ -39,6 +39,18 @@ public:
                              const GenerateInputPB*                 request,
                              grpc::ServerWriter<GenerateOutputsPB>* response_writer);
 
+    grpc::Status enqueueBatch(const EnqueueBatchRequestPB& request,
+                              EnqueueBatchResponsePB*      response,
+                              const std::string&           prefill_address,
+                              int64_t                      deadline_ms,
+                              const std::function<bool()>& is_cancelled);
+
+    grpc::Status forwardBatchGenerate(const BatchGenerateInputPB&  request,
+                                      BatchGenerateOutputsPB*      response,
+                                      const std::string&           prefill_address,
+                                      int64_t                      deadline_ms,
+                                      const std::function<bool()>& is_cancelled);
+
     // Fetch once for each PD request; only the RPC connection is reused.
     ErrorResult<PrefillPeerInfo> getPrefillPeerInfo(const std::string&           ip,
                                                     uint32_t                     port,

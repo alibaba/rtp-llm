@@ -2214,7 +2214,7 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(client._get_explicit_target_address(input_py), "fusion:9001")
         self.assertIsNone(client._build_response_role_addrs(input_py, "fusion:9001"))
 
-    def test_batch_rejects_explicit_decode_route_on_frontend(self):
+    def test_batch_accepts_explicit_decode_route_on_frontend(self):
         client = ModelRpcClient(["local:9000"], {}, role_type=RoleType.FRONTEND)
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2]),
@@ -2224,21 +2224,32 @@ class ModelRpcClientTest(TestCase):
             request_id=1,
             mm_inputs=[],
         )
-        with self.assertRaisesRegex(FtRuntimeException, "not supported for PD roles"):
-            asyncio.run(client.batch_enqueue([input_py]))
+        async def channel(_):
+            return object()
+        client._channel_pool.get = channel
+        with patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=FakeBatchStub()):
+            self.assertEqual(len(asyncio.run(client.batch_enqueue([input_py]))), 1)
 
-    def test_pd_batch_enqueue_is_unsupported(self):
+    def test_pd_batch_enqueue_preserves_master_admission(self):
         client = ModelRpcClient(["127.0.0.1:10101"], {}, 0, RoleType.DECODE)
         input_obj = GenerateInput(
             token_ids=torch.tensor([1, 2]),
             generate_config=GenerateConfig(),
             request_id=1,
             mm_inputs=[],
+            enqueued_by_master=True,
         )
-        with self.assertRaisesRegex(
-            FtRuntimeException, "/batch_infer is not supported for PD roles"
-        ):
-            asyncio.run(client.batch_enqueue([input_obj]))
+        async def channel(_):
+            return object()
+        class CaptureStub(FakeBatchStub):
+            async def BatchGenerateCall(self, request, timeout=None):
+                self.request = request
+                return await super().BatchGenerateCall(request, timeout)
+        client._channel_pool.get = channel
+        stub = CaptureStub()
+        with patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub):
+            self.assertEqual(len(asyncio.run(client.batch_enqueue([input_obj]))), 1)
+        self.assertTrue(stub.request.inputs[0].enqueued_by_master)
 
     def test_batch_rejects_wrong_result_count(self):
         client = ModelRpcClient(["127.0.0.1:10101"], {}, 5000, RoleType.PDFUSION)
@@ -4125,6 +4136,21 @@ class MixedPdfusionBatchTest(unittest.IsolatedAsyncioTestCase):
                   for i, ip in [(1, "fusion1"), (2, "fusion2")]]
         with self.assertRaises(FtRuntimeException):
             await client.batch_enqueue(inputs)
+
+    async def test_pd_batch_preserves_per_item_timeouts_without_mutating_inputs(self):
+        client = ModelRpcClient(["unused:9000"], {}, 5000, RoleType.FRONTEND)
+        inputs = [self.make_input(i, [_decode_role_addr("decode", 9002)]) for i in (1, 2)]
+        inputs[0].generate_config.timeout_ms = 200
+        inputs[1].generate_config.timeout_ms = 1200
+        async def channel(_):
+            return object()
+        client._channel_pool.get = channel
+        stub = FakeBatchStub()
+        with patch("rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub):
+            self.assertEqual(len(await client.batch_enqueue(inputs)), 2)
+        self.assertEqual(stub.last_timeout, 1.2)
+        self.assertEqual(stub.last_item_timeouts, [200, 1200])
+        self.assertEqual([item.generate_config.timeout_ms for item in inputs], [200, 1200])
 
 
 class PdTraceDecisionTest(unittest.TestCase):

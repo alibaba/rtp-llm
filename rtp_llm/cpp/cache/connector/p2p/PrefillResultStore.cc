@@ -185,6 +185,21 @@ grpc::Status PrefillResultStore::fillStartLoadResponsePayload(const SideChannelD
             }
             TensorPbConvert::torchToPb((*payload->mutable_tensors())[name].mutable_tensor(), tensor);
         }
+        if (data.prompt_logits.has_value()) {
+            const auto& scores     = *data.prompt_logits;
+            auto*       pb         = payload->mutable_prompt_logits();
+            const auto  fill_score = [](TensorPB* output, const torch::Tensor& tensor) {
+                if (!tensor.defined() || !tensor.device().is_cpu())
+                    throw std::runtime_error("prompt logits tensor must be defined and on CPU");
+                TensorPbConvert::torchToPb(output, tensor);
+            };
+            fill_score(pb->mutable_topk_logprobs(), scores.topk_logprobs);
+            fill_score(pb->mutable_topk_token_ids(), scores.topk_token_ids);
+            if (scores.target_logprobs.defined())
+                fill_score(pb->mutable_target_logprobs(), scores.target_logprobs);
+            pb->set_start_pos(scores.start_pos);
+            pb->set_end_pos(scores.end_pos);
+        }
         if (!data.position_ids.empty()) {
             auto& pos_tensor = (*payload->mutable_tensors())["position_ids"];
             auto* pos_pb     = pos_tensor.mutable_tensor();

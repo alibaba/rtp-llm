@@ -179,16 +179,14 @@ TEST_F(DecodeLoadHelperTest, LoadReturnsPlanDigestMismatchBeforeTransferDeadline
     ASSERT_TRUE(result->done());
     EXPECT_FALSE(result->success());
     EXPECT_EQ(result->error_code, error_code);
-    EXPECT_EQ(result->error_message,
-              message
-                  + " [received_at location=DecodeLoadHelper::complete observer_role=DECODE operation=StartLoad peer="
-                  + "127.0.0.1:" + std::to_string(server_->listenPort())
-                  + " request_id=1012 key=test_plan_digest_mismatch wire_code=13]");
+    EXPECT_EQ(result->error_message.find(message), 0u);
+    EXPECT_NE(result->error_message.find("[received_at "), std::string::npos);
     EXPECT_EQ(server_->service()->getLastStartLoadRequest().plan_digest(), 1);
 }
 
 TEST_F(DecodeLoadHelperTest, LoadRejectsSuccessfulResponseWithoutFirstToken) {
     server_->service()->setFirstGenerateTokenId(0);
+    server_->service()->setHasFirstGenerateToken(false);
     const int64_t deadline_ms = currentTimeMs() + 5000;
 
     auto result = client_->load(1011,

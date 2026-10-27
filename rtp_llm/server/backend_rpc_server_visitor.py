@@ -1018,11 +1018,6 @@ class BackendRPCServerVisitor:
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         if not inputs:
             return []
-        if self.pd_sep_config.role_type in (RoleType.PREFILL, RoleType.DECODE):
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "/batch_infer is not supported for PD roles",
-            )
         for input in inputs:
             self.fill_request_info(input)
             input.generate_config.validate()
@@ -1030,45 +1025,45 @@ class BackendRPCServerVisitor:
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
 
-        # HTTP batch has no PD batch entry. Resolve only PDFUSION endpoints,
-        # without asking Master to reserve/enqueue a P/D request first.
+        # Select one batch destination without per-item Master admissions, which
+        # can split a batch across workers before Decode receives it.
         if self.pd_sep_config.role_type == RoleType.FRONTEND:
-            selected_pdfusion = None
+            selected_addrs = next(
+                (
+                    input.generate_config.role_addrs
+                    for input in inputs
+                    if any(
+                        addr.ip and addr.role in (RoleType.PDFUSION, RoleType.DECODE)
+                        for addr in input.generate_config.role_addrs
+                    )
+                ),
+                None,
+            )
+            if selected_addrs is None:
+                candidates = self.host_service.get_backend_role_addrs(
+                    [RoleType.PDFUSION]
+                )
+                selected_addrs = [
+                    addr for addr in (candidates or [])
+                    if addr.ip and addr.role == RoleType.PDFUSION
+                ][:1]
+                if not selected_addrs:
+                    selected_addrs = self.host_service.get_backend_role_addrs(
+                        [RoleType.PREFILL, RoleType.DECODE]
+                    ) or []
             for input in inputs:
-                targets = [
-                    addr
-                    for addr in input.generate_config.role_addrs
-                    if addr.ip and addr.role in (RoleType.PDFUSION, RoleType.DECODE)
+                roles = {addr.role for addr in input.generate_config.role_addrs if addr.ip}
+                input.generate_config.role_addrs = list(input.generate_config.role_addrs) + [
+                    addr for addr in selected_addrs if addr.ip and addr.role not in roles
                 ]
-                if targets:
-                    if targets[0].role != RoleType.PDFUSION or getattr(
-                        input, "enqueued_by_master", False
-                    ):
-                        raise FtRuntimeException(
-                            ExceptionType.UNSUPPORTED_OPERATION,
-                            "/batch_infer requires a PDFUSION target",
-                        )
-                    if selected_pdfusion is None:
-                        selected_pdfusion = targets[0]
-                    continue
-                if selected_pdfusion is None:
-                    candidates = self.host_service.get_backend_role_addrs(
-                        [RoleType.PDFUSION]
-                    )
-                    selected_pdfusion = next(
-                        (
-                            addr
-                            for addr in (candidates or [])
-                            if addr.role == RoleType.PDFUSION and addr.ip
-                        ),
-                        None,
-                    )
-                if selected_pdfusion is None:
+                roles = {addr.role for addr in input.generate_config.role_addrs if addr.ip}
+                if RoleType.PDFUSION not in roles and not {
+                    RoleType.PREFILL, RoleType.DECODE
+                }.issubset(roles):
                     raise FtRuntimeException(
-                        ExceptionType.UNSUPPORTED_OPERATION,
-                        "/batch_infer requires a PDFUSION target",
+                        ExceptionType.ROUTE_ERROR,
+                        "/batch_infer requires a PDFUSION target or a Prefill/Decode pair",
                     )
-                input.generate_config.role_addrs = [selected_pdfusion]
         elif self.host_service.service_available:
             for input in inputs:
                 await self.route_ips(input)

@@ -1059,17 +1059,39 @@ class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):
         for item in inputs:
             self.assertEqual(item.generate_config.role_addrs, [fusion])
 
-    async def test_pd_target_and_missing_pdfusion_remain_unsupported(self):
+    async def test_missing_batch_targets_fail_before_rpc(self):
         visitor = self.make_visitor()
         visitor.host_service.get_backend_role_addrs.return_value = []
         item = _FakeRouteInput()
         with self.assertRaises(FtRuntimeException):
             await visitor.batch_enqueue([item])
-        item.generate_config.role_addrs = [RoleAddr(role=RoleType.DECODE, ip="decode", http_port=1, grpc_port=2)]
-        with self.assertRaises(FtRuntimeException):
-            await visitor.batch_enqueue([item])
         visitor.model_rpc_client.batch_enqueue.assert_not_awaited()
         visitor.route_ips.assert_not_awaited()
+
+    async def test_pd_only_frontend_resolves_one_pair_without_master_admission(self):
+        visitor = self.make_visitor()
+        prefill = RoleAddr(role=RoleType.PREFILL, ip="prefill", http_port=1, grpc_port=2)
+        decode = RoleAddr(role=RoleType.DECODE, ip="decode", http_port=3, grpc_port=4)
+        visitor.host_service.get_backend_role_addrs.side_effect = [[], [prefill, decode]]
+        inputs = [_FakeRouteInput(), _FakeRouteInput()]
+        await visitor.batch_enqueue(inputs)
+        for item in inputs:
+            self.assertEqual(item.generate_config.role_addrs, [prefill, decode])
+            self.assertFalse(item.enqueued_by_master)
+        visitor.route_ips.assert_not_awaited()
+        visitor.model_rpc_client.batch_enqueue.assert_awaited_once_with(inputs)
+
+    async def test_master_admitted_batch_keeps_its_existing_pair(self):
+        visitor = self.make_visitor()
+        pair = [RoleAddr(role=RoleType.PREFILL, ip="prefill", http_port=1, grpc_port=2),
+                RoleAddr(role=RoleType.DECODE, ip="decode", http_port=3, grpc_port=4)]
+        item = _FakeRouteInput()
+        item.generate_config.role_addrs = list(pair)
+        item.enqueued_by_master = True
+        await visitor.batch_enqueue([item])
+        self.assertEqual(item.generate_config.role_addrs, pair)
+        self.assertTrue(item.enqueued_by_master)
+        visitor.host_service.get_backend_role_addrs.assert_not_called()
 
 
 if __name__ == "__main__":

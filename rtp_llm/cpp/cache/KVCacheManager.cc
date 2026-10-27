@@ -225,7 +225,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                const SpeculativeExecutionConfig&  sp_config,
                                const PDSepConfig&                 pd_sep_config,
                                const CacheStoreConfig&            cache_store_config,
-                               bool use_device_malloc_block_pool):
+                               bool                               use_device_malloc_block_pool):
     config_(config),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),

@@ -535,20 +535,25 @@ class FrontendServer(object):
     async def batch_infer(self, req: dict, raw_request: Request):
         from rtp_llm.frontend.frontend_worker import BatchPipelineResponse
 
-        # Concurrency accounting: a batch counts as ONE scheduling unit because the engine
-        # atomically enqueues all prompts via BatchGenerateCall. Per-item counting would over-
-        # reject under the same concurrency_limit; the trade-off is that a large batch occupies
-        # only one slot regardless of N.
-        sequence = self._global_controller.increment() % 4096
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip,
-            self.py_env_configs.server_config.server_port,
-            self.server_id,
-            sequence,
-        )
+        # Retain one HTTP concurrency slot per batch.
+        sequence = self._global_controller.increment()
         try:
             assert self._frontend_worker is not None
             prompts = req.get("prompt_batch", [])
+            if len(prompts) > 1:
+                # Pipeline uses base_request_id + item index. Reserve the whole
+                # sequence range so another batch/single request cannot reuse it.
+                with self._global_controller.lock:
+                    sequence = self._global_controller.request_counter.value + 1
+                    if sequence % 4096 + len(prompts) > 4096:
+                        sequence += (-sequence) % 4096
+                    self._global_controller.request_counter.value = sequence + len(prompts) - 1
+            request_id = generate_request_id(
+                self.py_env_configs.server_config.ip,
+                self.py_env_configs.server_config.server_port,
+                self.server_id,
+                sequence,
+            )
             generate_config = req.get("generate_config", {})
             result = await self._frontend_worker.batch_infer(
                 prompts=prompts,

@@ -388,4 +388,34 @@ ErrorResult<PrefillPeerInfo> PrefillServerCaller::getPrefillPeerInfo(const std::
     return std::move(info);
 }
 
+grpc::Status PrefillServerCaller::enqueueBatch(const EnqueueBatchRequestPB& request,
+                                           EnqueueBatchResponsePB*      response,
+                                           const std::string&           prefill_address,
+                                           int64_t                      deadline_ms,
+                                           const std::function<bool()>& is_cancelled) {
+    auto connection = rpc_pool_->getConnection(prefill_address);
+    if (!connection.ok())
+        return grpcStatusFromErrorInfo({ErrorCode::GET_CONNECTION_FAILED, connection.status().ToString()});
+    grpc::ClientContext context;
+    const auto          deadline = std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms));
+    context.set_deadline(deadline);
+    SyncPrefillRpcCancelGuard cancel_guard(is_cancelled, &context, deadline);
+    return connection->stub->EnqueueBatch(&context, request, response);
+}
+
+grpc::Status PrefillServerCaller::forwardBatchGenerate(const BatchGenerateInputPB&  request,
+                                                   BatchGenerateOutputsPB*      response,
+                                                   const std::string&           prefill_address,
+                                                   int64_t                      deadline_ms,
+                                                   const std::function<bool()>& is_cancelled) {
+    auto connection = rpc_pool_->getConnection(prefill_address);
+    if (!connection.ok())
+        return grpcStatusFromErrorInfo({ErrorCode::GET_CONNECTION_FAILED, connection.status().ToString()});
+    grpc::ClientContext context;
+    const auto          deadline = std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms));
+    context.set_deadline(deadline);
+    SyncPrefillRpcCancelGuard cancel_guard(is_cancelled, &context, deadline);
+    return connection->stub->BatchGenerateCall(&context, request, response);
+}
+
 }  // namespace rtp_llm

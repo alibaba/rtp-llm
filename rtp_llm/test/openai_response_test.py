@@ -4445,12 +4445,22 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         ]
         return visitor, inputs
 
-    async def test_batch_enqueue_pd_is_unsupported(self):
+    async def test_batch_enqueue_pd_uses_one_pair(self):
         visitor, inputs = self._decode_batch_visitor_and_inputs()
-        with self.assertRaisesRegex(
-            FtRuntimeException, "/batch_infer is not supported for PD roles"
-        ):
-            await visitor.batch_enqueue(inputs)
+        pair = [
+            RoleAddr(role=RoleType.PREFILL, ip="prefill", http_port=10000, grpc_port=10001),
+            RoleAddr(role=RoleType.DECODE, ip="decode", http_port=20000, grpc_port=20001),
+        ]
+        visitor.host_service.get_backend_role_addrs = lambda roles, refresh=False: [
+            addr for addr in pair if addr.role in roles
+        ]
+        async def batch_enqueue(items):
+            for item in items:
+                self.assertEqual(item.generate_config.role_addrs, pair)
+                self.assertFalse(item.enqueued_by_master)
+            return []
+        visitor.model_rpc_client.batch_enqueue = batch_enqueue
+        self.assertEqual(await visitor.batch_enqueue(inputs), [])
 
     async def test_batch_enqueue_pd_empty(self):
         visitor, _ = self._decode_batch_visitor_and_inputs()

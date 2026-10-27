@@ -38,6 +38,10 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer);
 
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response) override;
+
 private:
     std::unique_ptr<PDCancelRegistry> cancel_registry_;
     autil::LoopThreadPtr              cancel_cleanup_thread_;

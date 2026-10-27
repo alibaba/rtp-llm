@@ -178,6 +178,17 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
             const auto it = payload.first_token_tensors.find(name);
             return it == payload.first_token_tensors.end() ? torch::Tensor{} : TensorPbConvert::pbToTorch(it->second);
         };
+        std::optional<PromptLogitsOutput> prompt_logits;
+        if (payload.prompt_logits.has_value()) {
+            const auto& pb                = *payload.prompt_logits;
+            prompt_logits                 = PromptLogitsOutput{};
+            prompt_logits->topk_logprobs  = TensorPbConvert::pbToTorch(pb.topk_logprobs());
+            prompt_logits->topk_token_ids = TensorPbConvert::pbToTorch(pb.topk_token_ids());
+            if (pb.has_target_logprobs())
+                prompt_logits->target_logprobs = TensorPbConvert::pbToTorch(pb.target_logprobs());
+            prompt_logits->start_pos = pb.start_pos();
+            prompt_logits->end_pos   = pb.end_pos();
+        }
         stream->setIsContextStream(false);
         stream->step();
         stream->updateWithoutLock(
@@ -193,6 +204,7 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
              .all_hidden_states = output_tensor("first_token_all_hidden_states"),
              .update_remote_generate = false,
              .force_update_info      = false,
+             .prompt_logits          = std::move(prompt_logits),
              .generation_prefill_cuda_graph_status =
                  static_cast<GenerationPrefillCudaGraphStatus>(payload.generation_prefill_cuda_graph_status)});
         // DSpARK resumes from the prompt tail without a Prefill proposal.

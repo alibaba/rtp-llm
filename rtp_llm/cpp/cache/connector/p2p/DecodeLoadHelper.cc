@@ -325,6 +325,8 @@ void DecodeLoadHelper::Result::updateStreamFromResponse() {
         side_channel_payload.multimodal_lengths =
             std::map<int, int>(payload.multimodal_lengths().begin(), payload.multimodal_lengths().end());
         side_channel_payload.has_data         = true;
+        if (payload.has_prompt_logits())
+            side_channel_payload.prompt_logits = payload.prompt_logits();
 
         for (const char* name : {"first_token_logits",
                                  "first_token_hidden_states",

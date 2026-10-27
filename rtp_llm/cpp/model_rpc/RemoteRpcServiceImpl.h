@@ -12,11 +12,6 @@ public:
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine) override;
 
-    grpc::Status
-    BatchGenerateCall(grpc::ServerContext*, const BatchGenerateInputPB*, BatchGenerateOutputsPB*) override {
-        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "/batch_infer is not supported for PD roles");
-    }
-
     grpc::Status EnqueueBatch(grpc::ServerContext*         context,
                               const EnqueueBatchRequestPB* request,
                               EnqueueBatchResponsePB*      response) override {

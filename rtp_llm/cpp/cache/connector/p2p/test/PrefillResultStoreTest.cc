@@ -250,6 +250,36 @@ TEST_F(PrefillResultStoreTest, OmitsAbsentAndZeroElementSpeculativeTensors) {
     }
 }
 
+TEST_F(PrefillResultStoreTest, PromptLogitsPreserveTensorTypesRangeAndOptionalTargets) {
+    EXPECT_EQ(SideChannelPayloadPB::kMultimodalLengthsFieldNumber, 13);
+    EXPECT_EQ(SideChannelPayloadPB::kPromptLogitsFieldNumber, 14);
+    auto result           = data();
+    result.prompt_logits  = PromptLogitsOutput{};
+    auto& scores          = *result.prompt_logits;
+    scores.topk_logprobs  = torch::ones({2, 3}, torch::kFloat32);
+    scores.topk_token_ids = torch::ones({2, 3}, torch::kInt32);
+    scores.start_pos      = 2;
+    scores.end_pos        = 4;
+    P2PConnectorStartLoadResponsePB response;
+    for (bool targets : {false, true}) {
+        scores.target_logprobs = targets ? torch::ones({2}, torch::kFloat32) : torch::Tensor{};
+        ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(result, response).ok());
+        P2PConnectorStartLoadResponsePB received;
+        ASSERT_TRUE(received.ParseFromString(response.SerializeAsString()));
+        ASSERT_TRUE(received.payload().has_prompt_logits());
+        const auto& pb = received.payload().prompt_logits();
+        EXPECT_EQ(pb.topk_logprobs().data_type(), TensorPB::FP32);
+        EXPECT_EQ(pb.topk_token_ids().data_type(), TensorPB::INT32);
+        EXPECT_EQ(pb.topk_token_ids().int32_data().size(), 6 * sizeof(int32_t));
+        EXPECT_EQ(pb.start_pos(), 2);
+        EXPECT_EQ(pb.end_pos(), 4);
+        EXPECT_EQ(pb.has_target_logprobs(), targets);
+    }
+    result.prompt_logits.reset();
+    ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(result, response).ok());
+    EXPECT_FALSE(response.payload().has_prompt_logits());
+}
+
 TEST_F(PrefillResultStoreTest, SerializationFailureClearsPartialPayload) {
     auto result          = data();
     result.propose_probs = torch::ones({2}, torch::kInt64);
