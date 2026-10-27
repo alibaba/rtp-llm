@@ -126,7 +126,29 @@ _X86_TESTS = [
         env = {"RTP_V41_PREFILL_DEEPSELECT_GPU_TEST": "1"} if name == "test_v41_prefill_deepselect" else {},
         legacy_create_init = 0,
     )
-    for name in _TESTS if name not in ["test_v41_qkv_rope_cache", "test_v41_global_overlap", "test_attention_v41_cp_raw_groups"]
+    for name in _TESTS if name not in ["test_v41_qkv_rope_cache", "test_v41_global_overlap", "test_attention_v41_cp_raw_groups", "test_v41_prefill_indexer", "test_attention_v41_prefill_selection"]
+]
+
+
+[
+    cuda13_sm100_py_test(
+        name = name,
+        srcs = [
+            name + ".py",
+            "//rtp_llm/test/pytest:pytest_main.py",
+        ] + (["test_v41_prefill_indexer.py"] if name == "test_v41_prefill_indexer_schedule" else []),
+        main = "//rtp_llm/test/pytest:pytest_main.py",
+        args = ["--cuda-devices", "1", "$(location :" + name + ".py)"],
+        deps = [
+            "//rtp_llm:testlib",
+            "//rtp_llm/models_py:modules",
+            test_requirement("pytest"),
+        ],
+        env = {"DSV41_TEST_FUSED_INDEXER_GPU": "1"},
+        tags = ["dsv41_cuda13"],
+        legacy_create_init = 0,
+    )
+    for name in ["test_v41_prefill_indexer", "test_v41_prefill_indexer_schedule", "test_attention_v41_prefill_selection"]
 ]
 
 
