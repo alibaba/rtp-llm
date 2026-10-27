@@ -63,48 +63,32 @@ class SchedulerRuntimeTest {
         }
     }
 
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-    void executorErrorTransfersWorkOnceAndDoesNotLeakItsDrainOwner(boolean recoveryAlsoFails)
-            throws Exception {
+    @Test
+    void executorErrorTransfersWorkOnceAndDoesNotLeakItsDrainOwner() throws Exception {
         var f = new Fixture();
         var workers = SchedulerTestSupport.requestWorkers(f.runtime);
-        var recovery =
-                org.springframework.test.util.ReflectionTestUtils.getField(
-                        f.runtime, "requestRecovery");
         var rejected = mock(java.util.concurrent.ExecutorService.class);
         var error = new AssertionError("executor failed before accepting work");
         doThrow(error).when(rejected).execute(any(Runnable.class));
-        var completed = new java.util.concurrent.CompletableFuture<Thread>();
         var executions = new java.util.concurrent.atomic.AtomicInteger();
-        var caller = Thread.currentThread();
         try {
             org.springframework.test.util.ReflectionTestUtils.setField(
                     f.runtime, "requestWorkers", rejected);
-            if (recoveryAlsoFails) {
-                var rejectedRecovery = mock(java.util.concurrent.ExecutorService.class);
-                doThrow(new AssertionError("recovery executor failed"))
-                        .when(rejectedRecovery)
-                        .execute(any(Runnable.class));
-                org.springframework.test.util.ReflectionTestUtils.setField(
-                        f.runtime, "requestRecovery", rejectedRecovery);
-            }
-            f.runtime.executeRequestWork(
-                    RequestProtocolTestSupport.context(f.config, 9110L),
-                    () -> {
-                        executions.incrementAndGet();
-                        completed.complete(Thread.currentThread());
-                    });
-            assertNotSame(caller, completed.get(5, java.util.concurrent.TimeUnit.SECONDS));
+            assertThrows(
+                    AssertionError.class,
+                    () ->
+                            f.runtime.executeRequestWork(
+                                    RequestProtocolTestSupport.context(f.config, 9110L),
+                                    () -> {
+                                        executions.incrementAndGet();
+                                    }));
             assertTimeoutPreemptively(
                     java.time.Duration.ofSeconds(5),
                     () -> SchedulerTestSupport.awaitRequestWork(f.runtime));
-            assertEquals(1, executions.get());
+            assertEquals(0, executions.get());
         } finally {
             org.springframework.test.util.ReflectionTestUtils.setField(
                     f.runtime, "requestWorkers", workers);
-            org.springframework.test.util.ReflectionTestUtils.setField(
-                    f.runtime, "requestRecovery", recovery);
             assertSame(error, assertThrows(AssertionError.class, f.runtime::shutdown));
         }
     }

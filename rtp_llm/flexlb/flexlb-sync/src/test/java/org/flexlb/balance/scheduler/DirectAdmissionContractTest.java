@@ -294,7 +294,9 @@ class DirectAdmissionContractTest {
             AtomicReference<DeliveryClaim> claimed = new AtomicReference<>();
             doAnswer(
                             call -> {
-                                DeliveryClaim claim = call.getArgument(0);
+                                var fact =
+                                        call.getArgument(0, ContextResult.DeliveryEvidence.class);
+                                DeliveryClaim claim = fact.delivery();
                                 claimed.set(claim);
                                 RequestContext context = claim.item().ctx();
                                 assertEquals(105L, context.data().getRequestId());
@@ -365,9 +367,8 @@ class DirectAdmissionContractTest {
                                 return null;
                             })
                     .when(fixture.requests)
-                    .onDeliveryEvidence(
-                            any(),
-                            org.mockito.ArgumentMatchers.isA(ContextResult.RouteDelivered.class));
+                    .onDeliveryFact(
+                            org.mockito.ArgumentMatchers.any(ContextResult.DeliveryFact.class));
 
             try {
                 Response response =

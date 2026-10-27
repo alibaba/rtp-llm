@@ -77,9 +77,16 @@ final class ResponsePublication implements AutoCloseable {
         }
     }
 
-    void reject() {
+    void reject(Throwable failure) {
         if (phase.compareAndSet(Phase.SUBMITTED, Phase.CLOSED)) {
-            executor.release(this);
+            try {
+                var data = owner.data();
+                if (data != null && data.getFuture() instanceof RequestFuture future) {
+                    future.completeExceptionallyOwned(failure);
+                }
+            } finally {
+                executor.release(this);
+            }
         }
     }
 

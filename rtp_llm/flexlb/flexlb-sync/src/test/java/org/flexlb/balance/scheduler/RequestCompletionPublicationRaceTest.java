@@ -21,6 +21,7 @@ import org.junit.jupiter.params.provider.EnumSource;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -115,11 +116,6 @@ class RequestCompletionPublicationRaceTest {
             execution.get(3, TimeUnit.SECONDS);
             close.get(3, TimeUnit.SECONDS);
             assertTrue(workers.isTerminated());
-            assertTrue(
-                    ((ExecutorService)
-                                    org.springframework.test.util.ReflectionTestUtils.getField(
-                                            responseExecutor, "rejectedTaskWorker"))
-                            .isTerminated());
         } finally {
             resumeCallback.countDown();
             innerRegistration.close();
@@ -156,15 +152,10 @@ class RequestCompletionPublicationRaceTest {
                             org.springframework.test.util.ReflectionTestUtils.getField(
                                     responseExecutor, "completionWorkers");
             executor.shutdown();
-            CompletableFuture<Thread> callbackThread =
-                    future.thenApply(ignored -> Thread.currentThread());
-
-            registry.cancel(503L, 0L, CancelReason.CLIENT_CANCELLED);
-            // Waiting on the source future can help run its dependent callback on this thread.
-            assertFalse(callbackThread.get(2L, TimeUnit.SECONDS) == Thread.currentThread());
-            assertEquals(
-                    StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
-                    future.get(2L, TimeUnit.SECONDS).getCode());
+            assertThrows(
+                    java.util.concurrent.RejectedExecutionException.class,
+                    () -> registry.cancel(503L, 0L, CancelReason.CLIENT_CANCELLED));
+            assertThrows(ExecutionException.class, () -> future.get(2L, TimeUnit.SECONDS));
             assertEquals(
                     RequestState.Phase.CANCELLED,
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
@@ -327,11 +318,6 @@ class RequestCompletionPublicationRaceTest {
             assertSame(failure, first.get(5, TimeUnit.SECONDS));
             assertSame(failure, second.get(5, TimeUnit.SECONDS));
             assertTrue(interruptPreserved.get());
-            assertTrue(
-                    ((ExecutorService)
-                                    org.springframework.test.util.ReflectionTestUtils.getField(
-                                            responseExecutor, "rejectedTaskWorker"))
-                            .isShutdown());
             if (shutdownFails) {
                 assertSame(
                         failure,

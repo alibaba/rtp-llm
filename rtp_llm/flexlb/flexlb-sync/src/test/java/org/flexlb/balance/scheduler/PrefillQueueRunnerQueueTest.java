@@ -118,10 +118,8 @@ class PrefillQueueRunnerQueueTest {
                                 throw observerFailure;
                             })
                     .when(owner)
-                    .onDeliveryEvidence(
-                            org.mockito.ArgumentMatchers.isNull(),
-                            org.mockito.ArgumentMatchers.isA(
-                                    ContextResult.PreparationFailure.class));
+                    .onDeliveryFact(
+                            org.mockito.ArgumentMatchers.any(ContextResult.DeliveryFact.class));
             worker.start();
             for (long id : new long[] {930L, 931L}) {
                 var context = RequestProtocolTestSupport.context(config, id);

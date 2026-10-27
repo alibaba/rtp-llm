@@ -7,22 +7,19 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
 
-/** Serializes and coalesces each request's closing effects outside Context's monitor. */
+/** Serializes and coalesces each owner's effects outside Context's monitor. */
 final class RequestWorkQueue {
-    private final ConcurrentMap<RequestContext, Lane> lanes = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Object, Lane> lanes = new ConcurrentHashMap<>();
 
     boolean execute(
-            RequestContext context,
-            Runnable work,
-            Consumer<Throwable> rejected,
-            Consumer<Runnable> start) {
+            Object owner, Runnable work, Consumer<Throwable> rejected, Consumer<Runnable> start) {
         Objects.requireNonNull(work, "work");
         for (; ; ) {
-            Lane lane = lanes.get(context);
+            Lane lane = lanes.get(owner);
             if (lane == null || lane.retired) {
                 lane =
                         lanes.compute(
-                                context,
+                                owner,
                                 (key, old) -> old == null || old.retired ? new Lane(key) : old);
             }
             synchronized (lane) {
@@ -51,14 +48,14 @@ final class RequestWorkQueue {
     private record Task(Runnable work, Consumer<Throwable> rejected) {}
 
     private final class Lane implements Runnable {
-        private final RequestContext context;
+        private final Object owner;
         private Task pending;
         private boolean running;
         private boolean started;
         private volatile boolean retired;
 
-        private Lane(RequestContext context) {
-            this.context = context;
+        private Lane(Object owner) {
+            this.owner = owner;
         }
 
         @Override
@@ -80,7 +77,7 @@ final class RequestWorkQueue {
                     }
                 }
                 if (next == null) {
-                    lanes.remove(context, this);
+                    lanes.remove(owner, this);
                     Failures.rethrow(failure, "request closing failed");
                     return;
                 }
@@ -99,7 +96,7 @@ final class RequestWorkQueue {
                 abandoned = pending;
                 pending = null;
             }
-            lanes.remove(context, this);
+            lanes.remove(owner, this);
             if (abandoned != null) {
                 Failures.run(cause, () -> abandoned.rejected().accept(cause));
             }

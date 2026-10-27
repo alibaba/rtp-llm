@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SchedulerRequestWorkTest {
@@ -89,22 +90,15 @@ class SchedulerRequestWorkTest {
     }
 
     @Test
-    void rejectedPoolTaskRecoversOffTheCallingThread() throws Exception {
+    void rejectedPoolTaskIsReportedToTheCaller() {
         SchedulerRuntime executor = runtime();
         ExecutorService workers =
                 (ExecutorService) ReflectionTestUtils.getField(executor, "requestWorkers");
         workers.shutdown();
-        CountDownLatch ran = new CountDownLatch(1);
-        AtomicReference<String> threadName = new AtomicReference<>();
         try {
-            executor.executeRequestWork(
-                    requestContext(993003L),
-                    () -> {
-                        threadName.set(Thread.currentThread().getName());
-                        ran.countDown();
-                    });
-            assertTrue(ran.await(5, TimeUnit.SECONDS));
-            assertTrue(threadName.get().startsWith("request-work-recovery-"));
+            assertThrows(
+                    RuntimeException.class,
+                    () -> executor.executeRequestWork(requestContext(993003L), () -> {}));
         } finally {
             close(executor);
         }
@@ -133,18 +127,10 @@ class SchedulerRequestWorkTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({
-        "false,false",
-        "false,true",
-        "true,false",
-        "true,true"
-    })
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     @org.junit.jupiter.api.Timeout(15)
-    void drainWaitsForRunningAndReentrantFacts(boolean close, boolean recovery) throws Exception {
+    void drainWaitsForRunningAndReentrantFacts(boolean close) throws Exception {
         SchedulerRuntime executor = runtime();
-        if (recovery) {
-            ((ExecutorService) ReflectionTestUtils.getField(executor, "requestWorkers")).shutdown();
-        }
         RequestContext context = requestContext(993005L);
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
@@ -221,14 +207,10 @@ class SchedulerRequestWorkTest {
         }
     }
 
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-    void nestedWorkRunsOutsideContextMonitorAndIsIncludedInDrain(boolean recovery)
+    @org.junit.jupiter.api.Test
+    void nestedWorkRunsOutsideContextMonitorAndIsIncludedInDrain()
             throws Exception {
         SchedulerRuntime executor = runtime();
-        if (recovery) {
-            ((ExecutorService) ReflectionTestUtils.getField(executor, "requestWorkers")).shutdown();
-        }
         RequestContext context = requestContext(993006L);
         var observed = new java.util.concurrent.CopyOnWriteArrayList<Integer>();
         CountDownLatch entered = new CountDownLatch(1);
@@ -295,19 +277,13 @@ class SchedulerRequestWorkTest {
     }
 
     @Test
-    void rejectionByBothPoolsPreservesAcceptedWorkOffCallerAndRecordsTheFailure() throws Exception {
+    void rejectedRequestPoolIsReportedToTheCaller() {
         var runtime = runtime();
         SchedulerTestSupport.requestWorkers(runtime).shutdown();
-        ((ExecutorService) ReflectionTestUtils.getField(runtime, "requestRecovery")).shutdown();
-        var worker = new AtomicReference<Thread>();
         try {
-            runtime.executeRequestWork(
-                    requestContext(993008L), () -> worker.set(Thread.currentThread()));
-            SchedulerTestSupport.awaitRequestWork(runtime);
-            org.junit.jupiter.api.Assertions.assertNotNull(worker.get());
-            org.junit.jupiter.api.Assertions.assertNotSame(Thread.currentThread(), worker.get());
-            org.junit.jupiter.api.Assertions.assertNotNull(
-                    ReflectionTestUtils.getField(runtime, "failure"));
+            assertThrows(
+                    RuntimeException.class,
+                    () -> runtime.executeRequestWork(requestContext(993008L), () -> {}));
         } finally {
             close(runtime);
         }

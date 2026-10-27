@@ -412,7 +412,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                                 .isTerminated(),
                         field + " must terminate after the execution registrations drain");
             }
-            for (String field : List.of("requestWorkers", "requestRecovery", "cleanupExecutor")) {
+            for (String field : List.of("requestWorkers", "cleanupExecutor")) {
                 assertTrue(
                         ((ExecutorService) ReflectionTestUtils.getField(runtime, field))
                                 .isTerminated(),
