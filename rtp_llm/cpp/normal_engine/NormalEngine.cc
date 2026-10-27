@@ -1125,11 +1125,16 @@ absl::Status NormalEngine::stop() {
     // collectives for inputs that rank 0 has already published before exiting.
     CpuTpBroadcaster::instance().requestStop();
     loop_thread_->join();
+    loop_thread_.reset();
     scheduler_->finalizeCancelledStreams();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
+    const auto finalize_status = scheduler_->finalizeStop();
+    if (!finalize_status.ok()) {
+        RTP_LLM_LOG_ERROR("scheduler stop finalization failed: %s", finalize_status.ToString().c_str());
+    }
     resource_context_.cache_manager->stopMetricsReporter();
-    return scheduler_status;
+    return scheduler_status.ok() ? finalize_status : scheduler_status;
 }
 
 void NormalEngine::loop() {
