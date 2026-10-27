@@ -30,6 +30,8 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
+import java.util.function.BooleanSupplier;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -178,8 +180,7 @@ public class DeliveryDispatcher {
                 claim.owner()
                         .data()
                         .getScheduler()
-                        .onDeliveryEvidence(
-                                claim,
+                        .onDeliveryFact(
                                 new ContextResult.Prediction(
                                         claim,
                                         PrefillPredictionBoundary.predictedVisibilityDeadlineMs(
@@ -279,8 +280,7 @@ public class DeliveryDispatcher {
                             .ctx()
                             .data()
                             .getScheduler()
-                            .onDeliveryEvidence(
-                                    null,
+                            .onDeliveryFact(
                                     new ContextResult.PreparationFailure(
                                             null,
                                             member.route(),
@@ -392,8 +392,7 @@ public class DeliveryDispatcher {
                 claim.owner()
                         .data()
                         .getScheduler()
-                        .onDeliveryEvidence(
-                                claim,
+                        .onDeliveryFact(
                                 new ContextResult.TransportResult(
                                         claim, result, System.currentTimeMillis()));
             } catch (Throwable failure) {
@@ -405,7 +404,7 @@ public class DeliveryDispatcher {
             } finally {
                 var task = sessions.get(claim);
                 if (task != null) {
-                    task.post(() -> {});
+                    task.start();
                 }
             }
         }
@@ -423,8 +422,7 @@ public class DeliveryDispatcher {
                             .ctx()
                             .data()
                             .getScheduler()
-                            .onDeliveryEvidence(
-                                    null,
+                            .onDeliveryFact(
                                     new ContextResult.PreparationFailure(
                                             null,
                                             member.route(),
@@ -467,21 +465,6 @@ public class DeliveryDispatcher {
             Logger.error("{} batch_id={}", operation, batchId, failure);
         } catch (Throwable ignored) {
         }
-    }
-
-    /** Accept the entire stop operation; callers do not drive retries or sender completion. */
-    CompletableFuture<StopResult> stop(DeliveryClaim claim) {
-        var runtime = claim.owner().data().getScheduler().runtime;
-        return stop(claim, runtime.engineClient, runtime);
-    }
-
-    public CompletableFuture<PreemptionRegistration.Reply> preempt(
-            PreemptionRegistration registration,
-            DecodeEndpoint endpoint,
-            String detail,
-            long timeoutMs) {
-        var runtime = registration.owner().data().getScheduler().runtime;
-        return preempt(registration, runtime.engineClient, runtime, timeoutMs, endpoint, detail);
     }
 
     private void logDispatch(
@@ -551,8 +534,9 @@ public class DeliveryDispatcher {
     // MapMaker weak keys use identity: equal-valued claims must not share an operation.
     private final ConcurrentMap<Object, StopTask> sessions = new MapMaker().weakKeys().makeMap();
 
-    CompletableFuture<StopResult> stop(
-            DeliveryClaim claim, EngineGrpcClient client, SchedulerRuntime runtime) {
+    /** Accept the entire stop operation; callers do not drive retries or sender completion. */
+    CompletableFuture<StopResult> stop(DeliveryClaim claim) {
+        var runtime = claim.owner().data().getScheduler().runtime;
         for (; ; ) {
             if (runtime.signals().delivery(claim).toCompletableFuture().isDone()) {
                 return CompletableFuture.completedFuture(StopResult.ALREADY_SETTLED);
@@ -561,35 +545,28 @@ public class DeliveryDispatcher {
             if (delivery == null || delivery.identity() != claim) {
                 return CompletableFuture.completedFuture(StopResult.STALE);
             }
-            var record = record(claim, claim, claim.owner(), client, runtime);
-            synchronized (record) {
-                if (record.closed) {
-                    sessions.remove(claim, record);
+            var task = record(claim, claim, claim.owner());
+            synchronized (task) {
+                if (task.closed) {
+                    sessions.remove(claim, task);
                     continue;
                 }
-                if (record.stopSubmitted) {
-                    return record.finished;
+                if (task.stopRequested) {
+                    return task.finished;
                 }
-                record.stopSubmitted = true;
+                task.stopRequested = true;
             }
-            record.post(
-                    () -> {
-                        record.stopRequested = true;
-                        record.deadline =
-                                System.nanoTime()
-                                        + TimeUnit.MILLISECONDS.toNanos(CLEANUP_TIMEOUT_MS);
-                    });
-            return record.finished;
+            task.start();
+            return task.finished;
         }
     }
 
-    CompletableFuture<PreemptionRegistration.Reply> preempt(
+    public CompletableFuture<PreemptionRegistration.Reply> preempt(
             PreemptionRegistration registration,
-            EngineGrpcClient client,
-            SchedulerRuntime runtime,
-            long timeoutMs,
             DecodeEndpoint endpoint,
-            String detail) {
+            String detail,
+            long timeoutMs) {
+        var runtime = registration.owner().data().getScheduler().runtime;
         var delivery = registration.owner().snapshot().delivery();
         var claim = delivery == null ? null : delivery.identity();
         var answer = new CompletableFuture<PreemptionRegistration.Reply>();
@@ -599,276 +576,281 @@ public class DeliveryDispatcher {
                         () -> answer.complete(PreemptionRegistration.Reply.UNKNOWN),
                         Math.max(1L, timeoutMs));
         answer.whenComplete((ignored, failure) -> timeout.cancel());
-        var record =
-                record(
-                        claim == null ? registration : claim,
-                        claim,
-                        registration.owner(),
-                        client,
-                        runtime);
-
-        record.post(
-                        () -> {
-                            if (answer.isDone() || System.nanoTime() >= expiresAt) {
-                                answer.complete(PreemptionRegistration.Reply.UNKNOWN);
-                                boolean unused;
-                                synchronized (record) {
-                                    unused =
-                                            !record.stopSubmitted
-                                                    && record.preemption == null
-                                                    && record.pending == 0;
-                                    if (unused) {
-                                        record.closed = true;
-                                        sessions.remove(record.key, record);
-                                    }
-                                }
-                                if (unused) {
-                                    record.close(StopResult.UNRESOLVED);
-                                }
-                                return;
-                            }
-                            if (!record.stopRequested && record.preemption != registration) {
-                                record.preemption = registration;
-                                record.preemptionEndpoint = endpoint;
-                                record.preemptionDetail = detail;
-                                record.firstReply = new CompletableFuture<>();
-                                record.attempts = 0;
-                                record.timeoutMs =
-                                        Math.max(
-                                                1L,
-                                                TimeUnit.NANOSECONDS.toMillis(
-                                                        expiresAt - System.nanoTime()));
-                            }
-                            record.firstReply.whenComplete(
-                                    (reply, failure) ->
-                                            answer.complete(
-                                                    failure == null
-                                                            ? reply
-                                                            : PreemptionRegistration.Reply
-                                                                    .UNKNOWN));
-                        })
-                .whenComplete(
-                        (ignored, failure) -> {
-                            if (failure != null || record.closed) {
-                                answer.complete(PreemptionRegistration.Reply.UNKNOWN);
-                            }
-                        });
+        var task = record(claim == null ? registration : claim, claim, registration.owner());
+        CompletableFuture<PreemptionRegistration.Reply> response;
+        boolean rejected;
+        synchronized (task) {
+            rejected =
+                    task.closed
+                            || (task.stopRequested
+                                    && (task.preemption == null
+                                            || task.preemption.registration() != registration));
+            if (!rejected
+                    && (task.preemption == null
+                            || task.preemption.registration() != registration)) {
+                task.preemption =
+                        new PreemptionCall(
+                                registration,
+                                endpoint,
+                                detail,
+                                expiresAt,
+                                new CompletableFuture<>());
+            }
+            response = rejected ? null : task.preemption.response();
+        }
+        if (rejected) {
+            answer.complete(PreemptionRegistration.Reply.UNKNOWN);
+            return answer;
+        }
+        response.whenComplete(
+                (reply, failure) ->
+                        answer.complete(
+                                failure == null ? reply : PreemptionRegistration.Reply.UNKNOWN));
+        task.start();
+        if (task.closed) {
+            answer.complete(PreemptionRegistration.Reply.UNKNOWN);
+        }
         return answer;
     }
 
-    private StopTask record(
-            Object key,
-            DeliveryClaim claim,
-            RequestContext context,
-            EngineGrpcClient client,
-            SchedulerRuntime runtime) {
+    private StopTask record(Object key, DeliveryClaim claim, RequestContext context) {
         var existing = sessions.get(key);
         if (existing != null) {
             return existing;
         }
-        var created = new StopTask(key, claim, context, client, runtime);
+        var created = new StopTask(key, claim, context);
         var previous = sessions.putIfAbsent(key, created);
         if (previous != null) {
             return previous;
         }
-        created.settled.whenComplete(
-                (ignored, failure) ->
-                        created.post(() -> created.close(StopResult.ALREADY_SETTLED)));
+        if (claim != null) {
+            created.runtime
+                    .signals()
+                    .delivery(claim)
+                    .whenComplete((ignored, failure) -> created.close(StopResult.ALREADY_SETTLED));
+        }
         return created;
     }
 
-    /** Drain accepted events and late RPC replies while Scheduler still accepts evidence. */
+    /** Drain late RPC callbacks before Scheduler closes its fact ingress. */
     void awaitStops(SchedulerRuntime runtime) {
         Throwable problem = null;
         long deadline =
                 System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLEANUP_TIMEOUT_MS + 1_000L);
-        for (var record : sessions.values()) {
-            if (record.runtime != runtime) {
-                continue;
-            }
-            var drained = new CompletableFuture<Void>();
-            record.post(() -> record.draining = drained);
-            if (record.closed) {
+        for (var task : sessions.values()) {
+            if (task.runtime != runtime) {
                 continue;
             }
             try {
-                drained.get(Math.max(0L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                synchronized (task) {
+                    while (!task.closed && (task.queued != 0 || task.pending != 0)) {
+                        long remaining = deadline - System.nanoTime();
+                        if (remaining <= 0) {
+                            throw new java.util.concurrent.TimeoutException(
+                                    "stop callbacks pending");
+                        }
+                        TimeUnit.NANOSECONDS.timedWait(task, remaining);
+                    }
+                }
             } catch (Exception failure) {
                 if (failure instanceof InterruptedException) {
                     Thread.currentThread().interrupt();
                 }
-                record.closed =
-                        true; // Explicit shutdown cutoff; never fabricate resource-release proof.
-                record.finished.completeExceptionally(failure);
-                record.firstReply.complete(PreemptionRegistration.Reply.UNKNOWN);
-                sessions.remove(record.key, record);
+                task.finished.completeExceptionally(failure);
+                task.close(StopResult.UNRESOLVED);
                 problem = Failures.append(problem, failure);
             }
         }
         Failures.rethrow(problem, "delivery stop callbacks did not drain");
     }
 
-    private final class StopTask {
+    private record PreemptionCall(
+            PreemptionRegistration registration,
+            DecodeEndpoint endpoint,
+            String detail,
+            long expiresAt,
+            CompletableFuture<PreemptionRegistration.Reply> response) {}
+
+    private final class StopTask implements Runnable {
         private final Object key;
         private final DeliveryClaim claim;
         private final RequestContext context;
-        private final EngineGrpcClient client;
         private final SchedulerRuntime runtime;
-        private final CompletableFuture<Void> settled;
         private final CompletableFuture<StopResult> finished = new CompletableFuture<>();
-        private volatile CompletableFuture<PreemptionRegistration.Reply> firstReply =
+        private final CompletableFuture<PreemptionRegistration.Reply> firstReply =
                 new CompletableFuture<>();
-        private CompletableFuture<Void> tail = CompletableFuture.completedFuture(null), draining;
-        private CompletableFuture<EngineGrpcClient.CancelReply> rpc;
-        private RequestTaskScheduler.Cancellation alarm;
-        private PreemptionRegistration preemption;
-        private DecodeEndpoint preemptionEndpoint;
-        private String preemptionDetail;
-        private ContextResult.SendState lastSend = ContextResult.SendState.NOT_STARTED;
-        private StopResult terminal;
-        private volatile boolean closed;
-        private boolean stopSubmitted, stopRequested;
-        private int attempts, pending;
-        private long deadline, readyAt, timeoutMs = 500L;
+        private volatile PreemptionCall preemption;
+        private volatile StopResult terminal;
+        private volatile boolean closed, stopRequested;
+        private volatile Thread runner;
+        // The queue owns serialization; the monitor only accounts for work and callback drain.
+        private int queued, pending;
+        // Only the running workflow changes its retry state.
+        // Completion means the Scheduler has applied the receipt, including late receipts.
+        private CompletableFuture<Long> rpc;
+        private PreemptionCall attemptedPreemption;
+        private boolean postSend;
+        private int attempts;
+        private long deadline, rpcDeadline;
 
-        StopTask(
-                Object key,
-                DeliveryClaim claim,
-                RequestContext context,
-                EngineGrpcClient client,
-                SchedulerRuntime runtime) {
+        StopTask(Object key, DeliveryClaim claim, RequestContext context) {
             this.key = key;
             this.claim = claim;
             this.context = context;
-            this.client = client;
-            this.runtime = runtime;
-            settled =
-                    claim == null
-                            ? new CompletableFuture<>()
-                            : runtime.signals().delivery(claim).toCompletableFuture();
+            this.runtime = context.data().getScheduler().runtime;
         }
 
-        /** Only this ordered event stream changes execution state; no effects run under the record monitor. */
-        private synchronized CompletableFuture<Void> post(Runnable event) {
-            if (closed) {
-                return CompletableFuture.completedFuture(null);
+        private void start() {
+            synchronized (this) {
+                if (closed) {
+                    return;
+                }
+                queued++;
             }
-            tail =
-                    tail.handleAsync(
-                                    (ignored, previousFailure) -> {
-                                        if (!closed) {
-                                            if (alarm != null) {
-                                                alarm.cancel();
-                                                alarm = null;
-                                            }
-                                            event.run();
-                                            advance();
-                                        }
-                                        if (draining != null
-                                                && (closed || pending == 0 && alarm == null)) {
-                                            draining.complete(null);
-                                        }
-                                        return (Void) null;
-                                    },
-                                    task -> runtime.executeStopWork(context, task))
-                            .whenComplete(
-                                    (ignored, failure) -> {
-                                        if (failure == null) {
-                                            return;
-                                        }
-                                        terminal = StopResult.UNRESOLVED;
-                                        finished.completeExceptionally(failure);
-                                        firstReply.complete(PreemptionRegistration.Reply.UNKNOWN);
-                                        runtime.recordFailure(failure);
-                                        if (draining != null && pending == 0) {
-                                            draining.complete(null);
-                                        }
-                                    });
-            return tail;
+            signal();
+            boolean accepted = false;
+            try {
+                accepted = runtime.executeStopWork(context, this);
+            } catch (RuntimeException | Error failure) {
+                finished.completeExceptionally(failure);
+                close(StopResult.UNRESOLVED);
+                runtime.recordFailure(failure);
+            } finally {
+                if (!accepted) {
+                    synchronized (this) {
+                        queued--;
+                        notifyAll();
+                    }
+                }
+            }
         }
 
-        private void advance() {
-            if (closed) {
-                return;
+        private void signal() {
+            LockSupport.unpark(runner);
+        }
+
+        @Override
+        public void run() {
+            runner = Thread.currentThread();
+            var operation = preemption;
+            try {
+                var result = result();
+                if (result != null) {
+                    finish(result);
+                } else if (stopRequested) {
+                    stopRemotely();
+                } else {
+                    if (operation != null && operation != attemptedPreemption) {
+                        attemptedPreemption = operation;
+                        if (System.nanoTime() < operation.expiresAt()) {
+                            attempts = 0;
+                            requestProof(operation);
+                        }
+                    }
+                }
+            } catch (RuntimeException | Error failure) {
+                finished.completeExceptionally(failure);
+                firstReply.complete(PreemptionRegistration.Reply.UNKNOWN);
+                runtime.recordFailure(failure);
+            } finally {
+                boolean unused;
+                synchronized (this) {
+                    runner = null;
+                    queued--;
+                    unused =
+                            !stopRequested
+                                    && attempts == 0
+                                    && pending == 0
+                                    && queued == 0
+                                    && operation == preemption;
+                    if (unused) {
+                        closed = true;
+                    }
+                    notifyAll();
+                }
+                if (unused) {
+                    close(StopResult.UNRESOLVED);
+                }
             }
-            if (settled.isDone()) {
-                close(StopResult.ALREADY_SETTLED);
-                return;
+        }
+
+        private StopResult result() {
+            if (closed) {
+                return StopResult.ALREADY_SETTLED;
             }
             var delivery = context.snapshot().delivery();
             if (claim != null && (delivery == null || delivery.identity() != claim)) {
                 close(StopResult.STALE);
-                return;
+                return StopResult.STALE;
             }
             if (delivery != null
                     && (delivery.send() == ContextResult.SendState.NOT_SENT
                             || delivery.send() == ContextResult.SendState.ROUTE_CLOSED)) {
-                firstReply.complete(PreemptionRegistration.Reply.UNKNOWN);
-                finish(StopResult.NOT_SENT);
-                return;
+                return StopResult.NOT_SENT;
             }
             if (delivery != null && delivery.prefillProof() && delivery.decodeProof()) {
-                terminal = StopResult.REMOTE_CLEANED;
+                return StopResult.REMOTE_CLEANED;
             }
-            if (terminal != null) {
-                firstReply.complete(PreemptionRegistration.Reply.UNKNOWN);
-                finish(terminal);
-                return;
-            }
-            if (!stopRequested) {
-                if (preemption != null && attempts == 0) {
-                    requestProof();
-                }
-                return;
-            }
-            long now = System.nanoTime();
-            var send = delivery == null ? ContextResult.SendState.UNKNOWN : delivery.send();
-            boolean sending =
-                    send == ContextResult.SendState.NOT_STARTED
-                            || send == ContextResult.SendState.SENDING;
-            if (!sending
-                    && (lastSend == ContextResult.SendState.NOT_STARTED
-                            || lastSend == ContextResult.SendState.SENDING)) {
-                // One post-send budget, sharing the same attempt count with the pre-ACK
-                // cancellation.
-                deadline = now + TimeUnit.MILLISECONDS.toNanos(CLEANUP_TIMEOUT_MS);
-                lastSend = send;
-                if (rpc == null) {
-                    readyAt = 0L;
-                }
-            }
-            if (attempts >= MAX_ATTEMPTS && rpc == null || now >= deadline) {
-                finish(StopResult.UNRESOLVED);
-                return;
-            }
-            if (send == ContextResult.SendState.NOT_STARTED || sending && attempts > 0) {
-                wakeAt(deadline);
-                return;
-            }
-            if (rpc != null) {
-                if (rpc.isDone()) {
-                    return;
-                } // Its queued reply owns fact publication, even when the timer fires first.
-                if (now < readyAt) {
-                    wakeAt(Math.min(readyAt, deadline));
-                    return;
-                }
-                rpc = null;
-                readyAt =
-                        now + TimeUnit.MILLISECONDS.toNanos(Math.min(400L, 25L << (attempts - 1)));
-            }
-            if (now < readyAt) {
-                wakeAt(Math.min(readyAt, deadline));
-                return;
-            }
-            if (attempts >= MAX_ATTEMPTS) {
-                finish(StopResult.UNRESOLVED);
-                return;
-            }
-            requestProof();
+            return terminal;
         }
 
-        private void requestProof() {
+        private void stopRemotely() {
+            if (deadline == 0) {
+                deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLEANUP_TIMEOUT_MS);
+            }
+            while (result() == null) {
+                var delivery = context.snapshot().delivery();
+                var send = delivery == null ? ContextResult.SendState.UNKNOWN : delivery.send();
+                boolean sending =
+                        send == ContextResult.SendState.NOT_STARTED
+                                || send == ContextResult.SendState.SENDING;
+                if (!postSend && !sending) {
+                    postSend = true;
+                    deadline =
+                            System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLEANUP_TIMEOUT_MS);
+                }
+                if (System.nanoTime() >= deadline) {
+                    break;
+                }
+                if (send == ContextResult.SendState.NOT_STARTED || sending && attempts > 0) {
+                    await(deadline, () -> context.snapshot().delivery().send() != send);
+                    continue;
+                }
+                if (rpc != null) {
+                    await(Math.min(deadline, rpcDeadline), rpc::isDone);
+                    long completedAt = rpc.getNow(System.nanoTime());
+                    rpc = null;
+                    await(
+                            Math.min(
+                                    deadline,
+                                    completedAt
+                                            + TimeUnit.MILLISECONDS.toNanos(
+                                                    Math.min(400L, 25L << (attempts - 1)))),
+                            () -> false);
+                }
+                if (result() != null || System.nanoTime() >= deadline || attempts >= MAX_ATTEMPTS) {
+                    break;
+                }
+                requestProof(preemption);
+            }
+            var result = result();
+            finish(result == null ? StopResult.UNRESOLVED : result);
+        }
+
+        private void await(long until, BooleanSupplier ready) {
+            while (result() == null && !ready.getAsBoolean()) {
+                long remaining = until - System.nanoTime();
+                if (remaining <= 0) {
+                    return;
+                }
+                LockSupport.parkNanos(this, remaining);
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new IllegalStateException("delivery stop interrupted");
+                }
+            }
+        }
+
+        private void requestProof(PreemptionCall operation) {
             var state = context.snapshot();
             var reason =
                     state.cancellation() != null
@@ -876,18 +858,30 @@ public class DeliveryDispatcher {
                             : state.delivery() != null && state.delivery().abandonment() != null
                                     ? state.delivery().abandonment()
                                     : CancelReason.PRIORITY_PREEMPTED;
-            var target = preemption == null ? null : preemption.cancelTarget();
-            var response = firstReply;
-            long timeout = attempts++ == 0 ? timeoutMs : 500L;
-            lastSend =
-                    state.delivery() == null
-                            ? ContextResult.SendState.UNKNOWN
-                            : state.delivery().send();
-            pending++;
+            // An expired, unsent preemption must not replace a later ordinary cancellation.
+            if (attempts == 0 && operation != null && System.nanoTime() >= operation.expiresAt()) {
+                if (!stopRequested) {
+                    return;
+                }
+                operation = null;
+            }
+            var target = operation == null ? null : operation.registration().cancelTarget();
+            long timeout =
+                    attempts++ == 0 && operation != null
+                            ? Math.max(
+                                    1L,
+                                    TimeUnit.NANOSECONDS.toMillis(
+                                            operation.expiresAt() - System.nanoTime()))
+                            : 500L;
+            synchronized (this) {
+                pending++;
+            }
+            rpcDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout);
+            var exact = operation;
             try {
                 var remote =
                         Objects.requireNonNull(
-                                client.cancelAsync(
+                                runtime.engineClient.cancelAsync(
                                         target == null
                                                 ? claim.item().prefillEp().getIp()
                                                 : target.prefillIp(),
@@ -897,124 +891,89 @@ public class DeliveryDispatcher {
                                         reason.toRequest(context.data().getRequestId()),
                                         timeout),
                                 "cancel future");
-                rpc = remote;
-                readyAt = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout);
-                var registration = preemption;
-                var endpoint = preemptionEndpoint;
-                var detail = preemptionDetail;
-                remote.whenComplete(
-                        (reply, failure) ->
-                                applyReply(
-                                        remote,
-                                        response,
-                                        failure == null && reply != null
-                                                ? reply
-                                                : EngineGrpcClient.CancelReply.FAILED,
-                                        registration,
-                                        endpoint,
-                                        detail));
-            } catch (RuntimeException failed) {
-                applyReply(
-                        null,
-                        response,
-                        EngineGrpcClient.CancelReply.FAILED,
-                        preemption,
-                        preemptionEndpoint,
-                        preemptionDetail);
-            }
-            if (stopRequested) {
-                wakeAt(Math.min(readyAt, deadline));
-            }
-        }
-
-        private void applyReply(
-                CompletableFuture<EngineGrpcClient.CancelReply> remote,
-                CompletableFuture<PreemptionRegistration.Reply> response,
-                EngineGrpcClient.CancelReply reply,
-                PreemptionRegistration registration,
-                DecodeEndpoint endpoint,
-                String detail) {
-            Runnable apply =
-                    () -> {
-                        var progress = PreemptionRegistration.Reply.UNKNOWN;
-                        boolean applied = false;
-                        try {
-                            var scheduler = context.data().getScheduler();
-                            progress =
-                                    scheduler.onCancelReply(
-                                            registration, claim, endpoint, reply, detail);
-                            applied = true;
-                        } catch (RuntimeException failed) {
-                            runtime.recordFailure(failed);
-                        }
-                        var evidence = applied ? reply : EngineGrpcClient.CancelReply.FAILED;
-                        response.complete(progress);
-                        if (registration == null) {
-                            receive(remote, evidence);
-                        } else {
-                            post(() -> receive(remote, evidence));
-                        }
-                    };
-            if (registration == null) {
-                post(apply);
-                return;
-            }
-            try {
-                runtime.executeRequestWork(context, apply);
-            } catch (RuntimeException rejected) {
-                // The stop owner retains the callback if request work can no longer accept it.
-                post(apply);
-            }
-        }
-
-        private void receive(
-                CompletableFuture<EngineGrpcClient.CancelReply> remote,
-                EngineGrpcClient.CancelReply reply) {
-            try {
-                if (reply == EngineGrpcClient.CancelReply.REQUEST_CLEANED) {
-                    terminal = StopResult.REMOTE_CLEANED;
+                rpc =
+                        remote.handle(
+                                (reply, failure) ->
+                                        applyReply(
+                                                failure == null && reply != null
+                                                        ? reply
+                                                        : EngineGrpcClient.CancelReply.FAILED,
+                                                exact));
+                rpc.whenComplete((ignored, failure) -> signal());
+            } catch (RuntimeException | Error failed) {
+                if (failed instanceof Error) {
+                    runtime.recordFailure(failed);
                 }
-                if (reply == EngineGrpcClient.CancelReply.UNSUPPORTED && terminal == null) {
-                    terminal = StopResult.UNSUPPORTED;
+                rpc =
+                        CompletableFuture.completedFuture(
+                                applyReply(EngineGrpcClient.CancelReply.FAILED, exact));
+            }
+        }
+
+        private long applyReply(EngineGrpcClient.CancelReply reply, PreemptionCall operation) {
+            var progress = PreemptionRegistration.Reply.UNKNOWN;
+            var evidence = EngineGrpcClient.CancelReply.FAILED;
+            try {
+                var scheduler = context.data().getScheduler();
+                if (operation != null) {
+                    var event =
+                            AbstractRequestScheduler.PreemptionEvent.receipt(
+                                    operation.registration().reservation(),
+                                    operation.endpoint(),
+                                    reply,
+                                    operation.detail(),
+                                    claim);
+                    progress =
+                            scheduler.onDeliveryFact(
+                                    new ContextResult.PreemptionFact(
+                                            operation.registration(),
+                                            event.phase(),
+                                            event.release(),
+                                            event.endpoint(),
+                                            event.reservation(),
+                                            event.detail(),
+                                            event.cleanup()));
+                } else if (claim != null) {
+                    scheduler.onDeliveryFact(
+                            AbstractRequestScheduler.PreemptionEvent.acknowledgement(claim, reply));
+                }
+                evidence = reply;
+            } catch (RuntimeException | Error failed) {
+                runtime.recordFailure(failed);
+            } finally {
+                boolean unsupported;
+                synchronized (this) {
+                    unsupported =
+                            evidence == EngineGrpcClient.CancelReply.UNSUPPORTED
+                                    && terminal == null;
+                    if (evidence == EngineGrpcClient.CancelReply.REQUEST_CLEANED) {
+                        terminal = StopResult.REMOTE_CLEANED;
+                    } else if (unsupported) {
+                        terminal = StopResult.UNSUPPORTED;
+                    }
+                }
+                if (unsupported) {
                     try {
                         Logger.warn(
-                                "[delivery-cleanup] remote cancellation unsupported: request_id={};"
-                                        + " waiting for Worker completion or retirement",
+                                "[delivery-cleanup] remote cancellation unsupported: request_id={}"
+                                        + "; waiting for Worker completion or retirement",
                                 context.data().getRequestId());
-                    } catch (RuntimeException ignored) {
+                    } catch (RuntimeException | Error ignored) {
                     }
                 }
-                if (rpc == remote) {
-                    rpc = null;
-                    readyAt =
-                            System.nanoTime()
-                                    + TimeUnit.MILLISECONDS.toNanos(
-                                            Math.min(400L, 25L << (attempts - 1)));
+                if (operation != null) {
+                    operation.response().complete(progress);
                 }
-            } finally {
-                pending--;
-            }
-            if (claim == null && pending == 0) {
-                close(StopResult.UNRESOLVED);
-            }
-        }
-
-        private void wakeAt(long at) {
-            for (int attempt = 0; ; attempt++) {
-                try {
-                    alarm =
-                            runtime.scheduleTimeout(
-                                    () -> post(() -> {}),
-                                    Math.max(
-                                            1L,
-                                            TimeUnit.NANOSECONDS.toMillis(at - System.nanoTime())));
-                    return;
-                } catch (RuntimeException rejected) {
-                    if (attempt == 2) {
-                        throw rejected;
-                    }
+                firstReply.complete(progress);
+                synchronized (this) {
+                    pending--;
+                    notifyAll();
+                }
+                if (claim == null) {
+                    close(StopResult.UNRESOLVED);
                 }
             }
+            return System.nanoTime();
         }
 
         private void finish(StopResult result) {
@@ -1024,16 +983,27 @@ public class DeliveryDispatcher {
                                 "delivery stop ended without release proof: request_id="
                                         + context.data().getRequestId()));
             }
+            if (result == StopResult.NOT_SENT || result == StopResult.UNSUPPORTED) {
+                firstReply.complete(PreemptionRegistration.Reply.UNKNOWN);
+            }
         }
 
         private void close(StopResult result) {
+            boolean drained;
             synchronized (this) {
                 closed = true;
+                drained = pending == 0;
                 sessions.remove(key, this);
+                notifyAll();
             }
+            signal();
             finish(result);
-            if (pending == 0) {
+            if (drained) {
                 firstReply.complete(PreemptionRegistration.Reply.UNKNOWN);
+                var operation = preemption;
+                if (operation != null) {
+                    operation.response().complete(PreemptionRegistration.Reply.UNKNOWN);
+                }
             }
         }
     }

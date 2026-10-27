@@ -490,10 +490,15 @@ class RequestTerminalSettlementTest {
                         ? DecodeResources.PreemptionUpdate.canceled(RESERVATION)
                         : DecodeResources.PreemptionUpdate.active(RESERVATION);
         when(f.item().decodeEp().updatePreemption(31L, update))
-                .thenReturn(
-                        org.flexlb.balance.endpoint.DecodeResources.ResourceChange.of(
-                                org.flexlb.balance.endpoint.DecodeResources.MutationStatus.APPLIED,
-                                false));
+                .thenAnswer(
+                        call -> {
+                            assertFalse(
+                                    Thread.holdsLock(f.requestContext()),
+                                    "Decode ledger updates must not run under the Context lock");
+                            return org.flexlb.balance.endpoint.DecodeResources.ResourceChange.of(
+                                    org.flexlb.balance.endpoint.DecodeResources.MutationStatus.APPLIED,
+                                    false);
+                        });
         doAnswer(
                         call -> {
                             assertFalse(Thread.holdsLock(f.requestContext()));
@@ -841,6 +846,9 @@ class RequestTerminalSettlementTest {
         when(f.item().decodeEp().updatePreemption(4L, proof))
                 .thenAnswer(
                         call -> {
+                            assertFalse(
+                                    Thread.holdsLock(f.requestContext()),
+                                    "Decode ledger updates must not run under the Context lock");
                             assertFalse(
                                     contextFinished(f.requestContext()),
                                     "resource transaction precedes Context finality");

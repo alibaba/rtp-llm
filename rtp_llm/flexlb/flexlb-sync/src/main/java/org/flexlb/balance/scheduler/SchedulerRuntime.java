@@ -81,19 +81,14 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
             Executors.newFixedThreadPool(
                     Math.clamp(Runtime.getRuntime().availableProcessors(), 2, 8),
                     Thread.ofPlatform().daemon().name("request-work-", 1).factory());
-    private final ExecutorService stopWorkers =
-            Executors.newFixedThreadPool(
-                    Math.clamp(Runtime.getRuntime().availableProcessors(), 2, 8),
-                    Thread.ofPlatform().daemon().name("delivery-stop-", 1).factory());
-    private final ExecutorService requestRecovery =
-            Executors.newSingleThreadExecutor(
-                    Thread.ofPlatform().daemon().name("request-work-recovery-", 1).factory());
+    private final java.util.concurrent.Executor stopWorkers =
+            work -> Thread.ofVirtual().name("delivery-stop-work").start(work);
     // Never run request code while holding this monitor. Context -> workLifecycle is the only edge.
     private final RequestWorkQueue requestWorkQueue = new RequestWorkQueue();
     private final ThreadLocal<RequestContext> executingRequest = new ThreadLocal<>();
     private final Object workLifecycle = new Object();
     private boolean acceptingWork = true;
-    private long pendingWork;
+    private long pendingWork, pendingStops;
     private final Object admissionLifecycle = new Object();
     private boolean admitting = true;
     private long admissions;
@@ -150,12 +145,19 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         }
     }
 
-    /** Isolates stop events while retaining the same ownership and shutdown accounting. */
-    void executeStopWork(RequestContext context, Runnable work) {
+    /** Coalesce the exact stop workflow; local close work has a separate Context key. */
+    boolean executeStopWork(RequestContext context, Runnable work) {
         Objects.requireNonNull(work, "work");
         try (var registration = registerRequestWork(context)) {
-            registration.executor = stopWorkers;
-            registration.submit(work);
+            synchronized (workLifecycle) {
+                pendingWork--;
+                pendingStops++;
+                registration.stop = true;
+                if (pendingWork == 0) {
+                    workLifecycle.notifyAll();
+                }
+            }
+            return registration.submit(work, work, false);
         }
     }
 
@@ -180,7 +182,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
     /** Counts both the submitting source and its optional task, including the handoff between them. */
     final class WorkRegistration implements AutoCloseable {
         private final RequestContext context;
-        private ExecutorService executor = requestWorkers;
+        private boolean stop;
         private int owners = 1;
         private boolean submitted;
         private boolean sourceClosed;
@@ -192,6 +194,14 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         }
 
         void submit(Runnable work) {
+            submit(work, null, false);
+        }
+
+        void submitClose(Runnable work, boolean inline) {
+            submit(work, context, inline);
+        }
+
+        private boolean submit(Runnable work, Object owner, boolean inline) {
             Objects.requireNonNull(work, "work");
             checkState(!Thread.holdsLock(context), "request work submission under Context lock");
             synchronized (this) {
@@ -200,7 +210,19 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
                 owners++;
             }
             try {
-                dispatch(() -> run(work, false));
+                if (owner == null) {
+                    dispatch(() -> run(work, inline));
+                    return true;
+                }
+                if (requestWorkQueue.execute(
+                        owner,
+                        () -> run(work, inline),
+                        this::reject,
+                        inline ? Runnable::run : this::dispatch)) {
+                    return true;
+                }
+                release();
+                return false;
             } catch (RuntimeException | Error failure) {
                 reject(failure);
                 throw failure;
@@ -208,42 +230,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         }
 
         private void dispatch(Runnable task) {
-            try {
-                executor.execute(task);
-            } catch (RuntimeException | Error rejected) {
-                if (rejected instanceof Error) {
-                    recordFailure(rejected);
-                }
-                try {
-                    requestRecovery.execute(task);
-                } catch (RuntimeException | Error recoveryRejected) {
-                    // Accepted terminal/publication owners cannot be dropped or run on an RPC
-                    // callback.
-                    recordFailure(Failures.append(rejected, recoveryRejected));
-                    Thread.ofPlatform().daemon().name("request-work-emergency").start(task);
-                }
-            }
-        }
-
-        void submitClose(Runnable work, boolean inline) {
-            checkState(!Thread.holdsLock(context), "request closing submission under Context lock");
-            synchronized (this) {
-                checkState(!sourceClosed && !submitted, "request work already handed off");
-                submitted = true;
-                owners++;
-            }
-            try {
-                if (!requestWorkQueue.execute(
-                        context,
-                        () -> run(work, inline),
-                        this::reject,
-                        inline ? Runnable::run : this::dispatch)) {
-                    release();
-                }
-            } catch (RuntimeException | Error failure) {
-                reject(failure);
-                throw failure;
-            }
+            (stop ? stopWorkers : requestWorkers).execute(task);
         }
 
         private void reject(Throwable cause) {
@@ -294,7 +281,11 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
                 }
             }
             synchronized (workLifecycle) {
-                pendingWork--;
+                if (stop) {
+                    pendingStops--;
+                } else {
+                    pendingWork--;
+                }
                 if (pendingWork == 0) {
                     workLifecycle.notifyAll();
                 }
@@ -324,7 +315,8 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
     private void awaitRequestWork() {
         boolean interrupted = false;
         synchronized (workLifecycle) {
-            while (pendingWork != 0) {
+            // Local drains do not wait for remote cleanup; shutdown also drains stop owners.
+            while (pendingWork != 0 || !acceptingWork && pendingStops != 0) {
                 try {
                     workLifecycle.wait();
                 } catch (InterruptedException ignored) {
@@ -343,7 +335,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         }
         // A running owner can still hand off its exact request through executingRequest.
         awaitRequestWork();
-        var executors = java.util.List.of(stopWorkers, requestWorkers, requestRecovery);
+        var executors = java.util.List.of(requestWorkers);
         executors.forEach(ExecutorService::shutdown);
         boolean interrupted = false;
         for (var executor : executors) {

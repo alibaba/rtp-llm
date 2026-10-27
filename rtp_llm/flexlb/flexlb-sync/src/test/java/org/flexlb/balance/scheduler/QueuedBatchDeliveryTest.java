@@ -430,8 +430,7 @@ class QueuedBatchDeliveryTest {
                 .commitSelection(any());
         org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> submit(List.of(item)));
         verify(registry)
-                .onDeliveryEvidence(
-                        org.mockito.ArgumentMatchers.isNull(),
+                .onDeliveryFact(
                         argThat(
                                 e ->
                                         e instanceof ContextResult.PreparationFailure failed
@@ -608,8 +607,7 @@ class QueuedBatchDeliveryTest {
                             throw observerFailure;
                         })
                 .when(registry)
-                .onDeliveryEvidence(
-                        any(),
+                .onDeliveryFact(
                         argThat(
                                 e ->
                                         e instanceof ContextResult.TransportResult result

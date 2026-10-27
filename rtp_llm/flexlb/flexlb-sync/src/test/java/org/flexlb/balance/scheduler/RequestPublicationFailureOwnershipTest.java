@@ -350,15 +350,8 @@ class RequestPublicationFailureOwnershipTest {
             var delivery = f.owner.claimDelivery(route, DeliveryClaimKind.ROUTE_DECISION, 0L, null);
             var publisher = SchedulerTestSupport.responseCompletions(f.runtime);
             var originalWorkers = ReflectionTestUtils.getField(publisher, "completionWorkers");
-            var originalRecovery = ReflectionTestUtils.getField(publisher, "rejectedTaskWorker");
-            var originalEmergency =
-                    (java.util.concurrent.ThreadFactory)
-                            ReflectionTestUtils.getField(publisher, "emergencyWorkers");
             var workers = mock(java.util.concurrent.ThreadPoolExecutor.class);
-            var recovery = mock(java.util.concurrent.ExecutorService.class);
-            var emergency = mock(java.util.concurrent.ThreadFactory.class);
             var oldTask = new java.util.concurrent.atomic.AtomicReference<Runnable>();
-            var failFirstStart = new AtomicBoolean(true);
             doAnswer(
                             call -> {
                                 oldTask.compareAndSet(null, call.getArgument(0));
@@ -367,23 +360,7 @@ class RequestPublicationFailureOwnershipTest {
                             })
                     .when(workers)
                     .execute(any(Runnable.class));
-            doThrow(
-                            new java.util.concurrent.RejectedExecutionException(
-                                    "completion recovery rejected"))
-                    .when(recovery)
-                    .execute(any(Runnable.class));
-            doAnswer(
-                            call -> {
-                                if (failFirstStart.getAndSet(false)) {
-                                    throw new IllegalStateException("first emergency start failed");
-                                }
-                                return originalEmergency.newThread(call.getArgument(0));
-                            })
-                    .when(emergency)
-                    .newThread(any(Runnable.class));
             ReflectionTestUtils.setField(publisher, "completionWorkers", workers);
-            ReflectionTestUtils.setField(publisher, "rejectedTaskWorker", recovery);
-            ReflectionTestUtils.setField(publisher, "emergencyWorkers", emergency);
             try {
                 assertDoesNotThrow(
                         () ->
@@ -399,7 +376,7 @@ class RequestPublicationFailureOwnershipTest {
                                                 () -> future.get(5, TimeUnit.SECONDS))
                                         .getCause());
                 RequestProtocolTestSupport.awaitCondition(() -> registrations(f.runtime).isEmpty());
-                assertEquals(ResponseKind.ACK, context.snapshot().selectedResponse().kind());
+                assertNull(context.snapshot().selectedResponse());
                 assertEquals(Phase.OPEN, context.snapshot().phase());
                 assertEquals(1, f.runtime.requests().liveRequestCount());
                 var before = context.snapshot();
@@ -407,12 +384,9 @@ class RequestPublicationFailureOwnershipTest {
                 oldTask.get().run();
                 assertSame(before, context.snapshot());
                 assertSame(failure, assertThrows(ExecutionException.class, future::get).getCause());
-                verify(emergency, times(2)).newThread(any(Runnable.class));
                 verify(endpoint, never()).release(org.mockito.ArgumentMatchers.isNull(), any());
             } finally {
                 ReflectionTestUtils.setField(publisher, "completionWorkers", originalWorkers);
-                ReflectionTestUtils.setField(publisher, "rejectedTaskWorker", originalRecovery);
-                ReflectionTestUtils.setField(publisher, "emergencyWorkers", originalEmergency);
             }
             f.owner.onEngineEvidence(
                     context,

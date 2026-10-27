@@ -2,17 +2,13 @@ package org.flexlb.balance.scheduler;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -21,7 +17,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -68,37 +63,28 @@ class ResponseCompletionExecutorTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void rejectedWorkersKeepAnAsynchronousCompletionOwner(boolean rejectRecovery) throws Exception {
+    @Test
+    void rejectedSubmissionFailsThePublishedCompletion() {
         try (var f = new Fixture()) {
-            var caller = Thread.currentThread();
-            var completed = new CompletableFuture<Thread>();
             var executions = new AtomicInteger();
             var rejected = mock(ThreadPoolExecutor.class);
             doThrow(new RejectedExecutionException("primary rejected"))
                     .when(rejected)
                     .execute(any());
             ReflectionTestUtils.setField(f.executor, "completionWorkers", rejected);
-            if (rejectRecovery) {
-                var recovery = mock(ExecutorService.class);
-                doThrow(new RejectedExecutionException("recovery rejected"))
-                        .when(recovery)
-                        .execute(any());
-                ReflectionTestUtils.setField(f.executor, "rejectedTaskWorker", recovery);
-            }
             var registration = SchedulerTestSupport.responsePublication(f.executor);
             assertNotNull(registration);
-            registration.submit(
-                    () -> {
-                        executions.incrementAndGet();
-                        completed.complete(Thread.currentThread());
-                        return true;
-                    });
-            assertNotSame(caller, completed.get(5, TimeUnit.SECONDS));
-            RequestProtocolTestSupport.awaitCondition(() -> registrations(f.executor).isEmpty());
-            assertTrue(registration.hasCompletionOwner());
-            assertEquals(1, executions.get());
+            assertThrows(
+                    RejectedExecutionException.class,
+                    () ->
+                            registration.submit(
+                                    () -> {
+                                        executions.incrementAndGet();
+                                        return true;
+                                    }));
+            assertFalse(registration.hasCompletionOwner());
+            assertEquals(0, executions.get());
+            assertTrue(registrations(f.executor).isEmpty());
         }
     }
 
@@ -155,17 +141,7 @@ class ResponseCompletionExecutorTest {
                             })
                     .when(primary)
                     .execute(any());
-            var recovery = mock(ExecutorService.class);
-            doThrow(new RejectedExecutionException("recovery rejected"))
-                    .when(recovery)
-                    .execute(any());
-            var factory = mock(ThreadFactory.class);
-            doThrow(new IllegalStateException("emergency unavailable"))
-                    .when(factory)
-                    .newThread(any());
             ReflectionTestUtils.setField(f.executor, "completionWorkers", primary);
-            ReflectionTestUtils.setField(f.executor, "rejectedTaskWorker", recovery);
-            ReflectionTestUtils.setField(f.executor, "emergencyWorkers", factory);
             var abandoned = SchedulerTestSupport.responsePublication(f.executor);
             assertNotNull(abandoned);
             assertSame(
@@ -200,21 +176,11 @@ class ResponseCompletionExecutorTest {
     }
 
     @Test
-    void closeDrainsARunningEmergencyCompletionAndRejectsSelfWaiting() throws Exception {
+    void closeDrainsARunningCompletionAndRejectsSelfWaiting() throws Exception {
         try (var f = new Fixture();
                 var closers = Executors.newSingleThreadExecutor()) {
             var started = new CountDownLatch(1);
             var finish = new CountDownLatch(1);
-            var primary = mock(ThreadPoolExecutor.class);
-            var recovery = mock(ExecutorService.class);
-            doThrow(new RejectedExecutionException("primary rejected"))
-                    .when(primary)
-                    .execute(any());
-            doThrow(new RejectedExecutionException("recovery rejected"))
-                    .when(recovery)
-                    .execute(any());
-            ReflectionTestUtils.setField(f.executor, "completionWorkers", primary);
-            ReflectionTestUtils.setField(f.executor, "rejectedTaskWorker", recovery);
             var actual = SchedulerTestSupport.responsePublication(f.executor);
             assertNotNull(actual);
             actual.submit(
@@ -239,7 +205,6 @@ class ResponseCompletionExecutorTest {
                 assertTrue(
                         registrations(f.executor).contains(actual),
                         "a running callback still owes its registration");
-                f.restore();
                 var closing = closers.submit(f.executor::close);
                 RequestProtocolTestSupport.awaitCondition(
                         () -> ReflectionTestUtils.getField(f.executor, "closeResult") != null);
@@ -248,7 +213,6 @@ class ResponseCompletionExecutorTest {
                 closing.get(5, TimeUnit.SECONDS);
                 assertTrue(registrations(f.executor).isEmpty());
                 assertTrue(f.primary.isTerminated());
-                assertTrue(f.recovery.isTerminated());
             } finally {
                 finish.countDown();
             }
@@ -268,15 +232,9 @@ class ResponseCompletionExecutorTest {
         private final ResponseCompletionExecutor executor = new ResponseCompletionExecutor(1);
         private final ThreadPoolExecutor primary =
                 (ThreadPoolExecutor) ReflectionTestUtils.getField(executor, "completionWorkers");
-        private final ExecutorService recovery =
-                (ExecutorService) ReflectionTestUtils.getField(executor, "rejectedTaskWorker");
-        private final ThreadFactory emergency =
-                (ThreadFactory) ReflectionTestUtils.getField(executor, "emergencyWorkers");
 
         private void restore() {
             ReflectionTestUtils.setField(executor, "completionWorkers", primary);
-            ReflectionTestUtils.setField(executor, "rejectedTaskWorker", recovery);
-            ReflectionTestUtils.setField(executor, "emergencyWorkers", emergency);
         }
 
         @Override
