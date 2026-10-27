@@ -25,8 +25,8 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 77)
-                self.assertEqual(state[:2], ("KVCacheConfig", 12))
+                self.assertEqual(len(state), 83)
+                self.assertEqual(state[:2], ("KVCacheConfig", 13))
                 self.assertEqual(
                     state[64:69], tuple(list(KV_CACHE_EVENT_FIELD_VALUES.values())[:5])
                 )

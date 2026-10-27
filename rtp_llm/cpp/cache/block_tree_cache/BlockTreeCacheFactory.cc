@@ -720,6 +720,36 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             return nullptr;
         }
     }
+    const auto set_full_watermark = [&](Tier tier, double low, double high, std::optional<TierWatermark>& override) {
+        if (!config.isTierEnabled(tier) || (low == -1.0 && high == -1.0)) {
+            return true;
+        }
+        const TierWatermark watermark{low, high};
+        if (!valid_watermark(watermark)) {
+            RTP_LLM_LOG_ERROR("invalid FULL cache watermark: tier=%s low_ratio=%f high_ratio=%f; "
+                              "set both to -1 to inherit, both to 0 to disable, or 0 < low < high <= 1",
+                              tierName(tier),
+                              low,
+                              high);
+            return false;
+        }
+        override = watermark;
+        return true;
+    };
+    if (!set_full_watermark(Tier::DEVICE,
+                            kv_cache_config.block_tree_full_device_evict_low_watermark_ratio,
+                            kv_cache_config.block_tree_full_device_evict_high_watermark_ratio,
+                            config.full_watermark_device)
+        || !set_full_watermark(Tier::HOST,
+                               kv_cache_config.block_tree_full_memory_evict_low_watermark_ratio,
+                               kv_cache_config.block_tree_full_memory_evict_high_watermark_ratio,
+                               config.full_watermark_host)
+        || !set_full_watermark(Tier::DISK,
+                               kv_cache_config.block_tree_full_disk_evict_low_watermark_ratio,
+                               kv_cache_config.block_tree_full_disk_evict_high_watermark_ratio,
+                               config.full_watermark_disk)) {
+        return nullptr;
+    }
     config.host_cache_sync_timeout_ms =
         checkedTimeout(kv_cache_config.memory_cache_sync_timeout_ms, "memory_cache_sync_timeout_ms");
     config.disk_cache_sync_timeout_ms =

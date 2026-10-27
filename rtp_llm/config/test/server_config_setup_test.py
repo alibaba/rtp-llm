@@ -245,6 +245,38 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.block_tree_disk_evict_low_watermark_ratio, 0.73)
         self.assertEqual(config.block_tree_disk_evict_high_watermark_ratio, 0.83)
 
+    def test_full_watermarks_env_cli_and_worker_pickle(self):
+        import pickle
+
+        values = {
+            "block_tree_full_device_evict_low_watermark_ratio": 0.90,
+            "block_tree_full_device_evict_high_watermark_ratio": 0.95,
+            "block_tree_full_memory_evict_low_watermark_ratio": 0.94,
+            "block_tree_full_memory_evict_high_watermark_ratio": 0.97,
+            "block_tree_full_disk_evict_low_watermark_ratio": 0.96,
+            "block_tree_full_disk_evict_high_watermark_ratio": 0.98,
+        }
+        env = {name.upper(): str(value) for name, value in values.items()}
+        with patch.dict("os.environ", _jit_env(**env), clear=True):
+            config = setup_args([]).kv_cache_config
+            # Spawned backend and rank workers must keep the FULL overrides.
+            for _ in range(2):
+                config = pickle.loads(pickle.dumps(config))
+                for name, value in values.items():
+                    self.assertEqual(getattr(config, name), value)
+            self.assertEqual(config.block_tree_device_evict_low_watermark_ratio, 0.82)
+            self.assertEqual(config.block_tree_device_evict_high_watermark_ratio, 0.90)
+            config = setup_args(
+                ["--block_tree_full_device_evict_high_watermark_ratio", "0.96"]
+            ).kv_cache_config
+            self.assertEqual(
+                config.block_tree_full_device_evict_high_watermark_ratio, 0.96
+            )
+        with patch.dict("os.environ", _jit_env(), clear=True):
+            config = setup_args([]).kv_cache_config
+            for name in values:
+                self.assertEqual(getattr(config, name), -1.0)
+
     def test_kv_cache_strategy_defaults_are_rollback_safe(self):
         config = PyEnvConfigs().kv_cache_config
 
@@ -435,8 +467,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 77)
-        self.assertEqual(state[:2], ("KVCacheConfig", 12))
+        self.assertEqual(len(state), 83)
+        self.assertEqual(state[:2], ("KVCacheConfig", 13))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -497,6 +529,12 @@ class GenerateConfigTest(TestCase):
             "block_tree_memory_evict_high_watermark_ratio": "float",
             "block_tree_disk_evict_low_watermark_ratio": "float",
             "block_tree_disk_evict_high_watermark_ratio": "float",
+            "block_tree_full_device_evict_low_watermark_ratio": "float",
+            "block_tree_full_device_evict_high_watermark_ratio": "float",
+            "block_tree_full_memory_evict_low_watermark_ratio": "float",
+            "block_tree_full_memory_evict_high_watermark_ratio": "float",
+            "block_tree_full_disk_evict_low_watermark_ratio": "float",
+            "block_tree_full_disk_evict_high_watermark_ratio": "float",
         }
         stub_path = (
             Path(__file__).resolve().parents[2] / "ops" / "libth_transformer_config.pyi"
