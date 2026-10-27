@@ -11,6 +11,7 @@
 #define private public
 #define protected public
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #undef protected
 #undef private
@@ -174,6 +175,67 @@ TEST_F(EngineFinishTest, StopJoinsLoopFinishBeforeDestroyingExecutor) {
     }
 }
 
+class ObservedBatchStopScheduler: public BatchDecodeScheduler {
+public:
+    ObservedBatchStopScheduler(NormalEngine* engine, bool fail_stop):
+        BatchDecodeScheduler(engine->runtime_config, engine->resourceContext().cache_manager, nullptr),
+        engine_(engine),
+        fail_stop_(fail_stop) {}
+
+    absl::Status stop() override {
+        const auto result = BatchDecodeScheduler::stop();
+        return fail_stop_ ? absl::InternalError("injected scheduler stop error") : result;
+    }
+
+    absl::Status finalizeStop() override {
+        EXPECT_EQ(engine_->loop_thread_, nullptr);
+        EXPECT_EQ(engine_->executor_, nullptr);
+        ++finalize_calls;
+        return BatchDecodeScheduler::finalizeStop();
+    }
+
+    std::atomic<int> finalize_calls{0};
+
+private:
+    NormalEngine* engine_;
+    bool          fail_stop_;
+};
+
+TEST_F(EngineFinishTest, BatchSchedulerFinalizesAfterLoopFinishAndExecutorDrainEvenWhenStopFails) {
+    for (const bool fail_stop : {false, true}) {
+        SCOPED_TRACE(fail_stop);
+        auto engine = createMockEngine(CustomConfig{});
+        ASSERT_TRUE(engine->stop().ok());
+        auto  scheduler          = std::make_unique<ObservedBatchStopScheduler>(engine.get(), fail_stop);
+        auto* observed           = scheduler.get();
+        engine->scheduler_       = std::move(scheduler);
+        auto               state = std::make_shared<FinishState>();
+        std::promise<void> release;
+        state->release    = release.get_future().share();
+        auto started      = state->started.get_future();
+        engine->executor_ = std::make_unique<GatedFinishExecutor>(state, engine->running_);
+        ASSERT_TRUE(engine->startLoop().ok());
+        auto stopped = std::async(std::launch::async, [&] { return engine->stop(); });
+        EXPECT_EQ(started.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+        EXPECT_EQ(stopped.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+        EXPECT_EQ(observed->finalize_calls.load(), 0);
+        EXPECT_FALSE(state->destroyed.load());
+        release.set_value();
+        EXPECT_EQ(stopped.wait_for(std::chrono::seconds(30)), std::future_status::ready);
+        const auto status = stopped.get();
+        if (fail_stop) {
+            EXPECT_EQ(status, absl::InternalError("injected scheduler stop error"));
+        } else {
+            EXPECT_TRUE(status.ok());
+        }
+        EXPECT_TRUE(state->completed.load());
+        EXPECT_TRUE(state->destroyed_after_finish.load());
+        EXPECT_EQ(observed->finalize_calls.load(), 1);
+        EXPECT_TRUE(engine->stop().ok());
+        EXPECT_EQ(observed->finalize_calls.load(), 1);
+    }
+}
+
 // Separate Bazel targets set RTP_LLM_STREAM_ASYNC before process startup because
 // NormalExecutor caches this flag. Both modes also exercise worker counts 0/2.
 void EngineStopTest::checkStopWaitsForDispatch(int max_new_tokens) {
@@ -240,14 +302,16 @@ TEST_P(EngineStopTest, StopWaitsForInFlightPrefillOnlyDispatch) {
     checkStopWaitsForDispatch(0);
 }
 
-TEST_P(EngineStopTest, SchedulerStopErrorStillReleasesExecutor) {
+TEST_P(EngineStopTest, BatchSchedulerStopReleasesExecutor) {
     auto engine = createConfiguredEngine({}, [](EngineInitParams& params) {
         params.runtime_config.use_batch_decode_scheduler = true;
-        // Keep the empty scheduler nonblocking so this exercises cleanup, not its idle timeout.
-        params.runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 0;
+        // Stop must wake the real idle scheduler without waiting for a full batch.
+        params.runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 2;
     });
-    EXPECT_TRUE(absl::IsUnimplemented(engine->stop()));
+    EXPECT_TRUE(engine->stop().ok());
     EXPECT_EQ(engine->executor_, nullptr);
+    EXPECT_EQ(engine->loop_thread_, nullptr);
+    EXPECT_TRUE(engine->stop().ok());
 }
 
 TEST_P(EngineStopTest, SystemPromptsDoNotConsumeProfilingWindow) {
