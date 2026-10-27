@@ -104,6 +104,27 @@ TEST_F(GenerateStreamWrapperTest, generateResponseMapsStreamErrors) {
         ErrorCode::EXECUTION_EXCEPTION, HttpApiServerException::UNKNOWN_ERROR, "private backend detail");
 }
 
+TEST_F(GenerateStreamWrapperTest, generateResponseSkipsFrontendMetricOnlyFrames) {
+    auto mock_token_processor = std::make_shared<MockTokenProcessor>();
+    auto token_processor      = std::dynamic_pointer_cast<TokenProcessor>(mock_token_processor);
+    auto mock_stream          = CreateMockGenerateStream();
+
+    GenerateOutputs metric_output;
+    metric_output.frontend_metric_only = true;
+    GenerateOutputs business_output;
+    EXPECT_CALL(*mock_stream, nextOutput(_))
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(metric_output))))
+        .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(business_output))));
+    EXPECT_CALL(*mock_token_processor, getTokenProcessorCtx(_, _, _)).WillOnce(Return(nullptr));
+    EXPECT_CALL(*mock_token_processor, decodeTokens(_, _, _, _)).WillOnce(Return(std::vector<std::string>()));
+
+    GenerateStreamWrapper stream_wrapper(nullptr, token_processor);
+    stream_wrapper.init(std::dynamic_pointer_cast<GenerateStream>(mock_stream), nullptr);
+
+    const auto [response, finished] = stream_wrapper.generateResponse();
+    EXPECT_FALSE(finished);
+}
+
 TEST_F(GenerateStreamWrapperTest, generateResponseMapsErrorAfterOutput) {
     auto mock_token_processor = std::make_shared<MockTokenProcessor>();
     auto token_processor      = std::dynamic_pointer_cast<TokenProcessor>(mock_token_processor);

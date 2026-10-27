@@ -60,12 +60,14 @@ from rtp_llm.dash_sc.inference.servicer import (
     _dash_error_spec_for_ft_exception,
     _derive_max_token_id,
     _finish_server_trace,
+    _make_frontend_metric_observer,
     _request_qos_level,
     build_think_runtime,
     iter_real_model_stream_infer,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
-from rtp_llm.metrics import AccMetrics
+from rtp_llm.frontend.frontend_request_metrics import FrontendRequestMetrics
+from rtp_llm.metrics import AccMetrics, GaugeMetrics
 from rtp_llm.ops import RoleType
 from rtp_llm.server.master_client import MasterClient
 from rtp_llm.telemetry import tracing
@@ -93,6 +95,20 @@ def _add_input_tensor(
 
 def _unpack_int32_le(raw: bytes) -> list[int]:
     return list(struct.unpack("<%di" % (len(raw) // 4), raw))
+
+
+class _MetricSink:
+    def __init__(self):
+        self.calls = []
+
+    def report(self, metric, value=1, tags=None):
+        self.calls.append((metric, value, dict(tags or {})))
+
+    def values(self, metric):
+        return [value for called, value, _ in self.calls if called == metric]
+
+    def tags(self, metric):
+        return [tags for called, _, tags in self.calls if called == metric]
 
 
 class _FakeAsyncStream:
@@ -134,6 +150,23 @@ class _FakeVisitor:
         self.last_generate_input = _generate_input
         self.generate_inputs.append(_generate_input)
         return self._stream
+
+
+class _MetricAwareFakeVisitor(_FakeVisitor):
+    """Project raw private envelopes like BackendRPCServerVisitor does."""
+
+    async def enqueue(self, generate_input):
+        stream = await super().enqueue(generate_input)
+
+        async def observed_stream():
+            async for output in stream:
+                observer = generate_input.frontend_metric_observer
+                if observer is not None:
+                    observer(output, 0)
+                if not output.frontend_metric_only:
+                    yield output
+
+        return observed_stream()
 
 
 class _MultiStreamVisitor:
@@ -3169,6 +3202,275 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [9])
+
+    async def test_real_mode_reports_shared_frontend_metrics_and_cache_tags(
+        self,
+    ) -> None:
+        first = GenerateOutput(
+            output_ids=torch.tensor([9, 10], dtype=torch.int32),
+            finished=False,
+            aux_info=AuxInfo(
+                input_len=10,
+                output_len=2,
+                reuse_len=4,
+                iter_count=2,
+            ),
+        )
+        second = GenerateOutput(
+            output_ids=torch.tensor([11, 12, 13], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(
+                input_len=10,
+                output_len=5,
+                reuse_len=4,
+                iter_count=3,
+            ),
+        )
+        visitor = _MetricAwareFakeVisitor(
+            _FakeAsyncStream(
+                [
+                    GenerateOutputs(
+                        generate_outputs=[first],
+                        frontend_input_len=10,
+                        frontend_output_len=2,
+                        frontend_context_token_num=6,
+                        frontend_context_token_num_with_cache=10,
+                        frontend_context_execute_time_us=10_000,
+                        frontend_context_execute_time_with_cache_us=5_000,
+                        frontend_generate_token_num=3,
+                        frontend_generate_execute_time_us=10_000,
+                        frontend_speculative_verify_rounds=1,
+                        frontend_speculative_accepted_token_num=3,
+                        frontend_speculative_proposed_draft_tokens=4,
+                        frontend_sp_tpot_samples=[(1, 2000.0)],
+                    ),
+                    GenerateOutputs(
+                        generate_outputs=[second],
+                        frontend_input_len=10,
+                        frontend_output_len=5,
+                        frontend_context_token_num=6,
+                        frontend_context_token_num_with_cache=10,
+                        frontend_context_execute_time_us=10_000,
+                        frontend_context_execute_time_with_cache_us=5_000,
+                        frontend_generate_token_num=6,
+                        frontend_generate_execute_time_us=40_000,
+                        frontend_speculative_verify_rounds=2,
+                        frontend_speculative_accepted_token_num=6,
+                        frontend_speculative_proposed_draft_tokens=8,
+                        frontend_sp_tpot_samples=[(2, 3000.0)],
+                    ),
+                ]
+            )
+        )
+        sink = _MetricSink()
+        clock_values = iter((0.0, 0.0, 0.1, 1.0, 1.0))
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            rank_id=2,
+            server_id="3",
+            request_metrics=FrontendRequestMetrics(
+                sink, clock=clock_values.__next__, enabled=True
+            ),
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(
+                _areq_iter([self._valid_infer_request()]),
+                MagicMock(),
+            )
+        )
+
+        self.assertEqual(len(responses), 2)
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_INPUT_TOKEN_TPS_METRIC),
+            [2000.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_NONCACHE_INPUT_TOKEN_TPS_METRIC),
+            [600.0],
+        )
+        # Match the one-second rtp_llm_generate_tps window: accepted tokens
+        # accumulated during this reporting interval.
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_OUTPUT_TOKEN_TPS_METRIC),
+            [6.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_NONCACHE_OUTPUT_TOKEN_TPS_METRIC),
+            [6.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_INPUT_LENGTH_METRIC),
+            [10],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_OUTPUT_LENGTH_METRIC),
+            [5],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_CACHED_TOKEN_LENGTH_METRIC),
+            [4],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_CACHE_HIT_RATIO_METRIC),
+            [40.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_SPECULATIVE_AVG_ACCEPT_LENGTH_METRIC),
+            [3.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_SPECULATIVE_ACCEPT_RATE_METRIC),
+            [0.5],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_STREAM_FIRST_OUTPUT_TOKEN_LENGTH_METRIC),
+            [2],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_CONCURRENCY_METRIC),
+            [1, 0],
+        )
+        self.assertEqual(
+            sink.tags(GaugeMetrics.FRONTEND_CACHE_HIT_RATIO_METRIC)[0]["source"],
+            "dash_sc",
+        )
+        self.assertTrue(
+            sink.values(GaugeMetrics.FRONTEND_TTFT_MS_METRIC),
+        )
+        self.assertTrue(
+            sink.values(GaugeMetrics.FRONTEND_TPOT_MS_METRIC),
+        )
+        self.assertTrue(
+            sink.values(GaugeMetrics.FRONTEND_REQUEST_RT_MS_METRIC),
+        )
+        self.assertTrue(
+            sink.values(GaugeMetrics.FRONTEND_SPECULATIVE_ACCEPT_RATE_METRIC),
+        )
+        self.assertTrue(
+            sink.values(GaugeMetrics.FRONTEND_SPECULATIVE_AVG_ACCEPT_LENGTH_METRIC),
+        )
+        self.assertEqual(
+            visitor.last_generate_input.frontend_metric_tags,
+            {
+                "rank_id": "2",
+                "server_id": "3",
+                "source": "dash_sc",
+                "protocol": "dash_sc_grpc",
+                "priority": "0",
+            },
+        )
+        self.assertTrue(
+            visitor.last_generate_input.generate_config.frontend_metric_streaming
+        )
+        self.assertTrue(visitor.last_generate_input.generate_config.aux_info)
+        self.assertIsNotNone(visitor.last_generate_input.frontend_metric_observer)
+
+    async def test_frontend_metrics_use_metadata_then_body_priority(self) -> None:
+        for metadata, expected in (
+            ((), "7"),
+            ((("x-dashscope-inner-qos-level", "80"),), "80"),
+        ):
+            with self.subTest(metadata=metadata):
+                visitor = self._terminal_visitor()
+                sink = _MetricSink()
+                servicer = DashScInferenceServicer(
+                    backend_visitor=visitor,
+                    request_metrics=FrontendRequestMetrics(sink, enabled=True),
+                )
+                req = self._valid_infer_request()
+                req.parameters["ds_header_attributes"].string_param = json.dumps(
+                    {"x-dashscope-inner-qos-level": 7}
+                )
+                await _drain(
+                    servicer.ModelStreamInfer(
+                        _areq_iter([req]), _FakeGrpcContext(metadata=metadata)
+                    )
+                )
+                self.assertEqual(
+                    visitor.last_generate_input.frontend_metric_tags["priority"],
+                    expected,
+                )
+                self.assertEqual(
+                    sink.tags(GaugeMetrics.FRONTEND_REQUEST_RT_MS_METRIC)[0][
+                        "priority"
+                    ],
+                    expected,
+                )
+
+    async def test_raw_metric_projector_preserves_error_access_counters_and_samples(
+        self,
+    ) -> None:
+        sink = _MetricSink()
+        metrics = FrontendRequestMetrics(sink, clock=lambda: 1.0, enabled=True)
+        state = metrics.begin(
+            rank_id="0", server_id="0", source="dash_sc", streaming=True
+        )
+        access = GrpcAccessRecord.create(
+            _FakeGrpcContext(), "ModelStreamInfer", "bidi_stream", raw_mode=False
+        )
+        observer = _make_frontend_metric_observer(state, GenerateConfig(), 0, access)
+        observer(
+            GenerateOutputs(
+                frontend_metric_only=True,
+                frontend_speculative_verify_rounds=2,
+                frontend_speculative_accepted_token_num=6,
+                frontend_speculative_proposed_draft_tokens=8,
+                frontend_sp_tpot_samples=[(1, 2500.0)],
+            ),
+            0,
+        )
+        access.status = "CANCELLED"
+        payload = access.build_record(server_id=0, rank_id=0)
+        self.assertEqual(payload["speculative_accept_rate"], 0.5)
+        state.finish()
+        self.assertEqual(sink.values(GaugeMetrics.FRONTEND_TPOT_MS_METRIC), [2.5])
+
+    async def test_raw_metric_projector_counts_all_return_sequences(self) -> None:
+        sink = _MetricSink()
+        metrics = FrontendRequestMetrics(sink, clock=lambda: 1.0, enabled=True)
+        state = metrics.begin(
+            rank_id="2",
+            server_id="3",
+            source="dash_sc",
+            streaming=True,
+        )
+        config = GenerateConfig(num_return_sequences=2, is_streaming=True)
+        observer = _make_frontend_metric_observer(state, config, 0)
+        self.assertIsNotNone(observer)
+        repeated_aux = AuxInfo(
+            input_len=10,
+            output_len=11,
+            reuse_len=4,
+        )
+        output = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(aux_info=repeated_aux),
+                GenerateOutput(aux_info=repeated_aux),
+            ],
+            frontend_context_token_num=12,
+            frontend_context_token_num_with_cache=20,
+            frontend_context_execute_time_us=10_000,
+            frontend_context_execute_time_with_cache_us=5_000,
+            frontend_generate_token_num=20,
+            frontend_generate_execute_time_us=40_000,
+        )
+
+        observer(output, 0)
+        state.finish()
+
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_INPUT_TOKEN_TPS_METRIC),
+            [4000.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_NONCACHE_INPUT_TOKEN_TPS_METRIC),
+            [1200.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_OUTPUT_TOKEN_TPS_METRIC),
+            [20.0],
+        )
 
     async def test_timeout_request_sets_dashscope_partial_response_metadata(
         self,

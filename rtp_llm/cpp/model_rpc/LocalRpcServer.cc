@@ -281,7 +281,10 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             // WriterInterface uses false to signal that its downstream consumer has closed or cancelled.
             return grpc::Status(grpc::StatusCode::CANCELLED, "request output consumer closed");
         }
-        if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+        // A coalesced metric marker can precede the prefill token while the
+        // executor has already signalled PD handoff. Drain that token before
+        // handing the RPC over to Decode.
+        if (!result.value().frontend_metric_only && stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
             break;
         }
     }
@@ -354,6 +357,7 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
                                               std::shared_ptr<GenerateStream>&      stream,
                                               const std::shared_ptr<GenerateInput>& input,
                                               GenerateOutputs&                      last_outputs) {
+    std::vector<std::pair<uint64_t, double>> frontend_sp_tpot_samples;
     while (true) {
         const auto output_result = stream->nextOutput(kRpcOutputWaitTimeoutMs);
         if (isCancelled(context)) {
@@ -369,8 +373,15 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
             }
             break;
         }
-        last_outputs = output_result.value();
+        const auto& output = output_result.value();
+        frontend_sp_tpot_samples.insert(frontend_sp_tpot_samples.end(),
+                                        output.frontend_sp_tpot_samples.begin(),
+                                        output.frontend_sp_tpot_samples.end());
+        if (!output.frontend_metric_only) {
+            last_outputs = output;
+        }
     }
+    last_outputs.frontend_sp_tpot_samples = std::move(frontend_sp_tpot_samples);
     return ErrorInfo::OkStatus();
 }
 

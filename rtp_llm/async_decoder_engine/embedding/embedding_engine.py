@@ -31,6 +31,9 @@ class EmbeddingCppEngine(BaseEngine):
         # started, so _stop before _start is safe.
         self.mm_process_engine: Optional[MMProcessEngine] = None
 
+    def set_serving(self, serving: bool) -> None:
+        self.cpp_engine.set_serving(serving)
+
     @override
     def _stop(self) -> None:
         # Stop the C++ engine first so it issues no more embedding calls, then

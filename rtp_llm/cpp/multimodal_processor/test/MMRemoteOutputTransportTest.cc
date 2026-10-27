@@ -5,11 +5,14 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "gtest/gtest.h"
+#include "kmonitor/client/core/MetricsCollector.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/MMRemoteOutputTransport.h"
@@ -23,6 +26,53 @@
 namespace rtp_llm {
 
 namespace {
+
+TEST(MMTransportMetricsTest, HonorsWarmupAndDrainingWithRealSdkReports) {
+    startKmonServiceStatus(nullptr);
+    auto check = [](bool enabled, const std::string& serving) {
+        auto monitor = std::make_shared<kmonitor::KMonitor>("mm_transport_metric_paths");
+        monitor->SetServiceName("");
+        auto reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags("dp_rank", "0"));
+        MMTransportMetrics metrics(reporter);
+        metrics.reportRpcClientError("vit:1234", "rpc_error", "14");
+        metrics.reportRpcMetrics("vit:1234", 17, 23, 31);
+        kmonitor::MetricsCollector snapshot;
+        monitor->GetMetrics(&snapshot, {kmonitor::NORMAL}, 10000);
+        std::set<std::string> names;
+        for (const auto* record : snapshot.GetRecords().getRecords()) {
+            EXPECT_EQ(record->Tags()->FindTag(KMON_SERVICE_STATUS_TAG), serving);
+            EXPECT_EQ(record->Tags()->FindTag("dp_rank"), "0");
+            EXPECT_EQ(record->Tags()->FindTag("target"), "vit:1234");
+            EXPECT_EQ(record->Tags()->FindTag("source"), kMetricSourceInferenceClient);
+            for (const auto* value : record->Values()) {
+                names.insert(value->Name());
+                if (value->Name() == "rtp_llm_vit_rpc_client_error_qps") {
+                    EXPECT_EQ(record->Tags()->FindTag("reason"), "rpc_error");
+                    EXPECT_EQ(record->Tags()->FindTag("grpc_code"), "14");
+                }
+            }
+        }
+        if (enabled) {
+            EXPECT_EQ(names,
+                      (std::set<std::string>{"rtp_llm_vit_rpc_client_error_qps",
+                                             "rtp_llm_vit_rpc_client_rt_us",
+                                             "rtp_llm_vit_rpc_request_bytes",
+                                             "rtp_llm_vit_rpc_response_bytes"}));
+        } else {
+            EXPECT_TRUE(names.empty());
+        }
+    };
+    check(false, "false");
+    setKmonServiceServing(true);
+    check(true, "true");
+    {
+        ScopedKmonMetricsSuppression warmup;
+        check(false, "false");
+    }
+    setKmonServiceServing(false);
+    check(true, "false");
+    stopKmonServiceStatus();
+}
 
 std::string uniqueEndpoint(const char* name) {
     return std::string("127.0.0.1:") + name;

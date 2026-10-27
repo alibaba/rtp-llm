@@ -103,12 +103,13 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         init_batch_size, maxBatchSize(), max_seq_len_, model_config.attn_config.tokens_per_block);
     complete_token_ids_->init(input, extra_reserve_token_num);
 
-    last_output_pos_ = seqLength();
+    last_output_pos_                 = seqLength();
+    last_frontend_metric_output_pos_ = last_output_pos_;
 
     cum_log_probs_ = torch::zeros({(int64_t)init_batch_size}, torch::kFloat32);
 
     is_context_stream_ = std::make_shared<std::atomic<bool>>(true);
-    generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    generate_status_   = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
     sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
@@ -639,6 +640,7 @@ int64_t GenerateStream::prefillMemoryReuseLen() const {
 
 void GenerateStream::incLastOutputPos() {
     last_output_pos_++;
+    last_frontend_metric_output_pos_++;
 }
 
 bool GenerateStream::isContextStream() const {
@@ -744,6 +746,51 @@ void GenerateStream::step() {
 
 void GenerateStream::spStep() {
     sp_iter_count_++;
+}
+
+void GenerateStream::addFrontendContextExecuteMetrics(int64_t execute_time_us,
+                                                      int64_t context_token_num,
+                                                      int64_t context_token_num_with_cache) {
+    if (execute_time_us <= 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (context_token_num > 0) {
+        frontend_context_token_num_ += context_token_num;
+        frontend_context_execute_time_us_ += execute_time_us;
+    }
+    if (context_token_num_with_cache > 0) {
+        frontend_context_token_num_with_cache_ += context_token_num_with_cache;
+        frontend_context_execute_time_with_cache_us_ += execute_time_us;
+    }
+}
+
+void GenerateStream::addFrontendGenerateExecuteMetrics(int64_t execute_time_us, int64_t generate_token_num) {
+    if (generate_token_num > 0) {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        frontend_generate_execute_time_us_ += std::max<int64_t>(execute_time_us, 0);
+        frontend_generate_token_num_ += generate_token_num;
+    }
+}
+
+int64_t GenerateStream::frontendContextTokenNum() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return frontend_context_token_num_;
+}
+
+int64_t GenerateStream::frontendContextTokenNumWithCache() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return frontend_context_token_num_with_cache_;
+}
+
+int64_t GenerateStream::frontendContextExecuteTimeUs() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return frontend_context_execute_time_us_;
+}
+
+int64_t GenerateStream::frontendContextExecuteTimeWithCacheUs() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return frontend_context_execute_time_with_cache_us_;
 }
 
 int64_t GenerateStream::getTimeoutMs() const {
@@ -1123,7 +1170,7 @@ void GenerateStream::matchEosToken() {
 void GenerateStream::matchEosToken(int batch_id) {
     if ((!generate_input_->generate_config->ignore_eos)
         && complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id)) {
-        sub_generate_status_[batch_id] = StreamState::FINISHED;
+        markSubGenerateFinished(batch_id);
     }
 }
 
@@ -1155,7 +1202,7 @@ void GenerateStream::matchStopWordsList(int batch_id) {
         }
     }
     if (match) {
-        sub_generate_status_[batch_id] = StreamState::FINISHED;
+        markSubGenerateFinished(batch_id);
     }
 }
 
@@ -1208,6 +1255,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 
     if (update_info.speculative_propose_step > 0) {
         sp_iter_count_++;
+        speculative_proposed_draft_tokens_ += update_info.speculative_propose_step;
         speculative_accepted_tokens_per_pos_.resize(update_info.speculative_propose_step, 0);
         const int accepted_draft_tokens =
             std::clamp(update_info.accepted_draft_tokens, 0, update_info.speculative_propose_step);
@@ -1538,10 +1586,10 @@ void GenerateStream::reportStreamMetrics() {
                 collector.timeout_latency_us = getTimeoutMs() * 1000;
             }
         }
-        // pass tag will cause default tags deep copy
-        static kmonitor::MetricsTags timeout_tag("timeout", "true");
-        metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(timeout ? &timeout_tag : nullptr,
-                                                                                     &collector);
+        // Timeout is an additional dimension; preserve request priority for
+        // every terminal outcome, including cancellation and errors.
+        kmonitor::MetricsTags tags(buildStreamMetricTagMap(priority(), timeout));
+        metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(&tags, &collector);
     }
 }
 
@@ -1654,9 +1702,27 @@ void GenerateStream::incBatchWithPrefillLen(int32_t len) {
     batch_with_prefill_len_ += len;
 }
 
+void GenerateStream::markSubGenerateFinished(size_t batch_id) {
+    RTP_LLM_CHECK(batch_id < sub_generate_status_.size());
+    sub_generate_status_[batch_id] = StreamState::FINISHED;
+    if (!hasNumBeams() && sub_generate_output_lengths_[batch_id] < 0) {
+        sub_generate_output_lengths_[batch_id] = static_cast<int64_t>(outputTokenLen());
+    }
+}
+
+int64_t GenerateStream::subGenerateOutputLength(size_t batch_id) const {
+    RTP_LLM_CHECK(batch_id < sub_generate_output_lengths_.size());
+    const auto terminal_length = sub_generate_output_lengths_[batch_id];
+    return !hasNumBeams() && terminal_length >= 0 ? terminal_length : static_cast<int64_t>(outputTokenLen());
+}
+
 void GenerateStream::fillSubGenerateStatus(StreamState state) {
     for (size_t i = 0; i < sub_generate_status_.size(); ++i) {
-        sub_generate_status_[i] = state;
+        if (state == StreamState::FINISHED) {
+            markSubGenerateFinished(i);
+        } else {
+            sub_generate_status_[i] = state;
+        }
     }
 }
 
@@ -1664,6 +1730,7 @@ void GenerateStream::resizeSubGenerateStatus(size_t new_size) {
     if (sub_generate_status_.size() != new_size) {
         size_t old_size = sub_generate_status_.size();
         sub_generate_status_.resize(new_size);
+        sub_generate_output_lengths_.resize(new_size, -1);
         for (size_t i = old_size; i < new_size; ++i) {
             sub_generate_status_[i] = StreamState::RUNNING;
         }
