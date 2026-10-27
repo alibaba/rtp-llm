@@ -53,8 +53,19 @@ py_library(
 )
 
 py_library(
+    name = "attention",
+    srcs = glob(["attention/*.py"]),
+    deps = ["//rtp_llm:torch"] + select({
+        "@//:using_rocm": ["//rtp_llm:aiter"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "triton_kernels",
     deps = [
+        ":attention",
         ":autotune_cache",
         ":fla",
         ":kimi_kda",
