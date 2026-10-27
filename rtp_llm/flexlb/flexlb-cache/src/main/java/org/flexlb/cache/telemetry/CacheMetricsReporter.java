@@ -125,15 +125,11 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
         monitor.register(CACHE_AFFINITY_OVER_CAP_MS, FlexMetricType.TIMER);
         monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
-        monitor.register(CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS,
-                FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS, FlexMetricType.QPS, FlexPriorityType.NORMAL);
         monitor.register(CACHE_LOCAL_STANDBY_MAPPING_COUNT, FlexMetricType.GAUGE);
-        monitor.register(CACHE_MATCH_ACTIVE_SOURCE,
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(CACHE_MATCH_SOURCE_CHANGE_QPS,
-                FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(CACHE_MATCH_STANDBY_FALLBACK_QPS,
-                FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_MATCH_ACTIVE_SOURCE, FlexMetricType.GAUGE, FlexPriorityType.NORMAL);
+        monitor.register(CACHE_MATCH_SOURCE_CHANGE_QPS, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        monitor.register(CACHE_MATCH_STANDBY_FALLBACK_QPS, FlexMetricType.QPS, FlexPriorityType.NORMAL);
 
         // Cache service response time metrics
         monitor.register(CACHE_FIND_MATCHING_ENGINES_RT, FlexMetricType.GAUGE);
