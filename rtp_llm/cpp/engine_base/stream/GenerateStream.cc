@@ -296,23 +296,84 @@ bool GenerateStream::hasPendingMultimodal() const {
     return generate_input_->multimodal_token_layout && generate_input_->multimodal_token_layout->length_only;
 }
 
-void GenerateStream::prepareLateMultimodal() {
+std::shared_ptr<GenerateInput> GenerateStream::beginLateMultimodal() {
     {
         std::lock_guard<std::mutex> lock(*mutex_);
         checkTimeoutWithoutLock();
         if (!hasPendingMultimodal() || hasErrorWithoutLock()) {
-            return;
+            return nullptr;
         }
     }
     // No stream/scheduler lock is held during CPU preprocessing, ViT or safety inspection.
     // Prepare into a private copy; cancellation must not observe half-installed tensors.
-    auto prepared = std::make_shared<GenerateInput>(*generate_input_);
+    return std::make_shared<GenerateInput>(*generate_input_);
+}
+
+void GenerateStream::prepareLateMultimodal() {
+    auto prepared = beginLateMultimodal();
+    if (!prepared) {
+        return;
+    }
     try {
         if (!prepared->prepare_multimodal) {
             reportError(ErrorCode::INVALID_PARAMS, "missing multimodal preparation callback");
             return;
         }
         auto result = prepared->prepare_multimodal(prepared);
+        finishLateMultimodal(prepared, result);
+    } catch (const std::exception& error) {
+        reportError(ErrorCode::MM_PROCESS_ERROR, error.what());
+    }
+}
+
+void GenerateStream::prepareLateMultimodalBatch(const std::vector<std::shared_ptr<GenerateStream>>& streams) {
+    // Each DP backend has its own processor/queue. Never merge different owners.
+    std::vector<std::shared_ptr<GenerateInput::PrepareMultimodalBatch>> owners;
+    std::vector<std::vector<std::shared_ptr<GenerateStream>>>           groups;
+    for (const auto& stream : streams) {
+        const auto& owner = stream->generateInput()->prepare_multimodal_batch;
+        if (!owner) {
+            stream->prepareLateMultimodal();
+            continue;
+        }
+        auto it = std::find(owners.begin(), owners.end(), owner);
+        if (it == owners.end()) {
+            owners.push_back(owner);
+            groups.push_back({stream});
+        } else {
+            groups[std::distance(owners.begin(), it)].push_back(stream);
+        }
+    }
+    for (size_t group = 0; group < groups.size(); ++group) {
+        std::vector<std::shared_ptr<GenerateStream>> active;
+        std::vector<std::shared_ptr<GenerateInput>>  prepared;
+        for (const auto& stream : groups[group]) {
+            if (auto input = stream->beginLateMultimodal()) {
+                active.push_back(stream);
+                prepared.push_back(std::move(input));
+            }
+        }
+        if (prepared.empty()) {
+            continue;
+        }
+        try {
+            auto results = (*owners[group])(prepared);
+            if (results.size() != active.size()) {
+                throw std::runtime_error("local multimodal batch returned the wrong result count");
+            }
+            for (size_t i = 0; i < active.size(); ++i) {
+                active[i]->finishLateMultimodal(prepared[i], results[i]);
+            }
+        } catch (const std::exception& error) {
+            for (const auto& stream : active) {
+                stream->reportError(ErrorCode::MM_PROCESS_ERROR, error.what());
+            }
+        }
+    }
+}
+
+void GenerateStream::finishLateMultimodal(const std::shared_ptr<GenerateInput>& prepared, const ErrorInfo& result) {
+    try {
         if (!result.ok()) {
             reportError(result.code(), result.ToString());
             return;
@@ -341,9 +402,10 @@ void GenerateStream::prepareLateMultimodal() {
         }
         prepared->multimodal_token_layout->length_only = false;
         prepared->prepare_multimodal                   = {};
-        prepared->multimodal_prepared_late             = true;
-        *generate_input_                               = *prepared;
-        logits_processor_list_                         = std::move(processors.value());
+        prepared->prepare_multimodal_batch.reset();
+        prepared->multimodal_prepared_late = true;
+        *generate_input_                   = *prepared;
+        logits_processor_list_             = std::move(processors.value());
     } catch (const std::exception& error) {
         reportError(ErrorCode::MM_PROCESS_ERROR, error.what());
     }

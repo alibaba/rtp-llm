@@ -41,6 +41,7 @@ public:
         max_seq_len_(max_seq_len) {}
 
 protected:
+    ErrorInfo                    applyMultimodalOutput(std::shared_ptr<GenerateInput>& input, MultimodalOutput output);
     py::object                   mm_process_engine_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 
@@ -70,7 +71,14 @@ private:
                                                        const std::vector<torch::Tensor>& feature_hashes);
 
 public:
-    ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input);
+    ErrorInfo                      updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input);
+    virtual std::vector<ErrorInfo> updateMultimodalFeaturesBatch(std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+        std::vector<ErrorInfo> results;
+        for (auto& input : inputs) {
+            results.push_back(updateMultimodalFeatures(input));
+        }
+        return results;
+    }
 
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
                                        const std::vector<rtp_llm::MultimodalInput>& mm_inputs,

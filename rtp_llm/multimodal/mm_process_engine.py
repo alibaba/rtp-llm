@@ -839,6 +839,120 @@ class MMProcessEngine:
         )
         return result
 
+    def mm_embedding_batch_cpp(
+        self, requests: List[List[MultimodalInput]], request_ids: List[int]
+    ):
+        """Local, bounded prefill cohort; one result/error tuple per request.
+
+        Reserve and create work in request order before starting any caller.
+        This orders cache ownership (including overlapping multi-media requests)
+        and lets the existing executor feed concurrent callers to MMScheduler.
+        GPU batch/media/work budgets and the single forward owner are unchanged.
+        """
+        if len(requests) != len(request_ids):
+            raise ValueError("multimodal batch request/id counts differ")
+        results = [None] * len(requests)
+        jobs = []
+
+        def failure(error):
+            return (
+                None,
+                int(getattr(error, "exception_type", 0)),
+                str(getattr(error, "message", str(error))),
+            )
+
+        for index, (mm_inputs, request_id) in enumerate(zip(requests, request_ids)):
+            accepted, _ = self._try_reserve_async_slots(1)
+            if not accepted:
+                results[index] = failure(
+                    FtRuntimeException(
+                        ExceptionType.CONCURRENCY_LIMIT_ERROR,
+                        "ViT local batch exceeds async admission capacity",
+                    )
+                )
+                continue
+            try:
+                if self._stopped:
+                    raise RuntimeError("MMProcessEngine is stopped")
+                started = time.monotonic()
+                items = self._create_work_items(mm_inputs)
+                timeout_ms = max(
+                    (item.mm_timeout_ms for item in items),
+                    default=self.vit_config.mm_timeout_ms,
+                )
+                jobs.append(
+                    (index, mm_inputs, request_id, items, started + timeout_ms / 1000.0)
+                )
+            except Exception as error:
+                self._release_async_slots()
+                results[index] = failure(error)
+
+        futures = []
+        for index, mm_inputs, request_id, items, deadline in jobs:
+            try:
+                future = self._async_compute_executor.submit(
+                    self._run_local_batch_request,
+                    mm_inputs,
+                    request_id,
+                    items,
+                    deadline,
+                )
+
+                def done(completed, owned_items=items):
+                    if completed.cancelled():
+                        error = RuntimeError(
+                            "local multimodal request cancelled before execution"
+                        )
+                        for item in owned_items:
+                            item.fail_cache(error)
+                        self._release_async_slots()
+
+                future.add_done_callback(done)
+                futures.append((index, future))
+            except Exception as error:
+                for item in items:
+                    item.fail_cache(error)
+                self._release_async_slots()
+                results[index] = failure(error)
+
+        # All submissions precede the first wait. Keep each logical request's
+        # output and error separate; never flatten a cohort into one request.
+        for index, future in futures:
+            try:
+                results[index] = (future.result(), 0, "")
+            except Exception as error:
+                results[index] = failure(error)
+        return results
+
+    def _run_local_batch_request(self, mm_inputs, request_id, items, deadline):
+        try:
+            context = (
+                torch.cuda.device(self.device)
+                if str(self.device).startswith("cuda")
+                else nullcontext()
+            )
+            remaining_ms = (deadline - time.monotonic()) * 1000.0
+            if remaining_ms <= 0:
+                raise TimeoutError(
+                    "local multimodal request timed out before execution"
+                )
+            for item in items:
+                item.mm_timeout_ms = min(item.mm_timeout_ms, remaining_ms)
+            with context, torch.inference_mode():
+                result, _ = self._mm_embedding_impl(
+                    mm_inputs, request_id=request_id, work_items=items
+                )
+                result.position_ids = [pos.cpu() for pos in result.position_ids]
+                return result
+        except Exception as error:
+            for item in items:
+                item.fail_cache(error)
+            raise
+        finally:
+            # Return capacity before Future.result() can release the caller;
+            # otherwise the next prefill cohort can see a spurious overload.
+            self._release_async_slots()
+
     def _mm_embedding_impl(
         self,
         mm_inputs: List[MultimodalInput],
@@ -848,8 +962,10 @@ class MMProcessEngine:
         report_image_count=True,
         report_embedding_length=True,
         report_success_access=True,
+        work_items=None,
     ):
-        work_items = []
+        supplied_work_items = work_items is not None
+        work_items = [] if work_items is None else work_items
         self.inc_query_num()
         try:
             with torch.profiler.record_function("mm_embedding_impl"):
@@ -865,12 +981,20 @@ class MMProcessEngine:
                     self._access_logger.log_query_access(
                         mm_inputs, request_id=request_id
                     )
-                work_items = self._create_work_items(
-                    mm_inputs,
-                    cache_claim=cache_claim,
-                    defer_cache_complete=defer_cache_complete,
-                )
-                self._wait_for_preprocessing(work_items)
+                if not supplied_work_items:
+                    work_items = self._create_work_items(
+                        mm_inputs,
+                        cache_claim=cache_claim,
+                        defer_cache_complete=defer_cache_complete,
+                    )
+                # A repeated media item can depend on an owner in this same
+                # request. Submit owners before waiting on cache followers.
+                owners = [item for item in work_items if not item.waiting_for_cache]
+                followers = [item for item in work_items if item.waiting_for_cache]
+                self._wait_for_preprocessing(owners)
+                if followers:
+                    self._compute_embeddings(owners)
+                    self._wait_for_preprocessing(followers)
                 with torch.profiler.record_function("compute_embeddings"):
                     embeddings, positions, extras = self._compute_embeddings(work_items)
                 result = MMEmbeddingRes(

@@ -150,27 +150,28 @@ protected:
     virtual TorchAllocatorDumpResultPB dumpTorchAllocatorOnCurrentProcess(const std::string& dump_id);
 
 protected:
-    std::shared_ptr<EngineBase>           engine_;
-    std::shared_ptr<MultimodalProcessor>  mm_processor_;
-    EngineInitParams                      maga_init_params_;
-    ProposeModelEngineInitParams*         propose_maga_init_params_;
-    kmonitor::MetricsReporterPtr          metrics_reporter_;
-    std::atomic<size_t>                   onflight_requests_{0};
-    std::shared_ptr<RpcServerRuntimeMeta> meta_;
-    py::object                            weight_manager_;
-    std::shared_ptr<BroadcastManager>     tp_broadcaster_;
-    bool                                  torch_allocator_dump_enabled_{false};
-    std::string                           torch_allocator_dump_auth_token_;
-    double                                torch_allocator_dump_cooldown_seconds_{60.0};
-    std::mutex                            torch_allocator_dump_mutex_;
-    bool                                  torch_allocator_dump_in_progress_{false};
-    bool                                  torch_allocator_dump_has_completed_{false};
-    bool                                  torch_allocator_dump_active_started_by_public_{false};
-    bool                                  torch_allocator_dump_active_internal_started_{false};
-    std::string                           torch_allocator_dump_active_id_;
-    std::chrono::steady_clock::time_point torch_allocator_dump_last_completed_at_;
-    std::unordered_set<std::string>       torch_allocator_dump_ids_;
-    std::deque<std::string>               torch_allocator_dump_id_order_;
+    std::shared_ptr<EngineBase>                            engine_;
+    std::shared_ptr<MultimodalProcessor>                   mm_processor_;
+    std::shared_ptr<GenerateInput::PrepareMultimodalBatch> mm_batch_preparer_;
+    EngineInitParams                                       maga_init_params_;
+    ProposeModelEngineInitParams*                          propose_maga_init_params_;
+    kmonitor::MetricsReporterPtr                           metrics_reporter_;
+    std::atomic<size_t>                                    onflight_requests_{0};
+    std::shared_ptr<RpcServerRuntimeMeta>                  meta_;
+    py::object                                             weight_manager_;
+    std::shared_ptr<BroadcastManager>                      tp_broadcaster_;
+    bool                                                   torch_allocator_dump_enabled_{false};
+    std::string                                            torch_allocator_dump_auth_token_;
+    double                                                 torch_allocator_dump_cooldown_seconds_{60.0};
+    std::mutex                                             torch_allocator_dump_mutex_;
+    bool                                                   torch_allocator_dump_in_progress_{false};
+    bool                                                   torch_allocator_dump_has_completed_{false};
+    bool                                                   torch_allocator_dump_active_started_by_public_{false};
+    bool                                                   torch_allocator_dump_active_internal_started_{false};
+    std::string                                            torch_allocator_dump_active_id_;
+    std::chrono::steady_clock::time_point                  torch_allocator_dump_last_completed_at_;
+    std::unordered_set<std::string>                        torch_allocator_dump_ids_;
+    std::deque<std::string>                                torch_allocator_dump_id_order_;
 };
 
 }  // namespace rtp_llm

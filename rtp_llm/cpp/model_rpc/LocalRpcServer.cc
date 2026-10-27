@@ -158,6 +158,10 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
                                                          maga_init_params.model_config_.mm_model_config,
                                                          maga_init_params.model_config_.max_seq_len));
+        mm_batch_preparer_ = std::make_shared<GenerateInput::PrepareMultimodalBatch>(
+            [processor = mm_processor_](std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+                return processor->updateMultimodalFeaturesBatch(inputs);
+            });
     } else if (mm_kind == MMProcessorKind::REMOTE) {
         mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
                                                           maga_init_params.model_config_.max_seq_len,
@@ -302,6 +306,7 @@ ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::sha
         output->prepare_multimodal = [processor](std::shared_ptr<GenerateInput>& prepared) {
             return processor->updateMultimodalFeatures(prepared);
         };
+        output->prepare_multimodal_batch = mm_batch_preparer_;
         return ErrorInfo::OkStatus();
     }
     if (mm_processor_ != nullptr && output->multimodal_inputs) {

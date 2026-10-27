@@ -100,7 +100,11 @@ public:
     std::optional<MultimodalTokenLayout>        multimodal_token_layout;
     // Only called after bounded prefill admission; never captures an RPC context.
     std::function<ErrorInfo(std::shared_ptr<GenerateInput>&)> prepare_multimodal;
-    bool                                                      multimodal_prepared_late = false;
+    // Shared by inputs owned by the same local processor. The scheduler groups
+    // only identical owners; results retain the original request ordering.
+    using PrepareMultimodalBatch = std::function<std::vector<ErrorInfo>(std::vector<std::shared_ptr<GenerateInput>>&)>;
+    std::shared_ptr<PrepareMultimodalBatch> prepare_multimodal_batch;
+    bool                                    multimodal_prepared_late = false;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;

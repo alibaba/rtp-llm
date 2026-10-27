@@ -195,6 +195,11 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     }
     CHECK_AND_RETURN_REF(mm_embedding_res,
                          MultimodalEmbedding(input->multimodal_inputs.value(), ip_port, input->request_id));
+    return applyMultimodalOutput(input, std::move(mm_embedding_res));
+}
+
+ErrorInfo MultimodalProcessor::applyMultimodalOutput(std::shared_ptr<GenerateInput>& input,
+                                                     MultimodalOutput                mm_embedding_res) {
     input->multimodal_features = std::move(mm_embedding_res.mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
     input->mm_extra_input      = std::move(mm_embedding_res.mm_extra_input);

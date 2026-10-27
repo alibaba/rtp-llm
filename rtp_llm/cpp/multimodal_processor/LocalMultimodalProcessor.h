@@ -13,7 +13,84 @@ public:
         return mm_process_engine_.attr("token_lengths")(inputs).cast<std::vector<int32_t>>();
     }
 
+    std::vector<ErrorInfo> updateMultimodalFeaturesBatch(std::vector<std::shared_ptr<GenerateInput>>& inputs) override {
+        std::vector<ErrorInfo>                    results(inputs.size(), ErrorInfo::OkStatus());
+        std::vector<size_t>                       indices;
+        std::vector<std::vector<MultimodalInput>> media;
+        std::vector<int64_t>                      request_ids;
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            if (inputs[i]->generate_config && inputs[i]->generate_config->calculate_loss) {
+                results[i] = ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
+            } else if (!inputs[i]->multimodal_inputs) {
+                results[i] = ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "missing multimodal inputs");
+            } else {
+                indices.push_back(i);
+                media.push_back(*inputs[i]->multimodal_inputs);
+                request_ids.push_back(inputs[i]->request_id);
+            }
+        }
+        if (indices.empty()) {
+            return results;
+        }
+        // Python waits release the GIL. All request jobs are submitted before
+        // waiting; the existing bounded executor feeds one GPU scheduler.
+        py::gil_scoped_acquire gil;
+        try {
+            auto outputs = mm_process_engine_.attr("mm_embedding_batch_cpp")(media, request_ids).cast<py::list>();
+            if (outputs.size() != indices.size()) {
+                throw std::runtime_error("local multimodal batch returned the wrong result count");
+            }
+            for (size_t j = 0; j < indices.size(); ++j) {
+                const auto i      = indices[j];
+                auto       output = outputs[j].cast<py::tuple>();
+                if (output[0].is_none()) {
+                    const auto message = output[2].cast<std::string>();
+                    auto       code    = parseMultimodalErrorCode(output[1].cast<int>());
+                    auto       legacy  = parseMultimodalErrorMessage(message);
+                    results[i]         = code   ? ErrorInfo(*code, message) :
+                                         legacy ? *legacy :
+                                                  ErrorInfo(ErrorCode::MM_PROCESS_ERROR, message);
+                } else {
+                    try {
+                        results[i] = applyMultimodalOutput(inputs[i], convertResult(output[0]));
+                    } catch (const std::exception& error) {
+                        results[i] = ErrorInfo(ErrorCode::MM_PROCESS_ERROR, error.what());
+                    }
+                }
+            }
+        } catch (const std::exception& error) {
+            for (auto i : indices) {
+                results[i] = ErrorInfo(ErrorCode::MM_PROCESS_ERROR, error.what());
+            }
+        }
+        return results;
+    }
+
 private:
+    static MultimodalOutput convertResult(py::handle res) {
+        MultimodalOutput output;
+        for (auto emb : convertPyObjectToVec(res.attr("embeddings"))) {
+            output.mm_features.push_back(convertPyObjectToTensor(emb));
+        }
+        if (!res.attr("position_ids").is_none()) {
+            output.mm_position_ids.emplace();
+            for (auto pos : convertPyObjectToVec(res.attr("position_ids"))) {
+                output.mm_position_ids->push_back(convertPyObjectToTensor(pos));
+            }
+        }
+        if (!res.attr("extra_input").is_none()) {
+            output.mm_extra_input.emplace();
+            for (auto extra : convertPyObjectToVec(res.attr("extra_input"))) {
+                output.mm_extra_input->push_back(convertPyObjectToTensor(extra));
+            }
+        }
+        if (py::hasattr(res, "feature_hashes")) {
+            for (auto hash : convertPyObjectToVec(res.attr("feature_hashes"))) {
+                output.feature_hashes.push_back(convertPyObjectToTensor(hash));
+            }
+        }
+        return output;
+    }
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                       std::string                                 ip_port    = "",
                                                       int64_t                                     request_id = 0) {

@@ -467,6 +467,7 @@ class MMProcessEngineGpuBatchTest(TestCase):
             model.model_config,
             vit_config,
             ProfilingDebugLoggingConfig(),
+            device="cpu",
         )
         self.addCleanup(engine.stop)
         return engine, model.mm_part
@@ -522,6 +523,185 @@ class MMProcessEngineGpuBatchTest(TestCase):
         self.assertEqual(r1.embeddings[0].item(), 7)
         self.assertEqual(r2.embeddings[0].item(), 7)
         self.assertEqual(part.embedding_calls, 1)
+
+    @staticmethod
+    def _local_batch_inputs(values):
+        return [
+            [
+                MultimodalInput(
+                    f"fake://{value}",
+                    MMUrlType.IMAGE,
+                    torch.empty(0),
+                    MMPreprocessConfig(*_DEFAULT_CONFIG),
+                )
+                for value in request
+            ]
+            for request in values
+        ]
+
+    def test_local_prefill_batch_forms_cross_request_forward(self):
+        engine, part = self._make_engine(
+            gpu_max_batch_size=4, gpu_batch_wait_ms=400, vit_concurrency=4
+        )
+        values = [[13], [7], [21], [4]]
+        results = engine.mm_embedding_batch_cpp(
+            self._local_batch_inputs(values), [1, 2, 3, 4]
+        )
+        for (result, code, message), expected in zip(results, values):
+            self.assertEqual((code, message), (0, ""))
+            for tensors in (result.embeddings, result.position_ids, result.extra_input):
+                self.assertEqual([tensor.item() for tensor in tensors], expected)
+            self.assertEqual(len(result.feature_hashes), 1)
+        # Every request has exactly one item: this proves cross-request merging,
+        # not merely batching several images from one request.
+        self.assertGreaterEqual(max(part.batch_sizes), 2)
+        self.assertEqual(sum(part.batch_sizes), 4)
+
+    def test_local_prefill_batch_respects_serial_and_batch_limits(self):
+        for limit in (1, 2):
+            with self.subTest(limit=limit):
+                engine, part = self._make_engine(
+                    gpu_max_batch_size=limit, gpu_batch_wait_ms=200, vit_concurrency=4
+                )
+                results = engine.mm_embedding_batch_cpp(
+                    self._local_batch_inputs([[1], [2], [3], [4]]), [1, 2, 3, 4]
+                )
+                self.assertTrue(all(result is not None for result, _, _ in results))
+                self.assertEqual(sum(part.batch_sizes), 4)
+                self.assertLessEqual(max(part.batch_sizes), limit)
+                if limit == 2:
+                    self.assertIn(2, part.batch_sizes)
+
+    def test_local_prefill_batch_overlapping_media_and_cache_order(self):
+        engine, part = self._make_engine(
+            gpu_batch_wait_ms=100, mm_cache_cpu_max_bytes=4096, vit_concurrency=2
+        )
+        values = [[1, 1, 2], [2, 1], [3]]
+        for _ in range(2):
+            results = engine.mm_embedding_batch_cpp(
+                self._local_batch_inputs(values), [1, 2, 3]
+            )
+            for (result, code, message), expected in zip(results, values):
+                self.assertIsNotNone(result, message)
+                self.assertEqual(code, 0)
+                self.assertEqual(
+                    [tensor.item() for tensor in result.embeddings], expected
+                )
+                self.assertEqual(
+                    [tensor.item() for tensor in result.position_ids], expected
+                )
+                self.assertEqual(len(result.feature_hashes), len(expected))
+        self.assertEqual(part.embedding_calls, 3)
+
+    def test_local_prefill_batch_preprocess_error_is_per_request(self):
+        engine, _ = self._make_engine(gpu_batch_wait_ms=100)
+        original = engine.preprocess_executor.preprocess_func
+
+        def preprocess(inputs, config, **kwargs):
+            if inputs[0].url == "fake://2":
+                raise ValueError("bad media")
+            return original(inputs, config, **kwargs)
+
+        engine.preprocess_executor.preprocess_func = preprocess
+        results = engine.mm_embedding_batch_cpp(
+            self._local_batch_inputs([[1], [2], [3]]), [1, 2, 3]
+        )
+        self.assertEqual(results[0][0].embeddings[0].item(), 1)
+        self.assertIsNone(results[1][0])
+        self.assertIn("bad media", results[1][2])
+        self.assertEqual(results[2][0].embeddings[0].item(), 3)
+
+    def test_local_prefill_batch_admission_is_bounded(self):
+        engine, part = self._make_engine(vit_concurrency=1, vit_max_queue_size=0)
+        results = engine.mm_embedding_batch_cpp(
+            self._local_batch_inputs([[1], [2]]), [1, 2]
+        )
+        self.assertEqual(results[0][0].embeddings[0].item(), 1)
+        self.assertIsNone(results[1][0])
+        self.assertEqual(results[1][1], int(ExceptionType.CONCURRENCY_LIMIT_ERROR))
+        self.assertEqual(part.embedding_calls, 1)
+        # A completed cohort does not leak admission slots.
+        again = engine.mm_embedding_batch_cpp(self._local_batch_inputs([[3]]), [3])
+        self.assertIsNotNone(again[0][0], again[0][2])
+
+    def test_local_prefill_batch_submit_failure_releases_cache_owner(self):
+        engine, _ = self._make_engine(mm_cache_cpu_max_bytes=4096)
+        with mock.patch.object(
+            engine._async_compute_executor, "submit", side_effect=RuntimeError("closed")
+        ):
+            results = engine.mm_embedding_batch_cpp(
+                self._local_batch_inputs([[1], [1]]), [1, 2]
+            )
+        self.assertTrue(all(result is None for result, _, _ in results))
+        self.assertEqual(engine._async_admitted, 0)
+        retry = engine.mm_embedding_batch_cpp(self._local_batch_inputs([[1]]), [3])
+        self.assertIsNotNone(retry[0][0], retry[0][2])
+
+    def test_local_prefill_batch_rejects_mismatched_ids(self):
+        engine, _ = self._make_engine()
+        with self.assertRaises(ValueError):
+            engine.mm_embedding_batch_cpp(self._local_batch_inputs([[1]]), [])
+
+    def test_local_prefill_batch_matches_serial_tensors_and_hashes(self):
+        engine, _ = self._make_engine(gpu_batch_wait_ms=200)
+        serial, _ = self._make_engine(gpu_max_batch_size=1)
+        values = [[13, 7], [21], [4, 9]]
+        results = engine.mm_embedding_batch_cpp(
+            self._local_batch_inputs(values), [11, 12, 13]
+        )
+        for (result, code, message), expected in zip(results, values):
+            self.assertEqual((code, message), (0, ""))
+            reference = self._embed(serial, [f"fake://{value}" for value in expected])
+            for field in (
+                "embeddings",
+                "position_ids",
+                "extra_input",
+                "feature_hashes",
+            ):
+                actual_tensors = getattr(result, field)
+                expected_tensors = getattr(reference, field)
+                self.assertEqual(len(actual_tensors), len(expected_tensors))
+                for actual, target in zip(actual_tensors, expected_tensors):
+                    self.assertTrue(torch.equal(actual, target), field)
+
+    def test_local_prefill_batch_queue_timeout_releases_cache_and_admission(self):
+        engine, _ = self._make_engine(mm_cache_cpu_max_bytes=4096)
+        original = engine._run_local_batch_request
+
+        def expire_first(inputs, request_id, items, deadline):
+            if request_id == 1:
+                deadline = time.monotonic() - 1
+            return original(inputs, request_id, items, deadline)
+
+        with mock.patch.object(
+            engine, "_run_local_batch_request", side_effect=expire_first
+        ):
+            results = engine.mm_embedding_batch_cpp(
+                self._local_batch_inputs([[1], [2]]), [1, 2]
+            )
+        self.assertIsNone(results[0][0])
+        self.assertIn("timed out before execution", results[0][2])
+        self.assertEqual(results[1][0].embeddings[0].item(), 2)
+        self.assertEqual(engine._async_admitted, 0)
+        retry = engine.mm_embedding_batch_cpp(self._local_batch_inputs([[1]]), [3])
+        self.assertIsNotNone(retry[0][0], retry[0][2])
+
+    def test_local_prefill_batch_cancelled_submission_releases_cache_and_admission(
+        self,
+    ):
+        engine, _ = self._make_engine(mm_cache_cpu_max_bytes=4096)
+        cancelled = concurrent.futures.Future()
+        cancelled.cancel()
+        with mock.patch.object(
+            engine._async_compute_executor, "submit", return_value=cancelled
+        ):
+            results = engine.mm_embedding_batch_cpp(
+                self._local_batch_inputs([[1]]), [1]
+            )
+        self.assertIsNone(results[0][0])
+        self.assertEqual(engine._async_admitted, 0)
+        retry = engine.mm_embedding_batch_cpp(self._local_batch_inputs([[1]]), [2])
+        self.assertIsNotNone(retry[0][0], retry[0][2])
 
 
 class PreprocessMetricTest(TestCase):

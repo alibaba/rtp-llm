@@ -753,9 +753,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     const auto multimodal_candidates = selectMultimodalCandidates();
     if (!multimodal_candidates.empty()) {
         lock.unlock();
-        for (const auto& stream : multimodal_candidates) {
-            stream->prepareLateMultimodal();
-        }
+        GenerateStream::prepareLateMultimodalBatch(multimodal_candidates);
         lock.lock();
     }
 

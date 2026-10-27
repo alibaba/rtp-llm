@@ -328,7 +328,10 @@ public:
     }
     StreamState moveToNext();
     void        prepareLateMultimodal();
-    bool        hasPendingMultimodal() const;
+    static void prepareLateMultimodalBatch(const std::vector<std::shared_ptr<GenerateStream>>& streams);
+    std::shared_ptr<GenerateInput> beginLateMultimodal();
+    void finishLateMultimodal(const std::shared_ptr<GenerateInput>& prepared, const ErrorInfo& result);
+    bool hasPendingMultimodal() const;
 
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is finished
