@@ -509,15 +509,34 @@ def try_gather(
         it,
         layout,
         kernels[5],
+        oversized=groups is None,
         workspace=workspace,
         swa=swa,
         output_stream=output_stream,
     )
     if owned is not None:
         return owned
+    if groups is None:
+        return None
     # Unsupported common geometry preserves the previous collective schedule.
     # Once the owned path is selected, local errors propagate from that path.
     if len(ends) < _MIN_BATCH:
+        segmented = _v41_owned_pool.try_gather(
+            main,
+            index,
+            ends,
+            seq_ends,
+            mt,
+            it,
+            layout,
+            kernels[5],
+            oversized=True,
+            workspace=workspace,
+            swa=swa,
+            output_stream=output_stream,
+        )
+        if segmented is not None:
+            return segmented
         return None
     from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_indexer import (
         PrefillIndexerKeys,

@@ -122,7 +122,7 @@ def try_gather_prefill_pools(
         for count in counts
     )
     groups = _request_groups(counts)
-    if groups is None:
+    if any(count < 0 for count in counts):
         return None
     if (
         main_pool.device.type != "cuda"
@@ -145,6 +145,9 @@ def try_gather_prefill_pools(
     )
     if joint is not None:
         return joint
+
+    if groups is None:
+        return None
 
     if (
         main_pool.dtype != torch.uint8
