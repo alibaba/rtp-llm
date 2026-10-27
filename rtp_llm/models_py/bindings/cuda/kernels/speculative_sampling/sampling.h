@@ -38,5 +38,11 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                     // callers may pass uninitialized outputs. Defaults keep the
                                     // legacy kernel contract byte-for-byte.
                                     const bool* force_mask       = nullptr,
-                                    bool        finalize_outputs = false);
+                                    bool        finalize_outputs = false,
+                                    // Optional [batch_size] CUDA int32 lengths. Physical strides
+                                    // stay num_speculative_tokens / num_speculative_tokens+1.
+                                    // A row verifies only its prefix L and uses target row L for
+                                    // the bonus. Values are clamped to [0, num_speculative_tokens]
+                                    // on device. nullptr preserves the full-width behavior.
+                                    const int32_t* valid_draft_lengths = nullptr);
 }  // namespace rtp_llm

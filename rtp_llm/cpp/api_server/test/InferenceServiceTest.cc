@@ -1,5 +1,6 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <algorithm>
 
 #include "rtp_llm/cpp/api_server/Exception.h"
 #include "rtp_llm/cpp/api_server/ErrorResponse.h"
@@ -366,6 +367,68 @@ TEST_F(InferenceServiceTest, InferResponseRejectsPartialEnqueueAndCancelsAdmitte
     EXPECT_EQ(inference_service_->controller_->current_concurrency_, 0);
 
     writer_ptr.release();
+}
+
+TEST_F(InferenceServiceTest, BatchStreamIdsStayUniqueAcrossInterleavedRequestsAndRetainSeeds) {
+    auto*                                                    writer = mock_writer_.get();
+    std::unique_ptr<http_server::HttpResponseWriter>         writer_ptr(std::move(mock_writer_));
+    std::vector<std::vector<std::shared_ptr<GenerateInput>>> observed_inputs;
+    EXPECT_CALL(*mock_engine_, enqueueMultiple(Matcher<const std::vector<std::shared_ptr<GenerateInput>>&>(_)))
+        .Times(3)
+        .WillRepeatedly(Invoke([&](const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
+            observed_inputs.push_back(inputs);
+            // Stop at the engine admission boundary; this test does not need
+            // inference to observe the identities retained by actual inputs.
+            return std::make_pair(std::vector<bool>(inputs.size(), false),
+                                  std::vector<GenerateStreamPtr>(inputs.size()));
+        }));
+    EXPECT_CALL(*writer, isConnected()).Times(3).WillRepeatedly(Return(true));
+    EXPECT_CALL(*mock_metric_reporter_, reportQpsMetric(_, _)).Times(3);
+    EXPECT_CALL(*mock_metric_reporter_, reportFTInputTokenLengthMetric(_)).Times(7);
+    EXPECT_CALL(*mock_metric_reporter_, reportFTNumBeansMetric(_)).Times(7);
+    EXPECT_CALL(*mock_metric_reporter_, reportFTPreTokenProcessorRtMetric(_)).Times(7);
+    EXPECT_CALL(*mock_token_processor_, encode(_)).Times(7).WillRepeatedly(Return(std::vector<int>{1, 2, 3}));
+
+    http_server::HttpRequest batch_request;
+    batch_request._request =
+        CreateHttpPacket(R"({"prompt_batch":["first","second","third"],"generate_config":{"random_seed":17}})");
+    http_server::HttpRequest single_request;
+    single_request._request = CreateHttpPacket(R"({"prompt":"single"})");
+
+    // A second HTTP request can reserve its ID before the first batch expands.
+    // Deriving sibling IDs by outer_id + index would collide with this ID.
+    const auto batch_id  = inference_service_->request_counter_->incAndReturn();
+    const auto single_id = inference_service_->request_counter_->incAndReturn();
+    EXPECT_THROW(inference_service_->inferResponse(batch_id, writer_ptr, batch_request), HttpApiServerException);
+    const auto counter_after_batch = inference_service_->request_counter_->getValue();
+    EXPECT_EQ(counter_after_batch, single_id + 2);
+    EXPECT_THROW(inference_service_->inferResponse(single_id, writer_ptr, single_request), HttpApiServerException);
+    EXPECT_EQ(inference_service_->request_counter_->getValue(), counter_after_batch);
+    const auto next_batch_id = inference_service_->request_counter_->incAndReturn();
+    EXPECT_THROW(inference_service_->inferResponse(next_batch_id, writer_ptr, batch_request), HttpApiServerException);
+
+    ASSERT_EQ(observed_inputs.size(), 3);
+    ASSERT_EQ(observed_inputs[0].size(), 3);
+    ASSERT_EQ(observed_inputs[1].size(), 1);
+    ASSERT_EQ(observed_inputs[2].size(), 3);
+    EXPECT_EQ(observed_inputs[0][0]->request_id, batch_id);
+    EXPECT_EQ(observed_inputs[1][0]->request_id, single_id);
+    EXPECT_EQ(observed_inputs[2][0]->request_id, next_batch_id);
+    std::vector<int64_t> ids;
+    for (const auto& batch : observed_inputs) {
+        for (const auto& input : batch) {
+            ids.push_back(input->request_id);
+        }
+    }
+    std::sort(ids.begin(), ids.end());
+    EXPECT_EQ(std::adjacent_find(ids.begin(), ids.end()), ids.end());
+    for (const auto batch_index : {0, 2}) {
+        for (const auto& input : observed_inputs[batch_index]) {
+            EXPECT_EQ(input->generate_config->random_seed, 17);
+        }
+    }
+    EXPECT_FALSE(observed_inputs[1][0]->generate_config->random_seed.has_value());
+    EXPECT_EQ(inference_service_->controller_->current_concurrency_, 0);
 }
 
 TEST_F(InferenceServiceTest, fillGenerateInput) {

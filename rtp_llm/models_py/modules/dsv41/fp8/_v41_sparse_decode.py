@@ -318,7 +318,8 @@ def make_plan(
     *,
     query_len,
     candidate_mask=None,
-    valid_requests=None
+    valid_requests=None,
+    request_ids=None,
 ):
     """Build once per forward from unique block IDs and -1 padding.
 
@@ -344,6 +345,14 @@ def make_plan(
     positive pages and score repair omitted. Context lengths/metadata stay unchanged.
     """
     rows, k = candidates.shape
+    if request_ids is not None:
+        if request_ids.shape != (rows,) or request_ids.device != block_table.device:
+            raise ValueError("Packed sparse request ids must match the query rows")
+        request_ids = request_ids.long()
+        block_table = block_table.index_select(0, request_ids)
+        if valid_requests is not None:
+            valid_requests = valid_requests.index_select(0, request_ids)
+        query_len = 1
     if k not in (512, 1024, 2048) or candidates.dtype != torch.int32:
         raise ValueError("Sparse decode requires int32 candidate TopK 512/1024/2048")
     if rows != block_table.shape[0] * query_len:

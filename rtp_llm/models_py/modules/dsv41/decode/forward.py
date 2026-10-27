@@ -178,6 +178,7 @@ def build_metadata_eager(
     paged_pool_specs: Dict[int, Tuple[int, int, int]],
     kv_cache: Optional[Any] = None,
     fp8_kv_cache: bool = False,
+    total_tokens: Optional[int] = None,
 ) -> Optional[Any]:  # DSv4DecodeAttnMetadata | None
     """Build ``DSv4DecodeAttnMetadata`` inline from framework attn inputs.
 
@@ -190,24 +191,37 @@ def build_metadata_eager(
     caller can short-circuit to an empty ``PyModelOutputs``.
 
     Per-request first-token position is read from ``attn.sequence_lengths``
-    (normal decode) or ``attn.prefix_lengths`` (target verify). The FP8
-    branch passes ``attn`` straight through and lets
+    (normal decode) or ``attn.prefix_lengths`` (target verify). For dense
+    verification, the FP8 branch passes ``attn`` straight through and lets
     :func:`build_decode_metadata_fp8` derive + clamp ``start_pos``
     internally via :func:`_build_start_pos_from_attention_inputs`; the
     BF16 branch builds + clamps ``start_pos`` here before calling the
     legacy :func:`build_decode_metadata`. Both clamp to
     ``[0, max_seq_len - q_len]`` so the whole ``[start_pos, start_pos + q_len)``
-    window stays within KV/compressed pool capacity.
+    window stays within KV/compressed pool capacity. Packed verification uses
+    each request's actual prefix and query length; its ``q_len`` is only the
+    average ``total_tokens / bs`` used for the packed buffer view.
     """
     # Target verify is a multi-token decode. C++ MtpExecutor (see
-    # MtpExecutor.cc:879-958) clears ``sequence_lengths`` and stashes the
+    # MtpExecutor.cc) clears ``sequence_lengths`` and stashes the
     # prior decode positions into ``prefix_lengths``; ``input_lengths``
-    # carries the uniform verify width = ``gen_num_per_cycle + 1``.
+    # carries gamma+1 for dense verification, or each selected prefix length+1
+    # for packed verification.
     is_target_verify = bool(getattr(attn, "is_target_verify", False))
+    packed_verify = bool(getattr(attn, "is_packed_target_verify", False))
     if is_target_verify:
         input_lengths_d = attn.input_lengths
-        q_len = int(input_lengths_d[0]) if input_lengths_d.numel() > 0 else 1
         bs = int(attn.prefix_lengths.shape[0])
+        if packed_verify:
+            if not fp8_kv_cache or not getattr(v4_args, "v41_config", None):
+                raise ValueError("Packed target verification requires V4.1 FP8 decode")
+            if not bs or total_tokens is None or total_tokens <= 0 or total_tokens % bs:
+                raise ValueError(
+                    "Packed target rows must have an integral average width"
+                )
+            q_len = total_tokens // bs
+        else:
+            q_len = int(input_lengths_d[0]) if input_lengths_d.numel() > 0 else 1
     else:
         q_len = 1
         bs = int(attn.sequence_lengths.shape[0])
@@ -235,6 +249,35 @@ def build_metadata_eager(
         paged_tokens_per_block[tag] = int(spec[1])
 
     if fp8_kv_cache:
+        if packed_verify:
+            from rtp_llm.models_py.modules.dsv41.fp8.decode.packed_metadata import (
+                allocate_packed_decode_metadata,
+                update_packed_decode_metadata,
+            )
+
+            meta = allocate_packed_decode_metadata(
+                max_batch_size=bs,
+                q_len=q_len,
+                window_size=int(v4_args.window_size),
+                head_dim=int(v4_args.head_dim),
+                max_seq_len=max_s,
+                compress_ratios=decode_metadata_compress_ratios(v4_args),
+                index_topk=int(v4_args.index_topk),
+                device=device,
+                paged_pool_specs=paged_pool_specs,
+                paged_block_tables=paged_block_tables,
+            )
+            meta.is_cuda_graph = False
+            if meta.decoder_swa_metadata is not None:
+                meta.decoder_swa_metadata.is_cuda_graph = False
+            update_packed_decode_metadata(
+                meta,
+                attn,
+                paged_block_tables,
+                paged_entries_per_block,
+                paged_tokens_per_block,
+            )
+            return meta
         from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_attn_metadata import (
             build_decode_metadata_fp8,
         )
@@ -466,6 +509,7 @@ def forward_decode(
             paged_specs,
             kv_cache=kv_cache,
             fp8_kv_cache=bool(getattr(v4, "fp8_kv_cache", False)),
+            total_tokens=int(input_ids.numel()),
         )
         if meta is None:
             # Empty batch (B == 0) — short-circuit with zero-row hidden.

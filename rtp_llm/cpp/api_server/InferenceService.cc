@@ -183,7 +183,11 @@ void InferenceService::inferResponse(int64_t                                    
     std::vector<std::shared_ptr<GenerateInput>> inputs;
     inputs.reserve(req.input_texts.size());
     for (int i = 0; i < req.input_texts.size(); i++) {
-        auto input = fillGenerateInput(request_id, req.input_texts[i], req.input_urls[i], req.generate_configs[i]);
+        // Each prompt becomes an independent stream. Keep the outer ID for the
+        // first one, and use the shared counter for siblings so concurrent HTTP
+        // requests cannot collide. Access logs still use the outer request_id.
+        const int64_t stream_id = i == 0 ? request_id : request_counter_->incAndReturn();
+        auto input = fillGenerateInput(stream_id, req.input_texts[i], req.input_urls[i], req.generate_configs[i]);
         inputs.push_back(input);
     }
     auto [enqueue_successes, ori_streams] = engine_->enqueueMultiple(inputs);

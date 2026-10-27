@@ -5,6 +5,7 @@
 #include <map>
 #include <cerrno>
 #include <cstdlib>
+#include <cmath>
 #include <limits>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -210,7 +211,8 @@ bool SpeculativeSampler::replayRejectionGraph(SpeculativeSamplerOutput& output,
                                               const torch::Tensor&      target,
                                               const torch::Tensor&      uniform,
                                               const torch::Tensor&      probs,
-                                              bool                      point_mass) const {
+                                              bool                      point_mass,
+                                              const torch::Tensor&      valid_draft_lengths) const {
 #if USING_CUDA
     const auto& graphs = rejection_graphs_;
     if (!graphs || !point_mass || draft.device() != graphs->device || target.device() != graphs->device
@@ -248,18 +250,20 @@ bool SpeculativeSampler::replayRejectionGraph(SpeculativeSamplerOutput& output,
         // Patch node arguments to this call's tensors. The original kernel
         // reads the last history column directly; no staging or output clone
         // is needed, and every GPU result owns independent storage.
-        float* draft_probs    = nullptr;
-        float* target_probs   = nullptr;
-        auto*  draft_ids      = draft.data_ptr<int32_t>();
-        auto*  target_ids     = target.data_ptr<int32_t>();
-        auto*  samples        = uniform.data_ptr<float>();
-        auto*  output_ids     = result.data_ptr<int32_t>();
-        auto*  output_lengths = output_ids + token_count;
-        auto*  do_sample      = entry->masks_d.data_ptr<bool>();
-        auto*  force          = do_sample + found->first;
-        int    rows = batch, steps = propose_step_, vocab = graphs->vocab, stride = target.size(1);
-        bool   draft_point_mass = true, target_point_mass = true, finalize = true;
-        void*  args[]       = {&draft_probs,
+        float*         draft_probs    = nullptr;
+        float*         target_probs   = nullptr;
+        auto*          draft_ids      = draft.data_ptr<int32_t>();
+        auto*          target_ids     = target.data_ptr<int32_t>();
+        auto*          samples        = uniform.data_ptr<float>();
+        auto*          output_ids     = result.data_ptr<int32_t>();
+        auto*          output_lengths = output_ids + token_count;
+        auto*          do_sample      = entry->masks_d.data_ptr<bool>();
+        auto*          force          = do_sample + found->first;
+        int            rows = batch, steps = propose_step_, vocab = graphs->vocab, stride = target.size(1);
+        bool           draft_point_mass = true, target_point_mass = true, finalize = true;
+        const int32_t* valid_lengths =
+            valid_draft_lengths.defined() ? valid_draft_lengths.data_ptr<int32_t>() : nullptr;
+        void* args[]        = {&draft_probs,
                                &draft_ids,
                                &samples,
                                &target_probs,
@@ -274,8 +278,9 @@ bool SpeculativeSampler::replayRejectionGraph(SpeculativeSamplerOutput& output,
                                &draft_point_mass,
                                &target_point_mass,
                                &force,
-                               &finalize};
-        auto   params       = entry->kernel_params;
+                               &finalize,
+                               &valid_lengths};
+        auto  params        = entry->kernel_params;
         params.gridDim.x    = rows;
         params.kernelParams = args;
         C10_CUDA_CHECK(cudaGraphExecKernelNodeSetParams(entry->executable, entry->kernel, &params));
@@ -376,6 +381,105 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
     return output;
 }
 
+torch::Tensor SpeculativeSampler::buildValidDraftLengths(const torch::Tensor& confidence_rates,
+                                                         const torch::Tensor& stable_order_indices,
+                                                         int64_t              total_draft_budget) {
+    RTP_LLM_CHECK_WITH_INFO(confidence_rates.defined() && confidence_rates.dim() == 2
+                                && confidence_rates.scalar_type() == torch::kFloat32 && confidence_rates.is_contiguous()
+                                && (confidence_rates.device().is_cpu() || confidence_rates.is_cuda()),
+                            "DSpARK prefix planner requires contiguous CPU/CUDA FP32 [B, gamma] rates");
+    const int64_t batch_size = confidence_rates.size(0);
+    const int64_t gamma      = confidence_rates.size(1);
+    RTP_LLM_CHECK_WITH_INFO(gamma > 0 && gamma <= std::numeric_limits<int32_t>::max(),
+                            "DSpARK prefix planner requires a positive int32 proposal width");
+    RTP_LLM_CHECK_WITH_INFO(
+        stable_order_indices.defined() && stable_order_indices.dim() == 1 && stable_order_indices.size(0) == batch_size
+            && stable_order_indices.scalar_type() == torch::kInt64 && stable_order_indices.is_contiguous()
+            && stable_order_indices.device() == confidence_rates.device(),
+        "DSpARK prefix planner requires contiguous int64 [B] stable row indices on the rates device");
+    RTP_LLM_CHECK_WITH_INFO(total_draft_budget >= 0 && total_draft_budget <= confidence_rates.numel(),
+                            "DSpARK prefix planner budget must be between zero and B*gamma");
+    const auto length_options = confidence_rates.options().dtype(torch::kInt32);
+    if (batch_size == 0 || total_draft_budget == 0) {
+        return torch::zeros({batch_size}, length_options);
+    }
+    if (total_draft_budget == confidence_rates.numel()) {
+        return torch::full({batch_size}, gamma, length_options);
+    }
+
+    auto valid =
+        torch::isfinite(confidence_rates).logical_and(confidence_rates.ge(0.0)).logical_and(confidence_rates.le(1.0));
+    auto clean = torch::where(valid, confidence_rates, torch::zeros_like(confidence_rates));
+    // Parallel cumprod may use different floating-point association at adjacent
+    // positions. A prefix minimum prevents a rounded successor from overtaking
+    // its predecessor. It reads only earlier scores, preserving causality.
+    auto scores = std::get<0>(clean.cumprod(1).cummin(1)).index_select(0, stable_order_indices);
+    // Request-major flattening already orders ties by stable identity and then
+    // position. A stable score sort preserves that order without epsilon keys.
+    auto order    = torch::argsort(scores.reshape({-1}), /*stable=*/true, /*dim=*/0, /*descending=*/true);
+    auto selected = torch::zeros({confidence_rates.numel()}, length_options);
+    selected.index_fill_(0, order.narrow(0, 0, total_draft_budget), 1);
+    auto sorted_lengths = selected.view({batch_size, gamma}).sum(1, false, torch::kInt32);
+    auto lengths        = torch::empty({batch_size}, length_options);
+    lengths.index_copy_(0, stable_order_indices, sorted_lengths);
+    return lengths;
+}
+
+torch::Tensor SpeculativeSampler::buildConfidenceStats(const torch::Tensor& confidence_rates,
+                                                       const torch::Tensor& accept_len,
+                                                       const torch::Tensor& valid_lengths,
+                                                       const torch::Tensor& eligible_rows) {
+    RTP_LLM_CHECK_WITH_INFO(confidence_rates.defined() && confidence_rates.dim() == 2
+                                && confidence_rates.scalar_type() == torch::kFloat32,
+                            "DSpARK confidence statistics require FP32 [B, gamma] rates");
+    const auto batch_size          = confidence_rates.size(0);
+    const auto gamma               = confidence_rates.size(1);
+    const auto valid_length_tensor = [&](const torch::Tensor& tensor) {
+        return tensor.defined() && tensor.dim() == 1 && tensor.size(0) == batch_size
+               && tensor.device() == confidence_rates.device()
+               && (tensor.scalar_type() == torch::kInt32 || tensor.scalar_type() == torch::kInt64);
+    };
+    RTP_LLM_CHECK_WITH_INFO(valid_length_tensor(accept_len),
+                            "DSpARK confidence statistics require int32/int64 [B] accept lengths on the rates device");
+    RTP_LLM_CHECK_WITH_INFO(!valid_lengths.defined() || valid_length_tensor(valid_lengths),
+                            "DSpARK confidence statistics require int32/int64 [B] valid lengths on the rates device");
+    RTP_LLM_CHECK_WITH_INFO(!eligible_rows.defined()
+                                || (eligible_rows.dim() == 1 && eligible_rows.size(0) == batch_size
+                                    && eligible_rows.scalar_type() == torch::kBool
+                                    && eligible_rows.device() == confidence_rates.device()),
+                            "DSpARK confidence statistics require bool [B] eligibility on the rates device");
+
+    auto positions = torch::arange(gamma, confidence_rates.options().dtype(torch::kInt64)).unsqueeze(0);
+    auto accepted  = accept_len.to(torch::kInt64).sub(1).unsqueeze(1);
+    // The first rejection is observed; later positions are censored. When all
+    // valid drafts were accepted, the bonus position is not a draft attempt.
+    auto attempted = positions.le(accepted);
+    if (valid_lengths.defined()) {
+        attempted.logical_and_(positions.lt(valid_lengths.unsqueeze(1)));
+    }
+    if (eligible_rows.defined()) {
+        attempted.logical_and_(eligible_rows.unsqueeze(1));
+    }
+    auto valid_prediction =
+        torch::isfinite(confidence_rates).logical_and(confidence_rates.ge(0.0)).logical_and(confidence_rates.le(1.0));
+    auto observed = attempted.logical_and(valid_prediction);
+    auto invalid  = attempted.logical_and(valid_prediction.logical_not());
+
+    // Select before arithmetic: multiplying an excluded NaN by zero would
+    // otherwise poison a whole position's asynchronously aggregated metrics.
+    auto zeros       = torch::zeros_like(confidence_rates);
+    auto predictions = torch::where(observed, confidence_rates, zeros);
+    auto labels      = torch::where(observed, positions.lt(accepted).to(torch::kFloat32), zeros);
+    auto errors      = predictions - labels;
+    return torch::stack({observed.to(torch::kFloat32).sum(0),
+                         labels.sum(0),
+                         predictions.sum(0),
+                         errors.abs().sum(0),
+                         errors.square().sum(0),
+                         invalid.to(torch::kFloat32).sum(0)},
+                        1);
+}
+
 SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_logits,
                                                     const torch::Tensor& anchors,
                                                     const torch::Tensor& temperature,
@@ -387,8 +491,73 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
                                                     bool                 batch_all_greedy,
                                                     int                  force_topk,
                                                     int                  joint_max_top_k,
-                                                    bool                 copy_token_ids) const {
+                                                    bool                 copy_token_ids,
+                                                    const torch::Tensor& confidence_hidden_logits,
+                                                    const torch::Tensor& confidence_head_w,
+                                                    double               confidence_temperature) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.sample_dspark_draft");
+    const bool compute_confidence = confidence_head_w.defined() || confidence_hidden_logits.defined();
+    const auto batch_size         = compute_confidence ? temperature.numel() : 0;
+    // Python projects the pre-norm proposal hidden to FP32 scalars. Finish
+    // the head using the same previous-token embedding as the Markov bias.
+    // No full hidden tensor crosses this API.
+    RTP_LLM_CHECK_WITH_INFO(confidence_head_w.defined() == confidence_hidden_logits.defined(),
+                            "DSpARK confidence head requires both hidden logits and the head weight");
+    RTP_LLM_CHECK_WITH_INFO(!compute_confidence
+                                || (std::isfinite(confidence_temperature) && confidence_temperature > 0.0),
+                            "DSpARK confidence temperature must be positive and finite, got %g",
+                            confidence_temperature);
+    torch::Tensor confidence_rates;
+    torch::Tensor hidden_logits;
+    torch::Tensor confidence_w_markov;
+    if (compute_confidence) {
+        RTP_LLM_CHECK_WITH_INFO(
+            confidence_hidden_logits.is_cuda() && confidence_hidden_logits.is_contiguous()
+                && confidence_hidden_logits.scalar_type() == torch::kFloat32 && confidence_hidden_logits.dim() == 2
+                && confidence_hidden_logits.size(0) == base_logits.size(0) && confidence_hidden_logits.size(1) == 1
+                && confidence_hidden_logits.device() == base_logits.device(),
+            "DSpARK confidence hidden logits must be contiguous CUDA FP32 [B*gamma, 1] "
+            "on the logits device");
+        RTP_LLM_CHECK_WITH_INFO(markov_w1.defined() && markov_w1.is_cuda() && markov_w1.dim() == 2
+                                    && markov_w1.size(1) > 0 && markov_w1.device() == base_logits.device(),
+                                "DSpARK confidence head requires CUDA [vocab, markov_rank] embeddings "
+                                "on the logits device");
+        const auto markov_rank = markov_w1.size(1);
+        // The executor validates the exact hidden+rank width. This scalar API
+        // can validate the full-head shape and consume its final rank columns.
+        RTP_LLM_CHECK_WITH_INFO(confidence_head_w.is_cuda() && confidence_head_w.is_contiguous()
+                                    && confidence_head_w.device() == base_logits.device()
+                                    && confidence_head_w.dim() == 2 && confidence_head_w.size(0) == 1
+                                    && confidence_head_w.size(1) > markov_rank
+                                    && (confidence_head_w.scalar_type() == torch::kFloat32
+                                        || confidence_head_w.scalar_type() == torch::kBFloat16),
+                                "DSpARK confidence head weight must be contiguous CUDA FP32/BF16 "
+                                "[1, hidden+markov_rank] on the logits device");
+        confidence_w_markov = confidence_head_w.narrow(1, confidence_head_w.size(1) - markov_rank, markov_rank)
+                                  .to(torch::kFloat32)
+                                  .view({markov_rank, 1});
+        hidden_logits    = confidence_hidden_logits.view({batch_size, static_cast<int64_t>(propose_step_), 1});
+        confidence_rates = torch::empty({batch_size, static_cast<int64_t>(propose_step_)},
+                                        torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
+    }
+
+    // Sampling graphs retain the fused Markov walk. The confidence for position
+    // t depends on its pre-norm projection and token t-1, so it can be evaluated
+    // from the finished proposal without changing sampling or RNG consumption.
+    auto finish = [&](SamplerOutput output) {
+        if (compute_confidence) {
+            for (int64_t step = 0; step < static_cast<int64_t>(propose_step_); ++step) {
+                auto previous_tokens = step == 0 ? anchors.reshape({batch_size}) : output.token_ids.select(1, step - 1);
+                auto markov_embedding = markov_w1.index_select(0, previous_tokens.to(torch::kLong));
+                auto markov_logit     = markov_embedding.to(torch::kFloat32).mm(confidence_w_markov);
+                auto logit            = (hidden_logits.select(1, step) + markov_logit).squeeze(1);
+                auto scaled           = (logit / static_cast<float>(confidence_temperature)).clamp(-60.0, 60.0);
+                confidence_rates.select(1, step).copy_(torch::sigmoid(scaled));
+            }
+            output.confidence_rates = confidence_rates;
+        }
+        return output;
+    };
 #if USING_CUDA
     const auto& graphs = dspark_graphs_;
     if (graphs && batch_all_greedy && draft_vocab_size == graphs->vocab && base_logits.defined()
@@ -420,21 +589,21 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
             if (copy_token_ids) {
                 output.token_ids = output.token_ids.clone();
             }
-            return output;
+            return finish(std::move(output));
         }
     }
 #endif
-    return sampleDSparkDraftEager(base_logits,
-                                  anchors,
-                                  temperature,
-                                  top_k,
-                                  top_p,
-                                  markov_w1,
-                                  markov_w2,
-                                  draft_vocab_size,
-                                  batch_all_greedy,
-                                  force_topk,
-                                  joint_max_top_k);
+    return finish(sampleDSparkDraftEager(base_logits,
+                                         anchors,
+                                         temperature,
+                                         top_k,
+                                         top_p,
+                                         markov_w1,
+                                         markov_w2,
+                                         draft_vocab_size,
+                                         batch_all_greedy,
+                                         force_topk,
+                                         joint_max_top_k));
 }
 
 SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& base_logits,
@@ -635,7 +804,7 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
             sampled_target_tokens = d2t_map_.index_select(0, sampled_draft_tokens.to(torch::kLong)).to(torch::kInt32);
         }
         token_columns.push_back(sampled_target_tokens);
-        previous_tokens = sampled_target_tokens.to(torch::kLong);
+        previous_tokens  = sampled_target_tokens.to(torch::kLong);
         markov_embedding = torch::Tensor();
     }
 
@@ -669,7 +838,21 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     int batch_size = streams.size();
 
-    auto draft_token_ids  = draft_sampler_output.token_ids;
+    const auto& valid_draft_lengths = draft_sampler_output.valid_draft_lengths;
+    if (valid_draft_lengths.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(
+            valid_draft_lengths.is_cuda()
+                && valid_draft_lengths.get_device() == cuda_graph::graphGetCurrentStream().device_index()
+                && valid_draft_lengths.scalar_type() == torch::kInt32 && valid_draft_lengths.dim() == 1
+                && valid_draft_lengths.size(0) == batch_size && valid_draft_lengths.is_contiguous(),
+            "DSpARK valid draft lengths must be contiguous CUDA int32 [B] on the sampling device");
+        // Legacy finalization assumes full width, including forced acceptance
+        // and row-gamma bonus selection. Only the CUDA folded path supports L.
+        RTP_LLM_CHECK_WITH_INFO(execRejectionSamplingSupportsFinalize(),
+                                "DSpARK bounded verification requires CUDA folded finalization support");
+    }
+
+    auto draft_token_ids = draft_sampler_output.token_ids;
 
     auto       draft_token_probs      = draft_sampler_output.all_probs;
     auto       target_token_probs     = target_sampler_output.all_probs;
@@ -734,7 +917,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                              target_token_ids_d_t,
                              uniform_samples_d,
                              target_token_probs,
-                             draft_probs_point_mass && target_probs_point_mass))
+                             draft_probs_point_mass && target_probs_point_mass,
+                             valid_draft_lengths))
         return;
 
     auto       masks_d      = masks.to(target_device, true);
@@ -801,6 +985,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             target_probs_point_mass,
             force_mask_d,
             finalize_in_kernel,
+            valid_draft_lengths,
         });
     }
 

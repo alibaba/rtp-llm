@@ -249,7 +249,9 @@ public:
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
+        // An idle DP rank must return to the engine to run alignment work even
+        // while another rank still owns a full batch. Keep admission unchanged.
+        cond_.wait_for(lock, poll_interval_, [this] {
             return stop_requested_.load() || waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
                    || !loading_cache_streams_.empty() || (draining_mixed_modes_ && !waiting_streams_.empty());
         });

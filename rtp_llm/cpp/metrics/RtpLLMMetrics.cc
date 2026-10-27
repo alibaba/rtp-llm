@@ -531,6 +531,10 @@ bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager
     REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_accept_rate_metric, "rtp_llm_sp_avg_accept_rate");
     REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric, "rtp_llm_sp_avg_fix_accept_rate");
     REGISTER_GAUGE_MUTABLE_METRIC(sp_estimate_tpot_us_metric, "rtp_llm_sp_estimate_tpot_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(verify_budget_metric, "rtp_llm_sp_verify_budget");
+    REGISTER_GAUGE_MUTABLE_METRIC(decided_draft_token_num_metric, "rtp_llm_sp_decided_draft_token_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(total_verify_draft_token_num_metric, "rtp_llm_sp_total_verify_draft_token_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(acceptance_metrics_dropped_metric, "rtp_llm_sp_acceptance_metrics_dropped");
     return true;
 }
 
@@ -541,14 +545,34 @@ void RtpLLMSpeculativeEngineMetrics::report(const kmonitor::MetricsTags*        
     REPORT_MUTABLE_METRIC(score_step_latency_us_metric, collector->score_step_latency_us);
     REPORT_MUTABLE_METRIC(speculative_sampler_latency_us_metric, collector->speculative_sampler_latency_us);
 
-    if (collector->total_propose_token_num > 0 && collector->total_stream_num > 0) {
+    // Decisions are host metadata for the current round. Acceptance arrives
+    // asynchronously, so its denominator must use the completed round's budget.
+    if (collector->verify_budget >= 0) {
+        REPORT_MUTABLE_METRIC(verify_budget_metric, collector->verify_budget);
+        if (collector->decided_draft_token_num >= 0) {
+            REPORT_MUTABLE_METRIC(decided_draft_token_num_metric, collector->decided_draft_token_num);
+        }
+        REPORT_MUTABLE_METRIC(acceptance_metrics_dropped_metric, collector->acceptance_metrics_dropped);
+    }
+
+    double verify_draft_token_num = static_cast<double>(collector->total_verify_draft_token_num);
+    if (collector->total_verify_draft_token_num == -1) {
+        verify_draft_token_num = static_cast<double>(collector->total_stream_num) * collector->spec_steps;
+    }
+    if (collector->total_stream_num > 0 && verify_draft_token_num >= 0) {
         REPORT_MUTABLE_METRIC(total_propose_token_num_metric, collector->total_propose_token_num);
         REPORT_MUTABLE_METRIC(total_accepted_token_num_metric, collector->total_accepted_token_num);
-        double avg_accept_num = (double)collector->total_accepted_token_num / collector->total_stream_num;
+        if (collector->total_verify_draft_token_num >= 0) {
+            REPORT_MUTABLE_METRIC(total_verify_draft_token_num_metric, collector->total_verify_draft_token_num);
+        }
+        const double accepted_token_num = static_cast<double>(collector->total_accepted_token_num);
+        const double avg_accept_num     = accepted_token_num / collector->total_stream_num;
         REPORT_MUTABLE_METRIC(sp_avg_accept_token_num_metric, avg_accept_num);
-        REPORT_MUTABLE_METRIC(sp_avg_accept_rate_metric, avg_accept_num / (collector->spec_steps + 1));
-        if (collector->spec_steps > 0) {
-            REPORT_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric, (avg_accept_num - 1) / collector->spec_steps);
+        REPORT_MUTABLE_METRIC(sp_avg_accept_rate_metric,
+                              accepted_token_num / (verify_draft_token_num + collector->total_stream_num));
+        if (verify_draft_token_num > 0) {
+            REPORT_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric,
+                                  (accepted_token_num - collector->total_stream_num) / verify_draft_token_num);
         }
         if (avg_accept_num > 0) {
             REPORT_MUTABLE_METRIC(sp_estimate_tpot_us_metric, (double)collector->step_latency_us / avg_accept_num);
@@ -630,8 +654,8 @@ bool RtpLLMCacheEventDropMetrics::init(kmonitor::MetricsGroupManager* manager) {
     return true;
 }
 
-void RtpLLMCacheEventDropMetrics::report(const kmonitor::MetricsTags* tags,
-                                        RtpLLMCacheEventDropMetricsCollector* collector) {
+void RtpLLMCacheEventDropMetrics::report(const kmonitor::MetricsTags*          tags,
+                                         RtpLLMCacheEventDropMetricsCollector* collector) {
     kmonitor::MetricsTags queue_tags = tags ? *tags : kmonitor::MetricsTags{};
     queue_tags.AddTag("reason", "queue_full");
     drop_qps_metric->Report(&queue_tags, collector->queue_full_count);
@@ -954,26 +978,23 @@ void RtpLLMRemoteCacheSDKMetrics::report(const kmonitor::MetricsTags*          t
 }
 
 bool RtpLLMRemoteCacheQuarantineMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_lease_count_metric,
-                                  "rtp_llm_remote_cache_quarantined_lease_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_block_count_metric,
-                                  "rtp_llm_remote_cache_quarantined_block_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_block_ratio_metric,
-                                  "rtp_llm_remote_cache_quarantined_block_ratio");
+    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_lease_count_metric, "rtp_llm_remote_cache_quarantined_lease_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_block_count_metric, "rtp_llm_remote_cache_quarantined_block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_block_ratio_metric, "rtp_llm_remote_cache_quarantined_block_ratio");
     REGISTER_QPS_MUTABLE_METRIC(quarantine_qps_metric, "rtp_llm_remote_cache_quarantine_qps");
     REGISTER_QPS_MUTABLE_METRIC(quarantine_block_qps_metric, "rtp_llm_remote_cache_quarantine_block_qps");
     return true;
 }
 
-void RtpLLMRemoteCacheQuarantineMetrics::report(
-    const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheQuarantineMetricsCollector* collector) {
+void RtpLLMRemoteCacheQuarantineMetrics::report(const kmonitor::MetricsTags*                 tags,
+                                                RtpLLMRemoteCacheQuarantineMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(quarantined_lease_count_metric, collector->quarantined_lease_count);
     REPORT_MUTABLE_METRIC(quarantined_block_count_metric, collector->quarantined_block_count);
     REPORT_MUTABLE_METRIC(quarantined_block_ratio_metric, collector->quarantined_block_ratio);
 }
 
-void RtpLLMRemoteCacheQuarantineMetrics::report(
-    const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheQuarantineEventMetricsCollector* collector) {
+void RtpLLMRemoteCacheQuarantineMetrics::report(const kmonitor::MetricsTags*                      tags,
+                                                RtpLLMRemoteCacheQuarantineEventMetricsCollector* collector) {
     kmonitor::MetricsTags event_tags = tags ? *tags : kmonitor::MetricsTags{};
     event_tags.AddTag("op", collector->op);
     event_tags.AddTag("reason", collector->reason);

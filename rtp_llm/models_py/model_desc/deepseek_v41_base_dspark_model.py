@@ -123,6 +123,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     # Draft side: carries the capture ids for the shared-buffer row-width
     # derivation but consumes the features — only the target captures.
     _captures_aux_hidden = False
+    _dspark_confidence_enabled = False
 
     def __init__(
         self,
@@ -158,6 +159,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             or str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
         )
         self._v4_args.commit_only = self._commit_only_prefill
+        self._dspark_confidence_enabled = (
+            bool(getattr(model_config, "dspark_confidence_enabled", False))
+            and not self._commit_only_prefill
+        )
+        self._dspark_confidence_hidden_weight: Optional[torch.Tensor] = None
         if self._commit_only_prefill:
             logging.info(
                 "[DeepSeekV4DSparkModel] PREFILL role: enabling commit-only "
@@ -269,6 +275,21 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
 
     def _load_extra_weights(self, weights: ModelWeights) -> None:
         gw = weights.global_weights
+        if self._dspark_confidence_enabled:
+            confidence_weight = gw[W.dspark_confidence_head]
+            expected_shape = (1, int(self._v4_args.dim) + self._dspark_markov_rank)
+            if (
+                tuple(confidence_weight.shape) != expected_shape
+                or confidence_weight.dtype != torch.float32
+            ):
+                raise ValueError(
+                    "V4.1 confidence head requires FP32 weight "
+                    f"{expected_shape}, got {tuple(confidence_weight.shape)} "
+                    f"{confidence_weight.dtype}"
+                )
+            self._dspark_confidence_hidden_weight = confidence_weight[
+                :, : int(self._v4_args.dim)
+            ]
         self.main_norm = RMSNorm(
             gw[W.v4_dspark_main_norm], float(self._v4_args.norm_eps)
         )
@@ -1050,6 +1071,36 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
 
         head_hidden = self.v4._hc_head_reduce(hidden).reshape(batch_size * gamma, dim)
         return self.v4.norm(head_hidden)
+
+    def compute_draft_outputs(self, hidden: torch.Tensor) -> PyModelOutputs:
+        if not self._dspark_confidence_enabled:
+            return super().compute_draft_outputs(hidden)
+        batch_size, gamma = int(hidden.shape[0]), int(hidden.shape[1])
+        dim = int(self._v4_args.dim)
+        head_hidden = self.v4._hc_head_reduce(hidden).reshape(batch_size * gamma, dim)
+        if self._dspark_confidence_hidden_weight is None:
+            raise RuntimeError("V4.1 confidence head weight was not loaded")
+        # The checkpoint confidence head reads pre-norm hidden. Only its scalar
+        # hidden contribution crosses the Python/C++ boundary; the sampler adds
+        # the previous-token Markov contribution before applying sigmoid.
+        hidden_logits = torch.mm(
+            head_hidden.float(), self._dspark_confidence_hidden_weight.t()
+        )
+        outputs = PyModelOutputs(self.v4.norm(head_hidden))
+        outputs.dspark_confidence_hidden_logits = hidden_logits
+        return outputs
+
+    def dspark_empty_outputs(
+        self, batch_size: int, device: torch.device
+    ) -> PyModelOutputs:
+        outputs = super().dspark_empty_outputs(batch_size, device)
+        if self._dspark_confidence_enabled:
+            outputs.dspark_confidence_hidden_logits = torch.zeros(
+                (batch_size * self._dspark_query_width, 1),
+                dtype=torch.float32,
+                device=device,
+            )
+        return outputs
 
     def _forward_device(self) -> torch.device:
         if getattr(self, "_commit_only_prefill", False):
