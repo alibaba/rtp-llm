@@ -21,6 +21,7 @@ public final class RtpStatusService extends RpcServiceGrpc.RpcServiceImplBase {
         this.config = config; this.cache = cache; requests = new LocalPrefill(config, cache);
     }
     public void close() { closed = true; requests.close(); }
+    String scrapeMetrics() { return requests.scrapeMetrics(); }
 
     @Override public void generateStreamCall(GenerateInputPB request, StreamObserver<GenerateOutputsPB> observer) {
         var response = (ServerCallStreamObserver<GenerateOutputsPB>) observer;

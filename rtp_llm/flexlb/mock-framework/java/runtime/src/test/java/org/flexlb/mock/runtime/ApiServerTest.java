@@ -19,6 +19,25 @@ class ApiServerTest {
     }
     @AfterEach void close() { server.close(); }
 
+    @Test void optionalMetricsEndpointIsExactAndReportsCollectionFailure() throws Exception {
+        var fail = new java.util.concurrent.atomic.AtomicBoolean();
+        try (var exporter = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).metrics(() -> {
+            if (fail.get()) throw new IllegalStateException("broken collector");
+            return "# TYPE probe_total counter\nprobe_total 3\n";
+        }).start()) {
+            var request = HttpRequest.newBuilder(URI.create(exporter.url() + "/metrics")).GET().build();
+            var response = CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, response.statusCode()); assertTrue(response.body().contains("probe_total 3"));
+            assertEquals("text/plain; version=0.0.4; charset=utf-8", response.headers().firstValue("Content-Type").orElseThrow());
+            for (String path : List.of("/metrics/unknown", "/metrics?unexpected=1"))
+                assertEquals(404, CLIENT.send(HttpRequest.newBuilder(URI.create(exporter.url() + path)).GET().build(), HttpResponse.BodyHandlers.ofString()).statusCode());
+            assertEquals(404, CLIENT.send(HttpRequest.newBuilder(request.uri()).POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString()).statusCode());
+            fail.set(true);
+            assertEquals(500, CLIENT.send(request, HttpResponse.BodyHandlers.ofString()).statusCode());
+        }
+        assertEquals(404, CLIENT.send(HttpRequest.newBuilder(URI.create(server.url() + "/metrics")).GET().build(), HttpResponse.BodyHandlers.ofString()).statusCode());
+    }
+
     private HttpResponse<String> call(String route, Object args, String run, long timeout) throws Exception {
         var context = new HashMap<String, Object>();
         context.put("run", run); context.put("query_time", Instant.now().toString());

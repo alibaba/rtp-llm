@@ -7,6 +7,7 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.compute.*;
 import org.flexlb.mock.engine.rtp.cache.DeviceCache;
+import org.flexlb.mock.metrics.EngineMetrics;
 
 /** Bounded FIFO for local, text-only, single-token prefill. Owns each request's timer and KV lease. */
 final class LocalPrefill implements AutoCloseable {
@@ -17,6 +18,7 @@ final class LocalPrefill implements AutoCloseable {
     private record Finished(long version, TaskInfoPB task) {}
     private final RtpConfig config;
     private final DeviceCache cache;
+    private final EngineMetrics metrics;
     private final SimulatedCompute compute = new SimulatedCompute();
     private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1,
         Thread.ofPlatform().daemon().name("rtp-request-deadline").factory());
@@ -30,6 +32,7 @@ final class LocalPrefill implements AutoCloseable {
 
     LocalPrefill(RtpConfig config, DeviceCache cache) {
         this.config = config; this.cache = cache;
+        metrics = new EngineMetrics("rtp", config.role().name(), config.id(), this::metricState);
         deadlines.setRemoveOnCancelPolicy(true);
     }
 
@@ -65,6 +68,7 @@ final class LocalPrefill implements AutoCloseable {
         if (active.size() >= LIMIT) throw Status.RESOURCE_EXHAUSTED.withDescription("Mock local request limit reached").asRuntimeException();
         var session = new Session(input, rpcDeadline);
         active.put(input.getRequestId(), session); waiting.add(session);
+        metrics.started();
         if (session.deadline != Long.MAX_VALUE)
             session.timeout = deadlines.schedule(() -> finish(session, Status.DEADLINE_EXCEEDED.withDescription("Request budget expired"), 603),
                 Math.max(0, session.deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
@@ -107,6 +111,7 @@ final class LocalPrefill implements AutoCloseable {
                     end(session, Status.RESOURCE_EXHAUSTED.withDescription("KV allocation failed: " + admission.failure()), 602); continue;
                 }
                 session.lease = admission.lease(); session.reused = session.lease.reusedBlocks() * config.blockSize();
+                metrics.cacheLookup(session.input.getTokenIdsCount(), session.reused);
                 session.runningAt = System.nanoTime();
                 var request = new ForwardBatch.Request(Long.toString(session.input.getRequestId()), session.input.getTokenIdsCount(), session.reused,
                     1, 0, session.input.getTokenIdsCount() - session.reused, session.input.getPriority(), List.of());
@@ -114,11 +119,18 @@ final class LocalPrefill implements AutoCloseable {
                 var plan = config.compute().plan(Role.prefill, config.id(), batch);
                 session.execution = compute.submit(plan);
                 session.execution.completion().thenAccept(outcome -> {
-                    if (outcome.state() == SimulatedCompute.State.COMPLETED) finish(session, Status.OK, 0);
+                    if (outcome.state() == SimulatedCompute.State.COMPLETED) computed(session, outcome.elapsedNanos());
                     else finish(session, Status.CANCELLED.withDescription("Computation cancelled"), 0);
                 });
             } catch (RuntimeException error) { end(session, Status.INTERNAL.withDescription("Forward failed: " + error.getMessage()), 0); }
         }
+    }
+
+    private synchronized void computed(Session session, long elapsedNanos) {
+        if (session.terminal) return;
+        if (System.nanoTime() < session.deadline)
+            metrics.forwardCompleted(elapsedNanos, session.input.getTokenIdsCount(), session.input.getTokenIdsCount() - session.reused, 1);
+        finish(session, Status.OK, 0);
     }
 
     private synchronized void finish(Session session, Status status, long code) {
@@ -145,6 +157,12 @@ final class LocalPrefill implements AutoCloseable {
             }
         }
         active.remove(session.input.getRequestId(), session); waiting.remove(session);
+        metrics.finished(switch (status.getCode()) {
+            case OK -> EngineMetrics.Outcome.success;
+            case CANCELLED -> EngineMetrics.Outcome.cancelled;
+            case DEADLINE_EXCEEDED -> EngineMetrics.Outcome.timeout;
+            default -> EngineMetrics.Outcome.error;
+        });
         if (running == session) running = null;
         var task = task(session).setEndTimeMs(System.currentTimeMillis()).setIterateCount(status.isOk() ? 1 : 0);
         if (!status.isOk()) task.setErrorInfo(ErrorDetailsPB.newBuilder().setErrorCode(code == 0 ? status.getCode().value() : code).setErrorMessage(status.getDescription()));
@@ -160,6 +178,15 @@ final class LocalPrefill implements AutoCloseable {
         return new Snapshot(active.values().stream().map(s -> task(s).build()).toList(),
             history.stream().filter(f -> f.version() > latestFinished).map(Finished::task).toList(), finishedVersion,
             waiting.size(), running == null ? 0 : 1);
+    }
+
+    String scrapeMetrics() { return metrics.scrape(); }
+
+    private synchronized EngineMetrics.State metricState() {
+        var kv = cache.snapshot(0, false);
+        long size = config.blockSize();
+        return new EngineMetrics.State(waiting.size(), running == null ? 0 : 1,
+            kv.totalBlocks() * size, kv.availableBlocks() * size, kv.freeBlocks() * size, kv.heldBlocks() * size);
     }
     private TaskInfoPB.Builder task(Session s) {
         boolean executing = s.runningAt != 0;

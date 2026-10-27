@@ -111,6 +111,10 @@ class LocalPrefillTest {
                 assertEquals(8, cache.snapshot(-1, false).availableBlocks());
             }
             assertEquals(100, engine.snapshot(0).finishedVersion());
+            var text = engine.scrapeMetrics();
+            assertEquals(100, LocalRpcTest.sample(text, "mock_engine_requests_started_total", ""));
+            assertEquals(100, LocalRpcTest.sample(text, "mock_engine_requests_finished_total", "outcome=\"success\"")
+                + LocalRpcTest.sample(text, "mock_engine_requests_finished_total", "outcome=\"cancelled\""));
         }
     }
 

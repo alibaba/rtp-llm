@@ -58,6 +58,15 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                 assert actual['block_size'] == 16 and actual['cache_keys'] == 0
                 if role == 'prefill':
                     assert actual['local_output_tokens'] == 1
+                with urllib.request.urlopen(endpoints['metrics'], timeout=2) as response:
+                    assert response.status == 200
+                    assert response.headers.get_content_type() == 'text/plain'
+                    metrics = response.read().decode('utf-8')
+                (directory / 'metrics.prom').write_text(metrics)
+                samples = [line for line in metrics.splitlines() if line.startswith('mock_engine_forward_seconds_count{')]
+                assert len(samples) == 1
+                assert float(samples[0].rsplit(' ', 1)[1]) == (1 if role == 'prefill' else 0)
+                assert f'role="{role}"' in samples[0]
                 effective = json.loads((directory / 'effective-config.json').read_text())
                 assert effective['compute'][role]['noise']['scale'] == 1
             assert (await task)['status'] == 'PASS'

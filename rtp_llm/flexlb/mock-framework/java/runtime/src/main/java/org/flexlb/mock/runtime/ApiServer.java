@@ -9,6 +9,7 @@ import java.nio.file.*;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.function.Supplier;
 import org.flexlb.mock.api.*;
 
 /** A transport bound to component objects; no case, gate or engine behavior lives here. */
@@ -49,6 +50,27 @@ public final class ApiServer implements AutoCloseable {
     public ApiServer start() {
         // A native-protocol node can publish transport health before business adapters are bound.
         server.start(); started = true;
+        return this;
+    }
+
+    /** Optional pull endpoint; exposition and metric definitions belong to the component. */
+    public ApiServer metrics(Supplier<String> scrape) {
+        if (started) throw new IllegalStateException("Cannot bind after start");
+        Objects.requireNonNull(scrape);
+        server.createContext("/metrics", exchange -> {
+            try (exchange) {
+                if (!exchange.getRequestMethod().equals("GET") || !exchange.getRequestURI().toString().equals("/metrics")) {
+                    send(exchange, 404, Map.of("error", "Unknown endpoint")); return;
+                }
+                String text;
+                try { text = scrape.get(); }
+                catch (RuntimeException error) { send(exchange, 500, Map.of("error", "Metric collection failed")); return; }
+                byte[] bytes = text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+                exchange.sendResponseHeaders(200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+            }
+        });
         return this;
     }
 

@@ -6,7 +6,7 @@
   <modules>
     <module>../flexlb-common</module>
     <module>../flexlb-grpc</module>
-    <module>java/interfaces</module><module>java/runtime</module><module>java/shared/compute</module>
+    <module>java/interfaces</module><module>java/runtime</module><module>java/shared/compute</module><module>java/shared/metrics</module>
     <module>java/engine/rtp</module>
   </modules>
   <properties>

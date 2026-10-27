@@ -31,7 +31,7 @@ public final class RtpNode implements AutoCloseable {
         var node = new RtpNode(config);
         try {
             node.rpc = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0)).addService(node.service).build().start();
-            node.api = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).start();
+            node.api = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).metrics(node.service::scrapeMetrics).start();
             return node;
         } catch (IOException | RuntimeException error) { node.close(); throw error; }
     }
@@ -40,7 +40,7 @@ public final class RtpNode implements AutoCloseable {
     public DeviceCache cache() { return cache; }
     public Map<String, Object> endpoints() {
         return Map.of("id", config.id(), "role", config.role().name(), "engine", "rtp", "rpc", rpcAddress(),
-            "control", api.url(), "supported_rpc", config.role() == org.flexlb.mock.api.model.Types.Role.prefill
+            "control", api.url(), "metrics", api.url() + "/metrics", "supported_rpc", config.role() == org.flexlb.mock.api.model.Types.Role.prefill
                 ? List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "GenerateStreamCall")
                 : List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus"),
             "local_generation", config.role() == org.flexlb.mock.api.model.Types.Role.prefill

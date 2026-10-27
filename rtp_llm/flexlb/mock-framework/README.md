@@ -1,6 +1,6 @@
 # Mock框架
 
-Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP节点支持状态RPC、设备缓存与本地单token请求；P/D链路、多JVM Client播放、指标采集和正式历史查看服务尚未接入，不由测试组件模拟验收。
+Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP节点支持状态RPC、设备缓存、本地单token请求与Prometheus抓取；P/D链路、多JVM Client播放、历史指标存储和正式历史查看服务尚未接入，不由测试组件模拟验收。
 
 ## 目录与构建
 
@@ -9,6 +9,7 @@ Python负责case配置编译和执行组织，Java负责组件共享接口与实
 - `python/mock_framework/execution/`：本地进程初始化、顺序执行、HTTP调用、门禁比较、收尾和运行记录。
 - `java/runtime/`：将接口实现绑定为HTTP端点，按接口清单校验参数与回执，提供单次调用上下文。
 - `java/shared/compute/`：共享Forward batch、公式绑定、确定性噪声与可取消计时执行。
+- `java/shared/metrics/`：共享Engine指标定义、独立Prometheus注册表与标准文本导出。
 - `java/engine/rtp/`：RTP节点入口、原生配置读取、KV块租约和生产proto状态RPC。
 - `tests/`：编译与跨语言接口扩展验证；Java测试跟随模块。
 - `scripts/`：构建和验证入口。
@@ -96,7 +97,7 @@ Compute按prefill/decode/vit分别配置，不复制引擎调度、缓存或KV�
 
 组件通过`ComputeModels.fromComponentFile`读取Runner生成的配置文件，通过`effectiveConfiguration()`取得含默认值的配置用于保存。`plan`只计算Sample，`SimulatedCompute.submit`才启动等待，返回Execution；Engine通过`Execution.cancel()`取消，completion返回唯一的COMPLETED或CANCELLED结果及实际elapsedNanos。计时器关闭会取消所有未完成计算并拒绝新任务，业务回调在独立虚拟线程执行，不阻塞其他计时或取消。共享层不提交cache、不释放Engine资源，也不把计算完成当作请求成功；这些动作由Engine依据真实结果执行。
 
-Compute组件已经可以独立计算与执行，但尚未接入RTP RPC链路或指标上报；组件测试不作为完整Engine行为、TPS或压测验收。
+Compute已接入RTP本地单token链路；完成Forward时记录实际计时和token数。组件测试不作为完整Engine行为、TPS或压测验收。
 
 ## 扩展接口
 
@@ -138,7 +139,7 @@ Java组件初始化后调用`new ApiServer(address).bind(MasterApi.class, implem
 
 每次读取固定query_time；`latest`记录查询点，`[-60s, 0s]`解析为明确起止时间，`all`取唯一发流回执中的started_at到当前查询时刻。原始PromQL不解析内部窗口，记录单点查询和全部返回样本，所有样本必须满足expect，空结果为ERROR。集合eq忽略顺序，拒绝重复身份；Master的Engine集合逐个比较，空Master结果不能通过门禁。
 
-运行目录不覆盖已有目录，保存原始case、编译配置、启动配方、接口清单、代码版本与工作区差异、组件配置和日志、phase/step时间线、门禁实际值及范围、最终结果。PASS表示所执行步骤通过，FAIL表示门禁不满足，ERROR表示执行或数据异常，CANCELLED表示取消；清理异常不能得到PASS。当前尚不产生业务指标或逐请求记录，正式报告的数据保留由后续采集接入完成。测试中的TransportProbe只用于验证真实JVM进程及网络链路，不实现Engine或压测行为。
+运行目录不覆盖已有目录，保存原始case、编译配置、启动配方、接口清单、代码版本与工作区差异、组件配置和日志、phase/step时间线、门禁实际值及范围、最终结果。PASS表示所执行步骤通过，FAIL表示门禁不满足，ERROR表示执行或数据异常，CANCELLED表示取消；清理异常不能得到PASS。RTP节点已可导出本地链路指标，但运行器尚未管理Prometheus历史存储，也未生成逐请求记录；正式报告的数据保留由后续采集接入完成。测试中的TransportProbe只用于验证真实JVM进程及网络链路，不实现Engine或压测行为。
 
 ## RTP节点与缓存底座
 
@@ -168,7 +169,7 @@ Mock容量通过点分键capacity.device_blocks配置，单位为本实例的物
 
 设备块池按引用管理共享前缀：可用容量包含空闲块和未被引用的LRU块，物理free不包含LRU数据。分配先引用命中、再检查净新增需求与reserve，失败回滚引用；需要空闲物理块时才淘汰LRU。增长失败保留已增长的部分，最终由原owner释放。DeviceCache封装原始池租约，完成、取消和关闭只有一次所有权转换；publish可保留已计算P数据供连接器使用，但不会自动推进P/D协议。取消后不能再次发布，关闭清除缓存并拒绝新分配。
 
-组件目录同时保存endpoints.json，记录本实例原生RPC地址、控制地址、支持的RPC和本地生成范围。HTTP /health仅报告已绑定的公共业务接口清单；当前RTP节点该清单为空，不把原生状态RPC或健康探测扩充为case业务接口。Enqueue、Fetch、原生Cancel、RemoteGenerate和P/D接续尚未绑定，调用返回gRPC UNIMPLEMENTED；EngineApi动作/指标适配及Prometheus指标也尚未提供，节点启动通过不表示压测或完整RTP行为通过。
+组件目录同时保存endpoints.json，记录本实例原生RPC地址、控制地址、支持的RPC和本地生成范围。HTTP /health仅报告已绑定的公共业务接口清单；当前RTP节点该清单为空，不把原生状态RPC或健康探测扩充为case业务接口。Enqueue、Fetch、原生Cancel、RemoteGenerate和P/D接续尚未绑定，调用返回gRPC UNIMPLEMENTED；EngineApi动作/指标查询适配尚未提供，Prometheus原始抓取见下文。节点启动通过不表示压测或完整RTP行为通过。
 
 ### 本地单token请求
 
@@ -181,3 +182,24 @@ LocalPrefill管理请求与状态，PrefixKeys计算原生文本前缀，LocalRe
 请求timeout_ms从接收开始独立计时，覆盖排队和执行，不随阶段重置；RPC deadline和流取消也会终止对应Session。回调持有Session身份，延迟取消不能作用于后来复用相同request_id的请求。完成、取消、超时和关闭在同一所有权边界处理一次，释放后不能再次提交cache。602/603/605通过原生ErrorDetailsPB尾部元数据返回；不自动重试资源分配，也不因取消而发送成功帧。
 
 WorkerStatus返回实际waiting/running任务、队列数、finished任务与latest_finished_version。当前Mock入口固定最多1024个活动请求；完成历史也保留1024条，调用方请求的旧版本已丢失时返回OUT_OF_RANGE，避免把缺失历史当作完整结果。该上限是本地Mock保护，不宣称是real Engine的调度规则。此实现不含动态batch、P/D资源准备/接续、GPU、完整重试策略或压力能力验收。
+
+### 共享Engine指标
+
+`endpoints.json`的`metrics`给出Prometheus抓取URL，与控制接口共用HTTP端口，仅接受`GET /metrics`。使用Prometheus官方Java simpleclient 0.16.0及TextFormat导出标准0.0.4文本。每个节点有独立注册表，不使用默认全局注册表；没有常驻采样线程，累计量在事件发生时更新，瞬时量在抓取时读取。
+
+EngineMetrics放在共享目录，不依赖RTP协议、缓存实现或调度器。其他Engine使用同一组件，传入事件和当前状态即可。固定标签为`engine`、`role`、`node`，额外维度仅为下表枚举，不把请求ID、cache key或异常文本放进标签。
+
+| 指标 | 类型与额外标签 | 上报时机与含义 |
+| --- | --- | --- |
+| `mock_engine_requests_started_total` | Counter | 校验并接纳请求后加一；不支持的协议、重复ID和入口超限不计入。 |
+| `mock_engine_requests_finished_total` | Counter，`outcome=success/cancelled/timeout/error` | 已接纳请求只记录一次终态；节点关闭计error。这是Engine结果，不能替代Client最终成功率。 |
+| `mock_engine_cache_lookup_tokens_total` | Counter | 成功获得KV租约时累计输入token数，包括已命中的部分。 |
+| `mock_engine_cache_hit_tokens_total` | Counter | 同一次分配中实际复用的历史前缀token数；后续请求取消不撤销已发生的查找。 |
+| `mock_engine_forward_tokens_total` | Counter，`kind=input/compute/output` | 活跃请求的Forward完成时记录输入、实际计算和输出token数。当前P路径分别为输入长度、输入减命中、1；被取消或超时的Forward不补记成功计算。 |
+| `mock_engine_forward_seconds` | Histogram | 完成Forward的实际计时，单位秒，排除请求排队时间；提供bucket、sum、count。它不是Client TTFT。 |
+| `mock_engine_requests` | Gauge，`state=waiting/running` | 当前排队、执行数量。 |
+| `mock_engine_kv_tokens` | Gauge，`state=total/available/free/held` | 当前KV容量，单位token。available含可淘汰的未引用缓存，不能当作物理free。 |
+
+累计量预建为0，抓取不会清零。缓存命中率按hit tokens增量除以lookup tokens增量做token加权，不能平均每请求命中率。Prefill计算TPS可由完成的compute tokens增量除以Forward seconds sum增量得到，带cache TPS使用input tokens；若要墙钟吞吐则取token counter的rate，两者分母不同。共享层只保存观测值，由查询接口选择对应口径。分母为0时没有可判断的比率，不补成100%或0来通过门禁。
+
+这些指标是新框架的公共口径，不冒充KMonitor原指标。后续语义查询接口负责PromQL，case仍优先调用接口；Grafana旧大盘的指标映射、Runner管理Prometheus与历史保留、Client请求指标尚未接入。打包测试保存一次metrics.prom供核对，不代表历史采集完成。
