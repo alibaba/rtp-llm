@@ -35,6 +35,8 @@ const char* memoryTypeName(MemoryType memory_type) {
             return "CPU_PINNED";
         case MemoryType::MEMORY_GPU:
             return "GPU";
+        case MemoryType::MEMORY_NPU:
+            return "NPU";
     }
     return "UNKNOWN";
 }
@@ -304,8 +306,17 @@ void DeviceBlockPool::initializeCacheBuffer() {
     } else if (cfg.use_device_malloc_backing) {
         initializeDeviceMallocBuffer();
     } else {
+#if USING_CUDA
+        torch::Device device = torch::kCUDA;
+#elif USING_ASCEND
+        torch::Device device = torch::Device(torch::kPrivateUse1);
+#elif USING_ROCM
+        torch::Device device = torch::kCUDA;
+#else
+        torch::Device device = torch::kCPU;
+#endif
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(cfg.total_size_bytes)},
-                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+                                             torch::TensorOptions().dtype(torch::kUInt8).device(device));
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr,
@@ -570,7 +581,8 @@ void DeviceBlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cac
     if (cache_store_ && !kvcache_reg_mr_) {
         RTP_LLM_LOG_INFO("start to register user mr, pool_name=%s", config().pool_name.c_str());
         auto       memory_util = cache_store_->getMemoryUtil();
-        const bool gpu         = where() == MemoryType::MEMORY_GPU;
+        // NPU pool memory is device memory; register with the device flag.
+        const bool gpu = where() == MemoryType::MEMORY_GPU || where() == MemoryType::MEMORY_NPU;
 
         for (size_t layout_idx = 0; layout_idx < config().memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config().memory_layouts[layout_idx];
@@ -601,7 +613,7 @@ void DeviceBlockPool::deregUserMr() {
     if (kvcache_reg_mr_ && cache_store_) {
         RTP_LLM_LOG_INFO("start to deregister user mr, pool_name=%s", config().pool_name.c_str());
         auto       memory_util = cache_store_->getMemoryUtil();
-        const bool gpu         = where() == MemoryType::MEMORY_GPU;
+        const bool gpu = where() == MemoryType::MEMORY_GPU || where() == MemoryType::MEMORY_NPU;
 
         for (size_t layout_idx = 0; layout_idx < config().memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config().memory_layouts[layout_idx];
@@ -702,10 +714,14 @@ DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block, int part
 }
 
 MemoryType DeviceBlockPool::where() const {
+#if USING_ASCEND
+    return cache_aligned_buffer_.is_privateuseone() ? MemoryType::MEMORY_NPU : MemoryType::MEMORY_CPU;
+#else
     if (cache_aligned_buffer_.is_cuda()) {
         return MemoryType::MEMORY_GPU;
     }
     return cache_aligned_buffer_.is_pinned() ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_CPU;
+#endif
 }
 
 void DeviceBlockPool::checkLayoutValidity(int layout_id) const {
@@ -716,9 +732,15 @@ void DeviceBlockPool::checkLayoutValidity(int layout_id) const {
 }
 
 int DeviceBlockPool::deviceIndex() const {
+#if USING_ASCEND
+    if (cache_aligned_buffer_.is_privateuseone()) {
+        return static_cast<int>(cache_aligned_buffer_.get_device());
+    }
+#else
     if (cache_aligned_buffer_.is_cuda()) {
         return static_cast<int>(cache_aligned_buffer_.get_device());
     }
+#endif
     return -1;
 }
 

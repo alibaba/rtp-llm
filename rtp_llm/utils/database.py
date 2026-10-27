@@ -328,7 +328,8 @@ class CkptDatabase(BaseDatabase):
                 [file.file_name for file in self.pretrain_file_list]
             )
             if device == "cuda":
-                device = f"cuda:{pg.rank()}"
+                from rtp_llm.device.device_type import device_name
+                device = f"{device_name()}:{pg.rank()}"
                 logging.debug(f"origin device is cuda, set to {device}")
 
             # FASTSAFETENSORS_NOGDS=1 forces the 'nogds' copier (skips the

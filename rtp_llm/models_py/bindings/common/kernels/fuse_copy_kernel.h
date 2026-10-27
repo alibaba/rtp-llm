@@ -12,8 +12,10 @@
 
 namespace rtp_llm {
 
+#if USING_CUDA || USING_ROCM
 void invokeFusedCopy(const FusedD2DCopyParams& params, cudaStream_t stream);
 
 void invokeFusedStridedCopy(const FusedStridedCopyParams& params, cudaStream_t stream);
+#endif
 
 }  // namespace rtp_llm

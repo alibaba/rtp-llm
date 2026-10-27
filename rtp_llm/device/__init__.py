@@ -12,6 +12,7 @@ _current_device: Optional["DeviceBase"] = None
 _LAZY_EXPORTS = {
     "DeviceBase": ("rtp_llm.device.device_base", "DeviceBase"),
     "ArmCpuImpl": ("rtp_llm.device.device_impl", "ArmCpuImpl"),
+    "AscendImpl": ("rtp_llm.device.device_impl", "AscendImpl"),
     "CpuImpl": ("rtp_llm.device.device_impl", "CpuImpl"),
     "CudaImpl": ("rtp_llm.device.device_impl", "CudaImpl"),
     "PpuImpl": ("rtp_llm.device.device_impl", "PpuImpl"),
@@ -34,6 +35,7 @@ def get_device_cls(type: DeviceType) -> Type:
     # workers that do not provide libcuda.so.
     from rtp_llm.device.device_impl import (
         ArmCpuImpl,
+        AscendImpl,
         CpuImpl,
         CudaImpl,
         PpuImpl,
@@ -50,6 +52,8 @@ def get_device_cls(type: DeviceType) -> Type:
         return PpuImpl
     elif type == DeviceType.ROCm:
         return RocmImpl
+    elif type == DeviceType.Ascend:
+        return AscendImpl
     else:
         raise ValueError(f"Invalid device type {type}")
 

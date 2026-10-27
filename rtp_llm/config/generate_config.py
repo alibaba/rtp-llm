@@ -114,6 +114,15 @@ def _reset_sanitize_warn_state():
     _last_downgrade_warn_time = 0.0
 
 
+def _deviates(value, neutral) -> bool:
+    """True if a scalar-or-list sampling param deviates from its neutral (no-op) value."""
+    if value is None:
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(v != neutral for v in value)
+    return value != neutral
+
+
 class GenerateConfig(BaseModel):
     # --- private attrs（不参与序列化/schema，生命周期与实例绑定） ---
     _diverge_depth_warned: bool = PrivateAttr(default=False)
@@ -488,6 +497,35 @@ class GenerateConfig(BaseModel):
     def has_num_beams(self):
         return self.max_num_beams() > 1
 
+    def _check_ascend_unsupported_sampling(self) -> None:
+        """Reject request-level sampling params not yet implemented on Ascend NPU.
+
+        Beam search and repetition/presence/frequency penalties (plus
+        no_repeat_ngram_size) are CUDA-only. Rejecting here returns a
+        request-scoped error instead of letting the engine-loop-thread
+        fail-fast terminate the whole server.
+        """
+        from rtp_llm.device.device_type import is_ascend
+
+        if not is_ascend():
+            return
+        unsupported = []
+        if self.has_num_beams():
+            unsupported.append(f"num_beams={self.max_num_beams()} (beam search)")
+        if _deviates(self.repetition_penalty, 1.0):
+            unsupported.append(f"repetition_penalty={self.repetition_penalty}")
+        if _deviates(self.presence_penalty, 0.0):
+            unsupported.append(f"presence_penalty={self.presence_penalty}")
+        if _deviates(self.frequency_penalty, 0.0):
+            unsupported.append(f"frequency_penalty={self.frequency_penalty}")
+        if _deviates(self.no_repeat_ngram_size, 0):
+            unsupported.append(f"no_repeat_ngram_size={self.no_repeat_ngram_size}")
+        if unsupported:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "not yet supported on Ascend NPU: " + "; ".join(unsupported),
+            )
+
     def is_same(self, config: "GenerateConfig") -> bool:
         return self.md5_value == config.md5_value
 
@@ -769,6 +807,7 @@ class GenerateConfig(BaseModel):
                 check_optional(is_union_positive_integer, self.random_seed),
                 f"random_seed {self.random_seed} is wrong data type",
             )
+            self._check_ascend_unsupported_sampling()
             check_with_info(
                 check_optional(is_union_positive_number, self.top_p_decay),
                 f"top_p_decay {self.top_p_decay} is wrong data type",

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -12,6 +13,8 @@
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
 #include "ATen/cuda/CUDAContext.h"
+#elif USING_ASCEND
+#include "acl/acl.h"
 #endif
 
 namespace rtp_llm {
@@ -23,14 +26,19 @@ bool asyncDebugEnabled() {
 }
 
 torch::Tensor copyToPinnedCpuAsync(const torch::Tensor& tensor, bool& need_sync) {
-    if (!tensor.defined() || !tensor.is_cuda()) {
+    if (!tensor.defined() || (!tensor.is_cuda() && !tensor.is_privateuseone())) {
         return tensor;
     }
 
     auto cpu_tensor = torch::empty(
         tensor.sizes(), torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true));
+#if USING_ASCEND
+    // No explicit stream handle to synchronize on Ascend; do a blocking D2H.
+    cpu_tensor.copy_(tensor, /*non_blocking=*/false);
+#else
     cpu_tensor.copy_(tensor, /*non_blocking=*/true);
     need_sync = true;
+#endif
     return cpu_tensor;
 }
 
@@ -41,7 +49,11 @@ void syncPinnedCpuCopies(bool need_sync) {
     // Keep D2H waiting explicit here instead of hiding it inside Tensor::cpu().
     // The copy launch returns quickly; only this worker thread blocks on its
     // stream while the main engine thread can continue issuing CUDA work.
+#if USING_ASCEND
+    // No explicit stream handle on Ascend; the default stream is synchronous.
+#else
     cuda_graph::graphGetCurrentStream().synchronize();
+#endif
 }
 
 }  // namespace
@@ -370,7 +382,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         auto tokens            = stream->currentExecuteTokens(0);
         auto label_tensor =
             torch::from_blob(const_cast<int*>(tokens.data() + 1), {(int64_t)(tokens.size() - 1)}, torch::kInt32)
-                .to(torch::kCUDA);
+                .to(getTorchCudaDevice());
         auto labels_int64 = label_tensor.toType(torch::kInt64);
         loss = torch::cross_entropy_loss(all_logits_tensor, labels_int64, torch::nullopt, at::Reduction::None)
                    .to(torch::kFloat32);
@@ -412,11 +424,11 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                 int  label_end   = std::min(end_pos + 1, (int)tokens.size());
                 int  logprob_len = label_end - label_start;
                 if (logprob_len > 0) {
-                    // from_blob + to(kCUDA) is a synchronous copy; token buffer is stable during prefill.
+                    // from_blob + to(compute device) is a synchronous copy; token buffer is stable during prefill.
                     auto label_tensor = torch::from_blob(const_cast<int*>(tokens.data() + label_start),
                                                          {(int64_t)logprob_len},
                                                          torch::kInt32)
-                                            .to(torch::kCUDA)
+                                            .to(getTorchCudaDevice())
                                             .toType(torch::kInt64)
                                             .unsqueeze(1);
                     auto target_raw = sliced_logits.narrow(0, 0, logprob_len).gather(1, label_tensor).squeeze(1);

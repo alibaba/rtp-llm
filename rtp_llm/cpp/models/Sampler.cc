@@ -117,12 +117,13 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     const bool requires_independent_output = !std::equal(num_beams_in, num_beams_in + inputs.batch_size, num_beams_out);
 
     // allocate output tensors
-    // Keep success on CUDA to avoid a blocking D2H copy: the GPU sampling kernel writes success
+    // Keep success on device to avoid a blocking D2H copy: the device sampling kernel writes success
     // directly, and callers that need CPU access should call .cpu() explicitly.
     auto all_success =
-        torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
+        torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(getTorchCudaDevice()));
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
+#if USING_CUDA
 #if USING_ROCM
     // ROCm: hipMemcpyAsync from pageable memory is truly async, and
     // Tensor::record_stream() rejects at::hip streams (aborts with a device
@@ -142,10 +143,14 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         inputs_token_ids_cuda.record_stream(main_stream);
     }
 #endif
+#else
+    // Ascend/other devices: blocking transfer to the active compute device.
+    auto inputs_token_ids_cuda = inputs.token_ids.to(getTorchCudaDevice());
+#endif
 
     auto all_token_ids_out     = requires_independent_output ?
                                      torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len},
-                                              torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)) :
+                                              torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice())) :
                                      inputs_token_ids_cuda;
     auto all_cum_log_probs_out = requires_independent_output && inputs.cum_log_probs.defined() ?
                                      torch::empty({(int64_t)inputs.batch_size_out}, torch::kFloat32) :
@@ -284,11 +289,11 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                     cum_log_probs_in.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_in}) :
                     torch::zeros({(int64_t)beam_batch_size, (int64_t)cur_num_beams_in});
 
-            auto logits_t           = logits_reshaped.to(torch::kCUDA);
-            auto token_ids_in_t     = token_ids_in_reshaped.to(torch::kCUDA);
-            auto input_lengths_t    = input_lengths_reshaped.to(torch::kCUDA);
-            auto sequence_lengths_t = sequence_lengths_reshaped.to(torch::kCUDA);
-            auto cum_log_probs_in_t = cum_log_probs_in_reshaped.to(torch::kCUDA);
+            auto logits_t           = logits_reshaped.to(getTorchCudaDevice());
+            auto token_ids_in_t     = token_ids_in_reshaped.to(getTorchCudaDevice());
+            auto input_lengths_t    = input_lengths_reshaped.to(getTorchCudaDevice());
+            auto sequence_lengths_t = sequence_lengths_reshaped.to(getTorchCudaDevice());
+            auto cum_log_probs_in_t = cum_log_probs_in_reshaped.to(getTorchCudaDevice());
 
             auto output = execSampleBeamSearch({logits_t,
                                                 token_ids_in_t,
