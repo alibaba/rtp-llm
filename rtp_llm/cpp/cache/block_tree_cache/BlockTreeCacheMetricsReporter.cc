@@ -319,8 +319,15 @@ void BlockTreeCacheMetricsReporter::reportInsertHardStop(const BlockTreeInsertHa
         return;
     }
     RtpLLMCacheInsertMetricsCollector collector;
-    collector.existing_tier  = tierName(hard_stop.existing_tier);
-    collector.transfer_state = transferStateName(hard_stop.transfer_state);
+    collector.tier = tierName(hard_stop.existing_tier);
+    if (hard_stop.transfer_state == GroupSetTransferState::DEMOTING) {
+        collector.operation = cacheTransferOperationName(CacheTransferOperation::EVICT);
+    } else if (hard_stop.transfer_state == GroupSetTransferState::LOAD_PENDING
+               || hard_stop.transfer_state == GroupSetTransferState::LOADING) {
+        collector.operation = cacheTransferOperationName(CacheTransferOperation::LOAD);
+    } else {
+        collector.operation = "idle";
+    }
     metrics_reporter_->report<RtpLLMCacheInsertMetrics, RtpLLMCacheInsertMetricsCollector>(nullptr, &collector);
 }
 
