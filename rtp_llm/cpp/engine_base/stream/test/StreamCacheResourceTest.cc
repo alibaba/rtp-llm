@@ -1594,8 +1594,11 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
     resource.allocator_load_context_ = context;
     stream_->reportEvent(StreamEvents::CanRun);
     stream_->reportEvent(StreamEvents::LoadInitiated);
-    stream_->generate_status_->status = StreamState::LOADING_CACHE;
+    stream_->generate_status_->status = StreamState::WAITING;
     resource.malloc_failed_times_     = 9;
+    EXPECT_EQ(stream_->moveToNext(), StreamState::LOADING_CACHE);
+    EXPECT_EQ(resource.allocator_load_context_, context);
+    EXPECT_FALSE(resource.isResourceReleased());
     EXPECT_FALSE(resource.loadCacheDone());
     EXPECT_FALSE(resource.loadCacheDone());
     ASSERT_NO_FATAL_FAILURE(expect_retry_qps(0));
@@ -1654,7 +1657,10 @@ TEST_F(StreamCacheResourceTest, testPrefillPermanentMaterializationFailureTermin
     resource.allocator_load_context_ = context;
     stream_->reportEvent(StreamEvents::CanRun);
     stream_->reportEvent(StreamEvents::LoadInitiated);
-    stream_->generate_status_->status = StreamState::LOADING_CACHE;
+    stream_->generate_status_->status = StreamState::WAITING;
+    EXPECT_EQ(stream_->moveToNext(), StreamState::LOADING_CACHE);
+    EXPECT_EQ(resource.allocator_load_context_, context);
+    EXPECT_FALSE(resource.isResourceReleased());
     context->startBackendMatch();
     context->waitDone();
 

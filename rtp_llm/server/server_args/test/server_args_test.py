@@ -1804,6 +1804,51 @@ class ServerArgsSetTest(TestCase):
             1,
         )
 
+    def test_async_prepare_cache_config_and_pickle(self):
+        from rtp_llm.server.server_args import server_args
+
+        cases = (
+            ({}, [], False),
+            ({"RTP_LLM_ASYNC_PREPARE_CACHE": "1"}, [], True),
+            ({"RTP_LLM_ASYNC_PREPARE_CACHE": "0"}, [], False),
+            (
+                {"RTP_LLM_ASYNC_PREPARE_CACHE": "1"},
+                ["--async_prepare_cache", "false"],
+                False,
+            ),
+            (
+                {"RTP_LLM_ASYNC_PREPARE_CACHE": "0"},
+                ["--async_prepare_cache=true"],
+                True,
+            ),
+        )
+        for env, args, expected in cases:
+            with (
+                self.subTest(env=env, args=args),
+                patch.dict(os.environ, env, clear=True),
+            ):
+                config = server_args.setup_args(
+                    args
+                ).runtime_config.fifo_scheduler_config
+                self.assertEqual(config.async_prepare_cache, expected)
+                self.assertEqual(
+                    pickle.loads(pickle.dumps(config)).async_prepare_cache, expected
+                )
+
+        config_type = type(config)
+        legacy_config = config_type.__new__(config_type)
+        legacy_config.__setstate__((32, 8192, "ratio", "2", False, 16, 2048, 256))
+        self.assertFalse(legacy_config.async_prepare_cache)
+        self.assertEqual(legacy_config.prefill_chunk_size, 256)
+        with patch.dict(
+            os.environ, {"RTP_LLM_ASYNC_PREPARE_CACHE": "invalid"}, clear=True
+        ):
+            with (
+                self.assertRaises(SystemExit),
+                patch("sys.stderr", new_callable=io.StringIO),
+            ):
+                server_args.setup_args([])
+
     def test_pdfusion_scheduler_mode_config(self):
         """Test that pdfusion_scheduler_mode is opt-in and decode_prefill_ratio is configurable."""
         sys.argv = ["prog"]

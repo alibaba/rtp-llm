@@ -466,6 +466,7 @@ struct FIFOSchedulerConfig {
     // Global real-context token budget per chunked-prefill forward; <=0 disables, >0 enables.
     // Config injection requires at least one seq_size_per_block and floor-aligns larger values.
     int64_t     prefill_chunk_size = 0;
+    bool        async_prepare_cache = false;
     std::string to_string() const;
 };
 

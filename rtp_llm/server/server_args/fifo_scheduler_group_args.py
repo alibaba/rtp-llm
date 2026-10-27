@@ -8,6 +8,14 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
     fifo_scheduler_group = parser.add_argument_group("FIFO Scheduler")
 
     fifo_scheduler_group.add_argument(
+        "--async_prepare_cache",
+        env_name="RTP_LLM_ASYNC_PREPARE_CACHE",
+        bind_to=[(fifo_scheduler_config, "async_prepare_cache")],
+        type=str2bool,
+        default=False,
+        help="在 PREFILL 主 TP rank 后台准备 KV cache；仅支持纯 PD 分离请求，不支持 PDFUSION 或本地多 token 生成。",
+    )
+    fifo_scheduler_group.add_argument(
         "--max_context_batch_size",
         env_name="MAX_CONTEXT_BATCH_SIZE",
         bind_to=[(fifo_scheduler_config, "max_context_batch_size")],

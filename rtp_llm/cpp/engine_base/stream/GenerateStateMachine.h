@@ -51,6 +51,10 @@ public:
         events_.clearLoadInitiated();
     }
 
+    void clearCachePrepareDeferred() {
+        events_.clearCachePrepareDeferred();
+    }
+
     StreamState moveToNext();
 
     StreamState getStatus() const {

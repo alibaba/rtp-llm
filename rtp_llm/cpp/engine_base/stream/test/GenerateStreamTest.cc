@@ -254,6 +254,26 @@ void waitForConsumer(std::future<T>& future, const std::shared_ptr<NormalGenerat
     future.wait();
 }
 
+class ConsumerWaitObservedStream: public NormalGenerateStream {
+public:
+    using NormalGenerateStream::NormalGenerateStream;
+
+    mutable std::promise<void> consumer_waiting;
+
+protected:
+    bool consumerReadyWithoutLock() const override {
+        // nextOutput holds mutex_ here until its condition-variable wait releases it.
+        if (!consumer_observed_) {
+            consumer_observed_ = true;
+            consumer_waiting.set_value();
+        }
+        return NormalGenerateStream::consumerReadyWithoutLock();
+    }
+
+private:
+    mutable bool consumer_observed_ = false;
+};
+
 void updateOneToken(const GenerateStreamPtr& stream, int token_id) {
     const auto new_tokens = torch::full(
         {static_cast<int64_t>(stream->currentBatchSize()), 1}, token_id, torch::TensorOptions().dtype(torch::kInt32));
@@ -970,6 +990,31 @@ TEST_F(GenerateStreamTest, consumerWaitWakesOnError) {
     auto result = consumer.get();
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.status().code(), ErrorCode::CANCELLED);
+}
+
+TEST_F(GenerateStreamTest, consumerWaitWakesOnCachePreparationError) {
+    auto input                             = std::make_shared<GenerateInput>();
+    input->input_ids                       = torch::tensor({1, 2, 3}, torch::kInt32);
+    input->generate_config                 = std::make_shared<GenerateConfig>();
+    input->generate_config->max_new_tokens = 2;
+    input->generate_config->pd_separation  = false;
+    input->begin_time_us                   = autil::TimeUtility::currentTimeInMicroSeconds();
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 1024;
+    auto stream =
+        std::make_shared<ConsumerWaitObservedStream>(input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+
+    auto consumer_ready = stream->consumer_waiting.get_future();
+    auto consumer       = std::async(std::launch::async, [stream] { return stream->nextOutput(); });
+    consumer_ready.get();
+
+    EXPECT_EQ(stream->prepareCache(), GenerateStream::CachePrepareResult::DONE);
+
+    waitForConsumer(consumer, stream);
+    auto result = consumer.get();
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::INVALID_PARAMS);
 }
 
 TEST_F(GenerateStreamTest, errorTakesPrecedenceOverQueuedOutput) {
