@@ -419,7 +419,7 @@ class KevModule:
 
         if config.compute_dtype != torch.bfloat16:
             raise ValueError(
-                "Kev-4B requires BF16 backbone activations; set --act_type bf16"
+                "Kev requires BF16 backbone activations; set --act_type bf16"
             )
         quant_config = getattr(config, "quant_config", None)
         quant_algo = config.quant_algo
@@ -439,15 +439,34 @@ class KevModule:
             and getattr(quant_algo, "getWeightBits", lambda: None)() == 8
             and getattr(quant_algo, "getGroupSize", lambda: None)() == 128
         )
+        # PTPC is a distinct native quantization method (isFp8() is false).
+        # Limit its Kev admission to the ROCm runtime whose linear backend has
+        # been selected for per-channel weights and per-token activations.
+        fp8_per_channel = (
+            bool(torch.version.hip)
+            and quant_config is not None
+            and getattr(quant_config, "get_method", lambda: None)()
+            == "FP8_PER_CHANNEL_COMPRESSED"
+            and getattr(quant_config, "bits", None) == 8
+            and getattr(quant_config, "group_size", lambda: None)() == 0
+            and quant_algo.isQuant()
+            and getattr(quant_algo, "isFp8PTPC", lambda: False)()
+            and getattr(quant_algo, "getWeightBits", lambda: None)() == 8
+            and getattr(quant_algo, "getGroupSize", lambda: None)() == 0
+        )
         layered_quantization = (
             getattr(config, "enable_nvfp4_dense_ffn", False)
             or getattr(config, "enable_w4a16_sm120_dense_ffn", False)
             or getattr(quant_config, "enable_nvfp4_dense_ffn", False)
         )
-        if (has_quantization and not fp8_per_block) or layered_quantization:
+        if (
+            has_quantization and not (fp8_per_block or fp8_per_channel)
+        ) or layered_quantization:
             raise ValueError(
-                "Kev-4B supports only BF16 or FP8_PER_BLOCK backbone weights "
-                "(8-bit, group_size=128), without layered quantization"
+                "Kev supports only BF16 or FP8_PER_BLOCK backbone weights "
+                "(8-bit, group_size=128); ROCm also supports "
+                "FP8_PER_CHANNEL_COMPRESSED (8-bit, group_size=0), "
+                "without layered quantization"
             )
         self.config_ = config
         self.tokenizer_ = tokenizer

@@ -1,5 +1,17 @@
-load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "SMOKE_FRAMEWORK_DEPS", "smoke_test")
 package(default_visibility = ["//visibility:public"])
+
+py_test(
+    name = "kev_family_acceptance_test",
+    srcs = ["kev_family_acceptance_test.py"],
+    data = ["//rtp_llm:sdk"],
+    deps = SMOKE_FRAMEWORK_DEPS + ["//rtp_llm:requests", "//rtp_llm:transformers"],
+    env = {"GPU_COUNT": "1", "PYTHONNOUSERSITE": "1"},
+    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
+    tags = ["manual", "rocm"],
+    timeout = "eternal",
+    legacy_create_init = 0,
+)
 
 # Framework source files for cross-package smoke tests.
 # Used as data dep (not srcs/deps) so internal smoke targets can merge their

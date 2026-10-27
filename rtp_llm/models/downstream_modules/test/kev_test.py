@@ -365,9 +365,7 @@ class KevHeadTest(unittest.TestCase):
         self.assertTrue(self.handler.supports_prefix_cache)
         for row in self.rows:
             tokens = torch.tensor(row)
-            self.assertEqual(
-                self.handler.cache_prefix_length(tokens), row.index(2)
-            )
+            self.assertEqual(self.handler.cache_prefix_length(tokens), row.index(2))
         for tokens in (
             torch.tensor(self.rows[0][1:]),
             torch.tensor(self.rows[0][:-1]),
@@ -444,9 +442,7 @@ class KevHeadTest(unittest.TestCase):
         )
         for row, prefix in invalid:
             with self.subTest(row=row, prefix=prefix), self.assertRaises(ValueError):
-                self.run_rows(
-                    [row], torch.zeros((len(row), 4)), torch.tensor([prefix])
-                )
+                self.run_rows([row], torch.zeros((len(row), 4)), torch.tensor([prefix]))
 
     def test_head_loading_rejects_missing_or_low_precision_weights(self):
         with self.assertRaises(ValueError):
@@ -540,6 +536,104 @@ class KevHeadTest(unittest.TestCase):
                 self.fp8_block_config(compute_dtype=torch.float16), FakeTokenizer()
             )
 
+    def fp8_channel_config(self, **overrides):
+        from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
+
+        fields = {
+            "quantization": "FP8_PER_CHANNEL_COMPRESSED",
+            "quant_config": Fp8PerChannelCompressedQuantConfig(),
+            "quant_algo": SimpleNamespace(
+                isQuant=lambda: True,
+                isFp8=lambda: False,
+                isFp8PTPC=lambda: True,
+                getWeightBits=lambda: 8,
+                getGroupSize=lambda: 0,
+            ),
+        }
+        fields.update(overrides)
+        return self.module_config(**fields)
+
+    def test_module_accepts_rocm_fp8_per_channel_and_keeps_head_fp32(self):
+        from safetensors.torch import save_file
+
+        from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
+
+        save_file(self.weights, str(Path(self.directory.name, "kev_head.safetensors")))
+        expected = self.run_rows(self.rows, self.hidden)
+        for requested in ("FP8_PER_CHANNEL_COMPRESSED", None):
+            with (
+                self.subTest(requested=requested),
+                mock.patch.object(torch.version, "hip", "7.2.0"),
+            ):
+                module = KevModule(
+                    self.fp8_channel_config(
+                        quantization=requested,
+                        quant_config=Fp8PerChannelCompressedQuantConfig(
+                            is_quanted=requested is None
+                        ),
+                    ),
+                    FakeTokenizer(),
+                )
+                self.assertEqual(module.get_custom_weight_info(), [])
+                module.init(None)
+                self.handler = module.get_handler()
+                actual = self.run_rows(self.rows, self.hidden)
+                self.assertEqual(actual.dtype, torch.float32)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                for tensor in self.handler._weights.values():
+                    self.assertEqual(tensor.dtype, torch.float32)
+
+    def test_module_rejects_fp8_per_channel_outside_rocm(self):
+        for cuda_version in (None, "13.0"):
+            with (
+                self.subTest(cuda_version=cuda_version),
+                mock.patch.multiple(torch.version, hip=None, cuda=cuda_version),
+                self.assertRaisesRegex(ValueError, "ROCm also supports"),
+            ):
+                KevModule(self.fp8_channel_config(), FakeTokenizer())
+
+    def test_module_rejects_invalid_rocm_fp8_per_channel_config(self):
+        from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
+
+        valid_algo = vars(self.fp8_channel_config().quant_algo)
+        invalid = [
+            {"quant_config": None},
+            {"quant_config": Fp8PerChannelCompressedQuantConfig(bits=4)},
+            {
+                "quant_config": SimpleNamespace(
+                    get_method=lambda: "FP8_PER_CHANNEL_COMPRESSED",
+                    bits=8,
+                    group_size=lambda: 128,
+                )
+            },
+            {"enable_nvfp4_dense_ffn": True},
+            {"enable_w4a16_sm120_dense_ffn": True},
+        ]
+        for method in ("FP8_PER_CHANNEL_QUARK", "FP8_PER_TENSOR_COMPRESSED", "FP8"):
+            invalid.append(
+                {"quant_config": SimpleNamespace(get_method=lambda m=method: m)}
+            )
+        for name, value in (
+            ("isQuant", False),
+            ("isFp8PTPC", False),
+            ("getWeightBits", 4),
+            ("getGroupSize", 128),
+        ):
+            invalid.append(
+                {
+                    "quant_algo": SimpleNamespace(
+                        **{**valid_algo, name: lambda v=value: v}
+                    )
+                }
+            )
+        for overrides in invalid:
+            with (
+                self.subTest(overrides=overrides),
+                mock.patch.object(torch.version, "hip", "7.2.0"),
+                self.assertRaisesRegex(ValueError, "only BF16 or FP8_PER_BLOCK"),
+            ):
+                KevModule(self.fp8_channel_config(**overrides), FakeTokenizer())
+
     def test_module_rejects_unresolved_or_other_quantization_before_loading_head(self):
         for overrides in (
             {"quant_algo": SimpleNamespace(isQuant=lambda: True)},
@@ -562,11 +656,7 @@ class KevHeadTest(unittest.TestCase):
             },
             {"quant_config": SimpleNamespace(get_method=lambda: "modelopt_fp4")},
             {"quant_algo": SimpleNamespace(isQuant=lambda: False)},
-            {
-                "quant_algo": SimpleNamespace(
-                    isQuant=lambda: True, isFp8=lambda: False
-                )
-            },
+            {"quant_algo": SimpleNamespace(isQuant=lambda: True, isFp8=lambda: False)},
             {
                 "quant_algo": SimpleNamespace(
                     isQuant=lambda: True,
