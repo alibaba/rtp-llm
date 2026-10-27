@@ -88,7 +88,7 @@ class Processes:
                 directory.mkdir(parents=True)
                 config = directory / 'config.json'
                 ready = directory / 'ready.json'
-                write_json(config, {'component': self.case.environment[role],
+                write_json(config, {'component_role': role, 'component': self.case.environment[role],
                                     'environment': self.case.environment, 'index': index, 'id': node})
                 env = {**os.environ, **recipe['env'], 'MOCK_NODE_ID': node, 'MOCK_COMPONENT': role,
                        'MOCK_CONFIG_FILE': str(config), 'MOCK_READY_FILE': str(ready), 'MOCK_OUTPUT_DIR': str(directory)}

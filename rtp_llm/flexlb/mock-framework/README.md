@@ -1,6 +1,6 @@
 # Mock框架
 
-Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP Mock业务适配、多JVM Client播放、指标采集和正式历史查看服务尚未接入，不由测试组件模拟验收。
+Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP节点支持原生状态RPC与设备缓存底座，请求链路、多JVM Client播放、指标采集和正式历史查看服务尚未接入，不由测试组件模拟验收。
 
 ## 目录与构建
 
@@ -9,6 +9,7 @@ Python负责case配置编译和执行组织，Java负责组件共享接口与实
 - `python/mock_framework/execution/`：本地进程初始化、顺序执行、HTTP调用、门禁比较、收尾和运行记录。
 - `java/runtime/`：将接口实现绑定为HTTP端点，按接口清单校验参数与回执，提供单次调用上下文。
 - `java/shared/compute/`：共享Forward batch、公式绑定、确定性噪声与可取消计时执行。
+- `java/engine/rtp/`：RTP节点入口、原生配置读取、KV块租约和生产proto状态RPC。
 - `tests/`：编译与跨语言接口扩展验证；Java测试跟随模块。
 - `scripts/`：构建和验证入口。
 
@@ -19,7 +20,7 @@ export JAVA_HOME=<Java21目录>
 ./scripts/check.sh
 ```
 
-`build.sh`编译Java并运行测试，然后生成`build/interfaces.json`。Python没有另一份组件接口枚举；`runtime/wait`由Python定义为执行器内置动作，不制造Java端点。生成目录不入库；Python依赖锁定在`uv.lock`。Java构建直接引用并构建生产`flexlb-common`公式模块，不继承旧Mock或online_eval模块。Compute运行依赖仅保留生产公式类所需的ASM，不引入该模块的Spring等传递运行依赖。
+`build.sh`编译Java并运行测试，然后生成`build/interfaces.json`。Python没有另一份组件接口枚举；`runtime/wait`由Python定义为执行器内置动作，不制造Java端点。生成目录不入库；Python依赖锁定在`uv.lock`。Java构建直接构建生产`flexlb-common`和`flexlb-grpc`，复用实际公式与生成协议，不继承旧Mock或online_eval构建。新组件只保留所用依赖，不引入生产模块的Spring等传递运行依赖。
 
 ## 编译case
 
@@ -120,7 +121,7 @@ uv run --locked mock-case run <case目录>/case.yaml \
   --output <新的运行目录>
 ```
 
-启动配方是开发接线配置，不放入case业务区域，也不新增一套业务接口定义。当前需要组件提供可启动入口；框架没有默认的RTP或Client业务启动配方。
+启动配方是开发接线配置，不放入case业务区域，也不新增一套业务接口定义。RTP节点使用下述独立JAR入口；Master/Client完整业务启动配方尚未提供。
 
 ```yaml
 components:
@@ -144,3 +145,33 @@ Java组件初始化后调用`new ApiServer(address).bind(MasterApi.class, implem
 每次读取固定query_time；`latest`记录查询点，`[-60s, 0s]`解析为明确起止时间，`all`取唯一发流回执中的started_at到当前查询时刻。原始PromQL不解析内部窗口，记录单点查询和全部返回样本，所有样本必须满足expect，空结果为ERROR。集合eq忽略顺序，拒绝重复身份；Master的Engine集合逐个比较，空Master结果不能通过门禁。
 
 运行目录不覆盖已有目录，保存原始case、编译配置、启动配方、接口清单、代码版本与工作区差异、组件配置和日志、phase/step时间线、门禁实际值及范围、最终结果。PASS表示所执行步骤通过，FAIL表示门禁不满足，ERROR表示执行或数据异常，CANCELLED表示取消；清理异常不能得到PASS。当前尚不产生业务指标或逐请求记录，正式报告的数据保留由后续采集接入完成。测试中的TransportProbe只用于验证真实JVM进程及网络链路，不实现Engine或压测行为。
+
+## RTP节点与缓存底座
+
+构建生成`java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar`，包含生产生成的gRPC/protobuf类型及新组件所需运行依赖。启动配方中使用`command: [<Java21>, -jar, <该JAR绝对路径>]`，组件可为prefill或decode；每个副本独立JVM，端口由系统分配，当前仅监听本机回环地址。
+
+```yaml
+environment:
+  prefill:
+    engine: rtp
+    config:
+      SEQ_SIZE_PER_BLOCK: "64"
+      MAX_SEQ_LEN: "32768"
+      MAX_BATCH_TOKENS_SIZE: "8192"
+      REUSE_CACHE: "true"
+      capacity.device_blocks: 1024
+      capacity.reserve_blocks: 52
+  compute:
+    prefill:
+      expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
+```
+
+原生字段支持server_args的小写名称或Whale环境变量的大写名称；同一字段两种写法同时存在时报错，不做静默优先级覆盖。整数/布尔字段接受对应原生env文本，保留原始业务配置，不展开其中的JSON文本。当前读取seq_size_per_block、max_seq_len、max_batch_tokens_size、reuse_cache、enable_device_cache、reserve_block_ratio、tp_size、dp_size、dp_rank；其他原生内容保留但不宣称已实现其业务效果。block size和max seq length必须显式配置，不从虚拟GPU型号或真实模型结构猜测；当前仅支持dp_size=1、dp_rank=0。
+
+Mock容量通过点分键capacity.device_blocks配置，单位为本实例的物理块；capacity.reserve_blocks可提供观测到的绝对预留块数。未提供绝对预留值时，按原生reserve_block_ratio计算，默认5%，向上取整。总token容量=物理块数×原生block size，不把部署内存作为模拟KV容量。默认参数和实际解析值写入组件目录的effective-config.json，原始业务配置仍保留；复制配置不表示忽略的原生功能已完成对齐。
+
+节点在原生gRPC提供CheckHealth、GetWorkerStatus和GetCacheStatus。健康返回OK；WorkerStatus使用RoleType.PREFILL/DECODE和对应类型枚举，available_concurrency保持生产默认0，KV容量使用token单位；CacheStatus另外提供block size。缓存键版本只随已发布键集合变化，同版本省略键列表，但每次仍返回当前可用容量。precision暂为FP16的Mock状态标记，不模拟量化或真实模型布局。
+
+设备块池按引用管理共享前缀：可用容量包含空闲块和未被引用的LRU块，物理free不包含LRU数据。分配先引用命中、再检查净新增需求与reserve，失败回滚引用；需要空闲物理块时才淘汰LRU。增长失败保留已增长的部分，最终由原owner释放。DeviceCache封装原始池租约，完成、取消和关闭只有一次所有权转换；publish可保留已计算P数据供连接器使用，但不会自动推进P/D协议。取消后不能再次发布，关闭清除缓存并拒绝新分配。
+
+组件目录同时保存endpoints.json，记录本实例原生RPC地址、控制地址和支持的RPC。HTTP /health仅报告已绑定的公共业务接口清单；当前RTP节点该清单为空，不把原生状态RPC或健康探测扩充为case业务接口。Enqueue、Fetch、Generate、Cancel和P/D接续尚未绑定，调用返回gRPC UNIMPLEMENTED；EngineApi动作/指标适配及Prometheus指标也尚未提供，节点启动通过不表示压测或完整RTP行为通过。

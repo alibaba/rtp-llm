@@ -24,6 +24,13 @@ public final class ApiServer implements AutoCloseable {
         server = HttpServer.create(address, 0);
         server.setExecutor(handlers);
         server.createContext("/invoke", this::invoke);
+        server.createContext("/health", exchange -> {
+            try (exchange) {
+                if (exchange.getRequestMethod().equals("GET") && exchange.getRequestURI().toString().equals("/health"))
+                    send(exchange, 200, Map.of("interfaces", bindings.keySet()));
+                else send(exchange, 404, Map.of("error", "Unknown endpoint"));
+            }
+        });
     }
 
     @SuppressWarnings("unchecked")
@@ -40,7 +47,7 @@ public final class ApiServer implements AutoCloseable {
     }
 
     public ApiServer start() {
-        if (bindings.isEmpty()) throw new IllegalStateException("No component interfaces bound");
+        // A native-protocol node can publish transport health before business adapters are bound.
         server.start(); started = true;
         return this;
     }

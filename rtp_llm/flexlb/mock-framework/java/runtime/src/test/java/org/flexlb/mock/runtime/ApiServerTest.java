@@ -35,6 +35,14 @@ class ApiServerTest {
         assertThrows(IllegalStateException.class, InvocationContext::current);
     }
 
+    @Test void nativeOnlyNodeHealthAdvertisesNoImplementedBusinessInterfaces() throws Exception {
+        try (var nativeHost = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).start()) {
+            var response = CLIENT.send(HttpRequest.newBuilder(URI.create(nativeHost.url() + "/health")).GET().build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, response.statusCode());
+            assertEquals(0, JsonWire.JSON.readTree(response.body()).get("interfaces").size());
+        }
+    }
+
     @Test void rejectsInvalidRequestsBeforeImplementation() throws Exception {
         assertEquals(400, call("probe/action", Map.of("delay_ms", -1), "foreground", 1000).statusCode());
         assertEquals(400, call("probe/action", Map.of("delay_ms", "1"), "foreground", 1000).statusCode());

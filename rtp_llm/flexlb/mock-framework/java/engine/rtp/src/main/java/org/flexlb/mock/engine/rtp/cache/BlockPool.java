@@ -1,0 +1,812 @@
+package org.flexlb.mock.engine.rtp.cache;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.function.Consumer;
+
+/**
+ * Block pool with token counting — the mock counterpart of the production
+ * C++ BlockPool/KVCacheAllocator admission chain (KV capacity model v2).
+ *
+ * <p>One pool per engine, sized in BLOCKS: {@code totalBlocks = ceil(totalKvTokens / spb)}.
+ * A block is in exactly one of three states:
+ * <ul>
+ *   <li><b>held</b> — referenced by an in-flight request (prefill batch member,
+ *       running decode stream, decode growth blocks). Never counted as available.</li>
+ *   <li><b>LRU</b> — a cache-key block with reference count 0 (pure LRU). Freely
+ *       evictable, but eviction sacrifices prefix reuse.</li>
+ *   <li><b>free</b> — carrying no data, immediately allocatable.</li>
+ * </ul>
+ *
+ * <p>Production-faithful semantics (C++ verified):
+ * <ul>
+ *   <li>{@code availableBlocks = totalBlocks - held - referencedKeyBlocks} — the
+ *       analogue of {@code BlockPool::availableBlocksNum()} ({@code req_con_ref_counter_
+ *       freeBlockNum()}): free blocks AND pure-LRU blocks count as available, so
+ *       "release != delete" and "free != available" both hold.</li>
+ *   <li>Admission gate ({@code KVCacheAllocator::evaluateInitCapacity},
+ *       TOTAL_AND_AVAILABLE): {@code need <= available && reserve <= available - need}
+ *       with {@code reserve = ceil(reserveRatio x totalBlocks)}; a gate
+ *       failure classifies PERMANENT vs RETRYABLE (see
+ *       {@link AllocationFailure}).</li>
+ *   <li>Allocation coupling: malloc needs FREE blocks; when short, pure-LRU blocks
+ *       are evicted by oldest leaf and unbranched ancestor chain ({@code KVCacheGroup::ensureFreeBlocks} /
+ *       {@code evictAndFreeForGroup}); only if that still fails is the request
+ *       rejected (LACK_MEM).</li>
+ *   <li>Completion hands held blocks over to the LRU (the hash-keyed part becomes
+ *       cache entries; keyless blocks — decode growth, empty-bh requests — return
+ *       to free, mirroring the hash-channel limit of the mock).</li>
+ * </ul>
+ *
+ * <p>Thread safety: all mutating reads/writes are synchronized on this instance.
+ * Callers must not hold this monitor while taking other engine locks; the
+ * standard order is {@code decodeQueueLock -> cache} (never the reverse).
+ */
+final class BlockPool {
+
+    /** Default reserve watermark ratio (production reserve_block_num_ ≈ 5% of init available). */
+    static final double DEFAULT_RESERVE_RATIO = 0.05;
+
+    private final int totalBlocks;
+    // Updated under the cache monitor on 0 <-> 1 reference transitions.
+    private int referencedBlocks;
+    private final double reserveRatio;
+    private Integer observedReserveBlocks;
+    private final boolean floorReserve;
+    /**
+     * cache key → reference count. ref == 0: pure LRU block (evictable);
+     * ref > 0: referenced by in-flight requests (matchable, NOT evictable).
+     * Tree topology and the eligible-leaf LRU below select victims, not this map's
+     * iteration order. A whole unbranched chain is removed per selected leaf.
+     */
+    private final LinkedHashMap<Long, Integer> blocks;
+    /** Tree edges and access-ordered eligible leaves for chain eviction. */
+    private final Map<Long, TreeNode> tree = new HashMap<>();
+    private final TreeSet<Leaf> leaves = new TreeSet<>(
+            Comparator.comparingLong(Leaf::sequence).thenComparingLong(Leaf::key));
+    private long accessSequence;
+    private boolean prefixTreeEnabled = true;
+
+    synchronized void setPrefixTreeEnabled(boolean enabled) { prefixTreeEnabled = enabled; }
+    synchronized boolean prefixTreeEnabled() { return prefixTreeEnabled; }
+    private Consumer<EvictionEvent> evictionListener = event -> {};
+    /** Blocks held by in-flight requests that carry no cache key (growth/empty-bh). */
+    private int heldBlocks;
+    private long evictions;
+    private long allocationGeneration;
+    synchronized long allocationGeneration() { return allocationGeneration; }
+    synchronized void capacityChanged() { allocationGeneration++; notifyAll(); }
+    synchronized void awaitCapacityChange(long observed, long waitMs) throws InterruptedException {
+        if (allocationGeneration == observed) wait(Math.max(1, waitMs));
+    }
+    private java.util.function.DoubleConsumer evictionLifetimeListener = ignored -> {};
+
+    synchronized void setEvictionLifetimeListener(java.util.function.DoubleConsumer listener) {
+        evictionLifetimeListener = listener;
+    }
+    // Test-only idle-cache quota. Active leases retain the full physical pool.
+    private int retentionBlocks;
+    private long retentionEvictions;
+
+    BlockPool(int totalBlocks) {
+        this(totalBlocks, DEFAULT_RESERVE_RATIO);
+    }
+
+    BlockPool(int totalBlocks, double reserveRatio) {
+        this(totalBlocks, reserveRatio, false);
+    }
+
+    BlockPool(int totalBlocks, double reserveRatio, boolean floorReserve) {
+        this.floorReserve = floorReserve;
+        this.totalBlocks = Math.max(0, totalBlocks);
+        this.retentionBlocks = this.totalBlocks;
+        this.reserveRatio = Math.max(0, Math.min(0.5, reserveRatio));
+        this.blocks = new LinkedHashMap<>(16, 0.75f, true);
+    }
+
+    // ─────────────────────────── match ───────────────────────────
+
+    /**
+     * Longest prefix run of {@code keys} present in the cache (hit blocks are
+     * later re-referenced by {@link #acquire}). Same behavior as before the
+     * block-pool rework: the first miss truncates the run.
+     */
+    synchronized int prefixHitBlocks(List<Long> keys) {
+        return matchPrefix(keys).size();
+    }
+
+    /**
+     * Prefix match against ALL indexed keys, including ones referenced in-flight.
+     *
+     * <p>KV v2 fix #5: the match is a READ through {@code get()} (not
+     * {@code containsKey}), so the access-ordered map refreshes each matched
+     * entry's recency — the prefix-match read path itself keeps matched
+     * chains hot. This is the decode-side positive feedback: the more a
+     * prefix is matched, the later its blocks sit in the eviction order
+     * ("the more you use it, the more you save"), matching the production
+     * prefix-match read that touches every block it confirms.
+     */
+    private List<Long> matchPrefix(List<Long> keys) {
+        List<Long> hits = new ArrayList<>();
+        for (Long key : keys) {
+            if (blocks.get(key) == null) {
+                break;
+            }
+            touch(key);
+            hits.add(key);
+        }
+        return hits;
+    }
+
+    // ─────────────────────────── admission ───────────────────────────
+
+    /**
+     * Admission + allocation for one request. {@code needBlocks} is the request's
+     * total block demand (cache-key count, or ceil(inputLen/spb) for empty-bh
+     * requests); prefix-hit blocks are re-referenced instead of re-allocated
+     * (production reuseCache reduces need_blocks BEFORE the capacity gate).
+     *
+     * <p>Gate (TOTAL_AND_AVAILABLE): {@code netNew <= available} and
+     * {@code reserve <= available - netNew}. Allocation first spends free blocks,
+     * then evicts whole unbranched chains ({@code ensureFreeBlocks}). A pinned
+     * descendant can structurally protect otherwise available ancestors, so
+     * allocation also checks actual free capacity after eviction. Gate rejection
+     * allocates nothing; a later allocation failure may already have evicted data.
+     *
+     * @return the lease to hand back on admit/release, or {@code null} = LACK_MEM
+     */
+    synchronized BlockLease acquire(int needBlocks, List<Long> keys) {
+        return acquireDetailed(needBlocks, keys).lease();
+    }
+
+    /**
+     * Detailed prefill-flavoured admission: the lease on success, or the
+     * FAILURE FAMILY (production {@code KVCacheAllocator::initKVBlock}
+     * classification) on the LACK_MEM gate — see {@link AllocationFailure}.
+     * Same state contract as {@link #acquire}: failure retains no new lease.
+     */
+    synchronized AllocationOutcome acquireDetailed(int needBlocks, List<Long> keys) {
+        if (needBlocks <= 0) {
+            return new AllocationOutcome(new BlockLease(List.of(), 0), null);
+        }
+        List<Long> hitKeys = matchPrefix(keys);
+        if (hitKeys.size() > needBlocks) {
+            hitKeys = new ArrayList<>(hitKeys.subList(0, needBlocks));
+        }
+        int newBlocks = needBlocks - hitKeys.size();
+        // Allocation coupling: free first, then whole-chain eviction.
+        // Pin hits before selecting an eviction chain: a reused block must
+        // never disappear between matching and reference acquisition.
+        for (Long key : hitKeys) {
+            if (blocks.get(key) == 0) referencedBlocks++;
+            blocks.put(key, blocks.get(key) + 1);
+            refreshLeaf(key);
+        }
+        // Real initMalloc references hits before checking available capacity.
+        // Roll back our references on rejection, retaining other owners' pins.
+        int avail = availableBlocks();
+        if (newBlocks > avail || avail - newBlocks < reserveBlocks()) {
+            dereference(hitKeys);
+            return new AllocationOutcome(null, failureFamily(newBlocks));
+        }
+        evictChains(newBlocks - freeBlocks(), "admission");
+        if (freeBlocks() < newBlocks) {
+            dereference(hitKeys);
+            return new AllocationOutcome(null, AllocationFailure.RETRYABLE);
+        }
+        heldBlocks += newBlocks;
+        return new AllocationOutcome(new BlockLease(hitKeys, newBlocks), null);
+    }
+
+    /**
+     * Grow a running request's allocation by one block (decode per-step growth —
+     * production incrMalloc; only free/LRU are consulted, no reserve gate).
+     * @return false when the pool is exhausted (caller degrades growth).
+     */
+    synchronized boolean grow(BlockLease lease) {
+        if (freeBlocks() <= 0 && evictChains(1, "growth") == 0) {
+            return false;
+        }
+        lease.nakedBlocks++;
+        heldBlocks++;
+        return true;
+    }
+
+    /**
+     * Grow a running request's allocation toward {@code targetBlocks} TOTAL
+     * blocks (the per-step growth entrypoint — production incrMalloc toward
+     * ceil((seq_len + reserve_step)/spb); only free/LRU are consulted, no
+     * reserve gate). On exhaustion the outcome carries the FAILURE FAMILY
+     * classified against the target demand (the growth twin of the admission
+     * gate's required + reserve vs physical total) — blocks already grown
+     * stay grown (the partial lease survives; the caller releases it).
+     *
+     * @return the lease on success; {@code failure} = the family when the
+     *         pool cannot reach the target
+     */
+    synchronized AllocationOutcome growTo(BlockLease lease, int targetBlocks) {
+        while (lease.totalBlocks() < targetBlocks) {
+            if (!grow(lease)) {
+                return new AllocationOutcome(null, failureFamily(targetBlocks));
+            }
+        }
+        return new AllocationOutcome(lease, null);
+    }
+
+    /**
+     * Decode-side admission with local reuse deduction — KV v2 fix #5, the
+     * production {@code DecodeRpcServerNew} semantics: at hand-off the decode
+     * engine re-matches the request's block keys against its OWN LRU
+     * ({@code reuse_block_size = generate_stream->reuseBlockSize()}) and the
+     * NET new allocation is {@code totalBlocksDemand − hitBlocks} (floor 0);
+     * reused blocks are REFERENCED, never re-allocated — a reuse hit does not
+     * consume pool capacity the way a fresh block does.
+     *
+     * <p>Differences from the prefill-flavored {@link #acquire}:
+     * <ul>
+     *   <li>Token caliber: {@code totalBlocksDemand} is ceil(inputLen/spb) —
+     *       the FULL input including the hash-channel-uncovered suffix (the
+     *       prefill gate keeps its hash-key-count caliber).</li>
+     *   <li>Net-demand gate: the TOTAL_AND_AVAILABLE gate evaluates the NET
+     *       demand ({@code netNew <= available && reserve <= available - netNew})
+     *       — production reuse reduces need_blocks BEFORE the capacity gate, so
+     *       a fully-reused request admits whenever the reserve watermark holds,
+     *       even with {@code totalBlocksDemand > available}.</li>
+     * </ul>
+     *
+     * <p>Hit keys are pinned (ref+1) BEFORE the free-first/LRU-tail eviction
+     * sweep for the net-new part, so an eviction victim can never be a block
+     * this request is about to reference.
+     *
+     * @param totalBlocksDemand the request's FULL block demand (ceil(inputLen/spb))
+     * @param keys the request's hash-channel block keys (may be empty)
+     * @return the lease ({@code hitKeys} = referenced reuse blocks,
+     *         {@code nakedBlocks} = net-new blocks), or {@code null} = LACK_MEM
+     *         (no new lease retained)
+     */
+    synchronized BlockLease acquireWithReuse(int totalBlocksDemand, List<Long> keys) {
+        return acquireWithReuseDetailed(totalBlocksDemand, keys).lease();
+    }
+
+    /**
+     * Detailed decode-flavoured admission (same semantics as
+     * {@link #acquireWithReuse}, plus the failure family on the LACK_MEM
+     * gate — see {@link AllocationFailure}). Failure retains no new lease;
+     * allocation-stage eviction, if attempted, remains observable.
+     */
+    synchronized AllocationOutcome acquireWithReuseDetailed(int totalBlocksDemand, List<Long> keys) {
+        if (totalBlocksDemand <= 0) {
+            return new AllocationOutcome(new BlockLease(List.of(), 0), null);
+        }
+        List<Long> hitKeys = matchPrefix(keys);
+        if (hitKeys.size() > totalBlocksDemand) {
+            // Reuse can never exceed the request's own demand — clamp the
+            // referenced prefix (defensive: a trace with more bh keys than
+            // input blocks would otherwise over-pin the LRU).
+            hitKeys = new ArrayList<>(hitKeys.subList(0, totalBlocksDemand));
+        }
+        int netNew = totalBlocksDemand - hitKeys.size();
+        // Pin the reused blocks FIRST: each reference moves the key out of the
+        // evictable pure-LRU set, so the LRU-tail eviction below can never
+        // sacrifice a block this request is about to reuse.
+        for (Long key : hitKeys) {
+            if (blocks.get(key) == 0) referencedBlocks++;
+            blocks.put(key, blocks.get(key) + 1);
+            refreshLeaf(key);
+        }
+        // Real initMalloc references hits before checking available capacity.
+        // Roll back our references on rejection, retaining other owners' pins.
+        int avail = availableBlocks();
+        if (netNew > avail || avail - netNew < reserveBlocks()) {
+            dereference(hitKeys);
+            return new AllocationOutcome(null, failureFamily(netNew));
+        }
+        // Free-first allocation for the net-new part (same coupling as
+        // acquire: eviction trades prefix reuse for capacity).
+        evictChains(netNew - freeBlocks(), "admission");
+        if (freeBlocks() < netNew) {
+            dereference(hitKeys);
+            return new AllocationOutcome(null, AllocationFailure.RETRYABLE);
+        }
+        heldBlocks += netNew;
+        return new AllocationOutcome(new BlockLease(hitKeys, netNew), null);
+    }
+
+    // ─────────────────────────── completion / cancel ───────────────────────────
+
+    /**
+     * Normal completion: release the lease and hand the request's cache-keyed
+     * blocks over to the LRU. Keyless held blocks (growth, empty-bh) return to
+     * free — the hash channel carries no key for them, so they cannot become
+     * reusable cache entries.
+     *
+     * @return true when the indexed key set changed
+     */
+    synchronized boolean admit(BlockLease lease, List<Long> keys) {
+        dereference(lease.hitKeys);
+        heldBlocks -= lease.nakedBlocks;
+        boolean changed = false;
+        for (Long key : keys) {
+            Integer ref = blocks.get(key);
+            if (ref == null) {
+                blocks.put(key, 0);
+                changed = true;
+            } else {
+                blocks.put(key, ref); // already indexed — refresh LRU order only
+            }
+        }
+        // Capacity conservation: the LRU (pure + referenced) may not crowd
+        // out held blocks — evict pure-LRU tail blocks ONLY when the pool is
+        // genuinely over-subscribed (free < 0). The old transferred > naked
+        // heuristic was a prefill-acquire invariant (keys.size == needBlocks
+        // there); a decode lease (fix #5) legitimately carries hash-channel
+        // keys exceeding its token-caliber net allocation ceil(inputLen/spb)
+        // (keys are trace metadata, the demand is tokens) — those keys park
+        // fine whenever the pool has room.
+        indexSequence(keys);
+        evictChains(blocks.size() + heldBlocks - totalBlocks, "completion");
+        long beforeTrim = retentionEvictions;
+        trimRetention();
+        capacityChanged();
+        return changed || retentionEvictions != beforeTrim;
+    }
+
+    /** Publish computed P keys while retaining the connector's references until KV transfer. */
+    synchronized BlockLease retainComputed(BlockLease lease, List<Long> keys) {
+        // Retain only the materialized physical KV. An explicit hash channel
+        // can describe more keys than a token-caliber FIFO lease owns; those
+        // extra keys cannot grow the lease during completion.
+        List<Long> retained = new ArrayList<>(lease.hitKeys);
+        int naked = lease.nakedBlocks;
+        for (Long key : keys) {
+            if (retained.contains(key)) {
+                continue;
+            }
+            if (naked == 0) {
+                break;
+            }
+            Integer references = blocks.get(key);
+            if (references == null || references == 0) referencedBlocks++;
+            if (references == null) {
+                blocks.put(key, 1);
+            } else {
+                blocks.put(key, references + 1);
+            }
+            // Another request may already have published this key. Its shared
+            // physical block replaces our reserved keyless block as well.
+            heldBlocks--;
+            naked--;
+            retained.add(key);
+        }
+        indexSequence(retained);
+        capacityChanged();
+        return new BlockLease(retained, naked);
+    }
+
+    /** Cancelled request: release references and return held blocks to free (no LRU handover). */
+    synchronized void release(BlockLease lease) {
+        dereference(lease.hitKeys);
+        heldBlocks -= lease.nakedBlocks;
+        trimRetention();
+        capacityChanged();
+    }
+
+    /**
+     * Admit keys with NO holding lease — direct LRU insertion (unit tests and
+     * legacy callers). Capacity comes from free blocks / LRU tail eviction.
+     * @return true when the key set changed
+     */
+    synchronized boolean admit(List<Long> keys) {
+        if (totalBlocks == 0 || keys.isEmpty()) {
+            return false;
+        }
+        boolean changed = false;
+        for (Long key : keys) {
+            // containsKey guard: never clobber a live reference count — a key
+            // currently pinned by an in-flight request only gets its LRU order
+            // refreshed, exactly like the lease-based admit path.
+            if (!blocks.containsKey(key)) {
+                blocks.put(key, 0);
+                changed = true;
+            }
+        }
+        indexSequence(keys);
+        evictChains(blocks.size() + heldBlocks - totalBlocks, "insertion");
+        long beforeTrim = retentionEvictions;
+        trimRetention();
+        return changed || retentionEvictions != beforeTrim;
+    }
+
+    // ─────────────────────────── forced eviction (/cache_evict) ───────────────────────────
+
+    /**
+     * Force-evict the given keys (control-plane POST /cache_evict). Idempotent:
+     * keys not present — or currently referenced by an in-flight request
+     * (production: a referenced chain cannot be dropped) — are a no-op. Each
+     * actual removal counts as an eviction; returns whether the key set changed.
+     */
+    synchronized boolean evict(List<Long> keys) {
+        boolean changed = false;
+        for (Long key : keys) {
+            Integer ref = blocks.get(key);
+            if (ref != null && ref == 0 && blocks.remove(key) != null) {
+                reportEvictionLifetime(key);
+                removeNode(key);
+                evictions++;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    // ─────────────────────────── process crash (crash_after) ───────────────────────────
+
+    /**
+     * Drop EVERYTHING — the crash_after true-crash semantics: a dead process
+     * leaves no KV memory behind, so on recovery the pool starts from zero
+     * (all keys gone, no held blocks, eviction history reset). Distinct from
+     * stop_engine, which only closes the port and keeps the pool intact for
+     * in-place continuation.
+     */
+    synchronized void clear() {
+        tree.keySet().forEach(key -> keyListener.accept(key, false));
+        blocks.clear();
+        referencedBlocks = 0;
+        tree.clear();
+        leaves.clear();
+        accessSequence = 0;
+        heldBlocks = 0;
+        evictions = 0;
+        retentionEvictions = 0;
+    }
+
+    synchronized void setRetentionBlocks(int limit) {
+        if (limit < 0 || limit > totalBlocks) {
+            throw new IllegalArgumentException("cache retention must be within the physical pool");
+        }
+        retentionBlocks = limit;
+        trimRetention();
+    }
+
+    synchronized int retentionBlocks() { return retentionBlocks; }
+    synchronized long retentionEvictions() { return retentionEvictions; }
+
+    private void trimRetention() {
+        retentionEvictions += evictChains(
+                blocks.size() - referencedKeyBlocks() - retentionBlocks, "retention");
+    }
+
+    // ─────────────────────────── observation ───────────────────────────
+
+    /** Total number of LRU evictions (capacity + forced). */
+    synchronized long evictions() {
+        return evictions;
+    }
+
+    /** Extra connector reference to already computed GPU source blocks. */
+    synchronized BlockLease pinExisting(List<Long> keys) {
+        for (Long key : keys) if (!blocks.containsKey(key)) return null;
+        List<Long> held = new ArrayList<>(new LinkedHashSet<>(keys));
+        for (Long key : held) {
+            int refs = blocks.get(key);
+            if (refs == 0) referencedBlocks++;
+            blocks.put(key, refs + 1);
+            refreshLeaf(key);
+        }
+        return new BlockLease(held, 0);
+    }
+
+    synchronized int peekPrefixHitBlocks(List<Long> keys) {
+        int count = 0;
+        while (count < keys.size() && blocks.containsKey(keys.get(count))) count++;
+        return count;
+    }
+
+    synchronized Set<Long> snapshotKeys() {
+        return Set.copyOf(blocks.keySet());
+    }
+
+    /** Owned immutable-by-caller snapshot; avoids Set.copyOf's temporary hash table. */
+    synchronized long[] snapshotKeyArray() {
+        long[] keys = new long[blocks.size()];
+        int index = 0;
+        for (Long key : blocks.keySet()) keys[index++] = key;
+        return keys;
+    }
+
+    /** Pool size in blocks (== ceil(totalKvTokens / spb)). */
+    synchronized int totalBlocks() {
+        return totalBlocks;
+    }
+
+    /**
+     * Available blocks: free + pure-LRU (production availableBlocksNum —
+     * the prefix cache counts toward availability; held does not).
+     */
+    synchronized int availableBlocks() {
+        return totalBlocks - heldBlocks - referencedKeyBlocks();
+    }
+
+    /** Blocks held by in-flight requests (keyless allocations + growth). */
+    synchronized int heldBlocks() {
+        return heldBlocks;
+    }
+
+    /** Cache-key blocks referenced by in-flight requests. */
+    synchronized int referencedKeyBlocks() {
+        return referencedBlocks;
+    }
+
+    /** Indexed cache-key blocks (pure LRU + referenced). */
+    synchronized int lruKeyBlocks() {
+        return blocks.size();
+    }
+
+    /** Fully unallocated blocks. */
+    synchronized int freeBlocks() {
+        return totalBlocks - heldBlocks - blocks.size();
+    }
+
+    /** Reserve watermark in blocks: ceil(reserveRatio x totalBlocks). */
+    synchronized void setObservedReserveBlocks(int count) {
+        if (count < 0 || count > totalBlocks) throw new IllegalArgumentException("reserve blocks outside pool");
+        observedReserveBlocks = count;
+    }
+
+    synchronized int reserveBlocks() {
+        if (observedReserveBlocks != null) return observedReserveBlocks;
+        return (int) (floorReserve ? Math.floor(totalBlocks * reserveRatio) : Math.ceil(totalBlocks * reserveRatio));
+    }
+
+    // ─────────────────────────── failure classification ───────────────────────────
+
+    /**
+     * Production {@code KVCacheAllocator.cc} {@code initKVBlock} failure
+     * classification (Zola forensics, lines 100-110):
+     * <ul>
+     *   <li>{@link #PERMANENT} — {@code required + reserve > physical total
+     *       blocks}: the request can NEVER fit this pool, retrying is
+     *       pointless (production still spins to the retry timeout — the
+     *       retry LOOP treats both families identically; only the counting
+     *       differs).</li>
+     *   <li>{@link #RETRYABLE} — the pool TOTAL is sufficient but currently
+     *       short: another request's completion may release blocks and flip
+     *       the verdict within the retry window.</li>
+     * </ul>
+     */
+    enum AllocationFailure {
+        PERMANENT,
+        RETRYABLE
+    }
+
+    /**
+     * Result of a detailed admission attempt: exactly one of {@code lease}
+     * (success) or {@code failure} (the family for counting/retry policy)
+     * is non-null.
+     */
+    record AllocationOutcome(BlockLease lease, AllocationFailure failure) {
+
+        boolean success() {
+            return lease != null;
+        }
+    }
+
+    /** Family of a gate failure: {@code required + reserve} vs the PHYSICAL pool. */
+    private AllocationFailure failureFamily(int requiredBlocks) {
+        return (long) requiredBlocks + reserveBlocks() > totalBlocks
+                ? AllocationFailure.PERMANENT
+                : AllocationFailure.RETRYABLE;
+    }
+
+    // ─────────────────────────── internals ───────────────────────────
+
+    private void dereference(List<Long> hitKeys) {
+        for (Long key : hitKeys) {
+            Integer ref = blocks.get(key);
+            if (Integer.valueOf(1).equals(ref)) referencedBlocks--;
+            int next = ref == null ? 0 : ref - 1;
+            blocks.put(key, Math.max(0, next));
+            refreshLeaf(key);
+        }
+    }
+
+    private static final class TreeNode {
+        final long createdNanos = System.nanoTime();
+        Long parent;
+        final Set<Long> children = new HashSet<>();
+        long sequence;
+        Leaf leaf;
+    }
+
+    private record Leaf(long sequence, long key) {}
+
+    record EvictionEvent(long leafKey, List<Long> chainKeys, int blocksFreed, String reason) {}
+
+    synchronized void setEvictionListener(Consumer<EvictionEvent> listener) {
+        evictionListener = listener == null ? event -> {} : listener;
+    }
+
+    private java.util.function.BiConsumer<Long, Boolean> keyListener = (key, added) -> {};
+
+    synchronized void setKeyListener(java.util.function.BiConsumer<Long, Boolean> listener) {
+        keyListener = listener;
+    }
+
+    /** Build edges only for newly indexed blocks; a suffix write never reparents a hit. */
+    private void indexSequence(List<Long> keys) {
+        Long parent = null;
+        for (Long key : keys) {
+            if (!blocks.containsKey(key)) {
+                parent = null;
+                continue;
+            }
+            if (!tree.containsKey(key)) {
+                TreeNode node = new TreeNode();
+                node.parent = parent;
+                tree.put(key, node);
+                keyListener.accept(key, true);
+                if (parent != null) {
+                    tree.get(parent).children.add(key);
+                    refreshLeaf(parent);
+                }
+            }
+            touch(key);
+            parent = key;
+        }
+    }
+
+    private void touch(Long key) {
+        TreeNode node = tree.get(key);
+        if (node != null) {
+            if (node.leaf != null) leaves.remove(node.leaf);
+            node.leaf = null;
+            node.sequence = ++accessSequence;
+            refreshLeaf(key);
+        }
+    }
+
+    private void refreshLeaf(Long key) {
+        // In flat mode structural maintenance must not refresh a parent's LRU age.
+        if (!prefixTreeEnabled) return;
+        TreeNode node = tree.get(key);
+        if (node == null) return;
+        if (node.leaf != null) leaves.remove(node.leaf);
+        node.leaf = null;
+        if (node.children.isEmpty() && Integer.valueOf(0).equals(blocks.get(key))) {
+            node.leaf = new Leaf(node.sequence, key);
+            leaves.add(node.leaf);
+        }
+    }
+
+    private void reportEvictionLifetime(Long key) {
+        TreeNode node = tree.get(key);
+        if (node != null) evictionLifetimeListener.accept(
+                Math.max(0L, System.nanoTime() - node.createdNanos) / 1_000_000.0);
+    }
+
+    private void removeNode(Long key) {
+        TreeNode node = tree.remove(key);
+        if (node == null) return;
+        keyListener.accept(key, false);
+        if (node.leaf != null) leaves.remove(node.leaf);
+        if (node.parent != null && tree.containsKey(node.parent)) {
+            tree.get(node.parent).children.remove(key);
+            refreshLeaf(node.parent);
+        }
+        // Explicit /cache_evict remains key-local: surviving children become roots.
+        for (Long child : node.children) {
+            TreeNode childNode = tree.get(child);
+            if (childNode != null) childNode.parent = null;
+        }
+    }
+
+    /** Oldest eligible leaf, then its unbranched ancestors; whole-chain rounding. */
+    synchronized int usedBlocks() { return totalBlocks - freeBlocks(); }
+    synchronized List<List<Long>> watermarkCandidates(int count) {
+        List<List<Long>> result = new ArrayList<>();
+        if (count <= 0) return result;
+        if (!prefixTreeEnabled) {
+            for (var entry : blocks.entrySet()) {
+                if (entry.getValue() == 0) { result.add(List.of(entry.getKey())); if (--count <= 0) break; }
+            }
+            return result;
+        }
+        Set<Long> selected = new HashSet<>();
+        for (var leaf : leaves) {
+            List<Long> chain = new ArrayList<>();
+            Long key = leaf.key();
+            while (key != null && chain.size() < count && Integer.valueOf(0).equals(blocks.get(key)) && selected.add(key)) {
+                chain.add(key);
+                var node = tree.get(key);
+                Long parent = node.parent;
+                if (parent == null || tree.get(parent).children.size() != 1) break;
+                key = parent;
+            }
+            java.util.Collections.reverse(chain);
+            if (!chain.isEmpty()) { result.add(chain); count -= chain.size(); }
+            if (count <= 0) break;
+        }
+        return result;
+    }
+
+    private int evictChains(int minBlocks, String reason) {
+        if (!prefixTreeEnabled) return evictFlatLru(minBlocks, reason);
+        int freed = 0;
+        while (freed < minBlocks && !leaves.isEmpty()) {
+            Long leaf = leaves.first().key();
+            List<Long> chain = new ArrayList<>();
+            Long key = leaf;
+            while (key != null) {
+                TreeNode node = tree.get(key);
+                chain.add(key);
+                if (blocks.get(key) > 0) break;
+                Long parent = node.parent;
+                if (parent == null || tree.get(parent).children.size() != 1) break;
+                key = parent;
+            }
+            int removed = 0;
+            // Same root-to-leaf removal order as SharedBlockCache::selectAndEvict.
+            for (int i = chain.size() - 1; i >= 0; i--) {
+                key = chain.get(i);
+                if (!Integer.valueOf(0).equals(blocks.get(key))) continue;
+                blocks.remove(key);
+                reportEvictionLifetime(key);
+                removeNode(key);
+                removed++;
+            }
+            evictions += removed;
+            freed += removed;
+            evictionListener.accept(new EvictionEvent(leaf, List.copyOf(chain), removed, reason));
+        }
+        return freed;
+    }
+
+    /** Plain access-order LRU: skip referenced blocks and stop at the requested size. */
+    private int evictFlatLru(int minBlocks, String reason) {
+        if (minBlocks <= 0) return 0;
+        List<Long> victims = new ArrayList<>();
+        for (var entry : blocks.entrySet()) {
+            if (entry.getValue() == 0) victims.add(entry.getKey());
+            if (victims.size() >= minBlocks) break;
+        }
+        // Tree maintenance can touch the access-order map; finish iteration first.
+        for (Long key : victims) {
+            blocks.remove(key);
+            reportEvictionLifetime(key);
+            removeNode(key);
+        }
+        evictions += victims.size();
+        if (!victims.isEmpty())
+            evictionListener.accept(new EvictionEvent(victims.get(0), List.copyOf(victims), victims.size(), reason));
+        return victims.size();
+    }
+
+    /**
+     * A running request's block lease: the prefix-hit cache keys it references
+     * (ref-counted) and the keyless blocks it holds. Mutable in
+     * {@link #nakedBlocks} because decode growth extends the allocation
+     * mid-flight (production incrMalloc).
+     */
+    static final class BlockLease {
+        final List<Long> hitKeys;
+        int nakedBlocks;
+
+        BlockLease(List<Long> hitKeys, int nakedBlocks) {
+            this.hitKeys = hitKeys;
+            this.nakedBlocks = nakedBlocks;
+        }
+
+        /** Total blocks this lease pins (hit references + keyless holds). */
+        int totalBlocks() {
+            return hitKeys.size() + nakedBlocks;
+        }
+    }
+}

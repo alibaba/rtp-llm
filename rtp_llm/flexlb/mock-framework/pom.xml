@@ -5,7 +5,9 @@
   <packaging>pom</packaging>
   <modules>
     <module>../flexlb-common</module>
+    <module>../flexlb-grpc</module>
     <module>java/interfaces</module><module>java/runtime</module><module>java/shared/compute</module>
+    <module>java/engine/rtp</module>
   </modules>
   <properties>
     <maven.compiler.release>21</maven.compiler.release>
