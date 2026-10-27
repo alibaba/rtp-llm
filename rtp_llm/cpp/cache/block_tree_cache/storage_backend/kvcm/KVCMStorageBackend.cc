@@ -207,7 +207,8 @@ public:
                     (void)group_id;
                     for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
                         const std::string legacy_name = "tp" + std::to_string(rank) + "_" + group.group_name;
-                        const std::string expected_name = kvcm::genLocationSpecName(rank, group.group_name);
+                        const std::string expected_name =
+                            kvcm::genLocationSpecName(rank, group.group_name, runtime_config_.model_name);
                         if (legacy_name != expected_name && configured_infos.count(legacy_name) != 0) {
                             RTP_LLM_LOG_ERROR("KVCM_CLIENT_CONFIG must replace location spec [%s] with [%s]",
                                               legacy_name.c_str(), expected_name.c_str());
@@ -706,7 +707,7 @@ private:
                 (void)id;
                 bool available = true;
                 for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
-                    const auto name = kvcm::genLocationSpecName(rank, group.group_name);
+                    const auto name = kvcm::genLocationSpecName(rank, group.group_name, runtime_config_.model_name);
                     const auto found = present.find(name);
                     available = available && found != present.end() && !found->second->uri.empty();
                 }
@@ -819,11 +820,14 @@ private:
         auto infos  = std::make_shared<kvcm::KVCMConfig::LocationSpecInfoMap>();
         auto groups = std::make_shared<kvcm::KVCMConfig::LocationSpecGroups>();
         RTP_LLM_CHECK_WITH_INFO(
-            group_policy_->buildLocationSpecGroups(static_cast<int>(parallelism_config_.tp_size), *groups),
+            group_policy_->buildLocationSpecGroups(static_cast<int>(parallelism_config_.tp_size),
+                                                    *groups,
+                                                    runtime_config_.model_name),
             "failed to build KVCM location spec groups");
         for (const auto& [group_id, group] : group_policy_->groups()) {
             for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
-                const std::string spec_name = kvcm::genLocationSpecName(rank, group.group_name);
+                const std::string spec_name =
+                    kvcm::genLocationSpecName(rank, group.group_name, runtime_config_.model_name);
                 infos->emplace(spec_name, cache_config_.blockSizeBytesForGroup(group.tag));
             }
         }
@@ -932,11 +936,55 @@ private:
                 }
                 total_device_block_count_ += block_count;
             }
-            pools_by_tag_.emplace(tag, pool);
-            registration_tags_.push_back(tag);
-            registrations.push_back({{pool->getBaseAddress(), pool->getTotalSizeBytes()},
-                                     kvcm::genLocationSpecName(static_cast<int>(parallelism_config_.tp_rank),
-                                                               groups.at(group_id).group_name)});
+            bool use_gdr = false;
+#if USING_CUDA
+            use_gdr = gdr_enabled_ && pool->where() == MemoryType::MEMORY_GPU && pool->usesDedicatedDeviceAllocation()
+                      && pool->getAllocationSizeBytes() > 0 && pool->deviceIndex() >= 0;
+#endif
+            const size_t registration_size = use_gdr ? pool->getAllocationSizeBytes() : pool->getTotalSizeBytes();
+            kvcm::ClientWrapper::PoolRegistration registration{
+                {pool->getBaseAddress(), registration_size},
+                kvcm::genLocationSpecName(static_cast<int>(parallelism_config_.tp_rank),
+                                          groups.at(group_id).group_name,
+                                          runtime_config_.model_name)};
+            if (use_gdr) {
+#if USING_CUDA
+                const long page_size = sysconf(_SC_PAGESIZE);
+                if (page_size <= 0
+                    || reinterpret_cast<uintptr_t>(pool->getBaseAddress()) % static_cast<size_t>(page_size) != 0
+                    || pool->getAllocationSizeBytes() % static_cast<size_t>(page_size) != 0) {
+                    RTP_LLM_LOG_ERROR("RemoteCache GDR registration span must be page aligned for group %d: "
+                                      "base=%p size=%zu page_size=%ld",
+                                      group_id,
+                                      pool->getBaseAddress(),
+                                      pool->getAllocationSizeBytes(),
+                                      page_size);
+                    return {};
+                }
+                kv_cache_manager::ClientMemoryRegistrations memory_registrations;
+                memory_registrations.gpu.push_back(
+                    {pool->getBaseAddress(), pool->getAllocationSizeBytes(), pool->deviceIndex()});
+                registration.memory_registrations = std::move(memory_registrations);
+#endif
+            }
+            if (gdr_enabled_ && !use_gdr) {
+                RTP_LLM_LOG_WARNING("RemoteCache GDR unavailable for group %d tag=%s; falling back to standard "
+                                    "registration, memory_type=%d dedicated=%d allocation_size=%zu device=%d",
+                                    group_id,
+                                    tag.c_str(),
+                                    static_cast<int>(pool->where()),
+                                    pool->usesDedicatedDeviceAllocation(),
+                                    pool->getAllocationSizeBytes(),
+                                    pool->deviceIndex());
+            }
+            RTP_LLM_LOG_INFO("KVCM pool registration group=%d tag=%s mode=%s span_size=%zu",
+                             group_id,
+                             tag.c_str(),
+                             use_gdr ? "gdr" : "standard",
+                             registration_size);
+            pools_by_tag.emplace(tag, pool);
+            registration_tags.push_back(tag);
+            registrations.push_back(std::move(registration));
         }
         pools_by_tag_      = std::move(pools_by_tag);
         registration_tags_ = std::move(registration_tags);

@@ -20,11 +20,12 @@ std::string getBitHashStr(uint64_t bithash, size_t width = 64) {
 
 }  // namespace
 
-std::string genLocationSpecName(int tp_rank, const std::string& group_name) {
-    if (group_name == "Fglobal_kv_1") {
+std::string genLocationSpecName(int tp_rank, const std::string& group_name, const std::string& model_name) {
+    const bool legacy_dsv41_specs = model_name == "DeepSeekV41" || model_name == "DeepSeekV41DSpark";
+    if (group_name == "Fglobal_kv_1" || (legacy_dsv41_specs && group_name == "Fhca_kv")) {
         return "F0_TP" + std::to_string(tp_rank);
     }
-    if (group_name == "Fglobal_kv_2") {
+    if (group_name == "Fglobal_kv_2" || (legacy_dsv41_specs && group_name == "Fcsa_kv")) {
         return "F1_TP" + std::to_string(tp_rank);
     }
     if (group_name == "Findexer_kv") {
@@ -39,7 +40,9 @@ std::string genLocationSpecName(int tp_rank, const std::string& group_name) {
     return "tp" + std::to_string(tp_rank) + "_" + group_name;
 }
 
-bool GroupPolicy::buildLocationSpecGroups(int tp_size, LocationSpecGroups& location_spec_groups) {
+bool GroupPolicy::buildLocationSpecGroups(int                 tp_size,
+                                          LocationSpecGroups& location_spec_groups,
+                                          const std::string&  model_name) {
     if (tp_size <= 0 || groups_.empty()) {
         RTP_LLM_LOG_ERROR("cannot build KVCM location groups: tp_size=%d groups=%zu", tp_size, groups_.size());
         return false;
@@ -55,7 +58,7 @@ bool GroupPolicy::buildLocationSpecGroups(int tp_size, LocationSpecGroups& locat
         }
         new_location_spec_group_map[group.group_name_bithash] = group.group_name;
         for (int rank = 0; rank < tp_size; ++rank) {
-            const std::string spec_name = genLocationSpecName(rank, group.group_name);
+            const std::string spec_name = genLocationSpecName(rank, group.group_name, model_name);
             group_it->second.push_back(spec_name);
             const auto [unused_it, spec_inserted] =
                 new_spec_name_to_info.emplace(spec_name, SpecInfo{group_id, rank, group.tag});
