@@ -225,9 +225,6 @@ class AutoModel:
             input_ids=input_ids,
             attention_inputs=attention_inputs,
         )
-        model_inputs.lm_output_indexes = torch.tensor(
-            [input_length - 1], dtype=torch.long, device=self.device
-        )
         model_outputs = self.model.forward(model_inputs)
         next_token_id = self._sample_next_token(model_outputs, sampling_params)
         next_token_id_cpu = next_token_id.cpu().item()
@@ -261,13 +258,9 @@ class AutoModel:
         self, model_outputs: PyModelOutputs, sampling_params: dict = None
     ) -> torch.Tensor:
         hidden_states = model_outputs.hidden_states[-1:, :]
-        if model_outputs.logits is not None:
-            logits = model_outputs.logits[-1:]
+        if self.lm_head_weight.dtype == torch.uint8:
+            logits = self.model.compute_quantized_logits(hidden_states)
         else:
-            if self.lm_head_weight.dtype == torch.uint8:
-                raise ValueError(
-                    "Packed LM head requires final logits from model.forward"
-                )
             logits = torch.matmul(
                 hidden_states.to(self.lm_head_weight.dtype), self.lm_head_weight.t()
             ).to(torch.float32)

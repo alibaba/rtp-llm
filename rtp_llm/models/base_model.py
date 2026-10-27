@@ -217,10 +217,6 @@ class BaseModel(object):
             f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
         )
         self._create_python_model()
-        if getattr(self.py_model, "nvfp4_lm_head", None) is not None:
-            from rtp_llm.models_py.model_desc.module_base import wrap_quantized_lm_head
-
-            wrap_quantized_lm_head(self.py_model)
         if self._enable_w4a16_sm120_dense_ffn:
             from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 

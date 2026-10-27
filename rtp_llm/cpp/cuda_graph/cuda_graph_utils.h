@@ -69,7 +69,6 @@ public:
 public:
     py::object               attn_pyobj_{py::none()};
     at::Tensor               decoder_layer_hidden_states_;
-    at::Tensor               local_logits_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 
