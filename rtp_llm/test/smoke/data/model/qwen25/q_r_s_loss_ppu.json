@@ -1,0 +1,163 @@
+// Test: qwen25/q_r_s_loss.json
+// Description: loss calculation
+// Model: qwen_2 @ /mnt/nas1/hf/Qwen2.5-0.5B-Instruct
+        // q0: $prompt:s5 — sharegpt [en] 78 chars
+        // q1: empty/special
+{
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 1,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "calculate_loss": 1
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response": " Flask",
+                "response_alternatives": null,
+                "hidden_states": null,
+                "logits": null,
+                "loss": 304.190673828125,
+                "input_ids": null,
+                "output_ids": null,
+                "aux_info": {
+                    "input_len": 13,
+                    "prefix_len": 0,
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "output_len": 1,
+                    "step_output_len": 1,
+                    "iter_count": 1,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "pd_sep": false,
+                    "softmax_probs": []
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s5",
+                    "$prompt:s3"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 1,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "calculate_loss": 2
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": " Flask",
+                        "response_alternatives": null,
+                        "hidden_states": null,
+                        "logits": null,
+                        "loss": [
+                            10.523231506347656,
+                            11.383102416992188,
+                            8.092596054077148,
+                            1.9483859539031982,
+                            3.550689220428467,
+                            4.106085777282715,
+                            0.11622531712055206,
+                            3.2757270336151123,
+                            13.329141616821289,
+                            3.1423492431640625,
+                            7.596169948577881,
+                            1.5481467247009277
+                        ],
+                        "input_ids": null,
+                        "output_ids": null,
+                        "aux_info": {
+                            "input_len": 13,
+                            "prefix_len": 0,
+                            "reuse_len": 0,
+                            "local_reuse_len": 0,
+                            "remote_reuse_len": 0,
+                            "memory_reuse_len": 0,
+                            "prefill_total_reuse_len": 0,
+                            "prefill_local_reuse_len": 0,
+                            "prefill_remote_reuse_len": 0,
+                            "prefill_memory_reuse_len": 0,
+                            "decode_total_reuse_len": 0,
+                            "decode_local_reuse_len": 0,
+                            "decode_remote_reuse_len": 0,
+                            "decode_memory_reuse_len": 0,
+                            "output_len": 1,
+                            "step_output_len": 1,
+                            "iter_count": 1,
+                            "cum_log_probs": [],
+                            "beam_responses": [],
+                            "pd_sep": false,
+                            "softmax_probs": []
+                        }
+                    },
+                    {
+                        "response": "\n\n",
+                        "response_alternatives": null,
+                        "hidden_states": null,
+                        "logits": null,
+                        "loss": [
+                            8.12183952331543,
+                            2.2612452507019043,
+                            3.846848964691162,
+                            0.1331431269645691,
+                            9.175370216369629,
+                            5.104678153991699,
+                            4.893691062927246,
+                            0.3129318356513977,
+                            0.02866523154079914,
+                            0.0007381098694168031,
+                            0.003998025320470333
+                        ],
+                        "input_ids": null,
+                        "output_ids": null,
+                        "aux_info": {
+                            "input_len": 12,
+                            "prefix_len": 0,
+                            "reuse_len": 0,
+                            "local_reuse_len": 0,
+                            "remote_reuse_len": 0,
+                            "memory_reuse_len": 0,
+                            "prefill_total_reuse_len": 0,
+                            "prefill_local_reuse_len": 0,
+                            "prefill_remote_reuse_len": 0,
+                            "prefill_memory_reuse_len": 0,
+                            "decode_total_reuse_len": 0,
+                            "decode_local_reuse_len": 0,
+                            "decode_remote_reuse_len": 0,
+                            "decode_memory_reuse_len": 0,
+                            "output_len": 1,
+                            "step_output_len": 1,
+                            "iter_count": 1,
+                            "cum_log_probs": [],
+                            "beam_responses": [],
+                            "pd_sep": false,
+                            "softmax_probs": []
+                        }
+                    }
+                ]
+            }
+        }
+    ]
+}
