@@ -166,6 +166,52 @@ private:
     int64_t                      baseline_reserved_   = 0;
 };
 #endif
+#if USING_CUDA
+constexpr size_t kMiB = 1024 * 1024;
+
+void preallocateTorchCudaPoolForPrefill(RoleType role_type, int device_id) {
+    if (role_type != RoleType::PREFILL) {
+        return;
+    }
+
+    constexpr int64_t safety_mb = 8192;
+
+    c10::cuda::CUDAGuard device_guard(device_id);
+    size_t               cuda_free  = 0;
+    size_t               cuda_total = 0;
+    RTP_LLM_CHECK_WITH_INFO(cudaMemGetInfo(&cuda_free, &cuda_total) == cudaSuccess, "cudaMemGetInfo failed");
+
+    // Match large_segment_size_mb=1024: never let allocator rounding consume the safety margin.
+    constexpr int64_t allocation_granularity_mb = 1024;
+    int64_t           target_mb = std::max<int64_t>(0, static_cast<int64_t>(cuda_free / kMiB) - safety_mb);
+    target_mb = target_mb / allocation_granularity_mb * allocation_granularity_mb;
+    if (target_mb == 0) {
+        RTP_LLM_LOG_WARNING(
+            "skip Torch CUDA pool preallocation: free=%zu MiB safety=%ld MiB", cuda_free / kMiB, safety_mb);
+        return;
+    }
+
+    const int64_t target_bytes = target_mb * static_cast<int64_t>(kMiB);
+    {
+        auto buffer =
+            torch::empty({target_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, device_id));
+    }
+
+    const auto stats        = c10::cuda::CUDACachingAllocator::getDeviceStats(device_id);
+    const auto cached_bytes = stats.reserved_bytes[0].current - stats.allocated_bytes[0].current;
+    RTP_LLM_CHECK_WITH_INFO(cached_bytes >= target_bytes,
+                            "Torch CUDA pool preallocation failed: target=%ld MiB cached=%ld MiB",
+                            target_mb,
+                            cached_bytes / static_cast<int64_t>(kMiB));
+    RTP_LLM_LOG_INFO("Torch CUDA pool ready: device=%d target=%ld MiB cached=%ld MiB free_before=%zu MiB "
+                     "safety=%ld MiB",
+                     device_id,
+                     target_mb,
+                     cached_bytes / static_cast<int64_t>(kMiB),
+                     cuda_free / kMiB,
+                     safety_mb);
+}
+#endif
 }  // anonymous namespace
 
 int NormalEngine::calculateReserveStep(const EngineInitParams& params) {
@@ -1100,6 +1146,9 @@ absl::Status NormalEngine::startLoop() {
     }
     // System prompts run on the constructor thread; keep Kineto on the engine loop.
     step_profiler_.configureFromConfig(profiling_debug_logging_config);
+#if USING_CUDA
+    preallocateTorchCudaPoolForPrefill(pd_sep_config.role_type, getDeviceId());
+#endif
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_     = true;
     loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
