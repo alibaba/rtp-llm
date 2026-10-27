@@ -61,6 +61,12 @@ public:
         }
         {
             std::lock_guard<std::mutex> lock(lock_);
+            if (stop_requested_.load()) {
+                stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+                // Never admitted to the engine; no execution can own its KV.
+                stream->moveToNext();
+                return absl::CancelledError("scheduler stopped");
+            }
             waiting_streams_.emplace_back(stream);
             if (waiting_streams_.size() % 16 == 0) {
                 RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d",
@@ -99,6 +105,13 @@ public:
         }
         {
             std::lock_guard<std::mutex> lock(lock_);
+            if (stop_requested_.load()) {
+                for (const auto& stream : stream_enqueued) {
+                    stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+                    stream->moveToNext();
+                }
+                return {std::vector<bool>(streams.size(), false), streams};
+            }
             waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
         }
         cond_.notify_all();
@@ -194,10 +207,18 @@ public:
         // but later homogeneous arrivals must go through the normal batch-size gate.
         draining_mixed_modes_ = has_other_mode;
         for (auto& stream : selected_streams) {
+            if (stop_requested_.load()) {
+                return;
+            }
             stream->reportEvent(StreamEvents::CanRun);
             // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
-            while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
+            while (!stop_requested_.load() && stream->getStatus() != StreamState::FINISHED
+                   && stream->moveToNext() != StreamState::RUNNING) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            // Keep selected streams in waiting_streams_ for finalizeStop().
+            if (stop_requested_.load()) {
+                return;
             }
         }
         for (const auto& stream : selected_streams) {
@@ -229,9 +250,13 @@ public:
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
         cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+            return stop_requested_.load() || waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
                    || !loading_cache_streams_.empty() || (draining_mixed_modes_ && !waiting_streams_.empty());
         });
+
+        if (stop_requested_.load()) {
+            return std::list<GenerateStreamPtr>{};
+        }
 
         // 统一通过状态机驱动各队列中 stream 的状态转移
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
@@ -245,6 +270,9 @@ public:
         if (running_streams_.empty()
             && (waiting_streams_.size() >= batch_size_ || (draining_mixed_modes_ && !waiting_streams_.empty()))) {
             evaluateWaitingStreams();
+            if (stop_requested_.load()) {
+                return std::list<GenerateStreamPtr>{};
+            }
             if (!running_streams_.empty()) {
                 initRunningStreams();
                 RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
@@ -256,8 +284,34 @@ public:
     }
 
     absl::Status stop() override {
-        // Not implemented
-        return absl::UnimplementedError("BatchDecodeScheduler::stop not implemented");
+        // Cache-load polling holds lock_, so publish the stop request first.
+        stop_requested_.store(true);
+        {
+            // Pair with schedule's predicate check to avoid a lost wakeup.
+            std::lock_guard<std::mutex> lock(lock_);
+        }
+        cond_.notify_all();
+        // The engine can still be executing. Keep every stream and its KV alive.
+        return absl::OkStatus();
+    }
+
+    absl::Status finalizeStop() override {
+        std::lock_guard<std::mutex> lock(lock_);
+        if (!stop_requested_.load()) {
+            return absl::FailedPreconditionError("finalizeStop requires stop first");
+        }
+        // Called only after the engine loop joins and executor dispatch drains.
+        for (auto* streams : {&waiting_streams_, &loading_cache_streams_, &running_streams_}) {
+            for (const auto& stream : *streams) {
+                if (!stream->isFinished() && !stream->hasEvent(StreamEvents::GenerateDone) && !stream->hasError()) {
+                    stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+                }
+                stream->moveToNext();
+            }
+            streams->clear();
+        }
+        draining_mixed_modes_ = false;
+        return absl::OkStatus();
     }
 
     bool empty() override {
@@ -275,6 +329,7 @@ public:
     }
 
 private:
+    std::atomic<bool>            stop_requested_{false};
     std::mutex                   lock_;
     std::condition_variable      cond_;
     std::list<GenerateStreamPtr> waiting_streams_;
