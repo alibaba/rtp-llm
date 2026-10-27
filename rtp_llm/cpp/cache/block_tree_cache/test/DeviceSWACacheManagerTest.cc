@@ -210,12 +210,15 @@ TEST_F(DeviceSWACacheManagerTest, GetNeedBlocks_CommonTailIsShared) {
     auto need1 = group.getNeedBlocks(0, 20, 0, 0, false);
     auto need2 = group.getNeedBlocks(20, 20, 0, 0, false);
     auto need3 = group.getNeedBlocks(16, 20, 0, 0, false);
+    auto need4 = group.getNeedBlocks(100, 20, 0, 0, false);
     EXPECT_EQ(need1.common_blocks, 0);
     EXPECT_EQ(need1.extra_blocks, 2);
     EXPECT_EQ(need2.common_blocks, 2);
     EXPECT_EQ(need2.extra_blocks, 0);
     EXPECT_EQ(need3.common_blocks, 2);
     EXPECT_EQ(need3.extra_blocks, 1);
+    EXPECT_EQ(need4.common_blocks, 2);
+    EXPECT_EQ(need4.extra_blocks, 0);
 }
 
 // ==================== malloc (default step=0, acts like step=1, tail-only) ====================
