@@ -1359,7 +1359,14 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             }
         }
 
-        if (engine_->isMTPEagle()) {
+        // A PD prefill peer publishes only model_id 0 blocks, so the MTP module (model_id >= 1)
+        // blocks can never be served by it. DSV4_PD_SKIP_MTP_MODULE_LOAD=1 skips the draft-module
+        // load; the handoff still carries proposals / hidden for the first draft step.
+        static const bool skip_mtp_module_load = [] {
+            const char* e = getenv("DSV4_PD_SKIP_MTP_MODULE_LOAD");
+            return e != nullptr && std::string(e) == "1";
+        }();
+        if (!skip_mtp_module_load && engine_->isMTPEagle()) {
             if (propose_maga_init_params_ && propose_maga_init_params_->mtp_model_params_
                 && !propose_maga_init_params_->mtp_model_params_->empty()) {
                 const auto mtp_load_plan = makeMTPModuleLoadPlan(propose_maga_init_params_);
