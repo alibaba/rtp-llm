@@ -9,6 +9,10 @@
 #include <utility>
 
 #include <torch/python.h>
+#if USING_CUDA
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
+#endif
 
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/rdma_transport/RdmaTransport.h"
@@ -24,6 +28,19 @@ bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&      mm_tensors,
         if (mm_output == nullptr || output_pb == nullptr || mm_tensors.size() != roles.size()) {
             return false;
         }
+#if USING_CUDA
+        // readAllSlots returns completed tensors. Keep subsequent concatenation
+        // and position-ID copies off the RPC thread's legacy default stream.
+        std::optional<c10::cuda::CUDAStream> materialize_stream;
+        c10::cuda::OptionalCUDAStreamGuard   stream_guard;
+        for (const auto& tensor : mm_tensors) {
+            if (tensor.is_cuda()) {
+                materialize_stream = c10::cuda::getStreamFromPool(false, tensor.get_device());
+                stream_guard.reset_stream(*materialize_stream);
+                break;
+            }
+        }
+#endif
         std::vector<torch::Tensor> embedding_chunks;
         torch::Tensor              mm_position_id;
         bool                       has_pos_id = false;
@@ -37,8 +54,21 @@ bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&      mm_tensors,
                     if (has_pos_id) {
                         return false;
                     }
-                    mm_position_id = mm_tensors[i].to(torch::kCPU);
-                    has_pos_id     = true;
+#if USING_CUDA
+                    if (mm_tensors[i].is_cuda()) {
+                        auto options = torch::TensorOptions()
+                                           .dtype(mm_tensors[i].scalar_type())
+                                           .device(torch::kCPU)
+                                           .pinned_memory(true);
+                        mm_position_id = torch::empty(mm_tensors[i].sizes(), options);
+                        mm_position_id.copy_(mm_tensors[i], /*non_blocking=*/true);
+                        materialize_stream->synchronize();
+                    } else
+#endif
+                    {
+                        mm_position_id = mm_tensors[i].to(torch::kCPU);
+                    }
+                    has_pos_id = true;
                     break;
                 case MMRdmaSlotPB::EXTRA_INPUT:
                     extra_inputs.emplace_back(mm_tensors[i]);
@@ -54,6 +84,12 @@ bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&      mm_tensors,
             return false;
         }
         auto embedding = embedding_chunks.size() == 1 ? embedding_chunks[0] : torch::cat(embedding_chunks, 0);
+#if USING_CUDA
+        // Complete queued work before any validation can discard its inputs.
+        if (materialize_stream.has_value()) {
+            materialize_stream->synchronize();
+        }
+#endif
         std::vector<int64_t> split_sizes(output_pb->split_size().begin(), output_pb->split_size().end());
         const int64_t        split_total = std::accumulate(split_sizes.begin(), split_sizes.end(), int64_t{0});
         if (split_sizes.empty() || split_total != embedding.size(0)) {

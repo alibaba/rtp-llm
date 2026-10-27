@@ -5,6 +5,10 @@
 #include <string>
 #include <vector>
 #include <torch/python.h>
+#if USING_CUDA
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
+#endif
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/multimodal_processor/FeatureHashOp.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
@@ -23,10 +27,18 @@ ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* 
                 continue;
             }
             if (tensor.is_cuda()) {
-                auto options =
+                // Transport readers return completed tensors. RPC threads must
+                // not use the legacy default stream: it can wait for a peer
+                // collective while holding the driver lock needed to launch it.
+                const auto                       stream = c10::cuda::getStreamFromPool(false, tensor.get_device());
+                const c10::cuda::CUDAStreamGuard stream_guard(stream);
+                auto                             options =
                     torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true);
-                // Downstream TP serialization can read the host tensor immediately.
-                tensor = tensor.to(options, /*non_blocking=*/false);
+                auto host_tensor = torch::empty(tensor.sizes(), options);
+                host_tensor.copy_(tensor, /*non_blocking=*/true);
+                // TP serialization reads host storage immediately after return.
+                stream.synchronize();
+                tensor = std::move(host_tensor);
             } else {
                 tensor = tensor.pin_memory();
             }

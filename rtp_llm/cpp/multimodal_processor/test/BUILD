@@ -21,12 +21,14 @@ cc_test(
     name = "multimodal_processor_test",
     srcs = glob([
         "MultimodalProcessorTest.cc",
+        "MultimodalCopyStreamTest.cc",
         "FakeMultimodalProcessor.h",
     ]),
     copts = test_copts,
     deps = torch_deps() + [
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/multimodal_processor",
+        "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_reader",
         "//rtp_llm/cpp/testing:device_test_utils",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "@com_google_absl//absl/status",
