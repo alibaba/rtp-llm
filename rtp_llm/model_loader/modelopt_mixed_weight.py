@@ -116,7 +116,6 @@ class ModelOptMixedWeight(CompositeWeight, QuantWeight):
         super().__init__(
             sub_weights, name=src_weight_info.name, quant_config=quant_config
         )
-        self.quant_config = quant_config
         self.kernel = next(iter(sub_weights.values()))
 
     def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):

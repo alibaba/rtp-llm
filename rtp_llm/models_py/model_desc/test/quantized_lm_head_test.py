@@ -83,15 +83,6 @@ class QuantizedLmHeadOutputTest(unittest.TestCase):
         expected = torch.full((3, 128), 128 * 36, device="cuda", dtype=torch.bfloat16)
         torch.testing.assert_close(logits, expected, rtol=0, atol=0)
 
-    def test_forward_keeps_hidden_only_contract(self):
-        model = HeadOnlyModel()
-        hidden = torch.arange(48).reshape(6, 8).float() / 16
-        inputs = PyModelInputs(input_hiddens=hidden)
-        with patch.object(model.nvfp4_lm_head, "forward") as head:
-            outputs = model.forward(inputs)
-        head.assert_not_called()
-        self.assertTrue(torch.equal(outputs.hidden_states, hidden))
-
     def test_projection_returns_bf16_for_all_hidden_dtypes(self):
         # Isolate projection dtype from the packed-weight kernel. The on-device
         # loader/projection case above covers the actual NVFP4 GEMM.

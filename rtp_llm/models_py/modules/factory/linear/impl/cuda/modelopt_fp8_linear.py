@@ -53,8 +53,6 @@ class CudaModelOptFp8Linear(CudaFp8PerTensorLinear):
         for start, end in zip(boundaries, boundaries[1:]):
             self.parts.append(
                 (
-                    start,
-                    end,
                     weight[start:end].contiguous().T,
                     self.weight_scale[:, start:end].contiguous(),
                     weight_scales[1, start].reshape(()),
@@ -82,7 +80,7 @@ class CudaModelOptFp8Linear(CudaFp8PerTensorLinear):
 
     def _forward_rows(self, x):
         outputs = []
-        for start, end, weight, scale, input_scale in self.parts:
+        for weight, scale, input_scale in self.parts:
             fused = static_fp8_quant_rows(x, input_scale)
             if fused is None:
                 qinput, scale_a = scaled_fp8_per_tensor_quant(
