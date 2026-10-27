@@ -67,9 +67,14 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
                             need_all_logits=need_all,
                             output_vocab_size=13,
                         )
-                        all_logits = self.model.nvfp4_lm_head(self.hidden).float()[
-                            :, :13
-                        ]
+                        # The dense C++ GEMM accumulates into FP32. The packed
+                        # projection returns BF16 before the shared output path.
+                        all_logits = (
+                            self.model.nvfp4_lm_head(self.hidden).float()
+                            if packed
+                            else self.hidden.float()
+                            @ self.model.nvfp4_lm_head.weight.float().t()
+                        )[:, :13]
                         selected = has_context and not need_all
                         expected = (
                             all_logits[[5, 1]] if selected or need_all else all_logits

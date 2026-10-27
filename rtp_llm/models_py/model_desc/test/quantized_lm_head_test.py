@@ -1,5 +1,6 @@
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -54,8 +55,6 @@ class QuantizedLmHeadOutputTest(unittest.TestCase):
             "lm_head.weight_scale_2": torch.ones((), device="cuda"),
             "lm_head.input_scale": torch.ones((), device="cuda"),
         }
-        from types import SimpleNamespace
-
         source = SimpleNamespace(
             load_tensor=lambda name, dtype: [tensors[name].to(dtype)]
         )
