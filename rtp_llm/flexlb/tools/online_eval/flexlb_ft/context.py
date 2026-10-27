@@ -97,7 +97,7 @@ class CaseContext:
 
     def batch_dispatch(self) -> bool:
         """True when the current profile dispatches via BATCH (master sends
-        EnqueueBatch, clients consume FetchResponse); False for NON_BATCH
+        EnqueueBatch, clients consume batch GenerateStreamCall); False for NON_BATCH
         (frontend sends GenerateStreamCall).  The client path itself is
         decided per response by ``enqueued_by_master``."""
         return profile_dispatches_batch(self.profile)

@@ -259,7 +259,7 @@ class PythonCompatControlApiTest {
         assertTrue(rpcCounts.isObject());
         assertTrue(rpcCounts.has("enqueue_batch"));
         assertTrue(rpcCounts.has("generate_stream"));
-        assertTrue(rpcCounts.has("fetch_response"));
+        assertTrue(rpcCounts.has("batch_attach"));
         assertTrue(rpcCounts.has("cancel"));
         assertTrue(engine.get("cancelled_count").isNumber());
         assertTrue(engine.get("cancelled_rids").isArray());

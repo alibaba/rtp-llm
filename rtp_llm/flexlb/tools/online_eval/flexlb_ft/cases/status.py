@@ -2176,17 +2176,17 @@ def status_zombie_fake_running(ctx: CaseContext):
 
 
 # ===========================================================================
-# Migrated from the legacy fault families: batch FetchResponse fault
+# Migrated from the legacy fault families: batch batch GenerateStreamCall fault
 # ===========================================================================
 
 
 @case(
     "status_fetch_error",
     profiles=["batch-window"],
-    source="gap G6/G7: /inject type=fetch_error (cross-process, batch FetchResponse path)",
+    source="gap G6/G7: /inject type=fetch_error (cross-process, batch batch GenerateStreamCall path)",
 )
 def inject_fetch_error(ctx: CaseContext):
-    """FetchResponse fails after one unfinished output.
+    """batch GenerateStreamCall fails after one unfinished output.
 
     The client must observe the failure, Engine status/cancellation must settle
     the request, and a fresh request must succeed after clearing the injection."""

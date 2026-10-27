@@ -921,7 +921,7 @@ PROFILE_SPECS = {
 # (e.g. requires=["enqueue_batch"] keeps a case to BATCH-dispatch profiles).
 # Capability vocabulary (stable identifiers, extended in later phases):
 #   queue / fifo / fixed_window / single
-#   batch_dispatch / enqueue_batch / fetch_response   — BATCH dispatcher
+#   batch_dispatch / enqueue_batch / batch_attach   — BATCH dispatcher
 #   non_batch_dispatch / frontend_send / generate_stream — NON_BATCH dispatcher
 PROFILE_CAPS = {
     "batch-window": {
@@ -930,7 +930,7 @@ PROFILE_CAPS = {
         "fixed_window",
         "batch_dispatch",
         "enqueue_batch",
-        "fetch_response",
+        "batch_attach",
     },
     "single-nonbatch": {
         "queue",
@@ -946,7 +946,7 @@ PROFILE_CAPS = {
         "single",
         "batch_dispatch",
         "enqueue_batch",
-        "fetch_response",
+        "batch_attach",
     },
     "window-nonbatch": {
         "queue",
@@ -961,7 +961,7 @@ PROFILE_CAPS = {
 
 def profile_dispatches_batch(profile: str) -> bool:
     """True when *profile*'s dispatcher axis is BATCH (master sends via
-    EnqueueBatch; clients consume FetchResponse)."""
+    EnqueueBatch; clients consume batch GenerateStreamCall)."""
     return PROFILE_SPECS[profile]["dispatcher"] == "batch"
 
 

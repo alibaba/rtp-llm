@@ -467,7 +467,7 @@ def cancel_sibling_isolation(ctx: CaseContext):
             handles.append(ops.start_stream(resp, rid, input_pb=input_pb))
 
         # Wait for the SHORT requests' (A, C) first output only.  In batch
-        # mode the mock engine's FetchResponse surfaces the first message
+        # mode the mock engine's batch GenerateStreamCall surfaces the first message
         # only after decode completes, so waiting for B (output_len=500)
         # would mean B is already terminal when the cancel fires — the
         # master then (correctly) answers REQUEST_STATE_COMPLETED
@@ -948,7 +948,7 @@ def cancel_schedule_drop_delivered(ctx: CaseContext):
     completes.
 
     Trigger note: this is the Schedule-RPC drop (the only stream the
-    master's CancellationListener observes); dropping the FetchResponse
+    master's CancellationListener observes); dropping the batch GenerateStreamCall
     stream instead never reaches the master — that variant is the C1/C2
     autonomous-cleanup cases below.
 
@@ -1317,11 +1317,11 @@ def cancel_preemption_victim(ctx: CaseContext):
 
 @case("cancel_stream_break_prefill_autonomous", requires=["enqueue_batch"])
 def cancel_stream_break_prefill_autonomous(ctx: CaseContext):
-    """C1: the client drops the FetchResponse stream mid-request; the
+    """C1: the client drops the batch GenerateStreamCall stream mid-request; the
     ENGINE must sense the break and clean the request up on its own.
 
     Scenario (BATCH only): a long request (output_len=500) is dispatched
-    and its first output has been received (the FetchResponse stream is
+    and its first output has been received (the batch GenerateStreamCall stream is
     established, decode is running); the client then cancels the stream
     itself (StreamHandle.call.cancel()) WITHOUT the explicit Cancel RPC.
 
@@ -1350,7 +1350,7 @@ def cancel_stream_break_prefill_autonomous(ctx: CaseContext):
         response = ops.schedule(rid, output_len=500)
         if response.code != 200 or not response.success:
             return False, f"schedule failed: {response.error_message}"
-        handle = ops.start_stream(response, rid)  # BATCH: FetchResponse
+        handle = ops.start_stream(response, rid)  # BATCH: batch GenerateStreamCall
         if not handle.wait_first_output():
             handle.cancel()
             return False, "no output received before stream-break window"

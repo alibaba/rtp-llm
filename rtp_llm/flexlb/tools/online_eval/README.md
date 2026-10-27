@@ -403,10 +403,10 @@ The client is configured entirely through environment variables
 for that mapping (unpassed vars are blanked so no ambient environment leaks
 in).
 
-For master-enqueued batch requests (BATCH dispatcher), the client follows the
-frontend behavior: it calls `FetchResponse` on the selected prefill engine. For
-frontend-sent requests (NON_BATCH dispatcher), it calls `GenerateStreamCall`
-directly on the routed prefill engine.
+Both BATCH and NON_BATCH clients call `GenerateStreamCall` on the selected
+Decode/PDFUSION engine with the complete scheduled input and role addresses.
+BATCH requests also set `enqueued_by_master` so Decode attaches to the existing
+Prefill admission instead of admitting it again.
 
 The functional-test runner selects a scheduling profile
 (`--profile batch-window|single-nonbatch|single-batch|window-nonbatch`):

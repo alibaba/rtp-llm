@@ -172,7 +172,25 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
         await self.decode_channel.close()
         await self.cluster.stop()
 
-    async def test_enqueue_fetch_status_and_cache(self) -> None:
+    async def test_retired_pd_rpc_methods_are_absent(self) -> None:
+        methods = self.pb2.DESCRIPTOR.services_by_name["RpcService"].methods_by_name
+        for name in (
+            "FetchResponse", "EnqueueGroup", "RemoteGenerate", "RemoteGenerateNew",
+            "RemoteLoad", "RemoteFinish", "RemoteFinishNew",
+        ):
+            self.assertNotIn(name, methods)
+
+    async def test_decode_entry_streams_normal_request(self) -> None:
+        stub = self.pb2_grpc.RpcServiceStub(self.decode_channel)
+        request = self._attach_input(122)
+        request.enqueued_by_master = False
+        outputs = [output async for output in stub.GenerateStreamCall(request)]
+        self.assertEqual([False, True], [output.flatten_output.finished[0] for output in outputs])
+        self.assertEqual(1, self.decode._rpc_counts["generate_stream"])
+        self.assertEqual(1, self.prefill._rpc_counts["generate_stream"])
+        self.assertEqual(0, self.prefill._rpc_counts["batch_attach"])
+
+    async def test_decode_batch_stream_status_and_cache(self) -> None:
         stub = self.pb2_grpc.RpcServiceStub(self.channel)
         decode_stub = self.pb2_grpc.RpcServiceStub(self.decode_channel)
 
@@ -186,7 +204,7 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([123], [item.request_id for item in response.successes])
 
         finished = []
-        async for output in stub.FetchResponse(self.pb2.FetchRequestPB(request_id=123)):
+        async for output in decode_stub.GenerateStreamCall(self._attach_input(123)):
             finished.extend(bool(x) for x in output.flatten_output.finished)
         self.assertEqual([False, True], finished)
 
@@ -213,15 +231,14 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.pb2.CANCEL_STATUS_NOT_FOUND, missing.status)
         self.assertNotIn(999, self.prefill._cancelled)
 
-    async def test_decode_cancel_rpc_is_unimplemented(self) -> None:
-        import grpc
-
+    async def test_decode_cancel_forwards_to_selected_prefill(self) -> None:
+        self.prefill._register_prefill_owner(self._input_pb(request_id=456))
         decode_stub = self.pb2_grpc.RpcServiceStub(self.decode_channel)
-
-        with self.assertRaises(grpc.aio.AioRpcError) as raised:
-            await decode_stub.Cancel(self.pb2.CancelRequestPB(request_id=456))
-
-        self.assertEqual(grpc.StatusCode.UNIMPLEMENTED, raised.exception.code())
+        response = await decode_stub.Cancel(self.pb2.CancelRequestPB(
+            request_id=456, prefill_address=f"{self.prefill.host}:{self.prefill.grpc_port}"
+        ))
+        self.assertEqual(self.pb2.CANCEL_STATUS_ACCEPTED, response.status)
+        self.assertIn(456, self.prefill._cancelled)
 
     async def test_batch_generate_rpc_is_unimplemented(self) -> None:
         import grpc
@@ -232,20 +249,6 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
             await prefill_stub.BatchGenerateCall(self.pb2.BatchGenerateInputPB())
 
         self.assertEqual(grpc.StatusCode.UNIMPLEMENTED, raised.exception.code())
-
-    async def test_decode_fetch_response_rpc_is_unimplemented(self) -> None:
-        import grpc
-
-        decode_stub = self.pb2_grpc.RpcServiceStub(self.decode_channel)
-
-        with self.assertRaises(grpc.aio.AioRpcError) as raised:
-            async for _ in decode_stub.FetchResponse(
-                self.pb2.FetchRequestPB(request_id=460)
-            ):
-                pass
-
-        self.assertEqual(grpc.StatusCode.UNIMPLEMENTED, raised.exception.code())
-        self.assertEqual(0, self.decode._rpc_counts["fetch_response"])
 
     async def test_cancel_does_not_scan_another_engine(self) -> None:
         prefill_stub = self.pb2_grpc.RpcServiceStub(self.channel)
@@ -415,17 +418,15 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(8429, prefill_finished.error_info.error_code)
         self.assertIsNotNone(decode_finished)
         self.assertEqual(
-            self.pb2.PRIORITY_PREEMPTION_NONE,
+            self.pb2.PRIORITY_PREEMPTION_CANCELED,
             decode_finished.priority_preemption_progress,
         )
-        self.assertEqual(0, decode_finished.error_info.error_code)
+        self.assertEqual(8429, decode_finished.error_info.error_code)
         self.assertEqual(0, self.decode._active_kv_tokens)
         self.assertEqual(0, self.decode._rpc_counts["cancel"])
 
         with self.assertRaises(grpc.aio.AioRpcError) as raised:
-            async for _ in prefill_stub.FetchResponse(
-                self.pb2.FetchRequestPB(request_id=request_id)
-            ):
+            async for _ in self.pb2_grpc.RpcServiceStub(self.decode_channel).GenerateStreamCall(self._attach_input(request_id)):
                 pass
         self.assertEqual(
             grpc.StatusCode.RESOURCE_EXHAUSTED,
@@ -437,6 +438,15 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
             details.ParseFromString(metadata["grpc-status-details-bin"])
         )
         self.assertEqual(8429, details.error_code)
+
+    def _attach_input(self, request_id: int):
+        request = self._input_pb(request_id)
+        request.enqueued_by_master = True
+        request.generate_config.role_addrs.add(
+            role=self.pb2.RoleAddrPB.PREFILL, ip=self.prefill.host,
+            grpc_port=self.prefill.grpc_port,
+        )
+        return request
 
     def _input_pb(self, request_id: int):
         config = self.pb2.GenerateConfigPB(

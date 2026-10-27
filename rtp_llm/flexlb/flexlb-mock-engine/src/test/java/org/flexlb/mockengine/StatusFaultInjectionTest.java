@@ -665,15 +665,15 @@ class StatusFaultInjectionTest {
 
         inject(basePort, "prefill_async_partial_fail", "\"k\":1,\"code\":8500");
 
-        // Open BOTH client-side FetchResponse streams BEFORE enqueuing (the
+        // Open BOTH client-side batch GenerateStreamCall streams BEFORE enqueuing (the
         // real client's call order: the stream is issued right after the
         // schedule ack, well before the 10 ms prefill executes; the queue is
         // shared with the EnqueueBatch Phase-1 admission either way).
         StreamCollector failedStream = new StreamCollector();
         StreamCollector survivorStream = new StreamCollector();
-        prefill.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
+        prefill.generateStreamCall(EngineRpcService.GenerateInputPB.newBuilder().setEnqueuedByMaster(true)
                 .setRequestId(401).build(), failedStream.observer());
-        prefill.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
+        prefill.generateStreamCall(EngineRpcService.GenerateInputPB.newBuilder().setEnqueuedByMaster(true)
                 .setRequestId(402).build(), survivorStream.observer());
 
         EngineRpcService.EnqueueBatchResponsePB ack =
@@ -715,7 +715,7 @@ class StatusFaultInjectionTest {
                 "the survivor's frame is the normal terminal frame");
     }
 
-    /** Async FetchResponse / GenerateStreamCall collector (MultiFrameStreamTtft
+    /** Async GenerateStreamCall collector (MultiFrameStreamTtft
      *  style, adapted so several streams can be opened before the batch runs). */
     private static final class StreamCollector {
         final List<EngineRpcService.GenerateOutputsPB> frames = new CopyOnWriteArrayList<>();

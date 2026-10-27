@@ -762,22 +762,13 @@ class LoadClient:
     async def _read_engine_stream(
         self, input_pb, schedule_response
     ) -> tuple[Optional[float], Optional[float]]:
-        prefill_addr = self._role_addr(schedule_response, "PREFILL")
-        pdfusion_addr = self._role_addr(schedule_response, "PDFUSION")
-        target = prefill_addr or pdfusion_addr
+        target = self._role_addr(schedule_response, "DECODE") or self._role_addr(schedule_response, "PDFUSION")
         if not target:
-            raise RuntimeError("schedule response has no PREFILL/PDFUSION address")
+            raise RuntimeError("schedule response has no DECODE/PDFUSION address")
+        input_pb.enqueued_by_master = schedule_response.enqueued_by_master
         channel = await self._channel(target)
         stub = self.pb2_grpc.RpcServiceStub(channel)
-        if schedule_response.enqueued_by_master:
-            stream = stub.FetchResponse(
-                self.pb2.FetchRequestPB(request_id=input_pb.request_id),
-                timeout=self.args.timeout_ms / 1000.0,
-            )
-        else:
-            stream = stub.GenerateStreamCall(
-                input_pb, timeout=self.args.timeout_ms / 1000.0
-            )
+        stream = stub.GenerateStreamCall(input_pb, timeout=self.args.timeout_ms / 1000.0)
 
         first_frame_s = None
         terminal_s = None

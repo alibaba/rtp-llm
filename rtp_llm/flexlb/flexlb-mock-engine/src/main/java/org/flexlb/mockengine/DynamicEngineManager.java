@@ -327,7 +327,7 @@ final class DynamicEngineManager {
                 // the flush would turn a finished request into a transport
                 // error on the client side (exactly what graceful mode exists
                 // to prevent). Falls back to the hard cut if a straggler stream
-                // (e.g. a master FetchResponse park) refuses to end.
+                // (e.g. a master batch GenerateStreamCall park) refuses to end.
                 server.shutdown();
                 try {
                     server.awaitTermination(2, TimeUnit.SECONDS);

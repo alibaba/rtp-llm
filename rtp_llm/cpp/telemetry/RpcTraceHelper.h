@@ -209,7 +209,7 @@ inline int64_t retryAttemptFromExecutionCount(int64_t execution_count) noexcept 
 }
 
 // Starts a gRPC CLIENT span as child of the given local span (e.g. the
-// Prefill SERVER span for the P->D RemoteGenerate call). Returns an empty
+// Decode SERVER span for the D->P GenerateStreamCall). Returns an empty
 // shared_ptr when telemetry is inactive or the parent is null; never throws.
 inline opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>
 startChildClientSpan(const std::string&                                                  name,

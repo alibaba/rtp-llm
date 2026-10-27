@@ -135,8 +135,8 @@ RTP_LLM_GRPC_STATUS_CODE = "rtp_llm.grpc_status_code"
 # must not be written to either attribute.
 RTP_LLM_ERROR_CODE = "rtp_llm.error.code"
 RTP_LLM_ERROR_REASON = "rtp_llm.error.reason"
-# Zero-based number of retries already performed before this physical P->D
-# RemoteGenerate RPC. The initial attempt is 0, the first retry is 1.
+# Zero-based number of retries already performed before this physical
+# outbound generation RPC. The initial attempt is 0, the first retry is 1.
 RTP_LLM_RETRY_ATTEMPT = "rtp_llm.retry_attempt"
 # P->D CLIENT span stage timings in microseconds.
 RTP_LLM_ALLOCATE_RT_US = "rtp_llm.allocate_rt_us"

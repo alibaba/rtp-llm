@@ -710,7 +710,7 @@ def elastic_remove_pending_drain(ctx: CaseContext):
                 schedule_rejects += 1
                 continue
             route = addr_map.get(ops.role_addr(resp, "PREFILL"), "")
-            handle = ops.start_stream(resp, rid)  # FetchResponse parked
+            handle = ops.start_stream(resp, rid)  # batch GenerateStreamCall parked
             fired.append((rid, resp, handle, route))
             if route == victim:
                 victim_routed += 1
@@ -871,7 +871,7 @@ def elastic_remove_pending_drain(ctx: CaseContext):
         # Restore perf (survivor; the victim is gone and set_perf on a
         # removed engine harmlessly 404s), consume every fired request to
         # a terminal state (wait_end + cancel fallback — a parked
-        # FetchResponse whose stream never ends would leak master-side
+        # batch GenerateStreamCall whose stream never ends would leak master-side
         # inflight/ledger entries into later cases), then the usual
         # dynamic-engine hygiene.
         try:

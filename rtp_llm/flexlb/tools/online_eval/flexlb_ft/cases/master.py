@@ -1316,8 +1316,8 @@ def inject_generate_error(ctx: CaseContext):
     request state is registered).
 
     Profile semantics (v2, task #55): under the v1 mode axis ALL master
-    modes delivered via enqueueBatch + FetchResponse (direct-run evidence:
-    generate_stream_rpcs=0 while enqueue_rpcs=3 / fetch_response_rpcs=3),
+    modes delivered via enqueueBatch + batch GenerateStreamCall (direct-run evidence:
+    generate_stream_rpcs=0 while enqueue_rpcs=3 / batch_attach_rpcs=3),
     so the fault was structurally unreachable for master traffic and the
     case pinned the client-direct contract.  Under v2 the BATCH
     dispatcher is still unreachable, but the NON_BATCH dispatcher routes

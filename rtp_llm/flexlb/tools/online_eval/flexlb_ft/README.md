@@ -141,7 +141,7 @@ engine→master 状态上报通道的故障注入：ack 丢失 / 部分失败 / 
 | `status_finished_then_running` | 已终态请求随后又上报 RUNNING | 终态不可复活 |
 | `status_zombie_completed_running` | 已完成任务的僵尸 RUNNING 持续上报 | terminal record 吸收；账目不回退 |
 | `status_zombie_fake_running` | 永久驻留的假 RUNNING 探针 | 重复未知事实不得创建 Master 请求；连续观察期间保持零幻影请求 |
-| `status_fetch_error` | 批量 FetchResponse 流中途故障 | 故障表面化到客户端；账目收敛；恢复 |
+| `status_fetch_error` | 提前入队请求的 GenerateStreamCall 流中途故障 | 故障表面化到客户端；账目收敛；恢复 |
 
 ### kv（15 例 · 全 profile）
 

@@ -36,7 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Autonomous client-gone cancellation (production C++ engine alignment):
- * when the client's GenerateStream / FetchResponse stream breaks mid-flight,
+ * when the client's GenerateStream / batch GenerateStreamCall stream breaks mid-flight,
  * the engine itself must clean the request up within a short window (the
  * production engine checks IsCancelled in its per-token loop).
  *
@@ -47,7 +47,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       terminal published, census counts it — all within 1s of the break;</li>
  *   <li><b>P→D propagation</b> — the break lands on the prefill AFTER the
  *       decode hand-off (both a broken GenerateStream and a broken
- *       FetchResponse): the decode cleans its slot/KV bookkeeping and records
+ *       batch GenerateStreamCall): the decode cleans its slot/KV bookkeeping and records
  *       its own CANCELLED terminal, the prefill publishes the typed terminal
  *       carrying the request identity (tryCancelDownstream contract);</li>
  *   <li><b>decode direct break</b> — NON_BATCH style direct-to-decode stream:
@@ -192,8 +192,8 @@ class StreamCancelAutonomousTest {
     }
 
     @Test
-    void fetchResponseBreakPropagatesCancelToDecode() throws Exception {
-        // The BATCH-dispatcher shape: the client's FetchResponse stream is
+    void batchAttachmentBreakPropagatesCancelToDecode() throws Exception {
+        // The BATCH-dispatcher shape: the client's batch GenerateStreamCall stream is
         // glued to the ORIGINAL prefill; breaking it must drive the same
         // P->D propagation while the sibling GenerateStream stays alive.
         startCluster(model("10", 5000), 1, 1);
@@ -206,14 +206,14 @@ class StreamCancelAutonomousTest {
             awaitCondition(() -> decode.getRunningCount() >= 1, 2_000,
                     "decode should run the request after the P->D hand-off");
 
-            try (ClientStream fetch = ClientStream.fetchResponse(prefillPort(),
-                    EngineRpcService.FetchRequestPB.newBuilder()
+            try (ClientStream fetch = ClientStream.generateStream(prefillPort(),
+                    EngineRpcService.GenerateInputPB.newBuilder().setEnqueuedByMaster(true)
                             .setRequestId(rid)
                             .build())) {
                 // Wait until the fetch RPC actually reached the engine's
                 // handler (listener armed), then break ONLY the fetch stream.
-                awaitCondition(() -> rpcCount(prefill, "fetch_response") >= 1, 2_000,
-                        "fetchResponse should reach the engine handler");
+                awaitCondition(() -> rpcCount(prefill, "batch_attach") >= 1, 2_000,
+                        "batchAttachment should reach the engine handler");
                 Thread.sleep(100); // handler registration completes after the counter
                 fetch.breakStream();
             }
@@ -520,10 +520,6 @@ class StreamCancelAutonomousTest {
 
         static ClientStream generateStream(int port, EngineRpcService.GenerateInputPB input) {
             return open(port, RpcServiceGrpc.getGenerateStreamCallMethod(), input);
-        }
-
-        static ClientStream fetchResponse(int port, EngineRpcService.FetchRequestPB request) {
-            return open(port, RpcServiceGrpc.getFetchResponseMethod(), request);
         }
 
         private static <ReqT> ClientStream open(

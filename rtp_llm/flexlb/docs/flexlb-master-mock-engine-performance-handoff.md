@@ -32,7 +32,7 @@
   当时的 `dispatcher.earlyDispatchPredictedExecutionMs=500` 和
   `dispatcher.maxCollectionWaitMs=160`；当前 fixture 已迁移到对应的
   `scheduler.decision` 字段。
-- 不调用 `FetchResponse`。Fetch 是 frontend 的后续动作，不属于 Master Schedule 性能；
+- 不读取 `GenerateStreamCall` 结果流。读取结果是 frontend 的后续动作，不属于 Master Schedule 性能；
   关闭客户端读流（`FETCH_OUTPUT_STREAM=0`）不影响 engine 侧的完整执行。
 - 吞吐以 Master 服务端的 `server_arrival_qps` 为准。
 - 延迟以 Master 服务端的 `schedule_latency_ms` 为准，不以 client RTT 作为最终报告口径。
@@ -585,7 +585,7 @@ artifact directory:
 ## 15. 常见错误
 
 - 只看 client RTT：会把发压端排队和网络抖动算到 Master。正式值必须取服务端打点。
-- 忘记 `FETCH_OUTPUT_STREAM=0`：客户端会读取 FetchResponse 输出流，测试目标变成端到端链路。
+- 忘记 `FETCH_OUTPUT_STREAM=0`：客户端会读取 GenerateStreamCall 输出流，测试目标变成端到端链路。
 - mock 余量不足就冲高 QPS：mock 可能先成为瓶颈，无法证明 Master 容量。
 - 使用固定 completion delay：丢失输入长度、cache 命中和 active batch 对执行时间的影响。
 - 一次直接打 10K：无法定位拐点，还可能用冷启动失败污染结论。

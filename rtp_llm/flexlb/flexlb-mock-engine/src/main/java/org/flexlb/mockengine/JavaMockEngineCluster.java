@@ -422,7 +422,7 @@ public final class JavaMockEngineCluster {
                         + "decode_run_min=%d decode_run_max=%d max_decode_waiting=%d "
                         + "decode_admitted=%d decode_done=%d decode_exec_p50=%d decode_exec_p95=%d decode_exec_max=%d "
                         + "heap_used_mb=%d heap_max_mb=%d "
-                        + "generate_stream_rpcs=%d fetch_response_rpcs=%d cancel_rpcs=%d "
+                        + "generate_stream_rpcs=%d batch_attach_rpcs=%d cancel_rpcs=%d "
                         + "cancel_census_tracked=%d cancel_census_finished=%d cancel_census_unknown=%d cancel_census_already_cancelled=%d "
                         + "cancel_census_injected=%d cancel_census_client_gone=%d%n",
                 System.currentTimeMillis(),
@@ -436,7 +436,7 @@ public final class JavaMockEngineCluster {
                 stats.decodeAdmitted.sum(),
                 decodeWindow.count(), decodeWindow.p50Ms(), decodeWindow.p95Ms(), decodeWindow.maxMs(),
                 heapUsedMb, heapMaxMb,
-                stats.generateStreamRpcs.sum(), stats.fetchResponseRpcs.sum(), stats.cancelRpcs.sum(),
+                stats.generateStreamRpcs.sum(), stats.batchAttachRpcs.sum(), stats.cancelRpcs.sum(),
                 stats.cancelCensusTracked.sum(), stats.cancelCensusAlreadyFinished.sum(),
                 stats.cancelCensusUnknown.sum(), stats.cancelCensusAlreadyCancelled.sum(),
                 stats.cancelCensusInjected.sum(), stats.cancelCensusClientGone.sum());
@@ -652,7 +652,7 @@ public final class JavaMockEngineCluster {
         // Per-method RPC counters (Python _rpc_counts, snapshot "rpc_counts").
         private final AtomicLong rpcEnqueueBatch = new AtomicLong();
         private final AtomicLong rpcGenerateStream = new AtomicLong();
-        private final AtomicLong rpcFetchResponse = new AtomicLong();
+        private final AtomicLong rpcBatchAttach = new AtomicLong();
         private final AtomicLong rpcCancel = new AtomicLong();
         // Bounded request lifecycle map keyed by request id (Python _request_lifecycle).
         private final LinkedHashMap<Long, Map<String, Object>> requestLifecycles = new LinkedHashMap<>();
@@ -1564,6 +1564,26 @@ public final class JavaMockEngineCluster {
                 return;
             }
 
+            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
+                for (EngineRpcService.RoleAddrPB addr : request.getGenerateConfig().getRoleAddrsList()) {
+                    if (RoleTypeProtoConverter.fromRoleAddr(addr) == RoleType.PREFILL) {
+                        FastRpcService prefill = services.get(addr.getGrpcPort());
+                        if (prefill == null) {
+                            observer.onError(io.grpc.Status.UNAVAILABLE
+                                    .withDescription("selected Prefill is unavailable").asException());
+                        } else if (request.getEnqueuedByMaster()) {
+                            prefill.attachResult(request, observer);
+                        } else {
+                            prefill.generateStreamCall(request, observer);
+                        }
+                        return;
+                    }
+                }
+            }
+            if (request.getEnqueuedByMaster()) {
+                attachResult(request, observer);
+                return;
+            }
             long requestId = request.getRequestId();
             MockPerformanceModel.RequestShape shape = performance.shape(request, cache);
             // Key-level cache-hit accounting (direct path, same admission hit
@@ -1729,16 +1749,12 @@ public final class JavaMockEngineCluster {
             });
         }
 
-        @Override
-        public void fetchResponse(EngineRpcService.FetchRequestPB request,
+        private void attachResult(EngineRpcService.GenerateInputPB request,
                 StreamObserver<EngineRpcService.GenerateOutputsPB> observer) {
-            stats.fetchResponseRpcs.increment();
-            rpcFetchResponse.incrementAndGet();
-            // Same client-gone capture as generateStreamCall: under the BATCH
-            // dispatcher the client's FetchResponse stream is glued to the
-            // ORIGINAL PREFILL engine, so a broken fetch must drive that
-            // prefill's autonomous cancel (and the P->D propagation when the
-            // hand-off already happened).
+            stats.batchAttachRpcs.increment();
+            rpcBatchAttach.incrementAndGet();
+            // Decode attaches to the selected Prefill's simulation queue. The
+            // same RPC context lets Prefill release the request on disconnect.
             Context rpcContext = Context.current();
 
             long requestId = request.getRequestId();
@@ -1760,19 +1776,9 @@ public final class JavaMockEngineCluster {
             // Arm the autonomous client-gone detector for this fetch stream.
             registerClientGoneListener(requestId, rpcContext);
 
-            // Loop poll until a finished=true frame or timeout — same pump as
-            // generateStreamCall. Under the BATCH dispatcher the client polls
-            // FetchResponse against the ORIGINAL PREFILL engine (startDecode
-            // handed the prefill-side queue to the Decode engine), so the stream
-            // carries TWO frames per request: a first-token frame (finished=false)
-            // offered at prefill completion and a terminal frame (finished=true)
-            // offered at decode completion. Polling exactly ONE frame collapsed
-            // the stream after the first-token frame, making the client's ttft
-            // and e2e identical by construction (verified: run 20260827_112212
-            // per-second ttft_p50==e2e_p50 everywhere) and truncating e2e for
-            // every request that actually spent decode time. The loop keeps the
-            // empty_response semantics: zero frames delivered before the timeout
-            // still completes the stream without error.
+            // Deliver the first-token and terminal frames from the shared
+            // Prefill/Decode simulation queue. An empty timeout completes the
+            // stream without error, preserving the existing fault surface.
             responseExecutor.execute(() -> {
                 try {
                     while (true) {
@@ -1793,7 +1799,7 @@ public final class JavaMockEngineCluster {
                             // Error-only frames (cancel, P->D downstream
                             // cancel, preemption terminal records) terminate the
                             // stream — mirrors the generateStreamCall pump.
-                            // Without this a cancelled request's FetchResponse
+                            // Without this a cancelled request's batch GenerateStreamCall
                             // hangs until the 600s frame-gap timeout.
                             terminal = true;
                         } else {
@@ -2249,7 +2255,7 @@ public final class JavaMockEngineCluster {
                 EngineRpcService.TaskPhase observedPhase = phase != null
                         ? phase : EngineRpcService.TaskPhase.TASK_PHASE_RUNNING;
                 // Terminate the client-facing stream: after the P->D hand-off the
-                // response queue the client's FetchResponse / GenerateStreamCall
+                // response queue the client's GenerateStreamCall
                 // poller hangs on lives on the ORIGINAL PREFILL (startDecode passed
                 // it to this Decode). cancel() above only offers into this
                 // Decode's own responseQueues, which never contained the request,
@@ -2287,7 +2293,7 @@ public final class JavaMockEngineCluster {
 
         /**
          * Arm the client-gone detector for one client-facing stream
-         * (generateStreamCall / fetchResponse). The per-RPC gRPC context is
+         * (generateStreamCall / batchAttachment). The per-RPC gRPC context is
          * captured on the handler thread — the only place where
          * Context.current() is the request's cancellable context — and the
          * registered listener fires on the response-pump executor within
@@ -2321,7 +2327,7 @@ public final class JavaMockEngineCluster {
          * Autonomous cancellation driven by the CLIENT's stream breaking —
          * the mock's counterpart of the production C++ engine checking
          * IsCancelled in its per-token loop: a broken
-         * FetchResponse/GenerateStream context makes the engine itself clean
+         * GenerateStreamCall context makes the engine itself clean
          * the request up, record the cancel, publish the typed CANCELLED
          * terminal, and propagate to the downstream decode once the P->D
          * hand-off has happened.
@@ -3122,7 +3128,7 @@ public final class JavaMockEngineCluster {
                                 // terminal (onNext then onCompleted). The queue
                                 // was provisioned by the EnqueueBatch Phase-1
                                 // admission (before the batch even started
-                                // executing), so the client's FetchResponse /
+                                // executing), so the client's batch GenerateStreamCall /
                                 // GenerateStreamCall pump -- whichever side got
                                 // there first -- shares this exact queue instance.
                                 // The injected code is NOT a production
@@ -4405,6 +4411,21 @@ public final class JavaMockEngineCluster {
                     observer.onCompleted();
                     return;
                 }
+                if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
+                        && !request.getPrefillAddress().isEmpty()) {
+                    String address = request.getPrefillAddress();
+                    int separator = address.lastIndexOf(':');
+                    FastRpcService prefill = separator >= 0
+                            ? services.get(Integer.parseInt(address.substring(separator + 1))) : null;
+                    if (prefill == null) {
+                        observer.onError(io.grpc.Status.UNAVAILABLE
+                                .withDescription("selected Prefill is unavailable").asException());
+                        return;
+                    }
+                    cancelRequest(request.getRequestId());
+                    prefill.cancel(request, observer);
+                    return;
+                }
                 CancelResult result = cancelRequest(request.getRequestId());
                 EngineRpcService.CancelStatusPB status;
                 if (result.found()) {
@@ -4467,7 +4488,7 @@ public final class JavaMockEngineCluster {
             // may still be awaiting decode output from another engine even after the
             // local runningTasks entry has been removed (prefill completed, decode in
             // flight). Using pendingRequests > 0 as the guard prevents premature
-            // removal of queues that are still being polled by fetchResponse or
+            // removal of queues that are still being polled by batchAttachment or
             // generateStreamCall.
             if (pendingRequests.get() == 0) {
                 responseQueues.keySet().retainAll(activeIds);
@@ -4697,7 +4718,7 @@ public final class JavaMockEngineCluster {
             enqueueCount.set(0);
             rpcEnqueueBatch.set(0);
             rpcGenerateStream.set(0);
-            rpcFetchResponse.set(0);
+            rpcBatchAttach.set(0);
             rpcCancel.set(0);
             busyMs.set(0);
             kvAdmissionFails.reset();
@@ -5252,7 +5273,7 @@ public final class JavaMockEngineCluster {
             Map<String, Object> rpcCounts = new LinkedHashMap<>();
             rpcCounts.put("enqueue_batch", rpcEnqueueBatch.get());
             rpcCounts.put("generate_stream", rpcGenerateStream.get());
-            rpcCounts.put("fetch_response", rpcFetchResponse.get());
+            rpcCounts.put("batch_attach", rpcBatchAttach.get());
             rpcCounts.put("cancel", rpcCancel.get());
             snap.put("rpc_counts", rpcCounts);
             snap.put("cancelled_count", cancelledCount.get());
@@ -5361,7 +5382,7 @@ public final class JavaMockEngineCluster {
         private final LongAdder statusRpcs = new LongAdder();
         private final LongAdder cacheRpcs = new LongAdder();
         private final LongAdder generateStreamRpcs = new LongAdder();
-        private final LongAdder fetchResponseRpcs = new LongAdder();
+        private final LongAdder batchAttachRpcs = new LongAdder();
         private final LongAdder cancelRpcs = new LongAdder();
         // Leak-attribution census (Jack A1/A2): how incoming cancel RPCs
         // distribute across tracked / already-finished / unknown / terminal record.
@@ -5380,7 +5401,7 @@ public final class JavaMockEngineCluster {
         // unknown nor a terminal record: the engine state never saw it.
         final LongAdder cancelCensusInjected = new LongAdder();
         // Autonomous client-gone cancellations (broken GenerateStream /
-        // FetchResponse stream): how many in-flight requests the engine
+        // batch GenerateStreamCall stream): how many in-flight requests the engine
         // cleaned up by itself because the client stream died, split from the
         // explicit-Cancel census above so leak attribution stays clean.
         final LongAdder cancelCensusClientGone = new LongAdder();

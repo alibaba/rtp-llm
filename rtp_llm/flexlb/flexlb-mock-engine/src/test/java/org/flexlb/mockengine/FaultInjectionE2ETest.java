@@ -177,7 +177,7 @@ class FaultInjectionE2ETest {
                     .fetchError(true)
                     .build());
 
-            StreamResult result = callFetchResponse(h.prefillEngines.get(0), 9501);
+            StreamResult result = callBatchStream(h.prefillEngines.get(0), 9501);
             assertNotNull(result.error(), "fetch_response must fail on the faulted engine");
             assertTrue(result.error().getMessage().contains("injected fetch_error"),
                     result.error().getMessage());
@@ -395,11 +395,11 @@ class FaultInjectionE2ETest {
     }
 
     /** 直连 fetch_response，等 500ms 观察流事件。 */
-    private static StreamResult callFetchResponse(JavaMockEngineCluster.FastRpcService svc,
+    private static StreamResult callBatchStream(JavaMockEngineCluster.FastRpcService svc,
                                                   long requestId) throws InterruptedException {
         AtomicReference<Throwable> error = new AtomicReference<>();
         CountDownLatch terminal = new CountDownLatch(1);
-        svc.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
+        svc.generateStreamCall(EngineRpcService.GenerateInputPB.newBuilder().setEnqueuedByMaster(true)
                 .setRequestId(requestId)
                 .build(), new StreamObserver<>() {
             @Override

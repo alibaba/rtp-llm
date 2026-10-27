@@ -149,7 +149,7 @@ def parse_prometheus_samples(
 
 @dataclass
 class StreamSnapshot:
-    """Collected state from a FetchResponse / GenerateStreamCall stream."""
+    """Collected state from a GenerateStreamCall stream."""
 
     outputs: List[object] = field(default_factory=list)
     first_received: bool = False
@@ -159,7 +159,7 @@ class StreamSnapshot:
     terminated_s: Optional[float] = None  # monotonic time when stream ended
     # Monotonic time when the FIRST output arrived — the client-observed
     # TTFT anchor for graded property P7 (see balance_overload_avoid_prefill;
-    # under BATCH dispatch the first FetchResponse message only surfaces
+    # under BATCH dispatch the first batch GenerateStreamCall message only surfaces
     # after decode completes, so P7 uses the completion-duration口径 there).
     first_received_s: Optional[float] = None
     # In-band typed error frame (GenerateOutputsPB.error_info, RpcErrorPB):
@@ -262,6 +262,7 @@ class EngineOps:
         self.pb2, self.pb2_grpc = ensure_proto_modules()
         self.schedule_pb2, self.schedule_pb2_grpc = ensure_schedule_proto_modules()
         self._channels: dict = {}
+        self._scheduled_inputs: dict[int, bytes] = {}
         self._request_counter = 20000
         self._rid_lock = threading.Lock()
         # One-shot management-exposition readiness gate state (see
@@ -278,6 +279,7 @@ class EngineOps:
             except Exception:
                 pass
         self._channels.clear()
+        self._scheduled_inputs.clear()
 
     def _channel(self, target: str):
         if target not in self._channels:
@@ -417,6 +419,7 @@ class EngineOps:
             self._channel(self.master_target())
         )
         req = self.build_schedule_request(request_id, **kwargs)
+        self._scheduled_inputs[request_id] = req.generate_input
         if qos_level is not None:
             return stub.Schedule(
                 req,
@@ -440,7 +443,7 @@ class EngineOps:
             response, "PDFUSION"
         )
 
-    # -- dual-path stream ---------------------------------------------------
+    # -- generation stream ---------------------------------------------------
 
     def _copy_role_addrs(self, input_pb, response) -> None:
         del input_pb.generate_config.role_addrs[:]
@@ -453,24 +456,20 @@ class EngineOps:
             )
 
     def start_stream(self, response, request_id: int, input_pb=None) -> StreamHandle:
-        """Start FetchResponse (BATCH dispatch, enqueued_by_master) or
-        GenerateStreamCall (NON_BATCH, frontend-sent) — decided per response
-        from the master's enqueued_by_master flag."""
-        target = self.prefill_addr(response)
+        """Connect the selected Decode/PDFUSION stream, including Master admission."""
+        target = self.role_addr(response, "DECODE") or self.role_addr(response, "PDFUSION")
         if not target:
-            raise RuntimeError("schedule response has no PREFILL/PDFUSION address")
+            raise RuntimeError("schedule response has no DECODE/PDFUSION address")
+        # Decode must receive the exact input serialized for Master admission.
+        scheduled_input = self._scheduled_inputs.pop(request_id, None)
+        if scheduled_input is not None:
+            input_pb = self.pb2.GenerateInputPB.FromString(scheduled_input)
+        elif input_pb is None:
+            input_pb = self.build_generate_input(request_id)
+        self._copy_role_addrs(input_pb, response)
+        input_pb.enqueued_by_master = response.enqueued_by_master
         stub = self.pb2_grpc.RpcServiceStub(self._channel(target))
-        if response.enqueued_by_master:
-            call = stub.FetchResponse(
-                self.pb2.FetchRequestPB(request_id=request_id), timeout=60.0
-            )
-        else:
-            if input_pb is None:
-                # Default-shape fallback: callers that scheduled with a
-                # non-default shape MUST pass input_pb (see run_one_request).
-                input_pb = self.build_generate_input(request_id)
-            self._copy_role_addrs(input_pb, response)
-            call = stub.GenerateStreamCall(input_pb, timeout=60.0)
+        call = stub.GenerateStreamCall(input_pb, timeout=60.0)
         return StreamHandle(call, StreamSnapshot())
 
     # -- cancel -------------------------------------------------------------
@@ -493,11 +492,15 @@ class EngineOps:
             self.worker_cancel(request_id, response)
 
     def worker_cancel(self, request_id: int, response) -> None:
-        target = self.prefill_addr(response)
+        target = self.role_addr(response, "DECODE") or self.role_addr(response, "PDFUSION")
         if not target:
             return
         stub = self.pb2_grpc.RpcServiceStub(self._channel(target))
-        stub.Cancel(self.pb2.CancelRequestPB(request_id=request_id), timeout=10.0)
+        stub.Cancel(
+            self.pb2.CancelRequestPB(
+                request_id=request_id, prefill_address=self.role_addr(response, "PREFILL")
+            ), timeout=10.0
+        )
 
     # -- recovery -----------------------------------------------------------
 

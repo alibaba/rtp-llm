@@ -61,7 +61,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * never here.
  *
  * <p>FETCH_OUTPUT_STREAM (default true) controls ONLY the client-side read of engine
- * output streams (phase-2 FetchResponse/GenerateStreamCall). With FETCH_OUTPUT_STREAM=0
+ * output streams (phase-2 GenerateStreamCall). With FETCH_OUTPUT_STREAM=0
  * the client stops after a successful Schedule RPC; the engine still executes the
  * request in full (BATCH dispatcher: master enqueued it via EnqueueBatch during the
  * Schedule RPC). This trims the client's stream-reading network cost from load tests
@@ -793,27 +793,21 @@ public final class JavaLoadClient {
                 Double firstFrameNanos = null;
                 Double terminalNanos = null;
 
-                String prefillAddr = roleAddr(scheduleResponse, "PREFILL");
-                if (prefillAddr.isEmpty()) {
-                    prefillAddr = roleAddr(scheduleResponse, "PDFUSION");
+                String streamTarget = roleAddr(scheduleResponse, "DECODE");
+                if (streamTarget.isEmpty()) {
+                    streamTarget = roleAddr(scheduleResponse, "PDFUSION");
                 }
-                if (prefillAddr.isEmpty()) {
-                    throw new RuntimeException("schedule response has no PREFILL/PDFUSION address");
+                if (streamTarget.isEmpty()) {
+                    throw new RuntimeException("schedule response has no DECODE/PDFUSION address");
                 }
 
-                EngineRpcService.GenerateInputPB modifiedInput = copyRoleAddrs(inputPb, scheduleResponse);
-                ManagedChannel engineChannel = getEngineChannel(prefillAddr);
+                EngineRpcService.GenerateInputPB modifiedInput = copyRoleAddrs(inputPb, scheduleResponse).toBuilder()
+                        .setEnqueuedByMaster(scheduleResponse.getEnqueuedByMaster()).build();
+                ManagedChannel engineChannel = getEngineChannel(streamTarget);
                 RpcServiceGrpc.RpcServiceBlockingStub engineStub = RpcServiceGrpc.newBlockingStub(engineChannel)
                         .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
 
-                Iterator<EngineRpcService.GenerateOutputsPB> stream;
-                if (scheduleResponse.getEnqueuedByMaster()) {
-                    stream = engineStub.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
-                            .setRequestId(inputPb.getRequestId())
-                            .build());
-                } else {
-                    stream = engineStub.generateStreamCall(modifiedInput);
-                }
+                Iterator<EngineRpcService.GenerateOutputsPB> stream = engineStub.generateStreamCall(modifiedInput);
 
                 while (stream.hasNext()) {
                     EngineRpcService.GenerateOutputsPB output = stream.next();
@@ -1734,8 +1728,8 @@ public final class JavaLoadClient {
         final int limit;
         final long timeoutMs;
         final double slaTtftMs;
-        /** When false the client skips reading engine output streams (FetchResponse/
-         *  GenerateStreamCall phase 2) after a successful Schedule RPC. The engine
+        /** When false the client skips reading engine output streams
+         *  (GenerateStreamCall phase 2) after a successful Schedule RPC. The engine
          *  still executes prefill + decode in full — only the client-side read is
          *  trimmed. Requires a BATCH dispatcher (see the enqueued_by_master
          *  fail-fast in handleRequest). */

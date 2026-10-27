@@ -643,8 +643,8 @@ TEST_F(TelemetryTest, SpanFactoriesCarryRpcAttributes) {
     auto span_data = startInMemoryRuntime();
     auto parent    = TelemetryRuntime::tracer()->StartSpan("parent");
     auto client    = startChildClientSpan(
-        "rtp_llm.remote_generate", parent, "decode.example", 26101, 42, 1, "RpcService/RemoteGenerate");
-    auto server = startRpcServerSpan("rtp_llm.decode_remote_generate", nullptr, true, "RpcService/RemoteGenerate");
+        "rtp_llm.call_prefill", parent, "prefill.example", 26101, 42, 1, "RpcService/GenerateStreamCall");
+    auto server = startRpcServerSpan("rtp_llm.prefill_generate", nullptr, true, "RpcService/GenerateStreamCall");
     auto local  = startRpcServerSpan("rtp_llm.generate_stream_call", nullptr, false, "RpcService/GenerateStreamCall");
     ASSERT_NE(client, nullptr);
     ASSERT_NE(server, nullptr);
@@ -658,22 +658,22 @@ TEST_F(TelemetryTest, SpanFactoriesCarryRpcAttributes) {
     auto spans = span_data->GetSpans();
     ASSERT_EQ(spans.size(), 4u);
     for (const auto& span : spans) {
-        if (span->GetName() == "rtp_llm.remote_generate") {
+        if (span->GetName() == "rtp_llm.call_prefill") {
             const auto& attributes = span->GetAttributes();
             auto        it         = attributes.find("rpc.system");
             ASSERT_NE(it, attributes.end());
             EXPECT_EQ(nostd::get<std::string>(it->second), "grpc");
-            EXPECT_EQ(nostd::get<std::string>(attributes.at("rpc.method")), "RpcService/RemoteGenerate");
+            EXPECT_EQ(nostd::get<std::string>(attributes.at("rpc.method")), "RpcService/GenerateStreamCall");
             EXPECT_EQ(span->GetSpanKind(), trace_api::SpanKind::kClient);
-            EXPECT_EQ(nostd::get<std::string>(attributes.at("server.address")), "decode.example");
+            EXPECT_EQ(nostd::get<std::string>(attributes.at("server.address")), "prefill.example");
             EXPECT_EQ(nostd::get<int64_t>(attributes.at("server.port")), 26101);
             EXPECT_EQ(nostd::get<std::string>(attributes.at("request_id")), "42");
             EXPECT_EQ(attributes.count("rtp_llm.request_id"), 0u);
             EXPECT_EQ(nostd::get<int64_t>(attributes.at("rtp_llm.retry_attempt")), 1);
-        } else if (span->GetName() == "rtp_llm.decode_remote_generate") {
+        } else if (span->GetName() == "rtp_llm.prefill_generate") {
             const auto& attributes = span->GetAttributes();
             EXPECT_EQ(nostd::get<std::string>(attributes.at("rpc.system")), "grpc");
-            EXPECT_EQ(nostd::get<std::string>(attributes.at("rpc.method")), "RpcService/RemoteGenerate");
+            EXPECT_EQ(nostd::get<std::string>(attributes.at("rpc.method")), "RpcService/GenerateStreamCall");
             EXPECT_TRUE(nostd::get<bool>(attributes.at("rtp_llm.pd_sep")));
             EXPECT_EQ(span->GetSpanKind(), trace_api::SpanKind::kServer);
         } else if (span->GetName() == "rtp_llm.generate_stream_call") {
@@ -701,7 +701,7 @@ TEST_F(TelemetryTest, ClientSpanCanonicalizesAndValidatesEndpoint) {
         bool        valid;
     };
     const std::vector<EndpointCase> cases = {
-        {"decode.example", 1, "decode.example", true},
+        {"prefill.example", 1, "prefill.example", true},
         {"127.0.0.1", 65535, "127.0.0.1", true},
         {"2001:db8::1", 26101, "2001:db8::1", true},
         {"[2001:db8::2]", 26102, "2001:db8::2", true},
@@ -709,10 +709,10 @@ TEST_F(TelemetryTest, ClientSpanCanonicalizesAndValidatesEndpoint) {
         {"[]", 26101, "", false},
         {"[2001:db8::3", 26101, "", false},
         {"2001:db8::3]", 26101, "", false},
-        {"dns:///decode.example", 26101, "", false},
-        {"decode.example", -1, "", false},
-        {"decode.example", 0, "", false},
-        {"decode.example", 65536, "", false},
+        {"dns:///prefill.example", 26101, "", false},
+        {"prefill.example", -1, "", false},
+        {"prefill.example", 0, "", false},
+        {"prefill.example", 65536, "", false},
     };
     for (size_t i = 0; i < cases.size(); ++i) {
         auto span = startChildClientSpan("endpoint_" + std::to_string(i), parent, cases[i].address, cases[i].port);

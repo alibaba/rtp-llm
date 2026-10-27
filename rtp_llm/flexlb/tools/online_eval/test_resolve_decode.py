@@ -271,11 +271,18 @@ class TestRunPrefillBatchRoutesToCorrectDecode(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(1, response.batch_id)
         self.assertIn(request_id, [int(s.request_id) for s in response.successes])
 
+        input_pb.enqueued_by_master = True
+        input_pb.generate_config.role_addrs.add(
+            role=self.pb2.RoleAddrPB.PREFILL, role_str="PREFILL",
+            ip=self.prefill_a.host, grpc_port=self.prefill_a.grpc_port,
+        )
+        decode_channel = await self.cluster_b._get_grpc_channel(
+            f"{self.decode_remote_b.host}:{self.decode_remote_b.grpc_port}"
+        )
+        stub = self.pb2_grpc.RpcServiceStub(decode_channel)
         # Consume the response stream (blocks until decode completes)
         finished_flags: list[bool] = []
-        async for output in stub.FetchResponse(
-            self.pb2.FetchRequestPB(request_id=request_id), timeout=10.0
-        ):
+        async for output in stub.GenerateStreamCall(input_pb, timeout=10.0):
             finished_flags.extend(bool(x) for x in output.flatten_output.finished)
         self.assertEqual([False, True], finished_flags)
 
@@ -307,10 +314,17 @@ class TestRunPrefillBatchRoutesToCorrectDecode(unittest.IsolatedAsyncioTestCase)
         stub = self.pb2_grpc.RpcServiceStub(self.channel)
         await stub.EnqueueBatch(batch, timeout=5.0)
 
+        input_pb.enqueued_by_master = True
+        input_pb.generate_config.role_addrs.add(
+            role=self.pb2.RoleAddrPB.PREFILL, role_str="PREFILL",
+            ip=self.prefill_a.host, grpc_port=self.prefill_a.grpc_port,
+        )
+        decode_channel = await self.cluster_b._get_grpc_channel(
+            f"{self.decode_remote_b.host}:{self.decode_remote_b.grpc_port}"
+        )
+        stub = self.pb2_grpc.RpcServiceStub(decode_channel)
         # Consume responses
-        async for _ in stub.FetchResponse(
-            self.pb2.FetchRequestPB(request_id=request_id), timeout=10.0
-        ):
+        async for _ in stub.GenerateStreamCall(input_pb, timeout=10.0):
             pass
 
         await asyncio.sleep(0.05)
@@ -596,7 +610,7 @@ class TestRunRemoteDecodeCancelForward(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(request_id, remote_decode._running)
             self.assertEqual(0, remote_decode._active_kv_tokens)
             self.assertNotIn(request_id, remote_decode._response_queues)
-            self.assertEqual(0, remote_decode._rpc_counts["fetch_response"])
+            self.assertEqual(0, remote_decode._rpc_counts["batch_attach"])
         finally:
             await channel.close()
             await remote_cluster.stop()

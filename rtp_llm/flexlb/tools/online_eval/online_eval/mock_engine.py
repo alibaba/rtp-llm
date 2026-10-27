@@ -195,7 +195,7 @@ class MockEngineState:
         self._rpc_counts: Dict[str, int] = {
             "enqueue_batch": 0,
             "generate_stream": 0,
-            "fetch_response": 0,
+            "batch_attach": 0,
             "cancel": 0,
         }
         self._cancelled_count = 0
@@ -209,7 +209,7 @@ class MockEngineState:
 
         Supported keys:
           enqueue_error  – enqueue_batch returns empty-successes response
-          fetch_error    – fetch_response yields one frame then raises grpc.RpcError
+          fetch_error    – batch stream attachment yields one frame then raises grpc.RpcError
           generate_error – generate_stream raises grpc.RpcError immediately
           no_respond     – prefill/decode sleep but never queue responses (stream hangs)
           cancel_cleanup_delay_ms – delay Decode task/accounting cleanup after
@@ -277,6 +277,26 @@ class MockEngineState:
 
             raise grpc.RpcError("injected enqueue_error")
         request_id = int(input_pb.request_id)
+        prefill_addr = None
+        if self.role == "decode":
+            for addr in input_pb.generate_config.role_addrs:
+                if role_addr_type(self.pb2, addr) == self.pb2.ROLE_TYPE_PREFILL:
+                    prefill_addr = f"{addr.ip}:{addr.grpc_port}"
+                    break
+        if prefill_addr is not None:
+            channel = await self.cluster._get_grpc_channel(prefill_addr)
+            stub = self.cluster.pb2_grpc.RpcServiceStub(channel)
+            upstream = stub.GenerateStreamCall(input_pb, timeout=120.0)
+            try:
+                async for output in upstream:
+                    yield output
+            finally:
+                upstream.cancel()
+            return
+        if input_pb.enqueued_by_master:
+            async for output in self.attach_result(request_id):
+                yield output
+            return
         queue = self._response_queues.setdefault(request_id, asyncio.Queue())
         decode_task: Optional[asyncio.Task] = None
         if self.role == "decode":
@@ -302,18 +322,14 @@ class MockEngineState:
             # Propagate that stream cancellation into Decode's normal cancel
             # event so the detached simulation task does not keep generating
             # and holding KV forever after the RPC handler is gone.
-            if (
-                decode_task is not None
-                and not stream_completed
-                and not decode_task.done()
-            ):
+            if not stream_completed:
                 self.request_priority_cancel(request_id)
                 self._response_queues.pop(request_id, None)
 
-    async def fetch_response(self, request_id: int):
-        self._rpc_counts["fetch_response"] += 1
+    async def attach_result(self, request_id: int):
+        self._rpc_counts["batch_attach"] += 1
         request_id = int(request_id)
-        logger.debug("FetchResponse arrived engine=%s rid=%d", self.name, request_id)
+        logger.debug("Batch attachment arrived engine=%s rid=%d", self.name, request_id)
         self._response_queues.setdefault(request_id, asyncio.Queue())
         if self.inject_config.get("fetch_error"):
             import grpc
@@ -322,8 +338,14 @@ class MockEngineState:
                 request_id, finished=False, token_id=101, output_len=1
             )
             raise grpc.RpcError("injected fetch_error")
-        async for output in self._read_response_queue(request_id):
-            yield output
+        completed = False
+        try:
+            async for output in self._read_response_queue(request_id):
+                yield output
+            completed = True
+        finally:
+            if not completed:
+                self.request_priority_cancel(request_id)
 
     async def cancel(self, request_id: int) -> bool:
         self._rpc_counts["cancel"] += 1
@@ -460,7 +482,7 @@ class MockEngineState:
             else:
                 status.running_task_info.append(self._task_pb(task))
         # Stage 3/4 Prefill has already left the local compute scheduler, but
-        # remains the priority-terminal authority until downstream cleanup.
+        # keeps a cancellation overlay until downstream cleanup finishes.
         # This control overlay is visible for reconciliation and deliberately
         # does not increment running_query_len or consume Prefill concurrency.
         for control in self._owned_requests.values():
@@ -647,7 +669,7 @@ class MockEngineState:
                             input_pb,
                             batch_id,
                             queue,
-                            priority_terminal_owned_by_prefill=True,
+                            defer_stream_close_to_prefill=True,
                         ),
                     )
                 )
@@ -732,7 +754,7 @@ class MockEngineState:
         batch_id: int,
         queue: asyncio.Queue,
         *,
-        priority_terminal_owned_by_prefill: bool = False,
+        defer_stream_close_to_prefill: bool = False,
     ) -> None:
         shape = self._shape_from_input(input_pb)
         start = now_ms()
@@ -741,7 +763,7 @@ class MockEngineState:
         )
         if cancel_event.is_set():
             self._priority_cancel_events.pop(shape.request_id, None)
-            if not priority_terminal_owned_by_prefill:
+            if not defer_stream_close_to_prefill:
                 await queue.put(SENTINEL)
             return
         self._accepted += 1
@@ -800,6 +822,10 @@ class MockEngineState:
         self._priority_cancel_events.pop(shape.request_id, None)
         if task is not None:
             task.execution_time_ms = max(1, end - task.start_ms)
+            if cancelled:
+                task.priority_preemption_progress = self.pb2.PRIORITY_PREEMPTION_CANCELED
+                task.terminal_error_code = 8429
+                task.terminal_error_message = "priority preempted"
             self._finish_task(task)
         if not cancelled and self.cache.admit(shape.block_keys):
             self._cache_version += 1
@@ -824,7 +850,7 @@ class MockEngineState:
                     output_len=shape.output_len,
                 )
             )
-        if not cancelled or not priority_terminal_owned_by_prefill:
+        if not cancelled or not defer_stream_close_to_prefill:
             await queue.put(SENTINEL)
 
     @staticmethod
@@ -904,7 +930,14 @@ class MockEngineState:
                 try:
                     channel = await self.cluster._get_grpc_channel(decode_addr)
                     stub = self.cluster.pb2_grpc.RpcServiceStub(channel)
-                    stream = stub.GenerateStreamCall(input_pb, timeout=120.0)
+                    handoff = self.pb2.GenerateInputPB()
+                    handoff.CopyFrom(input_pb)
+                    handoff.enqueued_by_master = False
+                    routes = [addr for addr in handoff.generate_config.role_addrs
+                              if role_addr_type(self.pb2, addr) != self.pb2.ROLE_TYPE_PREFILL]
+                    del handoff.generate_config.role_addrs[:]
+                    handoff.generate_config.role_addrs.extend(routes)
+                    stream = stub.GenerateStreamCall(handoff, timeout=120.0)
                     if priority_cancel_event is not None:
                         async def _cancel_stream_on_priority_preemption() -> None:
                             await priority_cancel_event.wait()
@@ -1093,28 +1126,6 @@ class MockRpcServicer:
     async def EnqueueBatch(self, request, context):
         return await self.state.enqueue_batch(request)
 
-    async def EnqueueGroup(self, request, context):
-        batch = self.pb2.EnqueueBatchRequestPB(batch_id=request.batch_id)
-        slot = batch.dp_slots.add(dp_rank=request.dp_rank)
-        for item in request.requests:
-            external = slot.requests.add()
-            external.input.CopyFrom(item.input)
-        return await self.state.enqueue_batch(batch)
-
-    async def FetchResponse(self, request, context):
-        if self.state.role == "decode":
-            import grpc
-
-            await context.abort(
-                grpc.StatusCode.UNIMPLEMENTED,
-                "FetchResponse is not implemented by Decode",
-            )
-        async for output in self.state.fetch_response(int(request.request_id)):
-            if isinstance(output, TerminalError):
-                await self._abort_with_terminal_error(context, output)
-                return
-            yield output
-
     async def GenerateStreamCall(self, request, context):
         async for output in self.state.generate_stream(request):
             if isinstance(output, TerminalError):
@@ -1130,29 +1141,13 @@ class MockRpcServicer:
             "BatchGenerateCall is not implemented by the mock engine",
         )
 
-    async def RemoteLoad(self, request, context):
-        return self.pb2.BroadcastLoadResponsePB()
-
-    async def RemoteGenerate(self, request_iterator, context):
-        async for _ in request_iterator:
-            break
-        if False:
-            yield self.pb2.GenerateOutputsPB()
-
-    async def RemoteFinish(self, request, context):
-        return self.pb2.EmptyPB()
-
-    async def RemoteFinishNew(self, request, context):
-        return self.pb2.EmptyPB()
-
     async def Cancel(self, request, context):
-        if self.state.role != "prefill":
-            import grpc
-
-            await context.abort(
-                grpc.StatusCode.UNIMPLEMENTED,
-                "priority Cancel is owned by the original Prefill",
-            )
+        if self.state.role == "decode" and request.prefill_address:
+            channel = await self.state.cluster._get_grpc_channel(request.prefill_address)
+            stub = self.pb2_grpc.RpcServiceStub(channel)
+            response = await stub.Cancel(request, timeout=1.0)
+            self.state.request_priority_cancel(int(request.request_id))
+            return response
         found = await self.state.cancel(int(request.request_id))
         return self.pb2.CancelResponsePB(
             status=(
@@ -1218,9 +1213,6 @@ class MockRpcServicer:
 
     async def UpdateWeights(self, request, context):
         return self.pb2.EmptyPB()
-
-    async def RemoteGenerateNew(self, request, context):
-        return self.pb2.RemoteGenerateResponsePBNew(finished=True)
 
     async def RemoteStore(self, request, context):
         return self.pb2.RemoteStoreResponsePB()

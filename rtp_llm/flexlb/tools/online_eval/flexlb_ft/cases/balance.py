@@ -220,8 +220,8 @@ def balance_overload_avoid_prefill(ctx: CaseContext):
         output (StreamSnapshot.first_received_s);
       * BATCH dispatch — completion duration: schedule-return → stream
         terminal state.  Under BATCH the mock surfaces the first
-        FetchResponse message only after decode completes (the cancel T3
-        lesson), so FetchResponse "TTFT" cannot observe the prefill phase
+        batch GenerateStreamCall message only after decode completes (the cancel T3
+        lesson), so batch GenerateStreamCall "TTFT" cannot observe the prefill phase
         at all; the completion-duration caliber carries the same protection
         signal (a request swallowed by the hot engine pays its ~5s prefill
         either way).
@@ -446,7 +446,7 @@ def balance_overload_avoid_prefill(ctx: CaseContext):
         except Exception:
             pass
         # Drainage (inherited S4 lesson): fire-and-forget requests never
-        # consume FetchResponse, so their master-side inflight/ledger entries
+        # consume batch GenerateStreamCall, so their master-side inflight/ledger entries
         # can linger long after the engine finished and poison later balance
         # cases.  The deterministic cleanup is the normal completion path —
         # consume each fired request's stream to terminal state (the seed's

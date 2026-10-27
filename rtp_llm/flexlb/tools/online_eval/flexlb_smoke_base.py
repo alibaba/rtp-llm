@@ -33,7 +33,7 @@ class ScenarioResult:
 
 @dataclass
 class StreamSnapshot:
-    """Collected state from a FetchResponse / GenerateStreamCall stream."""
+    """Collected state from a GenerateStreamCall stream."""
 
     outputs: List[object] = field(default_factory=list)
     first_received: bool = False
@@ -61,6 +61,7 @@ class FlexLBSmokeBase:
         self.pb2, self.pb2_grpc = ensure_proto_modules()
         self.schedule_pb2, self.schedule_pb2_grpc = ensure_schedule_proto_modules()
         self._channels: dict[str, object] = {}
+        self._scheduled_inputs: dict[int, bytes] = {}
         self._request_counter = args.request_id_base
         self.results: List[ScenarioResult] = []
 
@@ -72,6 +73,7 @@ class FlexLBSmokeBase:
         for channel in self._channels.values():
             await channel.close()
         self._channels.clear()
+        self._scheduled_inputs.clear()
 
     async def _channel(self, target: str):
         import grpc
@@ -191,6 +193,7 @@ class FlexLBSmokeBase:
             await self._channel(self._master_target())
         )
         req = self._build_schedule_request(request_id, **kwargs)
+        self._scheduled_inputs[request_id] = req.generate_input
         return await stub.Schedule(req, timeout=30.0)
 
     def _role_addr(self, response, role: str) -> str:
@@ -199,7 +202,7 @@ class FlexLBSmokeBase:
                 return f"{status.server_ip}:{status.grpc_port}"
         return ""
 
-    # -- Dual-path stream helpers -----------------------------------------
+    # -- Generation stream helpers -----------------------------------------
 
     def _copy_role_addrs(self, input_pb, response) -> None:
         """Copy ``server_status`` role addrs into ``input_pb.generate_config``."""
@@ -217,21 +220,19 @@ class FlexLBSmokeBase:
             )
 
     async def _start_stream(self, response, request_id: int, input_pb=None):
-        """Start FetchResponse (batch) or GenerateStreamCall (direct/queue)."""
-        target = self._role_addr(response, "PREFILL") or self._role_addr(
-            response, "PDFUSION"
-        )
+        """Connect Decode/PDFUSION using the complete scheduled request."""
+        target = self._role_addr(response, "DECODE") or self._role_addr(response, "PDFUSION")
         if not target:
-            raise RuntimeError("schedule response has no PREFILL/PDFUSION address")
-        stub = self.pb2_grpc.RpcServiceStub(await self._channel(target))
-        if response.enqueued_by_master:
-            return stub.FetchResponse(
-                self.pb2.FetchRequestPB(request_id=request_id),
-                timeout=60.0,
-            )
-        if input_pb is None:
+            raise RuntimeError("schedule response has no DECODE/PDFUSION address")
+        # Decode must receive the exact input serialized for Master admission.
+        scheduled_input = self._scheduled_inputs.pop(request_id, None)
+        if scheduled_input is not None:
+            input_pb = self.pb2.GenerateInputPB.FromString(scheduled_input)
+        elif input_pb is None:
             input_pb = self._build_generate_input(request_id)
         self._copy_role_addrs(input_pb, response)
+        input_pb.enqueued_by_master = response.enqueued_by_master
+        stub = self.pb2_grpc.RpcServiceStub(await self._channel(target))
         return stub.GenerateStreamCall(input_pb, timeout=60.0)
 
     # -- Stream consumption -----------------------------------------------
@@ -303,13 +304,17 @@ class FlexLBSmokeBase:
 
     async def _worker_cancel(self, request_id: int, response) -> None:
         """Call Worker ``RpcService.Cancel`` directly."""
-        target = self._role_addr(response, "PREFILL") or self._role_addr(
+        target = self._role_addr(response, "DECODE") or self._role_addr(
             response, "PDFUSION"
         )
         if not target:
             return
         stub = self.pb2_grpc.RpcServiceStub(await self._channel(target))
-        await stub.Cancel(self.pb2.CancelRequestPB(request_id=request_id), timeout=10.0)
+        await stub.Cancel(
+            self.pb2.CancelRequestPB(
+                request_id=request_id, prefill_address=self._role_addr(response, "PREFILL")
+            ), timeout=10.0
+        )
 
     # -- Recovery verification --------------------------------------------
 

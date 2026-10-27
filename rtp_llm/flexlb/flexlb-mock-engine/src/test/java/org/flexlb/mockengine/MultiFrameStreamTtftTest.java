@@ -33,20 +33,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * decode completion), so client-side ttft &lt; e2e instead of collapsing to a
  * single timestamp.
  *
- * <p>Background: the first-token frame and the loop pump in generateStreamCall
- * already existed; fetch_response still polled exactly ONE frame, which cut
- * the stream after the first-token frame — under the BATCH dispatcher the
- * client polls FetchResponse against the original prefill engine, so every
- * completed request's ttft and e2e were identical by construction (observed
- * live: run 20260827_112212 per-second ttft_p50 == e2e_p50 at every second).
- * These tests pin the multi-frame contract for BOTH pumps and the timeout
- * semantics (timeout completes the stream without error, preserving the
- * client's empty_response detection for zero-frame streams).
- *
- * <p>Topology per test: 1 prefill + 1 decode engine, in-process (no gRPC
- * server), prefill formula 100 ms, decode step 50 ms x 8 steps (tokens_per_step
- * pinned to 1 so output_len 8 == 8 steps) = 400 ms decode — the two frames are
- * ~400 ms apart, comfortably measurable.
+ * <p>Both ordinary and Master-enqueued requests enter Decode through
+ * GenerateStreamCall. They must retain separate first-token and terminal
+ * frames, so TTFT measures prefill and E2E includes decode execution.
+ * Empty and partial-response timeouts preserve the existing mock contract.
  */
 class MultiFrameStreamTtftTest {
 
@@ -73,7 +63,7 @@ class MultiFrameStreamTtftTest {
 
     @Test
     @Timeout(30)
-    void fetchResponseDeliversFirstTokenFrameThenTerminalFrame() throws Exception {
+    void batchAttachmentDeliversFirstTokenFrameThenTerminalFrame() throws Exception {
         startCluster("100", 50.0);
         long requestId = 1;
 
@@ -82,7 +72,7 @@ class MultiFrameStreamTtftTest {
         assertEquals(1, ack.getSuccessesCount(), "request must be admitted");
         assertEquals(0, ack.getErrorsCount());
 
-        CollectedStream stream = fetch(prefill, requestId, 10_000);
+        CollectedStream stream = attachBatch(prefill, requestId, 10_000);
 
         assertNull(stream.error.get(), "stream must not error");
         assertEquals(2, stream.frames.size(),
@@ -98,8 +88,12 @@ class MultiFrameStreamTtftTest {
         startCluster("100", 50.0);
         long requestId = 2;
 
-        CollectedStream stream = generate(prefill,
-                inputWithDecode(requestId, 10, decode.getGrpcPort()), 10_000);
+        EngineRpcService.GenerateInputPB input = inputWithDecode(requestId, 10, decode.getGrpcPort());
+        input = input.toBuilder().setGenerateConfig(input.getGenerateConfig().toBuilder()
+                .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
+                        .setRole(EngineRpcService.RoleAddrPB.RoleType.PREFILL)
+                        .setRoleStr("PREFILL").setGrpcPort(prefill.getGrpcPort()))).build();
+        CollectedStream stream = generate(decode, input, 10_000);
 
         assertNull(stream.error.get(), "stream must not error");
         assertEquals(2, stream.frames.size(),
@@ -113,7 +107,7 @@ class MultiFrameStreamTtftTest {
 
     @Test
     @Timeout(30)
-    void fetchResponseTimeoutAfterFirstFrameCompletesStreamWithoutError() throws Exception {
+    void batchAttachmentTimeoutAfterFirstFrameCompletesStreamWithoutError() throws Exception {
         // decode = 8 tokens x 50 ms = 400 ms; poll timeout 150 ms fires between
         // the first-token frame (~100 ms) and the terminal frame (~500 ms).
         startCluster("100", 50.0);
@@ -125,7 +119,7 @@ class MultiFrameStreamTtftTest {
                 batch(7001, slot(0, inputWithDecode(requestId, 10, decode.getGrpcPort()))));
         assertEquals(1, ack.getSuccessesCount());
 
-        CollectedStream stream = fetch(prefill, requestId, 10_000);
+        CollectedStream stream = attachBatch(prefill, requestId, 10_000);
 
         // Timeout terminates the stream WITHOUT error — the client keeps its
         // own empty_response detection (zero frames + onCompleted) and its
@@ -138,7 +132,7 @@ class MultiFrameStreamTtftTest {
 
     @Test
     @Timeout(30)
-    void fetchResponseZeroFramesTimesOutWithCleanCompletion() throws Exception {
+    void batchAttachmentZeroFramesTimesOutWithCleanCompletion() throws Exception {
         startCluster("100", 50.0);
         prefill.setResponsePollTimeoutMs(150);
         decode.setResponsePollTimeoutMs(150);
@@ -146,7 +140,7 @@ class MultiFrameStreamTtftTest {
         // requestId 4 was never enqueued: an empty queue, a short poll timeout,
         // and the stream must still complete cleanly with zero frames (the
         // empty_response contract the load client relies on).
-        CollectedStream stream = fetch(prefill, 4, 10_000);
+        CollectedStream stream = attachBatch(prefill, 4, 10_000);
 
         assertNull(stream.error.get(), "zero-frame timeout must complete, not error");
         assertEquals(0, stream.frames.size(), "no frame may be delivered for an unknown request");
@@ -311,11 +305,17 @@ class MultiFrameStreamTtftTest {
         return new CollectedStream(new ArrayList<>(frames), new ArrayList<>(frameNanos), error);
     }
 
-    private static CollectedStream fetch(JavaMockEngineCluster.FastRpcService service,
-                                         long requestId, long awaitMs) throws InterruptedException {
-        return collect(observer -> service.fetchResponse(
-                EngineRpcService.FetchRequestPB.newBuilder().setRequestId(requestId).build(),
-                observer), awaitMs);
+    private CollectedStream attachBatch(JavaMockEngineCluster.FastRpcService service,
+                                   long requestId, long awaitMs) throws InterruptedException {
+        EngineRpcService.GenerateInputPB input = inputWithDecode(requestId, 10, decode.getGrpcPort());
+        EngineRpcService.GenerateInputPB attach = input.toBuilder()
+                .setEnqueuedByMaster(true)
+                .setGenerateConfig(input.getGenerateConfig().toBuilder()
+                        .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
+                                .setRole(EngineRpcService.RoleAddrPB.RoleType.PREFILL)
+                                .setRoleStr("PREFILL").setGrpcPort(service.getGrpcPort())))
+                .build();
+        return collect(observer -> decode.generateStreamCall(attach, observer), awaitMs);
     }
 
     private static CollectedStream generate(JavaMockEngineCluster.FastRpcService service,

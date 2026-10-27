@@ -1938,7 +1938,7 @@ def atpm_preempt_decode_engine_owned(ctx: CaseContext):
     # layer); the arm is reserved so a future priority-batch variant fills
     # it without touching the NON_BATCH logic below.
     if ctx.batch_dispatch():
-        # TODO(A4): BATCH arm — victim terminal rides FetchResponse, the
+        # TODO(A4): BATCH arm — victim terminal rides batch GenerateStreamCall, the
         # closure caliber is completion-duration; fill when a
         # priority-batch variant enables BATCH dispatch.
         raise NotImplementedError(
@@ -3973,7 +3973,7 @@ def atpm_preempt_decode_reserved_live(ctx: CaseContext):
     Contract:
       * victim terminal EXACTLY 8400 (asserted NOT 8429 — the stage's
         discriminating feature) and no engine ever saw the rid;
-      * placeholder + incoming complete 200 with real FetchResponse
+      * placeholder + incoming complete 200 with real batch GenerateStreamCall
         output;
       * metric plane: auto_tpm.victim.count{stage=decode_reserved} == 1
         and auto_tpm.victim.kv_tokens{stage=decode_reserved} >= 428
@@ -4055,7 +4055,7 @@ def atpm_preempt_decode_reserved_live(ctx: CaseContext):
                 f"victim terminal={v_resp.code} (expected exactly "
                 f"{CODE_YIELDED}, NEVER {CODE_ENGINE_CANCELLED} — the "
                 f"stage's discriminating feature), incoming schedule="
-                f"{inc_resp.code}, FetchResponse completed="
+                f"{inc_resp.code}, batch GenerateStreamCall completed="
                 f"{ {r % 1_000_000: completed.get(r) for r in (ph, inc)} }"
             ),
         )
@@ -4284,7 +4284,7 @@ def atpm_preempt_cancel_request_fenced(ctx: CaseContext):
     hands off to decode (first output received — the slot lives
     decode-side and survives the prefill generation retire); prefill-0
     then true-crashes (crash_after n=1 via a sacrificial request — the
-    victim's FetchResponse stream, whose pump thread lives in the
+    victim's batch GenerateStreamCall stream, whose pump thread lives in the
     engine JVM, is cut by the crash) and restarts as a FRESH instance
     (same address, empty memory).  The P70 incoming then fires: the
     master view still has the victim RUNNING on decode (decode-0 is
@@ -4294,7 +4294,7 @@ def atpm_preempt_cancel_request_fenced(ctx: CaseContext):
     REQUEST_FENCED + ABSENT_FENCE.
 
     Contract:
-      * the incoming completes 200 with real FetchResponse output
+      * the incoming completes 200 with real batch GenerateStreamCall output
         (terminal record-settled preemption);
       * the victim's stream is TERMINATED not completed (cut by the
         crash) and the victim's engine-side decode leg finishes its
@@ -4328,7 +4328,7 @@ def atpm_preempt_cancel_request_fenced(ctx: CaseContext):
             return False, (
                 f"crash/restart failed: dropped={dropped}, " f"restored={restored}"
             )
-        # The crash cut the victim's FetchResponse (pump thread lived in
+        # The crash cut the victim's batch GenerateStreamCall (pump thread lived in
         # the engine JVM): terminated, not completed.
         victim_cut = bool(
             victim_handle.wait_end(10.0) and not victim_handle.snap.completed
@@ -4381,7 +4381,7 @@ def atpm_preempt_cancel_request_fenced(ctx: CaseContext):
             detail=(
                 f"victim stream cut by crash={victim_cut} "
                 f"(terminated, completed={victim_handle.snap.completed}), "
-                f"incoming schedule={inc_resp.code} FetchResponse "
+                f"incoming schedule={inc_resp.code} batch GenerateStreamCall "
                 f"completed={inc_completed} (terminal record-settled preemption "
                 f"— the freed slot went to the incoming), "
                 f"cancel_rpc_delta={cancel_delta} (>=1 on the fresh "
