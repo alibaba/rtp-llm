@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -75,11 +76,9 @@ public:
     // ---- Eviction selection & migration (caller owns synchronization) ----
     // Selection, task preparation, settlement, and abort mutate tree/group-set/pool/heap
     // state and must run under BlockTreeCache's mutex. Task execution is lock-free.
-    // Direct DEVICE drops require the entire drop plan to release its device blocks immediately.
-    bool dropLocked(size_t      group_set_id,
-                    Tier        source_tier,
-                    bool        notify_settled,
-                    const char* trigger_type = "force_drop");
+    // Force-drop a batch until this member pool reaches the requested free-block delta
+    // or no candidate remains. Return the actual number of physically reclaimed blocks.
+    size_t reclaimDeviceBlocksLocked(size_t group_set_id, size_t member_group_id, size_t num_blocks);
     void   scheduleWatermarkEvictionsLocked(Tier                         tier,
                                             const TierWatermark&         watermark,
                                             std::optional<TierWatermark> full_watermark = std::nullopt);
@@ -102,6 +101,10 @@ public:
     void onLoaded(TreeNode* node, size_t group_set_id);
 
 private:
+    // Reuse only within one selection pass for the same group, tier and mode,
+    // while holding the cache mutex. A new pass must recheck released references.
+    using VictimSelectionCache = std::unordered_set<TreeNode*>;
+
     struct BatchEvictResult {
         bool   direct_progress{false};
         bool   async_submitted{false};
@@ -129,10 +132,19 @@ private:
 
     EvictionHeap*                     heapFor(size_t group_set_id, Tier tier) const;
     bool                              isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const;
-    std::optional<TransferDescriptor> chooseVictim(size_t group_set_id,
-                                                  Tier   tier,
-                                                  bool   force_drop = false);
+    std::optional<TransferDescriptor> chooseVictim(size_t                group_set_id,
+                                                   Tier                  tier,
+                                                   bool                  force_drop      = false,
+                                                   VictimSelectionCache* selection_cache = nullptr);
     bool canReclaimDeviceDrop(const TransferDescriptor& desc) const;
+
+    // Direct DEVICE drops require the primary resource to be immediately reclaimable.
+    // Non-FULL candidates additionally check every DEVICE resource in their drop plan.
+    bool dropLocked(size_t                group_set_id,
+                    Tier                  source_tier,
+                    bool                  notify_settled,
+                    const char*           trigger_type    = "force_drop",
+                    VictimSelectionCache* selection_cache = nullptr);
     // Builds the drop closure without reserving or detaching its resources.
     EvictionDropTask planDropTask(TransferDescriptor                        eviction_desc,
                                  std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
