@@ -11,7 +11,7 @@ import java.util.List;
 import java.util.function.LongSupplier;
 
 /**
- * Fixed-size recent cache-key pool for request-level cache hit metrics.
+ * Capacity-bounded request history with an index of each key's latest retained occurrence.
  */
 @Slf4j
 @Component
@@ -22,27 +22,24 @@ public class RecentCacheKeyWindow {
     private static final int MAX_ARRAY_SIZE = Integer.MAX_VALUE - 8;
     private static final int MIN_HASH_TABLE_SIZE = 16;
     private static final double HASH_LOAD_FACTOR = 0.67D;
-    private static final byte EMPTY = 0;
-    private static final byte USED = 1;
+    private static final long[] EMPTY = new long[0];
+    private static final int CLEANUP_SLOTS = 64;
 
     private final long timeWindowMs;
     private final int maxCacheKeys;
     private final LongSupplier nowSupplier;
-
-    private final long[] cacheKeyRing;
-    private final long[] entryTimestampMs;
-    private final int[] entryStart;
-    private final int[] entryLength;
-    private final long[] tableKeys;
-    private final int[] tableCounts;
-    private final byte[] tableStates;
-    private final int tableMask;
-
+    private long[] entryTimestampMs = EMPTY;
+    private long[] entryEndSequence = EMPTY;
+    private long[] tableKeys = EMPTY;
+    private long[] tableSequences = EMPTY;
     private int entryHead;
     private int entrySize;
-    private int keyTail;
-    private int keySize;
-    private int uniqueSize;
+    private int tableSize;
+    private int cleanupCursor;
+    private int remainingCleanupSlots;
+    private long sequence;
+    private long expiredThrough;
+    private long lastRecordMs = Long.MIN_VALUE;
 
     @Autowired
     public RecentCacheKeyWindow(ConfigService configService) {
@@ -53,225 +50,175 @@ public class RecentCacheKeyWindow {
         this.timeWindowMs = normalizeTimeWindowMs(timeWindowMs);
         this.maxCacheKeys = normalizeCapacity(maxCacheKeys);
         this.nowSupplier = nowSupplier;
-
-        int hashTableCapacity = hashTableCapacityFor(this.maxCacheKeys);
-        this.tableMask = hashTableCapacity - 1;
-        this.cacheKeyRing = new long[this.maxCacheKeys];
-        this.entryTimestampMs = new long[this.maxCacheKeys];
-        this.entryStart = new int[this.maxCacheKeys];
-        this.entryLength = new int[this.maxCacheKeys];
-        this.tableKeys = new long[hashTableCapacity];
-        this.tableCounts = new int[hashTableCapacity];
-        this.tableStates = new byte[hashTableCapacity];
-
-        log.info("Recent cache-key pool config: timeWindowMs={}, maxCacheKeys={}, hashTableCapacity={}",
-                this.timeWindowMs,
-                this.maxCacheKeys,
-                hashTableCapacity);
     }
 
     public Snapshot record(List<Long> cacheKeys) {
-        return record(cacheKeys, nowSupplier.getAsLong());
-    }
-
-    Snapshot record(List<Long> cacheKeys, long nowMs) {
-        long requestOccurrences;
-        long requestHitOccurrences;
         synchronized (this) {
-            evictExpired(nowMs);
-            requestOccurrences = countNonNull(cacheKeys);
-            requestHitOccurrences = countHits(cacheKeys);
-
-            if (requestOccurrences > 0L) {
-                retainRequest(cacheKeys, requestOccurrences, nowMs);
-            }
-
+            return record(cacheKeys, nowSupplier.getAsLong());
         }
-
-        if (log.isDebugEnabled()) {
-            logRequest(nowMs, requestOccurrences, requestHitOccurrences);
-        }
-        return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences);
     }
 
-    private long countNonNull(List<Long> cacheKeys) {
-        if (cacheKeys == null || cacheKeys.isEmpty()) {
-            return 0L;
-        }
-        long count = 0L;
-        int size = cacheKeys.size();
-        for (int i = 0; i < size; i++) {
-            Long cacheKey = cacheKeys.get(i);
-            if (cacheKey != null) {
-                count++;
+    synchronized Snapshot record(List<Long> cacheKeys, long nowMs) {
+        nowMs = Math.max(nowMs, lastRecordMs);
+        lastRecordMs = nowMs;
+        expire(nowMs);
+        long occurrences = 0L, hits = 0L;
+        if (cacheKeys != null) {
+            for (Long key : cacheKeys) {
+                if (key == null) { continue; }
+                occurrences++;
+                if (contains(key)) { hits++; }
             }
         }
-        return count;
-    }
-
-    private long countHits(List<Long> cacheKeys) {
-        if (cacheKeys == null || cacheKeys.isEmpty()) {
-            return 0L;
-        }
-        long hits = 0L;
-        int size = cacheKeys.size();
-        for (int i = 0; i < size; i++) {
-            Long cacheKey = cacheKeys.get(i);
-            if (cacheKey != null && getCount(cacheKey) > 0) {
-                hits++;
+        if (occurrences > 0 && occurrences <= maxCacheKeys) {
+            long end = Math.addExact(sequence, occurrences);
+            long required = end - maxCacheKeys;
+            if (required > expiredThrough) {
+                int count = 1;
+                if (entryEndSequence[entryHead] < required) {
+                    int low = 1, high = entrySize;
+                    while (low < high) {
+                        int middle = (low + high) >>> 1;
+                        if (entryEndSequence[entryIndex(middle)] < required) { low = middle + 1; } else { high = middle; }
+                    }
+                    count = low + 1;
+                }
+                discardEntries(count);
+            }
+            growEntries();
+            int tail = entryIndex(entrySize++);
+            entryTimestampMs[tail] = nowMs;
+            entryEndSequence[tail] = end;
+            sequence = end;
+            for (Long key : cacheKeys) {
+                if (key != null) { put(key, end); }
             }
         }
-        return hits;
+        cleanStaleSlots();
+        return new Snapshot(timeWindowMs, occurrences, hits);
     }
 
-    private void retainRequest(List<Long> cacheKeys, long requestOccurrences, long nowMs) {
-        if (requestOccurrences > maxCacheKeys) {
-            log.debug("Recent cache-key request exceeds pool capacity; skip retaining request: "
-                            + "requestCacheKeys={}, maxCacheKeys={}",
-                    requestOccurrences,
-                    maxCacheKeys);
-            return;
-        }
-
-        while (keySize + requestOccurrences > maxCacheKeys && evictOldestEntry()) {
-            // Make enough room for the current request.
-        }
-        while (entrySize >= maxCacheKeys && evictOldestEntry()) {
-            // Keep one entry slot for the current request.
-        }
-
-        int start = keyTail;
-        int retained = 0;
-        int size = cacheKeys.size();
-        for (int i = 0; i < size; i++) {
-            Long boxedKey = cacheKeys.get(i);
-            if (boxedKey == null) {
-                continue;
-            }
-            long cacheKey = boxedKey;
-            appendKey(cacheKey);
-            incrementCount(cacheKey);
-            retained++;
-        }
-        if (retained > 0) {
-            addEntry(nowMs, start, retained);
-        }
+    private int entryIndex(int offset) {
+        return (int) (((long) entryHead + offset) % entryEndSequence.length);
     }
 
-    private void evictExpired(long nowMs) {
-        long expireBeforeOrAt = nowMs - timeWindowMs;
-        while (entrySize > 0 && entryTimestampMs[entryHead] <= expireBeforeOrAt) {
-            evictOldestEntry();
+    private void expire(long nowMs) {
+        if (entrySize == 0) { return; }
+        long cutoff = com.google.common.math.LongMath.saturatedSubtract(nowMs, timeWindowMs);
+        if (entryTimestampMs[entryHead] > cutoff) { return; }
+        int low = 0, high = entrySize;
+        while (low < high) {
+            int middle = (low + high) >>> 1;
+            if (entryTimestampMs[entryIndex(middle)] <= cutoff) { low = middle + 1; } else { high = middle; }
         }
+        discardEntries(low);
     }
 
-    private void addEntry(long timestampMs, int start, int length) {
-        int tail = Math.floorMod(entryHead + entrySize, maxCacheKeys);
-        entryTimestampMs[tail] = timestampMs;
-        entryStart[tail] = start;
-        entryLength[tail] = length;
-        entrySize++;
-    }
-
-    private void appendKey(long cacheKey) {
-        cacheKeyRing[keyTail] = cacheKey;
-        keyTail = Math.floorMod(keyTail + 1, maxCacheKeys);
-        keySize++;
-    }
-
-    private boolean evictOldestEntry() {
+    private void discardEntries(int count) {
+        if (count == 0) { return; }
+        expiredThrough = entryEndSequence[entryIndex(count - 1)];
+        entryHead = entryIndex(count);
+        entrySize -= count;
+        remainingCleanupSlots = tableKeys.length;
         if (entrySize == 0) {
-            return false;
+            entryHead = 0;
+            entryTimestampMs = EMPTY;
+            entryEndSequence = EMPTY;
+            tableKeys = EMPTY;
+            tableSequences = EMPTY;
+            tableSize = 0;
+            cleanupCursor = 0;
+            remainingCleanupSlots = 0;
         }
-        int start = entryStart[entryHead];
-        int length = entryLength[entryHead];
-        for (int i = 0; i < length; i++) {
-            decrementCount(cacheKeyRing[Math.floorMod(start + i, maxCacheKeys)]);
-        }
-        keySize -= length;
-        entryHead = Math.floorMod(entryHead + 1, maxCacheKeys);
-        entrySize--;
-        return true;
     }
 
-    private int getCount(long cacheKey) {
-        int slot = findSlot(cacheKey);
-        return slot >= 0 ? tableCounts[slot] : 0;
+    private void growEntries() {
+        if (entrySize < entryEndSequence.length) { return; }
+        int capacity = (int) Math.min(maxCacheKeys, Math.max(16L, 2L * entrySize));
+        long[] timestamps = new long[capacity], ends = new long[capacity];
+        for (int i = 0; i < entrySize; i++) {
+            timestamps[i] = entryTimestampMs[entryIndex(i)];
+            ends[i] = entryEndSequence[entryIndex(i)];
+        }
+        entryTimestampMs = timestamps;
+        entryEndSequence = ends;
+        entryHead = 0;
     }
 
-    private void incrementCount(long cacheKey) {
-        int index = hashIndex(cacheKey, tableMask);
-        while (tableStates[index] == USED) {
-            if (tableKeys[index] == cacheKey) {
-                tableCounts[index]++;
-                return;
-            }
-            index = (index + 1) & tableMask;
+    private boolean contains(long key) {
+        if (tableKeys.length == 0) { return false; }
+        int mask = tableKeys.length - 1;
+        int slot = hashIndex(key, mask);
+        while (tableSequences[slot] != 0L) {
+            if (tableKeys[slot] == key) { return tableSequences[slot] > expiredThrough; }
+            slot = (slot + 1) & mask;
         }
-        tableStates[index] = USED;
-        tableKeys[index] = cacheKey;
-        tableCounts[index] = 1;
-        uniqueSize++;
+        return false;
     }
 
-    private void decrementCount(long cacheKey) {
-        int slot = findSlot(cacheKey);
-        if (slot < 0) {
-            return;
+    private void put(long key, long end) {
+        if (tableKeys.length == 0) { resizeTable(MIN_HASH_TABLE_SIZE); }
+        int mask = tableKeys.length - 1;
+        int slot = hashIndex(key, mask);
+        while (tableSequences[slot] != 0L) {
+            if (tableKeys[slot] == key) { tableSequences[slot] = end; return; }
+            slot = (slot + 1) & mask;
         }
-        int next = tableCounts[slot] - 1;
-        if (next > 0) {
-            tableCounts[slot] = next;
-            return;
+        if (tableSize + 1 > tableKeys.length * HASH_LOAD_FACTOR) {
+            resizeTable(Math.min(hashTableCapacityFor(maxCacheKeys), Math.multiplyExact(tableKeys.length, 2)));
+            mask = tableKeys.length - 1;
+            slot = hashIndex(key, mask);
+            while (tableSequences[slot] != 0L) { slot = (slot + 1) & mask; }
         }
-        removeSlot(slot);
+        tableKeys[slot] = key;
+        tableSequences[slot] = end;
+        tableSize++;
     }
 
-    private int findSlot(long cacheKey) {
-        int index = hashIndex(cacheKey, tableMask);
-        while (tableStates[index] == USED) {
-            if (tableKeys[index] == cacheKey) {
-                return index;
-            }
-            index = (index + 1) & tableMask;
+    private void resizeTable(int capacity) {
+        long[] keys = tableKeys, sequences = tableSequences;
+        tableKeys = new long[capacity];
+        tableSequences = new long[capacity];
+        tableSize = 0;
+        cleanupCursor = 0;
+        remainingCleanupSlots = 0;
+        int mask = capacity - 1;
+        for (int i = 0; i < keys.length; i++) {
+            if (sequences[i] <= expiredThrough) { continue; }
+            int slot = hashIndex(keys[i], mask);
+            while (tableSequences[slot] != 0L) { slot = (slot + 1) & mask; }
+            tableKeys[slot] = keys[i];
+            tableSequences[slot] = sequences[i];
+            tableSize++;
         }
-        return -1;
     }
 
-    private void removeSlot(int slotToRemove) {
-        int slot = slotToRemove;
-        int next = (slot + 1) & tableMask;
-        while (tableStates[next] == USED) {
-            int ideal = hashIndex(tableKeys[next], tableMask);
-            if (((next - ideal) & tableMask) > ((slot - ideal) & tableMask)) {
+    private void cleanStaleSlots() {
+        if (remainingCleanupSlots == 0) { return; }
+        int mask = tableKeys.length - 1;
+        int count = Math.min(tableSize < tableKeys.length / 2 ? 1 : CLEANUP_SLOTS, remainingCleanupSlots);
+        remainingCleanupSlots -= count;
+        for (int i = 0; i < count; i++) {
+            int slot = cleanupCursor;
+            if (tableSequences[slot] != 0L && tableSequences[slot] <= expiredThrough) { removeSlot(slot); }
+            cleanupCursor = (cleanupCursor + 1) & mask;
+        }
+    }
+
+    private void removeSlot(int slot) {
+        int mask = tableKeys.length - 1;
+        int next = (slot + 1) & mask;
+        while (tableSequences[next] != 0L) {
+            int ideal = hashIndex(tableKeys[next], mask);
+            if (((next - ideal) & mask) > ((slot - ideal) & mask)) {
                 tableKeys[slot] = tableKeys[next];
-                tableCounts[slot] = tableCounts[next];
-                tableStates[slot] = USED;
+                tableSequences[slot] = tableSequences[next];
                 slot = next;
             }
-            next = (next + 1) & tableMask;
+            next = (next + 1) & mask;
         }
-        tableStates[slot] = EMPTY;
-        tableKeys[slot] = 0L;
-        tableCounts[slot] = 0;
-        uniqueSize--;
-    }
-
-    private void logRequest(long nowMs, long requestOccurrences, long requestHitOccurrences) {
-        double hitRatio = requestOccurrences > 0L ? requestHitOccurrences / (double) requestOccurrences : 0.0D;
-        log.debug("Recent cache-key request: nowMs={}, requestCacheKeys={}, hitCacheKeys={}, "
-                        + "hitRatio={}, poolCacheKeys={}, poolUniqueCacheKeys={}, poolDuplicateCacheKeys={}, "
-                        + "poolEntries={}, maxCacheKeys={}, timeWindowMs={}",
-                nowMs,
-                requestOccurrences,
-                requestHitOccurrences,
-                hitRatio,
-                keySize,
-                uniqueSize,
-                keySize - uniqueSize,
-                entrySize,
-                maxCacheKeys,
-                timeWindowMs);
+        tableSequences[slot] = 0L;
+        tableSize--;
     }
 
     static long resolveTimeWindowMs(ConfigService configService) {
@@ -304,7 +251,7 @@ public class RecentCacheKeyWindow {
             return (int) DEFAULT_MAX_CACHE_KEYS;
         }
         if (candidate > MAX_ARRAY_SIZE) {
-            log.warn("cacheHitMaxCacheKeys is too large for preallocated arrays: {}, cap to {}",
+            log.warn("cacheHitMaxCacheKeys is too large for arrays: {}, cap to {}",
                     candidate,
                     MAX_ARRAY_SIZE);
             return MAX_ARRAY_SIZE;
