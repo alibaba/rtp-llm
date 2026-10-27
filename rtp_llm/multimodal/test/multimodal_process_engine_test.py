@@ -43,6 +43,7 @@ from rtp_llm.multimodal.mm_error_messages import MMErr
 from rtp_llm.multimodal.mm_process_engine import (
     MMEmbeddingAsyncCache,
     MMEmbeddingCacheEntry,
+    MMEmbeddingRes,
     MMHashKeyCache,
     MMProcessEngine,
     MMWorkItem,
@@ -60,6 +61,138 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.qwen2_vl_mixin import (
 from rtp_llm.multimodal.multimodal_util import vit_emb_cache_
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+
+class MMRequestLatencyTest(TestCase):
+    """Exercise real public entrypoints without starting pools or CUDA work."""
+
+    def setUp(self):
+        self.engine = MMProcessEngine.__new__(MMProcessEngine)
+        self.engine.report_vit_error = MagicMock()
+        self.clock = 10.0
+        reporter = patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+        self.report = reporter.start()
+        self.addCleanup(reporter.stop)
+        clock = patch(
+            "rtp_llm.multimodal.mm_process_engine.time.perf_counter",
+            side_effect=lambda: self.clock,
+        )
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def _advance(self, seconds, result=None):
+        self.clock += seconds
+        return result
+
+    def _samples(self):
+        return [
+            call.args[1:]
+            for call in self.report.call_args_list
+            if call.args[0] == GaugeMetrics.VIT_REQUEST_RT_METRIC
+        ]
+
+    def test_cpp_includes_result_preparation_and_reports_once(self):
+        position = MagicMock()
+        position.cpu.side_effect = lambda: self._advance(0.25, "cpu_position")
+        result = MMEmbeddingRes([], [position])
+        self.engine._embed_with_greennet_sync = MagicMock(
+            side_effect=lambda *a, **kw: self._advance(1.0, result)
+        )
+        self.assertIs(self.engine.mm_embedding_cpp([], [], [], []), result)
+        self.assertEqual(result.position_ids, ["cpu_position"])
+        self.assertEqual(
+            self._samples(),
+            [(1250.0, {"source": "mm_embedding_cpp", "status": "success"})],
+        )
+
+    def test_cpp_failure_reports_once_without_masking_original_error(self):
+        for error in (ValueError("invalid"), TimeoutError("deadline")):
+            with self.subTest(error=type(error).__name__):
+                self.report.reset_mock()
+
+                def fail(*args, **kwargs):
+                    self._advance(0.5)
+                    raise error
+
+                self.engine._embed_with_greennet_sync = MagicMock(side_effect=fail)
+                with self.assertRaises(type(error)) as raised:
+                    self.engine.mm_embedding_cpp([], [], [], [])
+                self.assertIs(raised.exception, error)
+                self.assertEqual(
+                    self._samples(),
+                    [(500.0, {"source": "mm_embedding_cpp", "status": "error"})],
+                )
+
+    def test_result_wait_includes_inspection_and_all_media_not_one_sample_per_image(
+        self,
+    ):
+        self.engine.mm_part = MagicMock()
+        self.engine._raise_if_async_request_cancelled = MagicMock()
+        self.engine._request_scoped_inspection = MagicMock(return_value=False)
+        self.engine._greennet_enabled = MagicMock(return_value=True)
+        self.engine._inspect_cached_inputs = MagicMock(
+            side_effect=lambda *a, **kw: self._advance(
+                0.5, GreenNetVerdict(passed=True)
+            )
+        )
+        self.engine._hash_key_cache = MagicMock()
+        self.engine._hash_key_cache.get.return_value = [torch.zeros(2)]
+        entry = MagicMock()
+        entry.greennet_passed = True
+        entry.wait_ready.side_effect = lambda **kw: self._advance(1.0)
+        entry.wait.return_value = (torch.zeros(2, 4), None)
+        self.engine._claim_and_submit_async = MagicMock(
+            return_value=[("a", entry), ("b", entry)]
+        )
+        for hashes_only in (False, True):
+            with self.subTest(hashes_only=hashes_only):
+                self.report.reset_mock()
+                results = self.engine.get_embedding_result([], hashes_only=hashes_only)
+                self.assertEqual(len(results), 2)
+                self.assertEqual(
+                    self._samples(),
+                    [(2500.0, {"source": "get_embedding_result", "status": "success"})],
+                )
+
+    def test_result_failure_and_cancellation_are_reported(self):
+        self.engine.mm_part = MagicMock()
+        self.engine._raise_if_async_request_cancelled = MagicMock()
+        self.engine._request_scoped_inspection = MagicMock(return_value=False)
+        self.engine.cancel_queued_request = MagicMock()
+        for error in (TimeoutError("queue"), concurrent.futures.CancelledError()):
+            with self.subTest(error=type(error).__name__):
+                self.report.reset_mock()
+
+                def fail(*args, **kwargs):
+                    self._advance(0.75)
+                    raise error
+
+                self.engine._claim_and_submit_async = MagicMock(side_effect=fail)
+                with self.assertRaises((TimeoutError, FtRuntimeException)):
+                    self.engine.get_embedding_result([])
+                self.assertEqual(
+                    self._samples(),
+                    [(750.0, {"source": "get_embedding_result", "status": "error"})],
+                )
+
+    def test_async_ack_is_not_a_completed_request_sample(self):
+        self.engine.mm_part = MagicMock()
+        self.engine._claim_and_submit_async = MagicMock(return_value=[])
+        self.assertEqual(self.engine.async_submit([]), [])
+        self.assertEqual(self._samples(), [])
+
+    def test_telemetry_failure_preserves_success_and_original_failure(self):
+        result = MMEmbeddingRes([])
+        self.engine._embed_with_greennet_sync = MagicMock(return_value=result)
+        self.report.side_effect = RuntimeError("metrics unavailable")
+        with self.assertLogs(level="ERROR"):
+            self.assertIs(self.engine.mm_embedding_cpp([], [], [], []), result)
+        error = ValueError("original failure")
+        self.engine._embed_with_greennet_sync.side_effect = error
+        with self.assertLogs(level="ERROR"):
+            with self.assertRaises(ValueError) as raised:
+                self.engine.mm_embedding_cpp([], [], [], [])
+        self.assertIs(raised.exception, error)
 
 
 class FakeMultiModalEmbeddingInterface(Qwen2_VLImageEmbedding):
@@ -2536,6 +2669,19 @@ class MMProcessEngineGreenNetTest(TestCase):
                         result = self._embed_v41_request(engine, request)
                         self.assertEqual(tuple(result.embeddings[0].shape), (4, 8))
                     samples = report.call_args_list
+                    request_rts = [
+                        c
+                        for c in samples
+                        if c.args[0] == GaugeMetrics.VIT_REQUEST_RT_METRIC
+                    ]
+                    # One miss and one cache hit, including in proxy-worker mode.
+                    self.assertEqual(len(request_rts), 2)
+                    for sample in request_rts:
+                        self.assertGreaterEqual(sample.args[1], 0.0)
+                        self.assertEqual(
+                            sample.args[2],
+                            {"source": "mm_embedding_cpp", "status": "success"},
+                        )
                     for metric in (
                         AccMetrics.VIT_QPS_METRIC,
                         AccMetrics.VIT_SUCCESS_QPS_METRIC,
