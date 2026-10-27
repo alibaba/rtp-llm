@@ -90,6 +90,7 @@ private:
     void   accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool   waitPredicate() override;
     void   onRunningStream(const GenerateStreamPtr& stream) override;
+    void   onLoadingStream(const GenerateStreamPtr& stream) override;
     // FIFO-specific replacement for FIFOSchedulerBase::evaluateWaitingStreams(): admission and
     // state transition happen in a single pass so that per-round token budgets only account for
     // streams that really advanced, and errored streams behind a saturated budget are still

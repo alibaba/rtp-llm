@@ -399,6 +399,207 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testWaitPredicate_DoesNotSpinForLoadingCache
     EXPECT_FALSE(scheduler->waitPredicate());
 }
 
+TEST_F(FIFOSchedulerAsyncCacheTest, testLastAllocatorLoadCompletionWakesTimedSchedule) {
+    autil::EnvGuard poll_interval("RTP_LLM_SCHEDULER_POLL_INTERVAL_MS", "60000");
+    auto            scheduler = createScheduler();
+    auto            stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto            context   = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+
+    auto poll = std::async(std::launch::async, [scheduler] { return scheduler->schedule(); });
+    ASSERT_EQ(poll.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    ASSERT_TRUE(context->completeTransfers(1, true));
+
+    const auto status = poll.wait_for(std::chrono::milliseconds(500));
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status != std::future_status::ready) {
+        EXPECT_TRUE(scheduler->stop().ok());
+    }
+    auto result = poll.get();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.value().size(), 1);
+    EXPECT_EQ(result.value().front(), stream);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testPartialAllocatorLoadCompletionDoesNotWakeTimedSchedule) {
+    autil::EnvGuard poll_interval("RTP_LLM_SCHEDULER_POLL_INTERVAL_MS", "60000");
+    auto            scheduler = createScheduler(/*max_generate_batch_size=*/2);
+    auto            stream1   = createStream({1}, /*reuse_cache=*/true);
+    auto            stream2   = createStream({2}, /*reuse_cache=*/true);
+    auto            context1  = makeControlledAllocatorContext();
+    auto            context2  = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(stream1).ok());
+    ASSERT_TRUE(scheduler->enqueue(stream2).ok());
+    const std::unordered_map<int64_t, std::shared_ptr<AsyncContext>> contexts{
+        {stream1->streamId(), context1}, {stream2->streamId(), context2}};
+    installReadinessAllocator([contexts](const MallocInfo& info) { return contexts.at(info.request_id); });
+
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 2);
+
+    auto poll = std::async(std::launch::async, [scheduler] { return scheduler->schedule(); });
+    ASSERT_EQ(poll.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    ASSERT_TRUE(context1->completeTransfers(1, true));
+    EXPECT_EQ(poll.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    ASSERT_TRUE(context2->completeTransfers(1, true));
+
+    const auto status = poll.wait_for(std::chrono::milliseconds(500));
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status != std::future_status::ready) {
+        EXPECT_TRUE(scheduler->stop().ok());
+    }
+    auto result = poll.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result.value().size(), 2);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testTransientZeroDuringAdmissionDoesNotWakeTimedSchedule) {
+    autil::EnvGuard poll_interval("RTP_LLM_SCHEDULER_POLL_INTERVAL_MS", "60000");
+    auto            scheduler = createScheduler(/*max_generate_batch_size=*/2);
+    auto            stream1   = createStream({1}, /*reuse_cache=*/true);
+    auto            stream2   = createStream({2}, /*reuse_cache=*/true);
+    auto            context1  = makeControlledAllocatorContext();
+    auto            context2  = makeControlledAllocatorContext();
+    ASSERT_TRUE(context1->completeTransfers(1, true));
+    ASSERT_TRUE(scheduler->enqueue(stream1).ok());
+    ASSERT_TRUE(scheduler->enqueue(stream2).ok());
+    const std::unordered_map<int64_t, std::shared_ptr<AsyncContext>> contexts{
+        {stream1->streamId(), context1}, {stream2->streamId(), context2}};
+    installReadinessAllocator([contexts](const MallocInfo& info) { return contexts.at(info.request_id); });
+
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 2);
+
+    auto       poll      = std::async(std::launch::async, [scheduler] { return scheduler->schedule(); });
+    const auto premature = poll.wait_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(premature, std::future_status::timeout);
+    ASSERT_TRUE(context2->completeTransfers(1, true));
+
+    const auto status = poll.wait_for(std::chrono::milliseconds(500));
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status != std::future_status::ready) {
+        EXPECT_TRUE(scheduler->stop().ok());
+    }
+    EXPECT_TRUE(poll.get().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testFailedAllocatorLoadCompletionWakesTimedSchedule) {
+    autil::EnvGuard poll_interval("RTP_LLM_SCHEDULER_POLL_INTERVAL_MS", "60000");
+    auto            scheduler = createScheduler();
+    auto            stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto            context   = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_EQ(scheduler->scheduler_sync_state_->pending_cache_load_count.load(), 1);
+
+    auto poll = std::async(std::launch::async, [scheduler] { return scheduler->schedule(); });
+    ASSERT_EQ(poll.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    ASSERT_TRUE(context->completeTransfers(1, false));
+
+    const auto status = poll.wait_for(std::chrono::milliseconds(500));
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status != std::future_status::ready) {
+        EXPECT_TRUE(scheduler->stop().ok());
+    }
+    auto result = poll.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result.value().empty());
+    EXPECT_TRUE(stream->isFinished());
+    EXPECT_EQ(scheduler->scheduler_sync_state_->pending_cache_load_count.load(), 0);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testInlineAllocatorLoadCompletionWhileSchedulerLockHeld) {
+    auto scheduler = createScheduler();
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto context   = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_EQ(scheduler->scheduler_sync_state_->pending_cache_load_count.load(), 1);
+
+    {
+        std::lock_guard<std::mutex> lock(scheduler->lock_);
+        SchedulerSynchronizationState::LockOwnerScope lock_owner(*scheduler->scheduler_sync_state_);
+        ASSERT_TRUE(context->completeTransfers(1, false));
+        EXPECT_TRUE(scheduler->scheduler_sync_state_->cache_load_completion_trigger);
+    }
+    EXPECT_EQ(scheduler->scheduler_sync_state_->pending_cache_load_count.load(), 0);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingGroupRetryRegistersReplacementAllocatorLoad) {
+    autil::EnvGuard poll_interval("RTP_LLM_SCHEDULER_POLL_INTERVAL_MS", "60000");
+    auto            scheduler = createScheduler();
+    auto            stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto            context1  = makeControlledAllocatorContext();
+    auto            context2  = makeControlledAllocatorContext();
+    context1->malloc_status_.store(MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
+    auto malloc_call = std::make_shared<size_t>(0);
+    installReadinessAllocator([context1, context2, malloc_call](const MallocInfo&) {
+        return (*malloc_call)++ == 0 ? context1 : context2;
+    });
+    ASSERT_EQ(scheduler->enqueueGroup({stream}).first, std::vector<bool>({true}));
+
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_EQ(scheduler->scheduler_sync_state_->pending_cache_load_count.load(), 1);
+    ASSERT_TRUE(context1->completeTransfers(1, false));
+
+    // The controlled context is injected after the real allocator returns, so
+    // it is not owned by that allocator's coordinator and cannot roll back the
+    // first attempt's blocks itself. Mirror that rollback before exercising the
+    // scheduler's retry transition.
+    auto& cache_resource = stream->streamCacheResource();
+    const int block_count = cache_resource.curBlocksNum();
+    cache_resource.tryReleaseKVBlock(block_count);
+    cache_resource.batch_kv_cache_resource_->clearBlocks();
+
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_EQ(initial_malloc_calls_, 2);
+    EXPECT_EQ(scheduler->scheduler_sync_state_->pending_cache_load_count.load(), 1);
+
+    auto poll = std::async(std::launch::async, [scheduler] { return scheduler->schedule(); });
+    ASSERT_EQ(poll.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    ASSERT_TRUE(context2->completeTransfers(1, true));
+    const auto status = poll.wait_for(std::chrono::milliseconds(500));
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status != std::future_status::ready) {
+        EXPECT_TRUE(scheduler->stop().ok());
+    }
+    EXPECT_TRUE(poll.get().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testLateAllocatorCompletionAfterSchedulerDestructionIsSafe) {
+    auto scheduler = createScheduler();
+    auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
+    auto context   = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+
+    scheduler.reset();
+    EXPECT_TRUE(context->completeTransfers(1, true));
+}
+
 TEST_F(FIFOSchedulerAsyncCacheTest, testRetryableKVShortageDoesNotSpinAndIsPolled) {
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3},

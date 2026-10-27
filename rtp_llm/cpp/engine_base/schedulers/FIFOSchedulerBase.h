@@ -21,6 +21,41 @@ namespace rtp_llm {
 
 int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64_t block_size);
 
+struct SchedulerSynchronizationState {
+    class LockOwnerScope {
+    public:
+        explicit LockOwnerScope(const SchedulerSynchronizationState& state): previous_(lock_owner_) {
+            lock_owner_ = &state;
+        }
+
+        ~LockOwnerScope() {
+            lock_owner_ = previous_;
+        }
+
+        LockOwnerScope(const LockOwnerScope&)            = delete;
+        LockOwnerScope& operator=(const LockOwnerScope&) = delete;
+
+    private:
+        const SchedulerSynchronizationState* previous_;
+    };
+
+    bool lockOwnedByCurrentThread() const {
+        return lock_owner_ == this;
+    }
+
+    std::mutex              mutex;
+    std::condition_variable cond;
+    std::atomic<size_t>     pending_cache_load_count{0};
+    // Protected by mutex. The count remains atomic because allocator callbacks
+    // decrement it before taking mutex only on the transition to zero.
+    bool cache_load_completion_trigger{false};
+
+private:
+    static thread_local const SchedulerSynchronizationState* lock_owner_;
+};
+
+using SchedulerSynchronizationStatePtr = std::shared_ptr<SchedulerSynchronizationState>;
+
 class FIFOSchedulerBase: public SchedulerBase {
 public:
     explicit FIFOSchedulerBase(const RuntimeConfig&                   runtime_config,
@@ -59,6 +94,7 @@ protected:
                                               const GenerateStreamPtr&            new_stream) = 0;
     virtual bool        waitPredicate()                                                  = 0;
     virtual void        onRunningStream(const GenerateStreamPtr& stream) {}
+    virtual void        onLoadingStream(const GenerateStreamPtr& stream) {}
     virtual void        cancelExtraStreams() {}
     virtual int64_t extraOnflightStreams() const {
         return 0;
@@ -97,9 +133,10 @@ protected:
     bool                            need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
     bool                            schedule_trigger_        = false;
-    std::mutex                      lock_;
-    std::condition_variable         cond_;
-    kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
+    SchedulerSynchronizationStatePtr scheduler_sync_state_ = std::make_shared<SchedulerSynchronizationState>();
+    std::mutex&                     lock_                        = scheduler_sync_state_->mutex;
+    std::condition_variable&        cond_                        = scheduler_sync_state_->cond;
+    kmonitor::MetricsReporterPtr    metrics_reporter_                 = nullptr;
     int64_t                         last_admitted_context_batch_size_ = 0;
     int64_t                         last_admitted_context_token_size_ = 0;
     int64_t                         last_waiting_oldest_age_us_       = 0;

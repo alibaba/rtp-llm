@@ -30,8 +30,8 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                       metrics_reporter),
     cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
                              && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
-    max_batch_tokens_without_cache_(static_cast<size_t>(
-        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
+    max_batch_tokens_without_cache_(
+        static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
     prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
                          1) {
@@ -205,8 +205,7 @@ bool FIFOScheduler::evaluateRunningBatch(const std::list<GenerateStreamPtr>& str
         admitted_count, admitted_tokens, admitted_max_seq_len, admitted_sequence_count, new_stream);
 }
 
-bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
-                                          const GenerateStreamPtr&       new_stream) {
+bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) {
     // FIFOScheduler's own scheduling loop uses the counter-based evaluateRunningBatch();
     // this list-based FIFOSchedulerBase entry point delegates to the list overload so
     // both paths agree.
@@ -322,11 +321,53 @@ void FIFOScheduler::onRunningStream(const GenerateStreamPtr& stream) {
     accountBatchMetrics(stream);
 }
 
+void FIFOScheduler::onLoadingStream(const GenerateStreamPtr& stream) {
+    const auto sync_state = scheduler_sync_state_;
+    sync_state->pending_cache_load_count.fetch_add(1, std::memory_order_acq_rel);
+    const bool registered = stream->streamCacheResource().onAllocatorLoadDone([sync_state] {
+        const size_t previous = sync_state->pending_cache_load_count.fetch_sub(1, std::memory_order_acq_rel);
+        RTP_LLM_CHECK_WITH_INFO(previous > 0, "allocator load completion count underflow");
+        if (previous != 1) {
+            return;
+        }
+
+        // onDone() may run inline while schedule()/stop() already owns this
+        // mutex. In that case the active scheduler round will observe the
+        // predicate directly; recursively acquiring a non-recursive mutex
+        // would deadlock. Async callbacks acquire the mutex before publishing
+        // the predicate, closing the condition-variable check-to-park window.
+        if (sync_state->lockOwnedByCurrentThread()) {
+            if (sync_state->pending_cache_load_count.load(std::memory_order_acquire) == 0) {
+                sync_state->cache_load_completion_trigger = true;
+            }
+            return;
+        }
+
+        bool notify = false;
+        {
+            std::lock_guard<std::mutex> lock(sync_state->mutex);
+            if (sync_state->pending_cache_load_count.load(std::memory_order_acquire) == 0) {
+                sync_state->cache_load_completion_trigger = true;
+                notify                                    = true;
+            }
+        }
+        if (notify) {
+            sync_state->cond.notify_all();
+        }
+    });
+    if (!registered) {
+        const size_t previous = sync_state->pending_cache_load_count.fetch_sub(1, std::memory_order_acq_rel);
+        RTP_LLM_CHECK_WITH_INFO(previous > 0, "allocator load registration count underflow");
+    }
+}
+
 bool FIFOScheduler::waitPredicate() {
     // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
     // Pending loads and capacity-blocked waiters are polled by the timed wait below. They are not
     // wakeup events themselves, otherwise a retryable KV shortage spins the scheduler.
-    return stop_ || schedule_trigger_ || !running_streams_.empty() || !pending_decode_streams_.empty();
+    return stop_ || schedule_trigger_ || !running_streams_.empty() || !pending_decode_streams_.empty()
+           || (scheduler_sync_state_->cache_load_completion_trigger
+               && scheduler_sync_state_->pending_cache_load_count.load(std::memory_order_acquire) == 0);
 }
 
 void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_streams,
@@ -336,13 +377,10 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
     if (!waiting_streams.empty()) {
-        auto oldest_enqueue_time_us = (*std::min_element(waiting_streams.begin(),
-                                                         waiting_streams.end(),
-                                                         [](const auto& lhs, const auto& rhs) {
-                                                             return lhs->schedulerEnqueueTimeUs()
-                                                                    < rhs->schedulerEnqueueTimeUs();
-                                                         }))
-                                          ->schedulerEnqueueTimeUs();
+        auto oldest_enqueue_time_us =
+            (*std::min_element(waiting_streams.begin(), waiting_streams.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs->schedulerEnqueueTimeUs() < rhs->schedulerEnqueueTimeUs();
+            }))->schedulerEnqueueTimeUs();
         last_waiting_oldest_age_us_ =
             std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
     }
@@ -480,6 +518,9 @@ void FIFOScheduler::advanceLoadingGroup(StreamGroup& group) {
         // Resume it immediately so a ready group does not consume another scheduling round.
         if (state == StreamState::WAITING) {
             state = (*it)->moveToNext();
+            if (state == StreamState::LOADING_CACHE) {
+                onLoadingStream(*it);
+            }
         }
         if (state == StreamState::FINISHED) {
             it = group.erase(it);
@@ -582,6 +623,9 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
             stream->reportEvent(StreamEvents::CanRun);
         }
         const auto state = stream->moveToNext();
+        if (state == StreamState::LOADING_CACHE) {
+            onLoadingStream(stream);
+        }
         if (!already_inited_kv && stream->curBlocksNum() > 0) {
             ++newly_inited_kv_streams;
         }
@@ -643,7 +687,8 @@ bool FIFOScheduler::partitionChunkContinuations() {
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
-    unique_lock<mutex> lock(lock_);
+    unique_lock<mutex>                            lock(lock_);
+    SchedulerSynchronizationState::LockOwnerScope lock_owner(*scheduler_sync_state_);
     if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
         || !waiting_group_queue_.empty()) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
@@ -655,10 +700,11 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
 
-    schedule_trigger_                 = false;
-    last_admitted_context_batch_size_ = 0;
-    last_admitted_context_token_size_ = 0;
-    last_waiting_oldest_age_us_       = 0;
+    schedule_trigger_                                    = false;
+    scheduler_sync_state_->cache_load_completion_trigger = false;
+    last_admitted_context_batch_size_                    = 0;
+    last_admitted_context_token_size_                    = 0;
+    last_waiting_oldest_age_us_                          = 0;
 
     // LOADING_CACHE -> DONE/WAITING: error / load cache done
     const size_t waiting_size_before_cache_update = waiting_streams_.size();
