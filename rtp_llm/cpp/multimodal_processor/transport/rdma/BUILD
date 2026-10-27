@@ -12,6 +12,8 @@ cc_library(
         "//rtp_llm/cpp/rdma_transport:rdma_transport_arch_select_impl",
         "//rtp_llm/cpp/rdma_transport:rdma_transport",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:execution_stage_recorder_hdr",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

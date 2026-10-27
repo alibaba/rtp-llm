@@ -169,12 +169,35 @@ cc_binary(
 )
 
 cc_binary(
+    name = "rtp_execution_stage_recorder",
+    linkopts = [
+        "-Wl,-soname,librtp_execution_stage_recorder.so",
+    ],
+    linkshared = 1,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/utils:execution_stage_recorder",
+    ],
+)
+
+cc_binary(
     name = "rtp_compute_ops",
+    additional_linker_inputs = [
+        ":rtp_execution_stage_recorder",
+    ],
+    data = [
+        ":rtp_execution_stage_recorder",
+    ],
     copts = copts(),
     linkopts = [
         "-Wl,-rpath='$$ORIGIN'",
         "-Wl,-rpath=$(NVSHMEM_DIR)/lib",
         "-L$(NVSHMEM_DIR)/lib",
+        # Retain the same CPU-only recorder owner in every consumer DSO,
+        # including when the linker places shared inputs before their users.
+        "-Wl,--push-state,--no-as-needed",
+        "$(location :rtp_execution_stage_recorder)",
+        "-Wl,--pop-state",
     ],
     linkshared = 1,
     visibility = ["//visibility:public"],
@@ -190,9 +213,19 @@ cc_binary(
 
 cc_binary(
     name = "mm_rdma_exporter",
+    additional_linker_inputs = [
+        ":rtp_execution_stage_recorder",
+    ],
+    data = [
+        ":rtp_execution_stage_recorder",
+    ],
     copts = copts(),
     linkopts = [
         "-Wl,-rpath='$$ORIGIN'",
+        # ViT imports this extension without first importing compute ops.
+        "-Wl,--push-state,--no-as-needed",
+        "$(location :rtp_execution_stage_recorder)",
+        "-Wl,--pop-state",
     ],
     linkshared = 1,
     visibility = ["//visibility:public"],
@@ -207,11 +240,18 @@ cc_binary(
         ":rtp_compute_ops",
     ],
     additional_linker_inputs = [
+        ":rtp_execution_stage_recorder",
         ":rtp_compute_ops",
+    ],
+    data = [
+        ":rtp_execution_stage_recorder",
     ],
     copts = copts(),
     linkopts = [
         "-Wl,-rpath='$$ORIGIN'",
+        "-Wl,--push-state,--no-as-needed",
+        "$(location :rtp_execution_stage_recorder)",
+        "-Wl,--pop-state",
         # "-Wl,--exclude-libs,ALL",  # 添加这行，隐藏静态库符号
     ] + select({
         # ROCm keeps process-wide execution state in librtp_compute_ops.so.

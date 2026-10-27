@@ -574,6 +574,7 @@ py_library(
         ":frontend",
         ":embedding",
         "//rtp_llm/tools:model_assistant",
+        "//rtp_llm/tools:collect_host_stall",
         "//rtp_llm/distribute:distribute",
         ":tokenizer",
         "//rtp_llm/aios/kmonitor:kmonitor_py",

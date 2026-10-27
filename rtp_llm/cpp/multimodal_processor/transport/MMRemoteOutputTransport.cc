@@ -3,7 +3,9 @@
 #include "rtp_llm/cpp/model_rpc/MultimodalPbConverter.h"
 #include <algorithm>
 #include <memory>
+#include <sstream>
 #include <utility>
+#include "rtp_llm/cpp/utils/ExecutionStageRecorder.h"
 
 namespace rtp_llm {
 
@@ -60,6 +62,12 @@ void MMTransportMetrics::reportRpcMetrics(const std::string& endpoint,
 ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string&   endpoint,
                                                              MultimodalInputsPB&  request_pb,
                                                              grpc::ServerContext* server_context) {
+    ExecutionStageScope fetch_trace("mm.transport.fetch", {}, request_pb.request_id());
+    fetch_trace.annotateWith([&] {
+        std::ostringstream details;
+        details << "transport=" << this << " endpoint=" << endpoint;
+        return details.str();
+    });
     DeadlineBudget  budget(resolveRpcTimeoutMs(request_pb, default_rpc_timeout_ms_, rpc_timeout_margin_ms_),
                           server_context);
     DeliveryContext context{endpoint, budget, *control_, control_};
@@ -71,7 +79,9 @@ ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string& 
         }
     }
 
+    ExecutionStageScope control_trace("mm.transport.control_request");
     auto receipt = control_->request(endpoint, request_pb, budget);
+    control_trace.finish(receipt.ok() ? "returned" : "error");
     if (!receipt.ok()) {
         return receipt.status();
     }
@@ -86,7 +96,14 @@ ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string& 
     }
 
     if (matched != nullptr) {
+        ExecutionStageScope consume_trace("mm.transport.consume");
+        consume_trace.annotateWith([&] {
+            std::ostringstream details;
+            details << "reader=" << matched << " reader_name=" << matched->name() << " endpoint=" << endpoint;
+            return details.str();
+        });
         auto result = matched->consume(receipt.value(), context);
+        consume_trace.finish(result.succeeded() ? "returned" : "error");
         if (result.succeeded()) {
             auto hash_status = MultimodalPbConverter::featureHashesFromPb(receipt.value(), result.output());
             if (!hash_status.ok()) {

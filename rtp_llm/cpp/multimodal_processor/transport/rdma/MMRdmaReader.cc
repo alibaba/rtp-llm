@@ -5,6 +5,7 @@
 #include <exception>
 #include <limits>
 #include <numeric>
+#include <sstream>
 #include <unordered_set>
 #include <utility>
 
@@ -13,6 +14,8 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/rdma_transport/RdmaTransport.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ExecutionStageRecorder.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
 
@@ -20,6 +23,7 @@ bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&      mm_tensors,
                           const std::vector<MMRdmaSlotPB::Role>& roles,
                           const MultimodalOutputPB*              output_pb,
                           MultimodalOutput*                      mm_output) {
+    ExecutionStageScope assemble_trace("mm.rdma.assemble");
     try {
         if (mm_output == nullptr || output_pb == nullptr || mm_tensors.size() != roles.size()) {
             return false;
@@ -37,7 +41,18 @@ bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&      mm_tensors,
                     if (has_pos_id) {
                         return false;
                     }
-                    mm_position_id = mm_tensors[i].to(torch::kCPU);
+                    {
+                        GpuStageTrace trace("mm.rdma.pos_id.d2h", mm_tensors[i]);
+                        mm_position_id = mm_tensors[i].to(torch::kCPU);
+                        if (gpuStageTraceEnabled()) {
+                            try {
+                                std::ostringstream details;
+                                details << "tensor_index=" << i << " dst_ptr=" << mm_position_id.data_ptr()
+                                        << " dst_device=" << mm_position_id.device();
+                                trace.annotate(details.str());
+                            } catch (...) {}
+                        }
+                    }
                     has_pos_id     = true;
                     break;
                 case MMRdmaSlotPB::EXTRA_INPUT:
@@ -123,6 +138,13 @@ bool MMRdmaReader::matches(const MultimodalOutputPB& receipt) const {
 }
 
 ConsumeResult MMRdmaReader::consume(const MultimodalOutputPB& receipt, DeliveryContext& context) {
+    ExecutionStageScope consume_trace("mm.rdma.consume");
+    consume_trace.annotateWith([&] {
+        std::ostringstream details;
+        details << "reader=" << this << " provider=" << reader_.get() << " provider_lock=" << &provider_mutex_
+                << " endpoint=" << context.endpoint << " slots=" << receipt.output_rdma_slots_size();
+        return details.str();
+    });
     if (reader_ == nullptr) {
         return ConsumeResult::failure(
             ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "rdma receipt reached an adapter with no RDMA reader"));
@@ -176,6 +198,13 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
                                 std::vector<MMRdmaSlotPB::Role>* roles,
                                 bool*                            deadline_exhausted,
                                 bool*                            release_deferred) {
+    ExecutionStageScope read_trace("mm.rdma.read_slots");
+    read_trace.annotateWith([&] {
+        std::ostringstream details;
+        details << "reader=" << this << " provider=" << reader_.get() << " provider_lock=" << &provider_mutex_
+                << " endpoint=" << context.endpoint << " slots=" << receipt.output_rdma_slots_size();
+        return details.str();
+    });
     *deadline_exhausted                            = false;
     constexpr size_t kMaxDescriptorsPerReceipt     = 1024;
     constexpr size_t kMaxManifestEntriesPerReceipt = 16384;
@@ -307,6 +336,7 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
     int64_t remaining = context.budget.remainingMs();
     if (remaining <= 0) {
         *deadline_exhausted = true;
+        read_trace.finish("budget_exhausted_before_provider_lock");
         return false;
     }
     int64_t read_timeout_ms = remaining;
@@ -314,20 +344,40 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
         read_timeout_ms = std::min(read_timeout_ms, rdma_config_->read_timeout_ms);
     }
     const auto read_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(read_timeout_ms);
+    ExecutionStageScope provider_wait_trace("mm.rdma.provider_lock.wait");
+    provider_wait_trace.annotateWith([&] {
+        std::ostringstream details;
+        details << "reader=" << this << " provider=" << reader_.get() << " provider_lock=" << &provider_mutex_
+                << " read_timeout_ms=" << read_timeout_ms << " budget_remaining_ms=" << remaining;
+        return details.str();
+    });
     std::unique_lock<std::timed_mutex> provider_lock(provider_mutex_, std::defer_lock);
     if (!provider_lock.try_lock_until(read_deadline)) {
         *deadline_exhausted = context.budget.exhausted();
+        provider_wait_trace.finish("provider_lock_timeout");
+        read_trace.finish("provider_lock_timeout");
         return false;
     }
+    provider_wait_trace.finish("acquired");
+    // This CPU scope ends immediately before the existing unique_lock releases
+    // the mutex; it does not change the provider's lock or lease lifetime.
+    ExecutionStageScope provider_held_trace("mm.rdma.provider_lock.acquired_to_return");
+    provider_held_trace.annotateWith([&] {
+        std::ostringstream details;
+        details << "reader=" << this << " provider=" << reader_.get() << " provider_lock=" << &provider_mutex_;
+        return details.str();
+    });
     remaining = context.budget.remainingMs();
     if (remaining <= 0) {
         *deadline_exhausted = true;
+        read_trace.finish("budget_exhausted_after_provider_lock");
         return false;
     }
     const int64_t read_remaining_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(read_deadline - std::chrono::steady_clock::now()).count();
     if (read_remaining_ms <= 0) {
         *deadline_exhausted = context.budget.exhausted();
+        read_trace.finish("read_deadline_exhausted_after_provider_lock");
         return false;
     }
     read_timeout_ms = std::min(remaining, read_remaining_ms);
@@ -338,7 +388,17 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
                 owner->releaseAsync(endpoint, handles);
             }
         };
+        ExecutionStageScope provider_read_trace("mm.rdma.provider_read");
+        provider_read_trace.annotateWith([&] {
+            std::ostringstream details;
+            details << "reader=" << this << " provider=" << reader_.get() << " provider_lock=" << &provider_mutex_
+                    << " descriptor_count=" << descriptors.size() << " tensor_count=" << parsed_roles.size()
+                    << " payload_bytes=" << total_payload_bytes << " tensor_bytes=" << total_tensor_bytes
+                    << " timeout_ms=" << read_timeout_ms;
+            return details.str();
+        });
         result = reader_->readWithCleanup(descriptors, read_timeout_ms, std::move(release), release_deferred);
+        provider_read_trace.finish(result.status.ok() ? "returned" : "error");
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("tensor rdma read threw an exception: %s", e.what());
         return false;

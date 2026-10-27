@@ -3,6 +3,37 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//:__subpackages__"])
 
+cc_library(
+    name = "execution_stage_recorder_hdr",
+    hdrs = ["ExecutionStageRecorder.h"],
+    visibility = ["//visibility:public"],
+)
+
+# Production links this implementation only into librtp_execution_stage_recorder.so.
+# Consumer DSOs explicitly link that CPU-only shared library, never this archive.
+cc_library(
+    name = "execution_stage_recorder",
+    srcs = ["ExecutionStageRecorder.cc"],
+    deps = [":execution_stage_recorder_hdr"],
+    copts = copts(),
+    linkopts = ["-pthread"],
+    # The shared-library owner has no wrapper object that references these
+    # symbols itself; retain the implementation for its external consumers.
+    alwayslink = True,
+    visibility = ["//visibility:public"],
+)
+
+# Standalone CPU tests own their implementation; never depend on this from a
+# production DSO, which must resolve the shared recorder's implementation.
+cc_library(
+    name = "execution_stage_recorder_test_impl",
+    srcs = ["ExecutionStageRecorder.cc"],
+    deps = [":execution_stage_recorder_hdr"],
+    copts = copts(),
+    linkopts = ["-pthread"],
+    testonly = True,
+    visibility = ["//visibility:public"],
+)
 
 
 # KVCache utilities - simple inline functions, no external dependencies

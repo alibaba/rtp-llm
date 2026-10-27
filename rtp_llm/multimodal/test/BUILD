@@ -111,6 +111,7 @@ py_test(
     ],
     data = [
         "//rtp_llm/libs:libmm_rdma_exporter_so",
+        "//rtp_llm/libs:librtp_execution_stage_recorder_so",
         "//rtp_llm/libs:librtp_compute_ops_so",
         "//rtp_llm/libs:libth_transformer_config_so",
     ],

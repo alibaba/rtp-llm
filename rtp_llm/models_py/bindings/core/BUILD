@@ -112,6 +112,7 @@ cc_library(
         "ExecOps.h",
     ],
     deps = [
+        "//rtp_llm/cpp/utils:execution_stage_recorder_hdr",
         ":op_data",
         ":device_data",
         "//rtp_llm/cpp/config:config_modules",
@@ -136,6 +137,7 @@ cc_library(
         "ExecOps.cc",
     ],
     deps = [
+        "//rtp_llm/cpp/utils:execution_stage_recorder",
         ":device_data",
         ":op_data",
         ":type_convert",
@@ -205,6 +207,7 @@ filegroup(
 # exec_ctx_state: ExecOps.cc
 #   Defines process-global runtime and Python callback state.
 #   Linked ONLY into librtp_compute_ops.so (via th_compute_lib).
+#   Recorder state is owned separately by librtp_execution_stage_recorder.so.
 #
 # exec_ctx_ops: CudaOps.cc + sample ops
 #   Platform op implementations that do NOT directly touch global state.
@@ -220,6 +223,7 @@ cc_library(
         "ExecOps.cc",
     ],
     deps = [
+        "//rtp_llm/cpp/utils:execution_stage_recorder_hdr",
         ":device_data",
         ":op_data",
         ":type_convert",

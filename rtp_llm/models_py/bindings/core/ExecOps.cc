@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ExecutionStageRecorder.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
@@ -79,6 +80,70 @@ static bool g_enable_comm_overlap = true;
 
 static int64_t g_device_id = 0;
 }  // anonymous namespace
+
+bool gpuStageTraceEnabled() noexcept {
+    try {
+        return executionStageRecorder().enabled();
+    } catch (...) {
+        return false;
+    }
+}
+
+GpuStageTrace::GpuStageTrace(const char*          stage,
+                             const torch::Tensor& tensor,
+                             int                  device_id,
+                             const std::string&   details,
+                             int64_t              request_id) noexcept:
+    scope_(stage, {}, request_id) {
+    try {
+        if (!scope_.id()) {
+            return;
+        }
+        std::ostringstream metadata;
+        metadata << details;
+        const int device_index = tensor.defined() && tensor.is_cuda() ? tensor.get_device() :
+                                 device_id >= 0                       ? device_id :
+                                                                        static_cast<int>(getDeviceId());
+        metadata << " device=" << device_index;
+        if (tensor.defined()) {
+            metadata << " tensor_device=" << tensor.device() << " dtype=" << tensor.scalar_type()
+                     << " shape=" << tensor.sizes() << " bytes=" << tensor.nbytes()
+                     << " src_ptr=" << tensor.data_ptr();
+        }
+        metadata << " stream_source=caller_current_not_driver_api";
+        // Publish before the optional lookup: even diagnostics must identify a
+        // lookup that fails to return. Never initialize CUDA on a CPU-only path.
+        scope_.annotate(metadata.str());
+#if USING_CUDA
+        if (isRuntimeInitialized() && device_index >= 0) {
+            ExecutionStageScope lookup("diagnostic.caller_stream_lookup");
+            const auto stream = at::cuda::getCurrentCUDAStream(device_index);
+            metadata << " caller_stream=" << static_cast<const void*>(stream.stream())
+                     << " caller_stream_id=" << stream.id();
+            scope_.annotate(metadata.str());
+        }
+#endif
+        details_ = metadata.str();
+    } catch (...) {}
+}
+
+GpuStageTrace::~GpuStageTrace() {
+    finish();
+}
+
+void GpuStageTrace::finish(const char* phase) noexcept {
+    scope_.finish(phase);
+}
+
+void GpuStageTrace::annotate(const std::string& details) noexcept {
+    if (!scope_.id()) {
+        return;
+    }
+    try {
+        details_ += " " + details;
+        scope_.annotate(details_);
+    } catch (...) {}
+}
 
 // ============================================================
 // Runtime state query
@@ -736,6 +801,7 @@ void execBroadcast(const BroadcastParams& params) {
 }
 
 void execBroadcastCpu(const BroadcastParams& params) {
+    ExecutionStageScope stage("tp_broadcast.cpu_dispatch");
     RTP_LLM_CHECK_WITH_INFO(
         params.root == 0, "execBroadcastCpu supports only root=0; got %ld", static_cast<long>(params.root));
     RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::TP,
@@ -743,6 +809,13 @@ void execBroadcastCpu(const BroadcastParams& params) {
                             static_cast<int>(params.mode));
 
     auto& broadcaster = CpuTpBroadcaster::instance();
+    if (stage.id()) {
+        try {
+            stage.annotate(std::string("path=") + (broadcaster.isInitialized() ? "cpu" : "gpu_fallback")
+                           + " root=" + std::to_string(params.root) + " mode="
+                           + std::to_string(static_cast<int>(params.mode)));
+        } catch (...) {}
+    }
     if (broadcaster.isInitialized()) {
         for (auto& tensor : params.buffers) {
             RTP_LLM_CHECK_WITH_INFO(tensor.is_cpu(),
@@ -757,8 +830,14 @@ void execBroadcastCpu(const BroadcastParams& params) {
         return;
     }
     execBroadcast(params);
-    execSyncCommunication(false);
-    cudaSyncAndCheck();
+    {
+        ExecutionStageScope sync("tp_broadcast.communication_sync");
+        execSyncCommunication(false);
+    }
+    {
+        ExecutionStageScope check("tp_broadcast.cuda_check");
+        cudaSyncAndCheck();
+    }
 }
 
 bool isCpuTpBroadcasterInitialized() {
@@ -877,6 +956,28 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
 // ============================================================
 
 void registerExecCtxOps(pybind11::module& m) {
+    m.def("gpu_stage_trace_enabled", &gpuStageTraceEnabled);
+    m.def("set_gpu_stage_trace_rank", [](int rank) { executionStageRecorder().setRank(rank); });
+    m.def(
+        "dump_gpu_stage_trace",
+        [](const std::string& reason) { executionStageRecorder().dump(reason); },
+        py::arg("reason") = "manual",
+        py::call_guard<py::gil_scoped_release>());
+    py::class_<GpuStageTrace>(m, "GpuStageTrace")
+        .def(py::init<const char*, const torch::Tensor&, int, const std::string&, int64_t>(),
+             py::arg("stage"),
+             py::arg("tensor"),
+             py::arg("device_id")  = -1,
+             py::arg("details")    = "",
+             py::arg("request_id") = 0)
+        .def(
+            "__enter__",
+            [](GpuStageTrace& trace) -> GpuStageTrace& { return trace; },
+            py::return_value_policy::reference_internal)
+        .def("__exit__", [](GpuStageTrace& trace, py::object error_type, py::object, py::object) {
+            trace.finish(error_type.is_none() ? "returned" : "exception");
+            return false;
+        });
     m.def("get_device_id", &getDeviceId);
     m.def("preprocess_gemm_weight_by_key",
           &preprocessGemmWeightByKey,

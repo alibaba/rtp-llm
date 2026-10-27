@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/common/kernels/fuse_copy_util.h"
+#include "rtp_llm/cpp/utils/ExecutionStageRecorder.h"
 
 #include <memory>
 #include <atomic>
@@ -45,6 +46,28 @@ MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_ove
 bool isRuntimeInitialized();
 
 int64_t getDeviceId();
+
+// Optional host tracing. Disabled tracing never inspects tensors or streams.
+// Enabled tracing records caller stream metadata, never adds synchronization.
+bool gpuStageTraceEnabled() noexcept;
+
+class GpuStageTrace {
+public:
+    GpuStageTrace(const char*          stage,
+                  const torch::Tensor& tensor,
+                  int                  device_id  = -1,
+                  const std::string&   details    = {},
+                  int64_t              request_id = 0) noexcept;
+    ~GpuStageTrace();
+    GpuStageTrace(const GpuStageTrace&)            = delete;
+    GpuStageTrace& operator=(const GpuStageTrace&) = delete;
+    void           finish(const char* phase = nullptr) noexcept;
+    void           annotate(const std::string& details) noexcept;
+
+private:
+    ExecutionStageScope scope_;
+    std::string         details_;
+};
 
 // ===================================================================
 // Sync / error-check

@@ -9,6 +9,7 @@ cc_library(
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//rtp_llm/cpp/utils:error_code",
+        "//rtp_llm/cpp/utils:execution_stage_recorder_hdr",
         "@havenask//aios/kmonitor:kmonitor_client_cpp",
     ],
     copts = copts(),

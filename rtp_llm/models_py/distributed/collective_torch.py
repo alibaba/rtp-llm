@@ -432,6 +432,14 @@ def _register_process_groups_to_cpp():
     # The module-level functions have different signatures and semantics (e.g. all_gather
     # allocates a new tensor), so we implement the C++ contract directly here.
 
+    trace_gpu_stages = (
+        hasattr(librtp_compute_ops, "gpu_stage_trace_enabled")
+        and librtp_compute_ops.gpu_stage_trace_enabled()
+    )
+    if trace_gpu_stages:
+        librtp_compute_ops.set_gpu_stage_trace_rank(torch.distributed.get_rank())
+    broadcast_call_id = 0
+
     def _ensure_cuda(t: torch.Tensor, device_id: int):
         """Move CPU tensor to CUDA if needed (NCCL requires CUDA tensors)."""
         if t.is_cuda:
@@ -446,16 +454,45 @@ def _register_process_groups_to_cpp():
             root: Source rank that holds the data.
             mode: ParallelMode int (0=TP, 1=DP, 2=DP_AND_TP) selecting process group.
         """
+        nonlocal broadcast_call_id
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             return
         global_root = torch.distributed.get_global_rank(pg, root)
         device_id = torch.cuda.current_device()
-        for t in tensors:
-            gpu_t, was_cpu = _ensure_cuda(t, device_id)
-            torch.distributed.broadcast(gpu_t, global_root, group=pg)
+        if not trace_gpu_stages:
+            for t in tensors:
+                gpu_t, was_cpu = _ensure_cuda(t, device_id)
+                torch.distributed.broadcast(gpu_t, global_root, group=pg)
+                if was_cpu:
+                    t.copy_(gpu_t)
+            return
+
+        # This local callback ID is not an NCCL collective sequence number.
+        # Flight Recorder supplies the latter; the parent stage identifies the
+        # logical input buffer (shape hints, packed CPU data, or packed GPU data).
+        broadcast_call_id += 1
+        for index, t in enumerate(tensors):
+            details = (
+                f"mode={mode} root={global_root} "
+                f"broadcast_call={broadcast_call_id} tensor_index={index}"
+            )
+            if t.is_cuda:
+                gpu_t, was_cpu = t, False
+            else:
+                with librtp_compute_ops.GpuStageTrace(
+                    "tp_broadcast.h2d", t, device_id, details
+                ):
+                    gpu_t, was_cpu = _ensure_cuda(t, device_id)
+            with librtp_compute_ops.GpuStageTrace(
+                "tp_broadcast.nccl_call", gpu_t, device_id, details
+            ):
+                torch.distributed.broadcast(gpu_t, global_root, group=pg)
             if was_cpu:
-                t.copy_(gpu_t)
+                with librtp_compute_ops.GpuStageTrace(
+                    "tp_broadcast.d2h", gpu_t, device_id, details
+                ):
+                    t.copy_(gpu_t)
 
     _REDUCE_OPS = {
         0: torch.distributed.ReduceOp.SUM,

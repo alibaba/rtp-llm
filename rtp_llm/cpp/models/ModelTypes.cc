@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/utils/ExecutionStageRecorder.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -253,6 +254,14 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (parallelism_config.tp_size <= 1) {
         return;
     }
+    ExecutionStageScope trace("tp_sync.model_inputs");
+    if (trace.id()) {
+        try {
+            trace.annotate("tp_rank=" + std::to_string(parallelism_config.tp_rank)
+                           + " tp_size=" + std::to_string(parallelism_config.tp_size)
+                           + " local_world_size=" + std::to_string(parallelism_config.local_world_size));
+        } catch (...) {}
+    }
 
     // Producers and async snapshots already use canonical tag order. Keep
     // the original tensors throughout packing/broadcast; no group-row copies.
@@ -266,7 +275,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     // Python initializes intra-node UDS or cross-node Gloo for CPU control data;
     // execBroadcastCpu retains the synchronized GPU fallback if neither is registered.
-    execBroadcastCpu({{shape_hints_t}, 0});
+    {
+        ExecutionStageScope shape_trace("tp_sync.shape_hints");
+        execBroadcastCpu({{shape_hints_t}, 0});
+    }
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;
@@ -328,6 +340,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             }
         }
         // CPU broadcast (UDS path; fallback handles cudaSyncAndCheck).
+        ExecutionStageScope mm_shape_trace("tp_sync.mm_shapes");
         execBroadcastCpu({{mm_features_shape_t}, 0});
     }
 
@@ -708,11 +721,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     // Broadcast at most 2 packed buffers instead of N individual tensors.
     if (cpu_packed.defined()) {
+        ExecutionStageScope packed_trace("tp_sync.cpu_packed");
         execBroadcastCpu({{cpu_packed}, 0});
     }
 
     if (gpu_packed.defined()) {
         // gpu no need to sync communication
+        ExecutionStageScope packed_trace("tp_sync.gpu_packed");
         execBroadcast({{gpu_packed}, 0});
     }
 

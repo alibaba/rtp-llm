@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
+#include <sstream>
 #include <vector>
 #include <torch/python.h>
 #include "absl/status/statusor.h"
@@ -11,6 +12,7 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace py = pybind11;
 
@@ -18,19 +20,48 @@ namespace rtp_llm {
 
 namespace {
 
-ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* tensor_name) {
+#if USING_CUDA
+std::string pinTraceDetails(const char* tensor_name, size_t index) noexcept {
+    if (!gpuStageTraceEnabled()) {
+        return {};
+    }
+    try {
+        return std::string("tensor=") + tensor_name + " index=" + std::to_string(index);
+    } catch (...) {
+        return {};
+    }
+}
+
+void tracePinnedResult(GpuStageTrace& trace, const torch::Tensor& tensor) noexcept {
+    if (!gpuStageTraceEnabled()) {
+        return;
+    }
+    try {
+        std::ostringstream details;
+        details << "dst_ptr=" << tensor.data_ptr() << " dst_device=" << tensor.device();
+        trace.annotate(details.str());
+    } catch (...) {}
+}
+#endif
+
+ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* tensor_name, int64_t request_id) {
 #if USING_CUDA
     try {
-        for (auto& tensor : tensors) {
+        for (size_t index = 0; index < tensors.size(); ++index) {
+            auto& tensor = tensors[index];
             if (!tensor.defined() || tensor.is_pinned()) {
                 continue;
             }
             if (tensor.is_cuda()) {
                 auto options =
                     torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true);
+                GpuStageTrace trace("mm.pin.d2h", tensor, -1, pinTraceDetails(tensor_name, index), request_id);
                 // Downstream TP serialization can read the host tensor immediately.
                 tensor = tensor.to(options, /*non_blocking=*/false);
+                tracePinnedResult(trace, tensor);
             } else {
+                ExecutionStageScope trace("mm.pin.host", {}, request_id);
+                trace.annotateWith([&] { return pinTraceDetails(tensor_name, index); });
                 tensor = tensor.pin_memory();
             }
         }
@@ -41,6 +72,7 @@ ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* 
 #else
     (void)tensors;
     (void)tensor_name;
+    (void)request_id;
 #endif
     return ErrorInfo::OkStatus();
 }
@@ -369,8 +401,8 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
                                             {},
                                             mm_embedding_res.mm_feature_hashes));
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
-    RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_features, "embedding"));
-    RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_extra_input, "extra input"));
+    RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_features, "embedding", input->request_id));
+    RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_extra_input, "extra input", input->request_id));
     input->multimodal_features = std::move(mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
     input->mm_extra_input      = std::move(mm_extra_input);

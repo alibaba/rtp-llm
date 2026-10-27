@@ -10,6 +10,13 @@ google_test_deps = [
     "@com_google_googletest//:gtest_main",
 ]
 
+cc_test(
+    name = "execution_stage_recorder_test",
+    srcs = ["ExecutionStageRecorderTest.cc"],
+    copts = copts(),
+    deps = ["//rtp_llm/cpp/utils:execution_stage_recorder_test_impl"],
+)
+
 test_deps = [
     "//rtp_llm/cpp/utils:core_utils",
     "//rtp_llm/cpp/utils:kv_cache_utils",
