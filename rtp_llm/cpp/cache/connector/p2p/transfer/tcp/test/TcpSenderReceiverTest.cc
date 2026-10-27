@@ -21,6 +21,7 @@
 #include "autil/NetUtil.h"
 #include <torch/torch.h>
 #include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAFunctions.h>
 
 namespace rtp_llm {
 namespace transfer {
@@ -140,6 +141,38 @@ bool TcpSenderReceiverTest::device_initialized_ = false;
 // ===========================================================================
 
 // F1: block_info is empty → makeTransferRequest returns nullptr → BUILD_REQUEST_FAILED.
+// Run before the fixtures initialize GPU 0: this matches a Prefill rank that
+// computes on GPU 1 while a fresh sender thread starts with device 0 deferred.
+TEST(TcpCopyDeviceTest, DirectFallbackThenStagedCopyOnNonzeroDevice) {
+    if (c10::cuda::device_count() < 2 || c10::cuda::hasPrimaryContext(0)) {
+        GTEST_SKIP() << "Requires two GPUs and a fresh process without a GPU 0 context";
+    }
+    auto source = torch::full({64}, 37, torch::TensorOptions(torch::kUInt8).device(torch::Device(torch::kCUDA, 1)));
+    const auto expected = source.cpu();
+    auto       host     = torch::zeros({64}, torch::kUInt8);
+    auto       attempt  = std::async(std::launch::async, [&] {
+        CudaCopyUtil          direct;
+        std::vector<CopyTask> tasks{{source.data_ptr(), 64, reinterpret_cast<char*>(host.data_ptr()), 1}};
+        ASSERT_TRUE(direct.batchCopyToHost(tasks));
+        ASSERT_EQ(c10::cuda::current_device(), 0);
+        ASSERT_TRUE(torch::equal(host, expected));
+        host.zero_();
+        StagedMemoryCopyParams params;
+        params.direction    = StagedMemoryCopyDirection::D2H;
+        params.device_index = 1;
+        params.host_base    = host.data_ptr();
+        params.host_bytes   = 64;
+        for (size_t i = 0; i < 4; ++i)
+            params.tiles.push_back({source.data_ptr<uint8_t>() + i * 16, i * 16, 16});
+        StagedMemoryCopyScratch scratch;
+        const bool              copied = execStagedMemoryCopy(params, &scratch);
+        releaseStagedMemoryCopyScratch(scratch);
+        EXPECT_TRUE(copied);
+        EXPECT_TRUE(torch::equal(host, expected));
+    });
+    ASSERT_NO_THROW(attempt.get());
+}
+
 TEST_F(TcpSenderOnlyTest, F1_EmptyBlockInfo_ImmediateBuildFailed) {
     SendRequest req;
     req.ip          = "127.0.0.1";
